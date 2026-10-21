@@ -10,6 +10,7 @@
 # matches a real command.
 
 hardware:
+  - backend
   - machine
   - managed-host
   - host
@@ -70,6 +71,7 @@ tenant:
   - expected-power-shelf
   - expected-rack
   - expected-rack-group
+  - expected-nvlink-domain
   - expected-switch
   - operating-system
   - os-image

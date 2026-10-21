@@ -60,3 +60,82 @@ tests:
             name: collector-config
             configMap:
               name: collector-config
+
+  - it: resolves split images and precedence while preserving sidecar fields and order
+    set:
+      extraContainers:
+        - name: split-image
+          repository: registry.example.com/collector
+          tag: v1.2.3
+        - name: overridden-image
+          repository: registry.example.com/collector
+          tag: v2.0.0
+          image: legacy.example.com/ignored:old
+          imagePullPolicy: Always
+          command: ["collector"]
+          args: ["--config=/etc/collector/config.yaml"]
+          env:
+            - name: MODE
+              value: sidecar
+          securityContext:
+            runAsNonRoot: true
+          resources:
+            requests:
+              memory: 64Mi
+          volumeMounts:
+            - name: collector-config
+              mountPath: /etc/collector
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 3
+      - equal:
+          path: spec.template.spec.containers[1]
+          value:
+            name: split-image
+            image: registry.example.com/collector:v1.2.3
+      - equal:
+          path: spec.template.spec.containers[2]
+          value:
+            name: overridden-image
+            image: registry.example.com/collector:v2.0.0
+            imagePullPolicy: Always
+            command: ["collector"]
+            args: ["--config=/etc/collector/config.yaml"]
+            env:
+              - name: MODE
+                value: sidecar
+            securityContext:
+              runAsNonRoot: true
+            resources:
+              requests:
+                memory: 64Mi
+            volumeMounts:
+              - name: collector-config
+                mountPath: /etc/collector
+
+  - it: falls back to image without inheriting a missing tag from global.image
+    set:
+      global.image.repository: registry.example.com/main
+      global.image.tag: main-tag
+      extraContainers:
+        - name: collector
+          repository: registry.example.com/ignored
+          image: registry.example.com/collector@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1]
+          value:
+            name: collector
+            image: registry.example.com/collector@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+  - it: identifies the extraContainers entry when no image can be resolved
+    set:
+      extraContainers:
+        - name: valid-sidecar
+          image: registry.example.com/collector:original
+        - name: missing-tag
+          repository: registry.example.com/collector
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-hardware-health.extraContainers[1] requires either non-empty repository and tag or a non-empty image"

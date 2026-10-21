@@ -42,7 +42,7 @@ carbide-health-report = { path = "../health-report" }
 carbide-measured-boot = { path = "../measured-boot", features = ["cli"] }
 carbide-libmlx = { path = "../libmlx" }
 carbide-libmlx-model = { path = "../libmlx-model" }
-carbide-rpc = { path = "../rpc", features = ["cli"] }
+carbide-rpc = { path = "../rpc", features = ["cli", "model"] }
 carbide-rpc-utils = { path = "../rpc-utils" }
 carbide-utils = { path = "../utils" }
 config-version = { path = "../config-version" }

@@ -17,7 +17,7 @@ type State struct {
 	// HealthStatus current health state
 	HealthStatus atomic.Uint64
 	// Err is error message
-	Err string
+	Err atomic.String
 	// WflowMetrics workflow metrics
 	WflowMetrics WorkflowMetrics
 }

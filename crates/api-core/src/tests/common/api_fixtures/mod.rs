@@ -24,7 +24,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
-use carbide_extension_service_controller::context::ExtensionServiceStateHandlerServices;
+use carbide_extension_service_controller::context::{
+    ExtensionServiceStateHandlerServices, ServiceVpcRegistrationConfig,
+};
 use carbide_extension_service_controller::handler::ExtensionServiceStateHandler;
 use carbide_extension_service_controller::io::ExtensionServiceStateControllerIO;
 use carbide_ib_fabric::IbFabricMonitor;
@@ -55,6 +57,7 @@ use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_rack_controller::handler::RackStateHandler;
 use carbide_rack_controller::io::RackStateControllerIO;
 use carbide_redfish::libredfish::test_support::RedfishSim;
+use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry};
 use carbide_secrets::credentials::{
     CompositeCredentialManager, CredentialKey, CredentialManager, CredentialReader, CredentialType,
     Credentials,
@@ -89,6 +92,9 @@ use health_report::{HealthReport, HealthReportApplyMode};
 use ipnetwork::IpNetwork;
 use libnmxc::NmxcPool;
 use measured_boot::pcr::PcrRegisterValue;
+use model::attestation::profile::{
+    AttestationPolicyDocument, AttesterSelection, AttesterSelectionMode, ComponentIdMatch,
+};
 use model::attestation::spdm::Verifier;
 use model::hardware_info::{HardwareInfo, TpmEkCertificate};
 use model::instance_type::InstanceTypeMachineCapabilityFilter;
@@ -135,7 +141,7 @@ use crate::measured_boot::convert_vec;
 use crate::test_support::builder::TestApiBuilder;
 use crate::test_support::default_config;
 use crate::test_support::fixture_config::{
-    DpuConfigExt as _, FixtureDefault as _, ManagedHostConfigExt as _,
+    DpuConfigExt as _, FixtureDefault as _, MOCK_HOST_HARDWARE_CLASS, ManagedHostConfigExt as _,
 };
 use crate::test_support::ib_fabric::ib_fabric_test_manager;
 pub(in crate::tests) use crate::test_support::network::{
@@ -215,12 +221,13 @@ pub(in crate::tests) struct TestEnvOverrides {
     /// Optional compute-tray backend injected into the component manager.
     pub(in crate::tests) compute_tray_manager:
         Option<Arc<dyn component_manager::compute_tray_manager::ComputeTrayManager>>,
-
-    /// Optional NV-Switch backend injected into the component manager.
+    pub(in crate::tests) compute_tray_use_state_controller: Option<bool>,
     pub(in crate::tests) nv_switch_manager:
         Option<Arc<dyn component_manager::nv_switch_manager::NvSwitchManager>>,
+    pub(in crate::tests) power_shelf_manager:
+        Option<Arc<dyn component_manager::power_shelf_manager::PowerShelfManager>>,
 
-    /// Optional firmware-object fetcher injected into the rack state handler.
+    /// Optional firmware-object fetcher shared by the API and rack state handler.
     pub(in crate::tests) firmware_object_fetcher: Option<Arc<dyn FirmwareObjectFetcher>>,
 
     pub(in crate::tests) nras_should_fail_parsing: Option<Arc<AtomicBool>>,
@@ -411,10 +418,11 @@ impl TestEnv {
             rack_firmware_update_manager: test_rack_firmware_update_manager(&self.rms_sim),
             credential_manager: self.test_credential_manager.clone(),
             component_manager: self.test_component_manager.clone(),
-            nmx_cluster_switch_mtls_services:
-                component_manager::config::switch_mtls_services_as_i32(
-                    &component_manager::config::effective_nmx_cluster_switch_mtls_services(&[]),
-                ),
+            switch_mtls_services: self
+                .config
+                .switch_state_controller
+                .switch_mtls_services
+                .clone(),
             firmware_object_fetcher: self.firmware_object_fetcher.clone(),
             per_object_metrics_registry: self.per_object_metrics_registry(),
         }
@@ -648,6 +656,17 @@ impl TestEnv {
             .lock()
             .await
             .run_single_iteration()
+            .boxed()
+            .await;
+    }
+
+    /// Processes extension-service work already queued by a transition.
+    /// Skipping the periodic scan proves the preceding controller pass requested the retry.
+    pub(in crate::tests) async fn run_queued_extension_service_controller_iterations(&self) {
+        self.extension_service_controller
+            .lock()
+            .await
+            .run_queued_iterations()
             .boxed()
             .await;
     }
@@ -1228,7 +1247,41 @@ impl VerifierClient for VerifierClientSim {
     }
 }
 
-pub(in crate::tests) async fn create_test_env_with_overrides(
+/// Awaited behind a `Box::pin` so its frame is not inlined into the fixture's,
+/// which is in turn inlined into every test that builds an environment.
+async fn seed_mock_host_attestation_profile(db_pool: &sqlx::PgPool) {
+    let mut conn = db_pool.acquire().await.expect("no available connections");
+    let seeded = db::attestation_profile::find(&mut *conn, MOCK_HOST_HARDWARE_CLASS)
+        .await
+        .expect("failed to read the mock host's attestation profile");
+    if seeded.is_some() {
+        return;
+    }
+    db::attestation_profile::create(
+        &mut conn,
+        MOCK_HOST_HARDWARE_CLASS,
+        &AttestationPolicyDocument::new(AttesterSelection {
+            mode: AttesterSelectionMode::Allowlist,
+            component_ids: vec![ComponentIdMatch::Prefix("HGX_IRoT_GPU".to_string())],
+        }),
+        "test fixture",
+    )
+    .await
+    .expect("failed to seed the mock host's attestation profile");
+}
+
+/// Returns a boxed future rather than being an `async fn`, so a caller holds a
+/// pointer instead of inlining this fixture's frame into its own. Nearly every
+/// test in this crate awaits it, and the largest sit close enough to the
+/// default thread stack that the frame this adds decides whether they fit.
+pub(in crate::tests) fn create_test_env_with_overrides(
+    db_pool: sqlx::PgPool,
+    overrides: TestEnvOverrides,
+) -> impl std::future::Future<Output = TestEnv> {
+    Box::pin(create_test_env_with_overrides_inner(db_pool, overrides))
+}
+
+async fn create_test_env_with_overrides_inner(
     db_pool: sqlx::PgPool,
     overrides: TestEnvOverrides,
 ) -> TestEnv {
@@ -1334,6 +1387,22 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
         config.dhcp_lease_expiry_handling = val;
     }
 
+    // A machine only attests if a profile covers its hardware class, and in
+    // production an operator writes that profile. Tests have no operator, so
+    // seed one for the mock host whenever a test turns SPDM on.
+    //
+    // It allowlists the GPU attesters rather than taking every eligible one:
+    // the simulator's `ERoT_BMC_0` passes eligibility but answers
+    // `NotSupported` when asked for firmware, so attestation would never
+    // finish. Tests for the outcomes that schedule nothing change the class
+    // instead of deleting this, since creating the host attests it first.
+    // Seeded only when absent: a test may build two environments on one pool,
+    // and creation rejects a duplicate class. Skipping also leaves a profile
+    // the test wrote for this class ahead of the environment untouched.
+    if config.spdm.enabled {
+        Box::pin(seed_mock_host_attestation_profile(&db_pool)).await;
+    }
+
     let config = Arc::new(config);
 
     let site_fabric_networks = overrides
@@ -1358,6 +1427,14 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
     db::resource_pool::define_all_from(&mut txn, &pool_defs(pool_size))
         .await
         .unwrap();
+    // Bind the populated fixture pools to Integrated before constructing the API.
+    let resource_pool_registry = ResourcePoolRegistry::resolve(
+        PoolDefinitionSource::SeedConfiguration,
+        &mut txn,
+        &HashMap::new(),
+    )
+    .await
+    .unwrap();
     txn.commit().await.unwrap();
 
     let common_pools =
@@ -1404,6 +1481,14 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
         test_component_manager.nv_switch = nv_switch_manager;
     }
 
+    if let Some(power_shelf_manager) = overrides.power_shelf_manager.clone() {
+        test_component_manager.power_shelf = power_shelf_manager;
+    }
+
+    if let Some(use_state_controller) = overrides.compute_tray_use_state_controller {
+        test_component_manager.compute_tray_use_state_controller = use_state_controller;
+    }
+
     let test_component_manager = Some(Arc::new(test_component_manager));
     let fake_endpoint_explorer = MockEndpointExplorer::default();
 
@@ -1412,6 +1497,7 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
         common_pools.clone(),
         work_lock_manager_handle,
     )
+    .with_resource_pool_registry(resource_pool_registry)
     .with_credential_manager(composite_manager.clone())
     .with_runtime_config(config.clone())
     .with_eth_data(eth_virt_data)
@@ -1419,6 +1505,7 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
     .with_metric_emitter(ApiMetricsEmitter::new(&test_meter.meter()))
     .with_redfish_pool(redfish_sim.clone())
     .with_ib_fabric_manager(ib_fabric_manager.clone())
+    .with_firmware_object_fetcher(firmware_object_fetcher.clone())
     .with_endpoint_explorer(fake_endpoint_explorer.clone());
 
     if let Some(rms_client) = rms_sim.as_rms_client() {
@@ -1678,6 +1765,13 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
             ExtensionServiceStateHandlerServices {
                 db_pool: db_pool.clone(),
                 dpf_sdk: api.dpf_sdk.clone(),
+                service_vpc: ServiceVpcRegistrationConfig {
+                    slots: carbide_dpf::ServiceVpcSlots::new(
+                        config.dpu_config.service_vpc_slot_count,
+                    )
+                    .expect("test configuration has a validated service-VPC slot count"),
+                    enabled_address_families: config.dpf.deployments.service_vpc_address_families(),
+                },
             }
             .into(),
         )
@@ -1706,10 +1800,7 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
                 } else {
                     None
                 },
-                nmx_cluster_switch_mtls_services:
-                    component_manager::config::switch_mtls_services_as_i32(
-                        &component_manager::config::effective_nmx_cluster_switch_mtls_services(&[]),
-                    ),
+                switch_mtls_services: config.switch_state_controller.switch_mtls_services.clone(),
                 firmware_object_fetcher: firmware_object_fetcher.clone(),
                 per_object_metrics_registry: per_object_metrics_registry.clone(),
             }
@@ -1728,6 +1819,12 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
         SiteExplorerConfig {
             enabled: Arc::new(true.into()),
             retained_boot_interface_window: None,
+            admin_fnn_enabled: api
+                .runtime_config
+                .fnn
+                .as_ref()
+                .and_then(|fnn| fnn.admin_vpc.as_ref())
+                .is_some_and(|admin| admin.enabled),
             // run_interval shouldn't matter, this should not be run(), we only trigger intervals manually.
             run_interval: Duration::seconds(0).to_std().unwrap(),
             concurrent_explorations: 100,
@@ -1788,19 +1885,28 @@ pub(in crate::tests) async fn create_test_env_with_overrides(
 
     txn.commit().await.unwrap();
 
-    // Create domain
-    let domain: carbide_uuid::domain::DomainId = api
-        .create_domain(Request::new(rpc::protos::dns::CreateDomainRequest {
-            name: "dwrt1.com".to_string(),
-            default_ttl: None,
-        }))
+    // Restart tests keep their database. Reuse the domain so its name stays
+    // unique and existing segments keep the same domain ID.
+    let domain_name = "dwrt1.com";
+    let existing_domain = db::dns::domain::find_by_name(&db_pool, domain_name)
         .await
-        .unwrap()
-        .into_inner()
-        .id
-        .map(::carbide_uuid::domain::DomainId::try_from)
-        .unwrap()
-        .unwrap();
+        .expect("fixture domain lookup succeeds")
+        .into_iter()
+        .find(|domain| domain.vpc_id.is_none());
+    let domain = match existing_domain {
+        Some(domain) => domain.id,
+        None => api
+            .create_domain(Request::new(rpc::protos::dns::CreateDomainRequest {
+                name: domain_name.to_string(),
+                default_ttl: None,
+                vpc_id: None,
+            }))
+            .await
+            .expect("fixture domain creation succeeds")
+            .into_inner()
+            .id
+            .expect("created domain has an ID"),
+    };
 
     let (admin_segments, underlay_segment) = if overrides.create_network_segments.unwrap_or(true) {
         // Create admin network
@@ -2197,14 +2303,52 @@ pub(in crate::tests) async fn network_configured_with_health(
 
 /// Fake an iteration of forge-dpu-agent requesting network config, applying it, and reporting back.
 /// When reporting back, the health and extension services statuses reported by the DPU can be overrridden
-// This fixture reports the compatibility fields populated for older agents.
-#[allow(deprecated)]
 pub(in crate::tests) async fn network_configured_with_health_and_ext_services(
     env: &TestEnv,
     dpu_machine_id: &DpuMachineId,
     dpu_health: Option<rpc::health::HealthReport>,
     extension_services_state: Option<rpc::forge::DpuExtensionServiceDeploymentStatus>,
 ) {
+    report_network_status(
+        env,
+        dpu_machine_id,
+        dpu_health,
+        extension_services_state,
+        None,
+    )
+    .await
+    .unwrap()
+}
+
+/// Fake an iteration of forge-dpu-agent that attaches `lldp` to its network status report.
+pub(in crate::tests) async fn network_configured_with_lldp(
+    env: &TestEnv,
+    dpu_machine_id: &DpuMachineId,
+    lldp: rpc::forge::LldpReport,
+) {
+    try_network_configured_with_lldp(env, dpu_machine_id, lldp)
+        .await
+        .unwrap()
+}
+
+/// Like [`network_configured_with_lldp`], but returns the status report's result.
+pub(in crate::tests) async fn try_network_configured_with_lldp(
+    env: &TestEnv,
+    dpu_machine_id: &DpuMachineId,
+    lldp: rpc::forge::LldpReport,
+) -> Result<(), tonic::Status> {
+    report_network_status(env, dpu_machine_id, None, None, Some(lldp)).await
+}
+
+// This fixture reports the compatibility fields populated for older agents.
+#[allow(deprecated)]
+async fn report_network_status(
+    env: &TestEnv,
+    dpu_machine_id: &DpuMachineId,
+    dpu_health: Option<rpc::health::HealthReport>,
+    extension_services_state: Option<rpc::forge::DpuExtensionServiceDeploymentStatus>,
+    lldp: Option<rpc::forge::LldpReport>,
+) -> Result<(), tonic::Status> {
     let network_config = env
         .api
         .get_managed_host_network_config(Request::new(
@@ -2339,7 +2483,7 @@ pub(in crate::tests) async fn network_configured_with_health_and_ext_services(
             .map(|instance| instance.dpu_extension_service_version),
         dpu_extension_services,
         astra_config_status: None,
-        lldp: None,
+        lldp,
     };
     tracing::trace!(
         network_config_version = %status.network_config_version.as_ref().unwrap(),
@@ -2347,11 +2491,10 @@ pub(in crate::tests) async fn network_configured_with_health_and_ext_services(
         instance_config_version = ?instance_config_version,
         "machine network configured",
     );
-    let _ = env
-        .api
+    env.api
         .record_dpu_network_status(Request::new(status))
         .await
-        .unwrap();
+        .map(|_| ())
 }
 
 /// Fake hardware health service reporting health

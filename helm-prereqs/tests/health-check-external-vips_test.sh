@@ -22,6 +22,7 @@ extract_section() {
 
 OUTPUT_HELPERS=$(extract_section 'set -uo pipefail' '# Preflight: kubectl accessible')
 VIP_CHECKS=$(extract_section '# 8. External Services — LoadBalancer VIPs' '# 10. In-cluster service connectivity')
+DNS_CHECKS=$(extract_section '# 11. DNS — nico-unbound' '# 12. NTP (nico-ntp)')
 SUMMARY=$(extract_section '# Summary' '[[ "${FAIL}" -eq 0 ]]')
 
 kubectl() {
@@ -45,6 +46,24 @@ kubectl() {
         'exec -n metallb-system speaker-0 -c speaker -- nc -zw2 '*)
             printf '%s\n' "$*" >> "${TEST_LOG}"
             [[ "${10}" != "${TEST_FAILED_IP}" ]]
+            ;;
+        'get pod -n nico-system -l app.kubernetes.io/name=unbound --field-selector=status.phase=Running -o jsonpath={.items[0].metadata.name}')
+            printf 'unbound-0'
+            ;;
+        'exec -n nico-system unbound-0 -- sh -c command -v unbound-control >/dev/null 2>&1' | \
+        'exec -n metallb-system speaker-0 -c speaker -- sh -c command -v nslookup >/dev/null 2>&1') ;;
+        'exec -n nico-system unbound-0 -- unbound-control status')
+            printf 'unbound is running\n'
+            ;;
+        'get svc -n nico-system nico-unbound-external -o jsonpath={.status.loadBalancer.ingress[0].ip}')
+            return 1
+            ;;
+        'get svc -n nico-system -l app.kubernetes.io/name=unbound -o jsonpath={range .items[?(@.spec.type=="LoadBalancer")]}{range .status.loadBalancer.ingress[*]}{.ip}{"\n"}{end}{end}')
+            printf '%s\n' "${TEST_IPS}"
+            ;;
+        'exec -n metallb-system speaker-0 -c speaker -- nslookup '*)
+            printf '%s\n' "${10}" >> "${TEST_LOG}"
+            printf 'Name: %s\nAddress: 192.0.2.53\n' "${9}"
             ;;
         *)
             printf 'unexpected kubectl call: %s\n' "$*" >&2
@@ -121,6 +140,36 @@ second VIP unreachable|nico-api-external|192.0.2.10,2001:db8::10|TCP|2001:db8::1
 unassigned service|nico-api-external||TCP||0|1|
 UDP protocol|nico-ntp-external|192.0.2.10,2001:db8::10|UDP||2|0|
 UDP duplicate name|nico-unbound-external-udp|192.0.2.10,2001:db8::10|TCP||2|0|
+CASES
+
+export _SPEAKER=speaker-0
+while IFS='|' read -r name ips expected_ip; do
+    TEST_IPS="${ips//,/$'\n'}"
+    : > "${TEST_LOG}"
+    output=$(bash -c "${OUTPUT_HELPERS}
+${DNS_CHECKS}
+${SUMMARY}" 2>&1)
+    assert_output '  ALL CHECKS PASSED'
+    expected_probes=''
+    if [[ -n "${expected_ip}" ]]; then
+        assert_output "  ✓ PASS  nico-unbound: recursive resolution (example.com via ${expected_ip})"
+        expected_probes="${expected_ip}"$'\n'
+        for hostname in carbide-api.forge carbide-pxe.forge carbide-static-pxe.forge carbide-ntp.forge unbound.forge otel-receiver.forge socks.forge; do
+            assert_output "  ✓ PASS  nico-unbound: ${hostname} resolves via ${expected_ip} (192.0.2.53)"
+            expected_probes+="${expected_ip}"$'\n'
+        done
+    else
+        assert_output '  ⚠ WARN  nico-unbound: resolution tests skipped (no MetalLB speaker or VIP available)'
+    fi
+    actual_probes=$(< "${TEST_LOG}")
+    if [[ "${actual_probes}" != "${expected_probes%$'\n'}" ]]; then
+        printf '%s: unexpected DNS server arguments\nexpected:\n%sactual:\n%s\n' \
+            "${name}" "${expected_probes}" "${actual_probes}" >&2
+        exit 1
+    fi
+done <<'CASES'
+dual-stack DNS after an unassigned service|,2001:db8:1234:5678:90ab:cdef:1234:5678,192.0.2.10|2001:db8:1234:5678:90ab:cdef:1234:5678
+unassigned DNS service||
 CASES
 
 echo "health-check external VIP tests passed"

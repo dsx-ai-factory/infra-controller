@@ -12,7 +12,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -101,8 +100,6 @@ func TestSSHKeySQLDAO_Create(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -178,8 +175,6 @@ func TestSSHKeySQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -223,7 +218,6 @@ func TestSSHKeySQLDAO_GetAll(t *testing.T) {
 	assert.NotNil(t, skgsa2)
 
 	skg1Sshkeys := []SSHKey{}
-	skg2Sshkeys := []SSHKey{}
 
 	totalSshkeys := 25
 
@@ -253,7 +247,6 @@ func TestSSHKeySQLDAO_GetAll(t *testing.T) {
 			// Build SSHKeyAssociation
 			ska2 := testBuildSSHKeyAssociation(t, dbSession, sk1.ID, skg2.ID, tn.ID)
 			assert.NotNil(t, ska2)
-			skg2Sshkeys = append(skg2Sshkeys, *sk1)
 		}
 	}
 
@@ -432,8 +425,6 @@ func TestSSHKeySQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -546,8 +537,6 @@ func TestSSHKeySQLDAO_Update(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -616,8 +605,6 @@ func TestSSHKeySQLDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}

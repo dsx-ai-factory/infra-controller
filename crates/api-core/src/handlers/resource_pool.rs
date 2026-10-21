@@ -18,6 +18,10 @@
 use std::collections::HashMap;
 
 use ::rpc::forge as rpc;
+use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry};
+use model::resource_pool::binding::{
+    INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolSelection,
+};
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
@@ -31,18 +35,45 @@ pub(crate) async fn grow(
 
     let toml_text = request.into_inner().text;
 
-    let mut txn = api.txn_begin().await?;
-
     let mut pools = HashMap::new();
     let table: toml::Table = toml_text
         .parse()
         .map_err(|e: toml::de::Error| CarbideError::InvalidArgument(e.to_string()))?;
     for (name, def) in table {
+        if name.trim().is_empty() {
+            return Err(CarbideError::InvalidArgument(
+                "resource pool name must not be empty".to_owned(),
+            )
+            .into());
+        }
         let d: model::resource_pool::ResourcePoolDef = def
             .try_into()
             .map_err(|e: toml::de::Error| CarbideError::InvalidArgument(e.to_string()))?;
         pools.insert(name, d);
     }
+    let selections = pools
+        .iter()
+        .map(|(name, definition)| {
+            (
+                name.clone(),
+                ResourcePoolSelection {
+                    pool_name: name.clone(),
+                    value_domain: model::resource_pool::ValueType::from(definition.pool_type)
+                        .into(),
+                    backend_name: None,
+                    backend_kind: ResourcePoolBackendKind::Integrated,
+                    authority_id: INTEGRATED_AUTHORITY_ID.to_owned(),
+                    remote_pool: name.clone(),
+                },
+            )
+        })
+        .collect();
+    // Save bindings in the growth transaction so a rejected batch leaves both
+    // the bindings and available values unchanged.
+    let mut txn = api.txn_begin().await?;
+    ResourcePoolRegistry::resolve(PoolDefinitionSource::GrowthRequest, &mut txn, &selections)
+        .await
+        .map_err(CarbideError::from)?;
     let reconcile_dpu_loopbacks = pools.contains_key(model::resource_pool::common::LOOPBACK_IP_V6);
     use db::resource_pool::DefineResourcePoolError as DE;
     match db::resource_pool::define_all_from(&mut txn, &pools).await {

@@ -70,8 +70,10 @@ spec:
             - mountPath: "/var/run/secrets/spiffe.io"
               name: spiffe
               readOnly: true
-        {{- with .Values.extraContainers }}
-        {{- toYaml . | nindent 8 }}
+        {{- range $index, $entry := .Values.extraContainers }}
+        {{- $container := omit $entry "repository" "tag" }}
+        {{- $_ := set $container "image" (include "nico.containerImage" (dict "container" $entry "path" (printf "%s.extraContainers[%d]" $.Chart.Name $index))) }}
+        {{- toYaml (list $container) | nindent 8 }}
         {{- end }}
       volumes:
         - name: spiffe

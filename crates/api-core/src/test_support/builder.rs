@@ -21,8 +21,10 @@ use arc_swap::ArcSwap;
 use carbide_ib_fabric::ib::IBFabricManager;
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_nvlink_manager::nvlink::test_support::NmxcSimClient;
+use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_redfish::libredfish::BmcCredentialOps;
 use carbide_redfish::libredfish::test_support::RedfishSim;
+use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_secrets::credentials::CredentialManager;
 use carbide_secrets::test_support::certificates::TestCertificateProvider;
 use carbide_secrets::test_support::credentials::TestCredentialManager;
@@ -39,6 +41,7 @@ use librms::RmsApi;
 use model::resource_pool::common::CommonPools;
 use sqlx::PgPool;
 use state_controller::controller::Enqueuer;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
 use super::Api;
@@ -56,6 +59,7 @@ use crate::test_support::network::default_test_eth_virt_data;
 pub struct TestApiBuilder {
     db_pool: PgPool,
     common_pools: Arc<CommonPools>,
+    resource_pool_registry: ResourcePoolRegistry,
     work_lock_manager: WorkLockManagerHandle,
     runtime_config: Option<Arc<CarbideConfig>>,
     credential_manager: Option<Arc<dyn CredentialManager>>,
@@ -69,6 +73,8 @@ pub struct TestApiBuilder {
     component_manager: Option<Arc<component_manager::component_manager::ComponentManager>>,
     secrets_context: Option<crate::secrets::SecretsContext>,
     endpoint_explorer: Option<MockEndpointExplorer>,
+    console_log_source: Option<Arc<dyn crate::console_logs::ConsoleLogSource>>,
+    firmware_object_fetcher: Option<Arc<dyn FirmwareObjectFetcher>>,
 }
 
 impl TestApiBuilder {
@@ -80,6 +86,7 @@ impl TestApiBuilder {
         TestApiBuilder {
             db_pool,
             common_pools,
+            resource_pool_registry: ResourcePoolRegistry::default(),
             work_lock_manager,
             runtime_config: None,
             credential_manager: None,
@@ -93,6 +100,17 @@ impl TestApiBuilder {
             component_manager: None,
             secrets_context: None,
             endpoint_explorer: None,
+            console_log_source: None,
+            firmware_object_fetcher: None,
+        }
+    }
+
+    /// `with_resource_pool_registry` supplies the resolved pool backends used by the API.
+    /// Without one, pool lookups read the database in the caller's transaction.
+    pub fn with_resource_pool_registry(self, resource_pool_registry: ResourcePoolRegistry) -> Self {
+        Self {
+            resource_pool_registry,
+            ..self
         }
     }
 
@@ -195,6 +213,27 @@ impl TestApiBuilder {
     pub fn with_endpoint_explorer(self, endpoint_explorer: MockEndpointExplorer) -> Self {
         Self {
             endpoint_explorer: Some(endpoint_explorer),
+            ..self
+        }
+    }
+
+    pub fn with_console_log_source(
+        self,
+        console_log_source: Arc<dyn crate::console_logs::ConsoleLogSource>,
+    ) -> Self {
+        Self {
+            console_log_source: Some(console_log_source),
+            ..self
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_firmware_object_fetcher(
+        self,
+        firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher>,
+    ) -> Self {
+        Self {
+            firmware_object_fetcher: Some(firmware_object_fetcher),
             ..self
         }
     }
@@ -307,6 +346,7 @@ impl TestApiBuilder {
             bmc_proxy_passthrough: None,
             eth_data,
             common_pools: self.common_pools,
+            resource_pool_registry: self.resource_pool_registry,
             ib_fabric_manager,
             dynamic_settings,
             endpoint_explorer,
@@ -320,10 +360,17 @@ impl TestApiBuilder {
             machine_state_handler_enqueuer,
             metric_emitter,
             component_manager: self.component_manager.map(|cm| (*cm).clone()),
+            firmware_object_fetcher: self
+                .firmware_object_fetcher
+                .unwrap_or_else(|| Arc::new(reqwest::Client::new())),
             bmc_session_manager,
             bms_client: std::sync::OnceLock::new(),
             secrets_context: self.secrets_context,
             node_jwt_validator: None,
+            console_log_source: self
+                .console_log_source
+                .unwrap_or_else(|| Arc::new(crate::console_logs::UnavailableSource)),
+            cancel_token: CancellationToken::new(),
         }
     }
 }

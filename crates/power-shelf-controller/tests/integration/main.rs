@@ -21,4 +21,5 @@ mod error_state;
 mod health;
 mod maintenance;
 mod power_shelf_deletion;
+mod ready;
 mod reprovisioning;

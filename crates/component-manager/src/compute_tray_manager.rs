@@ -8,6 +8,7 @@ use carbide_secrets::credentials::Credentials;
 use mac_address::MacAddress;
 use model::component_manager::{ComputeTrayComponent, FirmwareState, PowerAction};
 
+use crate::component_common::{ComponentPowerStateResult, PowerStateSource};
 use crate::error::ComponentManagerError;
 use crate::types::FirmwareUpdateOptions;
 
@@ -42,6 +43,7 @@ impl From<bmc_vendor::BMCVendor> for ComputeTrayVendor {
             bmc_vendor::BMCVendor::LenovoAMI
             | bmc_vendor::BMCVendor::Liteon
             | bmc_vendor::BMCVendor::Delta
+            | bmc_vendor::BMCVendor::Sushy
             | bmc_vendor::BMCVendor::Unknown => Self::Unknown,
         }
     }
@@ -99,14 +101,20 @@ impl std::fmt::Display for Backend {
 
 /// Backend trait for compute tray management operations.
 ///
-/// Implementations receive physical endpoint information (BMC IP/MAC + vendor)
-/// and handle registration with the backend service internally. Each result
-/// echoes the endpoint's `bmc_ip` and `bmc_mac` so callers can correlate an
-/// outcome back to the target they supplied without a side lookup (the BMC IP
-/// is not a stable correlation key before ingestion, where leases churn).
+/// Implementations receive physical endpoint information (BMC IP/MAC + vendor).
+/// Mutation and firmware results echo both `bmc_ip` and `bmc_mac`; power
+/// observations identify the requested BMC MAC in `mac_address`. The BMC IP can
+/// change before ingestion as leases churn.
 #[async_trait::async_trait]
 pub trait ComputeTrayManager: Send + Sync + Debug + 'static {
     fn name(&self) -> &str;
+
+    /// Identifies the source when `get_power_state` supports fresh, passive reads.
+    /// `None` means callers must reject passive reads before fetching credentials
+    /// or invoking the getter; its default implementation is unsupported.
+    fn power_state_source(&self) -> Option<PowerStateSource> {
+        None
+    }
 
     fn backend(&self) -> Backend;
 
@@ -115,6 +123,23 @@ pub trait ComputeTrayManager: Send + Sync + Debug + 'static {
         endpoints: &[ComputeTrayEndpoint],
         action: PowerAction,
     ) -> Result<Vec<ComputeTrayResult>, ComponentManagerError>;
+
+    /// Reads power observations in endpoint order, identified by each tray's
+    /// requested BMC MAC. Per-tray absence and errors are represented in each
+    /// result; an error preparing the request can fail the whole call. Reads do not
+    /// register devices or change their power state.
+    ///
+    /// Backends without power observation support return
+    /// [`ComponentManagerError::Unsupported`].
+    async fn get_power_state(
+        &self,
+        _endpoints: &[ComputeTrayEndpoint],
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "power observations are not supported by the {} backend",
+            self.name()
+        )))
+    }
 
     /// Update firmware on compute trays.
     ///
@@ -161,6 +186,15 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn power_observations_are_unsupported_by_default() {
+        let error = crate::mock::MockComputeTrayManager
+            .get_power_state(&[])
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ComponentManagerError::Unsupported(_)));
+    }
+
     #[test]
     fn bmc_vendor_maps_to_compute_tray_vendor() {
         value_scenarios!(run = ComputeTrayVendor::from;
@@ -176,6 +210,7 @@ mod tests {
                 BMCVendor::LenovoAMI => ComputeTrayVendor::Unknown,
                 BMCVendor::Liteon => ComputeTrayVendor::Unknown,
                 BMCVendor::Delta => ComputeTrayVendor::Unknown,
+                BMCVendor::Sushy => ComputeTrayVendor::Unknown,
                 BMCVendor::Unknown => ComputeTrayVendor::Unknown,
             }
         );

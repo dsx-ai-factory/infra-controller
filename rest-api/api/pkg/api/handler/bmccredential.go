@@ -21,19 +21,17 @@ const createCredentialMethod = "/forge.Forge/CreateCredential"
 
 // CreateOrUpdateBMCCredentialHandler stores (creates or overwrites) a BMC credential.
 type CreateOrUpdateBMCCredentialHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateOrUpdateBMCCredentialHandler returns a handler for creating or updating a BMC credential.
 func NewCreateOrUpdateBMCCredentialHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) CreateOrUpdateBMCCredentialHandler {
 	return CreateOrUpdateBMCCredentialHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -49,7 +47,7 @@ func NewCreateOrUpdateBMCCredentialHandler(dbSession *cdb.Session, scp *sc.Clien
 // @Success 200 {object} model.APIBMCCredential
 // @Router /v2/org/{org}/nico/credential/bmc [put]
 func (h CreateOrUpdateBMCCredentialHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("BMCCredential", "CreateOrUpdate", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("BMCCredential", "CreateOrUpdate", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

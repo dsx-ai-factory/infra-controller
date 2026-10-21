@@ -536,6 +536,13 @@ fn catalog_component_regex(
             _ => None,
         },
         bmc_vendor::BMCVendor::Lenovo | bmc_vendor::BMCVendor::LenovoAMI => {
+            // Lenovo GB300 reports the host BMC as BMC, not BMC-Primary.
+            if vendor == bmc_vendor::BMCVendor::LenovoAMI
+                && model_matches(model, "HG635N_V2")
+                && component_type == FirmwareComponentType::Bmc
+            {
+                return Some("^BMC$");
+            }
             if model_matches(model, "ThinkSystem HS350X V3")
                 && component_type == FirmwareComponentType::Bmc
             {
@@ -823,6 +830,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(lenovo_ami_regex.as_str(), "^BMC-Primary");
+
+        let gb300_regex = component_regex(
+            bmc_vendor::BMCVendor::LenovoAMI,
+            "hg635n_v2",
+            FirmwareComponentType::Bmc,
+        )
+        .unwrap();
+        assert!(gb300_regex.is_match("BMC"));
+        assert!(!gb300_regex.is_match("BMC-Primary"));
+        assert!(!gb300_regex.is_match("HGX_BMC_0"));
     }
 
     #[test]

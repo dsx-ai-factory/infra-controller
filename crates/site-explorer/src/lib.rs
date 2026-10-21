@@ -32,14 +32,11 @@ use carbide_secrets::credentials::CredentialManager;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::machine::MachineType;
-use carbide_uuid::power_shelf::{PowerShelfIdSource, PowerShelfType};
 use chrono::Utc;
 use component_manager::MachineInfoProvider;
 use config::SiteExplorerConfig;
 use db::explored_endpoints::EndpointReportNotCurrent;
-use db::{
-    self, ConditionalWrite, DatabaseError, Transaction, machine, power_shelf as db_power_shelf,
-};
+use db::{self, ConditionalWrite, DatabaseError, Transaction, machine};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{StreamExt, TryFutureExt};
 use itertools::Itertools;
@@ -47,17 +44,15 @@ use mac_address::MacAddress;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::errors::OperatorError;
 use model::expected_entity::ExpectedEntity;
-use model::expected_power_shelf::ExpectedPowerShelf;
 use model::machine::MachineInterfaceSnapshot;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine_boot_interface::{BootInterfaceSelectionSource, MachineBootInterface};
 use model::machine_interface::InterfaceType;
-use model::power_shelf::{NewPowerShelf, PowerShelfConfig};
 use model::rack_type::RackProfileConfig;
 use model::resource_pool::common::CommonPools;
 use model::site_explorer::{
     BlueFieldOperatingMode, Chassis, EndpointExplorationError, EndpointExplorationReport,
-    EndpointType, ExploredDpu, ExploredEndpoint, ExploredManagedHost, ExploredManagedSwitch,
+    EndpointType, ExploredDpu, ExploredEndpoint, ExploredManagedHost,
     HostPrimaryInterfaceSelection, MachineExpectation, PowerState, PreingestionState, Service,
     SiteExplorerLastRun, is_bf3_dpu_part_number, is_bf3_supernic_part_number,
     is_bluefield_part_number, is_bluefield_system,
@@ -67,6 +62,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use version_compare::Cmp;
+mod attester_inventory;
 mod endpoint_explorer;
 pub use endpoint_explorer::{AuthenticatedBmc, EndpointExplorer};
 mod endpoint_exploration_service;
@@ -85,10 +81,16 @@ pub use bmc_endpoint_explorer::{AuthenticatedBmcClient, BmcEndpointExplorer};
 pub use redfish::{BmcAccess, EstablishedBmc, ProxiedPools};
 mod boot_order_tracker;
 use boot_order_tracker::BootOrderTracker;
-mod machine_creator;
-pub use machine_creator::MachineCreator;
+mod inventory_creator;
+use inventory_creator::InventoryCreator;
+pub use inventory_creator::{
+    Config as InventoryCreatorConfig, MachineCreator, PowerShelfCreator, SwitchCreator,
+};
+mod machine_location_reconciler;
+pub use machine_location_reconciler::MachineLocationReconciler;
 pub mod explored_endpoint_index;
 mod managed_host;
+use carbide_uuid::rack::RackId;
 use db::ObjectColumnFilter;
 use db::work_lock_manager::WorkLockManagerHandle;
 pub use managed_host::is_endpoint_in_managed_host;
@@ -99,10 +101,7 @@ use model::expected_machine::{
 };
 use model::firmware::FirmwareComponentType;
 use model::network_segment::NetworkSegmentType;
-mod switch_creator;
-use carbide_uuid::rack::RackId;
 use model::rack::Rack;
-pub use switch_creator::SwitchCreator;
 pub mod config;
 pub mod errors;
 use std::sync::atomic::AtomicBool;
@@ -178,9 +177,10 @@ pub fn enrich_endpoint_exploration_report(
                 "Can not find firmware info"
             );
         }
-
-        // Go through the chassis entries and get what at least one of them says.
-        report.parse_position_info()
+        // Persist cached position fields so older versions can read reports after rollback.
+        // TODO: Remove this compatibility call after release 2.5.
+        #[allow(deprecated)]
+        report.parse_position_info();
     } else {
         tracing::info!("Generating PowerShelfId for power shelf");
         if let Err(error) = report.generate_power_shelf_id() {
@@ -234,14 +234,7 @@ pub(crate) async fn ensure_rack_exists(
 
             tracing::info!(%rack_id, "Rack does not exist, creating from expected rack");
             let config = model::rack::RackConfig::default();
-            let rack = db::rack::create(
-                &mut *txn,
-                rack_id,
-                Some(&expected.rack_profile_id),
-                &config,
-                Some(&expected.metadata),
-            )
-            .await?;
+            let rack = db::rack::create_from_expected(&mut *txn, &expected, &config).await?;
 
             Ok(Some(rack))
         }
@@ -597,8 +590,8 @@ pub struct SiteExplorer {
     bmc_client: Arc<dyn AuthenticatedBmc>,
     endpoint_exploration_service: Arc<EndpointExplorationService>,
     work_lock_manager_handle: WorkLockManagerHandle,
-    machine_creator: MachineCreator,
-    switch_creator: SwitchCreator,
+    inventory_creator: InventoryCreator,
+    machine_location_reconciler: MachineLocationReconciler,
     boot_order_tracker: BootOrderTracker,
     /// Backstops the persisted BMC-reset timestamps for the reset rate limit,
     /// so a reset whose timestamp write failed still throttles the next reset.
@@ -648,18 +641,19 @@ impl SiteExplorer {
         let endpoint_explorer = endpoint_exploration_service.endpoint_explorer();
 
         SiteExplorer {
-            machine_creator: MachineCreator::new(
+            machine_location_reconciler: MachineLocationReconciler::new(
                 database_connection.clone(),
-                explorer_config.clone(),
+                rack_profiles.clone(),
+                machine_info_provider.clone(),
+                credential_manager,
+            ),
+            inventory_creator: InventoryCreator::new(
+                database_connection.clone(),
+                (&explorer_config).into(),
                 common_pools,
                 rack_profiles,
                 machine_info_provider,
-                credential_manager,
                 dpf_enabled_at_site,
-            ),
-            switch_creator: SwitchCreator::new(
-                database_connection.clone(),
-                explorer_config.clone(),
             ),
             database_connection,
             config: explorer_config,
@@ -1008,27 +1002,9 @@ impl SiteExplorer {
                     });
             }
 
-            for system in ep.report.systems.iter() {
-                if should_alert_power_state(system.power_state) {
-                    new_health_report
-                        .alerts
-                        .push(health_report::HealthProbeAlert {
-                            // PoweredOff alert ID covers Off/Paused/Unknown states
-                            id: "PoweredOff".parse().unwrap(),
-                            target: Some(ep.address.to_string()),
-                            in_alert_since: None,
-                            message: format!(
-                                "System \"{}\" power state is \"{:?}\"",
-                                system.id, system.power_state
-                            ),
-                            tenant_message: None,
-                            classifications: vec![
-                                health_report::HealthAlertClassification::prevent_allocations(),
-                            ],
-                        });
-                    break;
-                }
-            }
+            new_health_report
+                .alerts
+                .extend(ep.report.power_state_alert(ep.address));
 
             let expected_machine = expected_endpoint_index.matched_expected_machine(&ep.address);
 
@@ -1055,14 +1031,13 @@ impl SiteExplorer {
                 let expected_sn = &expected_machine.data.serial_number;
 
                 // Check expected vs actual serial number
-                // using system serial numbers.
+                // using the primary system serial number.
                 // If nothing found, try again with chassis
                 // serial numbers.
                 if !ep
                     .report
-                    .systems
-                    .iter()
-                    .any(|s| s.check_serial_number(expected_sn) || s.check_sku(expected_sn))
+                    .primary_system()
+                    .is_some_and(|s| s.check_serial_number(expected_sn) || s.check_sku(expected_sn))
                     && !ep.report.chassis.iter().any(|s| match s.serial_number {
                         Some(ref sn) => sn == expected_sn,
                         _ => false,
@@ -1159,7 +1134,7 @@ impl SiteExplorer {
         self.check_preconditions(metrics).await?;
 
         let update_explored_endpoints_start = Instant::now();
-        let expected_endpoint_index = self
+        let (expected_endpoint_index, explored_this_run) = self
             .update_explored_endpoints(metrics, &run_context)
             .await?;
         metrics.record_phase_latency(
@@ -1175,7 +1150,7 @@ impl SiteExplorer {
         // 2b) If the endpoint is for a host: make sure that the host is on and that infinite boot is enabled. Otherwise, we will not be able to provision the DPU appropriately
         // once we create a managed host and add it to the state machine.
         let identify_machines_to_ingest_start = Instant::now();
-        let (explored_dpus, explored_hosts) = self
+        let (explored_dpus, explored_hosts, already_ingested_bmc_ips) = self
             .identify_machines_to_ingest(metrics, &expected_endpoint_index, &run_context)
             .await?;
         metrics.record_phase_latency(
@@ -1203,88 +1178,16 @@ impl SiteExplorer {
             identify_managed_hosts_start.elapsed(),
         );
 
-        if self.config.create_machines.load(Ordering::Relaxed) {
-            let start_create_machines = Instant::now();
-            let create_machines_res = self
-                .machine_creator
-                .create_machines(metrics, &mut identified_hosts, &expected_endpoint_index)
-                .await;
-            let create_machines_latency = start_create_machines.elapsed();
-            metrics.create_machines_latency = Some(create_machines_latency);
-            metrics.record_phase_latency("create_machines", create_machines_latency);
-            create_machines_res?;
-        }
-
-        let reconcile_desired_boot_interfaces_start = Instant::now();
-        let reconcile_desired_boot_interfaces_res = self
-            .machine_creator
-            .reconcile_desired_boot_interfaces()
-            .await;
-        metrics.record_phase_latency(
-            "reconcile_desired_boot_interfaces",
-            reconcile_desired_boot_interfaces_start.elapsed(),
-        );
-        if let Err(error) = reconcile_desired_boot_interfaces_res {
-            tracing::warn!(
-                %error,
-                "Desired boot-interface reconciliation pass failed; a later Site Explorer run will retry"
-            );
-        }
-
-        // Identify and create power shelves
-        let identify_power_shelves_to_ingest_start = Instant::now();
-        let explored_power_shelves = self
-            .identify_power_shelves_to_ingest(&expected_endpoint_index, &run_context)
+        self.inventory_creator
+            .create_inventory(
+                metrics,
+                &mut identified_hosts,
+                &expected_endpoint_index,
+                &already_ingested_bmc_ips,
+                &explored_this_run,
+                &run_context.suppressed_bmc_macs,
+            )
             .await?;
-        metrics.record_phase_latency(
-            "identify_power_shelves_to_ingest",
-            identify_power_shelves_to_ingest_start.elapsed(),
-        );
-
-        if self.config.create_power_shelves.load(Ordering::Relaxed) {
-            let start_create_power_shelves = Instant::now();
-            let create_power_shelves_res = self
-                .create_power_shelves(metrics, explored_power_shelves, &expected_endpoint_index)
-                .await;
-            let create_power_shelves_latency = start_create_power_shelves.elapsed();
-            metrics.create_power_shelves_latency = Some(create_power_shelves_latency);
-            metrics.record_phase_latency("create_power_shelves", create_power_shelves_latency);
-            create_power_shelves_res?;
-        } else if !explored_power_shelves.is_empty() {
-            tracing::info!(
-                power_shelf_count = explored_power_shelves.len(),
-                "Identified power shelves during exploration but create_power_shelves=false; skipping PowerShelf creation. \
-                 Set [site_explorer] create_power_shelves=true and declare matching expected_power_shelves records to ingest them."
-            );
-        }
-
-        // Identify and create switches
-        let identify_switches_to_ingest_start = Instant::now();
-        let explored_switches = self
-            .identify_switches_to_ingest(&expected_endpoint_index, &run_context)
-            .await?;
-        metrics.record_phase_latency(
-            "identify_switches_to_ingest",
-            identify_switches_to_ingest_start.elapsed(),
-        );
-
-        if self.config.create_switches.load(Ordering::Relaxed) {
-            let start_create_switches = Instant::now();
-            let create_switches_res = self
-                .switch_creator
-                .create_switches(metrics, &explored_switches, &expected_endpoint_index)
-                .await;
-            let create_switches_latency = start_create_switches.elapsed();
-            metrics.create_switches_latency = Some(create_switches_latency);
-            metrics.record_phase_latency("create_switches", create_switches_latency);
-            create_switches_res?;
-        } else if !explored_switches.is_empty() {
-            tracing::info!(
-                switch_count = explored_switches.len(),
-                "Identified switches during exploration but create_switches=false; skipping Switch creation. \
-                 Set [site_explorer] create_switches=true and declare matching expected_switches records to ingest them."
-            );
-        }
 
         // Audit after everything has been explored, identified, and created.
         let audit_exploration_results_start = Instant::now();
@@ -1327,7 +1230,7 @@ impl SiteExplorer {
             .map(|identified| identified.explored_host.host_bmc_ip)
             .collect::<Vec<_>>();
         if let Err(error) = self
-            .machine_creator
+            .machine_location_reconciler
             .reconcile_machine_locations(&host_bmc_ips)
             .await
         {
@@ -1347,212 +1250,12 @@ impl SiteExplorer {
             .collect())
     }
 
-    async fn create_power_shelves(
-        &self,
-        metrics: &mut SiteExplorationMetrics,
-        explored_power_shelves: Vec<(ExploredEndpoint, EndpointExplorationReport)>,
-        expected_endpoint_index: &ExploredEndpointIndex,
-    ) -> SiteExplorerResult<()> {
-        for (endpoint, _report) in explored_power_shelves {
-            let address = endpoint.address;
-            let Some(expected_power_shelf) =
-                expected_endpoint_index.matched_expected_power_shelf(&endpoint.address)
-            else {
-                tracing::info!(
-                    bmc_ip_address = ?endpoint.address,
-                    "No expected power shelf found"
-                );
-                continue;
-            };
-
-            match self
-                .create_power_shelf(endpoint, expected_power_shelf, &self.database_connection)
-                .await
-            {
-                Ok(true) => {
-                    metrics.created_power_shelves_count += 1;
-                    if metrics.created_power_shelves_count as u64
-                        == self.config.power_shelves_created_per_run
-                    {
-                        break;
-                    }
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    tracing::error!(
-                        %error,
-                        bmc_ip_address = ?address,
-                        "Failed to create power shelf"
-                    )
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub async fn create_power_shelf(
-        &self,
-        explored_endpoint: ExploredEndpoint,
-        expected_shelf: &ExpectedPowerShelf,
-        pool: &PgPool,
-    ) -> SiteExplorerResult<bool> {
-        let mut txn = pool
-            .begin()
-            .await
-            .map_err(|e| DatabaseError::new("begin load create_power_shelf", e))?;
-
-        tracing::info!(
-            bmc_ip_address = %explored_endpoint.address,
-            "Creating power shelf"
-        );
-
-        // Defense against the duplicate-power-shelves bug: if a power shelf
-        // already exists in the database for this BMC MAC, don't make another
-        // one. This mirrors the dedup check on the switch creation path and
-        // catches the case where the input we hash to mint the
-        // `PowerShelfId` drifts between exploration cycles.
-        if let Some(existing) =
-            db_power_shelf::find_by_bmc_mac_address(&mut txn, expected_shelf.bmc_mac_address)
-                .await?
-        {
-            tracing::warn!(
-                bmc_mac_address = %expected_shelf.bmc_mac_address,
-                existing_power_shelf_id = %existing.id,
-                bmc_ip_address = %explored_endpoint.address,
-                "Power shelf already exists; skipping discovery",
-            );
-            txn.rollback()
-                .await
-                .map_err(|e| DatabaseError::new("rollback create_power_shelf", e))?;
-            return Ok(false);
-        }
-
-        // Check if a power shelf with the same name already exists
-        if !expected_shelf.metadata.name.is_empty() {
-            let existing_power_shelves = db_power_shelf::find_by(
-                &mut txn,
-                ObjectColumnFilter::All::<db::power_shelf::NameColumn>,
-            )
-            .await?;
-
-            // Check if any existing power shelf has the same name
-            for existing_ps in &existing_power_shelves {
-                if existing_ps.config.name == expected_shelf.metadata.name {
-                    tracing::info!(
-                        power_shelf_name = %expected_shelf.metadata.name,
-                        bmc_ip_address = %explored_endpoint.address,
-                        "Power shelf already exists; skipping creation"
-                    );
-                    txn.rollback()
-                        .await
-                        .map_err(|e| DatabaseError::new("rollback create_power_shelf", e))?;
-                    return Ok(false);
-                }
-            }
-        }
-
-        // Create a new power shelf
-        // Generate power_shelf_id similar to machine_id using deterministic hashing.
-        // Extract serial / vendor / model from the chassis reported by the
-        // explored endpoint. Prefer a chassis whose id identifies it as a
-        // power shelf, falling back to the first chassis if none match.
-        // Fall back to sensible defaults if the chassis is missing fields so
-        // that we can still mint a stable id during exploration.
-        let chassis_list = &explored_endpoint.report.chassis;
-        let power_shelf_chassis = chassis_list
-            .iter()
-            .find(|c| c.id.to_lowercase().contains("powershelf"))
-            .or_else(|| chassis_list.first());
-
-        if power_shelf_chassis.is_none() {
-            tracing::warn!(
-                bmc_ip_address = %explored_endpoint.address,
-                "No chassis reported for power shelf endpoint; falling back to defaults for id generation",
-            );
-        }
-
-        let power_shelf_serial = power_shelf_chassis
-            .and_then(|c| c.serial_number.as_deref())
-            .unwrap_or(expected_shelf.metadata.name.as_str());
-        let power_shelf_vendor = power_shelf_chassis
-            .and_then(|c| c.manufacturer.as_deref())
-            .unwrap_or("NVIDIA");
-        let power_shelf_model = power_shelf_chassis
-            .and_then(|c| c.model.as_deref())
-            .unwrap_or("PowerShelf");
-        let power_shelf_id = match model::power_shelf::power_shelf_id::from_hardware_info(
-            power_shelf_serial,
-            power_shelf_vendor,
-            power_shelf_model,
-            PowerShelfIdSource::ProductBoardChassisSerial,
-            PowerShelfType::Rack,
-        ) {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to create power shelf ID");
-                return Err(SiteExplorerError::InvalidArgument(format!(
-                    "Failed to create power shelf ID: {e}"
-                )));
-            }
-        };
-
-        let config = PowerShelfConfig {
-            name: expected_shelf.metadata.name.clone(),
-            capacity: Some(100),
-            voltage: Some(240),
-        };
-
-        let new_power_shelf = NewPowerShelf {
-            id: power_shelf_id,
-            config,
-            bmc_mac_address: Some(expected_shelf.bmc_mac_address),
-            metadata: Some(expected_shelf.metadata.clone()),
-            rack_id: expected_shelf.rack_id.clone(),
-        };
-
-        db_power_shelf::create(&mut txn, &new_power_shelf).await?;
-
-        let mi =
-            db::machine_interface::find_by_mac_address(&mut *txn, expected_shelf.bmc_mac_address)
-                .await?;
-        if let Some(interface) = mi.first() {
-            // A power shelf's BMC/PMC interface is its management endpoint, so
-            // associate it with the shelf and annotate it as `Bmc` (like
-            // host/switch BMC interfaces), demoting it from primary in one
-            // statement. This `Bmc` link is what lets the power-shelf load query
-            // resolve the shelf's MAC/IP into the `PowerShelf.bmc_info` field.
-            db::machine_interface::associate_bmc_interface(
-                &interface.id,
-                model::machine_interface_address::MachineInterfaceAssociation::PowerShelf(
-                    power_shelf_id,
-                ),
-                &mut txn,
-            )
-            .await?;
-        }
-
-        if let Some(ref rack_id) = expected_shelf.rack_id {
-            let _ = crate::ensure_rack_exists(txn.as_mut(), rack_id).await?;
-        }
-        // No need to update the power shelf name again; it was already set in config above.
-        txn.commit()
-            .await
-            .map_err(|e| DatabaseError::new("end create_power_shelf", e))?;
-
-        tracing::info!(
-            %power_shelf_id,
-            bmc_ip_address = %explored_endpoint.address,
-            "Created power shelf"
-        );
-
-        Ok(true)
-    }
-
-    /// identify_machines_to_ingest returns two maps.
+    /// identify_machines_to_ingest returns two maps and a set.
     /// The first map returned identifies all of the DPUs that site explorer will try to ingest.
     /// The latter identifies all of the hosts the the site explorer will try to ingest.
     /// Both map from machine BMC IP address to the corresponding explored endpoint.
+    /// The set holds the BMC IPs that already belong to an ingested machine, so
+    /// `create_machines` can skip existing hosts without reading it again.
     async fn identify_machines_to_ingest(
         &self,
         metrics: &mut SiteExplorationMetrics,
@@ -1561,6 +1264,7 @@ impl SiteExplorer {
     ) -> SiteExplorerResult<(
         HashMap<IpAddr, ExploredEndpoint>,
         HashMap<IpAddr, ExploredEndpoint>,
+        HashSet<IpAddr>,
     )> {
         let mut txn = self.txn_begin().await?;
 
@@ -1570,9 +1274,10 @@ impl SiteExplorer {
         let explored_endpoints =
             db::explored_endpoints::find_all_preingestion_complete(&mut txn).await?;
 
-        // Ingested BMC IPs are read once for the whole loop rather than per endpoint.
-        // The iteration work lock makes site-explorer the only writer that ingests
-        // machines, so nothing can become ingested while the loop below runs.
+        // Ingested BMC IPs are read once for the whole loop and for `create_machines`
+        // rather than per endpoint. The iteration work lock makes site-explorer the
+        // only writer that ingests machines, so the snapshot stays exact until
+        // `create_machines` starts creating.
         let already_ingested_bmc_ips =
             db::machine_topology::find_all_ingested_bmc_ips(&mut txn).await?;
 
@@ -1618,7 +1323,7 @@ impl SiteExplorer {
             }
         }
 
-        Ok((explored_dpus, explored_hosts))
+        Ok((explored_dpus, explored_hosts, already_ingested_bmc_ips))
     }
 
     async fn identify_managed_hosts(
@@ -2326,97 +2031,6 @@ impl SiteExplorer {
         }
     }
 
-    async fn identify_power_shelves_to_ingest(
-        &self,
-        expected_endpoint_index: &ExploredEndpointIndex,
-        run_context: &SiteExplorerRunContext,
-    ) -> SiteExplorerResult<Vec<(ExploredEndpoint, EndpointExplorationReport)>> {
-        let mut txn = self
-            .database_connection
-            .begin()
-            .await
-            .map_err(|e| DatabaseError::new("load find_all_preingestion_complete data", e))?;
-
-        let explored_endpoints =
-            db::explored_endpoints::find_all_preingestion_complete(&mut txn).await?;
-
-        txn.commit()
-            .await
-            .map_err(|e| DatabaseError::new("end find_all_preingestion_complete data", e))?;
-
-        let mut explored_power_shelves = Vec::new();
-        for ep in explored_endpoints.into_iter() {
-            if let Some(expected) =
-                expected_endpoint_index.matched_expected_power_shelf(&ep.address)
-                && run_context
-                    .suppressed_bmc_macs
-                    .contains(&expected.bmc_mac_address)
-            {
-                tracing::info!(
-                    bmc_ip_address = %ep.address,
-                    bmc_mac_address = %expected.bmc_mac_address,
-                    "Skipping ingestion of suppressed power shelf",
-                );
-                continue;
-            }
-
-            if ep.report.endpoint_type != EndpointType::Bmc {
-                continue;
-            }
-            if ep.report.is_power_shelf() {
-                explored_power_shelves.push((ep.clone(), ep.report.clone()));
-            }
-            //ignore other endpoints
-        }
-
-        Ok(explored_power_shelves)
-    }
-
-    async fn identify_switches_to_ingest(
-        &self,
-        expected_endpoint_index: &ExploredEndpointIndex,
-        run_context: &SiteExplorerRunContext,
-    ) -> SiteExplorerResult<Vec<ExploredManagedSwitch>> {
-        let mut txn = self
-            .database_connection
-            .begin()
-            .await
-            .map_err(|e| DatabaseError::new("load find_all_preingestion_complete data", e))?;
-
-        let explored_endpoints =
-            db::explored_endpoints::find_all_preingestion_complete(&mut txn).await?;
-
-        txn.commit()
-            .await
-            .map_err(|e| DatabaseError::new("end find_all_preingestion_complete data", e))?;
-        let managed_switches = explored_endpoints
-            .iter()
-            .filter(|ep| {
-                if let Some(expected) = expected_endpoint_index.matched_expected_switch(&ep.address)
-                    && run_context
-                        .suppressed_bmc_macs
-                        .contains(&expected.bmc_mac_address)
-                {
-                    tracing::info!(
-                        bmc_ip_address = %ep.address,
-                        bmc_mac_address = %expected.bmc_mac_address,
-                        "Skipping ingestion of suppressed switch",
-                    );
-                    return false;
-                }
-                true
-            })
-            .filter(|ep| ep.report.endpoint_type == EndpointType::Bmc && ep.report.is_switch())
-            .map(|ep| ExploredManagedSwitch {
-                bmc_ip: ep.address,
-                nv_os_mac_addresses: ep.report.all_mac_addresses(),
-                report: ep.report.clone(),
-            })
-            .collect::<Vec<_>>();
-
-        Ok(managed_switches)
-    }
-
     /// Checks if all data that a site exploration run requires is actually configured
     ///
     /// Doing this upfront avoids the risk of trying to log into BMCs without
@@ -2491,11 +2105,12 @@ impl SiteExplorer {
         Ok(suppressed_bmc_macs)
     }
 
+    /// Returns the endpoint index and the addresses explored in this run.
     async fn update_explored_endpoints(
         &self,
         metrics: &mut SiteExplorationMetrics,
         run_context: &SiteExplorerRunContext,
-    ) -> SiteExplorerResult<ExploredEndpointIndex> {
+    ) -> SiteExplorerResult<(ExploredEndpointIndex, HashSet<IpAddr>)> {
         let load_start = Instant::now();
         let mut txn = self.txn_begin().await?;
 
@@ -2623,11 +2238,11 @@ impl SiteExplorer {
                 .await;
             }
             // NVOS static IP: handler-side validation pairs `nvos_ip_address` with
-            // exactly one `nvos_mac_addresses` entry (the single wired NVOS port).
-            // ...but re-check here just incase, with the failure case being a
+            // exactly one `nvos_interfaces` entry (the single wired NVOS port).
+            // Re-check here, with the failure case being a
             // log and skip for this pass.
             if let Some(nvos_ip) = expected_switch.nvos_ip_address {
-                match expected_switch.nvos_mac_addresses.as_slice() {
+                match expected_switch.nvos_mac_addresses().as_slice() {
                     [nvos_mac] => {
                         try_preallocate_one(
                             &self.database_connection,
@@ -2644,7 +2259,7 @@ impl SiteExplorer {
                             bmc_mac_address = %expected_switch.bmc_mac_address,
                             nvos_ip_address = %nvos_ip,
                             nvos_mac_address_count = macs.len(),
-                            "Skipping NVOS preallocation: nvos_ip_address requires exactly one nvos_mac_addresses entry"
+                            "Skipping NVOS preallocation: nvos_ip_address requires exactly one nvos_interfaces entry"
                         );
                     }
                 }
@@ -2712,8 +2327,7 @@ impl SiteExplorer {
             .chain(
                 expected_switches
                     .iter()
-                    .flat_map(|switch| &switch.nvos_mac_addresses)
-                    .copied(),
+                    .flat_map(|switch| switch.nvos_mac_addresses()),
             )
             // An explicit BMC identity wins if legacy data assigns the same
             // MAC address to both a BMC and an OS interface.
@@ -2957,7 +2571,6 @@ impl SiteExplorer {
                                 error = %error,
                                 error_code = %schema.error_code,
                                 mitigation = %schema.mitigation_for_log(),
-                                text = %schema.text,
                                 machine_state,
                                 "Failed to explore endpoint"
                             );
@@ -2967,7 +2580,6 @@ impl SiteExplorer {
                                 error = %error,
                                 error_code = %schema.error_code,
                                 mitigation = %schema.mitigation_for_log(),
-                                text = %schema.text,
                                 "Failed to explore endpoint"
                             );
                         }
@@ -3007,6 +2619,10 @@ impl SiteExplorer {
         // Any transaction touching multiple explored_endpoints needs to sort them the same way to
         // avoid deadlocks: sort by IP.
         exploration_results.sort_by_key(|result| result.endpoint.address);
+        let explored_this_run: HashSet<IpAddr> = exploration_results
+            .iter()
+            .map(|result| result.endpoint.address)
+            .collect();
         metrics.record_phase_latency("update_explored_endpoints_probe", probe_start.elapsed());
         for EndpointExplorationTaskResult { steps, .. } in &exploration_results {
             metrics
@@ -3122,7 +2738,9 @@ impl SiteExplorer {
                             .await?;
                             endpoint_report_update_attempts += 1;
                             match report_write {
-                                ConditionalWrite::Applied(()) => {}
+                                ConditionalWrite::Applied(()) => {
+                                    attester_inventory::record(&report, &mut txn).await?;
+                                }
                                 ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
                                     // Skip transient remediation: it would use
                                     // the rejected report's stale endpoint snapshot.
@@ -3174,6 +2792,7 @@ impl SiteExplorer {
                                 &mut txn,
                             )
                             .await?;
+                            attester_inventory::record(&report, &mut txn).await?;
                             insert_endpoint_attempts += 1;
                         }
                         Err(e) => {
@@ -3247,7 +2866,7 @@ impl SiteExplorer {
             remediate_start.elapsed(),
         );
 
-        Ok(index)
+        Ok((index, explored_this_run))
     }
 
     /// Records one terminal BMC-reset attempt. `bmc_reset_count` remains the
@@ -4872,18 +4491,6 @@ fn pause_ingestion_and_poweron(
     false
 }
 
-/// Returns true if the power state should trigger a PoweredOff health alert.
-///
-/// We alert on `Off`, `Paused`, and `Unknown` states, but NOT on transitional
-/// states (`PoweringOn`, `PoweringOff`) because the BMC is still responding
-/// during graceful power reset (warm reboot)
-fn should_alert_power_state(power_state: PowerState) -> bool {
-    !matches!(
-        power_state,
-        PowerState::On | PowerState::PoweringOn | PowerState::PoweringOff
-    )
-}
-
 fn site_explorer_health_report_needs_update(
     previous_health_report: Option<&health_report::HealthReport>,
     new_health_report: &health_report::HealthReport,
@@ -4918,6 +4525,36 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn enrichment_serializes_rack_position_for_older_versions() {
+        let mut report = EndpointExplorationReport {
+            systems: vec![ComputerSystem {
+                id: "HGX_Baseboard_0".into(),
+                processors: Some(vec![model::site_explorer::Processor {
+                    id: "GPU_0".into(),
+                    model: None,
+                    physical_slot_number: Some(26),
+                    compute_tray_index: Some(16),
+                }]),
+                ..Default::default()
+            }],
+            chassis: vec![model::site_explorer::Chassis {
+                topology_id: Some(7),
+                revision_id: Some(2),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let firmware = carbide_firmware::FirmwareConfig::default().create_snapshot();
+        enrich_endpoint_exploration_report(&mut report, &firmware);
+
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(json["PhysicalSlotNumber"], 26);
+        assert_eq!(json["ComputeTrayIndex"], 16);
+        assert_eq!(json["TopologyId"], 7);
+        assert_eq!(json["RevisionId"], 2);
+    }
 
     fn observed_firmware_report(
         bmc_version: Option<&str>,
@@ -6590,20 +6227,6 @@ mod tests {
                 (outcome, order)
             },
         );
-    }
-
-    #[test]
-    fn test_should_alert_power_state() {
-        // Should NOT alert on On or transitional states (PoweringOn/PoweringOff)
-        // because the BMC is still responding during graceful power reset
-        assert!(!should_alert_power_state(PowerState::On));
-        assert!(!should_alert_power_state(PowerState::PoweringOn));
-        assert!(!should_alert_power_state(PowerState::PoweringOff));
-
-        // Should alert on Off, Paused, and Unknown states
-        assert!(should_alert_power_state(PowerState::Off));
-        assert!(should_alert_power_state(PowerState::Paused));
-        assert!(should_alert_power_state(PowerState::Unknown));
     }
 
     #[test]

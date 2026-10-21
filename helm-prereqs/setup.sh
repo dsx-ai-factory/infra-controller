@@ -1048,6 +1048,54 @@ helmfile sync -l name=vault \
     --set server.dataStorage.storageClass="${NICO_STORAGE_CLASS}" \
     --set server.auditStorage.storageClass="${NICO_STORAGE_CLASS}"
 
+# updateStrategy is OnDelete: a changed pod template (for example the probe
+# settings in operators/values/vault.yaml) reaches a running pod only when that
+# pod is deleted, so name the pods that still run the previous revision. The
+# controller can lag helmfile sync, so wait (up to 60s) for it to observe the
+# current generation first. Best effort: a missing StatefulSet is skipped, and
+# an unobserved generation or a failed query reports the revision as unknown
+# instead of comparing pods against stale status.
+vault_rev_unknown=""
+vault_gen=""
+vault_observed_gen=""
+for _vault_i in $(seq 1 12); do
+    if vault_gen_out="$(kubectl -n "${VAULT_NS}" get statefulset vault --ignore-not-found \
+        -o jsonpath='{.metadata.generation} {.status.observedGeneration}' 2>/dev/null)"; then
+        read -r vault_gen vault_observed_gen <<<"${vault_gen_out}"
+        vault_rev_unknown=""
+        if [[ -z "${vault_gen}" || "${vault_gen}" == "${vault_observed_gen}" ]]; then
+            break
+        fi
+        echo "  vault StatefulSet generation ${vault_gen} not yet observed (${_vault_i}/12), retrying in 5s..."
+    else
+        vault_gen=""
+        vault_observed_gen=""
+        vault_rev_unknown="kubectl query failed"
+        echo "  vault StatefulSet query failed (${_vault_i}/12), retrying in 5s..."
+    fi
+    sleep 5
+done
+vault_update_rev=""
+vault_stale_pods=""
+if [[ -n "${vault_gen}" && "${vault_gen}" != "${vault_observed_gen}" ]]; then
+    vault_rev_unknown="generation ${vault_gen} not observed within 60s"
+elif [[ -z "${vault_rev_unknown}" ]]; then
+    vault_update_rev="$(kubectl -n "${VAULT_NS}" get statefulset vault --ignore-not-found \
+        -o jsonpath='{.status.updateRevision}' 2>/dev/null)" || vault_rev_unknown="kubectl query failed"
+    vault_stale_pods="$(kubectl -n "${VAULT_NS}" get pods -l app.kubernetes.io/name=vault,component=server \
+        -o jsonpath="{range .items[?(@.metadata.labels.controller-revision-hash!='${vault_update_rev}')]}{.metadata.name} {end}" \
+        2>/dev/null)" || vault_rev_unknown="kubectl query failed"
+fi
+if [[ -n "${vault_rev_unknown}" ]]; then
+    echo "WARNING: could not verify the Vault StatefulSet revision (${vault_rev_unknown})."
+    echo "         If operators/values/vault.yaml changed the pod template, roll the pods"
+    echo "         as described in docs/manuals/upgrade.md."
+elif [[ -n "${vault_update_rev}" && -n "${vault_stale_pods// /}" ]]; then
+    echo "WARNING: Vault pods still running the previous StatefulSet revision: ${vault_stale_pods% }"
+    echo "         After this run, delete them one at a time, standbys first, wait for Running,"
+    echo "         and run helm-prereqs/unseal_vault.sh after each one. See docs/manuals/upgrade.md."
+fi
+
 # ---------------------------------------------------------------------------
 # 4. Initialize + unseal vault
 #    Also sets up nico-system namespace (Helm labels + ssh-host-key)

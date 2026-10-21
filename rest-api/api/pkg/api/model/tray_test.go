@@ -24,10 +24,21 @@ func TestAPITrayJSONContract(t *testing.T) {
 	value, ok := got["nvLinkDomainId"]
 	assert.True(t, ok)
 	assert.Nil(t, value)
+	health, ok := got["health"]
+	assert.True(t, ok)
+	assert.Nil(t, health)
 	assert.Equal(t, map[string]any{
 		"pendingTaskCount": float64(0),
 		"activeTaskCount":  float64(0),
 	}, got["taskStats"])
+}
+
+func TestAPITrayFromProtoClearsMissingHealth(t *testing.T) {
+	var tray APITray
+	tray.FromProto(&flowv1.Component{Health: &flowv1.HealthReport{}})
+	assert.NotNil(t, tray.Health)
+	tray.FromProto(&flowv1.Component{})
+	assert.Nil(t, tray.Health)
 }
 
 func TestProtoToAPIComponentTypeName(t *testing.T) {
@@ -64,7 +75,7 @@ func TestProtoToAPIComponentTypeName(t *testing.T) {
 func TestNewAPITray(t *testing.T) {
 	description := "Test tray description"
 	model := "GB200"
-	domainID := "59202b81-65fb-45ec-b3b8-91ab0ad3f34a"
+	domainID := "group-01"
 
 	tests := []struct {
 		name string
@@ -103,8 +114,9 @@ func TestNewAPITray(t *testing.T) {
 						IpAddress:  cutil.GetPtr("192.168.1.100"),
 					},
 				},
-				RackId:      &flowv1.UUID{Id: "flow-rack-uuid"},
-				NvlDomainId: &flowv1.UUID{Id: domainID},
+				RackId:              &flowv1.UUID{Id: "flow-rack-uuid"},
+				NvlDomainId:         &flowv1.UUID{Id: domainID},
+				NvlDomainExternalId: &domainID,
 			},
 			want: &APITray{
 				ID:              "nico-machine-456",

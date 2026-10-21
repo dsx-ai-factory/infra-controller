@@ -68,13 +68,14 @@ fn required_arguments_are_validated_before_dispatch() {
             clap::error::ErrorKind::MissingRequiredArgument,
         ),
         (
-            vec!["add", "group-01", "topology", "--rack", "{}"],
+            vec!["add", "group-01", "NVLINK_V6", "topology", "--rack", "{}"],
             clap::error::ErrorKind::ValueValidation,
         ),
         (
             vec![
                 "add",
                 "group-01",
+                "NVLINK_V6",
                 "topology",
                 "--rack",
                 r#"{"rack_id":"rack-01"}"#,
@@ -85,6 +86,7 @@ fn required_arguments_are_validated_before_dispatch() {
             vec![
                 "add",
                 "group-01",
+                "NVLINK_V6",
                 "topology",
                 "--rack",
                 r#"{"type":"NVSwitch","manufacturer":"NVIDIA","id":"switch-01"}"#,
@@ -99,6 +101,7 @@ fn required_arguments_are_validated_before_dispatch() {
 fn populated_group() -> forge::ExpectedRackGroup {
     forge::ExpectedRackGroup {
         rack_group_id: Some("nvl5-gp1-jhb01".parse().unwrap()),
+        protocol: "NVLINK_V6".into(),
         topology: "gb200_nvl72r1_c2g4".into(),
         racks: vec![
             forge::ExpectedRackGroupRack {
@@ -141,7 +144,7 @@ async fn writes_dispatch_expected_rpc_payloads() {
     ];
     for (args, method, expected) in [
         (
-            ["add", "nvl5-gp1-jhb01", "gb200_nvl72r1_c2g4"]
+            ["add", "nvl5-gp1-jhb01", "NVLINK_V6", "gb200_nvl72r1_c2g4"]
                 .into_iter()
                 .chain(attributes)
                 .collect::<Vec<_>>(),
@@ -152,6 +155,8 @@ async fn writes_dispatch_expected_rpc_payloads() {
             [
                 "update",
                 "nvl5-gp1-jhb01",
+                "--protocol",
+                "NVLINK_V6",
                 "--topology",
                 "gb200_nvl72r1_c2g4",
             ]
@@ -165,12 +170,15 @@ async fn writes_dispatch_expected_rpc_payloads() {
             vec![
                 "update",
                 "nvl5-gp1-jhb01",
+                "--protocol",
+                "NVLINK_V6",
                 "--topology",
                 "gb200_nvl72r1_c2g4",
             ],
             "UpdateExpectedRackGroup",
             forge::ExpectedRackGroup {
                 rack_group_id: populated_group().rack_group_id,
+                protocol: populated_group().protocol,
                 topology: populated_group().topology,
                 metadata: Some(forge::Metadata::default()),
                 ..Default::default()
@@ -209,6 +217,7 @@ async fn writes_dispatch_expected_rpc_payloads() {
 async fn show_renders_public_table_and_json_contract() {
     let empty = forge::ExpectedRackGroup {
         rack_group_id: Some("empty-group".parse().unwrap()),
+        protocol: "legacy".into(),
         topology: "empty-topology".into(),
         ..Default::default()
     };
@@ -235,13 +244,14 @@ async fn show_renders_public_table_and_json_contract() {
     let rows: Vec<Vec<_>> = output
         .lines()
         .filter(|line| line.starts_with('|'))
-        .map(|line| line.split('|').skip(1).take(6).map(str::trim).collect())
+        .map(|line| line.split('|').skip(1).take(7).map(str::trim).collect())
         .collect();
     assert_eq!(
         rows,
         vec![
             vec![
                 "Rack Group ID",
+                "Protocol",
                 "Topology",
                 "Racks",
                 "Name",
@@ -250,13 +260,14 @@ async fn show_renders_public_table_and_json_contract() {
             ],
             vec![
                 "nvl5-gp1-jhb01",
+                "NVLINK_V6",
                 "gb200_nvl72r1_c2g4",
                 &serde_json::to_string(&populated_group().racks).unwrap(),
                 "nvl5-gp1-jhb01",
                 "test group",
                 "\"location.datacenter:JHB01\""
             ],
-            vec!["empty-group", "empty-topology", "[]", "", "", ""],
+            vec!["empty-group", "legacy", "empty-topology", "[]", "", "", ""],
         ]
     );
 
@@ -300,6 +311,7 @@ async fn show_renders_yaml_and_csv() {
     group.metadata.as_mut().unwrap().description = "quoted \"value\",\nsecond line".into();
     let empty = forge::ExpectedRackGroup {
         rack_group_id: Some("empty-group".parse().unwrap()),
+        protocol: "legacy".into(),
         topology: "empty-topology".into(),
         ..Default::default()
     };
@@ -347,6 +359,7 @@ async fn show_renders_yaml_and_csv() {
             reader.headers().unwrap(),
             &csv::StringRecord::from(vec![
                 "Rack Group ID",
+                "Protocol",
                 "Topology",
                 "Racks",
                 "Name",
@@ -361,6 +374,7 @@ async fn show_renders_yaml_and_csv() {
                 rows[0],
                 csv::StringRecord::from(vec![
                     "nvl5-gp1-jhb01",
+                    "NVLINK_V6",
                     "gb200_nvl72r1_c2g4",
                     &serde_json::to_string(&populated_group().racks).unwrap(),
                     "nvl5-gp1-jhb01",
@@ -370,7 +384,15 @@ async fn show_renders_yaml_and_csv() {
             );
             assert_eq!(
                 rows[1],
-                csv::StringRecord::from(vec!["empty-group", "empty-topology", "[]", "", "", ""])
+                csv::StringRecord::from(vec![
+                    "empty-group",
+                    "legacy",
+                    "empty-topology",
+                    "[]",
+                    "",
+                    "",
+                    "",
+                ])
             );
         }
     }

@@ -8,15 +8,15 @@ import (
 	"fmt"
 	"testing"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
+
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func TestNVLinkLogicalPartition_ToProto(t *testing.T) {
@@ -231,8 +231,7 @@ func TestNVLinkLogicalPartitionSQLDAO_GetByID(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			nvllpsd := NVLinkLogicalPartitionSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: stracer.NewTracerSpan(),
+				dbSession: tt.fields.dbSession,
 			}
 
 			got, err := nvllpsd.GetByID(tt.args.ctx, nil, tt.args.id, tt.paramRelations)
@@ -250,8 +249,6 @@ func TestNVLinkLogicalPartitionSQLDAO_GetByID(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -671,8 +668,7 @@ func TestNVLinkLogicalPartition_GetAll(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			nvllpsd := NVLinkLogicalPartitionSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: stracer.NewTracerSpan(),
+				dbSession: tt.fields.dbSession,
 			}
 
 			got, total, err := nvllpsd.GetAll(
@@ -713,8 +709,6 @@ func TestNVLinkLogicalPartition_GetAll(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -812,8 +806,7 @@ func TestNVLinkLogicalPartitionSQLDAO_Create(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			nvllpsd := NVLinkLogicalPartitionSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: stracer.NewTracerSpan(),
+				dbSession: tt.fields.dbSession,
 			}
 			got, err := nvllpsd.Create(
 				tt.args.ctx,
@@ -844,8 +837,6 @@ func TestNVLinkLogicalPartitionSQLDAO_Create(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -935,8 +926,7 @@ func TestNVLinkLogicalPartitionSQLDAO_Update(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			nvllpsd := NVLinkLogicalPartitionSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: stracer.NewTracerSpan(),
+				dbSession: tt.fields.dbSession,
 			}
 			got, err := nvllpsd.Update(
 				tt.args.ctx,
@@ -965,8 +955,6 @@ func TestNVLinkLogicalPartitionSQLDAO_Update(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1025,8 +1013,7 @@ func TestNVLinkLogicalPartitionSQLDAO_Delete(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			nvllpsd := NVLinkLogicalPartitionSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: stracer.NewTracerSpan(),
+				dbSession: tt.fields.dbSession,
 			}
 
 			err := nvllpsd.Delete(tt.args.ctx, nil, tt.args.id)
@@ -1040,8 +1027,6 @@ func TestNVLinkLogicalPartitionSQLDAO_Delete(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1070,8 +1055,7 @@ func TestNVLinkLogicalPartitionSQLDAO_Clear(t *testing.T) {
 	_, _, ctx := testCommonTraceProviderSetup(t, context.Background())
 
 	type fields struct {
-		dbSession  *db.Session
-		tracerSpan *stracer.TracerSpan
+		dbSession *db.Session
 	}
 	type args struct {
 		ctx                                context.Context
@@ -1105,8 +1089,7 @@ func TestNVLinkLogicalPartitionSQLDAO_Clear(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			nvllpsd := NVLinkLogicalPartitionSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: tt.fields.tracerSpan,
+				dbSession: tt.fields.dbSession,
 			}
 			got, err := nvllpsd.Clear(
 				tt.args.ctx,

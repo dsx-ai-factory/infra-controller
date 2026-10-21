@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_uuid::DbTable;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::machine_validation::{
     MachineValidationAttemptId, MachineValidationId, MachineValidationRunItemId,
@@ -91,7 +92,12 @@ pub async fn find_run_items_by_run_id(
 ) -> DatabaseResult<Vec<MachineValidationRunItem>> {
     const QUERY: &str = "
         SELECT
-            run_item.*,
+            run_item.id, run_item.run_id, run_item.test_id, run_item.test_version,
+            run_item.display_name, run_item.context, run_item.component, run_item.state,
+            run_item.order_index, run_item.attempt, run_item.max_attempts,
+            run_item.timeout_seconds, run_item.plugin, run_item.plugin_full_host_approved,
+            run_item.started_at, run_item.ended_at, run_item.last_heartbeat_at,
+            run_item.skip_reason, run_item.failure_reason,
             current_attempt.id AS current_attempt_id
         FROM machine_validation_run_items run_item
         LEFT JOIN LATERAL (
@@ -138,7 +144,12 @@ pub async fn find_run_items_by_ids(
 
     const QUERY: &str = "
         SELECT
-            run_item.*,
+            run_item.id, run_item.run_id, run_item.test_id, run_item.test_version,
+            run_item.display_name, run_item.context, run_item.component, run_item.state,
+            run_item.order_index, run_item.attempt, run_item.max_attempts,
+            run_item.timeout_seconds, run_item.plugin, run_item.plugin_full_host_approved,
+            run_item.started_at, run_item.ended_at, run_item.last_heartbeat_at,
+            run_item.skip_reason, run_item.failure_reason,
             current_attempt.id AS current_attempt_id
         FROM machine_validation_run_items run_item
         LEFT JOIN LATERAL (
@@ -162,13 +173,16 @@ pub async fn find_attempt_by_id(
     txn: impl DbReader<'_>,
     id: &MachineValidationAttemptId,
 ) -> DatabaseResult<MachineValidationAttempt> {
-    const QUERY: &str = "SELECT * FROM machine_validation_attempts WHERE id=$1";
+    let query = format!(
+        "SELECT {} FROM machine_validation_attempts WHERE id=$1",
+        MachineValidationAttempt::db_table_columns(),
+    );
 
-    sqlx::query_as::<_, MachineValidationAttempt>(QUERY)
+    sqlx::query_as::<_, MachineValidationAttempt>(sqlx::AssertSqlSafe(query.as_str()))
         .bind(id)
         .fetch_optional(txn)
         .await
-        .map_err(|e| DatabaseError::query(QUERY, e))?
+        .map_err(|e| DatabaseError::query(&query, e))?
         .ok_or_else(|| DatabaseError::NotFoundError {
             kind: "machine_validation_attempt",
             id: id.to_string(),
@@ -200,16 +214,19 @@ pub async fn find_attempts_by_run_item_id(
     txn: impl DbReader<'_>,
     run_item_id: &MachineValidationRunItemId,
 ) -> DatabaseResult<Vec<MachineValidationAttempt>> {
-    const QUERY: &str = "
-        SELECT * FROM machine_validation_attempts
+    let query = format!(
+        "SELECT {}
+        FROM machine_validation_attempts
         WHERE run_item_id=$1
-        ORDER BY attempt_number";
+        ORDER BY attempt_number",
+        MachineValidationAttempt::db_table_columns(),
+    );
 
-    sqlx::query_as::<_, MachineValidationAttempt>(QUERY)
+    sqlx::query_as::<_, MachineValidationAttempt>(sqlx::AssertSqlSafe(query.as_str()))
         .bind(run_item_id)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(QUERY, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Appends the next log chunk for an active attempt.
@@ -346,20 +363,22 @@ pub async fn find_attempt_log_chunks(
     after_sequence: i32,
     limit: i32,
 ) -> DatabaseResult<Vec<MachineValidationAttemptLogChunk>> {
-    const QUERY: &str = "
-        SELECT attempt_id, sequence, stream, created_at, content
+    let query = format!(
+        "SELECT {}
         FROM machine_validation_attempt_logs
         WHERE attempt_id=$1 AND sequence > $2
         ORDER BY sequence
-        LIMIT $3";
+        LIMIT $3",
+        MachineValidationAttemptLogChunk::db_table_columns(),
+    );
 
-    sqlx::query_as::<_, MachineValidationAttemptLogChunk>(QUERY)
+    sqlx::query_as::<_, MachineValidationAttemptLogChunk>(sqlx::AssertSqlSafe(query.as_str()))
         .bind(attempt_id)
         .bind(after_sequence)
         .bind(limit)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(QUERY, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Deletes one bounded batch of terminal-attempt logs past the retention window.

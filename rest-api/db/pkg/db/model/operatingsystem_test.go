@@ -18,7 +18,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 )
 
@@ -313,8 +312,6 @@ func TestOperatingSystemSQLDAO_Create(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -465,8 +462,6 @@ func TestOperatingSystemSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1078,8 +1073,6 @@ func TestOperatingSystemSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1539,8 +1532,6 @@ func TestOperatingSystemSQLDAO_Update(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -2113,8 +2104,6 @@ func TestOperatingSystemSQLDAO_Clear(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -2185,8 +2174,6 @@ func TestOperatingSystemSQLDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}

@@ -18,6 +18,10 @@ nico-admin-cli managed-host reset clear <--machine>
 
 Clear a reset request that has not started yet.
 
+A started Reset cannot be canceled, including while it waits for DPUs to
+acknowledge Admin networking. The API rejects attempts to clear a
+started Reset.
+
 ## OPTIONS
 
 `--machine <MACHINE>`
@@ -49,7 +53,7 @@ Print help (see a summary with -h)
 ## Examples
 
 ```sh
-nico-admin-cli managed-host reset clear --machine 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli managed-host reset clear --machine fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
 ```
 
 ---

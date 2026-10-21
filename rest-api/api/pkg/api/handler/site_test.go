@@ -16,18 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
-	csmtypes "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/types"
 	"github.com/golang/mock/gomock"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
@@ -38,11 +26,23 @@ import (
 	"github.com/uptrace/bun/extra/bundebug"
 	oteltrace "go.opentelemetry.io/otel/trace"
 
-	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
+	csmtypes "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/types"
+
 	tOperatorv1 "go.temporal.io/api/operatorservice/v1"
 	tosv1mock "go.temporal.io/api/operatorservicemock/v1"
 	temporalClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
+
+	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 )
 
 func testUpdateSite(t *testing.T, dbSession *cdb.Session, site *cdbm.Site) *cdbm.Site {
@@ -350,7 +350,7 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 	tnc.Mock.On("Register", mock.Anything, mock.AnythingOfType("*workflowservice.RegisterNamespaceRequest")).Return(nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type fields struct {
 		dbSession *cdb.Session
@@ -480,7 +480,6 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 				tt.fields.cfg.SetSiteManagerEndpoint("")
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := csh.Handle(ec)
@@ -605,7 +604,7 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 	cfg.SetSiteManagerEndpoint(tcsm.getURL())
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type fields struct {
 		dbSession *cdb.Session
@@ -1024,7 +1023,6 @@ func TestUpdateSiteHandler_Handle(t *testing.T) {
 
 			ush := NewUpdateSiteHandler(tt.fields.dbSession, tt.fields.tc, tt.fields.cfg)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := ush.Handle(ec)
@@ -1240,7 +1238,7 @@ func TestGetSiteHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type fields struct {
 		dbSession *cdb.Session
@@ -1471,7 +1469,6 @@ func TestGetSiteHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org, tt.args.site.ID.String())
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := gsh.Handle(ec); (err != nil) != tt.wantErr {
@@ -1614,6 +1611,13 @@ func TestGetAllSiteHandler_Handle(t *testing.T) {
 	_ = testSiteBuildMachine(t, dbSession, ip2.ID, stdemo2.ID, cdbm.MachineStatusError)
 	_ = testSiteBuildMachine(t, dbSession, ip2.ID, stdemo2.ID, cdbm.MachineStatusError)
 
+	// Privileged Tenant denied at stdemo1 without Allocations
+	blockedTnOrg := "test-blocked-tenant-org"
+	blockedTnu := testSiteBuildUser(t, dbSession, "test-blocked-tenant-user", blockedTnOrg, tnRoles)
+	blockedTn := testSiteBuildTenant(t, dbSession, "Test Blocked Tenant", blockedTnOrg, blockedTnu)
+	common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip2, &blockedTn.ID, blockedTnOrg, cdbm.TenantAccountStatusReady, blockedTnu)
+	cdbm.TestBuildTenantSite(t, dbSession, blockedTn, stdemo1, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, blockedTnu)
+
 	// Build Site for Service Provider
 	ss := testSiteBuildSite(t, dbSession, sip, "test-service-site", cdbm.SiteStatusRegistered, su, nil, nil, nil)
 	common.TestBuildTenantSite(t, dbSession, stn, ss, su)
@@ -1637,7 +1641,7 @@ func TestGetAllSiteHandler_Handle(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type fields struct {
 		dbSession *cdb.Session
@@ -1958,6 +1962,22 @@ func TestGetAllSiteHandler_Handle(t *testing.T) {
 			wantRespCode:           http.StatusOK,
 		},
 		{
+			name: "get all Sites by privileged Tenant excludes Site denied without Allocations",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        &tmocks.Client{},
+				cfg:       cfg,
+			},
+			args: args{
+				org:  blockedTnOrg,
+				user: blockedTnu,
+			},
+			wantCount:      1,
+			wantTotalCount: 1,
+			wantRespCode:   http.StatusOK,
+			wantFirstEntry: stdemo2,
+		},
+		{
 			name: "get all Sites by Service Account success",
 			fields: fields{
 				dbSession: dbSession,
@@ -2223,7 +2243,6 @@ func TestGetAllSiteHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org)
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gash.Handle(ec)
@@ -2359,7 +2378,7 @@ func TestGetAllSiteHandler_NullConfig(t *testing.T) {
 
 	e := echo.New()
 	cfg := common.GetTestConfig()
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// ---- Step 1: cli site list ----
 	gash := GetAllSiteHandler{
@@ -2376,7 +2395,7 @@ func TestGetAllSiteHandler_NullConfig(t *testing.T) {
 	listCtx.SetParamNames("orgName")
 	listCtx.SetParamValues(org)
 	listCtx.Set("user", user)
-	listCtx.SetRequest(listReq.WithContext(context.WithValue(ctx, otelecho.TracerKey, tracer)))
+	listCtx.SetRequest(listReq.WithContext(ctx))
 
 	err = gash.Handle(listCtx)
 	require.NoError(t, err)
@@ -2404,13 +2423,12 @@ func TestGetAllSiteHandler_NullConfig(t *testing.T) {
 	createCtx.SetParamNames("orgName")
 	createCtx.SetParamValues(org)
 	createCtx.Set("user", user)
-	createCtx.SetRequest(createReq.WithContext(context.WithValue(ctx, otelecho.TracerKey, tracer)))
+	createCtx.SetRequest(createReq.WithContext(ctx))
 
 	csh := CreateSiteHandler{
-		dbSession:  dbSession,
-		tc:         &tmocks.Client{},
-		cfg:        cfg,
-		tracerSpan: sutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        &tmocks.Client{},
+		cfg:       cfg,
 	}
 	err = csh.Handle(createCtx)
 	require.NoError(t, err)
@@ -2516,7 +2534,7 @@ func TestDeleteSiteHandler_Handle(t *testing.T) {
 		mock.AnythingOfType("uuid.UUID"), true).Return(wrun, nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type fields struct {
 		dbSession *cdb.Session
@@ -2676,7 +2694,6 @@ func TestDeleteSiteHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org, tt.args.id)
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			dsh := DeleteSiteHandler{
@@ -2739,11 +2756,10 @@ func TestNewCreateSiteHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: CreateSiteHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				tnc:        tnc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				tnc:       tnc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -2781,10 +2797,9 @@ func TestNewUpdateSiteHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: UpdateSiteHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -2822,10 +2837,9 @@ func TestNewGetSiteHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: GetSiteHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -2863,10 +2877,9 @@ func TestNewGetAllSiteHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: GetAllSiteHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -2904,10 +2917,9 @@ func TestNewDeleteSiteHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: DeleteSiteHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -3024,7 +3036,7 @@ func TestSiteHandler_GetStatusDetails(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name      string
@@ -3124,7 +3136,6 @@ func TestSiteHandler_GetStatusDetails(t *testing.T) {
 			ec.SetParamValues(tc.reqOrg, tc.reqSiteID)
 			ec.Set("user", tc.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			assert.NoError(t, handler.Handle(ec))

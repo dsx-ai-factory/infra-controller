@@ -16,6 +16,7 @@
  */
 
 use carbide_utils::none_if_empty::NoneIfEmpty;
+use carbide_uuid::DbTable;
 use config_version::ConfigVersion;
 use model::machine_validation::{
     MachineValidationTest, MachineValidationTestAddRequest, MachineValidationTestUpdatePayload,
@@ -38,8 +39,11 @@ pub async fn find(
     txn: impl DbReader<'_>,
     req: MachineValidationTestsGetRequest,
 ) -> DatabaseResult<Vec<MachineValidationTest>> {
-    let mut qb: QueryBuilder<Postgres> =
-        QueryBuilder::new("SELECT * FROM machine_validation_tests WHERE 1 = 1");
+    let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(format!(
+        "SELECT {}
+        FROM machine_validation_tests WHERE 1 = 1",
+        MachineValidationTest::db_table_columns(),
+    ));
 
     if !req.supported_platforms.is_empty() {
         qb.push(" AND supported_platforms && ");

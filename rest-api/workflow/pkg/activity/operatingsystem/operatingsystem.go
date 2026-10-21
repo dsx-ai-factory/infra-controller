@@ -5,7 +5,6 @@ package operatingsystem
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"time"
 
@@ -18,6 +17,7 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
@@ -132,7 +132,7 @@ func (mos ManageOsImage) UpdateOsImagesInDB(ctx context.Context, siteID uuid.UUI
 
 			ossa, ok := existingOsImageMap[osImageIDStr]
 			if !ok {
-				slogger.Error().Str("OS Image ID", controllerOsImage.Attributes.Id.Value).Msg("OS Image Site Association does not have a record in DB, possibly created directly on Site")
+				slogger.Error().Msg("OS Image Site Association does not have a record in DB, possibly created directly on Site")
 				continue
 			}
 
@@ -165,7 +165,7 @@ func (mos ManageOsImage) UpdateOsImagesInDB(ctx context.Context, siteID uuid.UUI
 
 			ok = ControllerOsImageStatusMap[controllerOsImage.Status]
 			if !ok {
-				slogger.Error().Str("OS Image ID", controllerOsImage.Attributes.Id.Value).Str("OS Image Status", controllerOsImage.Status.String()).Msg("received unknown OS Image status from Site Agent")
+				slogger.Error().Str("OS Image Status", controllerOsImage.Status.String()).Msg("received unknown OS Image status from Site Agent")
 			}
 
 			switch controllerOsImage.Status {
@@ -197,7 +197,7 @@ func (mos ManageOsImage) UpdateOsImagesInDB(ctx context.Context, siteID uuid.UUI
 	ossasToDelete := []*cdbm.OperatingSystemSiteAssociation{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if osImageInventory.InventoryPage == nil || osImageInventory.InventoryPage.TotalPages == 0 || (osImageInventory.InventoryPage.CurrentPage == osImageInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(osImageInventory.GetInventoryPage()) {
 		for _, ossa := range existingOsImageMap {
 			found := false
 			_, found = reportedOsImageIDMap[ossa.OperatingSystemID]
@@ -214,16 +214,20 @@ func (mos ManageOsImage) UpdateOsImagesInDB(ctx context.Context, siteID uuid.UUI
 
 		// Operating System was not found on Site
 		if ossa.Status == cdbm.OperatingSystemSiteAssociationStatusDeleting {
-			// If the OperatingSystemSiteAssociation was being deleted, we can proceed with removing it from the DB
-			serr := ossaDAO.Delete(ctx, nil, ossa.ID)
+			// Keep the association available for the next inventory if locking or finalization fails.
+			serr := cdb.WithTx(ctx, mos.dbSession, func(tx *cdb.Tx) error {
+				err := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(ossa.OperatingSystemID.String()), nil)
+				if err != nil {
+					return err
+				}
+				err = ossaDAO.Delete(ctx, tx, ossa.ID)
+				if err != nil {
+					return err
+				}
+				return mos.updateOperatingSystemStatusInDB(ctx, tx, ossa.OperatingSystemID)
+			})
 			if serr != nil {
-				slogger.Error().Err(serr).Msg("failed to delete Operating System Site Association from DB")
-				continue
-			}
-			// Trigger re-evaluation of Operating System status (delete if no association exists)
-			serr = mos.UpdateOperatingSystemStatusInDB(ctx, ossa.OperatingSystemID)
-			if serr != nil {
-				slogger.Error().Err(serr).Msg("failed to trigger Operating System status update in DB")
+				slogger.Error().Err(serr).Msg("failed to delete Operating System Site Association and update Operating System status in DB")
 			}
 		} else {
 			// Was this created within inventory receipt interval? If so, we may be processing an older inventory
@@ -294,16 +298,39 @@ func (mos ManageOsImage) UpdateOperatingSystemStatusInDB(ctx context.Context, os
 
 	logger.Info().Msg("starting activity")
 
+	err := cdb.WithTx(ctx, mos.dbSession, func(tx *cdb.Tx) error {
+		// Share the API delete lock before reading status. Otherwise a readiness
+		// update can wait behind deletion, then overwrite Deleting with stale Ready.
+		err := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(osID.String()), nil)
+		if err != nil {
+			return err
+		}
+
+		return mos.updateOperatingSystemStatusInDB(ctx, tx, osID)
+	})
+	if err != nil {
+		return err
+	}
+
+	logger.Info().Msg("successfully completed activity")
+
+	return nil
+}
+
+// updateOperatingSystemStatusInDB requires the caller to hold the OS advisory lock in tx.
+func (mos ManageOsImage) updateOperatingSystemStatusInDB(ctx context.Context, tx *cdb.Tx, osID uuid.UUID) error {
+	logger := log.With().Str("Activity", "UpdateOperatingSystemStatusInDB").Str("Operating System ID", osID.String()).Logger()
+
 	osDAO := cdbm.NewOperatingSystemDAO(mos.dbSession)
 
-	os, err := osDAO.GetByID(ctx, nil, osID, nil)
+	os, err := osDAO.GetByID(ctx, tx, osID, nil)
 	if err != nil {
-		if err == cdb.ErrDoesNotExist {
+		if errors.Is(err, cdb.ErrDoesNotExist) {
 			logger.Warn().Err(err).Msg("received request for unknown or deleted Operating System")
-		} else {
-			logger.Error().Err(err).Msg("failed to retrieve Operating System from DB")
+			return nil
 		}
-		return nil
+		logger.Error().Err(err).Msg("failed to retrieve Operating System from DB")
+		return err
 	}
 
 	logger.Info().Msg("retrieved Operating System from DB")
@@ -314,7 +341,7 @@ func (mos ManageOsImage) UpdateOperatingSystemStatusInDB(ctx context.Context, os
 	ossaDAO := cdbm.NewOperatingSystemSiteAssociationDAO(mos.dbSession)
 	ossas, ossaTotal, err := ossaDAO.GetAll(
 		ctx,
-		nil,
+		tx,
 		cdbm.OperatingSystemSiteAssociationFilterInput{
 			OperatingSystemIDs: []uuid.UUID{osID},
 		},
@@ -329,73 +356,37 @@ func (mos ManageOsImage) UpdateOperatingSystemStatusInDB(ctx context.Context, os
 	// Operating System is in deleting state
 	if os.Status == cdbm.OperatingSystemStatusDeleting {
 		if ossaTotal == 0 {
-			// Start a db tx
-			tx, err := cdb.BeginTx(ctx, mos.dbSession, &sql.TxOptions{})
-			if err != nil {
-				logger.Error().Err(err).Msg("failed to start transaction")
-				return err
-			}
-
-			// No more associations left, we can delete the Operating System
-			serr := osDAO.Delete(ctx, tx, osID)
-			if serr != nil {
-				logger.Error().Err(serr).Msg("failed to delete Operating System from DB")
-				terr := tx.Rollback()
-				if terr != nil {
-					logger.Error().Err(terr).Msg("failed to rollback transaction")
-				}
-				return serr
-			}
-
-			// Commit transaction
-			err = tx.Commit()
-			if err != nil {
-				logger.Error().Err(err).Msg("error committing transaction to DB")
-				return err
-			}
+			return osDAO.Delete(ctx, tx, osID)
 		}
 
 		// One or more associations left to delete from Sites
 		return nil
 	}
 
-	if ossaTotal == 0 {
-		if os.Status == cdbm.OperatingSystemStatusReady {
-			return nil
-		}
+	statusCountMap := map[string]int{}
+	for _, dbossa := range ossas {
+		statusCountMap[dbossa.Status]++
+	}
+
+	switch {
+	case statusCountMap[cdbm.OperatingSystemSiteAssociationStatusError] > 0:
+		osStatus = cutil.GetPtr(cdbm.OperatingSystemStatusError)
+		osMessage = cutil.GetPtr("Failed to sync Operating System to one or more Sites")
+	case statusCountMap[cdbm.OperatingSystemSiteAssociationStatusSyncing] > 0:
+		osStatus = cutil.GetPtr(cdbm.OperatingSystemStatusSyncing)
+		osMessage = cutil.GetPtr("Operating System syncing to one or more Sites")
+	default:
 		osStatus = cutil.GetPtr(cdbm.OperatingSystemStatusReady)
 		osMessage = cutil.GetPtr("Operating System successfully synced to all Sites")
-	} else {
-		statusCountMap := map[string]int{}
-		for _, dbossa := range ossas {
-			statusCountMap[dbossa.Status]++
-		}
-
-		if statusCountMap[cdbm.OperatingSystemSiteAssociationStatusError] > 0 {
-			if os.Status == cdbm.OperatingSystemStatusError {
-				return nil
-			}
-			osStatus = cutil.GetPtr(cdbm.OperatingSystemStatusError)
-			osMessage = cutil.GetPtr("Failed to sync Operating System to one or more Sites")
-		} else if statusCountMap[cdbm.OperatingSystemSiteAssociationStatusSyncing] > 0 {
-			if os.Status == cdbm.OperatingSystemStatusSyncing {
-				return nil
-			}
-			osStatus = cutil.GetPtr(cdbm.OperatingSystemStatusSyncing)
-			osMessage = cutil.GetPtr("Operating System syncing to one or more Sites")
-		} else {
-			if os.Status == cdbm.OperatingSystemStatusReady {
-				return nil
-			}
-			osStatus = cutil.GetPtr(cdbm.OperatingSystemStatusReady)
-			osMessage = cutil.GetPtr("Operating System successfully synced to all Sites")
-		}
+	}
+	if os.Status == *osStatus {
+		return nil
 	}
 
 	// Update status
 	_, err = osDAO.Update(
 		ctx,
-		nil,
+		tx,
 		cdbm.OperatingSystemUpdateInput{
 			OperatingSystemId: osID,
 			Status:            osStatus,
@@ -406,26 +397,24 @@ func (mos ManageOsImage) UpdateOperatingSystemStatusInDB(ctx context.Context, os
 	}
 
 	statusDetailDAO := cdbm.NewStatusDetailDAO(mos.dbSession)
-	_, err = statusDetailDAO.Create(ctx, nil, cdbm.StatusDetailCreateInput{EntityID: osID.String(), Status: *osStatus, Message: osMessage})
+	_, err = statusDetailDAO.Create(ctx, tx, cdbm.StatusDetailCreateInput{EntityID: osID.String(), Status: *osStatus, Message: osMessage})
 	if err != nil {
 		return err
 	}
-
-	logger.Info().Msg("successfully completed activity")
 
 	return nil
 }
 
 // UpdateOperatingSystemsInDB reconciles the operating_system table for a Site based on Operating Systems reported from Site
-func (mos ManageOsImage) UpdateOperatingSystemsInDB(ctx context.Context, siteID uuid.UUID, inventory *corev1.OperatingSystemInventory) error {
+func (mos ManageOsImage) UpdateOperatingSystemsInDB(ctx context.Context, siteID uuid.UUID, operatingSystemInventory *corev1.OperatingSystemInventory) error {
 	logger := log.With().Str("Activity", "UpdateOperatingSystemsInDB").Str("Site ID", siteID.String()).Logger()
 	logger.Info().Msg("Starting activity")
 
-	if inventory == nil {
+	if operatingSystemInventory == nil {
 		return errors.New("UpdateOperatingSystemsInDB called with nil inventory")
 	}
 
-	if inventory.InventoryStatus == corev1.InventoryStatus_INVENTORY_STATUS_FAILED {
+	if operatingSystemInventory.InventoryStatus == corev1.InventoryStatus_INVENTORY_STATUS_FAILED {
 		logger.Warn().Msg("Received failed inventory status from Site Agent, skipping")
 		return nil
 	}
@@ -453,7 +442,7 @@ func (mos ManageOsImage) UpdateOperatingSystemsInDB(ctx context.Context, siteID 
 	// Collect the UUIDs of all reported OS records (active only — the new Find APIs do not
 	// return deleted records). Site and REST share the same UUID as PK.
 	reportedOSIDs := mapset.NewSet[uuid.UUID]()
-	for _, reportedOS := range inventory.GetOperatingSystems() {
+	for _, reportedOS := range operatingSystemInventory.GetOperatingSystems() {
 		if reportedOS == nil {
 			logger.Error().Msg("Received nil OS record in inventory, skipping")
 			continue
@@ -471,6 +460,21 @@ func (mos ManageOsImage) UpdateOperatingSystemsInDB(ctx context.Context, siteID 
 			continue
 		}
 		reportedOSIDs.Add(reportedOSID)
+	}
+
+	// The complete set this run reports as present on the Site, which is what deletion below
+	// reads. A paged run carries it in InventoryPage.ItemIds while each page holds only a
+	// subset of the records, and an unpaged run reports it as the records themselves, so the
+	// union is complete either way. reportedOSIDs stays the page's own records because the
+	// lookups below are scoped to them.
+	siteReportedOSIDs := reportedOSIDs.Clone()
+	for _, strID := range operatingSystemInventory.GetInventoryPage().GetItemIds() {
+		id, perr := uuid.Parse(strID)
+		if perr != nil {
+			logger.Error().Err(perr).Str("ID", strID).Msg("Failed to parse OS ID from inventory page, skipping")
+			continue
+		}
+		siteReportedOSIDs.Add(id)
 	}
 
 	// Fetch DB records matching the reported IDs (including soft-deleted so we can detect
@@ -500,7 +504,7 @@ func (mos ManageOsImage) UpdateOperatingSystemsInDB(ctx context.Context, siteID 
 	tenantOrgToID := map[string]*uuid.UUID{}
 
 	// Create or update OSes based on the Site inventory.
-	for _, reportedOS := range inventory.GetOperatingSystems() {
+	for _, reportedOS := range operatingSystemInventory.GetOperatingSystems() {
 		if reportedOS == nil || reportedOS.GetId().GetValue() == "" {
 			continue
 		}
@@ -851,30 +855,7 @@ func (mos ManageOsImage) UpdateOperatingSystemsInDB(ctx context.Context, siteID 
 	// Only single-site OSes (exactly one associated Site) are bidirectionally synced and
 	// therefore subject to deletion-by-absence; multi-site OSes are REST-owned and must
 	// not be deleted from Site inventory, and raw iPXE OSes have no associations at all.
-	//
-	// Inventory may be paged: each page carries only a subset in OperatingSystems but the
-	// full reported ID set in InventoryPage.ItemIds. Deletion must therefore run against
-	// the complete reported set, and only once per sweep — on the final page — so that an
-	// earlier page does not prematurely soft-delete an OS that appears on a later page.
-	page := inventory.GetInventoryPage()
-	isFinalPage := page == nil || page.TotalPages == 0 || page.CurrentPage == page.TotalPages
-	if isFinalPage {
-		// Build the complete set of reported OS IDs. When paging is in use the full set
-		// lives in InventoryPage.ItemIds; otherwise the single message's OperatingSystems
-		// already is the complete set (captured above in reportedOSIDs).
-		deletionReportedIDs := reportedOSIDs
-		if page != nil && len(page.ItemIds) > 0 {
-			deletionReportedIDs = mapset.NewSet[uuid.UUID]()
-			for _, strID := range page.ItemIds {
-				id, perr := uuid.Parse(strID)
-				if perr != nil {
-					logger.Error().Err(perr).Str("ID", strID).Msg("Failed to parse OS ID from inventory page, skipping")
-					continue
-				}
-				deletionReportedIDs.Add(id)
-			}
-		}
-
+	if util.ShouldReconcileDeletions(operatingSystemInventory.GetInventoryPage()) {
 		// Scope deletion to the reporting Site: only OSes associated with this Site
 		// are candidates, so an OS that lives at a different Site is not soft-deleted
 		// just because it is absent from this Site's inventory.
@@ -928,7 +909,7 @@ func (mos ManageOsImage) UpdateOperatingSystemsInDB(ctx context.Context, siteID 
 
 				slogger := logger.With().Str("OperatingSystemID", ipxeOS.ID.String()).Logger()
 
-				if !deletionReportedIDs.Contains(ipxeOS.ID) {
+				if !siteReportedOSIDs.Contains(ipxeOS.ID) {
 					// An OS associated to this Site after the inventory was collected is absent
 					// from it for that reason alone. A later inventory reads an already-deleted
 					// OS as a user decision and will not restore it, so defer to the next run.

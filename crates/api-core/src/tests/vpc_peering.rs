@@ -47,6 +47,43 @@ use crate::tests::common::api_fixtures::{
 use crate::tests::common::postgres::wait_for_blocked_query;
 use crate::tests::common::rpc_builder::VpcCreationRequest;
 
+mod deletion;
+
+/// Builds the production deletion handler for explicitly driven iterations.
+pub(super) fn deletion_controller(
+    env: &TestEnv,
+) -> state_controller::controller::StateController<crate::vpc_peering_controller::VpcPeeringDeletion>
+{
+    state_controller::controller::StateController::builder()
+        .database(env.pool.clone(), env.api.work_lock_manager_handle.clone())
+        .processor_id("vpc-peering-deletion-test".to_string())
+        .services(std::sync::Arc::new(env.pool.clone()))
+        .state_handler(std::sync::Arc::new(
+            crate::vpc_peering_controller::VpcPeeringDeletion,
+        ))
+        .build_for_manual_iterations(tokio_util::sync::CancellationToken::new())
+        .unwrap()
+}
+
+/// Simulates every receiver DPU applying its current network configuration.
+async fn acknowledge_peering_receivers(env: &TestEnv, id: VpcPeeringId) {
+    let mut txn = env.pool.begin().await.unwrap();
+    let peering = db::vpc_peering::find_by_ids(&mut txn, vec![id])
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let receivers = db::vpc_peering::find_receivers(&mut txn, &peering)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    for host in receivers {
+        for dpu in host.host_snapshot.associated_dpu_machine_ids() {
+            api_fixtures::network_configured_with_health(env, &dpu, None).await;
+        }
+    }
+}
+
 async fn create_test_vpcs(
     env: &TestEnv,
     count: i32,
@@ -501,6 +538,9 @@ async fn vpc_peering_overlap_gate_off_freezes_new_duplicate_source(
             id: Some(peering_id),
         }))
         .await?;
+    deletion_controller(&env)
+        .run_single_iteration_ext(false)
+        .await;
 
     let mut txn = env.pool.begin().await?;
     retain_peering_overlap_prefix(&mut txn, &vpcs[2]).await?;
@@ -725,6 +765,11 @@ async fn test_vpc_peering_full(pool: PgPool) -> Result<(), Box<dyn std::error::E
     let delete_response = env.api.delete_vpc_peering(vpc_peering_delete_request).await;
     assert!(delete_response.is_ok());
 
+    acknowledge_peering_receivers(&env, vpc_peering_12_id.unwrap()).await;
+    deletion_controller(&env)
+        .run_single_iteration_ext(false)
+        .await;
+
     let get_response = get_vpc_peerings(&env, vpc_id_1).await;
     assert!(get_response.is_ok());
     let vpc_peering_list = get_response.unwrap().into_inner();
@@ -735,6 +780,11 @@ async fn test_vpc_peering_full(pool: PgPool) -> Result<(), Box<dyn std::error::E
     });
     let delete_response = env.api.delete_vpc_peering(vpc_peering_delete_request).await;
     assert!(delete_response.is_ok());
+
+    acknowledge_peering_receivers(&env, vpc_peering_13_id.unwrap()).await;
+    deletion_controller(&env)
+        .run_single_iteration_ext(false)
+        .await;
 
     let get_response = get_vpc_peerings(&env, vpc_id_1).await;
     assert!(get_response.is_ok());
@@ -761,6 +811,15 @@ async fn test_vpc_peering_full(pool: PgPool) -> Result<(), Box<dyn std::error::E
     assert_eq!(vpc_peering_list.vpc_peerings.len(), 2);
 
     release_instances_from_vpcs(&env, &[vpc_id_1, vpc_id_2, vpc_id_3]).await?;
+
+    for peering in vpc_peering_list.vpc_peerings {
+        env.api
+            .delete_vpc_peering(Request::new(VpcPeeringDeletionRequest { id: peering.id }))
+            .await?;
+    }
+    deletion_controller(&env)
+        .run_single_iteration_ext(false)
+        .await;
 
     let vpc_delete_response = env
         .api
@@ -1146,12 +1205,13 @@ async fn test_vpc_peering_network_config_exclusive_etv(
     Ok(())
 }
 
+/// ETV permission removal must be acknowledged before its peer VPC releases a VNI.
 #[crate::sqlx_test]
-async fn test_vpc_peering_deletion_upon_vpc_deletion(
+async fn etv_peering_removal_must_finish_before_vpc_deletion(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = api_fixtures::create_test_env(pool).await;
-    let (vpc_id, peer_vpc_id, _, _, dpu_machine_id) = create_vpc_peering(
+    let (vpc_id, peer_vpc_id, _, peer_vni, dpu_machine_id) = create_vpc_peering(
         &env,
         VpcVirtualizationType::EthernetVirtualizer,
         VpcVirtualizationType::EthernetVirtualizer,
@@ -1162,6 +1222,7 @@ async fn test_vpc_peering_deletion_upon_vpc_deletion(
     assert!(get_response.is_ok());
     let vpc_peering_list = get_response.unwrap().into_inner();
     assert_eq!(vpc_peering_list.vpc_peerings.len(), 1);
+    let peering_id = vpc_peering_list.vpc_peerings[0].id.unwrap();
 
     let response = env
         .api
@@ -1181,12 +1242,41 @@ async fn test_vpc_peering_deletion_upon_vpc_deletion(
             id: Some(peer_vpc_id),
         }))
         .await;
-    assert!(vpc_delete_response.is_ok());
+    let error = vpc_delete_response.expect_err("the receiver still imports this VPC");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("delete its peerings"));
+
+    let mut txn = env.pool.begin().await?;
+    assert_eq!(
+        db::resource_pool::find_owned_allocation(
+            &env.common_pools.ethernet.pool_vpc_vni,
+            &mut txn,
+            model::resource_pool::OwnerType::Vpc,
+            &peer_vpc_id.to_string(),
+        )
+        .await?,
+        Some(i32::try_from(peer_vni)?)
+    );
+    txn.commit().await?;
+
+    env.api
+        .delete_vpc_peering(Request::new(VpcPeeringDeletionRequest {
+            id: Some(peering_id),
+        }))
+        .await?;
+    deletion_controller(&env)
+        .run_single_iteration_ext(false)
+        .await;
 
     let get_response = get_vpc_peerings(&env, vpc_id).await;
     assert!(get_response.is_ok());
     let vpc_peering_list = get_response.unwrap().into_inner();
-    assert_eq!(vpc_peering_list.vpc_peerings.len(), 0);
+    assert_eq!(vpc_peering_list.vpc_peerings.len(), 1);
+    assert_eq!(
+        vpc_peering_list.vpc_peerings[0].state(),
+        rpc::forge::VpcPeeringState::Deleting
+    );
+    deletion::stored_wait(&env, peering_id).await;
 
     let response = env
         .api
@@ -1199,6 +1289,35 @@ async fn test_vpc_peering_deletion_upon_vpc_deletion(
     assert_eq!(response.tenant_interfaces.len(), 1);
     assert_eq!(response.tenant_interfaces[0].vpc_peer_prefixes.len(), 0);
     assert_eq!(response.tenant_interfaces[0].vpc_peer_vnis.len(), 0);
+
+    api_fixtures::network_configured_with_health(&env, &dpu_machine_id, None).await;
+    deletion_controller(&env)
+        .run_single_iteration_ext(false)
+        .await;
+    assert!(
+        get_vpc_peerings(&env, vpc_id)
+            .await?
+            .into_inner()
+            .vpc_peerings
+            .is_empty()
+    );
+    env.api
+        .delete_vpc(Request::new(rpc::forge::VpcDeletionRequest {
+            id: Some(peer_vpc_id),
+        }))
+        .await?;
+    let mut txn = env.pool.begin().await?;
+    assert!(
+        db::resource_pool::find_owned_allocation(
+            &env.common_pools.ethernet.pool_vpc_vni,
+            &mut txn,
+            model::resource_pool::OwnerType::Vpc,
+            &peer_vpc_id.to_string(),
+        )
+        .await?
+        .is_none()
+    );
+    txn.commit().await?;
 
     Ok(())
 }

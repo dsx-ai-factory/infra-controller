@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	"github.com/google/uuid"
 
 	"github.com/uptrace/bun"
 )
@@ -188,19 +190,15 @@ type InfiniBandInterfaceDAO interface {
 
 // InfiniBandInterfaceSQLDAO is an implementation of the InfiniBandInterfaceDAO interface
 type InfiniBandInterfaceSQLDAO struct {
-	dbSession  *db.Session
-	tracerSpan *stracer.TracerSpan
+	dbSession *db.Session
 }
 
 // GetByID returns a InfiniBandInterface by ID
-func (ibisd InfiniBandInterfaceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*InfiniBandInterface, error) {
+func (ibisd InfiniBandInterfaceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *InfiniBandInterface, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, InfiniBandInterfaceDAOSpan := ibisd.tracerSpan.CreateChildInCurrentContext(ctx, "InfiniBandInterfaceDAO.GetByID")
-	if InfiniBandInterfaceDAOSpan != nil {
-		defer InfiniBandInterfaceDAOSpan.End()
-
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "id", id.String())
-	}
+	ctx, InfiniBandInterfaceDAOSpan := cotel.StartSpan(ctx, "InfiniBandInterfaceDAO.GetByID")
+	defer func() { cotel.EndSpan(InfiniBandInterfaceDAOSpan, retErr) }()
+	cotel.SetAttribute(InfiniBandInterfaceDAOSpan, attribute.String("id", id.String()))
 
 	ibi := &InfiniBandInterface{}
 
@@ -225,58 +223,46 @@ func (ibisd InfiniBandInterfaceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, i
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in InfiniBandInterfaceOrderByDefault in ascending order
-func (ibisd InfiniBandInterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter InfiniBandInterfaceFilterInput, page paginator.PageInput, includeRelations []string) ([]InfiniBandInterface, int, error) {
+func (ibisd InfiniBandInterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter InfiniBandInterfaceFilterInput, page paginator.PageInput, includeRelations []string) (_ []InfiniBandInterface, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, InfiniBandInterfaceDAOSpan := ibisd.tracerSpan.CreateChildInCurrentContext(ctx, "InfiniBandInterfaceDAO.GetAll")
-	if InfiniBandInterfaceDAOSpan != nil {
-		defer InfiniBandInterfaceDAOSpan.End()
-	}
+	ctx, InfiniBandInterfaceDAOSpan := cotel.StartSpan(ctx, "InfiniBandInterfaceDAO.GetAll")
+	defer func() { cotel.EndSpan(InfiniBandInterfaceDAOSpan, retErr) }()
 
 	ibis := []InfiniBandInterface{}
 
 	query := db.GetIDB(tx, ibisd.dbSession).NewSelect().Model(&ibis)
 	if filter.InstanceIDs != nil {
 		query = query.Where("ibi.instance_id IN (?)", bun.In(filter.InstanceIDs))
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "instance_ids", filter.InstanceIDs)
 	}
 	if filter.SiteIDs != nil {
 		query = query.Where("ibi.site_id IN (?)", bun.In(filter.SiteIDs))
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "site_id", filter.SiteIDs)
 	}
 	if filter.InfiniBandPartitionIDs != nil {
 		query = query.Where("ibi.infiniband_partition_id IN (?)", bun.In(filter.InfiniBandPartitionIDs))
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "infiniband_partition_id", filter.InfiniBandPartitionIDs)
 	}
 	if filter.Statuses != nil {
 		query = query.Where("ibi.status IN (?)", bun.In(filter.Statuses))
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "status", filter.Statuses)
 	}
 	if filter.Devices != nil {
 		query = query.Where("ibi.device IN (?)", bun.In(filter.Devices))
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "device", filter.Devices)
 	}
 	if filter.Vendors != nil {
 		query = query.Where("ibi.vendor IN (?)", bun.In(filter.Vendors))
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "vendor", filter.Vendors)
 	}
 	if filter.IsPhysical != nil {
 		query = query.Where("ibi.is_physical = ?", *filter.IsPhysical)
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "is_physical", *filter.IsPhysical)
 	}
 
 	if filter.PhysicalGUIDs != nil {
 		query = query.Where("ibi.physical_guid IN (?)", bun.In(filter.PhysicalGUIDs))
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "physical_guid", filter.PhysicalGUIDs)
 	}
 
 	if filter.GUIDs != nil {
 		query = query.Where("ibi.guid IN (?)", bun.In(filter.GUIDs))
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "guid", filter.GUIDs)
 	}
 
 	if filter.InfiniBandInterfaceIDs != nil {
 		query = query.Where("ibi.id IN (?)", bun.In(filter.InfiniBandInterfaceIDs))
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "ids", filter.InfiniBandInterfaceIDs)
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
@@ -290,7 +276,7 @@ func (ibisd InfiniBandInterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 				WhereOr("ibi.guid ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("ibi.status ILIKE ?", "%"+searchQuery+"%")
 		})
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "search_query", searchQuery)
+		cotel.SetAttribute(InfiniBandInterfaceDAOSpan, attribute.String("search_query", searchQuery))
 	}
 
 	for _, relation := range includeRelations {
@@ -316,12 +302,10 @@ func (ibisd InfiniBandInterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, fi
 }
 
 // Create creates a new InfiniBandInterface from the given parameters
-func (ibisd InfiniBandInterfaceSQLDAO) Create(ctx context.Context, tx *db.Tx, input InfiniBandInterfaceCreateInput) (*InfiniBandInterface, error) {
+func (ibisd InfiniBandInterfaceSQLDAO) Create(ctx context.Context, tx *db.Tx, input InfiniBandInterfaceCreateInput) (_ *InfiniBandInterface, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, InfiniBandInterfaceDAOSpan := ibisd.tracerSpan.CreateChildInCurrentContext(ctx, "InfiniBandInterfaceDAO.Create")
-	if InfiniBandInterfaceDAOSpan != nil {
-		defer InfiniBandInterfaceDAOSpan.End()
-	}
+	ctx, InfiniBandInterfaceDAOSpan := cotel.StartSpan(ctx, "InfiniBandInterfaceDAO.Create")
+	defer func() { cotel.EndSpan(InfiniBandInterfaceDAOSpan, retErr) }()
 
 	results, err := ibisd.CreateMultiple(ctx, tx, []InfiniBandInterfaceCreateInput{input})
 	if err != nil {
@@ -331,14 +315,10 @@ func (ibisd InfiniBandInterfaceSQLDAO) Create(ctx context.Context, tx *db.Tx, in
 }
 
 // Update updates an existing InfiniBandInterface from the given parameters
-func (ibisd InfiniBandInterfaceSQLDAO) Update(ctx context.Context, tx *db.Tx, input InfiniBandInterfaceUpdateInput) (*InfiniBandInterface, error) {
+func (ibisd InfiniBandInterfaceSQLDAO) Update(ctx context.Context, tx *db.Tx, input InfiniBandInterfaceUpdateInput) (_ *InfiniBandInterface, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, InfiniBandInterfaceDAOSpan := ibisd.tracerSpan.CreateChildInCurrentContext(ctx, "InfiniBandInterfaceDAO.Update")
-	if InfiniBandInterfaceDAOSpan != nil {
-		defer InfiniBandInterfaceDAOSpan.End()
-
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "id", input.InfiniBandInterfaceID)
-	}
+	ctx, InfiniBandInterfaceDAOSpan := cotel.StartSpan(ctx, "InfiniBandInterfaceDAO.Update")
+	defer func() { cotel.EndSpan(InfiniBandInterfaceDAOSpan, retErr) }()
 
 	ibi := &InfiniBandInterface{
 		ID: input.InfiniBandInterfaceID,
@@ -349,47 +329,43 @@ func (ibisd InfiniBandInterfaceSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 	if input.Device != nil {
 		ibi.Device = *input.Device
 		updatedFields = append(updatedFields, "device")
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "device", *input.Device)
+		cotel.SetAttribute(InfiniBandInterfaceDAOSpan, attribute.String("device", *input.Device))
 	}
 	if input.Vendor != nil {
 		ibi.Vendor = input.Vendor
 		updatedFields = append(updatedFields, "vendor")
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "vendor", *input.Vendor)
+		cotel.SetAttribute(InfiniBandInterfaceDAOSpan, attribute.String("vendor", *input.Vendor))
 	}
 	if input.DeviceInstance != nil {
 		ibi.DeviceInstance = *input.DeviceInstance
 		updatedFields = append(updatedFields, "device_instance")
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "device_instance", *input.DeviceInstance)
 	}
 	if input.IsPhysical != nil {
 		ibi.IsPhysical = *input.IsPhysical
 		updatedFields = append(updatedFields, "is_physical")
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "is_physical", *input.IsPhysical)
 	}
 	if input.VirtualFunctionId != nil {
 		ibi.VirtualFunctionID = input.VirtualFunctionId
 		updatedFields = append(updatedFields, "virtual_function_id")
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "virtual_function_id", *input.VirtualFunctionId)
 	}
 	if input.PhysicalGUID != nil {
 		ibi.PhysicalGUID = input.PhysicalGUID
 		updatedFields = append(updatedFields, "physical_guid")
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "physical_guid", *input.PhysicalGUID)
+		cotel.SetAttribute(InfiniBandInterfaceDAOSpan, attribute.String("physical_guid", *input.PhysicalGUID))
 	}
 	if input.GUID != nil {
 		ibi.GUID = input.GUID
 		updatedFields = append(updatedFields, "guid")
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "guid", *input.GUID)
+		cotel.SetAttribute(InfiniBandInterfaceDAOSpan, attribute.String("guid", *input.GUID))
 	}
 	if input.Status != nil {
 		ibi.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "status", *input.Status)
+		cotel.SetAttribute(InfiniBandInterfaceDAOSpan, attribute.String("status", *input.Status))
 	}
 	if input.IsMissingOnSite != nil {
 		ibi.IsMissingOnSite = *input.IsMissingOnSite
 		updatedFields = append(updatedFields, "is_missing_on_site")
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "is_missing_on_site", *input.IsMissingOnSite)
 	}
 
 	if len(updatedFields) > 0 {
@@ -409,14 +385,10 @@ func (ibisd InfiniBandInterfaceSQLDAO) Update(ctx context.Context, tx *db.Tx, in
 }
 
 // Clear clears InfiniBandInterface attributes based on provided arguments
-func (ibisd InfiniBandInterfaceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InfiniBandInterfaceClearInput) (*InfiniBandInterface, error) {
+func (ibisd InfiniBandInterfaceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InfiniBandInterfaceClearInput) (_ *InfiniBandInterface, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, InfiniBandInterfaceDAOSpan := ibisd.tracerSpan.CreateChildInCurrentContext(ctx, "InfiniBandInterfaceDAO.Clear")
-	if InfiniBandInterfaceDAOSpan != nil {
-		defer InfiniBandInterfaceDAOSpan.End()
-
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "id", input.InfiniBandInterfaceID)
-	}
+	ctx, InfiniBandInterfaceDAOSpan := cotel.StartSpan(ctx, "InfiniBandInterfaceDAO.Clear")
+	defer func() { cotel.EndSpan(InfiniBandInterfaceDAOSpan, retErr) }()
 
 	ibi := &InfiniBandInterface{
 		ID: input.InfiniBandInterfaceID,
@@ -462,14 +434,11 @@ func (ibisd InfiniBandInterfaceSQLDAO) Clear(ctx context.Context, tx *db.Tx, inp
 }
 
 // Delete deletes a InfiniBandInterface by ID
-func (ibisd InfiniBandInterfaceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (ibisd InfiniBandInterfaceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, InfiniBandInterfaceDAOSpan := ibisd.tracerSpan.CreateChildInCurrentContext(ctx, "InfiniBandInterfaceDAO.Delete")
-	if InfiniBandInterfaceDAOSpan != nil {
-		defer InfiniBandInterfaceDAOSpan.End()
-
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "id", id.String())
-	}
+	ctx, InfiniBandInterfaceDAOSpan := cotel.StartSpan(ctx, "InfiniBandInterfaceDAO.Delete")
+	defer func() { cotel.EndSpan(InfiniBandInterfaceDAOSpan, retErr) }()
+	cotel.SetAttribute(InfiniBandInterfaceDAOSpan, attribute.String("id", id.String()))
 
 	ib := &InfiniBandInterface{
 		ID: id,
@@ -485,13 +454,10 @@ func (ibisd InfiniBandInterfaceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id
 
 // DeleteAllBySiteID deletes all InfiniBandInterface records for a given Site
 // error is returned only if there is a db error
-func (ibisd InfiniBandInterfaceSQLDAO) DeleteAllBySiteID(ctx context.Context, tx *db.Tx, siteID uuid.UUID) error {
-	ctx, InfiniBandInterfaceDAOSpan := ibisd.tracerSpan.CreateChildInCurrentContext(ctx, "InfiniBandInterfaceDAO.DeleteAllBySiteID")
-	if InfiniBandInterfaceDAOSpan != nil {
-		defer InfiniBandInterfaceDAOSpan.End()
-
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "site_id", siteID.String())
-	}
+func (ibisd InfiniBandInterfaceSQLDAO) DeleteAllBySiteID(ctx context.Context, tx *db.Tx, siteID uuid.UUID) (retErr error) {
+	ctx, InfiniBandInterfaceDAOSpan := cotel.StartSpan(ctx, "InfiniBandInterfaceDAO.DeleteAllBySiteID")
+	defer func() { cotel.EndSpan(InfiniBandInterfaceDAOSpan, retErr) }()
+	cotel.SetAttribute(InfiniBandInterfaceDAOSpan, attribute.String("site_id", siteID.String()))
 
 	ibi := &InfiniBandInterface{
 		SiteID: siteID,
@@ -503,17 +469,14 @@ func (ibisd InfiniBandInterfaceSQLDAO) DeleteAllBySiteID(ctx context.Context, tx
 }
 
 // CreateMultiple creates multiple InfiniBandInterfaces from the given parameters
-func (ibisd InfiniBandInterfaceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []InfiniBandInterfaceCreateInput) ([]InfiniBandInterface, error) {
+func (ibisd InfiniBandInterfaceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []InfiniBandInterfaceCreateInput) (_ []InfiniBandInterface, retErr error) {
 	if len(inputs) > db.MaxBatchItems {
 		return nil, fmt.Errorf("batch size %d exceeds maximum allowed %d", len(inputs), db.MaxBatchItems)
 	}
 
 	// Create a child span and set the attributes for current request
-	ctx, InfiniBandInterfaceDAOSpan := ibisd.tracerSpan.CreateChildInCurrentContext(ctx, "InfiniBandInterfaceDAO.CreateMultiple")
-	if InfiniBandInterfaceDAOSpan != nil {
-		defer InfiniBandInterfaceDAOSpan.End()
-		ibisd.tracerSpan.SetAttribute(InfiniBandInterfaceDAOSpan, "batch_size", len(inputs))
-	}
+	ctx, InfiniBandInterfaceDAOSpan := cotel.StartSpan(ctx, "InfiniBandInterfaceDAO.CreateMultiple")
+	defer func() { cotel.EndSpan(InfiniBandInterfaceDAOSpan, retErr) }()
 
 	if len(inputs) == 0 {
 		return []InfiniBandInterface{}, nil
@@ -580,7 +543,6 @@ func (ibisd InfiniBandInterfaceSQLDAO) CreateMultiple(ctx context.Context, tx *d
 // NewInfiniBandInterfaceDAO returns a new InfiniBandInterfaceDAO
 func NewInfiniBandInterfaceDAO(dbSession *db.Session) InfiniBandInterfaceDAO {
 	return &InfiniBandInterfaceSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

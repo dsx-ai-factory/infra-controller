@@ -19,5 +19,6 @@ pub mod config;
 pub mod credentials;
 pub mod error;
 pub mod flasher;
+pub mod preflight;
 pub mod reset;
 pub mod source;

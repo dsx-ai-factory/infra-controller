@@ -22,7 +22,8 @@ use chrono::{DateTime, Utc};
 /// plus its wrapped DEK. `seq` is the journal order -- higher means written
 /// later. Decryption lives in `carbide::secrets`; this type only moves the
 /// columns.
-#[derive(sqlx::FromRow)]
+#[derive(sqlx::FromRow, carbide_macros::DbTable)]
+#[db_table(name = "secrets")]
 pub struct SecretRow {
     pub secret_id: SecretId,
     pub seq: i64,

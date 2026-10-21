@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block title %}Console Logs — {{ machine_id }}{% endblock %}
+
+{% block content %}
+<h1>Console Logs</h1>
+<p><a href="/admin/machine/{{ machine_id }}">{{ machine_id }}</a></p>
+<p>
+  <span id="console-status">Connecting…</span>
+  <button id="follow" type="button">Pause following</button>
+  <button id="clear" type="button">Clear</button>
+</p>
+<pre id="console-output" style="height: 70vh; overflow: auto; white-space: pre-wrap;"></pre>
+<script>
+(() => {
+  const output = document.getElementById("console-output");
+  const status = document.getElementById("console-status");
+  const followButton = document.getElementById("follow");
+  const lines = [];
+  let follow = true;
+  const source = new EventSource("/admin/machine/{{ machine_id }}/console-logs/stream");
+
+  source.onopen = () => {
+    lines.length = 0;
+    output.textContent = "";
+    status.textContent = "Connected";
+  };
+  source.onmessage = event => {
+    lines.push(JSON.parse(event.data));
+    if (lines.length > 5000) lines.splice(0, lines.length - 5000);
+    output.textContent = lines.join("");
+    if (follow) output.scrollTop = output.scrollHeight;
+  };
+  source.addEventListener("console-error", event => {
+    const error = JSON.parse(event.data);
+    status.textContent = `${error.code}: ${error.message}`;
+  });
+  source.onerror = () => { status.textContent = "Disconnected; retrying…"; };
+  followButton.onclick = () => {
+    follow = !follow;
+    followButton.textContent = follow ? "Pause following" : "Follow";
+    if (follow) output.scrollTop = output.scrollHeight;
+  };
+  document.getElementById("clear").onclick = () => {
+    lines.length = 0;
+    output.textContent = "";
+  };
+})();
+</script>
+{% endblock %}

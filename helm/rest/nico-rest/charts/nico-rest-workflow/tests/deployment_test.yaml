@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: workflow workers roll on config changes
+templates:
+  - configmap.yaml
+  - deployment-cloud-worker.yaml
+  - deployment-site-worker.yaml
+release:
+  namespace: nico-rest
+set:
+  # Provided by the nico-rest parent chart at render time; set here so the
+  # subchart's Deployment templates render standalone under helm-unittest.
+  global.image.repository: nvcr.io/example
+  global.image.tag: test
+  global.image.pullPolicy: IfNotPresent
+  global.imagePullSecrets: []
+tests:
+  - it: annotates the cloud worker with the config checksum next to pod annotations
+    template: deployment-cloud-worker.yaml
+    set:
+      podAnnotations:
+        example.com/team: rest
+    asserts:
+      - matchRegex:
+          path: spec.template.metadata.annotations["checksum/config"]
+          pattern: ^[0-9a-f]{64}$
+      - equal:
+          path: spec.template.metadata.annotations["example.com/team"]
+          value: rest
+
+  - it: annotates the site worker with the config checksum
+    template: deployment-site-worker.yaml
+    asserts:
+      - matchRegex:
+          path: spec.template.metadata.annotations["checksum/config"]
+          pattern: ^[0-9a-f]{64}$

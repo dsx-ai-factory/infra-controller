@@ -19,5 +19,6 @@ mod common;
 mod full;
 mod lldp_collector;
 mod metrics;
+mod polling;
 mod test_network_monitor;
 mod upgrade;

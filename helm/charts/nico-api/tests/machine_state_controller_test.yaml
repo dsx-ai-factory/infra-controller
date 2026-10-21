@@ -1,0 +1,32 @@
+suite: machine state controller concurrency
+templates:
+  - configmap.yaml
+tests:
+  - it: renders the configured value
+    documentIndex: 0
+    set:
+      machineStateController.maxConcurrency: 80
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^\[machine_state_controller\.controller\]$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^max_concurrency = 80$'
+      - notMatchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^max_concurrency = 10$'
+
+  - it: rejects zero
+    set:
+      machineStateController.maxConcurrency: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: machineStateController.maxConcurrency must be a positive integer
+
+  - it: rejects a value that is not an integer
+    set:
+      machineStateController.maxConcurrency: 80.5
+    asserts:
+      - failedTemplate:
+          errorPattern: machineStateController.maxConcurrency must be a positive integer

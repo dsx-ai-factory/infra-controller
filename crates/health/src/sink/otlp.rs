@@ -835,6 +835,122 @@ mod tests {
     }
 
     #[test]
+    fn composite_excludes_gnmi_event_rows_only_from_prometheus() {
+        let otlp = Arc::new(test_sink());
+        let second_otlp = Arc::new(test_sink());
+        let metrics = Arc::new(MetricsManager::new("test").unwrap());
+
+        let prometheus =
+            Arc::new(crate::sink::PrometheusSink::new(metrics.clone(), "custom").unwrap());
+
+        let sinks: Vec<Arc<dyn DataSink>> = vec![prometheus, otlp.clone(), second_otlp.clone()];
+        let composite = CompositeDataSink::new(sinks, metrics.clone());
+
+        let context = EventContext {
+            collector_type: "nvue_gnmi_events",
+            ..test_context()
+        };
+
+        let mut samples = Vec::new();
+
+        for (id, created, name, metric_type, unit, is_event_record) in [
+            (
+                "42",
+                "2026-10-16T10:19:00Z",
+                "nvue_gnmi_events",
+                "on_change_row",
+                "severity",
+                false,
+            ),
+            (
+                "43",
+                "2026-10-16T10:20:00Z",
+                "nvue_gnmi_extended",
+                "custom_event",
+                "info",
+                true,
+            ),
+        ] {
+            let sample = MetricSample {
+                key: format!("nvue_gnmi_events:{id}"),
+                name: name.into(),
+                metric_type: metric_type.into(),
+                unit: unit.into(),
+                value: 4.0,
+                labels: vec![
+                    ("instance_id".into(), id.into()),
+                    ("event-id".into(), id.into()),
+                    ("time-created".into(), created.into()),
+                    ("severity".into(), "critical".into()),
+                    ("text".into(), "link down".into()),
+                ],
+                context: None,
+            };
+
+            composite
+                .try_handle_classified_event(
+                    &context,
+                    &CollectorEvent::Metric(Box::new(sample.clone())),
+                    is_event_record,
+                )
+                .unwrap();
+
+            samples.push((context.clone(), sample));
+        }
+
+        let hardware_context = test_context();
+        let hardware_event = metric_event();
+
+        composite
+            .try_handle_event(&hardware_context, &hardware_event)
+            .unwrap();
+
+        let CollectorEvent::Metric(hardware_sample) = hardware_event else {
+            panic!("fixture must contain a metric");
+        };
+
+        samples.push((hardware_context, *hardware_sample));
+
+        let exposition = metrics.export_telemetry().unwrap();
+
+        assert!(!exposition.contains("nvue_gnmi_events"), "{exposition}");
+        assert!(!exposition.contains("nvue_gnmi_extended"), "{exposition}");
+
+        assert!(
+            exposition.contains("custom_temp_gauge_celsius"),
+            "{exposition}"
+        );
+
+        let queued = std::iter::from_fn(|| otlp.metrics_queue.pop().map(|(_, sample)| sample))
+            .collect::<Vec<_>>();
+
+        let expected = build_metrics_export_request(&samples, 123, "health");
+        let actual = build_queued_metrics_export_request(&queued, 123, "health");
+
+        assert_eq!(queued.len(), 3);
+
+        let second_queued =
+            std::iter::from_fn(|| second_otlp.metrics_queue.pop().map(|(_, sample)| sample))
+                .collect::<Vec<_>>();
+
+        assert_eq!(second_queued.len(), 3);
+        let second_export = build_queued_metrics_export_request(&second_queued, 123, "health");
+
+        for resource in &expected.resource_metrics {
+            assert!(second_export.resource_metrics.contains(resource));
+        }
+
+        assert_eq!(
+            actual.resource_metrics.len(),
+            expected.resource_metrics.len()
+        );
+
+        for resource in expected.resource_metrics {
+            assert!(actual.resource_metrics.contains(&resource));
+        }
+    }
+
+    #[test]
     fn shared_metric_targets_replace_and_evict_independently() {
         let mut first = bounded_test_sink(1);
         first.target = ConfiguredOtlpTarget("http://independent-first.example:4317".into());

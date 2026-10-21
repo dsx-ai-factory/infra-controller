@@ -113,11 +113,21 @@ After NICo imports the expected inventory, it goes through the following workflo
 
 NICo monitors the discovered and ingested trays and racks. It reports the actual inventory with dynamic information such as power status and installed firmware versions. It also compares the actual inventory against the expected inventory, and reports on any discrepancies (e.g. wrong rack installed, wrong slot installed, or wrong serial number).
 
+Rack and tray inventory includes synchronized health snapshots. See
+[Monitoring and Health](../operations/monitoring-health.md#rack-and-tray-health-snapshots)
+for freshness and empty-report semantics, and
+[Leak Detection and Handling](../operations/leak-detection-handling.md)
+for leak-specific status.
+
 </Step>
 
 <Step title="Power Control">
 
 NICo provides power control for racks as well as arbitrary groupings of trays in racks, following predefined or customized power operation sequences.
+
+Power operations are asynchronous and tracked as Flow tasks. See
+[REST power operations](../operations/flow/operation-rules.md#rest-power-operations)
+for supported states, AC power-cycle limitations, and task monitoring.
 
 **Sample Rack Power On Sequence:**
 
@@ -137,18 +147,10 @@ NICo provides power control for racks as well as arbitrary groupings of trays in
 
 <Step title="Firmware Management and Upgrade">
 
-NICo provides firmware update management for racks as well as arbitrary groups of trays in racks, following predefined or customized firmware update operation sequences.
+NICo provides firmware update management for racks as well as arbitrary groups of trays in racks, following predefined or customized firmware update operation sequences. The selected rule determines component ordering, verification, and any power cycles needed for activation.
 
-**Sample Rack Firmware Update Sequence**
-
-1. Perform firmware update on power shelves and wait for all to finish successfully.
-2. Reboot power shelves and wait for all to be back online.
-3. Perform firmware update on switch trays and wait for all to finish successfully.
-4. Reboot switch trays and wait for all to be back online.
-5. Perform firmware update on compute trays and wait for each to finish successfully.
-6. Reboot compute trays and wait for all to be back online.
-
-When a rack FW update completes successfully, all compute trays in the rack will have the same firmware version, all switch trays in the rack will have the same firmware version, and the compute tray firmware and switch tray firmware are supposed to be compatible with each other.
+See [Rack and Tray Firmware Updates](../operations/firmware-updates/rack-component-firmware.md)
+for request parameters, default sequencing, authentication, and task monitoring.
 
 </Step>
 
@@ -156,7 +158,10 @@ When a rack FW update completes successfully, all compute trays in the rack will
 
 ## REST API
 
-Currently, NICo only supports GB200 NVL72 racks, where a rack and a NVL domain overlaps precisely. Hence, domain endpoints are currently not exposed and rack endpoints should be used. This will change in the future.
+Use Rack endpoints for rack inventory, validation, and bringup, and Domain
+endpoints for domain inventory, power, and firmware operations. See
+[Flow inventory queries](../operations/flow/overview.md#inventory-queries)
+for component inclusion and list ordering.
 
 ### Rack Endpoints
 
@@ -164,8 +169,8 @@ Currently, NICo only supports GB200 NVL72 racks, where a rack and a NVL domain o
 - [GET /v2/org/{org}/nico/rack/{id}](api:GET/v2/org/:org/nico/rack/:id): Retrieve a rack with the specified ID.
 - [GET /v2/org/{org}/nico/rack/validation](api:GET/v2/org/:org/nico/rack/validation): Validate components of all racks in the specified site by comparing the expected inventory data to the actual inventory data.
 - [GET /v2/org/{org}/nico/rack/{id}/validation](api:GET/v2/org/:org/nico/rack/:id/validation): Validate components of the specified rack by comparing the expected inventory data to the actual inventory data.
-- [PATCH /v2/org/{org}/nico/rack/power](api:PATCH/v2/org/:org/nico/rack/power): Control power of all or selected racks in the site. Supported power states are `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
-- [PATCH /v2/org/{org}/nico/rack/{id}/power](api:PATCH/v2/org/:org/nico/rack/:id/power): Control power of the specified rack. Supported power states are `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+- [PATCH /v2/org/{org}/nico/rack/power](api:PATCH/v2/org/:org/nico/rack/power): Control power of all or selected racks in the site.
+- [PATCH /v2/org/{org}/nico/rack/{id}/power](api:PATCH/v2/org/:org/nico/rack/:id/power): Control power of the specified rack.
 - [PATCH /v2/org/{org}/nico/rack/firmware](api:PATCH/v2/org/:org/nico/rack/firmware): Update firmware on all or selected racks in the site.
 - [PATCH /v2/org/{org}/nico/rack/{id}/firmware](api:PATCH/v2/org/:org/nico/rack/:id/firmware): Update firmware on the specified rack.
 - [POST /v2/org/{org}/nico/rack/bringup](api:POST/v2/org/:org/nico/rack/bringup): Bring up all or selected racks in the site.
@@ -176,11 +181,20 @@ Currently, NICo only supports GB200 NVL72 racks, where a rack and a NVL domain o
 
 ### Tray (Rack Component) Endpoints
 
-- [GET /v2/org/{org}/nico/tray](api:GET/v2/org/:org/nico/tray): Retrieve all trays in the specified site.
-- [GET /v2/org/{org}/nico/tray/{id}](api:GET/v2/org/:org/nico/tray/:id): Retrieve a tray with the specified id.
+- [GET /v2/org/{org}/nico/tray](api:GET/v2/org/:org/nico/tray): Retrieve all trays and their health snapshots in the specified site.
+- [GET /v2/org/{org}/nico/tray/{id}](api:GET/v2/org/:org/nico/tray/:id): Retrieve a tray and its health snapshot with the specified ID.
 - [GET /v2/org/{org}/nico/tray/validation](api:GET/v2/org/:org/nico/tray/validation): Validate all or selected trays in the site by comparing the expected inventory data to the actual inventory data.
 - [GET /v2/org/{org}/nico/tray/{id}/validation](api:GET/v2/org/:org/nico/tray/:id/validation): Validate the specified tray by comparing the expected inventory data to the actual inventory data.
-- [PATCH /v2/org/{org}/nico/tray/power](api:PATCH/v2/org/:org/nico/tray/power): Control the power of all or selected trays in the site. Supported power states are `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
-- [PATCH /v2/org/{org}/nico/tray/{id}/power](api:PATCH/v2/org/:org/nico/tray/:id/power): Control the power of the specified tray. Supported power states are `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+- [PATCH /v2/org/{org}/nico/tray/power](api:PATCH/v2/org/:org/nico/tray/power): Control the power of all or selected trays in the site.
+- [PATCH /v2/org/{org}/nico/tray/{id}/power](api:PATCH/v2/org/:org/nico/tray/:id/power): Control the power of the specified tray.
 - [PATCH /v2/org/{org}/nico/tray/firmware](api:PATCH/v2/org/:org/nico/tray/firmware): Update the firmware on all or selected trays in the site.
 - [PATCH /v2/org/{org}/nico/tray/{id}/firmware](api:PATCH/v2/org/:org/nico/tray/:id/firmware): Update the firmware on the specified tray.
+
+### NVLink Domain Endpoints
+
+- [GET /v2/org/{org}/nico/domain/nvlink](api:GET/v2/org/:org/nico/domain/nvlink): Retrieve NVLink Domains in the specified Site.
+- [GET /v2/org/{org}/nico/domain/nvlink/{id}](api:GET/v2/org/:org/nico/domain/nvlink/:id): Retrieve an NVLink Domain by its ID.
+- [PATCH /v2/org/{org}/nico/domain/nvlink/power](api:PATCH/v2/org/:org/nico/domain/nvlink/power): Control power for explicitly selected NVLink Domains.
+- [PATCH /v2/org/{org}/nico/domain/nvlink/{id}/power](api:PATCH/v2/org/:org/nico/domain/nvlink/:id/power): Control power for one NVLink Domain.
+- [PATCH /v2/org/{org}/nico/domain/nvlink/firmware](api:PATCH/v2/org/:org/nico/domain/nvlink/firmware): Update firmware for explicitly selected NVLink Domains.
+- [PATCH /v2/org/{org}/nico/domain/nvlink/{id}/firmware](api:PATCH/v2/org/:org/nico/domain/nvlink/:id/firmware): Update firmware for one NVLink Domain.

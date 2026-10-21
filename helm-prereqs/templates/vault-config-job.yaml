@@ -320,9 +320,51 @@ spec:
               echo "Enabling KV v2 at {{ .Values.vault.kvMount }}/..."
               vault secrets enable -path={{ .Values.vault.kvMount }} kv-v2 2>/dev/null || true
 
+              # Seeds are first-write only. This Job also runs on every upgrade,
+              # and several seeds are placeholders an operator fills in afterwards
+              # (`credential add-uefi`), so a key that already holds a value is
+              # left alone; -cas=0 makes Vault refuse the write if a version
+              # appeared between the check and the put.
+              #
+              # seed_once <path>, seed JSON on stdin. Only the CLI's "No value
+              # found" answer means the key is absent; any other `kv get` failure
+              # is a Vault error and fails the Job with that error instead of a
+              # misleading check-and-set error from the put that would follow.
+              # A key whose latest version was soft-deleted still answers `kv get`
+              # (metadata only), so it also counts as set.
+              seed_once() {
+                _path="$1"
+                _data="$(cat)"
+                if _out="$(vault kv get "$_path" 2>&1)"; then
+                  # Live value: latest version neither soft-deleted nor destroyed.
+                  if printf '%s\n' "$_out" | grep -Eq '^deletion_time +n/a' \
+                     && printf '%s\n' "$_out" | grep -Eq '^destroyed +false'; then
+                    echo "Keeping $_path (already set; seeds never overwrite)"
+                  else
+                    echo "Keeping $_path (has version history but no live value; seeds never overwrite, restore with 'vault kv undelete' or 'credential add-uefi')"
+                  fi
+                  return 0
+                fi
+                if ! printf '%s\n' "$_out" | grep -q 'No value found'; then
+                  echo "ERROR: could not read $_path: $_out" >&2
+                  return 1
+                fi
+                echo "Seeding $_path..."
+                if printf '%s\n' "$_data" | vault kv put -cas=0 "$_path" -; then
+                  return 0
+                fi
+                # cas=0 refused the write: another writer (for example
+                # `credential add-uefi`) created the key after the check, and
+                # that value is the one to keep.
+                if vault kv get "$_path" >/dev/null 2>&1; then
+                  echo "Keeping $_path (written concurrently; seeds never overwrite)"
+                  return 0
+                fi
+                echo "ERROR: seeding $_path failed" >&2
+                return 1
+              }
               {{- range .Values.vault.kvSeeds }}
-              echo "Seeding {{ $.Values.vault.kvMount }}/{{ .path }}..."
-              vault kv put {{ $.Values.vault.kvMount }}/{{ .path }} - <<'KVSEED'
+              seed_once {{ $.Values.vault.kvMount }}/{{ .path }} <<'KVSEED'
               {{ .data | toJson }}
               KVSEED
               {{- end }}

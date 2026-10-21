@@ -103,7 +103,7 @@ and handles sensitive credentials and tenant state.
 
 - Core gRPC API and reflection routes for Forge methods.
 - Optional Core admin UI under `/admin`.
-- Core metrics and profiler endpoints, plus per-object metrics when enabled.
+- Core metrics endpoints, including per-object metrics when enabled.
 - REST `/v*/org/:orgName/<apiName>/...` API routes and public health or
   `.well-known` routes.
 - REST `/auth` Keycloak routes when Keycloak is configured.
@@ -192,7 +192,7 @@ and support scripts.
    or maintenance domains.
 
 7. **Sensitive observability or admin surface exposure:** Core metrics,
-   per-object metrics, profiler endpoints, admin UI pages, REST metrics,
+   per-object metrics, admin UI pages, REST metrics,
    hardware-health metrics, Loki logs, OpenTelemetry streams, and audit tables
    can reveal machine identifiers, site topology, tenant lifecycle state,
    authorization failures, or operational timing. Browser-facing REST deployments
@@ -213,7 +213,7 @@ and support scripts.
   failure.
 - Kubernetes ingress, Service types, NetworkPolicies, firewall rules, MetalLB
   address pools, and management VLANs expose each service only to its intended
-  peers. In particular, PXE, DHCP, DNS, FMDS, metrics, profiler, admin UI,
+  peers. In particular, PXE, DHCP, DNS, FMDS, metrics, admin UI,
   Temporal, PostgreSQL, and Vault endpoints are not broadly reachable.
 - The DPU is a trusted enforcement point. DPU OS integrity, DPU firmware, HBN,
   OVS/NVUE state, kernel isolation, and host-facing interface placement must be
@@ -254,7 +254,7 @@ control planes.
 - Require TLS/mTLS for Core, site-agent, Temporal, and service-to-service gRPC.
 - Disable development-only plaintext modes, debug logging, permissive auth,
   `bypass_rbac`, and local development certificates in production.
-- Restrict PXE, DHCP, DNS, FMDS, metrics, profiler, admin UI, Temporal,
+- Restrict PXE, DHCP, DNS, FMDS, metrics, admin UI, Temporal,
   PostgreSQL, Vault, and hardware-management interfaces to intended networks.
 - Configure REST JWT issuers, Keycloak, audiences, scopes, claim mappings, CORS,
   and rate limits for the deployment's trusted clients.

@@ -90,6 +90,10 @@ spec:
                   fieldPath: metadata.namespace
             - name: RUST_BACKTRACE
               value: "full"
+            {{- with .Values.otlpEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
           volumeMounts:
             - name: dhcp-conf
               mountPath: /var/support/forge-dhcp/conf

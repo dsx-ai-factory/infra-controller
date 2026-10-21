@@ -16,7 +16,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
@@ -66,6 +65,7 @@ func buildIpxeTemplateFixture(t *testing.T) (*ipxeTemplateTestFixture, func()) {
 	f.tnUser = testMachineBuildUser(t, dbSession, uuid.NewString(), []string{f.tnOrg}, []string{authz.TenantAdminRole})
 	f.tenant = testMachineBuildTenant(t, dbSession, f.tnOrg, "ipxet-tenant")
 	testBuildTenantSiteAssociation(t, dbSession, f.tnOrg, f.tenant.ID, f.site.ID, f.tnUser.ID)
+	common.TestBuildAllocation(t, dbSession, f.site, f.tenant, "ipxet-allocation", f.provUser)
 
 	templateDAO := cdbm.NewIpxeTemplateDAO(dbSession)
 	availTmpl, err := templateDAO.Create(ctx, nil, cdbm.IpxeTemplateCreateInput{
@@ -103,7 +103,7 @@ func TestIpxeTemplateHandler_GetAll(t *testing.T) {
 	ctx := context.Background()
 	cfg := common.GetTestConfig()
 	tc := &tmocks.Client{}
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -219,7 +219,6 @@ func TestIpxeTemplateHandler_GetAll(t *testing.T) {
 			if tc2.user != nil {
 				ec.Set("user", tc2.user)
 			}
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			h := NewGetAllIpxeTemplateHandler(f.dbSession, tc, cfg)
@@ -262,7 +261,7 @@ func TestIpxeTemplateHandler_Get(t *testing.T) {
 	ctx := context.Background()
 	cfg := common.GetTestConfig()
 	tc := &tmocks.Client{}
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name           string
@@ -343,7 +342,6 @@ func TestIpxeTemplateHandler_Get(t *testing.T) {
 			if tc2.user != nil {
 				ec.Set("user", tc2.user)
 			}
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			h := NewGetIpxeTemplateHandler(f.dbSession, tc, cfg)

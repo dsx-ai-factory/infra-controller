@@ -10,6 +10,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -21,13 +22,18 @@ import (
 // records the invoked method and populates the first scalar string field of the
 // reply so the response-encoding path runs without a real server.
 type fakeProxyConn struct {
-	lastMethod string
-	setValue   string
-	replyBytes []byte
+	lastMethod  string
+	lastRequest proto.Message
+	setValue    string
+	replyBytes  []byte
 }
 
-func (f *fakeProxyConn) Invoke(_ context.Context, method string, _, reply any, _ ...grpc.CallOption) error {
+func (f *fakeProxyConn) Invoke(_ context.Context, method string, request, reply any, _ ...grpc.CallOption) error {
 	f.lastMethod = method
+	message, ok := request.(proto.Message)
+	if ok {
+		f.lastRequest = proto.Clone(message)
+	}
 	msg, ok := reply.(proto.Message)
 	if !ok {
 		return errors.New("reply is not a proto.Message")
@@ -97,6 +103,38 @@ func TestResolveProxyMethod(t *testing.T) {
 }
 
 func TestInvokeProxyJSONConn(t *testing.T) {
+	// The new Flow method embeds Core messages. Exercise the client binding tree
+	// through the proxy so an import or descriptor mismatch cannot hide behind
+	// the separate Flow server's transport tests.
+	t.Run("flow power details resolves imported Core values", func(t *testing.T) {
+		binaryReply, err := proto.Marshal(&flowv1.GetTrayPowerDetailsResponse{
+			Details: &flowv1.TrayPowerDetails{
+				Actual: &flowv1.PowerActualDetails{Result: &flowv1.PowerActualDetails_Value{
+					Value: &corev1.ComponentPowerObservation{Outcome: &corev1.ComponentPowerObservation_State{
+						State: corev1.ComponentPowerState_COMPONENT_POWER_STATE_ON,
+					}},
+				}},
+				Operations: &flowv1.PowerOperations{
+					Actions: &flowv1.PowerActionDetails{Result: &flowv1.PowerActionDetails_Error{
+						Error: flowv1.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_UNSUPPORTED,
+					}},
+					Tasks: &flowv1.PowerTaskDetailsList{},
+				},
+			},
+		})
+		require.NoError(t, err)
+		conn := &fakeProxyConn{replyBytes: binaryReply}
+
+		response, err := invokeProxyJSONConn(t.Context(), conn, grpcproxy.Flow, "GetTrayPowerDetails", []byte(`{"id":"aa:bb:cc:dd:ee:ff"}`))
+
+		require.NoError(t, err)
+		assert.Equal(t, "/v1.Flow/GetTrayPowerDetails", conn.lastMethod)
+		require.NotNil(t, conn.lastRequest)
+		request := conn.lastRequest.ProtoReflect()
+		assert.Equal(t, "aa:bb:cc:dd:ee:ff", request.Get(request.Descriptor().Fields().ByName("id")).String())
+		assert.JSONEq(t, `{"details":{"actual":{"value":{"state":"COMPONENT_POWER_STATE_ON"}},"operations":{"actions":{"error":"POWER_DETAILS_READ_ERROR_UNSUPPORTED"},"tasks":{}}}}`, string(response))
+	})
+
 	for _, tc := range proxyBackendCases {
 		t.Run(tc.name+" round trips request and response", func(t *testing.T) {
 			conn := &fakeProxyConn{setValue: "proxy-test-value"}

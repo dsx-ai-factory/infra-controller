@@ -43,8 +43,8 @@ If you want Prometheus metrics collection, install the [Prometheus Operator](htt
 
 ### Grafana Dashboard Sidecar (Optional)
 
-The umbrella chart can install its packaged Grafana dashboards as a ConfigMap
-when `grafanaDashboards.enabled=true`. This requires an existing Grafana
+The umbrella chart can install its packaged Grafana dashboards, one ConfigMap
+per dashboard, when `grafanaDashboards.enabled=true`. This requires an existing Grafana
 installation with a dashboard sidecar watching the ConfigMap namespace and
 labels. The default `grafana_dashboard: "1"` label matches the common
 `kube-prometheus-stack` selector. To place dashboards in the configured NICo
@@ -333,6 +333,10 @@ Do not set `bypass_rbac = true` in production: it removes the internal RBAC
 gate, leaving the Casbin decision as the effective authorization result. Trust
 only a dedicated admin-client intermediate and issuance profile whose entire
 issuance population is intended to cross this admin trust boundary.
+
+For client-certificate issuance and installation, protected CLI verification,
+renewal, CA overlap, recovery, and the existing revocation support boundary,
+see [NICo mTLS and authorization](../docs/manuals/nico-api-auth.md).
 
 ---
 

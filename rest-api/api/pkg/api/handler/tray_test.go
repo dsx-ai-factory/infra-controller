@@ -19,7 +19,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -32,7 +31,6 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
-	oteltrace "go.opentelemetry.io/otel/trace"
 	temporalEnums "go.temporal.io/api/enums/v1"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
@@ -202,7 +200,6 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 
 	mockComponent.Bmcs = []*flowv1.BMCInfo{{MacAddress: "d8:ab:cd:ef:00:01"}}
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -324,7 +321,6 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg, tt.trayID)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -402,7 +398,6 @@ func TestGetAllTrayHandler_Handle(t *testing.T) {
 		createMockComponent("tray-5", "ToRSwitch-001", "Dell", "S5248", "comp-5", flowv1.ComponentType_COMPONENT_TYPE_TORSWITCH, rackID),
 	}
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -667,7 +662,6 @@ func TestGetAllTrayHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -738,7 +732,6 @@ func TestValidateTrayHandler_Handle(t *testing.T) {
 
 	handler := NewValidateTrayHandler(dbSession, nil, scp, cfg)
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	trayID := uuid.NewString()
@@ -875,7 +868,6 @@ func TestValidateTrayHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg, tt.trayID)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -927,7 +919,6 @@ func TestValidateTraysHandler_Handle(t *testing.T) {
 
 	handler := NewValidateTraysHandler(dbSession, nil, scp, cfg)
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	rackID := uuid.NewString()
@@ -1158,7 +1149,6 @@ func TestValidateTraysHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -1199,7 +1189,6 @@ func TestValidateTraysHandler_SlotFilter(t *testing.T) {
 	providerUser := testTrayBuildUser(t, dbSession, "provider-user-validate-trays-slot", org, []string{authz.ProviderAdminRole})
 
 	handler := NewValidateTraysHandler(dbSession, nil, scp, cfg)
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 
 	const wantedSlot = 3
 	matchedID := uuid.NewString()
@@ -1280,7 +1269,6 @@ func TestValidateTraysHandler_SlotFilter(t *testing.T) {
 			ec.SetParamNames("orgName")
 			ec.SetParamValues(org)
 			ec.Set("user", providerUser)
-			ec.SetRequest(ec.Request().WithContext(context.WithValue(context.Background(), otelecho.TracerKey, tracer)))
 
 			require.NoError(t, handler.Handle(ec))
 			require.Equal(t, tt.expectedStatus, rec.Code, "body=%s", rec.Body.String())
@@ -1327,7 +1315,6 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 
 	trayID := uuid.New().String()
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -1435,7 +1422,6 @@ func TestUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg, tt.trayID)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -1479,7 +1465,6 @@ func TestBatchUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 
 	handler := NewBatchUpdateTrayPowerStateHandler(dbSession, nil, scp, cfg)
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	rackID := uuid.NewString()
@@ -1572,7 +1557,6 @@ func TestBatchUpdateTrayPowerStateHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -1618,7 +1602,6 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 
 	trayID := uuid.New().String()
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -1722,7 +1705,6 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg, tt.trayID)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -1768,7 +1750,6 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 
 	handler := NewBatchUpdateTrayFirmwareHandler(dbSession, nil, scp, cfg)
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	fwRackID := uuid.NewString()
@@ -1866,7 +1847,6 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)

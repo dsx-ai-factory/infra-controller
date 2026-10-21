@@ -145,6 +145,14 @@ nico-api:
       deny_prefixes = []                         # your OOB / control-plane / underlay CIDRs
 
       # -----------------------------------------------------------------------
+      # FNN related configuration
+      # FNN support is mandatory for nico-api to function
+      # datacenter_asn is a root key and has to stay above the first [table].
+      # -----------------------------------------------------------------------
+      # Replace 4266030000 with the ASN for the physical datacenter itself
+      datacenter_asn = 4266030000
+
+      # -----------------------------------------------------------------------
       # Site explorer — periodic background scan of site inventory
       # -----------------------------------------------------------------------
       [site_explorer]
@@ -163,9 +171,13 @@ nico-api:
       # -----------------------------------------------------------------------
       # IP / integer pools — nico-api allocates from these ranges.
       # REQUIRED: set the loopback (lo-ip) range to your site's pool.
+      # A pool range is applied when nico-api first sees it. A later change
+      # logs a drift warning and is not applied. Grow an established pool with
+      # `nico-admin-cli resource-pool grow`.
       # -----------------------------------------------------------------------
       [pools.lo-ip]
       type = "ipv4"
+      # One address per machine, hosts and DPUs alike: size for hosts x (1 + DPUs per host).
       ranges = []                                # REQUIRED: e.g. [{ start = "...", end = "..." }]
 
       [pools.vlan-id]
@@ -229,15 +241,6 @@ nico-api:
       # -----------------------------------------------------------------------
       [machine_state_controller]
       failure_retry_time = "90m"
-
-      # -----------------------------------------------------------------------
-      # FNN related configuration
-      # FNN support is mandatory for nico-api to function
-      # -----------------------------------------------------------------------
-
-      # datacenter_asn
-      # Replace 4266030000 with the ASN for the physical datacenter itself
-      datacenter_asn = 4266030000
 
 
       [fnn.admin_vpc]
@@ -324,6 +327,7 @@ nico-api:
       [pools.fnn-asn]
       type = "integer"
       # Change 4268060405 and 4268060499 to the actual ASN values. Each DPU needs an ASN, so the range should be sufficient to cover all hosts.
+      # Size for hosts x DPUs per host. Like every pool, the range is not re-applied after a change.
       ranges = [{ start = "4268060405", end = "4268060499" }]
 
       [pools.vpc-dpu-lo]

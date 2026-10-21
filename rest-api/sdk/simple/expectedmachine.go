@@ -14,27 +14,42 @@ import (
 
 // ExpectedMachine represents a simplified Expected Machine
 type ExpectedMachine struct {
-	ID                       string                   `json:"id"`
-	BmcMacAddress            string                   `json:"bmcMacAddress"`
-	ChassisSerialNumber      string                   `json:"chassisSerialNumber"`
-	FallbackDPUSerialNumbers []string                 `json:"fallbackDPUSerialNumbers"`
-	SkuID                    *string                  `json:"skuId"`
-	Sku                      *standard.Sku            `json:"sku,omitempty"`
-	MachineID                *string                  `json:"machineId"`
-	Machine                  *standard.MachineSummary `json:"machine,omitempty"`
-	Labels                   map[string]string        `json:"labels"`
-	Created                  time.Time                `json:"created"`
-	Updated                  time.Time                `json:"updated"`
+	ID                       string                     `json:"id"`
+	BmcMacAddress            string                     `json:"bmcMacAddress"`
+	ChassisSerialNumber      string                     `json:"chassisSerialNumber"`
+	FallbackDPUSerialNumbers []string                   `json:"fallbackDPUSerialNumbers"`
+	Interfaces               []ExpectedMachineInterface `json:"interfaces"`
+	SkuID                    *string                    `json:"skuId"`
+	Sku                      *standard.Sku              `json:"sku,omitempty"`
+	MachineID                *string                    `json:"machineId"`
+	Machine                  *standard.MachineSummary   `json:"machine,omitempty"`
+	Labels                   map[string]string          `json:"labels"`
+	Created                  time.Time                  `json:"created"`
+	Updated                  time.Time                  `json:"updated"`
+}
+
+// ExpectedMachineInterface is expected host NIC information forwarded to NICo Core.
+type ExpectedMachineInterface struct {
+	MacAddress         string  `json:"macAddress"`
+	NicType            *string `json:"nicType"`
+	FixedIP            *string `json:"fixedIp"`
+	FixedMask          *string `json:"fixedMask"`
+	FixedGateway       *string `json:"fixedGateway"`
+	Primary            *bool   `json:"primary"`
+	NetworkSegmentType *string `json:"networkSegmentType"`
+	Role               *string `json:"role"`
+	IPAllocation       *string `json:"ipAllocation"`
 }
 
 // ExpectedMachineCreateRequest represents a request to create an Expected Machine
 type ExpectedMachineCreateRequest struct {
-	BmcMacAddress            string            `json:"bmcMacAddress"`
-	BmcUsername              *string           `json:"bmcUsername"`
-	BmcPassword              *string           `json:"bmcPassword"`
-	ChassisSerialNumber      string            `json:"chassisSerialNumber"`
-	FallbackDPUSerialNumbers []string          `json:"fallbackDPUSerialNumbers"`
-	Labels                   map[string]string `json:"labels"`
+	BmcMacAddress            string                     `json:"bmcMacAddress"`
+	BmcUsername              *string                    `json:"bmcUsername"`
+	BmcPassword              *string                    `json:"bmcPassword"`
+	ChassisSerialNumber      string                     `json:"chassisSerialNumber"`
+	FallbackDPUSerialNumbers []string                   `json:"fallbackDPUSerialNumbers"`
+	Interfaces               []ExpectedMachineInterface `json:"interfaces"`
+	Labels                   map[string]string          `json:"labels"`
 }
 
 // ExpectedMachineUpdateRequest represents a request to update an Expected Machine
@@ -42,13 +57,68 @@ type ExpectedMachineUpdateRequest struct {
 	ID string `json:"id,omitempty"` // Required for batch operations
 	// Deprecated: BmcMacAddress may reassert the current BMC MAC but cannot
 	// change it.
-	BmcMacAddress            *string           `json:"bmcMacAddress"`
-	BmcUsername              *string           `json:"bmcUsername"`
-	BmcPassword              *string           `json:"bmcPassword"`
-	ChassisSerialNumber      *string           `json:"chassisSerialNumber"`
-	FallbackDPUSerialNumbers []string          `json:"fallbackDPUSerialNumbers"`
-	SkuID                    *string           `json:"skuId"`
-	Labels                   map[string]string `json:"labels"`
+	BmcMacAddress            *string                    `json:"bmcMacAddress"`
+	BmcUsername              *string                    `json:"bmcUsername"`
+	BmcPassword              *string                    `json:"bmcPassword"`
+	ChassisSerialNumber      *string                    `json:"chassisSerialNumber"`
+	FallbackDPUSerialNumbers []string                   `json:"fallbackDPUSerialNumbers"`
+	Interfaces               []ExpectedMachineInterface `json:"interfaces"`
+	SkuID                    *string                    `json:"skuId"`
+	Labels                   map[string]string          `json:"labels"`
+}
+
+func expectedMachineInterfacesFromStandard(interfaces []standard.ExpectedMachineInterface) []ExpectedMachineInterface {
+	result := make([]ExpectedMachineInterface, 0, len(interfaces))
+	for _, expectedInterface := range interfaces {
+		result = append(result, ExpectedMachineInterface{
+			MacAddress:         expectedInterface.MacAddress,
+			NicType:            expectedInterface.NicType.Get(),
+			FixedIP:            expectedInterface.FixedIp.Get(),
+			FixedMask:          expectedInterface.FixedMask.Get(),
+			FixedGateway:       expectedInterface.FixedGateway.Get(),
+			Primary:            expectedInterface.Primary.Get(),
+			NetworkSegmentType: expectedInterface.NetworkSegmentType.Get(),
+			Role:               expectedInterface.Role.Get(),
+			IPAllocation:       expectedInterface.IpAllocation.Get(),
+		})
+	}
+	return result
+}
+
+func expectedMachineInterfacesToStandard(interfaces []ExpectedMachineInterface) []standard.ExpectedMachineInterface {
+	if interfaces == nil {
+		return nil
+	}
+	result := make([]standard.ExpectedMachineInterface, 0, len(interfaces))
+	for _, expectedInterface := range interfaces {
+		converted := standard.ExpectedMachineInterface{MacAddress: expectedInterface.MacAddress}
+		if expectedInterface.NicType != nil {
+			converted.NicType.Set(expectedInterface.NicType)
+		}
+		if expectedInterface.FixedIP != nil {
+			converted.FixedIp.Set(expectedInterface.FixedIP)
+		}
+		if expectedInterface.FixedMask != nil {
+			converted.FixedMask.Set(expectedInterface.FixedMask)
+		}
+		if expectedInterface.FixedGateway != nil {
+			converted.FixedGateway.Set(expectedInterface.FixedGateway)
+		}
+		if expectedInterface.Primary != nil {
+			converted.Primary.Set(expectedInterface.Primary)
+		}
+		if expectedInterface.NetworkSegmentType != nil {
+			converted.NetworkSegmentType.Set(expectedInterface.NetworkSegmentType)
+		}
+		if expectedInterface.Role != nil {
+			converted.Role.Set(expectedInterface.Role)
+		}
+		if expectedInterface.IPAllocation != nil {
+			converted.IpAllocation.Set(expectedInterface.IPAllocation)
+		}
+		result = append(result, converted)
+	}
+	return result
 }
 
 // ExpectedMachineManager manages Expected Machine operations
@@ -64,6 +134,7 @@ func NewExpectedMachineManager(client *Client) ExpectedMachineManager {
 func expectedMachineFromStandard(api standard.ExpectedMachine) ExpectedMachine {
 	em := ExpectedMachine{
 		FallbackDPUSerialNumbers: api.FallbackDPUSerialNumbers,
+		Interfaces:               expectedMachineInterfacesFromStandard(api.Interfaces),
 		Labels:                   api.Labels,
 		Sku:                      api.Sku,
 		Machine:                  api.Machine,
@@ -98,6 +169,7 @@ func toStandardExpectedMachineCreateRequest(request ExpectedMachineCreateRequest
 		BmcMacAddress:            request.BmcMacAddress,
 		ChassisSerialNumber:      request.ChassisSerialNumber,
 		FallbackDPUSerialNumbers: request.FallbackDPUSerialNumbers,
+		Interfaces:               expectedMachineInterfacesToStandard(request.Interfaces),
 		Labels:                   request.Labels,
 	}
 	if request.BmcUsername != nil {
@@ -112,6 +184,7 @@ func toStandardExpectedMachineCreateRequest(request ExpectedMachineCreateRequest
 func toStandardExpectedMachineUpdateRequest(request ExpectedMachineUpdateRequest) standard.ExpectedMachineUpdateRequest {
 	apiReq := standard.ExpectedMachineUpdateRequest{
 		FallbackDPUSerialNumbers: request.FallbackDPUSerialNumbers,
+		Interfaces:               expectedMachineInterfacesToStandard(request.Interfaces),
 		Labels:                   request.Labels,
 	}
 	if request.ID != "" {

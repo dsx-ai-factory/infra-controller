@@ -55,6 +55,12 @@ pub struct MachineRouterOptions {
     /// An enabled event service still closes streams and clears history on reset;
     /// with both features disabled, resets remain no-ops.
     pub bmc_reset_duration: Option<std::time::Duration>,
+    /// How long a firmware upload's Redfish task stays `Running` before it
+    /// reports `Completed` (per-platform, from the machine's resolved
+    /// `LifecycleTimings::firmware_upgrade`). `None` keeps the update
+    /// service's built-in 2 s. The jitter added on top is capped at the
+    /// duration, so a zero duration completes tasks immediately.
+    pub firmware_upgrade_duration: Option<std::time::Duration>,
 }
 
 trait AddRoutes {
@@ -120,7 +126,12 @@ fn machine_router_inner<C: Callbacks>(
 ) -> (Router, BmcState<C>) {
     let system_config = machine_info.system_config(callbacks.clone());
     let chassis_config = machine_info.chassis_config();
-    let update_service_config = machine_info.update_service_config();
+    let mut update_service_config = machine_info.update_service_config();
+    if let Some(delay) = options.firmware_upgrade_duration {
+        update_service_config.task_completion_delay = delay;
+        update_service_config.task_completion_jitter =
+            crate::redfish::update_service::DEFAULT_TASK_COMPLETION_JITTER.min(delay);
+    }
     let bmc_vendor = machine_info.bmc_vendor();
     let bmc_product = machine_info.bmc_product();
     let bmc_redfish_version = machine_info.bmc_redfish_version();
@@ -141,6 +152,7 @@ fn machine_router_inner<C: Callbacks>(
             }
         })
         .add_routes(crate::redfish::chassis::add_routes)
+        .add_routes(crate::redfish::component_integrity::add_routes)
         .add_routes(crate::redfish::manager::add_routes)
         .add_routes(crate::redfish::update_service::add_routes)
         .add_routes(crate::redfish::task_service::add_routes)
@@ -196,6 +208,7 @@ fn machine_router_inner<C: Callbacks>(
         availability: availability.clone(),
         callbacks: Some(callbacks.clone()),
         exposes_computer_systems: machine_info.exposes_computer_systems(),
+        component_integrities: machine_info.component_integrity_config(),
     };
     let account_service_state = state.account_service_state.clone();
     let session_service_state = state.session_service_state.clone();

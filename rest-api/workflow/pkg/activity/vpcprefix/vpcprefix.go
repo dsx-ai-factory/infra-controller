@@ -20,6 +20,7 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
@@ -168,7 +169,7 @@ func (mvp ManageVpcPrefix) UpdateVpcPrefixesInDB(ctx context.Context, siteID uui
 	vpcPrefixesToDelete := []*cdbm.VpcPrefix{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if vpcPrefixInventory.InventoryPage == nil || vpcPrefixInventory.InventoryPage.TotalPages == 0 || (vpcPrefixInventory.InventoryPage.CurrentPage == vpcPrefixInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(vpcPrefixInventory.GetInventoryPage()) {
 		for _, vpcPrefix := range existingVpcPrefixIDMap {
 			found := false
 
@@ -566,7 +567,9 @@ func getControllerVpcPrefixStatus(status *corev1.VpcPrefixStatus) (string, strin
 	case corev1.TenantState_TERMINATING:
 		return cdbm.VpcPrefixStatusDeleting, "VPC Prefix is being deleted on Site"
 	case corev1.TenantState_TERMINATED:
-		return cdbm.VpcPrefixStatusDeleted, "VPC Prefix has been deleted on Site"
+		// A terminated prefix that the Site still lists in inventory is not gone yet;
+		// the row is removed once inventory omits it, so it stays Deleting until then.
+		return cdbm.VpcPrefixStatusDeleting, "VPC Prefix is deleted on Site, pending removal from inventory"
 	case corev1.TenantState_FAILED:
 		return cdbm.VpcPrefixStatusError, "VPC Prefix is in error state"
 	default:

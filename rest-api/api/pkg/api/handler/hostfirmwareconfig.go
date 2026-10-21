@@ -24,17 +24,15 @@ const (
 
 // CreateOrUpdateHostFirmwareConfigHandler handles PUT /firmware-config/host.
 type CreateOrUpdateHostFirmwareConfigHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewCreateOrUpdateHostFirmwareConfigHandler returns a new CreateOrUpdateHostFirmwareConfigHandler
 func NewCreateOrUpdateHostFirmwareConfigHandler(dbSession *cdb.Session, scp *sc.ClientPool) CreateOrUpdateHostFirmwareConfigHandler {
 	return CreateOrUpdateHostFirmwareConfigHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -52,7 +50,7 @@ func NewCreateOrUpdateHostFirmwareConfigHandler(dbSession *cdb.Session, scp *sc.
 // @Failure 503 {object} util.APIError
 // @Router /v2/org/{org}/nico/firmware-config/host [put]
 func (uhfch CreateOrUpdateHostFirmwareConfigHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("HostFirmwareConfig", "CreateOrUpdate", c, uhfch.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("HostFirmwareConfig", "CreateOrUpdate", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -107,17 +105,15 @@ func (uhfch CreateOrUpdateHostFirmwareConfigHandler) Handle(c echo.Context) erro
 
 // DeleteHostFirmwareConfigHandler handles DELETE /firmware-config/host.
 type DeleteHostFirmwareConfigHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewDeleteHostFirmwareConfigHandler returns a new DeleteHostFirmwareConfigHandler.
 func NewDeleteHostFirmwareConfigHandler(dbSession *cdb.Session, scp *sc.ClientPool) DeleteHostFirmwareConfigHandler {
 	return DeleteHostFirmwareConfigHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -134,7 +130,7 @@ func NewDeleteHostFirmwareConfigHandler(dbSession *cdb.Session, scp *sc.ClientPo
 // @Failure 503 {object} util.APIError
 // @Router /v2/org/{org}/nico/firmware-config/host [delete]
 func (dhfch DeleteHostFirmwareConfigHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("HostFirmwareConfig", "Delete", c, dhfch.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("HostFirmwareConfig", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

@@ -46,6 +46,7 @@ Print help (see a summary with -h)
 | Subcommand | Description |
 |---|---|
 | [`show`](./domain-show.md) | Display Domain information |
+| [`update`](./domain-update.md) | Update domain default TTL |
 
 ---
 

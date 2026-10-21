@@ -15,13 +15,15 @@
  * limitations under the License.
  */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
+use std::net::IpAddr;
 use std::str::FromStr;
 use std::time::Duration;
 
 use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
 use carbide_network::virtualization::VpcVirtualizationType;
+use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry};
 use carbide_test_support::Outcome::Yields;
 use carbide_test_support::{Case, check_cases_async};
 use carbide_uuid::network::NetworkSegmentId;
@@ -41,6 +43,10 @@ use model::network_segment;
 use model::network_segment::{
     NetworkDefinition, NetworkDefinitionSegmentType, NetworkSegment, NetworkSegmentControllerState,
     NetworkSegmentType, NewNetworkSegment,
+};
+use model::resource_pool::binding::{
+    INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolSelection,
+    ResourcePoolValueDomain,
 };
 use model::resource_pool::common::VLANID;
 use model::resource_pool::{
@@ -690,6 +696,7 @@ pub(in crate::tests) async fn test_create_initial_vpc_and_attached_network(
         &env.pool,
         &vpcs,
         env.common_pools.ethernet.pool_vpc_vni.as_ref(),
+        &env.api.resource_pool_registry,
     )
     .await?;
     crate::db_init::create_initial_networks(&env.api, &env.pool, &networks).await?;
@@ -719,6 +726,7 @@ pub(in crate::tests) async fn test_create_initial_vpc_and_attached_network(
         &env.pool,
         &vpcs,
         env.common_pools.ethernet.pool_vpc_vni.as_ref(),
+        &env.api.resource_pool_registry,
     )
     .await?;
     let seeded_vpcs = db::vpc::find_by_name(&env.pool, "zero-dpu-vpc").await?;
@@ -873,11 +881,33 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                         vni: failure.requested_vni(),
                     },
                 )]);
+                let mut txn = db_pool.begin().await.expect("begin binding transaction");
+                let registry = ResourcePoolRegistry::resolve(
+                    PoolDefinitionSource::SeedConfiguration,
+                    &mut txn,
+                    &HashMap::from([(
+                        failure.pool_name().to_string(),
+                        ResourcePoolSelection {
+                            pool_name: failure.pool_name().to_string(),
+                            value_domain: ResourcePoolValueDomain::Integer,
+                            backend_name: None,
+                            backend_kind: ResourcePoolBackendKind::Integrated,
+                            authority_id: INTEGRATED_AUTHORITY_ID.to_string(),
+                            remote_pool: failure.pool_name().to_string(),
+                        },
+                    )]),
+                )
+                .await
+                .expect("resolve configured VPC pool");
+                // Keep the empty pool bound so exhaustion comes from the allocator.
+                assert!(registry.get(failure.pool_name()).is_some());
+                txn.commit().await.expect("commit pool binding");
                 let metrics = MetricsCapture::start();
                 let (result, logs) = capture_logs_async(crate::db_init::create_initial_vpcs(
                     &db_pool,
                     &vpcs,
                     &source_pool,
+                    &registry,
                 ))
                 .await;
                 let returned_error = result.expect_err("initial VPC allocation must fail");
@@ -1695,12 +1725,33 @@ async fn test_update_svi_ip_admin_segment(
     Ok(())
 }
 
+/// Later instances skip persisted IPv4 and IPv6 SVIs outside the reserved range.
 #[crate::sqlx_test]
 async fn test_update_svi_ip_post_instance_allocation(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env(pool).await;
-    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let mut site_prefixes = TEST_SITE_PREFIXES.to_vec();
+    site_prefixes.push("2001:db8::/32".parse()?);
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            site_prefixes: Some(site_prefixes),
+            ..Default::default()
+        }
+        .with_fnn_config(None),
+    )
+    .await;
+    let segment_id = env
+        .create_vpc_and_tenant_segment_with_vpc_details(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .metadata(Metadata {
+                    name: "test vpc 1".to_string(),
+                    ..Default::default()
+                })
+                .slaac_enabled(false)
+                .rpc(),
+        )
+        .await;
 
     let query = "UPDATE network_prefixes SET num_reserved = 2 WHERE id=$1";
 
@@ -1712,8 +1763,8 @@ async fn test_update_svi_ip_post_instance_allocation(
     )
     .await?;
 
-    // Let's make num_reserved 2 so that 3rd IP is assigned to instance.
-    // This will force carbide to pick next free IP as SVI IP.
+    // Leave 192.0.4.2 available for the first instance, so SVI allocation
+    // must use 192.0.4.3.
     sqlx::query(query)
         .bind(segments[0].prefixes[0].id)
         .execute(&mut *txn)
@@ -1737,13 +1788,18 @@ async fn test_update_svi_ip_post_instance_allocation(
     );
     txn.commit().await.unwrap();
 
-    mh.instance_builer(&env)
+    let first_instance = mh
+        .instance_builer(&env)
         .single_interface_network_config(segment_id)
         .build()
         .await;
 
-    // At this moment, the third IP is taken from the tenant subnet for the instance.
+    // The first instance has committed 192.0.4.2 before SVI allocation.
     let mut txn = env.pool.begin().await?;
+    let addresses = db::instance_address::find_by_segment_id(txn.as_mut(), &segment_id).await?;
+    assert_eq!(addresses.len(), 1);
+    assert_eq!(addresses[0].instance_id, first_instance.id);
+    assert_eq!(addresses[0].address, "192.0.4.2".parse::<IpAddr>().unwrap());
     let mut segment = db::network_segment::find_by(
         txn.as_mut(),
         ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
@@ -1756,6 +1812,24 @@ async fn test_update_svi_ip_post_instance_allocation(
         if_version_match: None,
         network_virtualization_type: carbide_network::virtualization::VpcVirtualizationType::Fnn,
     };
+    // The ETV fixture has no routing profile. Seed the FNN profile and IPv6
+    // prefix in the conversion transaction so the committed VPC supports both.
+    sqlx::query("UPDATE vpcs SET routing_profile_type = 'INTERNAL' WHERE id = $1")
+        .bind(update_request.id)
+        .execute(txn.as_mut())
+        .await?;
+    db::network_prefix::create_for(
+        txn.as_mut(),
+        &segment_id,
+        &[NewNetworkPrefix {
+            prefix: "2001:db8::/64".parse()?,
+            gateway: None,
+            dhcpv6_link_address: None,
+            num_reserved: 2,
+        }],
+        None,
+    )
+    .await?;
     db::vpc::update_virtualization(&update_request, &mut txn).await?;
     txn.commit().await?;
 
@@ -1769,11 +1843,63 @@ async fn test_update_svi_ip_post_instance_allocation(
     let segment = segment.remove(0);
     txn.rollback().await?;
 
-    // Now the 4th IP is next available IP, so it should be assigned as SVI IP.
+    // IPv4 skips the existing instance; IPv6 has no instance allocation yet.
     assert_eq!(
-        segment.prefixes[0].svi_ip.unwrap().to_string(),
-        "192.0.4.3".to_string()
+        segment
+            .prefixes
+            .iter()
+            .map(|prefix| prefix.svi_ip)
+            .collect::<HashSet<_>>(),
+        HashSet::from([
+            Some("192.0.4.3".parse::<IpAddr>()?),
+            Some("2001:db8::2".parse::<IpAddr>()?),
+        ])
     );
+
+    // Neither 192.0.4.3 nor 2001:db8::2 has a row in `instance_addresses`.
+    // The next instance must skip both SVIs through the overlay resolver.
+    let second_host = common::api_fixtures::create_managed_host(&env).await;
+    let second_instance = second_host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+
+    let mut txn = env.pool.begin().await?;
+    let addresses = db::instance_address::find_by_segment_id(txn.as_mut(), &segment_id).await?;
+    assert_eq!(
+        addresses
+            .iter()
+            .map(|address| (address.instance_id, address.address))
+            .collect::<Vec<_>>(),
+        vec![
+            (first_instance.id, "192.0.4.2".parse::<IpAddr>().unwrap()),
+            (second_instance.id, "192.0.4.4".parse::<IpAddr>().unwrap()),
+            (second_instance.id, "2001:db8::3".parse::<IpAddr>().unwrap()),
+        ]
+    );
+    assert_eq!(
+        addresses[2].prefix,
+        "2001:db8::3/128".parse::<ipnetwork::IpNetwork>()?
+    );
+
+    let mut segments = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
+        network_segment::NetworkSegmentSearchConfig {
+            include_num_free_ips: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    let segment = segments.remove(0);
+    let ipv4_prefix = segment
+        .prefixes
+        .iter()
+        .find(|prefix| prefix.prefix.is_ipv4())
+        .unwrap();
+    // Of 256 addresses, .0, .1, .2, .3, .4, and .255 are unavailable.
+    assert_eq!(ipv4_prefix.num_free_ips, Some(250));
 
     Ok(())
 }

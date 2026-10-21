@@ -16,7 +16,7 @@
  */
 
 use carbide_uuid::spx::SpxPartitionId;
-use db::{ConditionalWrite, ObjectColumnFilter};
+use db::ConditionalWrite;
 use model::resource_pool::common::DPA_VNI;
 use model::resource_pool::{OwnerType, ResourcePoolEntryState};
 use rpc::forge::forge_server::Forge;
@@ -39,6 +39,112 @@ async fn create_partition(env: &TestEnv, name: &str) -> rpc::forge::SpxPartition
         .await
         .expect("create SPX partition")
         .into_inner()
+}
+
+#[crate::sqlx_test]
+async fn spx_partition_metadata_survives_creation_and_lookup(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let metadata = rpc::forge::Metadata {
+        name: "labeled partition".to_string(),
+        description: "partition metadata round trip".to_string(),
+        labels: vec![
+            rpc::forge::Label {
+                key: "environment".to_string(),
+                value: Some("test".to_string()),
+            },
+            rpc::forge::Label {
+                key: "reserved".to_string(),
+                value: None,
+            },
+        ],
+    };
+    let expected = model::metadata::Metadata::try_from(metadata.clone()).unwrap();
+    let created = env
+        .api
+        .create_spx_partition(Request::new(SpxPartitionCreationRequest {
+            metadata: Some(metadata),
+            tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .expect("create labeled SPX partition")
+        .into_inner();
+    assert_eq!(
+        model::metadata::Metadata::try_from(created.metadata.unwrap()).unwrap(),
+        expected
+    );
+
+    let partitions = env
+        .api
+        .find_spx_partitions_by_ids(Request::new(rpc::forge::SpxPartitionsByIdsRequest {
+            spx_partition_ids: vec![created.id.unwrap()],
+        }))
+        .await
+        .expect("read persisted SPX partition")
+        .into_inner()
+        .spx_partitions;
+    assert_eq!(partitions.len(), 1);
+    assert_eq!(
+        model::metadata::Metadata::try_from(partitions[0].metadata.clone().unwrap()).unwrap(),
+        expected
+    );
+}
+
+#[crate::sqlx_test]
+async fn spx_partition_validation_preserves_existing_partitions(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let partition = create_partition(&env, "existing partition").await;
+    let id = partition.id.unwrap();
+    // Represent a partition persisted before create-time metadata validation.
+    let legacy_name = "分区";
+    sqlx::query("UPDATE spx_partitions SET name=$1 WHERE id=$2")
+        .bind(legacy_name)
+        .bind(id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    let before = deletion_records(&env, id).await;
+
+    let error = env
+        .api
+        .create_spx_partition(Request::new(SpxPartitionCreationRequest {
+            metadata: Some(rpc::forge::Metadata {
+                name: legacy_name.to_string(),
+                ..Default::default()
+            }),
+            tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(error.message().contains("ASCII"));
+    let partition_count: i64 = sqlx::query_scalar("SELECT count(*) FROM spx_partitions")
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+    assert_eq!(partition_count, 1);
+    assert_eq!(deletion_records(&env, id).await, before);
+
+    let partitions = env
+        .api
+        .find_spx_partitions_by_ids(Request::new(rpc::forge::SpxPartitionsByIdsRequest {
+            spx_partition_ids: vec![id],
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .spx_partitions;
+    assert_eq!(partitions.len(), 1);
+    assert_eq!(partitions[0].metadata.as_ref().unwrap().name, legacy_name);
+
+    env.api
+        .delete_spx_partition(Request::new(SpxPartitionDeletionRequest { id: Some(id) }))
+        .await
+        .expect("delete partition with legacy metadata");
+    let after = deletion_records(&env, id).await;
+    assert!(after["partition"]["deleted"].is_string());
+    assert_eq!(after["allocation"]["state"]["state"], "free");
 }
 
 async fn deletion_records(env: &TestEnv, id: SpxPartitionId) -> serde_json::Value {
@@ -91,16 +197,18 @@ async fn deleting_spx_partition_releases_vni_only_once(pool: sqlx::PgPool) {
         .expect("delete SPX partition");
 
     let mut txn = env.db_txn().await;
-    let partitions = db::spx_partition::find_by(
-        &mut *txn,
-        ObjectColumnFilter::One(db::spx_partition::IdColumn, &id),
-    )
-    .await
-    .expect("find deleted SPX partition");
-    let [deleted_partition] = partitions.as_slice() else {
-        panic!("SPX partition must remain as a soft-deleted row");
-    };
-    assert!(deleted_partition.deleted.is_some());
+    // `find_by` now excludes soft-deleted rows, so read the tombstone directly to
+    // confirm deletion left the row in place with its deletion timestamp set.
+    let is_soft_deleted: bool =
+        sqlx::query_scalar("SELECT deleted IS NOT NULL FROM spx_partitions WHERE id=$1")
+            .bind(id)
+            .fetch_one(&mut *txn)
+            .await
+            .expect("SPX partition must remain as a soft-deleted row");
+    assert!(
+        is_soft_deleted,
+        "SPX partition must remain as a soft-deleted row"
+    );
     let released_entry = db::resource_pool::find_value(&mut *txn, &vni)
         .await
         .expect("find released SPX allocation")

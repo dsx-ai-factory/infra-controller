@@ -17,6 +17,7 @@
 
 use std::path::PathBuf;
 
+use carbide_firmware::downloader::FirmwareDownloadConfig;
 use carbide_utils::config::as_duration;
 use chrono::Duration;
 use duration_str::deserialize_duration_chrono;
@@ -66,6 +67,10 @@ pub struct FirmwareGlobal {
     /// Writable directory used to cache downloaded firmware artifacts.
     #[serde(default = "FirmwareGlobal::firmware_download_cache_directory_default")]
     pub firmware_download_cache_directory: PathBuf,
+    /// Shared cache-worker and HTTP transfer limits. Omitted settings use
+    /// [`FirmwareDownloadConfig`] defaults; changes require a Core restart.
+    #[serde(default)]
+    pub downloads: FirmwareDownloadConfig,
     /// Delay before retrying a failed host firmware
     /// upgrade.
     /// Default is 60 minutes.
@@ -112,6 +117,7 @@ impl FirmwareGlobal {
             concurrency_limit: FirmwareGlobal::concurrency_limit_default(),
             firmware_directory: PathBuf::default(),
             firmware_download_cache_directory: PathBuf::default(),
+            downloads: FirmwareDownloadConfig::default(),
             host_firmware_upgrade_retry_interval: Self::get_retry_interval(),
             instance_updates_manual_tagging: false,
             no_reset_retries: false,
@@ -175,6 +181,7 @@ impl Default for FirmwareGlobal {
             firmware_directory: FirmwareGlobal::firmware_directory_default(),
             firmware_download_cache_directory:
                 FirmwareGlobal::firmware_download_cache_directory_default(),
+            downloads: FirmwareDownloadConfig::default(),
             host_firmware_upgrade_retry_interval:
                 FirmwareGlobal::host_firmware_upgrade_retry_interval_default(),
             instance_updates_manual_tagging: false,

@@ -17,6 +17,7 @@ test-support = []
 [dependencies]
 carbide-api-db = { path = "../api-db" }
 carbide-api-model = { path = "../api-model" }
+carbide-health-report = { path = "../health-report" }
 carbide-instrument = { path = "../instrument" }
 carbide-rack = { path = "../rack" }
 carbide-secrets = { path = "../secrets" }

@@ -54,6 +54,7 @@ func powerControl(
 		ctx,
 		reqInfo.TaskID,
 		typeToTargets,
+		typeToTargets,
 		info,
 		reqInfo.RuleDefinition,
 	)

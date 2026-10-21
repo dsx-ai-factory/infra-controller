@@ -1,0 +1,73 @@
+# The shared-external-IP example must render the documented eight-IP plan.
+suite: Shared external IP example
+values:
+  - ../examples/values-shared-external-ips.yaml
+set:
+  global.image.repository: example.invalid/core
+  global.image.tag: t
+  unbound.image.repository: example.invalid/unbound
+  unbound.image.tag: t
+  unbound.exporterImage.repository: example.invalid/unbound-exporter
+  unbound.exporterImage.tag: t
+tests:
+  - it: places ssh, dhcp, and unbound on one shared IP with one sharing key
+    templates:
+      - charts/nico-ssh-console-rs/templates/external-service.yaml
+      - charts/nico-dhcp/templates/external-service.yaml
+      - charts/unbound/templates/external-service.yaml
+    asserts:
+      - equal:
+          path: metadata.annotations["metallb.universe.tf/loadBalancerIPs"]
+          value: "10.0.0.12"
+      - equal:
+          path: metadata.annotations["metallb.universe.tf/allow-shared-ip"]
+          value: nico-shared
+      - notExists:
+          path: spec.externalTrafficPolicy
+
+  - it: keeps nico-api and nico-pxe on their own Local IPs
+    templates:
+      - charts/nico-api/templates/external-service.yaml
+      - charts/nico-pxe/templates/external-service.yaml
+    asserts:
+      - equal:
+          path: spec.externalTrafficPolicy
+          value: Local
+      - equal:
+          path: metadata.annotations["metallb.universe.tf/loadBalancerIPs"]
+          value: "10.0.0.10"
+        template: charts/nico-api/templates/external-service.yaml
+      - equal:
+          path: metadata.annotations["metallb.universe.tf/loadBalancerIPs"]
+          value: "10.0.0.11"
+        template: charts/nico-pxe/templates/external-service.yaml
+      - equal:
+          path: metadata.annotations["metallb.universe.tf/allow-shared-ip"]
+          value: nico-pxe
+        template: charts/nico-pxe/templates/external-service.yaml
+
+  - it: keeps one IP per DNS replica and one Local IP per NTP replica
+    templates:
+      - charts/nico-dns/templates/external-service.yaml
+      - charts/nico-ntp/templates/external-service.yaml
+    asserts:
+      - hasDocuments:
+          count: 4
+        template: charts/nico-dns/templates/external-service.yaml
+      - equal:
+          path: metadata.annotations["metallb.universe.tf/loadBalancerIPs"]
+          value: "10.0.0.21"
+        template: charts/nico-dns/templates/external-service.yaml
+        documentIndex: 3
+      - hasDocuments:
+          count: 3
+        template: charts/nico-ntp/templates/external-service.yaml
+      - equal:
+          path: spec.externalTrafficPolicy
+          value: Local
+        template: charts/nico-ntp/templates/external-service.yaml
+      - equal:
+          path: metadata.annotations["metallb.universe.tf/loadBalancerIPs"]
+          value: "10.0.0.32"
+        template: charts/nico-ntp/templates/external-service.yaml
+        documentIndex: 2

@@ -18,9 +18,10 @@
 //! Switch certificate configuration via Component Manager.
 
 use carbide_uuid::switch::SwitchId;
+use component_manager::config::{SwitchMtlsService, switch_mtls_services_as_i32};
 use component_manager::error::ComponentManagerError;
 use model::component_manager::ConfigureSwitchCertificateState;
-use model::switch::Switch;
+use model::switch::{ConfiguringState, Switch, SwitchControllerState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -85,6 +86,35 @@ pub async fn start_configure_switch_certificate(
         });
     }
 
+    // Rack maintenance binds cluster applications after RMS selects the primary.
+    let primary_only_services = switch_mtls_services_as_i32(&[
+        SwitchMtlsService::ScaleUpFabricManager,
+        SwitchMtlsService::ScaleUpFabricTelemetry,
+    ]);
+
+    let services = ctx
+        .services
+        .switch_mtls_services
+        .iter()
+        .copied()
+        .filter(|service| state.is_primary || !primary_only_services.contains(service))
+        .collect::<Vec<_>>();
+
+    if services.is_empty() {
+        tracing::info!(?switch_id, "No certificate services to configure");
+
+        let next_state = match mode {
+            ConfigureSwitchCertificateMode::BringUp => SwitchControllerState::Configuring {
+                config_state: ConfiguringState::RotateOsPassword,
+            },
+            ConfigureSwitchCertificateMode::Reconfigure => SwitchControllerState::Ready,
+        };
+
+        return Ok(StartConfigureSwitchCertificateResult::EarlyTransition(
+            StateHandlerOutcome::transition(next_state),
+        ));
+    }
+
     let Some(component_manager) = ctx.services.component_manager.as_ref() else {
         return Ok(match mode {
             ConfigureSwitchCertificateMode::BringUp => {
@@ -138,12 +168,9 @@ pub async fn start_configure_switch_certificate(
             ));
         }
     };
+
     let job_id = component_manager
-        .configure_switch_certificate(
-            &endpoint,
-            domain_name,
-            Some(ctx.services.switch_mtls_services.as_slice()),
-        )
+        .configure_switch_certificate(&endpoint, domain_name, Some(&services))
         .await
         .map_err(|error| {
             StateHandlerError::GenericError(eyre::eyre!(

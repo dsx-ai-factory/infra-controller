@@ -32,9 +32,9 @@ COPY sdk/standard/go.mod ./sdk/standard/
 RUN go mod download
 
 # Copy source files
+COPY common/ ./common/
 COPY site-manager/ ./site-manager/
 COPY cert-manager/ ./cert-manager/
-COPY common/ ./common/
 
 # Build the site manager
 WORKDIR /workspace/site-manager

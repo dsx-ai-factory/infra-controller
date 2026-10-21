@@ -53,6 +53,15 @@ lazy_static::lazy_static! {
     };
 }
 
+/// `api_server_runtime_builder` enables all Tokio drivers and uses the Core
+/// binary's 8 MiB worker stacks. In-process tests bypass Core's `main`, so they
+/// need to apply its runtime settings here.
+pub fn api_server_runtime_builder() -> tokio::runtime::Builder {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().thread_stack_size(8 * 1024 * 1024);
+    builder
+}
+
 #[derive(Debug, Clone)]
 pub struct IntegrationTestEnvironment {
     /// API client addresses. Each slot starts at `127.0.0.1:0`; [`start_api_server`] replaces it
@@ -269,8 +278,8 @@ pub async fn start_api_server(
         }
     });
 
-    let addresses = match ready_rx.await {
-        Ok(addresses) => addresses,
+    let ready = match ready_rx.await {
+        Ok(ready) => ready,
         Err(_error) => match join_handle.await {
             Ok(Err(error)) => return Err(error),
             Ok(Ok(())) => eyre::bail!("API server exited before reporting readiness"),
@@ -278,6 +287,7 @@ pub async fn start_api_server(
         },
     };
 
+    let addresses = ready.addresses;
     // `api_server::start` binds `[::]`, but test clients authenticate `127.0.0.1`; use the
     // listener's selected port without replacing the client IP.
     let listen_address = SocketAddr::new(api_address.ip(), addresses.listen_address.port());
@@ -293,12 +303,14 @@ pub async fn start_api_server(
     test_env.carbide_api_addrs[addr_index] = listen_address;
     test_env.carbide_metrics_addrs[addr_index] = metrics_address;
 
-    Ok(ApiServerHandle { join_handle })
+    Ok(ApiServerHandle { join_handle, ready })
 }
 
 /// When dropped, this will invalidate the API server.
 pub struct ApiServerHandle {
     join_handle: JoinHandle<eyre::Result<()>>,
+    /// Listener addresses and metric registration handle for this API server.
+    pub ready: carbide::ApiServerReady,
 }
 
 impl ApiServerHandle {

@@ -18,7 +18,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
@@ -350,10 +349,18 @@ func TestIPBlockHandler_Create(t *testing.T) {
 		PrefixLength:    prefLen24,
 		ProtocolVersion: cdbm.IPBlockProtocolVersionV4})
 	assert.Nil(t, err)
+	publicOverlappingPrefix, err := json.Marshal(&model.APIIPBlockCreateRequest{
+		Name:            "public-overlapping-prefix",
+		SiteID:          site.ID.String(),
+		RoutingType:     cdbm.IPBlockRoutingTypePublic,
+		Prefix:          "192.168.0.0",
+		PrefixLength:    25,
+		ProtocolVersion: cdbm.IPBlockProtocolVersionV4})
+	assert.Nil(t, err)
 	lockBusyBody, err := json.Marshal(&model.APIIPBlockCreateRequest{
 		Name:            "site-fabric-lock-busy",
 		SiteID:          site.ID.String(),
-		RoutingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+		RoutingType:     cdbm.IPBlockRoutingTypePublic,
 		Prefix:          "192.172.0.0",
 		PrefixLength:    prefLen24,
 		ProtocolVersion: cdbm.IPBlockProtocolVersionV4})
@@ -362,7 +369,7 @@ func TestIPBlockHandler_Create(t *testing.T) {
 		Name:            "errortest",
 		SiteID:          site.ID.String(),
 		RoutingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
-		Prefix:          "192.168.0.0",
+		Prefix:          "10.254.0.0",
 		PrefixLength:    prefLen15,
 		ProtocolVersion: cdbm.IPBlockProtocolVersionV4})
 	assert.Nil(t, err)
@@ -397,9 +404,12 @@ func TestIPBlockHandler_Create(t *testing.T) {
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}
 	ipamStorage := ipam.NewIpamStorage(dbSession.DB, nil)
+	// An IPAM entry without an IP Block, so only IPAM can reject an overlapping range.
+	_, err = ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, "10.254.0.0", 16, cdbm.IPBlockRoutingTypeDatacenterOnly, ip.ID.String(), site.ID.String())
+	require.NoError(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -536,15 +546,22 @@ func TestIPBlockHandler_Create(t *testing.T) {
 			expectedErrorText: "IPBlock with prefix: 192.168.0.0 and prefix_length: 24",
 		},
 		{
-			name:           "success when the same prefix uses another routing type",
-			reqOrgName:     ipOrg1,
-			reqBody:        string(publicSamePrefix),
-			user:           user,
-			expectedErr:    false,
-			expectedStatus: http.StatusCreated,
-			paramNamespace: ipam.GetIpamNamespaceForIPBlock(ctx, cdbm.IPBlockRoutingTypePublic, ip.ID.String(), site.ID.String()),
-			paramCIDR:      ipam.GetCidrForIPBlock(ctx, "192.168.0.0", 24),
-			expectedIpam:   true,
+			name:              "error when the same prefix uses another routing type",
+			reqOrgName:        ipOrg1,
+			reqBody:           string(publicSamePrefix),
+			user:              user,
+			expectedErr:       true,
+			expectedStatus:    http.StatusConflict,
+			expectedErrorText: "IPBlock with prefix: 192.168.0.0 and prefix_length: 24",
+		},
+		{
+			name:              "error when the prefix overlaps an IP Block of another routing type",
+			reqOrgName:        ipOrg1,
+			reqBody:           string(publicOverlappingPrefix),
+			user:              user,
+			expectedErr:       true,
+			expectedStatus:    http.StatusConflict,
+			expectedErrorText: "overlaps DatacenterOnly IPBlock with prefix: 192.168.0.0 and prefix_length: 24",
 		},
 		{
 			name:               "conflict while Site fabric IP Blocks are being updated",
@@ -606,9 +623,9 @@ func TestIPBlockHandler_Create(t *testing.T) {
 			expectedErr:        true,
 			expectedStatus:     http.StatusConflict,
 			paramNamespace:     ipam.GetIpamNamespaceForIPBlock(ctx, cdbm.IPBlockRoutingTypeDatacenterOnly, ip.ID.String(), site.ID.String()),
-			paramCIDR:          ipam.GetCidrForIPBlock(ctx, "192.168.0.0", 24),
+			paramCIDR:          ipam.GetCidrForIPBlock(ctx, "10.254.0.0", 16),
 			expectedIpam:       true,
-			expectedIpamErrMsg: "Could not create IPAM entry for IPBlock. Details: 192.168.0.0/15 overlaps 192.168.0.0/24",
+			expectedIpamErrMsg: "Could not create IPAM entry for IPBlock. Details: 10.254.0.0/15 overlaps 10.254.0.0/16",
 		},
 	}
 	for _, tc := range tests {
@@ -639,7 +656,6 @@ func TestIPBlockHandler_Create(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cipbh := CreateIPBlockHandler{
@@ -682,7 +698,7 @@ func TestIPBlockHandler_Create(t *testing.T) {
 					assert.Equal(t, pref.Namespace, tc.paramNamespace)
 				}
 			} else {
-				fmt.Printf("error message body : %s", string(rec.Body.Bytes()))
+				fmt.Printf("error message body : %s", rec.Body.String())
 				if tc.expectedErrorText != "" {
 					assert.Contains(t, rec.Body.String(), tc.expectedErrorText)
 				}
@@ -749,7 +765,7 @@ func TestIPBlockHandler_Update(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -907,7 +923,6 @@ func TestIPBlockHandler_Update(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := UpdateIPBlockHandler{
@@ -1061,7 +1076,7 @@ func TestIPBlockHandler_Get(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1313,7 +1328,6 @@ func TestIPBlockHandler_Get(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := GetIPBlockHandler{
@@ -1498,7 +1512,7 @@ func TestIPBlockHandler_GetAll(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1786,7 +1800,6 @@ func TestIPBlockHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gaipbh := GetAllIPBlockHandler{
@@ -1964,7 +1977,7 @@ func TestDerivedIPBlockHandler_GetAll(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -2179,7 +2192,6 @@ func TestDerivedIPBlockHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gaipbh := GetAllDerivedIPBlockHandler{
@@ -2318,7 +2330,7 @@ func TestIPBlockHandler_Delete(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -2450,7 +2462,6 @@ func TestIPBlockHandler_Delete(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			dipbh := DeleteIPBlockHandler{
@@ -2536,8 +2547,7 @@ func TestIPBlockHandler_Delete(t *testing.T) {
 		ec.SetParamNames("orgName", "id")
 		ec.SetParamValues(ipOrg1, id.String())
 		ec.Set("user", user)
-		requestCtx := context.WithValue(raceCtx, otelecho.TracerKey, tracer) //nolint:staticcheck // Middleware owns the context key.
-		ec.SetRequest(ec.Request().WithContext(requestCtx))
+		ec.SetRequest(ec.Request().WithContext(raceCtx))
 
 		done := make(chan error, 1)
 		go func() {

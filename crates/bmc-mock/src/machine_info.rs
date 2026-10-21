@@ -24,8 +24,8 @@ use crate::infiniband::Guid;
 use crate::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use crate::redfish::update_service::UpdateServiceConfig;
 use crate::{
-    Callbacks, DUMMY_FACTORY_PASSWORD, DUMMY_FACTORY_USERNAME, HardwareType, RackPlacement, hw,
-    redfish,
+    Callbacks, DUMMY_FACTORY_PASSWORD, DUMMY_FACTORY_USERNAME, DUMMY_NVOS_USERNAME, HardwareType,
+    RackPlacement, hw, nvue, redfish,
 };
 
 /// Represents static information we know ahead of time about a host or DPU (independent of any
@@ -763,6 +763,25 @@ impl HostMachineInfo {
         )
     }
 
+    /// The NVOS a switch tray runs, served over NVUE at its NVOS address;
+    /// `None` for hardware without one. The administrator starts on the
+    /// factory password, as the BMC's accounts do.
+    pub(crate) fn nvue_config(&self) -> Option<nvue::Config> {
+        let admin = nvue::Account::new(DUMMY_NVOS_USERNAME, DUMMY_FACTORY_PASSWORD);
+        let management_mac = self.nvos_mac_addresses.first().copied();
+        match self.hw_type {
+            HardwareType::NvidiaSwitchN5700Ld => Some(
+                self.nvidia_switch_n5700_ld()
+                    .nvue_config(management_mac, admin),
+            ),
+            HardwareType::NvidiaSwitchNd5200Ld => Some(
+                self.nvidia_switch_nd5200_ld()
+                    .nvue_config(management_mac, admin),
+            ),
+            _ => None,
+        }
+    }
+
     fn dell_poweredge_r750(&self) -> hw::dell_poweredge_r750::DellPowerEdgeR750<'_> {
         let nics = if self.dpus.is_empty() {
             self.non_dpu_mac_address
@@ -1028,6 +1047,17 @@ impl HostMachineInfo {
         !matches!(self.hw_type, HardwareType::DeltaPowerShelf)
     }
 
+    /// What this host says it can attest. `None` for every profile that does
+    /// not model the collection yet, which is how a BMC without one behaves.
+    fn component_integrity_config(
+        &self,
+    ) -> Option<Vec<redfish::component_integrity::ComponentIntegrity>> {
+        match self.hw_type {
+            HardwareType::NvidiaDgxGb300 => Some(self.dgx_gb300_nvl().component_integrity_config()),
+            _ => None,
+        }
+    }
+
     fn nvidia_switch_nd5200_ld(&self) -> hw::nvidia_switch_nd5200_ld::NvidiaSwitchNd5200Ld<'_> {
         let mut pool = MacAddressPool::new_pool(self.hw_mac_addr_pool);
         let mut next_mac = || pool.allocate().expect("MAC address must be allocated");
@@ -1246,6 +1276,17 @@ impl MachineInfo {
         match self {
             Self::Host(h) => h.exposes_computer_systems(),
             Self::Dpu(_) => true,
+        }
+    }
+
+    /// What this machine says it can attest, or `None` for one that advertises
+    /// no `ComponentIntegrity` collection.
+    pub(super) fn component_integrity_config(
+        &self,
+    ) -> Option<Vec<redfish::component_integrity::ComponentIntegrity>> {
+        match self {
+            Self::Host(h) => h.component_integrity_config(),
+            Self::Dpu(_) => None,
         }
     }
 

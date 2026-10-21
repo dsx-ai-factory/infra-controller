@@ -29,6 +29,7 @@ pub mod collectors;
 pub mod config;
 pub mod discovery;
 pub mod endpoint;
+mod inventory;
 pub mod limiter;
 pub mod metrics;
 pub mod otlp;

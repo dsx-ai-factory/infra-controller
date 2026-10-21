@@ -24,6 +24,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -107,21 +108,19 @@ func prepareRunHandler(
 
 // CreateTaskRunHandler is the API Handler for creating a Run.
 type CreateTaskRunHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateTaskRunHandler initializes a new CreateTaskRunHandler.
 func NewCreateTaskRunHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) CreateTaskRunHandler {
 	return CreateTaskRunHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -137,7 +136,7 @@ func NewCreateTaskRunHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.
 // @Success 201 {object} model.APITaskRun
 // @Router /v2/org/{org}/nico/task/run [post]
 func (h CreateTaskRunHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRun", "Create", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRun", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -193,21 +192,19 @@ func (h CreateTaskRunHandler) Handle(c echo.Context) error {
 
 // GetTaskRunHandler is the API Handler for getting a Run by ID.
 type GetTaskRunHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetTaskRunHandler initializes a new GetTaskRunHandler.
 func NewGetTaskRunHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) GetTaskRunHandler {
 	return GetTaskRunHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -225,13 +222,13 @@ func NewGetTaskRunHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.Cli
 // @Success 200 {object} model.APITaskRun
 // @Router /v2/org/{org}/nico/task/run/{id} [get]
 func (h GetTaskRunHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRun", "Get", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRun", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
 
 	runID := c.Param("id")
-	h.tracerSpan.SetAttribute(handlerSpan, attribute.String("run_id", runID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("run_id", runID))
 	if _, err := uuid.Parse(runID); err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Run ID specified in URL", nil)
 	}
@@ -287,21 +284,19 @@ func (h GetTaskRunHandler) Handle(c echo.Context) error {
 
 // GetAllTaskRunHandler is the API Handler for listing Runs on a Site.
 type GetAllTaskRunHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetAllTaskRunHandler initializes a new GetAllTaskRunHandler.
 func NewGetAllTaskRunHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) GetAllTaskRunHandler {
 	return GetAllTaskRunHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -321,7 +316,7 @@ func NewGetAllTaskRunHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.
 // @Success 200 {array} model.APITaskRun
 // @Router /v2/org/{org}/nico/task/run [get]
 func (h GetAllTaskRunHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRun", "List", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRun", "List", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -395,21 +390,19 @@ func (h GetAllTaskRunHandler) Handle(c echo.Context) error {
 // GetAllTaskRunTargetHandler is the API Handler for listing a Run's
 // per-rack execution targets.
 type GetAllTaskRunTargetHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetAllTaskRunTargetHandler initializes a new GetAllTaskRunTargetHandler.
 func NewGetAllTaskRunTargetHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) GetAllTaskRunTargetHandler {
 	return GetAllTaskRunTargetHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -430,13 +423,13 @@ func NewGetAllTaskRunTargetHandler(dbSession *cdb.Session, tc tClient.Client, sc
 // @Success 200 {array} model.APITaskRunTarget
 // @Router /v2/org/{org}/nico/task/run/{id}/target [get]
 func (h GetAllTaskRunTargetHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRunTargets", "List", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRunTargets", "List", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
 
 	runID := c.Param("id")
-	h.tracerSpan.SetAttribute(handlerSpan, attribute.String("run_id", runID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("run_id", runID))
 	if _, err := uuid.Parse(runID); err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Run ID specified in URL", nil)
 	}
@@ -542,21 +535,19 @@ func executeRunLifecycleAction(
 
 // PauseTaskRunHandler pauses a running Run.
 type PauseTaskRunHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewPauseTaskRunHandler initializes a new PauseTaskRunHandler.
 func NewPauseTaskRunHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) PauseTaskRunHandler {
 	return PauseTaskRunHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -573,13 +564,13 @@ func NewPauseTaskRunHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.C
 // @Success 202 {object} model.APITaskRun
 // @Router /v2/org/{org}/nico/task/run/{id}/pause [post]
 func (h PauseTaskRunHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRun", "Pause", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRun", "Pause", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
 
 	runID := c.Param("id")
-	h.tracerSpan.SetAttribute(handlerSpan, attribute.String("run_id", runID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("run_id", runID))
 	if _, err := uuid.Parse(runID); err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Run ID specified in URL", nil)
 	}
@@ -598,21 +589,19 @@ func (h PauseTaskRunHandler) Handle(c echo.Context) error {
 
 // ResumeTaskRunHandler resumes an operator-paused Run.
 type ResumeTaskRunHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewResumeTaskRunHandler initializes a new ResumeTaskRunHandler.
 func NewResumeTaskRunHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) ResumeTaskRunHandler {
 	return ResumeTaskRunHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -629,13 +618,13 @@ func NewResumeTaskRunHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.
 // @Success 202 {object} model.APITaskRun
 // @Router /v2/org/{org}/nico/task/run/{id}/resume [post]
 func (h ResumeTaskRunHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRun", "Resume", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRun", "Resume", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
 
 	runID := c.Param("id")
-	h.tracerSpan.SetAttribute(handlerSpan, attribute.String("run_id", runID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("run_id", runID))
 	if _, err := uuid.Parse(runID); err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Run ID specified in URL", nil)
 	}
@@ -654,21 +643,19 @@ func (h ResumeTaskRunHandler) Handle(c echo.Context) error {
 
 // AdvanceTaskRunPhaseHandler opens the next phase of a phase-gated Run.
 type AdvanceTaskRunPhaseHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewAdvanceTaskRunPhaseHandler initializes a new AdvanceTaskRunPhaseHandler.
 func NewAdvanceTaskRunPhaseHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) AdvanceTaskRunPhaseHandler {
 	return AdvanceTaskRunPhaseHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -685,13 +672,13 @@ func NewAdvanceTaskRunPhaseHandler(dbSession *cdb.Session, tc tClient.Client, sc
 // @Success 202 {object} model.APITaskRun
 // @Router /v2/org/{org}/nico/task/run/{id}/advance [post]
 func (h AdvanceTaskRunPhaseHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRun", "AdvancePhase", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRun", "AdvancePhase", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
 
 	runID := c.Param("id")
-	h.tracerSpan.SetAttribute(handlerSpan, attribute.String("run_id", runID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("run_id", runID))
 	if _, err := uuid.Parse(runID); err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Run ID specified in URL", nil)
 	}
@@ -713,21 +700,19 @@ func (h AdvanceTaskRunPhaseHandler) Handle(c echo.Context) error {
 
 // CancelTaskRunHandler cancels a Run and its in-flight targets.
 type CancelTaskRunHandler struct {
-	dbSession  *cdb.Session
-	tc         tClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCancelTaskRunHandler initializes a new CancelTaskRunHandler.
 func NewCancelTaskRunHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.ClientPool, cfg *config.Config) CancelTaskRunHandler {
 	return CancelTaskRunHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -744,13 +729,13 @@ func NewCancelTaskRunHandler(dbSession *cdb.Session, tc tClient.Client, scp *sc.
 // @Success 202 {object} model.APITaskRun
 // @Router /v2/org/{org}/nico/task/run/{id}/cancel [post]
 func (h CancelTaskRunHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRun", "Cancel", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TaskRun", "Cancel", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
 
 	runID := c.Param("id")
-	h.tracerSpan.SetAttribute(handlerSpan, attribute.String("run_id", runID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("run_id", runID))
 	if _, err := uuid.Parse(runID); err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Run ID specified in URL", nil)
 	}

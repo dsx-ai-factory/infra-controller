@@ -365,6 +365,13 @@ pub unsafe extern "C" fn discovery_fetch_machine(
         .unwrap() // TODO(ajf): don't unwrap
         .api_endpoint;
 
+    // Roots a trace for the discovery and the nico-api call it makes. A DHCP
+    // client sends no trace context to continue. The guard keeps the span
+    // current across the nested `block_on`, so the gRPC client sends its
+    // context.
+    let span = tracing::info_span!("dhcp_discovery");
+    let _guard = span.enter();
+
     // SAFETY: The caller supplies `ctx` as null or a live builder accessed
     // exclusively, and `machine_ptr_out` as null or a disjoint writable slot.
     // The implementation handles both null cases before dereferencing them.

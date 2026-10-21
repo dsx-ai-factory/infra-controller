@@ -10,6 +10,7 @@ use model::component_manager::{
     PowerAction, PowerShelfComponent,
 };
 
+use crate::component_common::ComponentPowerStateResult;
 use crate::compute_tray_manager::{
     Backend, ComputeTrayEndpoint, ComputeTrayFirmwareUpdateStatus, ComputeTrayManager,
     ComputeTrayResult,
@@ -18,11 +19,11 @@ use crate::error::ComponentManagerError;
 use crate::nv_switch_manager::{
     ConfigureSwitchCertificateJobStatus, NvSwitchManager, SwitchCertificateEndpoint,
     SwitchComponentResult, SwitchEndpoint, SwitchFactoryResetJobStatus, SwitchFirmwareUpdateStatus,
-    SwitchPasswordRotationState, SwitchPowerStateResult, SwitchSlotAndTrayResult,
+    SwitchPasswordRotationState, SwitchSlotAndTrayResult,
 };
 use crate::power_shelf_manager::{
     PowerShelfComponentResult, PowerShelfEndpoint, PowerShelfFirmwareUpdateStatus,
-    PowerShelfFirmwareVersions, PowerShelfManager, PowerShelfPowerStateResult,
+    PowerShelfFirmwareVersions, PowerShelfManager,
 };
 use crate::types::FirmwareUpdateOptions;
 
@@ -30,6 +31,7 @@ use crate::types::FirmwareUpdateOptions;
 #[derive(Debug, Clone, Default)]
 pub struct MockNvSwitchManager {
     certificate_batch_attempts: Option<Arc<AtomicUsize>>,
+    certificate_services: Arc<Mutex<Vec<Vec<i32>>>>,
     certificate_job_status: Option<ConfigureSwitchCertificateJobStatus>,
     password_rotation_enabled: bool,
     password_rotation_start_result: Option<MockPasswordRotationStartResult>,
@@ -51,6 +53,11 @@ impl MockNvSwitchManager {
         self.certificate_batch_attempts
             .as_ref()
             .map_or(0, |attempts| attempts.load(Ordering::Relaxed))
+    }
+
+    /// Returns the service lists submitted for individual switch certificates.
+    pub fn certificate_services(&self) -> Vec<Vec<i32>> {
+        self.certificate_services.lock().unwrap().clone()
     }
 
     /// Returns a mock configured with a certificate job status.
@@ -228,13 +235,12 @@ impl NvSwitchManager for MockNvSwitchManager {
     async fn get_power_state(
         &self,
         endpoints: &[SwitchEndpoint],
-    ) -> Result<Vec<SwitchPowerStateResult>, ComponentManagerError> {
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError> {
         Ok(endpoints
             .iter()
-            .map(|ep| SwitchPowerStateResult {
-                bmc_mac: ep.bmc_mac,
-                power_state: None,
-                error: None,
+            .map(|ep| ComponentPowerStateResult {
+                mac_address: ep.bmc_mac,
+                power_state: Ok(None),
             })
             .collect())
     }
@@ -243,8 +249,13 @@ impl NvSwitchManager for MockNvSwitchManager {
         &self,
         _endpoint: &SwitchEndpoint,
         _domain_name: Option<&str>,
-        _services: Option<&[i32]>,
+        services: Option<&[i32]>,
     ) -> Result<String, ComponentManagerError> {
+        self.certificate_services
+            .lock()
+            .unwrap()
+            .push(services.unwrap_or_default().to_vec());
+
         Ok("mock-switch-cert-job".to_string())
     }
 
@@ -424,13 +435,12 @@ impl PowerShelfManager for MockPowerShelfManager {
     async fn get_power_state(
         &self,
         endpoints: &[PowerShelfEndpoint],
-    ) -> Result<Vec<PowerShelfPowerStateResult>, ComponentManagerError> {
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError> {
         Ok(endpoints
             .iter()
-            .map(|ep| PowerShelfPowerStateResult {
-                pmc_mac: ep.pmc_mac,
-                power_state: None,
-                error: None,
+            .map(|ep| ComponentPowerStateResult {
+                mac_address: ep.pmc_mac,
+                power_state: Ok(None),
             })
             .collect())
     }

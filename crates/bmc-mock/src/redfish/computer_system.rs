@@ -25,15 +25,13 @@ use axum::extract::{Json, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
+use nv_redfish::schema::resource::PowerState;
 use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::{JsonExt, JsonPatch, json_patch};
 use crate::redfish::Builder;
-use crate::{
-    ActionError, BootOptionKind, Callbacks, MachineRouterOptions, MockPowerState,
-    POWER_CYCLE_DELAY, http, redfish,
-};
+use crate::{ActionError, BootOptionKind, Callbacks, MachineRouterOptions, http, redfish};
 
 pub(super) fn collection() -> redfish::Collection<'static> {
     redfish::Collection {
@@ -245,6 +243,7 @@ struct BootSourceOverride {
 
 pub(crate) struct SingleSystemState<C: Callbacks> {
     config: SingleSystemConfig<C>,
+    power_state: Mutex<Option<PowerState>>,
     serial_console_ssh_port_override: Mutex<Option<u16>>,
     virtual_media: Option<redfish::virtual_media::VirtualMediaState>,
     boot_order_override: Mutex<Option<Vec<String>>>,
@@ -277,6 +276,20 @@ pub(crate) enum Oem {
 }
 
 impl<C: Callbacks> SystemState<C> {
+    /// Updates the power observation exposed for the controlled system.
+    /// `PowerState` is omitted from Redfish responses until an observation is published.
+    /// Returns false when this BMC has no controlled system.
+    pub fn set_power_state(&self, power_state: PowerState) -> bool {
+        let Some(system) = self.controlled_system() else {
+            return false;
+        };
+        *system
+            .power_state
+            .lock()
+            .expect("power state lock poisoned") = Some(power_state);
+        true
+    }
+
     pub(crate) fn from_config(config: Config<C>, options: &MachineRouterOptions) -> Self {
         Self::from_configs(config.systems, options.virtual_media_devices.clone())
     }
@@ -405,6 +418,7 @@ impl<C: Callbacks> SingleSystemState<C> {
     ) -> Self {
         Self {
             config,
+            power_state: Mutex::new(None),
             virtual_media,
             serial_console_ssh_port_override: Mutex::new(None),
             boot_order_override: Mutex::new(None),
@@ -664,12 +678,15 @@ async fn get_system<C: Callbacks>(
 
     let config = &system_state.config;
 
-    if let Some(power_state) = config
-        .callbacks
-        .as_ref()
-        .map(|callbacks| callbacks.get_power_state())
-    {
-        b = b.power_state(power_state).reset_action(&system_id)
+    let power_state = *system_state
+        .power_state
+        .lock()
+        .expect("power state lock poisoned");
+    if let Some(power_state) = power_state {
+        b = b.power_state(power_state);
+    }
+    if config.callbacks.is_some() {
+        b = b.reset_action(&system_id);
     }
 
     if config.boot_options.is_some() {
@@ -850,7 +867,11 @@ async fn patch_settings<C: Callbacks>(
         }
         system_state.apply_boot_source_override(boot);
     }
-    json!({}).into_ok_response()
+    if matches!(state.bmc_vendor, redfish::oem::BmcVendor::Ami) {
+        http::ok_no_content()
+    } else {
+        json!({}).into_ok_response()
+    }
 }
 
 async fn patch_system<C: Callbacks>(
@@ -1030,7 +1051,11 @@ async fn patch_boot_option_settings<C: Callbacks>(
     if !system_state.patch_boot_option(&boot_option_id, patch_request) {
         return http::not_found();
     }
-    json!({}).into_ok_response()
+    if matches!(state.bmc_vendor, redfish::oem::BmcVendor::Ami) {
+        http::ok_no_content()
+    } else {
+        json!({}).into_ok_response()
+    }
 }
 
 /// Return the HPE iLO persistent boot-order resource.
@@ -1432,22 +1457,8 @@ impl SystemBuilder {
         self.apply_patch(resource.nav_property("Bios"))
     }
 
-    fn power_state(self, state: MockPowerState) -> Self {
-        let power_state = match state {
-            MockPowerState::Unknown => return self.apply_patch(json!({"PowerState": null})),
-            MockPowerState::On => "On",
-            MockPowerState::Off => "Off",
-            MockPowerState::PoweringOn => "PoweringOn",
-            MockPowerState::PoweringOff => "PoweringOff",
-            MockPowerState::PowerCycling { since } => {
-                if since.elapsed() < POWER_CYCLE_DELAY {
-                    "Off"
-                } else {
-                    "On"
-                }
-            }
-        };
-        self.add_str_field("PowerState", power_state)
+    fn power_state(self, state: PowerState) -> Self {
+        self.apply_patch(json!({"PowerState": state}))
     }
 
     fn log_services(self, log_services: &redfish::Collection<'_>) -> Self {
@@ -1505,8 +1516,8 @@ mod tests {
     use tower_http::normalize_path::NormalizePathLayer;
 
     use super::*;
-    use crate::test_support::{TestCallbacks, host_info};
-    use crate::{HardwareType, MachineRouterOptions, machine_router};
+    use crate::test_support::{TestBmcConfig, TestCallbacks, create_test_bmc, host_info};
+    use crate::{HardwareType, MachineRouterOptions};
 
     /// Reads one successful JSON response from the in-process mock router.
     async fn get_json(router: &Router, path: &str) -> serde_json::Value {
@@ -1521,10 +1532,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn published_power_state_only_changes_the_controlled_system() {
+        let (router, state) = create_test_bmc(
+            &host_info(HardwareType::NvidiaDgxGb300),
+            TestBmcConfig::default(),
+            "test-host-id".to_string(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        assert!(state.system_state.set_power_state(PowerState::Off));
+        for (system_id, expected) in [("HGX_Baseboard_0", None), ("System_0", Some("Off"))] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/redfish/v1/Systems/{system_id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                body.get("PowerState").and_then(serde_json::Value::as_str),
+                expected
+            );
+        }
+    }
+
+    /// Core's Lenovo client must accept both the order and option PATCH responses.
+    #[tokio::test]
+    async fn lenovo_gb300_client_restores_dpu_boot_order() {
+        use libredfish::{BootInterfaceRef, Endpoint, RedfishClientPool};
+
+        let machine = host_info(HardwareType::LenovoGB300Nvl);
+        let crate::MachineInfo::Host(host) = &machine else {
+            panic!("expected host fixture");
+        };
+        let dpu_mac = host.dpus[0].host_mac_address;
+        let (router, _) = create_test_bmc(
+            &machine,
+            TestBmcConfig::default(),
+            "test-host-id".to_string(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        let (_server, url) = crate::test_support::serve_https("gb300-boot-order", router.clone());
+        let client = RedfishClientPool::builder()
+            .danger_accept_invalid_certs()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .create_client(Endpoint {
+                host: url.host_str().unwrap().to_owned(),
+                port: url.port(),
+                user: None,
+                password: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            !client
+                .is_boot_order_setup(BootInterfaceRef::Mac(dpu_mac))
+                .await
+                .unwrap()
+        );
+        client
+            .set_boot_order_dpu_first(BootInterfaceRef::Mac(dpu_mac))
+            .await
+            .unwrap();
+        assert!(
+            client
+                .is_boot_order_setup(BootInterfaceRef::Mac(dpu_mac))
+                .await
+                .unwrap()
+        );
+        let target = get_json(&router, "/redfish/v1/Systems/System_0/BootOptions/0004").await;
+        assert_eq!(target["BootOptionEnabled"], true);
+    }
+
+    #[tokio::test]
     async fn log_services_discovery_names_the_log_collection() {
-        let (router, _) = machine_router(
+        let (router, _) = create_test_bmc(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(TestCallbacks::default()),
+            TestBmcConfig::default(),
             String::new(),
             false,
             MachineRouterOptions::default(),
@@ -1561,9 +1654,9 @@ mod tests {
     }
 
     fn dell_router() -> (Router, BmcState<TestCallbacks>) {
-        machine_router(
+        create_test_bmc(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(TestCallbacks::default()),
+            TestBmcConfig::default(),
             String::new(),
             false,
             MachineRouterOptions::default(),
@@ -1635,9 +1728,9 @@ mod tests {
 
     #[tokio::test]
     async fn storage_discovery_names_the_storage_collection() {
-        let (router, _) = machine_router(
+        let (router, _) = create_test_bmc(
             &host_info(HardwareType::DellPowerEdgeR750),
-            Arc::new(TestCallbacks::default()),
+            TestBmcConfig::default(),
             String::new(),
             false,
             MachineRouterOptions::default(),
@@ -1660,9 +1753,9 @@ mod tests {
     /// HPE OEM ordering round-trips without corrupting standard BootOption IDs.
     #[tokio::test]
     async fn hpe_boot_order_is_persisted_separately_from_standard_boot_order() {
-        let router = machine_router(
+        let router = create_test_bmc(
             &host_info(HardwareType::HpeProliantDl380aGen11),
-            Arc::new(TestCallbacks::default()),
+            TestBmcConfig::default(),
             "test-host-id".to_string(),
             false,
             MachineRouterOptions::default(),
@@ -1701,9 +1794,9 @@ mod tests {
 
     #[tokio::test]
     async fn simulated_ssh_port_can_be_added_without_profile_serial_console_data() {
-        let (router, state) = machine_router(
+        let (router, state) = create_test_bmc(
             &host_info(HardwareType::LenovoGB300Nvl),
-            Arc::new(TestCallbacks::default()),
+            TestBmcConfig::default(),
             "test-host-id".to_string(),
             false,
             MachineRouterOptions::default(),

@@ -15,10 +15,6 @@
  * limitations under the License.
  */
 
-// The deprecated flat fields on `rpc::forge::Machine` must still be read here for
-// backwards-compat until a follow-up PR migrates this crate to the new config/status sub-messages.
-#![allow(deprecated)]
-
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
 use std::sync::Arc;
@@ -80,7 +76,8 @@ impl ManagedHostMetadata {
         let dpu_id_request = tonic::Request::new(DpuMachineIdList {
             machine_ids: machines
                 .iter()
-                .flat_map(|m| m.associated_dpu_machine_ids.clone())
+                .filter_map(|machine| machine.status.as_ref())
+                .flat_map(|status| status.associated_dpu_machine_ids.iter().copied())
                 .collect(),
         });
         let connected_devices = api
@@ -158,7 +155,9 @@ pub struct ManagedHostOutput {
 
 impl From<Machine> for ManagedHostOutput {
     fn from(machine: Machine) -> ManagedHostOutput {
-        let primary_interface = machine.interfaces.iter().find(|x| x.primary_interface);
+        let status = machine.status.unwrap_or_default();
+        let config = machine.config.unwrap_or_default();
+        let primary_interface = status.interfaces.iter().find(|x| x.primary_interface);
         let (host_admin_ip, host_admin_mac) = primary_interface
             .map(|x| {
                 (
@@ -175,7 +174,7 @@ impl From<Machine> for ManagedHostOutput {
             firmware_version: host_bmc_firmware_version,
         } = machine.bmc_info.into();
 
-        let discovery_info = machine.discovery_info;
+        let discovery_info = status.discovery_info;
         let host_gpu_count = discovery_info
             .as_ref()
             .map(|di| di.gpus.len())
@@ -217,14 +216,14 @@ impl From<Machine> for ManagedHostOutput {
             .and_then(|di| di.dmi_data.as_ref())
             .into();
 
-        let health = machine
+        let health = status
             .health
             .map(|h| {
                 health_report::HealthReport::try_from(h)
                     .unwrap_or_else(health_report::HealthReport::malformed_report)
             })
             .unwrap_or_else(health_report::HealthReport::missing_report);
-        let health_sources = machine
+        let health_sources = status
             .health_sources
             .into_iter()
             .map(|o| o.source)
@@ -282,29 +281,29 @@ impl From<Machine> for ManagedHostOutput {
             host_gpu_count,
             host_ib_ifs_count,
             host_memory,
-            failure_details: machine.failure_details.clone(),
-            maintenance_reference: machine.maintenance_reference.clone(),
-            maintenance_start_time: to_time(machine.maintenance_start_time, machine.id),
+            failure_details: status.failure_details.clone(),
+            maintenance_reference: config.maintenance_reference.clone(),
+            maintenance_start_time: to_time(config.maintenance_start_time, machine.id),
             host_last_reboot_time: machine
                 .id
                 .as_ref()
-                .and_then(|id| to_time(machine.last_reboot_time, Some(id))),
+                .and_then(|id| to_time(status.last_reboot_time, Some(id))),
             host_last_reboot_requested_time_and_mode: machine.id.as_ref().map(|id| {
                 format!(
                     "{}/{}",
-                    to_time(machine.last_reboot_requested_time, Some(id))
+                    to_time(status.last_reboot_requested_time, Some(id))
                         .unwrap_or("Unknown".to_string()),
-                    machine.last_reboot_requested_mode.unwrap_or_default()
+                    status.last_reboot_requested_mode.unwrap_or_default()
                 )
             }),
-            quarantine_state: machine.quarantine_state.clone(),
-            instance_type_id: machine.instance_type_id.clone(),
+            quarantine_state: status.quarantine.clone(),
+            instance_type_id: config.instance_type_id.clone(),
             slot_number: machine.placement_in_rack.and_then(|p| p.slot_number),
             tray_index: machine.placement_in_rack.and_then(|p| p.tray_index),
             rack_id,
             health,
             health_sources,
-            dpf: machine.dpf,
+            dpf: config.dpf,
             // dpus and exploration_report are filled in later
             dpus: Default::default(),
             exploration_report: Default::default(),
@@ -363,18 +362,15 @@ impl ManagedHostAttachedDpu {
         exploration_report: Option<EndpointExplorationReport>,
         is_primary: bool,
     ) -> Self {
+        let status = dpu_machine.status.unwrap_or_default();
         let last_reboot_requested_time_and_mode = Some(format!(
             "{}/{}",
-            to_time(dpu_machine.last_reboot_requested_time, dpu_machine.id)
+            to_time(status.last_reboot_requested_time, dpu_machine.id)
                 .unwrap_or("Unknown".to_string()),
-            dpu_machine.last_reboot_requested_mode()
+            status.last_reboot_requested_mode.unwrap_or_default()
         ));
 
-        let (oob_ip, oob_mac) = match dpu_machine
-            .interfaces
-            .into_iter()
-            .find(|x| x.primary_interface)
-        {
+        let (oob_ip, oob_mac) = match status.interfaces.into_iter().find(|x| x.primary_interface) {
             Some(primary_interface) => (
                 Some(primary_interface.address.join(",")),
                 Some(primary_interface.mac_address.to_owned()),
@@ -393,14 +389,14 @@ impl ManagedHostAttachedDpu {
             product_serial: serial_number,
             chassis_serial: _,
             bios_version,
-        } = dpu_machine
+        } = status
             .discovery_info
             .as_ref()
             .and_then(|d| d.dmi_data.as_ref())
             .into();
 
         ManagedHostAttachedDpu {
-            discovery_info: dpu_machine.discovery_info.unwrap_or_default(),
+            discovery_info: status.discovery_info.unwrap_or_default(),
             machine_id: dpu_machine.id.map(|i| i.to_string()),
             state: Some(dpu_machine.state),
             serial_number,
@@ -409,22 +405,22 @@ impl ManagedHostAttachedDpu {
             bmc_mac,
             bmc_version,
             bmc_firmware_version,
-            last_reboot_time: to_time(dpu_machine.last_reboot_time, dpu_machine.id),
+            last_reboot_time: to_time(status.last_reboot_time, dpu_machine.id),
             exploration_report,
             last_reboot_requested_time_and_mode,
-            last_observation_time: to_time(dpu_machine.last_observation_time, dpu_machine.id),
+            last_observation_time: to_time(status.last_observation_time, dpu_machine.id),
             oob_ip,
             oob_mac,
             switch_connections,
             is_primary,
-            health: dpu_machine
+            health: status
                 .health
                 .map(|h| {
                     health_report::HealthReport::try_from(h)
                         .unwrap_or_else(health_report::HealthReport::malformed_report)
                 })
                 .unwrap_or_else(health_report::HealthReport::missing_report),
-            failure_details: dpu_machine.failure_details,
+            failure_details: status.failure_details,
         }
     }
 }
@@ -435,14 +431,20 @@ pub fn get_managed_host_output(source: ManagedHostMetadata) -> Vec<ManagedHostOu
         .managed_hosts
         .into_iter()
         .map(|machine| {
-            let primary_dpu_id = machine.interfaces.iter().find_map(|iface| {
-                if iface.primary_interface {
-                    iface.attached_dpu_machine_id
-                } else {
-                    None
-                }
+            let primary_dpu_id = machine.status.as_ref().and_then(|status| {
+                status.interfaces.iter().find_map(|interface| {
+                    if interface.primary_interface {
+                        interface.attached_dpu_machine_id
+                    } else {
+                        None
+                    }
+                })
             });
-            let dpu_machine_ids = machine.associated_dpu_machine_ids.clone();
+            let dpu_machine_ids = machine
+                .status
+                .as_ref()
+                .map(|status| status.associated_dpu_machine_ids.clone())
+                .unwrap_or_default();
 
             let mut managed_host_output = ManagedHostOutput::from(machine);
             managed_host_output.exploration_report = managed_host_output
@@ -748,22 +750,25 @@ mod tests {
     #[allow(deprecated)]
     fn managed_host_output_falls_back_to_legacy_memory_when_all_groups_are_zero_count() {
         let host_memory = ManagedHostOutput::from(Machine {
-            discovery_info: Some(DiscoveryInfo {
-                memory_device_groups: vec![MemoryDeviceGroup {
-                    size_mb: Some(8192),
-                    mem_type: Some("DDR4".to_string()),
-                    count: 0,
-                }],
-                memory_devices: vec![
-                    rpc::machine_discovery::MemoryDevice {
-                        size_mb: Some(16384),
-                        mem_type: Some("DDR5".to_string()),
-                    },
-                    rpc::machine_discovery::MemoryDevice {
-                        size_mb: Some(16384),
-                        mem_type: Some("DDR5".to_string()),
-                    },
-                ],
+            status: Some(rpc::forge::MachineStatus {
+                discovery_info: Some(DiscoveryInfo {
+                    memory_device_groups: vec![MemoryDeviceGroup {
+                        size_mb: Some(8192),
+                        mem_type: Some("DDR4".to_string()),
+                        count: 0,
+                    }],
+                    memory_devices: vec![
+                        rpc::machine_discovery::MemoryDevice {
+                            size_mb: Some(16384),
+                            mem_type: Some("DDR5".to_string()),
+                        },
+                        rpc::machine_discovery::MemoryDevice {
+                            size_mb: Some(16384),
+                            mem_type: Some("DDR5".to_string()),
+                        },
+                    ],
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             ..Default::default()
@@ -776,11 +781,14 @@ mod tests {
     fn managed_host_output_preserves_all_primary_interface_addresses() {
         value_scenarios!(
             run = |addresses| ManagedHostOutput::from(Machine {
-                interfaces: vec![rpc::MachineInterface {
-                    primary_interface: true,
-                    address: addresses,
+                status: Some(rpc::forge::MachineStatus {
+                    interfaces: vec![rpc::MachineInterface {
+                        primary_interface: true,
+                        address: addresses,
+                        ..Default::default()
+                    }],
                     ..Default::default()
-                }],
+                }),
                 ..Default::default()
             })
             .host_admin_ip;

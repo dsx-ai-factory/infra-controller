@@ -62,10 +62,13 @@ pub(super) struct ControllerEnv {
 
 impl ControllerEnv {
     pub(super) async fn new(pool: PgPool) -> Self {
+        Self::with_rack_profiles(pool, rms_rack_profiles()).await
+    }
+
+    pub(super) async fn with_rack_profiles(pool: PgPool, rack_profiles: RackProfileConfig) -> Self {
         let credential_manager = Arc::new(TestCredentialManager::default());
         let redfish_sim = Arc::new(RedfishSim::default());
         let rms_sim = Arc::new(RmsSim::default());
-        let rack_profiles = rms_rack_profiles();
         let mut runtime_config = carbide_test_harness::test_support::default_config::get();
         runtime_config.rack_profiles = rack_profiles.clone();
         let per_object_metrics_registry = PerObjectMetricsRegistry::new(

@@ -35,15 +35,27 @@ resources: {}
 ## a positive integer (validated at render).
 fileDescriptorLimit: 65536
 
-## Additional containers appended verbatim to the pod spec after the
-## nico-hardware-health container, for example a telemetry collector sidecar.
+## Additional containers appended in list order after the nico-hardware-health
+## container, for example a telemetry collector sidecar. Omitted or empty lists
+## add no extra containers.
+## Quote tags (for example, tag: "1.10") to preserve their exact text.
+## YAML parses unquoted 1.10 as 1.1; unquoted 0 is treated as empty and falls
+## back to image. Use "0" to select the literal tag 0.
+## Set both non-empty `repository` + `tag` to build `image: <repository>:<tag>`;
+## they take precedence over `image`. If either is omitted or empty, supply `image`
+## (a tag or digest reference). No repository or tag defaults come from global.image.
+## Rendering fails if neither form supplies an image; the error identifies the list entry.
+## The chart consumes repository and tag; all other Kubernetes container fields
+## pass through unchanged, and mounts are not injected.
 ## The chart sets no pod-level securityContext, so each extra container runs
 ## with only the securityContext it declares itself and is not covered by any
 ## chart hardening. Set securityContext on every extra container.
 extraContainers: []
 # extraContainers:
 #   - name: collector
-#     image: <your-registry>/collector:<tag>
+#     repository: <your-registry>/collector
+#     tag: "<tag>"
+#     # Alternatively: image: <your-registry>/collector:<tag>
 #     args: ["--config=/etc/collector/config.yaml"]
 #     volumeMounts:
 #       - name: collector-config

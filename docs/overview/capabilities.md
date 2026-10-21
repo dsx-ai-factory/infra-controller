@@ -38,7 +38,7 @@ NICo treats every host as untrustworthy by default:
 - Host attestation via Measured Boot PCR checking and TPM signature verification through the TPM Manufacturer CA
 - UEFI lockdown during active use, which prevents unauthorized BIOS changes while a tenant has the host
 - Managed BMC credentials (per site) and UEFI credentials (per device)
-- Secure erase of NVMe storage, GPU memory, and system memory between tenant uses
+- Secure erase of NVMe and SAS/SATA drives between tenant uses, with verification of the UEFI memory-overwrite request
 - Out-of-band monitoring only, as NICo never relies on in-band host reporting for security decisions
 
 ## Continuous Compliance and Firmware Control

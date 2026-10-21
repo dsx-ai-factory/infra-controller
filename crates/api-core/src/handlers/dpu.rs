@@ -21,7 +21,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use ::rpc::errors::RpcDataConversionError;
-use ::rpc::model::{RpcInto, RpcTryFrom};
+use ::rpc::model::RpcInto;
 use ::rpc::{common as rpc_common, forge as rpc};
 use carbide_dpf::{DpuDeploymentType, dpu_cr_name, dpu_node_cr_name};
 use carbide_network::virtualization::VpcVirtualizationType;
@@ -57,8 +57,8 @@ use tonic::{Request, Response, Status};
 use crate::api::{Api, log_machine_id, log_request_data};
 use crate::cfg::file::VpcIsolationBehaviorType;
 use crate::handlers::astra::{get_astra_config, process_astra_config_status};
-use crate::handlers::extension_service;
 use crate::handlers::utils::{StateHandlerWakeupFailed, WakeupTrigger, convert_and_log_machine_id};
+use crate::handlers::{extension_service, lldp};
 use crate::{CarbideError, cfg, ethernet_virtualization};
 
 /// vxlan48 is special HBN single vxlan device. It handles networking between machines on the
@@ -188,8 +188,7 @@ async fn get_managed_host_network_config_inner(
         }
     };
 
-    let mut maybe_instance =
-        Option::<rpc::Instance>::rpc_try_from(snapshot.clone()).map_err(CarbideError::from)?;
+    let mut maybe_instance = super::instance::snapshot_to_optional_instance(snapshot.clone())?;
 
     let primary_dpu_snapshot = snapshot
         .host_snapshot
@@ -740,6 +739,10 @@ async fn get_managed_host_network_config_inner(
     let astra_config = get_astra_config(api, &snapshot).await?;
 
     let resp = rpc::ManagedHostNetworkConfigResponse {
+        // TODO(Service VPC): Populate these fields for the authenticated receiving
+        // DPU when managed-host responses include service networking.
+        service_interfaces: vec![],
+        service_vpc_slot_inventory: None,
         instance_id: snapshot.instance.as_ref().map(|instance| instance.id),
         asn,
         dhcp_servers: api
@@ -1150,35 +1153,28 @@ pub(crate) async fn record_dpu_network_status(
         .await?;
     }
 
+    if let Some(lldp) = request.lldp {
+        lldp::handle_lldp_report(&mut txn, &dpu_machine_id, lldp).await?;
+    }
+
     txn.commit().await?;
 
-    // Check if we need to flag this forge-dpu-agent for upgrade or mark an upgrade completed
-    // We do this here because we just learnt about which version of forge-dpu-agent is
-    // running.
+    // Read upgrade inputs after committing the report. A concurrent report may
+    // already have persisted a later observation than the one in this request.
     let mut txn = api.txn_begin().await?;
 
     if let Some(policy) = dpu_agent_upgrade_policy::get(&mut txn).await? {
-        let snapshot =
-            db::managed_host::load_snapshot(&mut txn, &dpu_machine_id, Default::default())
-                .await?
-                .ok_or(CarbideError::NotFoundError {
-                    kind: "machine",
-                    id: dpu_machine_id.to_string(),
-                })?;
-
-        let dpu_machine = snapshot
-            .dpu_snapshots
-            .iter()
-            .find(|x| x.id == dpu_machine_id)
-            .ok_or_else(|| CarbideError::NotFoundError {
-                kind: "dpu",
+        let upgrade_status = db::machine::find_dpu_agent_upgrade_status(&mut txn, &dpu_machine_id)
+            .await?
+            .ok_or(CarbideError::NotFoundError {
+                kind: "machine",
                 id: dpu_machine_id.to_string(),
             })?;
 
-        if snapshot.host_snapshot.config.dpf.used_for_ingestion {
+        if upgrade_status.host_dpf_used_for_ingestion {
             // DPF-managed DPUs don't use this upgrade path. Clear any stale flag so the DPU
             // doesn't keep receiving upgrade signals after the host was switched to DPF.
-            if dpu_machine.needs_agent_upgrade() {
+            if upgrade_status.upgrade_requested {
                 db::machine::set_dpu_agent_upgrade_requested(
                     &mut txn,
                     &dpu_machine_id,
@@ -1188,8 +1184,7 @@ pub(crate) async fn record_dpu_network_status(
                 .await?;
             }
         } else {
-            let _needs_upgrade =
-                db::machine::apply_agent_upgrade_policy(&mut txn, policy, dpu_machine).await?;
+            db::machine::apply_agent_upgrade_policy(&mut txn, policy, &upgrade_status).await?;
         }
     }
 
@@ -1198,8 +1193,6 @@ pub(crate) async fn record_dpu_network_status(
     if let Some(astra_config_status) = request.astra_config_status.as_ref() {
         process_astra_config_status(api, &dpu_machine_id, astra_config_status).await?;
     }
-
-    // TODO Handle the LLDP report in the next PR.
 
     // If this all worked and the DPU is healthy, we shouldn't emit a log line
     // If there is any error the report, the logging of the follow-up report is
@@ -1585,6 +1578,19 @@ fn validate_dpu_reprovisioning_request(
         return Err(CarbideError::internal(
             "reprovisioning is already started".to_string(),
         ));
+    }
+
+    if snapshot.host_snapshot.config.dpf.used_for_ingestion
+        && machine_id.machine_type().is_dpu()
+        && snapshot.dpu_snapshots.len() > 1
+    {
+        // DPF siblings share a DPUNode and must use the same deployment template.
+        // Require the host ID for Set/Clear/Restart to handle all attached DPUs together.
+        return Err(CarbideError::FailedPrecondition(format!(
+            "DPF-ingested host {} requires reprovisioning every attached DPU together; \
+             use host machine ID {} for set, clear, or restart",
+            snapshot.host_snapshot.id, snapshot.host_snapshot.id,
+        )));
     }
 
     if mode == rpc::dpu_reprovisioning_request::Mode::Set {

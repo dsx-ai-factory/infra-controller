@@ -164,11 +164,20 @@ Kubernetes Secret does not install or bind the server identity on a switch.
 
 ### Grafana Dashboards
 
-The chart packages three dashboards built from NICo's exported Prometheus
-metrics: a site overview, object lifecycle diagnostics, and API performance.
+The chart packages six dashboards built from NICo's exported Prometheus
+metrics: a site overview, a deep per-site detail view, a multi-site fleet
+rollup, object lifecycle diagnostics, API performance, and BMC performance.
 They are disabled by default because this chart does not install Grafana.
 The source JSON files live in [`observability/dashboards/`](./observability/dashboards/) and can also be
 imported into Grafana directly.
+
+Most fleet dashboard panels group by a site label, which defaults to
+`forge_site`, the external label the NICo observability bundle sets per site.
+Fleet-wide totals, such as Distinct API versions and the Fleet BMC connection
+panels, aggregate across all sites.
+A Prometheus that serves only its own site leaves that label empty, because
+Prometheus attaches external labels only when data leaves the server; set the
+dashboard's `site_label` variable to `job` there.
 
 To expose the dashboards to a Grafana dashboard sidecar in the release
 namespace:
@@ -194,6 +203,20 @@ grafanaDashboards:
     grafana_dashboard: "1"
   annotations: {}
 ```
+
+The chart creates one ConfigMap per dashboard, so a single large dashboard
+cannot push the set past the 1 MiB object limit. Each name is
+`<release-namespace>-<release-name>-<dashboard>`, where the dashboard part is
+the JSON filename without its extension. The prefix is the Helm release
+namespace and release name, not `grafanaDashboards.namespace`. The namespace
+and release parts are truncated to 16 characters each, and the full name to 63.
+Long namespaces or release names therefore shorten the rendered name. Read the
+name back with `helm get manifest` before you reference it from a `configMapRef`.
+
+Upgrading from a chart version that rendered a single
+`<release-namespace>-<release-name>-grafana-dashboards` ConfigMap removes that
+ConfigMap. Update any `configMapRef` that points to it to use the per-dashboard
+names.
 
 The target namespace must exist before Helm runs, and the Helm identity must be
 allowed to create ConfigMaps there. The Grafana sidecar must also watch that
@@ -300,7 +323,7 @@ nico-api:
       metallb.universe.tf/loadBalancerIPs: "10.x.x.x"
 ```
 
-Services with external LoadBalancer support: `nico-api`, `nico-dhcp`, `nico-dns`, `nico-ntp`, `nico-pxe`, and `nico-ssh-console-rs`.
+Services with external LoadBalancer support: `nico-api`, `nico-dhcp`, `nico-dns`, `nico-ntp`, `nico-pxe`, `nico-ssh-console-rs`, and `unbound`.
 
 For StatefulSet-based services (`nico-dns`, `nico-ntp`), per-pod LoadBalancer IPs can be assigned:
 
@@ -313,13 +336,105 @@ nico-dns:
       - metallb.universe.tf/loadBalancerIPs: "10.x.x.2"   # pod-1
 ```
 
+#### Sharing External IPs
+
+By default every external Service keeps its own LoadBalancer IP, and the
+standard site layout uses ten IPs: API, DHCP, two DNS replicas, PXE, SSH
+console, three NTP replicas, and unbound. Sharing is optional. Nothing is
+shared unless a values file asks for it, and existing sites render the same
+Services on upgrade.
+
+Compatible Services can share one LoadBalancer IP, differentiated by protocol
+and port. Sharing is requested through the load-balancer controller's own
+annotations, so it works with any controller that supports them. The chart
+makes no assumption beyond passing the annotations through.
+
+- `nico-dns`, `nico-pxe`, and `unbound` add a built-in sharing annotation so
+  their own UDP and TCP (or port 80 and 8080) Services share one IP. The key is
+  `externalService.sharedIpAnnotation` (default
+  `metallb.universe.tf/allow-shared-ip`). Change it for a controller that uses
+  a different key, or set it to `""` to omit it. An operator annotation under
+  either MetalLB spelling (`metallb.universe.tf/allow-shared-ip` or
+  `metallb.io/allow-shared-ip`) replaces the built-in annotation, so a Service
+  never carries two sharing values. Other operator annotations are merged next
+  to the built-in one, and an entry with the same key as
+  `externalService.sharedIpAnnotation` overrides its value.
+- Other charts pass `externalService.annotations` (or `perPodAnnotations`)
+  through unchanged. Add the controller's sharing annotation there to join a
+  group.
+- External ports are configurable where sharing may need them:
+  `nico-api.externalService.port` (443), `nico-pxe.externalService.port`
+  (8080), `nico-pxe.externalService.alternatePort` (80, `0` omits the second
+  Service), and `nico-ssh-console-rs.externalService.port` (22). Backend target
+  ports do not change. DNS, DHCP, and NTP keep their standard ports.
+- `externalService.externalTrafficPolicy` is configurable on each chart's
+  external Service. Defaults are unchanged: `Local` for `nico-api`, `nico-pxe`,
+  and `nico-ntp`, and the Kubernetes default (`Cluster`) for `nico-dhcp`,
+  `nico-dns`, `nico-ssh-console-rs`, and `unbound`. The DHCPv6
+  relay Service (`nico-dhcp.v6ExternalService`) stays `Local`. `Local`
+  preserves client source IPs, and `Cluster` may SNAT them. MetalLB only lets a
+  `Local` Service share an IP with Services that select the same pods, so
+  `nico-api`, `nico-pxe`, and each NTP replica keep their own IPs unless you
+  switch them to `Cluster` deliberately.
+
+Two Services on one IP must not use the same protocol and port, so `unbound`
+and `nico-dns` cannot share an IP. Per-replica DNS and NTP endpoints stay
+separate, and sharing never collapses replicas.
+
+A shared IP merges the network scope of every Service on it. Firewalls, ACLs,
+and policers that match on the destination IP now apply to all of those
+Services, so filter by port and review the ACLs before sharing. In the
+eight-IP example, an ACL that limits the SSH console IP to administrators
+would also have to allow every host that uses the shared unbound resolver.
+
+##### Eight-IP Example
+
+[`examples/values-shared-external-ips.yaml`](./examples/values-shared-external-ips.yaml)
+is an overlay for your site values that fits the external Services into eight
+IPs with every port at its default. Apply it after your site values, from the
+repository root:
+
+```bash
+helm upgrade --install nico ./helm -n nico-system -f my-site-values.yaml -f helm/examples/values-shared-external-ips.yaml
+```
+
+| Service, replica | Protocol and port | Shared IP group | Traffic policy and restriction |
+|------------------|-------------------|-----------------|--------------------------------|
+| nico-api | TCP 443 | own IP | Local, shares only with identical selectors |
+| nico-pxe | TCP 8080 and 80 | own IP, built-in `nico-pxe` sharing value | Local, shares only with identical selectors |
+| nico-ssh-console-rs | TCP 22 | `nico-shared` | Cluster |
+| nico-dhcp | UDP 67 | `nico-shared` | Cluster, IP is the DHCP server identifier |
+| unbound | UDP and TCP 53 | `nico-shared` | Cluster, cannot share with nico-dns (port 53) |
+| nico-dns-0, nico-dns-1 | UDP and TCP 53 | one IP per replica | Cluster |
+| nico-ntp-0, nico-ntp-1, nico-ntp-2 | UDP 123 | one IP per replica | Local, shares only with identical selectors |
+
+The count covers the enabled external Services above, including the optional
+`nico-ntp` and `unbound` charts. It excludes the DHCPv6 relay VIP
+(`nico-dhcp.v6ExternalService`), the `nico-bmc-proxy` and
+`nico-machine-a-tron` external Services, which are disabled by default, and
+any ingress or observability VIPs installed outside this chart. Switching
+`nico-api` or `nico-pxe` to `Cluster` frees one more IP at the cost of client
+source IPs, provided the Service also joins a shared group: set its
+`loadBalancerIPs` annotation to the group's IP and its sharing annotation to
+the group's value. For `nico-pxe`, an `annotations` entry with the sharing key
+replaces the built-in `nico-pxe` value.
+
+The sharing rules above are MetalLB's. For another load-balancer controller,
+confirm its sharing annotation key, whether it supports IP sharing at all, and
+its `Local` policy rules before relying on this plan. Both `nico-pxe` ports
+are in use: UEFI HTTP boot fetches iPXE from port 8080, and DPU agents reach
+the PXE server on port 80. The two `nico-pxe` Services exist for those two
+clients and share one IP. A controller that cannot share IPs needs a single
+Service that exposes both ports, which the chart does not render, so do not
+set `alternatePort: 0` to work around it.
+
 ## Architecture
 
 ### Workload Summary
 
 | Subchart | Workload Type | Primary Port(s) | TLS Certificate | Metrics |
 |----------|--------------|-----------------|-----------------|---------|
-| nico-api | Deployment | 1079 (gRPC), 1080 (metrics), 1081 (profiler) | Yes | ServiceMonitor |
+| nico-api | Deployment | 1079 (gRPC), 1080 (metrics) | Yes | ServiceMonitor |
 | nico-bmc-proxy | Deployment | 1079 (gRPC), 1080 (metrics) | Yes | ServiceMonitor |
 | nico-dhcp | Deployment | 67/UDP, 1089 (metrics) | Yes | ServiceMonitor |
 | nico-dns | StatefulSet | 53/TCP, 53/UDP | Yes | -- |
@@ -354,6 +469,7 @@ For reference configurations, see:
 
 - [`examples/values-minimal.yaml`](./examples/values-minimal.yaml) -- Minimal deployment with only the core services
 - [`examples/values-full.yaml`](./examples/values-full.yaml) -- Full deployment with all services and production settings
+- [`examples/values-shared-external-ips.yaml`](./examples/values-shared-external-ips.yaml) -- Overlay that fits the external Services into eight LoadBalancer IPs
 
 ## Migrating from Kustomize
 
@@ -515,6 +631,29 @@ helm unittest helm/nico-flow
 ```
 
 Test files live in `tests/` directories within each chart. CI runs these tests automatically on every PR.
+
+### PXE runtime regression (manual developer test)
+
+Run this regression after changing PXE packaging, artifact init containers, or
+chart serving paths. CI runs Helm unit tests and the PXE Kustomize render check;
+it does not run this kind-based HTTP test. The developer supplies the locally
+built PXE image and invokes the command below.
+
+The PXE runtime regression requires Docker, kind, kubectl, Helm, curl, jq, and a
+locally built PXE runtime image containing the binary, templates, and coreutils.
+The Docker host needs enough inotify instances available for a new kind cluster.
+It creates and removes its own kind cluster and fixture image. It verifies HTTP
+serving as UID 10001 for `0600` artifacts copied with legacy commands and for
+artifacts bundled in the image. A later custom init creates a `0700` tree owned
+by another UID; the permissions init must preserve that owner while granting
+group 10001 access using only `CHOWN`, `FOWNER`, and `DAC_OVERRIDE`, with privilege
+escalation disabled. The test includes a custom serving path and exercises the
+Kustomize artifact-copy component without the optional legacy ConfigMap. It does
+not provision a host or call Core.
+
+```bash
+PXE_TEST_IMAGE=nico-pxe:<local-tag> bash helm/tests/runtime/test-pxe-boot-artifacts.sh
+```
 
 ## Uninstalling
 

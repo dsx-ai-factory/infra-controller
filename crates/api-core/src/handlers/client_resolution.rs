@@ -15,14 +15,17 @@
  * limitations under the License.
  */
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use ::rpc::forge as rpc;
-use carbide_uuid::machine::{DpuMachineId, MachineIdSubtypeTrait};
+use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineIdSubtypeTrait};
 use carbide_uuid::network::NetworkSegmentId;
 use db::ObjectColumnFilter;
 use db::db_read::DbReader;
+use model::instance::config::network::{
+    DeviceLocator, InstanceNetworkConfig, InstanceNetworkConfigUpdate, InterfaceFunctionId,
+};
 use model::instance::config::tenant_config::HOSTNAME_RE;
 use model::instance::snapshot::InstanceSnapshot;
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -40,13 +43,7 @@ use crate::api::Api;
 /// tenant-allocated `instance_address` (instance case).
 enum ResolvedClient {
     MachineInterface(Box<MachineInterfaceSnapshot>),
-    Instance(Box<InstanceSnapshot>),
-}
-
-impl From<InstanceSnapshot> for ResolvedClient {
-    fn from(snapshot: InstanceSnapshot) -> Self {
-        ResolvedClient::Instance(Box::new(snapshot))
-    }
+    Instance(Box<OverlayAddressOwner>),
 }
 
 impl From<MachineInterfaceSnapshot> for ResolvedClient {
@@ -65,6 +62,42 @@ enum PreferredLookup {
 pub(super) struct OverlayAddressOwner {
     instance: InstanceSnapshot,
     segment_ids: HashSet<NetworkSegmentId>,
+}
+
+/// A configured function and its placement. Function identity keeps a PF and
+/// VF on the same DPU distinct when retained configurations are compared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct InstanceAttachment<'a> {
+    function_id: &'a InterfaceFunctionId,
+    device_locator: Option<&'a DeviceLocator>,
+}
+
+fn matching_instance_attachments<'a>(
+    client_ip: IpAddr,
+    segment_ids: &HashSet<NetworkSegmentId>,
+    network: &'a InstanceNetworkConfig,
+    update: Option<&'a InstanceNetworkConfigUpdate>,
+) -> HashSet<InstanceAttachment<'a>> {
+    // Both sides of a network update can own addresses until old resources
+    // are released. Match the live segment too, since VPCs can reuse an IP.
+    std::iter::once(network)
+        .chain(
+            update
+                .into_iter()
+                .flat_map(|update| [&update.old_config, &update.new_config]),
+        )
+        .flat_map(|config| &config.interfaces)
+        .filter(|interface| {
+            interface
+                .network_segment_id
+                .is_some_and(|segment| segment_ids.contains(&segment))
+                && interface.ip_addrs.values().any(|ip| *ip == client_ip)
+        })
+        .map(|interface| InstanceAttachment {
+            function_id: &interface.function_id,
+            device_locator: interface.device_locator.as_ref(),
+        })
+        .collect()
 }
 
 /// The overlay ownership states an IP-only caller needs to distinguish.
@@ -169,13 +202,13 @@ async fn resolve_client_ip(
         (Some(machine_interface), OverlayAddressOwnerLookup::NotFound) => {
             Ok(machine_interface.into())
         }
-        (None, OverlayAddressOwnerLookup::One(owner)) => Ok(owner.instance.into()),
+        (None, OverlayAddressOwnerLookup::One(owner)) => Ok(ResolvedClient::Instance(owner)),
         (Some(machine_interface), OverlayAddressOwnerLookup::One(owner))
             if is_same_host_inband_interface(&machine_interface, &owner) =>
         {
             Ok(match preferred_lookup {
                 PreferredLookup::MachineInterface => machine_interface.into(),
-                PreferredLookup::Instance => owner.instance.into(),
+                PreferredLookup::Instance => ResolvedClient::Instance(owner),
             })
         }
         (Some(machine_interface), OverlayAddressOwnerLookup::One(owner)) => {
@@ -193,16 +226,21 @@ async fn resolve_client_ip(
 }
 
 /// Resolve a client IP to the host's `machine_interface` for PXE-script
-/// generation. For direct-interface IPs this returns the matching
-/// interface; for tenant-allocated IPs it resolves through the instance
-/// to the host's machine_interfaces, and prefers an admin-segment one.
+/// generation and discovery cloud-init. For direct-interface IPs this returns
+/// the matching interface. For tenant-allocated IPs it resolves through the
+/// instance's configured physical attachment. Retained configurations must
+/// agree on the function and attachment. VF requests and addresses without a
+/// matching config use compatibility selection: primary, then an Admin-segment
+/// interface, then the first interface. Omitted placement uses this fallback
+/// when the host has no primary interface.
 pub(super) async fn resolve_machine_interface(
     conn: &mut PgConnection,
     client_ip: IpAddr,
 ) -> Result<MachineInterfaceSnapshot, CarbideError> {
     match resolve_client_ip(conn, client_ip, PreferredLookup::MachineInterface).await? {
         ResolvedClient::MachineInterface(iface) => Ok(*iface),
-        ResolvedClient::Instance(instance) => {
+        ResolvedClient::Instance(owner) => {
+            let instance = &owner.instance;
             let interfaces_by_machine =
                 db::machine_interface::find_by_machine_ids(&mut *conn, &[instance.machine_id])
                     .await?;
@@ -216,15 +254,61 @@ pub(super) async fn resolve_machine_interface(
                         ))
                     })?;
 
+            let attachments = matching_instance_attachments(
+                client_ip,
+                &owner.segment_ids,
+                &instance.config.network,
+                instance.update_network_config_request.as_ref(),
+            );
+            let needs_physical_resolution = attachments.len() > 1
+                || attachments.iter().any(|attachment| {
+                    matches!(attachment.function_id, InterfaceFunctionId::Physical {})
+                });
+            let dpu_ids_by_device = if needs_physical_resolution
+                && attachments
+                    .iter()
+                    .any(|attachment| attachment.device_locator.is_some())
+            {
+                let host = db::machine::find_one(
+                    &mut *conn,
+                    &instance.machine_id,
+                    MachineSearchConfig::default(),
+                )
+                .await?
+                .ok_or_else(|| {
+                    CarbideError::internal(format!(
+                        "host {} disappeared during client resolution",
+                        instance.machine_id
+                    ))
+                })?;
+                host.get_dpu_device_and_id_mappings()?.1
+            } else {
+                HashMap::new()
+            };
+            if let Some(interface) = select_instance_attachment(
+                client_ip,
+                &attachments,
+                host_interfaces,
+                &dpu_ids_by_device,
+            )? {
+                return Ok(interface.clone());
+            }
+
             let admin_segment_ids: HashSet<_> = db::network_segment::admin(&mut *conn)
                 .await?
                 .into_iter()
                 .map(|s| s.id)
                 .collect();
 
+            // Keep compatibility selection when no configured PF was selected.
             host_interfaces
                 .iter()
-                .find(|i| admin_segment_ids.contains(&i.segment_id))
+                .find(|i| i.primary_interface)
+                .or_else(|| {
+                    host_interfaces
+                        .iter()
+                        .find(|i| admin_segment_ids.contains(&i.segment_id))
+                })
                 .or_else(|| host_interfaces.first())
                 .cloned()
                 .ok_or_else(|| {
@@ -234,6 +318,74 @@ pub(super) async fn resolve_machine_interface(
                     ))
                 })
         }
+    }
+}
+
+/// Returns the configured PF's host interface when retained descriptions agree.
+/// Conflicting descriptions or unresolved explicit placement fail. No matching
+/// config, agreeing VFs, or omitted placement without a primary return `None`
+/// for compatibility selection; a sole VF needs no placement resolution.
+fn select_instance_attachment<'a>(
+    client_ip: IpAddr,
+    attachments: &HashSet<InstanceAttachment<'_>>,
+    host_interfaces: &'a [MachineInterfaceSnapshot],
+    dpu_ids_by_device: &HashMap<String, Vec<DpuMachineId>>,
+) -> Result<Option<&'a MachineInterfaceSnapshot>, CarbideError> {
+    let Some(first) = attachments.iter().next() else {
+        return Ok(None);
+    };
+    if attachments.len() == 1 && matches!(first.function_id, InterfaceFunctionId::Virtual { .. }) {
+        return Ok(None);
+    }
+
+    let primary = host_interfaces
+        .iter()
+        .find(|interface| interface.primary_interface);
+    let mut selected: Option<(&InterfaceFunctionId, Option<&MachineInterfaceSnapshot>)> = None;
+    for attachment in attachments {
+        let interface = match attachment.device_locator {
+            None => primary,
+            Some(locator) => {
+                let dpu_id = dpu_ids_by_device
+                    .get(&locator.device)
+                    .and_then(|ids| ids.get(locator.device_instance))
+                    .ok_or_else(|| {
+                        CarbideError::FailedPrecondition(format!(
+                            "client IP {client_ip} has no managed DPU for device locator {locator}"
+                        ))
+                    })?;
+                let mut interfaces = host_interfaces.iter().filter(|interface| {
+                    interface.interface_type == InterfaceType::Data
+                        && interface.attached_dpu_machine_id == Some(*dpu_id)
+                });
+                let interface = interfaces.next().ok_or_else(|| {
+                    CarbideError::FailedPrecondition(format!(
+                        "client IP {client_ip} has no host interface for device locator {locator}"
+                    ))
+                })?;
+                if interfaces.next().is_some() {
+                    return Err(CarbideError::FailedPrecondition(format!(
+                        "client IP {client_ip} has multiple host interfaces for device locator {locator}"
+                    )));
+                }
+                Some(interface)
+            }
+        };
+        if let Some((function_id, selected_interface)) = selected
+            && (function_id != attachment.function_id
+                || selected_interface.map(|interface| interface.id)
+                    != interface.map(|interface| interface.id))
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "client IP {client_ip} has conflicting retained interface configurations"
+            )));
+        }
+        selected = Some((attachment.function_id, interface));
+    }
+
+    match selected {
+        Some((InterfaceFunctionId::Physical {}, interface)) => Ok(interface),
+        _ => Ok(None),
     }
 }
 
@@ -327,9 +479,9 @@ pub(super) async fn resolve_cloud_init_instructions(
         let mut resolved = resolve_client_ip(conn, client_ip, PreferredLookup::Instance).await?;
 
         // Is this an instance IP? If so, we use its cloud-init config *only* if it's Assigned/Ready.
-        if let ResolvedClient::Instance(instance) = &resolved
+        if let ResolvedClient::Instance(owner) = &resolved
             && let Some(managed_host_state) =
-                db::machine::lookup_managed_host_state(&mut *conn, instance.machine_id.into())
+                db::machine::lookup_managed_host_state(&mut *conn, owner.instance.machine_id.into())
                     .await?
         {
             let is_assigned_and_ready = matches!(
@@ -341,8 +493,8 @@ pub(super) async fn resolve_cloud_init_instructions(
 
             if !is_assigned_and_ready {
                 tracing::info!(
-                    instance_id=%instance.id,
-                    machine_id=%instance.machine_id,
+                    instance_id=%owner.instance.id,
+                    machine_id=%owner.instance.machine_id,
                     managed_host_state = %managed_host_state,
                     "cloud-init instructions: machine is not Assigned/Ready, using discovery cloud-init"
                 );
@@ -355,7 +507,8 @@ pub(super) async fn resolve_cloud_init_instructions(
     };
 
     match resolved_ip {
-        ResolvedClient::Instance(instance) => {
+        ResolvedClient::Instance(owner) => {
+            let instance = owner.instance;
             let local_hostname = if HOSTNAME_RE.is_match(&instance.metadata.name) {
                 Some(instance.metadata.name.clone())
             } else {
@@ -381,20 +534,33 @@ pub(super) async fn resolve_cloud_init_instructions(
             })
         }
         ResolvedClient::MachineInterface(machine_interface) => {
-            let domain_id = machine_interface.domain_id.ok_or_else(|| {
-                CarbideError::internal(format!(
-                    "machine interface did not have an associated domain {}",
-                    machine_interface.id
-                ))
-            })?;
-
-            let domain = db::dns::domain::find_by_uuid(&mut *conn, domain_id)
-                .await
-                .map_err(CarbideError::from)?
-                .ok_or_else(|| {
-                    CarbideError::internal(format!("could not find domain with id {domain_id}"))
-                })?
-                .to_owned();
+            let domain = match machine_interface.domain_id {
+                Some(domain_id) => Some(
+                    db::dns::domain::find_by_uuid(&mut *conn, domain_id)
+                        .await?
+                        .ok_or_else(|| {
+                            CarbideError::internal(format!(
+                                "could not find domain with id {domain_id}"
+                            ))
+                        })?,
+                ),
+                // Host Data interfaces, including predicted hosts, use machine
+                // identity for Scout metadata and need no domain. This includes
+                // secondary interfaces booting over tenant networking on release.
+                None if machine_interface.interface_type == InterfaceType::Data
+                    && machine_interface
+                        .machine_id
+                        .is_some_and(|id| HostMachineId::try_from(id).is_ok()) =>
+                {
+                    None
+                }
+                None => {
+                    return Err(CarbideError::internal(format!(
+                        "machine interface did not have an associated domain {}",
+                        machine_interface.id
+                    )));
+                }
+            };
 
             // This custom pxe is different from a customer instance of pxe. It is more for testing
             // one off changes until a real dev env is established and we can just override our
@@ -451,7 +617,7 @@ pub(super) async fn resolve_cloud_init_instructions(
                 custom_cloud_init,
                 discovery_instructions: Some(rpc::CloudInitDiscoveryInstructions {
                     machine_interface: Some((*machine_interface).into()),
-                    domain: Some(rpc::PxeDomain {
+                    domain: domain.map(|domain| rpc::PxeDomain {
                         domain: Some(rpc::pxe_domain::Domain::NewDomain(domain.into())),
                     }),
                     hbn_reps: vmaas_config.and_then(|config| config.hbn_reps.clone()),
@@ -469,5 +635,244 @@ pub(super) async fn resolve_cloud_init_instructions(
                 pxe_url_override,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::{Fails, Yields};
+    use carbide_test_support::scenarios;
+    use carbide_uuid::machine::MachineInterfaceId;
+    use mac_address::MacAddress;
+    use model::test_support::machine_snapshot::{dpu_machine_id, host_machine_id};
+
+    use super::*;
+
+    fn host_interface(index: u8) -> MachineInterfaceSnapshot {
+        let mut interface =
+            MachineInterfaceSnapshot::mock_with_mac(MacAddress::new([0x02, 0, 0, 0, 0, index]));
+        interface.id = MachineInterfaceId::from(uuid::Uuid::from_u128(index.into()));
+        interface.machine_id = Some(host_machine_id().into());
+        interface.attached_dpu_machine_id = Some(dpu_machine_id(index));
+        interface.primary_interface = index == 0;
+        interface
+    }
+
+    #[test]
+    fn retained_configs_match_the_exact_address_and_live_segment() {
+        // Full descriptions preserve placement differences for one function,
+        // deduplicate repeated descriptions, and expose omitted retained configs.
+        let client_ip = "192.0.2.10".parse().unwrap();
+        let segment = NetworkSegmentId::from(uuid::Uuid::from_u128(1));
+        let other_segment = NetworkSegmentId::from(uuid::Uuid::from_u128(2));
+        let config = |function_id, segment, ip| {
+            let mut config = InstanceNetworkConfig::for_segment_ids(&[segment], &[], &[]);
+            config.interfaces[0].function_id = InterfaceFunctionId::Virtual { id: function_id };
+            config.interfaces[0]
+                .ip_addrs
+                .insert(uuid::Uuid::nil().into(), ip);
+            config
+        };
+        let mut network = config(1, segment, client_ip);
+        network
+            .interfaces
+            .extend(config(4, segment, "192.0.2.11".parse().unwrap()).interfaces);
+        network
+            .interfaces
+            .extend(config(5, other_segment, client_ip).interfaces);
+        let mut update = InstanceNetworkConfigUpdate {
+            old_config: config(2, segment, client_ip),
+            new_config: config(3, segment, client_ip),
+        };
+        let secondary_locator = DeviceLocator {
+            device: "BlueField".into(),
+            device_instance: 1,
+        };
+        let mut secondary = network.interfaces[0].clone();
+        secondary.device_locator = Some(secondary_locator.clone());
+        update.old_config.interfaces.push(secondary.clone());
+        update.new_config.interfaces.push(secondary);
+
+        let attachments = matching_instance_attachments(
+            client_ip,
+            &HashSet::from([segment]),
+            &network,
+            Some(&update),
+        );
+        assert_eq!(
+            attachments,
+            HashSet::from([
+                InstanceAttachment {
+                    function_id: &InterfaceFunctionId::Virtual { id: 1 },
+                    device_locator: None
+                },
+                InstanceAttachment {
+                    function_id: &InterfaceFunctionId::Virtual { id: 2 },
+                    device_locator: None
+                },
+                InstanceAttachment {
+                    function_id: &InterfaceFunctionId::Virtual { id: 3 },
+                    device_locator: None
+                },
+                InstanceAttachment {
+                    function_id: &InterfaceFunctionId::Virtual { id: 1 },
+                    device_locator: Some(&secondary_locator)
+                },
+            ]),
+        );
+    }
+
+    #[test]
+    fn retained_attachments_must_agree_on_function_and_placement() {
+        let interfaces = [host_interface(0), host_interface(1)];
+        let primary_locator = DeviceLocator {
+            device: "BlueField".into(),
+            device_instance: 0,
+        };
+        let secondary_locator = DeviceLocator {
+            device_instance: 1,
+            ..primary_locator.clone()
+        };
+        let missing_locator = DeviceLocator {
+            device_instance: 2,
+            ..primary_locator.clone()
+        };
+        let dpu_ids_by_device = HashMap::from([(
+            primary_locator.device.clone(),
+            vec![dpu_machine_id(0), dpu_machine_id(1)],
+        )]);
+        let implicit_pf = InstanceAttachment {
+            function_id: &InterfaceFunctionId::Physical {},
+            device_locator: None,
+        };
+        let primary_pf = InstanceAttachment {
+            device_locator: Some(&primary_locator),
+            ..implicit_pf
+        };
+        let secondary_pf = InstanceAttachment {
+            device_locator: Some(&secondary_locator),
+            ..implicit_pf
+        };
+        let missing_pf = InstanceAttachment {
+            device_locator: Some(&missing_locator),
+            ..implicit_pf
+        };
+        let implicit_vf = InstanceAttachment {
+            function_id: &InterfaceFunctionId::Virtual { id: 1 },
+            ..implicit_pf
+        };
+        let primary_vf = InstanceAttachment {
+            device_locator: Some(&primary_locator),
+            ..implicit_vf
+        };
+        let missing_vf = InstanceAttachment {
+            device_locator: Some(&missing_locator),
+            ..implicit_vf
+        };
+        let other_vf = InstanceAttachment {
+            function_id: &InterfaceFunctionId::Virtual { id: 2 },
+            ..implicit_vf
+        };
+        let select = |attachments: Vec<InstanceAttachment<'_>>| {
+            select_instance_attachment(
+                "192.0.2.10".parse().unwrap(),
+                &attachments.into_iter().collect(),
+                &interfaces,
+                &dpu_ids_by_device,
+            )
+            .map(|interface| interface.map(|interface| interface.id))
+            .map_err(|error| {
+                assert!(
+                    matches!(error, CarbideError::FailedPrecondition(_)),
+                    "{error:?}"
+                );
+            })
+        };
+
+        scenarios!(run = select;
+            "omitted and explicit primary placement agree" {
+                vec![implicit_pf, primary_pf] => Yields(Some(interfaces[0].id)),
+            }
+            "explicit secondary placement resolves" {
+                vec![secondary_pf] => Yields(Some(interfaces[1].id)),
+            }
+            "primary and secondary placement conflict" {
+                vec![implicit_pf, secondary_pf] => Fails,
+            }
+            "a PF does not hide a conflicting VF" {
+                vec![primary_pf, primary_vf] => Fails,
+            }
+            "distinct VF functions conflict" {
+                vec![implicit_vf, other_vf] => Fails,
+            }
+            "equivalent VF placements preserve compatibility" {
+                vec![implicit_vf, primary_vf] => Yields(None),
+            }
+            "a sole VF does not require physical placement" {
+                vec![missing_vf] => Yields(None),
+            }
+            "owner-only allocation preserves compatibility" {
+                vec![] => Yields(None),
+            }
+            "explicit PF placement must resolve" {
+                vec![missing_pf] => Fails,
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_placement_needs_one_host_interface_and_known_implicit_placement() {
+        let locator = DeviceLocator {
+            device: "BlueField".into(),
+            device_instance: 1,
+        };
+        let explicit = InstanceAttachment {
+            function_id: &InterfaceFunctionId::Physical {},
+            device_locator: Some(&locator),
+        };
+        let implicit = InstanceAttachment {
+            device_locator: None,
+            ..explicit
+        };
+        let dpu_ids_by_device = HashMap::from([(
+            locator.device.clone(),
+            vec![dpu_machine_id(0), dpu_machine_id(1)],
+        )]);
+        let secondary = host_interface(1);
+        let mut duplicate = secondary.clone();
+        duplicate.id = MachineInterfaceId::from(uuid::Uuid::from_u128(2));
+        let select = |(attachments, interfaces): (
+            Vec<InstanceAttachment<'_>>,
+            Vec<MachineInterfaceSnapshot>,
+        )| {
+            select_instance_attachment(
+                "192.0.2.10".parse().unwrap(),
+                &attachments.into_iter().collect(),
+                &interfaces,
+                &dpu_ids_by_device,
+            )
+            .map(|interface| interface.map(|interface| interface.id))
+            .map_err(|error| {
+                assert!(
+                    matches!(error, CarbideError::FailedPrecondition(_)),
+                    "{error:?}"
+                );
+            })
+        };
+
+        scenarios!(run = select;
+            "mapped DPU without a host interface fails" {
+                (vec![explicit], vec![host_interface(0)]) => Fails,
+            }
+            "mapped DPU with multiple host interfaces fails" {
+                (vec![explicit], vec![secondary.clone(), duplicate]) => Fails,
+            }
+            "unknown implicit placement cannot agree with an explicit interface" {
+                (vec![implicit, explicit], vec![secondary.clone()]) => Fails,
+            }
+            "omitted placement without primary preserves compatibility" {
+                (vec![implicit], vec![secondary]) => Yields(None),
+            }
+        );
     }
 }

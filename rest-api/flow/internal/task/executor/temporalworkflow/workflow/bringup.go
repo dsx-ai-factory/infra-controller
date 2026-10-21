@@ -54,6 +54,7 @@ func bringUp(
 		ctx,
 		reqInfo.TaskID,
 		typeToTargets,
+		typeToTargets,
 		info,
 		reqInfo.RuleDefinition,
 	)

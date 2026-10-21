@@ -20,6 +20,7 @@
  *  tables in the database, leveraging the site-specific record types.
  */
 
+use carbide_uuid::DbTable;
 use carbide_uuid::measured_boot::{
     MeasurementApprovedMachineId, MeasurementApprovedProfileId, MeasurementSystemProfileId,
     TrustedMachineId,
@@ -41,8 +42,11 @@ pub async fn insert_into_approved_machines(
     pcr_registers: Option<String>,
     comments: Option<String>,
 ) -> Result<MeasurementApprovedMachineRecord, DatabaseError> {
-    let query = "insert into measurement_approved_machines(machine_id, approval_type, pcr_registers, comments) values($1, $2, $3, $4) returning *";
-    sqlx::query_as(query)
+    let query = format!(
+        "insert into measurement_approved_machines(machine_id, approval_type, pcr_registers, comments) values($1, $2, $3, $4) returning {}",
+        MeasurementApprovedMachineRecord::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(machine_id)
         .bind(approval_type)
         .bind(pcr_registers)
@@ -56,8 +60,11 @@ pub async fn remove_from_approved_machines_by_approval_id(
     txn: &mut PgConnection,
     approval_id: MeasurementApprovedMachineId,
 ) -> Result<MeasurementApprovedMachineRecord, DatabaseError> {
-    let query = "delete from measurement_approved_machines where approval_id = $1 returning *";
-    sqlx::query_as(query)
+    let query = format!(
+        "delete from measurement_approved_machines where approval_id = $1 returning {}",
+        MeasurementApprovedMachineRecord::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(approval_id)
         .fetch_one(txn)
         .await
@@ -68,8 +75,11 @@ pub async fn remove_from_approved_machines_by_machine_id(
     txn: &mut PgConnection,
     machine_id: TrustedMachineId,
 ) -> Result<MeasurementApprovedMachineRecord, DatabaseError> {
-    let query = "delete from measurement_approved_machines where machine_id = $1 returning *";
-    sqlx::query_as(query)
+    let query = format!(
+        "delete from measurement_approved_machines where machine_id = $1 returning {}",
+        MeasurementApprovedMachineRecord::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(machine_id)
         .fetch_one(txn)
         .await
@@ -100,8 +110,11 @@ pub async fn insert_into_approved_profiles(
     pcr_registers: Option<String>,
     comments: Option<String>,
 ) -> Result<MeasurementApprovedProfileRecord, DatabaseError> {
-    let query = "insert into measurement_approved_profiles(profile_id, approval_type, pcr_registers, comments) values($1, $2, $3, $4) returning *";
-    sqlx::query_as(query)
+    let query = format!(
+        "insert into measurement_approved_profiles(profile_id, approval_type, pcr_registers, comments) values($1, $2, $3, $4) returning {}",
+        MeasurementApprovedProfileRecord::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(profile_id)
         .bind(approval_type)
         .bind(pcr_registers)
@@ -115,8 +128,11 @@ pub async fn remove_from_approved_profiles_by_approval_id(
     txn: &mut PgConnection,
     approval_id: MeasurementApprovedProfileId,
 ) -> Result<MeasurementApprovedProfileRecord, DatabaseError> {
-    let query = "delete from measurement_approved_profiles where approval_id = $1 returning *";
-    sqlx::query_as(query)
+    let query = format!(
+        "delete from measurement_approved_profiles where approval_id = $1 returning {}",
+        MeasurementApprovedProfileRecord::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(approval_id)
         .fetch_one(txn)
         .await
@@ -127,8 +143,11 @@ pub async fn remove_from_approved_profiles_by_profile_id(
     txn: &mut PgConnection,
     profile_id: MeasurementSystemProfileId,
 ) -> Result<MeasurementApprovedProfileRecord, DatabaseError> {
-    let query = "delete from measurement_approved_profiles where profile_id = $1 returning *";
-    sqlx::query_as(query)
+    let query = format!(
+        "delete from measurement_approved_profiles where profile_id = $1 returning {}",
+        MeasurementApprovedProfileRecord::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(profile_id)
         .fetch_one(txn)
         .await
@@ -148,8 +167,11 @@ pub async fn get_approval_for_profile_id(
     profile_id: MeasurementSystemProfileId,
 ) -> Result<Option<MeasurementApprovedProfileRecord>, DatabaseError> {
     // TODO(chet): get_object_for_id should become fetch_optional.
-    let query = "select * from measurement_approved_profiles where profile_id = $1";
-    sqlx::query_as(query)
+    let query = format!(
+        "select {} from measurement_approved_profiles where profile_id = $1",
+        MeasurementApprovedProfileRecord::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(profile_id)
         .fetch_optional(txn)
         .await

@@ -120,6 +120,7 @@ async fn seed_expected_rack(
     db::expected_rack::create(
         txn,
         &ExpectedRack {
+            rack_group_id: None,
             rack_id: rack_id.clone(),
             rack_profile_id: RackProfileId::new(PROFILE_ID),
             ..Default::default()

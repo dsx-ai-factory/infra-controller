@@ -152,9 +152,8 @@ func (Managers *Manager) Init() {
 			Help:      "health status of the Site Agent",
 		},
 			func() float64 {
-				return float64(ManagerAccess.Data.EB.HealthStatus.Load())
+				return float64(computils.SiteHealth(ManagerAccess.Data.EB))
 			}))
-	ManagerAccess.Data.EB.HealthStatus.Store(uint64(computils.CompUnhealthy))
 
 	Managers.Orchestrator().Init()
 	Managers.Site().Init()
@@ -193,12 +192,14 @@ func (Managers *Manager) Start() {
 	Managers.CoreGrpc().Start()
 	Managers.Bootstrap().Start()
 	Managers.Orchestrator().Start()
+	// Checks begin once Core gRPC and Temporal have made their first connection attempt.
+	go StartHealthChecker()
 	Managers.FlowGrpc().Start()
 }
 
 func newMetricsServeMux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.Handler())
+	mux.Handle("GET /metrics", promhttp.Handler())
 	return mux
 }
 
@@ -207,5 +208,6 @@ func StartMetricServer() {
 	log.Info().Msgf("Beginning to serve on port %v", ManagerAccess.Conf.EB.MetricsPort)
 	port := ":" + ManagerAccess.Conf.EB.MetricsPort
 	mux := newMetricsServeMux()
-	http.ListenAndServe(port, mux)
+	err := http.ListenAndServe(port, mux)
+	log.Error().Err(err).Msg("Managers: metrics server stopped")
 }

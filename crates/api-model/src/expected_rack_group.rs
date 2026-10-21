@@ -34,6 +34,29 @@ impl fmt::Display for RackGroupTopology {
     }
 }
 
+/// The externally declared rack-management protocol for an expected rack group.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RackGroupProtocol(String);
+
+impl RackGroupProtocol {
+    /// Wrap an external protocol name; API validation is performed at the RPC boundary.
+    pub fn new(protocol: impl Into<String>) -> Self {
+        Self(protocol.into())
+    }
+
+    /// Borrow the external protocol name without changing its spelling.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for RackGroupProtocol {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// A device expected to participate in the rack group's NVLink domain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExpectedRackGroupMember {
@@ -64,6 +87,8 @@ pub struct ExpectedRackGroup {
     pub rack_group_id: RackGroupId,
     /// NVLink topology declared for the group.
     pub topology: RackGroupTopology,
+    /// Rack-management protocol declared for the group. Legacy rows may omit it.
+    pub protocol: Option<RackGroupProtocol>,
     /// Ordered racks; may be empty. RPC conversion requires non-blank, unique rack IDs,
     /// non-blank member manufacturer/ID values, and group-wide unique (type, manufacturer, id)
     /// tuples. Member types use the case-sensitive [`RackCapabilityType`] names.

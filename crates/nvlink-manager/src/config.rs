@@ -503,6 +503,23 @@ mod test {
     }
 
     #[test]
+    fn empty_default_authority_leaves_authority_unset() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["ca.crt", "tls.crt", "tls.key"] {
+            std::fs::write(root.path().join(name), "pem").unwrap();
+        }
+        let mut config = NvLinkConfig {
+            enabled: true,
+            ..NvLinkConfig::default()
+        };
+
+        let outcome = config.apply_default_nmx_c_tls(root.path(), root.path(), Some(""));
+
+        assert_eq!(outcome.client, DefaultNmxCClientTls::Applied);
+        assert_eq!(config.nmx_c_tls_authority, None);
+    }
+
+    #[test]
     fn deserialize_certificate_rotation_window_in_weeks() {
         let config: NmxCCertificateRotationConfig =
             serde_json::from_str(r#"{"rotate_before_expiry":"2w"}"#).unwrap();

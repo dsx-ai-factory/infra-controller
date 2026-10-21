@@ -15,10 +15,13 @@
  * limitations under the License.
  */
 
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use rpc::forge::AdminForceDeleteMachineRequest;
 
 #[derive(Parser, Debug, Clone)]
+#[clap(group(ArgGroup::new("interface_deletion")
+    .multiple(true)
+    .args(["delete_interfaces", "delete_bmc_interfaces"])))]
 #[command(after_long_help = "\
 EXAMPLES:
 
@@ -34,6 +37,11 @@ suppressions, and retained boot targets):
     $ nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 \
     --delete-interfaces --delete-bmc-interfaces --delete-bmc-suppressions \
     --delete-retained-boot-interfaces
+
+Force delete and permanently release preserved address reservations \
+instead of parking them:
+    $ nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 \
+    --delete-interfaces --release-preserved-addresses
 
 ")]
 pub(crate) struct Args {
@@ -74,9 +82,29 @@ pub(crate) struct Args {
     #[clap(
         long,
         action,
-        help = "Delete machine with allocated instance. This flag acknowledges destroying the user instance as well."
+        requires = "interface_deletion",
+        help = "Release preserved address reservations for deleted interfaces instead of parking them. Without this, an address marked for preservation is parked so the same MAC can reclaim it on re-ingestion."
+    )]
+    release_preserved_addresses: bool,
+
+    #[clap(
+        long,
+        action,
+        help = "Acknowledge deleting a machine with an allocated instance",
+        long_help = "Acknowledge deleting a machine with an allocated instance. The CLI checks for an instance only for machine-ID queries, not hostname, MAC, or IP queries. The API does not enforce this consent flag.\n\n\
+            Before deleting a host by any identifier, remove its instance type association; this flag does not bypass that check."
     )]
     pub(super) allow_delete_with_instance: bool,
+
+    #[clap(
+        long,
+        action,
+        help = "Wait for all attached DPUs to acknowledge Admin networking for an allocated instance",
+        long_help = "Wait for all attached DPUs to acknowledge the Admin network configuration before deleting a host that has an instance when force deletion starts. Disabled by default; a fresh deletion without this flag does not wait for DPU acknowledgements. A fresh deletion without an instance does not wait.\n\n\
+            Once recorded, the wait survives retries; omitting this flag cannot cancel it. Only servers supporting this option enforce a recorded wait. An older server can complete deletion without acknowledgement, even if a newer server already recorded the wait.\n\n\
+            An unavailable DPU can prevent completion indefinitely. The CLI waits 5 seconds between polling calls, with a nominal 20-minute retry limit. It checks the limit after RPC calls, so slow calls can extend the total time. A timeout does not cancel deletion. This flag does not replace --allow-delete-with-instance."
+    )]
+    wait_for_instance_dpu: bool,
 
     #[clap(
         long,
@@ -96,6 +124,86 @@ impl From<&Args> for AdminForceDeleteMachineRequest {
             allow_delete_with_orphaned_dpf_crds: args.allow_delete_with_orphaned_dpf_crds,
             delete_bmc_suppressions: args.delete_bmc_suppressions,
             delete_retained_boot_interfaces: args.delete_retained_boot_interfaces,
+            release_preserved_addresses: args.release_preserved_addresses,
+            wait_for_instance_dpu: args.wait_for_instance_dpu,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::scenarios;
+    use clap::CommandFactory;
+
+    use super::*;
+
+    const MACHINE: &str = "12345678-1234-5678-90ab-cdef01234567";
+
+    #[test]
+    fn arg_config_is_valid() {
+        Args::command().debug_assert();
+    }
+
+    #[test]
+    fn instance_dpu_wait_is_opt_in_and_does_not_grant_deletion_consent() {
+        scenarios!(
+            run = |extra: &[&str]| {
+                let argv = ["force-delete", "--machine", MACHINE]
+                    .into_iter()
+                    .chain(extra.iter().copied());
+                Args::try_parse_from(argv)
+                    .map(|args| {
+                        let request = AdminForceDeleteMachineRequest::from(&args);
+                        (request.wait_for_instance_dpu, args.allow_delete_with_instance)
+                    })
+                    .map_err(drop)
+            };
+            "omitting the wait flag preserves cleanup without acknowledgements" {
+                [].as_slice() => Yields((false, false)),
+            }
+            "waiting does not grant consent to delete an allocated instance" {
+                ["--wait-for-instance-dpu"].as_slice() => Yields((true, false)),
+            }
+            "waiting and deletion consent can be requested together" {
+                ["--allow-delete-with-instance", "--wait-for-instance-dpu"].as_slice()
+                    => Yields((true, true)),
+            }
+        );
+    }
+
+    #[test]
+    fn release_preserved_addresses_requires_an_interface_deletion_mode() {
+        scenarios!(
+            run = |extra: &[&str]| {
+                let mut argv = vec!["force-delete", "--machine", MACHINE];
+                argv.extend_from_slice(extra);
+                Args::try_parse_from(argv)
+                    .map(|args| {
+                        (
+                            args.release_preserved_addresses,
+                            args.delete_interfaces,
+                            args.delete_bmc_interfaces,
+                        )
+                    })
+                    .map_err(drop)
+            };
+            "release without a deletion mode is rejected" {
+                ["--release-preserved-addresses"].as_slice() => Fails,
+            }
+            "release pairs with either deletion mode" {
+                ["--delete-interfaces", "--release-preserved-addresses"].as_slice()
+                    => Yields((true, true, false)),
+                ["--delete-bmc-interfaces", "--release-preserved-addresses"].as_slice()
+                    => Yields((true, false, true)),
+            }
+            "both deletion modes may be combined" {
+                ["--delete-interfaces", "--delete-bmc-interfaces", "--release-preserved-addresses"]
+                    .as_slice() => Yields((true, true, true)),
+            }
+            "deletion modes are still valid without the release flag" {
+                ["--delete-interfaces"].as_slice() => Yields((false, true, false)),
+            }
+        );
     }
 }

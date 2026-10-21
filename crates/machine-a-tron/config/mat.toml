@@ -74,10 +74,16 @@ enable_ipmi_simulation = false
 # A rack type creates all of its devices automatically:
 # - wiwynn_gb200_nvl72: 18 compute trays, 9 ND5200 switches, 8 power shelves
 # - lenovo_gb300_nvl72: 18 compute trays, 9 N5700 switches, 6 power shelves
+# A rack no expected rack group declares yet is declared as its own group
+# (protocol NVLINK_V5), and an existing group is used as is. rack_profile_id
+# must be the profile nico-api derives from the rack's group: GB200_NVL72R1_C2G4_WIWYNN
+# for wiwynn_gb200_nvl72 and GB300_NVL72R1_C2G4_LENOVO for lenovo_gb300_nvl72 when
+# machine-a-tron declares the group. machine-a-tron checks this at startup. The
+# nico-api chart ships both.
 #
 # [racks.default]
 # type = "lenovo_gb300_nvl72"
-# rack_profile_id = "NVL72_GB300"
+# rack_profile_id = "GB300_NVL72R1_C2G4_LENOVO"
 # ids = ["rack-001", "rack-002"]
 # dpu_reboot_delay = 20
 # host_reboot_delay = 10

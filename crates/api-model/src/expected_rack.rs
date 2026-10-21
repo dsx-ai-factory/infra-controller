@@ -15,9 +15,10 @@
  * limitations under the License.
  */
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
-use carbide_uuid::rack::{RackId, RackProfileId};
+use carbide_uuid::rack::{RackGroupId, RackId, RackProfileId};
 use serde::Deserialize;
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, Row};
@@ -52,25 +53,66 @@ pub fn derive_rack_profile_id(
             if value.trim().is_empty() {
                 return Err(format!("rack {rack_id} has a blank {kind} manufacturer"));
             }
-            if selected.is_some_and(|previous| previous != value) {
-                return Err(format!("rack {rack_id} has multiple {kind} manufacturers"));
-            }
             selected = Some(value);
         }
         Ok(selected)
     };
-    let compute = manufacturer(RackCapabilityType::Compute)?
+    manufacturer(RackCapabilityType::Compute)?
         .ok_or_else(|| format!("rack {rack_id} has no Compute members"))?;
-    let switch = manufacturer(RackCapabilityType::Switch)?
+    manufacturer(RackCapabilityType::Switch)?
         .ok_or_else(|| format!("rack {rack_id} has no Switch members"))?;
-    let power_shelf = manufacturer(RackCapabilityType::PowerShelf)?.unwrap_or("NO_POWERSHELF");
+    let power_suffix = if manufacturer(RackCapabilityType::PowerShelf)?.is_some() {
+        ""
+    } else {
+        "_NO_POWERSHELF"
+    };
+    let vendor = ["WIWYNN", "LENOVO", "SMC"]
+        .into_iter()
+        .find(|vendor| {
+            rack.members.iter().any(|member| {
+                member.manufacturer.eq_ignore_ascii_case(vendor)
+                    || (*vendor == "SMC" && member.manufacturer.eq_ignore_ascii_case("Supermicro"))
+            })
+        })
+        .unwrap_or("NVIDIA");
+    let topology = profile_topology(group, rack_id);
     Ok(RackProfileId::new(format!(
-        "{}_{}_{}_{}",
-        group.topology.as_str().to_uppercase(),
-        compute,
-        switch,
-        power_shelf
+        "{}_{}{power_suffix}",
+        topology.to_uppercase(),
+        vendor
     )))
+}
+
+fn profile_topology<'a>(group: &'a ExpectedRackGroup, rack_id: &RackId) -> Cow<'a, str> {
+    let topology = group.topology.as_str();
+    let Some(protocol) = group.protocol.as_ref() else {
+        return Cow::Borrowed(topology);
+    };
+    if protocol.as_str() != "NVLINK_V6" {
+        return Cow::Borrowed(topology);
+    }
+    let Some((platform, suffix)) = topology.split_once('_') else {
+        return Cow::Borrowed(topology);
+    };
+    let Some(generation) = platform
+        .strip_prefix("gb")
+        .or_else(|| platform.strip_prefix("GB"))
+    else {
+        return Cow::Borrowed(topology);
+    };
+    if generation.is_empty() || !generation.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Cow::Borrowed(topology);
+    }
+    let normalized = format!("vr_{suffix}");
+    tracing::warn!(
+        rack_group_id = %group.rack_group_id,
+        %rack_id,
+        protocol = %protocol,
+        supplied_topology = topology,
+        normalized_topology = normalized,
+        "normalizing NVLINK_V6 rack profile topology"
+    );
+    Cow::Owned(normalized)
 }
 
 /// ExpectedRack represents a rack that has been declared and is expected to
@@ -85,6 +127,9 @@ pub struct ExpectedRack {
     /// This maps to a RackProfile in the Carbide config file, which defines
     /// the rack hardware type, topology, and rack capabilities.
     pub rack_profile_id: RackProfileId,
+
+    /// External group selected together with the profile on creation.
+    pub rack_group_id: Option<RackGroupId>,
 
     /// User-defined metadata for the rack. Physical-chassis and
     /// physical-location attributes are recorded as well-known label keys
@@ -105,6 +150,7 @@ impl<'r> FromRow<'r, PgRow> for ExpectedRack {
         Ok(ExpectedRack {
             rack_id: row.try_get("rack_id")?,
             rack_profile_id: row.try_get("rack_profile_id")?,
+            rack_group_id: row.try_get("rack_group_id")?,
             metadata,
         })
     }
@@ -114,7 +160,7 @@ impl<'r> FromRow<'r, PgRow> for ExpectedRack {
 mod tests {
     use super::*;
     use crate::expected_rack_group::{
-        ExpectedRackGroupMember, ExpectedRackGroupRack, RackGroupTopology,
+        ExpectedRackGroupMember, ExpectedRackGroupRack, RackGroupProtocol, RackGroupTopology,
     };
 
     #[test]
@@ -128,19 +174,44 @@ mod tests {
                     (Switch, "NVIDIA"),
                     (PowerShelf, "WiWynn"),
                 ],
-                Some("GB200_NVL72R1_C2G4_WiWynn_NVIDIA_WiWynn"),
+                Some("GB200_NVL72R1_C2G4_WIWYNN"),
             ),
             (
                 "no power shelf",
                 vec![(Compute, "NVIDIA"), (Compute, "NVIDIA"), (Switch, "NVIDIA")],
-                Some("GB200_NVL72R1_C2G4_NVIDIA_NVIDIA_NO_POWERSHELF"),
+                Some("GB200_NVL72R1_C2G4_NVIDIA_NO_POWERSHELF"),
             ),
             ("missing compute", vec![(Switch, "NVIDIA")], None),
             ("missing switch", vec![(Compute, "NVIDIA")], None),
             (
                 "mixed type manufacturers",
                 vec![(Compute, "NVIDIA"), (Compute, "WiWynn"), (Switch, "NVIDIA")],
-                None,
+                Some("GB200_NVL72R1_C2G4_WIWYNN_NO_POWERSHELF"),
+            ),
+            (
+                "wiwynn takes precedence across device types",
+                vec![(Compute, "SMC"), (Switch, "LENOVO"), (PowerShelf, "wiwynn")],
+                Some("GB200_NVL72R1_C2G4_WIWYNN"),
+            ),
+            (
+                "lenovo takes precedence over supermicro",
+                vec![(Compute, "Supermicro"), (Switch, "lenovo")],
+                Some("GB200_NVL72R1_C2G4_LENOVO_NO_POWERSHELF"),
+            ),
+            (
+                "supermicro alias",
+                vec![(Compute, "NVIDIA"), (Switch, "SuperMicro")],
+                Some("GB200_NVL72R1_C2G4_SMC_NO_POWERSHELF"),
+            ),
+            (
+                "smc power shelf",
+                vec![(Compute, "NVIDIA"), (Switch, "NVIDIA"), (PowerShelf, "smc")],
+                Some("GB200_NVL72R1_C2G4_SMC"),
+            ),
+            (
+                "unrecognized manufacturers default to nvidia",
+                vec![(Compute, "other-vendor"), (Switch, "NVIDIA")],
+                Some("GB200_NVL72R1_C2G4_NVIDIA_NO_POWERSHELF"),
             ),
             (
                 "blank manufacturer",
@@ -172,7 +243,7 @@ mod tests {
                 rack_id: RackId::new("other-rack"),
                 members: vec![ExpectedRackGroupMember {
                     device_type: Compute,
-                    manufacturer: "other-vendor".into(),
+                    manufacturer: "WIWYNN".into(),
                     id: "other-device".into(),
                 }],
             });
@@ -183,5 +254,31 @@ mod tests {
                 "{name}: {result:?}"
             );
         }
+    }
+
+    #[test]
+    fn nvlink_v6_uses_vr_profile_topology() {
+        let rack_id = RackId::new("rack-01");
+        let group = ExpectedRackGroup {
+            rack_group_id: RackGroupId::new("group-01"),
+            topology: RackGroupTopology::new("gb300_nvl72r1_c2g4"),
+            protocol: Some(RackGroupProtocol::new("NVLINK_V6")),
+            racks: vec![ExpectedRackGroupRack {
+                rack_id: rack_id.clone(),
+                members: [RackCapabilityType::Compute, RackCapabilityType::Switch]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, device_type)| ExpectedRackGroupMember {
+                        device_type,
+                        manufacturer: "NVIDIA".into(),
+                        id: index.to_string(),
+                    })
+                    .collect(),
+            }],
+            metadata: Default::default(),
+        };
+
+        let profile = derive_rack_profile_id(&group, &rack_id).unwrap();
+        assert_eq!(profile.as_str(), "VR_NVL72R1_C2G4_NVIDIA_NO_POWERSHELF");
     }
 }

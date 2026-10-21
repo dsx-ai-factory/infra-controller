@@ -46,9 +46,10 @@ use model::machine::{
 use model::machine_boot_interface::BootInterfaceSelectionSource;
 use model::metadata::Metadata;
 use model::site_explorer::{
-    BlueFieldOperatingMode, Chassis, ComputerSystem, EndpointExplorationError,
-    EndpointExplorationReport, EndpointType, ExploredDpu, ExploredManagedHost,
-    InitialBmcResetPhase, Inventory, NetworkAdapter, PreingestionState, Service, UefiDevicePath,
+    BlueFieldOperatingMode, Chassis, ComponentIntegrityEntry, ComputerSystem,
+    EndpointExplorationError, EndpointExplorationReport, EndpointType, ExploredDpu,
+    ExploredManagedHost, InitialBmcResetPhase, Inventory, NetworkAdapter, PreingestionState,
+    Service, UefiDevicePath,
 };
 use model::test_support::{DpuConfig, ManagedHostConfig};
 use rpc::forge::GetSiteExplorationRequest;
@@ -147,6 +148,66 @@ fn suppression_test_config(explorations_per_run: u64) -> SiteExplorerConfig {
         create_power_shelves: Arc::new(false.into()),
         create_switches: Arc::new(false.into()),
         ..Default::default()
+    }
+}
+
+/// Exploration is the only writer of the attester inventory, so one pass has to
+/// leave the endpoint's digest and the class's set behind together. Nothing
+/// else fills either, which makes this wiring the only thing that can lose
+/// them.
+#[sqlx_test]
+async fn exploration_records_the_attester_set_its_class_carries(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let mut machine = env.new_machine("02:00:00:00:11:01", "Vendor1");
+    machine.discover_dhcp(env.api()).await?;
+    let address: IpAddr = machine.ip.parse()?;
+
+    let report = EndpointExplorationReport {
+        endpoint_type: EndpointType::Bmc,
+        hardware_class: Some("nvidia_dgx-gb300".to_string()),
+        component_integrities: Some(vec![
+            component_integrity("ERoT_BMC_0", "SPDM"),
+            component_integrity("TPM_0", "TPM"),
+        ]),
+        ..Default::default()
+    };
+    let expected = report.attester_set().expect("the report reported a set");
+
+    let explorer = env.test_site_explorer(suppression_test_config(1));
+    explorer.insert_endpoints(vec![(address, report)]);
+    explorer.run_single_iteration().await?;
+
+    let mut txn = env.pool.begin().await?;
+    let digest: Option<String> =
+        sqlx::query_scalar("SELECT attester_digest FROM explored_endpoints WHERE address = $1")
+            .bind(address)
+            .fetch_one(txn.as_mut())
+            .await?;
+    assert_eq!(digest.as_deref(), Some(expected.digest.as_str()));
+
+    let (class, ids): (String, serde_json::Value) =
+        sqlx::query_as("SELECT hardware_class, attester_ids FROM hardware_class_attesters")
+            .fetch_one(txn.as_mut())
+            .await?;
+    txn.commit().await?;
+
+    assert_eq!(class, "nvidia_dgx-gb300");
+    assert_eq!(
+        ids,
+        serde_json::json!(["ERoT_BMC_0"]),
+        "the set holds the attesters, so the TPM the BMC also listed is not in it"
+    );
+
+    Ok(())
+}
+
+fn component_integrity(id: &str, integrity_type: &str) -> ComponentIntegrityEntry {
+    ComponentIntegrityEntry {
+        id: id.to_string(),
+        component_integrity_type: integrity_type.to_string(),
+        component_integrity_enabled: true,
     }
 }
 
@@ -331,7 +392,7 @@ async fn test_suppression_skips_cached_switch_and_power_shelf_ingestion(
         model::expected_switch::ExpectedSwitch {
             expected_switch_id: None,
             bmc_mac_address: devices[0].mac,
-            nvos_mac_addresses: Vec::new(),
+            nvos_interfaces: Vec::new(),
             serial_number: "SUPPRESSED-SWITCH".to_string(),
             bmc_username: "admin".to_string(),
             bmc_password: "password".to_string(),
@@ -717,6 +778,105 @@ async fn test_suppression_acknowledgement_waits_for_in_flight_exploration(
         "suppression should be acknowledged after the in-flight probe releases its lock"
     );
 
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_exploration_failure_logs_error_once(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use carbide_instrument::testing::capture_logs;
+    use carbide_test_support::value_scenarios;
+    use model::machine_interface_address::MachineInterfaceAssociation;
+
+    let env = Env::new(pool).await;
+    let mut machines = vec![
+        env.new_machine("02:00:00:00:15:01", "Vendor1"),
+        env.new_machine("02:00:00:00:15:02", "Vendor2"),
+    ];
+    machines.discover_dhcp(env.api()).await?;
+
+    let hardware_info = HardwareInfo {
+        dmi_data: Some(DmiData {
+            product_serial: "failure-log-host".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let machine_id = from_hardware_info_with_type(&hardware_info, MachineType::Host)?;
+    let mut txn = env.pool.begin().await?;
+    db::machine::create(
+        &mut txn,
+        None,
+        &machine_id,
+        ManagedHostState::Ready,
+        None,
+        CURRENT_STATE_MODEL_VERSION,
+    )
+    .await?;
+    let interfaces =
+        db::machine_interface::find_by_mac_address(txn.as_mut(), machines[0].mac).await?;
+    db::machine_interface::associate_bmc_interface(
+        &interfaces[0].id,
+        MachineInterfaceAssociation::Machine(machine_id),
+        &mut txn,
+    )
+    .await?;
+    txn.commit().await?;
+
+    let explorer = env.test_site_explorer(SiteExplorerConfig {
+        enabled: Arc::new(true.into()),
+        retained_boot_interface_window: None,
+        explorations_per_run: 2,
+        concurrent_explorations: 1,
+        create_machines: Arc::new(false.into()),
+        ..Default::default()
+    });
+    let error = EndpointExplorationError::ConnectionRefused {
+        details: "simulated connection refusal".to_string(),
+    };
+    for machine in &machines {
+        explorer.insert_endpoint_result(machine.ip.parse()?, Err(error.clone()));
+    }
+
+    let (result, logs) = tokio::task::spawn_blocking(move || {
+        let mut result = None;
+        // Keep the subscriber active until the exploration runtime has shut down.
+        let logs = capture_logs(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("create site-explorer test runtime");
+            result = Some(runtime.block_on(explorer.run_single_iteration()));
+        });
+        (result.expect("site-explorer iteration ran"), logs)
+    })
+    .await?;
+    result?;
+    let expected_error = error.to_string();
+
+    value_scenarios!(
+        run = |index: usize| {
+            let endpoint = format!("{}:443", machines[index].ip);
+            let mut events = logs.iter().filter(|log| {
+                log.message == "Failed to explore endpoint"
+                    && log.field("endpoint") == Some(endpoint.as_str())
+            });
+            let log = events.next().expect("endpoint exploration must log its failure");
+            assert!(events.next().is_none(), "expected one failure event per endpoint");
+            (
+                log.field("error"),
+                log.field("text"),
+                log.field("machine_state"),
+            )
+        };
+        "with machine state" {
+            0usize => (Some(expected_error.as_str()), None, Some("Ready")),
+        }
+        "without machine state" {
+            1usize => (Some(expected_error.as_str()), None, None),
+        }
+    );
     Ok(())
 }
 
@@ -1644,6 +1804,9 @@ async fn test_expected_machine_device_type_metrics(
         (
             machines[0].ip.parse().unwrap(),
             Ok(EndpointExplorationReport {
+                component_integrities: None,
+                component_integrity_unavailable: false,
+                hardware_class: None,
                 endpoint_type: EndpointType::Bmc,
                 last_exploration_error: None,
                 last_exploration_latency: Some(std::time::Duration::from_millis(100)),
@@ -1660,16 +1823,16 @@ async fn test_expected_machine_device_type_metrics(
                 lockdown_status: None,
                 power_shelf_id: None,
                 switch_id: None,
-                compute_tray_index: None,
-                physical_slot_number: None,
-                revision_id: None,
-                topology_id: None,
                 remediation_error: None,
+                ..Default::default()
             }),
         ),
         (
             machines[1].ip.parse().unwrap(),
             Ok(EndpointExplorationReport {
+                component_integrities: None,
+                component_integrity_unavailable: false,
+                hardware_class: None,
                 endpoint_type: EndpointType::Bmc,
                 last_exploration_error: None,
                 last_exploration_latency: Some(std::time::Duration::from_millis(100)),
@@ -1686,16 +1849,16 @@ async fn test_expected_machine_device_type_metrics(
                 lockdown_status: None,
                 power_shelf_id: None,
                 switch_id: None,
-                compute_tray_index: None,
-                physical_slot_number: None,
-                revision_id: None,
-                topology_id: None,
                 remediation_error: None,
+                ..Default::default()
             }),
         ),
         (
             machines[2].ip.parse().unwrap(),
             Ok(EndpointExplorationReport {
+                component_integrities: None,
+                component_integrity_unavailable: false,
+                hardware_class: None,
                 endpoint_type: EndpointType::Bmc,
                 last_exploration_error: None,
                 last_exploration_latency: Some(std::time::Duration::from_millis(100)),
@@ -1712,11 +1875,8 @@ async fn test_expected_machine_device_type_metrics(
                 lockdown_status: None,
                 power_shelf_id: None,
                 switch_id: None,
-                compute_tray_index: None,
-                physical_slot_number: None,
-                revision_id: None,
-                topology_id: None,
                 remediation_error: None,
+                ..Default::default()
             }),
         ),
     ]);
@@ -2028,6 +2188,9 @@ async fn test_site_explorer_main(pool: PgPool) -> Result<(), Box<dyn std::error:
         (
             machines[2].ip.parse().unwrap(),
             Ok(EndpointExplorationReport {
+                component_integrities: None,
+                component_integrity_unavailable: false,
+                hardware_class: None,
                 endpoint_type: EndpointType::Bmc,
                 last_exploration_error: None,
                 last_exploration_latency: None,
@@ -2047,11 +2210,8 @@ async fn test_site_explorer_main(pool: PgPool) -> Result<(), Box<dyn std::error:
                 lockdown_status: None,
                 power_shelf_id: None,
                 switch_id: None,
-                compute_tray_index: None,
-                physical_slot_number: None,
-                revision_id: None,
-                topology_id: None,
                 remediation_error: None,
+                ..Default::default()
             }),
         ),
     ]);
@@ -2388,6 +2548,7 @@ async fn test_site_explorer_audit_exploration_results(
     let explorer_config = SiteExplorerConfig {
         enabled: Arc::new(true.into()),
         retained_boot_interface_window: None,
+        admin_fnn_enabled: false,
         explorations_per_run: 7,
         concurrent_explorations: 1,
         run_interval: std::time::Duration::from_secs(1),
@@ -2418,6 +2579,9 @@ async fn test_site_explorer_audit_exploration_results(
         (
             machines[1].ip.parse().unwrap(),
             EndpointExplorationReport {
+                component_integrities: None,
+                component_integrity_unavailable: false,
+                hardware_class: None,
                 endpoint_type: EndpointType::Bmc,
                 // Pretend there was previously a successful exploration
                 // but now something has gone wrong.
@@ -2440,16 +2604,16 @@ async fn test_site_explorer_audit_exploration_results(
                 lockdown_status: None,
                 power_shelf_id: None,
                 switch_id: None,
-                compute_tray_index: None,
-                physical_slot_number: None,
-                revision_id: None,
-                topology_id: None,
                 remediation_error: None,
+                ..Default::default()
             },
         ),
         (
             machines[2].ip.parse().unwrap(),
             EndpointExplorationReport {
+                component_integrities: None,
+                component_integrity_unavailable: false,
+                hardware_class: None,
                 endpoint_type: EndpointType::Bmc,
                 // Pretend there was previously a successful exploration
                 // but now something has gone wrong.
@@ -2471,16 +2635,16 @@ async fn test_site_explorer_audit_exploration_results(
                 lockdown_status: None,
                 power_shelf_id: None,
                 switch_id: None,
-                compute_tray_index: None,
-                physical_slot_number: None,
-                revision_id: None,
-                topology_id: None,
                 remediation_error: None,
+                ..Default::default()
             },
         ),
         (
             machines[3].ip.parse().unwrap(),
             EndpointExplorationReport {
+                component_integrities: None,
+                component_integrity_unavailable: false,
+                hardware_class: None,
                 endpoint_type: EndpointType::Bmc,
                 last_exploration_error: None,
                 last_exploration_latency: None,
@@ -2497,11 +2661,8 @@ async fn test_site_explorer_audit_exploration_results(
                 lockdown_status: None,
                 power_shelf_id: None,
                 switch_id: None,
-                compute_tray_index: None,
-                physical_slot_number: None,
-                revision_id: None,
-                topology_id: None,
                 remediation_error: None,
+                ..Default::default()
             },
         ),
         (
@@ -2511,6 +2672,9 @@ async fn test_site_explorer_audit_exploration_results(
         (
             machines[5].ip.parse().unwrap(),
             EndpointExplorationReport {
+                component_integrities: None,
+                component_integrity_unavailable: false,
+                hardware_class: None,
                 endpoint_type: EndpointType::Bmc,
                 last_exploration_error: None,
                 last_exploration_latency: None,
@@ -2527,11 +2691,8 @@ async fn test_site_explorer_audit_exploration_results(
                 lockdown_status: None,
                 power_shelf_id: None,
                 switch_id: None,
-                compute_tray_index: None,
-                physical_slot_number: None,
-                revision_id: None,
-                topology_id: None,
                 remediation_error: None,
+                ..Default::default()
             },
         ),
         (

@@ -31,6 +31,7 @@ cli = ["dep:prettytable-rs", "dep:eyre", "dep:clap"]
 
 [dependencies]
 # workspace dependencies
+carbide-macros = { path = "../macros" }
 carbide-uuid = { path = "../uuid" }
 
 thiserror = { workspace = true }

@@ -42,7 +42,7 @@ func TestVerifyReachability(t *testing.T) {
 			env.ExecuteWorkflow(func(ctx workflow.Context) error {
 				ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: time.Second})
 				target := common.Target{Type: devicetypes.ComponentTypeCompute, IdentifierType: common.IdentifierTypeMACAddress, Identifiers: []string{"a", "b"}}
-				return verifyReachability(ctx, map[devicetypes.ComponentType]common.Target{target.Type: target}, []string{"Compute"}, time.Second, time.Second, tc.requireAll)
+				return verifyReachability(ctx, map[devicetypes.ComponentType]common.Target{target.Type: target}, []string{"Compute"}, time.Second, time.Second, tc.requireAll, 0)
 			})
 			if tc.wantError {
 				require.ErrorContains(t, env.GetWorkflowError(), "timeout")
@@ -52,6 +52,38 @@ func TestVerifyReachability(t *testing.T) {
 		})
 	}
 }
+
+func TestVerifyReachabilityEnforcesDeadlineBetweenBatches(t *testing.T) {
+	env := (&testsuite.WorkflowTestSuite{}).NewTestWorkflowEnvironment()
+	env.RegisterActivityWithOptions(mockGetPowerStatus, activity.RegisterOptions{Name: activitypkg.NameGetPowerStatus})
+	env.OnActivity(mockGetPowerStatus, mock.Anything, mock.Anything).
+		After(2*time.Second).
+		Return(map[string]operations.PowerStatus{
+			"a": operations.PowerStatusOn,
+			"b": operations.PowerStatusOn,
+		}, nil)
+
+	env.ExecuteWorkflow(func(ctx workflow.Context) error {
+		ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: 5 * time.Second})
+		target := common.Target{
+			Type:           devicetypes.ComponentTypeCompute,
+			IdentifierType: common.IdentifierTypeMACAddress,
+			Identifiers:    []string{"a", "b"},
+		}
+		return verifyReachability(
+			ctx,
+			map[devicetypes.ComponentType]common.Target{target.Type: target},
+			[]string{"Compute"},
+			3*time.Second,
+			time.Second,
+			true,
+			1,
+		)
+	})
+
+	require.ErrorContains(t, env.GetWorkflowError(), "timeout")
+}
+
 func TestVerifyPowerStatus(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

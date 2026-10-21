@@ -36,7 +36,7 @@ reproduced, on a configurable per-phase timer.
 ## Why Go + reuse from doca-platform
 
 Per the #3323 discussion, this is a controller-runtime job and the CR types
-come straight from the upstream module — no hand-written schema, no codegen,
+come straight from the upstream module: no hand-written schema, no codegen,
 no drift:
 
 ```go
@@ -48,9 +48,9 @@ structs + deepcopy + scheme registration for `DPU`, `DPUDevice`, `DPUNode`,
 `DPUNodeMaintenance`, `BFB`, `DPUFlavor`, `DPUSet` (group
 `provisioning.dpu.nvidia.com`), and the full `DPUPhase` constant set the
 simulator walks. The real operator's per-phase logic lives in
-`internal/provisioning/controllers/dpu/state/` upstream (one file per phase) —
-not importable (`internal/`), but the definitive reference for entry/exit
-criteria of each phase.
+`internal/provisioning/controllers/dpu/state/` upstream (one file per phase).
+It is not importable (`internal/`), but it is the definitive reference for
+entry/exit criteria of each phase.
 
 > **Pin the dependency** to the doca-platform release whose CRDs match the ones
 > NICo ships in `crates/dpf/crds/*.yaml`, not `public-main`, so the simulator's
@@ -111,10 +111,10 @@ dpf-sim-controller/
 ## Independence from the real DPF operator (and setup.sh)
 
 This simulator needs **only the DPF CRDs** (`DPUDevice`, `DPUNode`, `DPU`, and
-the CRs NICo references) present on the cluster — never the DPF operator. Those
+the CRs NICo references) present on the cluster, never the DPF operator. Those
 CRDs ship in this repo at `crates/dpf/crds/`, so `make deploy` applies them
 directly. It does **not** depend on the setup.sh DPF-install work: that branch
-installs the real operator, which you must **not** run here — the operator and
+installs the real operator, which you must **not** run here. The operator and
 the simulator would both drive `DPU.status.phase` and fight.
 
 The only coupling is version consistency: the simulator's Go types are pinned to
@@ -123,17 +123,23 @@ compatible. `crates/dpf/crds/` is that version.
 
 ## Quick start (against a machine-a-tron cluster)
 
-**The usual path is automatic:** `helm-prereqs/setup-machine-a-tron.sh`
-deploys this simulator by default (Phase 4b) whenever the nico-core config
-has `[dpf] enabled = true`, using the `DPF_SIM_IMAGE`
-(or `${NICO_IMAGE_REGISTRY}/dpf-sim-controller:latest`). This includes the
-DPF CRDs, the `nico-api-dpf` RBAC, and the `CARBIDE_API_ALLOW_INSECURE_DISCOVERY`
-flag.
+Deploy the simulator with `make deploy` below whenever the nico-core site
+config has `[dpf] enabled = true`. Two prerequisites are owned elsewhere. The
+`nico-api-dpf` Role comes from the `nico-api` chart (`dpf.rbacCreate: true`).
+Discovery from a shared pod IP needs `allow_insecure_discovery = true` in the
+nico-api site config. Both are set in
+`helm-prereqs/values/nico-core-simulation.yaml`.
 
-On a site without DPF enabled, the phase is a no-op, and it hard-fails if
-the REAL DPF operator is deployed (both would drive `DPU.status.phase` —
-remove the operator, or pass `--skip-dpf-sim` to keep it). The manual
-steps below remain for iterating on the simulator itself.
+Never run the simulator beside the real DPF operator: both would drive
+`DPU.status.phase`. Check before deploying. The command prints nothing when no
+operator is deployed. Otherwise remove the operator first, or leave the
+simulator out and accept that ingested hosts park in `dpuinit`:
+
+```bash
+kubectl get deploy -n dpf-operator-system -o name | grep -E 'dpf.*operator|operator.*dpf'
+```
+
+The manual steps below also serve for iterating on the simulator itself.
 
 **Installing NICo alongside this simulator: use `setup.sh --skip-dpf`.**
 The simulator applies the DPF CRDs itself (`make install-crds`), so letting
@@ -166,12 +172,14 @@ make deploy IMG=<registry>/dpf-sim-controller:<tag> \
 > after `v2.1.0-pr-294`): `DiscoverMachine` resolves callers by TCP source IP,
 > and every simulated machine shares the MAT pod's IP, so all agent discovery
 > fails with `machine_interface for discovery IP not found: <pod-ip>` and the
-> dpuinit walk parks at `waitingfornetworkconfig`. Set the sanctioned test-env
-> escape hatch on the nico-api deployment:
+> dpuinit walk parks at `waitingfornetworkconfig`. Set the test-only root key
+> in the nico-api site config (`nico-api.siteConfig.nicoApiSiteConfig` in the
+> Core values, as `helm-prereqs/values/nico-core-simulation.yaml` does) and
+> apply it with a Core `helm upgrade`. Do not `kubectl set env` the Deployment:
+> the next Core upgrade reverts it.
 >
-> ```bash
-> kubectl -n nico-system set env deployment/nico-api \
->     CARBIDE_API_ALLOW_INSECURE_DISCOVERY=true
+> ```toml
+> allow_insecure_discovery = true
 > ```
 
 Out-of-cluster alternative (no image needed), useful for local iteration:
@@ -199,7 +207,7 @@ kubectl annotate dpunode node-02-00-00-00-00-01 -n dpf-operator-system \
 ```
 
 > **Cleanup:** delete the `DPUDevice` (its `DPU` is garbage-collected via the
-> ownerRef), not the `DPU` directly — the simulator recreates the same DPU
+> ownerRef), not the `DPU` directly. The simulator recreates the same DPU
 > name within milliseconds, so `kubectl delete dpu`, which waits for the name
 > to disappear, hangs indefinitely.
 >

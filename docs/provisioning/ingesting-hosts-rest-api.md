@@ -66,7 +66,7 @@ Optional flags add metadata or pre-allocate resources:
 | ---- | ------- |
 | `--bmc-ip-address` | Pre-allocate a reserved BMC IP (IPv4 or IPv6) instead of letting DHCP assign one |
 | `--rack-id` | Associate with a rack identifier |
-| `--sku-id` | Associate with a SKU |
+| `--sku-id` | Assign an existing SKU to the host when it is discovered; refer to [Assign a SKU through the expected machine](sku-validation.md#assign-a-sku-through-the-expected-machine) |
 | `--manufacturer`, `--model`, `--firmware-version`, `--name`, `--description` | Free-text hardware metadata |
 | `--slot-id`, `--tray-idx`, `--host-id` | Physical placement within a rack/tray |
 

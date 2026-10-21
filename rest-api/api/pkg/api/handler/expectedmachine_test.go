@@ -125,6 +125,10 @@ func testExpectedMachineSetupTestData(t *testing.T, dbSession *cdb.Session, org 
 }
 
 func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
+	t.Run("complete mutation conflict", func(t *testing.T) {
+		testExpectedMachineMutationRejectsCompleteMutationLock(t, "single create")
+	})
+
 	// Setup
 	e := echo.New()
 
@@ -1263,6 +1267,10 @@ func TestBmcMacUnchanged(t *testing.T) {
 }
 
 func TestUpdateExpectedMachineHandler_Handle(t *testing.T) {
+	t.Run("complete mutation conflict", func(t *testing.T) {
+		testExpectedMachineMutationRejectsCompleteMutationLock(t, "single update")
+	})
+
 	tests := []struct {
 		name string
 		run  func(*testing.T)
@@ -1755,6 +1763,10 @@ func testUpdateExpectedMachineBmcIpAddress(t *testing.T) {
 }
 
 func TestDeleteExpectedMachineHandler_Handle(t *testing.T) {
+	t.Run("complete mutation conflict", func(t *testing.T) {
+		testExpectedMachineMutationRejectsCompleteMutationLock(t, "single delete")
+	})
+
 	// Setup
 	e := echo.New()
 	dbSession := testExpectedMachineInitDB(t)
@@ -2336,6 +2348,10 @@ func TestTenantWithTargetedInstanceCreationCapability(t *testing.T) {
 
 // TestCreateExpectedMachinesHandler_Handle tests the batch create handler
 func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
+	t.Run("complete mutation conflict", func(t *testing.T) {
+		testExpectedMachineMutationRejectsCompleteMutationLock(t, "batch create")
+	})
+
 	// Setup
 	e := echo.New()
 
@@ -2437,6 +2453,71 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 		workflowErrors map[int]string
 	}{
 		{
+			name: "multiple primary interfaces rejected before Core call",
+			requestBody: []model.APIExpectedMachineCreateRequest{{
+				SiteID: site.ID.String(), BmcMacAddress: "00:11:22:33:44:09", ChassisSerialNumber: "INVALID-PRIMARY",
+				Interfaces: model.APIExpectedMachineInterfaces{
+					{MacAddress: "02:00:00:00:00:01", Primary: cutil.GetPtr(true)},
+					{MacAddress: "02:00:00:00:00:02", Primary: cutil.GetPtr(true)},
+				},
+			}},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusBadRequest,
+			validateResp: func(t *testing.T, body []byte) {
+				assert.Contains(t, string(body), "at most one interface may set primary")
+				assert.Nil(t, capturedRequest, "invalid requests must not reach Core")
+			},
+		},
+		{
+			name: "zero MAC declarations persist within and across machines",
+			requestBody: []model.APIExpectedMachineCreateRequest{{
+				SiteID: site.ID.String(), BmcMacAddress: "00:11:22:33:44:09", ChassisSerialNumber: "ZERO-MAC-A",
+				Interfaces: model.APIExpectedMachineInterfaces{
+					{MacAddress: "00:00:00:00:00:00", NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.9")},
+					{MacAddress: "00:00:00:00:00:00", NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.10")},
+				},
+			}, {
+				SiteID: site.ID.String(), BmcMacAddress: "00:11:22:33:44:0A", ChassisSerialNumber: "ZERO-MAC-B",
+				Interfaces: model.APIExpectedMachineInterfaces{
+					{MacAddress: "00:00:00:00:00:00", NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.11")},
+				},
+			}},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusCreated,
+			validateResp: func(t *testing.T, body []byte) {
+				var response []model.APIExpectedMachine
+				require.NoError(t, json.Unmarshal(body, &response))
+				require.Len(t, response, 2)
+				batchRequest, ok := capturedRequest.(*corev1.BatchExpectedMachineOperationRequest)
+				require.True(t, ok)
+				require.Len(t, batchRequest.ExpectedMachines.ExpectedMachines, 2)
+				for machineIndex, ips := range [][]string{{"192.0.2.9", "192.0.2.10"}, {"192.0.2.11"}} {
+					stored, err := cdbm.NewExpectedMachineDAO(dbSession).Get(context.Background(), nil, response[machineIndex].ID, nil, false)
+					require.NoError(t, err)
+					nics := batchRequest.ExpectedMachines.ExpectedMachines[machineIndex].HostNics
+					require.Len(t, nics, len(ips))
+					require.Len(t, response[machineIndex].Interfaces, len(ips))
+					require.Len(t, stored.Interfaces, len(ips))
+					for index, ip := range ips {
+						assert.Equal(t, "00:00:00:00:00:00", nics[index].GetMacAddress())
+						assert.Equal(t, "CX9", nics[index].GetNicType())
+						assert.Equal(t, ip, nics[index].GetFixedIp())
+						assert.Equal(t, "00:00:00:00:00:00", stored.Interfaces[index].MacAddress)
+						assert.Equal(t, cutil.GetPtr(ip), stored.Interfaces[index].FixedIP)
+						assert.Equal(t, model.NewAPIExpectedMachineInterface(stored.Interfaces[index]), response[machineIndex].Interfaces[index])
+					}
+				}
+			},
+		},
+		{
 			name: "successful batch creation",
 			requestBody: []model.APIExpectedMachineCreateRequest{
 				{
@@ -2446,7 +2527,12 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 					DefaultBmcPassword:       cutil.GetPtr("password"),
 					ChassisSerialNumber:      "BATCH-CHASSIS-001",
 					FallbackDPUSerialNumbers: []string{"DPU001"},
-					Labels:                   map[string]string{"env": "test"},
+					Interfaces: []model.APIExpectedMachineInterface{{
+						MacAddress: "02-aa-bb-cc-dd-ee",
+						NicType:    cutil.GetPtr("CX9"),
+						FixedIP:    cutil.GetPtr("192.0.2.9"),
+					}},
+					Labels: map[string]string{"env": "test"},
 				},
 				{
 					SiteID:              site.ID.String(),
@@ -2474,6 +2560,13 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 				assert.JSONEq(t, `{"env":"test"}`, string(fields[0]["labels"]))
 				assert.JSONEq(t, `{}`, string(fields[1]["labels"]))
 				assert.JSONEq(t, `[]`, string(fields[1]["fallbackDPUSerialNumbers"]))
+				assert.JSONEq(t, `[]`, string(fields[1]["interfaces"]))
+				batchRequest := capturedRequest.(*corev1.BatchExpectedMachineOperationRequest)
+				require.Len(t, batchRequest.ExpectedMachines.ExpectedMachines[0].HostNics, 1)
+				assert.Equal(t, "02:AA:BB:CC:DD:EE", batchRequest.ExpectedMachines.ExpectedMachines[0].HostNics[0].GetMacAddress())
+				require.Len(t, response[0].Interfaces, 1)
+				assert.Equal(t, "02:AA:BB:CC:DD:EE", response[0].Interfaces[0].MacAddress)
+				assert.Equal(t, "CX9", batchRequest.ExpectedMachines.ExpectedMachines[0].HostNics[0].GetNicType())
 				assert.Contains(t, fields[0], "id")
 				assert.NotContains(t, fields[0], "Labels")
 			},
@@ -2720,6 +2813,11 @@ func TestCreateExpectedMachineHandler_DpfEnabledForwardedToWorkflow(t *testing.T
 		"bmcMacAddress":       "00:AA:BB:CC:DD:EF",
 		"chassisSerialNumber": "DPF-TEST-CHASSIS-001",
 		"isDpfEnabled":        false,
+		"interfaces": []map[string]interface{}{{
+			"macAddress": "02-aa-bb-cc-dd-ee",
+			"nicType":    "CX9",
+			"fixedIp":    "192.0.2.9",
+		}},
 	}
 	reqBody, err := json.Marshal(rawBody)
 	assert.Nil(t, err)
@@ -2754,12 +2852,22 @@ func TestCreateExpectedMachineHandler_DpfEnabledForwardedToWorkflow(t *testing.T
 			assert.False(t, *capturedRequest.IsDpfEnabled)
 		}
 		assert.False(t, capturedRequest.DpfEnabled)
+		require.Len(t, capturedRequest.HostNics, 1)
+		assert.Equal(t, "02:AA:BB:CC:DD:EE", capturedRequest.HostNics[0].GetMacAddress())
+		assert.Equal(t, "CX9", capturedRequest.HostNics[0].GetNicType())
+		assert.Equal(t, "192.0.2.9", capturedRequest.HostNics[0].GetFixedIp())
 	}
 
 	var apiResponse model.APIExpectedMachine
 	err = json.Unmarshal(rec.Body.Bytes(), &apiResponse)
 	assert.Nil(t, err)
 	assert.False(t, apiResponse.IsDpfEnabled)
+	require.Len(t, apiResponse.Interfaces, 1)
+	assert.Equal(t, "02:AA:BB:CC:DD:EE", apiResponse.Interfaces[0].MacAddress)
+	stored, err := cdbm.NewExpectedMachineDAO(dbSession).Get(context.Background(), nil, apiResponse.ID, nil, false)
+	require.NoError(t, err)
+	require.Len(t, stored.Interfaces, 1)
+	assert.Equal(t, "02:AA:BB:CC:DD:EE", stored.Interfaces[0].MacAddress)
 }
 
 // Each REST credential field must reach the encrypted Core PATCH request;
@@ -2826,6 +2934,15 @@ func testUpdateExpectedMachineBmcCredentials(t *testing.T) {
 			expectedUsername: "newadmin456",
 			expectedPath:     "bmc_username",
 		},
+		{
+			name: "interfaces replace",
+			requestBody: map[string]any{"interfaces": []map[string]any{{
+				"macAddress": "02-aa-bb-cc-dd-ee",
+				"nicType":    "CX9",
+				"fixedIp":    "192.0.2.9",
+			}}},
+			expectedPath: "host_nics",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2860,6 +2977,12 @@ func testUpdateExpectedMachineBmcCredentials(t *testing.T) {
 			assert.Equal(t, []string{tt.expectedPath}, capturedPatch.UpdateMask.Paths)
 			assert.Equal(t, tt.expectedUsername, capturedPatch.ExpectedMachine.BmcUsername)
 			assert.Equal(t, tt.expectedPassword, capturedPatch.ExpectedMachine.BmcPassword)
+			if tt.expectedPath == "host_nics" {
+				require.Len(t, capturedPatch.ExpectedMachine.HostNics, 1)
+				assert.Equal(t, "02:AA:BB:CC:DD:EE", capturedPatch.ExpectedMachine.HostNics[0].GetMacAddress())
+				assert.Equal(t, "CX9", capturedPatch.ExpectedMachine.HostNics[0].GetNicType())
+				assert.Equal(t, "192.0.2.9", capturedPatch.ExpectedMachine.HostNics[0].GetFixedIp())
+			}
 			for _, credential := range []string{tt.expectedUsername, tt.expectedPassword} {
 				if credential != "" {
 					testExpectedComponentPatchSecrets(t, capturedProxy, credential)
@@ -2920,6 +3043,12 @@ func TestExpectedMachineUpdateFields(t *testing.T) {
 		{
 			name:     "empty fallback DPU serial numbers",
 			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.FallbackDPUSerialNumbers = []string{} },
+		},
+		{
+			name: "empty interfaces",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) {
+				req.Interfaces = []model.APIExpectedMachineInterface{}
+			},
 		},
 		{
 			name:     "SKU ID",
@@ -3000,6 +3129,10 @@ func TestExpectedMachineUpdateFields(t *testing.T) {
 }
 
 func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
+	t.Run("complete mutation conflict", func(t *testing.T) {
+		testExpectedMachineMutationRejectsCompleteMutationLock(t, "batch update")
+	})
+
 	tests := []struct {
 		name string
 		run  func(*testing.T)

@@ -168,7 +168,8 @@ func (h *MockServerHelper) CreateJWKSServer(keys []TestKeyInfo) *httptest.Server
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write(jsonData)
+		// Mock response writes are best-effort if the client closes the connection.
+		_, _ = w.Write(jsonData)
 	}))
 }
 

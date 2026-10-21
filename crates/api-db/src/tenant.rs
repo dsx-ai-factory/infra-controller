@@ -17,7 +17,10 @@
 
 use config_version::ConfigVersion;
 use model::metadata::Metadata;
-use model::tenant::{Tenant, TenantPublicKeyValidationRequest};
+use model::nic_firmware::NicFirmwareProfileId;
+use model::tenant::{
+    Tenant, TenantNicFirmwareConfig, TenantOrganizationId, TenantPublicKeyValidationRequest,
+};
 use sqlx::PgConnection;
 
 use super::ObjectFilter;
@@ -26,6 +29,9 @@ use crate::{DatabaseError, DatabaseResult};
 
 type OrganizationID = String;
 
+#[cfg(test)]
+mod nic_firmware_tests;
+
 pub async fn create_and_persist(
     organization_id: String,
     metadata: Metadata,
@@ -33,7 +39,8 @@ pub async fn create_and_persist(
     txn: &mut PgConnection,
 ) -> Result<Tenant, DatabaseError> {
     let version = ConfigVersion::initial();
-    let query = "INSERT INTO tenants (organization_id, organization_name, version, routing_profile_type) VALUES ($1, $2, $3, $4) RETURNING *";
+    let query = "INSERT INTO tenants (organization_id, organization_name, version, routing_profile_type) VALUES ($1, $2, $3, $4)
+        RETURNING organization_id, organization_name, version, routing_profile_type";
 
     sqlx::query_as(query)
         .bind(organization_id)
@@ -50,7 +57,10 @@ pub async fn find<S: AsRef<str>>(
     for_update: bool,
     txn: &mut PgConnection,
 ) -> Result<Option<Tenant>, DatabaseError> {
-    let mut query = sqlx::QueryBuilder::new("SELECT * FROM tenants WHERE organization_id = $1");
+    let mut query = sqlx::QueryBuilder::new(
+        "SELECT organization_id, organization_name, version, routing_profile_type
+         FROM tenants WHERE organization_id = $1",
+    );
 
     if for_update {
         query.push(" FOR UPDATE ");
@@ -65,6 +75,84 @@ pub async fn find<S: AsRef<str>>(
 
     Ok(results)
 }
+
+/// `find_nic_firmware_config` reads the selection and shared tenant version
+/// without locking the row. A missing tenant returns `None`.
+pub async fn find_nic_firmware_config(
+    db: impl DbReader<'_>,
+    organization_id: &TenantOrganizationId,
+) -> DatabaseResult<Option<TenantNicFirmwareConfig>> {
+    let query = "SELECT organization_id, nic_firmware_profile_id, version
+        FROM tenants WHERE organization_id = $1";
+    sqlx::query_as(query)
+        .bind(organization_id)
+        .fetch_optional(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// `set_nic_firmware_config` sets or clears a selection on an existing tenant.
+/// Every successful write increments the shared tenant version, including a
+/// repeated selection or a clear when no profile is selected.
+///
+/// A selected profile's existence is checked before the tenant and its token.
+/// Missing profiles or tenants return `NotFoundError`; stale tokens return
+/// `ConcurrentModificationError`. No tenant hardware is bound here.
+///
+/// The connection must belong to an open `READ COMMITTED` transaction held
+/// through commit. The locking reads recheck committed row state after waiting,
+/// so a completed profile deletion returns `NotFoundError` and a tenant update
+/// is compared against its new token. Autocommit does not retain these locks.
+pub async fn set_nic_firmware_config(
+    txn: &mut PgConnection,
+    organization_id: &TenantOrganizationId,
+    profile_id: Option<&NicFirmwareProfileId>,
+    expected_version: ConfigVersion,
+) -> DatabaseResult<TenantNicFirmwareConfig> {
+    if let Some(profile_id) = profile_id {
+        // Check the profile before the tenant token and retain it through commit.
+        // If a concurrent deletion commits first, report NotFoundError here.
+        let query = "SELECT id FROM nic_firmware_profiles WHERE id = $1 FOR SHARE";
+        sqlx::query_scalar::<_, NicFirmwareProfileId>(query)
+            .bind(profile_id)
+            .fetch_optional(&mut *txn)
+            .await
+            .map_err(|error| DatabaseError::query(query, error))?
+            .ok_or_else(|| DatabaseError::NotFoundError {
+                kind: "NIC firmware profile",
+                id: profile_id.to_string(),
+            })?;
+    }
+
+    let query = "SELECT version FROM tenants WHERE organization_id = $1 FOR UPDATE";
+    let version: ConfigVersion = sqlx::query_scalar(query)
+        .bind(organization_id)
+        .fetch_optional(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?
+        .ok_or_else(|| DatabaseError::NotFoundError {
+            kind: "tenant",
+            id: organization_id.to_string(),
+        })?;
+    if version != expected_version {
+        return Err(DatabaseError::ConcurrentModificationError(
+            "tenant",
+            expected_version.to_string(),
+        ));
+    }
+
+    let query = "UPDATE tenants SET nic_firmware_profile_id = $1, version = $2
+        WHERE organization_id = $3
+        RETURNING organization_id, nic_firmware_profile_id, version";
+    sqlx::query_as(query)
+        .bind(profile_id)
+        .bind(expected_version.increment())
+        .bind(organization_id)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// Expects locking/coordination and the check for organization_id's
 /// existence to be handled by the caller.
 pub async fn update(
@@ -85,7 +173,7 @@ pub async fn update(
                 organization_id=$4
                 AND
                 version=$5
-            RETURNING *";
+            RETURNING organization_id, organization_name, version, routing_profile_type";
 
     sqlx::query_as(query)
         .bind(next_version)
@@ -182,7 +270,8 @@ pub async fn load_by_organization_ids(
     txn: &mut PgConnection,
     organization_ids: &[String],
 ) -> Result<Vec<Tenant>, DatabaseError> {
-    let query = "SELECT * from tenants WHERE organization_id = ANY($1)";
+    let query = "SELECT organization_id, organization_name, version, routing_profile_type
+        from tenants WHERE organization_id = ANY($1)";
     sqlx::query_as(query)
         .bind(organization_ids)
         .fetch_all(txn)
@@ -193,6 +282,84 @@ pub async fn load_by_organization_ids(
 #[cfg(test)]
 mod tests {
     use std::ops::DerefMut;
+
+    use sqlx::Connection;
+
+    use super::*;
+
+    #[crate::sqlx_test]
+    async fn tenant_queries_survive_added_columns(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut api_connection = pool.acquire().await?;
+        exercise_tenant_queries(&mut api_connection).await?;
+        assert!(api_connection.cached_statements_size() > 0);
+
+        // Keep the API connection and its prepared statements while another
+        // connection applies the schema change, just as a migration would.
+        let mut migration = pool.begin().await?;
+        sqlx::raw_sql(
+            "SET LOCAL lock_timeout = '5s';
+             ALTER TABLE tenants ADD COLUMN test_added_column text;",
+        )
+        .execute(&mut *migration)
+        .await?;
+        migration.commit().await?;
+
+        exercise_tenant_queries(&mut api_connection).await?;
+        Ok(())
+    }
+
+    async fn exercise_tenant_queries(
+        connection: &mut PgConnection,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = connection.begin().await?;
+        let metadata = Metadata {
+            name: "projection tenant".to_string(),
+            ..Default::default()
+        };
+        let tenant = create_and_persist(
+            "projection-tenant".to_string(),
+            metadata.clone(),
+            Some("external".to_string()),
+            &mut txn,
+        )
+        .await?;
+        assert_eq!(tenant.organization_id.as_str(), "projection-tenant");
+        assert_eq!(tenant.metadata, metadata);
+        assert_eq!(tenant.routing_profile_type.as_deref(), Some("external"));
+        assert_eq!(tenant.version.version_nr(), 1);
+
+        let metadata = Metadata {
+            name: "renamed tenant".to_string(),
+            ..Default::default()
+        };
+        let updated = update(
+            tenant.organization_id.to_string(),
+            metadata.clone(),
+            tenant.version,
+            Some("internal".to_string()),
+            &mut txn,
+        )
+        .await?;
+        assert_eq!(updated.organization_id, tenant.organization_id);
+        assert_eq!(updated.metadata, metadata);
+        assert_eq!(updated.routing_profile_type.as_deref(), Some("internal"));
+        assert_eq!(updated.version.version_nr(), 2);
+        assert_eq!(
+            find(updated.organization_id.as_str(), true, &mut txn).await?,
+            Some(updated.clone())
+        );
+        assert_eq!(
+            load_by_organization_ids(&mut txn, &[updated.organization_id.to_string()]).await?,
+            vec![updated]
+        );
+
+        // Roll back the fixture so both passes decode an inserted row.
+        // The connection retains its prepared statements after the rollback.
+        txn.rollback().await?;
+        Ok(())
+    }
 
     #[crate::sqlx_test]
     async fn test_null_organization_name(pool: sqlx::PgPool) {

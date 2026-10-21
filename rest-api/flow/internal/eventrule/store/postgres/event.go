@@ -140,7 +140,7 @@ func observeEvent(
 		Set("last_observed_at = GREATEST(e.last_observed_at, ?)", now).
 		Where("e.source_name = ?", key.SourceName).
 		Where("e.source_key = ?", key.SourceKey).
-		Returning("e.*").
+		Returning("?TableColumns").
 		Scan(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil

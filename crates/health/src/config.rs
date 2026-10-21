@@ -33,6 +33,7 @@ use url::Url;
 
 use crate::metrics::BmcLatencyAttribute;
 
+const MAX_GNMI_RECONCILE_INTERVAL: Duration = Duration::from_secs(366 * 24 * 60 * 60);
 const DEFAULT_BMC_REQUEST_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN.saturating_add(3);
 const ENDPOINT_SOURCES_CONFIG_KEY: &str = "endpoint_sources";
 const NICO_API_CONFIG_KEY: &str = "nico_api";
@@ -1014,6 +1015,7 @@ impl Default for PowerShelfHealthReportSinkConfig {
 #[serde(default)]
 pub struct RateLimitConfig {
     /// Burst value for explorations, optimal to set to max rate limit.
+    /// Must be greater than zero when rate limiting is enabled.
     pub bucket_burst: usize,
 
     /// Interval between bucket replenishment.
@@ -1525,14 +1527,27 @@ impl SseLogConfig {
     }
 }
 
+/// Periodic log collection settings.
+///
+/// Numeric entry IDs must increase between resets; existing entries must
+/// remain unchanged. Each poll validates the highest saved entry. A missing entry
+/// or changed mapped record triggers replay of retained history. Changes below an
+/// unchanged anchor are not detected.
+/// Nonnumeric entries are emitted when collecting or replaying retained history.
+/// Incremental scans and completed history-skipping baselines ignore them.
+///
+/// Paginated collections must report a stable `Members@odata.count` and return
+/// that many members. Numeric IDs must be distinct. Incomplete scans retry without advancing
+/// progress; records accepted by a sink before a failure can replay on retry.
+/// An unpaginated collection may omit the count.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PeriodicLogConfig {
-    /// Interval between log collection.
+    /// Interval between log collection polls. Defaults to 5 minutes.
     #[serde(with = "humantime_serde")]
     pub logs_collection_interval: Duration,
 
-    /// Interval between log service state refresh.
+    /// Interval between log service discovery refreshes. Defaults to 30 minutes.
     #[serde(with = "humantime_serde")]
     pub state_refresh_interval: Duration,
 
@@ -1547,11 +1562,11 @@ pub struct PeriodicLogConfig {
     #[serde(default = "default_excluded_log_services")]
     pub exclude_services: Vec<String>,
 
-    /// When true, on the first encounter of a LogService with no saved state,
-    /// anchor at the current highest entry ID without emitting existing entries.
-    /// Subsequent polls collect only new entries, matching SSE real-time
-    /// behaviour. Defaults to false (existing entries are collected on first
-    /// run). Also applies when auto-mode downgrades to periodic collection.
+    /// Skip retained history only on the first successful baseline without a checkpoint.
+    /// Failed baselines and saved numeric/SSE checkpoints replay retained records.
+    /// Defaults to false. Also applies after auto mode downgrades from SSE.
+    /// Old fingerprint checkpoints replay once. Numeric-only checkpoint readers
+    /// require this option disabled to replay history after rollback.
     #[serde(default)]
     pub skip_initial_history: bool,
 }
@@ -1929,7 +1944,8 @@ pub struct NvueGnmiConfig {
     ///
     /// One attempt may take nearly three times this duration before reconnect
     /// backoff. Updates before `sync_response=true` do not extend the
-    /// synchronization timeout.
+    /// synchronization timeout. gNMI reconciliation uses this duration as one
+    /// overall deadline, including credentials, connection, and the complete snapshot.
     #[serde(with = "humantime_serde")]
     pub request_timeout: Duration,
 
@@ -1941,6 +1957,16 @@ pub struct NvueGnmiConfig {
     /// Enable gNMI ON_CHANGE subscription for live system-event messages.
     #[serde(alias = "system_events_subscription_enabled", alias = "events_enabled")]
     pub system_events_enabled: bool,
+
+    /// Interval between complete snapshots used to remove stale metrics from each gNMI stream.
+    /// Omission or zero disables reconciliation. Positive intervals up to 366 days enable it.
+    /// A complete empty snapshot removes cached metrics unless live updates protect them.
+    /// The `system_events_reconcile_interval` alias also applies to every stream.
+    #[serde(
+        with = "humantime_serde::option",
+        alias = "system_events_reconcile_interval"
+    )]
+    pub reconcile_interval: Option<Duration>,
 
     /// gNMI SAMPLE subscription paths.
     pub paths: NvueGnmiPaths,
@@ -1960,6 +1986,7 @@ impl Default for NvueGnmiConfig {
             request_timeout: Duration::from_secs(30),
             dangerously_skip_tls_verification: false,
             system_events_enabled: true,
+            reconcile_interval: None,
             paths: NvueGnmiPaths::default(),
             additional_subscriptions: Vec::new(),
         }
@@ -1967,7 +1994,25 @@ impl Default for NvueGnmiConfig {
 }
 
 impl NvueGnmiConfig {
-    fn validate(&self) -> Result<(), String> {
+    /// Checks subscription configuration before collector activation.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self
+            .reconcile_interval
+            .is_some_and(|interval| interval > MAX_GNMI_RECONCILE_INTERVAL)
+        {
+            return Err(
+                "collectors.nvue.gnmi.reconcile_interval must not exceed 366 days".to_string(),
+            );
+        }
+
+        if self
+            .reconcile_interval
+            .is_some_and(|interval| !interval.is_zero())
+            && self.request_timeout.is_zero()
+        {
+            return Err("collectors.nvue.gnmi.request_timeout must be positive when gNMI reconciliation is enabled".to_string());
+        }
+
         if let Some(interface_paths) = &self.paths.interface_paths {
             let config_path = "collectors.nvue.gnmi.paths.interface_paths";
 
@@ -2693,7 +2738,9 @@ impl<P: Provider> Provider for CanonicalNicoApiProvider<P> {
 }
 
 impl Config {
-    /// Load configuration from optional path
+    /// Loads defaults, an optional TOML file, and `CARBIDE_HEALTH__` environment
+    /// overrides, in that order, then validates the resulting configuration.
+    /// Malformed enabled sections return an error instead of falling back to defaults.
     pub fn load(config_path: Option<&Path>) -> Result<Self, String> {
         let mut figment = Figment::new().merge(Serialized::defaults(Config::default()));
 
@@ -2705,9 +2752,29 @@ impl Config {
             Env::prefixed("CARBIDE_HEALTH__").split("__"),
         ));
 
-        let config: Config = figment
-            .extract()
-            .map_err(|e| format!("Failed to load configuration: {}", e))?;
+        let config: Config = figment.extract().map_err(|error| {
+            let sources = match config_path {
+                Some(path) => format!(
+                    "{} and CARBIDE_HEALTH__ environment variables",
+                    path.display()
+                ),
+                None => "defaults and CARBIDE_HEALTH__ environment variables".to_string(),
+            };
+
+            let location = if error.path.is_empty() {
+                String::new()
+            } else {
+                format!("{}: ", error.path.join("."))
+            };
+
+            // Buffered sections retain relative field paths in their error
+            // messages, but the enclosing tag does not identify the leaf's
+            // provider. Report the inputs without attributing a leaf origin.
+            format!(
+                "failed to load configuration from {sources}: {location}{}",
+                error.kind
+            )
+        })?;
 
         config.validate()?;
         Ok(config)
@@ -2748,6 +2815,14 @@ impl Config {
         {
             return Err(
                 "bucket_replenish must be greater than 0 when rate limiting is enabled".to_string(),
+            );
+        }
+
+        if let Configurable::Enabled(rate_limit) = &self.rate_limit
+            && rate_limit.bucket_burst == 0
+        {
+            return Err(
+                "bucket_burst must be greater than 0 when rate limiting is enabled".to_string(),
             );
         }
 
@@ -2890,6 +2965,11 @@ impl Config {
     }
 }
 
+/// A configuration table that is enabled unless `enabled = false` is specified.
+///
+/// Null disables the section. An empty enabled table uses `T::default()`;
+/// populated enabled tables follow `T`'s defaults and unknown-field policy.
+/// Disabled payloads are ignored, while malformed enabled payloads return errors.
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum Configurable<T> {
@@ -2918,32 +2998,44 @@ where
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        struct Helper<T> {
-            #[serde(default = "default_true")]
-            enabled: bool,
-            #[serde(flatten)]
-            config: Option<T>,
-        }
+        // Buffer before decoding so `enabled = false` wins regardless of key
+        // order. A payload decoding error must not be interpreted as absence.
+        let Some(value) = Option::<Value>::deserialize(deserializer)? else {
+            return Ok(Self::Disabled);
+        };
 
-        fn default_true() -> bool {
-            true
-        }
+        let Value::Dict(tag, mut fields) = value else {
+            return Err(serde::de::Error::custom("expected a configuration table"));
+        };
 
-        let helper_opt = Option::<Helper<T>>::deserialize(deserializer)?;
+        if let Some(enabled) = fields.remove("enabled") {
+            let enabled: bool = enabled
+                .deserialize()
+                .map_err(|error| serde::de::Error::custom(format!("enabled: {}", error.kind)))?;
 
-        match helper_opt {
-            None => Ok(Configurable::Disabled),
-            Some(helper) => {
-                if !helper.enabled {
-                    Ok(Configurable::Disabled)
-                } else if let Some(cfg) = helper.config {
-                    Ok(Configurable::Enabled(cfg))
-                } else {
-                    Ok(Configurable::Enabled(T::default()))
-                }
+            if !enabled {
+                return Ok(Self::Disabled);
             }
         }
+
+        if fields.is_empty() {
+            return Ok(Self::Enabled(T::default()));
+        }
+
+        // Generic Serde errors do not carry Figment's relative key/index path.
+        // Include it explicitly before crossing another Configurable wrapper.
+        Value::Dict(tag, fields)
+            .deserialize()
+            .map(Self::Enabled)
+            .map_err(|error| {
+                if error.path.is_empty() {
+                    return serde::de::Error::custom(error.kind);
+                }
+
+                let location = error.path.join(".");
+
+                serde::de::Error::custom(format!("{location}: {}", error.kind))
+            })
     }
 }
 
@@ -2953,6 +3045,49 @@ mod tests {
     use carbide_test_support::{Check, check_values, scenarios, value_scenarios};
 
     use super::*;
+
+    #[test]
+    fn gnmi_reconciliation_config_contract() {
+        for (input, seconds, valid) in [
+            ("", None, true),
+            ("reconcile_interval = '0s'", Some(0), true),
+            ("reconcile_interval = '2m'", Some(120), true),
+            ("reconcile_interval = '366d'", Some(31622400), true),
+            ("reconcile_interval = '31622401s'", Some(31622401), false),
+            ("system_events_reconcile_interval = '30m'", Some(1800), true),
+            ("request_timeout = '0s'", None, true),
+            (
+                "request_timeout = '0s'\nreconcile_interval = '30m'",
+                Some(1800),
+                false,
+            ),
+            (
+                "request_timeout = '0s'\nreconcile_interval = '30m'\nsystem_events_enabled = false",
+                Some(1800),
+                false,
+            ),
+            (
+                "request_timeout = '0s'\nreconcile_interval = '0s'",
+                Some(0),
+                true,
+            ),
+        ] {
+            let config: super::NvueGnmiConfig =
+                Figment::new().merge(Toml::string(input)).extract().unwrap();
+
+            assert_eq!(
+                config.reconcile_interval.map(|interval| interval.as_secs()),
+                seconds
+            );
+
+            assert_eq!(config.validate().is_ok(), valid, "{input}");
+
+            let round_trip: super::NvueGnmiConfig =
+                serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+
+            assert_eq!(round_trip.reconcile_interval, config.reconcile_interval);
+        }
+    }
 
     fn config_with(configure: impl FnOnce(&mut Config)) -> Box<Config> {
         let mut config = Config::default();
@@ -5078,12 +5213,182 @@ interface_paths = [["state", "oper-status"], ["phy-diag", "state", "raw-ber"]]
     }
 
     #[test]
+    #[allow(clippy::result_large_err)] // Figment controls the error representation.
+    fn malformed_enabled_sections_fail_configuration_loading() {
+        figment::Jail::expect_with(|jail| {
+            jail.clear_env();
+
+            let valid = r#"
+[collectors.nvue.gnmi]
+gnmi_port = 19339
+system_events_enabled = false
+
+[[collectors.nvue.gnmi.additional_subscriptions]]
+name = "first"
+paths = [["interfaces"]]
+metrics = [{path = ["interfaces", "state", "counter"], metric_type = "interface_counter", output = {kind = "gauge", unit = "bytes"}}]
+
+[[collectors.nvue.gnmi.additional_subscriptions]]
+name = "second"
+encoding = "json_ietf"
+mode = "sample"
+sample_interval = "10s"
+paths = [["interfaces"]]
+metrics = [{path = ["interfaces", "state", "counter"], metric_type = "interface_counter", output = {kind = "gauge", unit = "count"}}]
+"#;
+
+            // Only the second entry is malformed, so diagnostics must identify
+            // its index rather than blaming or discarding the valid first entry.
+            for (field, from, to, reason) in [
+                (
+                    "encoding",
+                    "encoding = \"json_ietf\"",
+                    "encoding = \"proto\"",
+                    "proto",
+                ),
+                ("mode", "mode = \"sample\"", "mode = \"sampl\"", "sampl"),
+                (
+                    "metrics.0.output",
+                    "kind = \"gauge\", unit = \"count\"",
+                    "kind = \"gaugeh\", unit = \"count\"",
+                    "gaugeh",
+                ),
+                (
+                    "sample_interval",
+                    "sample_interval = \"10s\"",
+                    "sample_interval = \"not-a-duration\"",
+                    "duration",
+                ),
+                (
+                    "unknown",
+                    "encoding = \"json_ietf\"",
+                    "encodign = \"json_ietf\"",
+                    "encodign",
+                ),
+            ] {
+                jail.create_file("health.toml", &valid.replace(from, to))?;
+
+                let error = Config::load(Some(Path::new("health.toml")))
+                    .expect_err("malformed enabled subscription must fail startup");
+
+                for expected in [
+                    "collectors.nvue",
+                    "gnmi",
+                    "additional_subscriptions.1",
+                    "health.toml",
+                    reason,
+                ] {
+                    assert!(
+                        error.contains(expected),
+                        "{field}: missing {expected}: {error}"
+                    );
+                }
+
+                if field != "unknown" {
+                    assert!(error.contains(field), "{field}: {error}");
+                }
+            }
+
+            for (contents, section, field) in [
+                (
+                    "[collectors.nmxt]\nscrape_interval = \"not-a-duration\"",
+                    "collectors.nmxt",
+                    "scrape_interval",
+                ),
+                (
+                    "[collectors.nvue.gnmi]\nenabled = \"sometimes\"",
+                    "collectors.nvue",
+                    "enabled",
+                ),
+            ] {
+                jail.create_file("health.toml", contents)?;
+
+                let error = Config::load(Some(Path::new("health.toml")))
+                    .expect_err("malformed enabled section must fail startup");
+
+                assert!(error.contains(section), "{error}");
+                assert!(error.contains(field), "{error}");
+            }
+
+            jail.create_file("health.toml", valid)?;
+            jail.set_env("CARBIDE_HEALTH__COLLECTORS__NVUE__GNMI__GNMI_PORT", "20339");
+
+            let config = Config::load(Some(Path::new("health.toml")))
+                .expect("valid environment override should preserve the configured payload");
+
+            let gnmi = config
+                .collectors
+                .nvue
+                .as_option()
+                .unwrap()
+                .gnmi
+                .as_option()
+                .unwrap();
+
+            assert_eq!(gnmi.gnmi_port, 20339);
+            assert!(!gnmi.system_events_enabled);
+            assert_eq!(gnmi.additional_subscriptions.len(), 2);
+
+            jail.set_env(
+                "CARBIDE_HEALTH__COLLECTORS__NVUE__GNMI__SAMPLE_INTERVAL",
+                "invalid",
+            );
+
+            let error = Config::load(Some(Path::new("health.toml")))
+                .expect_err("malformed environment override must fail loading");
+
+            for expected in [
+                "health.toml",
+                "CARBIDE_HEALTH__",
+                "sample_interval",
+                "duration",
+            ] {
+                assert!(error.contains(expected), "missing {expected}: {error}");
+            }
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn configurable_preserves_defaults_and_explicit_disabling() {
+        value_scenarios!(run = |input: serde_json::Value| {
+            serde_json::from_value::<Configurable<NvueCollectorConfig>>(input)
+                .expect("valid wrapper representation should parse")
+                .is_enabled()
+        };
+            "disabled representations" {
+                serde_json::Value::Null => false,
+                serde_json::json!({"enabled": false, "gnmi": {"sample_interval": "invalid"}}) => false,
+                serde_json::json!({"enabled": false, "rest": {"poll_interval": "invalid"}}) => false,
+            }
+
+            "empty enabled sections" {
+                serde_json::json!({}) => true,
+                serde_json::json!({"enabled": true}) => true,
+            }
+
+            "disabled child under enabled parent" {
+                serde_json::json!({"gnmi": {"enabled": false, "sample_interval": "invalid"}}) => true,
+            }
+        );
+
+        assert!(
+            serde_json::from_value::<Configurable<NvueCollectorConfig>>(serde_json::json!(false))
+                .is_err(),
+            "only null or a configuration table is supported"
+        );
+    }
+
+    #[test]
     fn nvue_gnmi_additional_subscription_parses_complete_contract() {
         let config: Config = Figment::new()
             .merge(Serialized::defaults(Config::default()))
             .merge(Toml::string(
                 r#"
 [collectors.nvue.gnmi]
+gnmi_port = 19339
+system_events_enabled = false
 
 [[collectors.nvue.gnmi.additional_subscriptions]]
 name = "external_metrics"
@@ -5126,6 +5431,8 @@ metrics = [
             .first()
             .expect("one additional subscription should be configured");
 
+        assert_eq!(gnmi.gnmi_port, 19339);
+        assert!(!gnmi.system_events_enabled);
         assert_eq!(subscription.name, "external_metrics");
         assert_eq!(subscription.target, "switch");
         assert_eq!(subscription.origin, "openconfig");
@@ -6298,53 +6605,27 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
     /// Capture tracing WARN events emitted during a closure.
     /// Uses a per-call dispatcher so parallel tests don't interfere.
     fn capture_warnings(f: impl FnOnce()) -> Vec<String> {
-        use std::sync::{Arc, Mutex};
+        carbide_instrument::testing::capture_logs(f)
+            .into_iter()
+            .filter(|log| log.level == tracing::Level::WARN)
+            .map(|log| log.message)
+            .collect()
+    }
 
-        use tracing::Level;
-        use tracing_subscriber::layer::SubscriberExt;
+    #[test]
+    fn capture_warnings_allows_retained_dispatch() {
+        let mut dispatch = None;
+        let warnings = capture_warnings(|| {
+            // Tracing can keep our `Dispatch` alive while another test rebuilds
+            // the callsite cache. Hold it past capture to verify that reading
+            // the warnings doesn't require exclusive ownership of the buffer.
+            dispatch = Some(tracing::dispatcher::get_default(Clone::clone));
+            tracing::info!("not a warning");
+            tracing::warn!("captured warning");
+        });
 
-        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let captured_clone = Arc::clone(&captured);
-
-        struct WarnCapture(Arc<Mutex<Vec<String>>>);
-
-        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnCapture {
-            fn on_event(
-                &self,
-                event: &tracing::Event<'_>,
-                _ctx: tracing_subscriber::layer::Context<'_, S>,
-            ) {
-                if *event.metadata().level() != Level::WARN {
-                    return;
-                }
-                struct Visitor(String);
-                impl tracing::field::Visit for Visitor {
-                    fn record_debug(
-                        &mut self,
-                        field: &tracing::field::Field,
-                        value: &dyn std::fmt::Debug,
-                    ) {
-                        if field.name() == "message" {
-                            self.0 = format!("{value:?}").trim_matches('"').to_string();
-                        }
-                    }
-                    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-                        if field.name() == "message" {
-                            self.0 = value.to_string();
-                        }
-                    }
-                }
-                let mut v = Visitor(String::new());
-                event.record(&mut v);
-                self.0.lock().unwrap().push(v.0);
-            }
-        }
-
-        tracing::subscriber::with_default(
-            tracing_subscriber::registry().with(WarnCapture(captured_clone)),
-            f,
-        );
-        Arc::try_unwrap(captured).unwrap().into_inner().unwrap()
+        assert_eq!(warnings, ["captured warning"]);
+        drop(dispatch);
     }
 
     #[test]

@@ -39,7 +39,7 @@ use vaultrs::error::ClientError;
 use vaultrs::{kv2, pki};
 
 use crate::SecretsError;
-use crate::certificates::{Certificate, CertificateProvider};
+use crate::certificates::{Certificate, CertificateProvider, machine_spiffe_uri};
 use crate::credentials::{
     CredentialKey, CredentialManager, CredentialPrefix, CredentialReader, CredentialWriter,
     Credentials,
@@ -143,22 +143,6 @@ fn service_account_role_name_from_jwt(jwt: &str) -> Result<String, eyre::Report>
         .as_str()
         .wrap_err("JWT payload does not contain /kubernetes.io/serviceaccount/name")
         .map(str::to_string)
-}
-
-/// Builds a machine SPIFFE URI SAN matching site `[auth.trust]` path layout.
-///
-/// `machine_base_path` is the path segment after the trust domain, e.g. `/forge-system/machine/`.
-pub(crate) fn machine_spiffe_uri(
-    trust_domain: &str,
-    machine_base_path: &str,
-    machine_id: &str,
-) -> String {
-    let base = machine_base_path.trim().trim_matches('/');
-    if base.is_empty() {
-        format!("spiffe://{trust_domain}/{machine_id}")
-    } else {
-        format!("spiffe://{trust_domain}/{base}/{machine_id}")
-    }
 }
 
 /// The Vault request kind, as the bounded `request_type` label carried by the

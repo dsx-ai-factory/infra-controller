@@ -12,7 +12,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -206,8 +205,6 @@ func TestSiteSQLDAO_GetByID(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -800,8 +797,6 @@ func TestSiteSQLDAO_GetAll(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1100,8 +1095,6 @@ func TestSiteSQLDAO_GetCount(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1225,8 +1218,6 @@ func TestSiteSQLDAO_Create(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1509,8 +1500,6 @@ func TestSiteSQLDAO_Update(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(tt.ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := tt.ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1613,8 +1602,6 @@ func TestSiteSQLDAO_Delete(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1912,14 +1899,14 @@ func TestSite_IsTimeWithinStaleInventoryThreshold(t *testing.T) {
 		{
 			name:       "a change older than the fallback threshold is safe to act on",
 			site:       &Site{},
-			actionTime: time.Now().Add(-(cutil.DefaultInventoryReceiptInterval + cutil.StaleInventoryBuffer + time.Second)),
+			actionTime: time.Now().Add(-(cutil.DefaultInventoryReceiptInterval + time.Second)),
 			want:       false,
 		},
 		{
 			// The same age that clears the fallback is still too recent for a slower Site.
 			name:       "follows a reported interval longer than the fallback",
 			site:       &Site{InventoryIntervalSeconds: cutil.GetPtr(300)},
-			actionTime: time.Now().Add(-(cutil.DefaultInventoryReceiptInterval + cutil.StaleInventoryBuffer + time.Second)),
+			actionTime: time.Now().Add(-(cutil.DefaultInventoryReceiptInterval + time.Second)),
 			want:       true,
 		},
 		{
@@ -1937,31 +1924,32 @@ func TestSite_IsTimeWithinStaleInventoryThreshold(t *testing.T) {
 			want:       true,
 		},
 		{
-			// The buffer keeps the check off the exact interval, where clock skew between the
-			// Site and Cloud would decide the outcome.
-			name:       "a change inside the buffer past the interval is still too recent",
+			// There is no padding past the interval. A reconciler that anchors its writes to
+			// the start of a cycle has to read them back as exactly one interval old and act
+			// on them, rather than treating its own write as an external change.
+			name:       "a change a full interval old is safe to act on",
 			site:       reportedOneMinute,
-			actionTime: time.Now().Add(-(time.Minute + cutil.StaleInventoryBuffer/2)),
-			want:       true,
+			actionTime: time.Now().Add(-time.Minute),
+			want:       false,
 		},
 		{
-			// A stored zero or negative would otherwise collapse the threshold to the buffer
-			// alone and let inventory act on data it should treat as newer.
+			// A stored zero or negative would otherwise collapse the threshold to nothing and
+			// let inventory act on data it should treat as newer.
 			name:       "falls back on a zero reported interval",
 			site:       &Site{InventoryIntervalSeconds: cutil.GetPtr(0)},
-			actionTime: time.Now().Add(-(cutil.StaleInventoryBuffer + time.Second)),
+			actionTime: time.Now().Add(-10 * time.Second),
 			want:       true,
 		},
 		{
 			name:       "falls back on a negative reported interval",
 			site:       &Site{InventoryIntervalSeconds: cutil.GetPtr(-30)},
-			actionTime: time.Now().Add(-(cutil.StaleInventoryBuffer + time.Second)),
+			actionTime: time.Now().Add(-10 * time.Second),
 			want:       true,
 		},
 		{
 			name:       "falls back on a nil Site",
 			site:       nil,
-			actionTime: time.Now().Add(-(cutil.StaleInventoryBuffer + time.Second)),
+			actionTime: time.Now().Add(-10 * time.Second),
 			want:       true,
 		},
 	}

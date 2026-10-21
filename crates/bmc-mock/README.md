@@ -79,9 +79,14 @@ that contains `PowerState` for power, boot override, BIOS, and VirtualMedia
 requests.
 
 The default libvirt device targets are `sdb` for `Cd` and `sdc` for `ConfigCd`.
-Confirm those targets are unused with `virsh domblklist DOMAIN --details` before
-inserting media. HTTP or HTTPS ISO URLs must be reachable from the host running
-the QEMU process. File paths must exist in that host's filesystem.
+At startup, the backend creates an empty SATA CD-ROM at each configured target,
+marked with a `ua-bmc-mock-vmedia-<device-id>` alias. An existing target must be
+an owned SATA CD-ROM; a foreign device causes startup or media updates to fail.
+Insert, replace, and eject use `update-device` to change media without removing
+the CD-ROM. Updates affect saved configuration and, while the VM is active,
+live configuration as well. Eject leaves an empty drive.
+
+HTTP or HTTPS ISO URLs must be reachable from the host running the QEMU process. File paths must exist in that host's filesystem.
 
 ## Apply boot-order changes with libvirt
 
@@ -120,7 +125,9 @@ MAC addresses will then agree. `--state-backend libvirt --libvirt-domain NAME`
 can be used for a DPU endpoint when a separate DPU VM exists.
 
 The internal backend maintains power state entirely within the process. It does
-not affect the host VM and intentionally does not expose libvirt virtual media.
+not affect the host VM. A DPU using libvirt exposes only `ConfigCd` for
+configuration media; a host using libvirt exposes `Cd` and `ConfigCd`. Internal
+simulation keeps the profile defaults.
 
 ## SSE events
 
@@ -262,3 +269,87 @@ resource that is not a collection is a 400 `QueryNotSupportedOnResource`; a
 cover, is a 400 `QueryParameterValueFormatError`; a negative `$skip` or a
 `$top` below 1 is a 400 `QueryParameterOutOfRange`. Parameters without a `$`
 are ignored.
+
+## Standalone state persistence
+
+Use `--state-file PATH` with the libvirt backend to preserve BMC
+accounts across restarts. Each BMC needs its own file and a single writer; the
+parent directory must exist. Snapshots contain plaintext credentials and are
+atomically replaced with owner-only permissions. Missing files are initialized
+from the profile; corrupt, unsupported, or unreadable state fails startup.
+Internal, archive and IPMI simulation modes do not support this option.
+
+The libvirt application's `state_refresh_indication()` sends a notification
+to the existing libvirt actor. The actor exports current state and writes only when
+it differs from the last saved snapshot. Storage failures are retried without
+rejecting changes already applied in memory. Abrupt termination can lose
+unsaved changes; SIGINT and SIGTERM trigger a final save. There is no periodic
+state polling. Callers changing state through internal APIs must indicate the
+change themselves.
+
+Embedded callers such as machine-a-tron use `BmcState::persisted()` and
+`restore_persisted()` inside their own persistence lifecycle. `snapshot_source()`
+provides weak access without retaining the BMC or depending on its callback
+type. `persistence::atomic_write()` accepts bytes independently of snapshot
+format. The library does not attach file storage or actors to resource state.
+
+Snapshot readers ignore unknown fields so additive changes within a format
+version do not prevent rollback. Missing required fields, invalid account
+identities, and unsupported versions remain errors. MAT snapshots use
+`bmc_state`; the old `bmc_accounts` format is not migrated.
+Start with fresh persisted state when upgrading from that format.
+
+## Switch NVOS endpoint
+
+An NVLink switch tray has two management addresses: its BMC, which the
+profiles above serve over Redfish, and its NVOS, which serves the NVUE REST
+API. For the `nvidia_switch_n5700_ld` and `nvidia_switch_nd5200_ld` profiles,
+`bmc_mock::nvue_router` returns a second router to serve at the switch's NVOS
+address, and the `NvueState` behind it. machine-a-tron mounts it at the
+switch's NVOS lease on the same listener as the BMCs.
+
+The router answers `GET` on the `/nvue_v1/` trees NICo reads, with HTTP Basic
+auth as the NVOS administrator: user `admin` (`DUMMY_NVOS_USERNAME`) with
+password `factory_password` (`DUMMY_FACTORY_PASSWORD`) until a password
+rotation changes it through `NvueState::set_password`. The responses
+follow a capture from an N5400_LD switch tray running NVOS 25.02.4463: the
+sensor roster, thresholds and application versions are that tray's, while the
+NVLink port count, the partition and the management MAC address are the
+simulated switch's.
+
+| Path | Content |
+| --- | --- |
+| `/nvue_v1/system` | Hostname, status, uptime, release and the health summary |
+| `/nvue_v1/system/version` | Image build id, base OS and kernel |
+| `/nvue_v1/system/health` | Overall status, status LED, and the components with an issue |
+| `/nvue_v1/system/reboot/reason` | The last reboot's reason, time and user |
+| `/nvue_v1/platform` | System type, part number, serial number and port layout |
+| `/nvue_v1/platform/environment` | Every fan, temperature sensor and LED with its state and type; the `STATUS` LED turns amber on a leak or an unhealthy system |
+| `/nvue_v1/platform/environment/fan` | Fans `FAN<tray>/<fan>` with current, minimum and maximum speed and airflow direction |
+| `/nvue_v1/platform/environment/led` | LED colors |
+| `/nvue_v1/platform/environment/temperature` | Temperature sensors with the current reading and the thresholds each has |
+| `/nvue_v1/platform/environment/leakage` | Leak sensors `LEAKAGE-<n>`, `ok` or `leak` |
+| `/nvue_v1/interface` | NVLink ports `acp1` onwards, fabric management ports `fnm1` and `fnm2`, `eth0` and `lo` |
+| `/nvue_v1/cluster/apps` | The NMX controller and telemetry applications |
+| `/nvue_v1/sdn/partition` | The NVLink partitions, keyed by id |
+
+The mock ignores `rev` and always returns operational values, where real NVOS
+answers `{}` when asked for `applied` on an operational-only tree. It also
+ignores `filter_`, as NVOS 25.02 does, so `/nvue_v1/interface` lists every
+interface regardless of the type filter. It ignores `include` and `omit`, so
+responses carry every field. A request without valid credentials gets the
+switch's nginx `text/html` 401 page with
+`WWW-Authenticate: Basic realm="nvueapi"`, and `HEAD` or `OPTIONS` gets its
+403 page. Any other path under `/nvue_v1/` is 404 and any other method on a
+served path is 405, as `application/problem+json`. Voltage sensors, PSUs,
+interface counters, configuration writes, revisions and `nv config apply` are
+not modeled.
+
+`NvueState` lets a simulator change what the switch reports: `set_leak_state`
+wets or dries a leak sensor, `set_system_health` sets the overall status and
+the issue table, and `set_password` follows an NVOS password rotation. The
+same fault-injection rules as the switch's BMC apply, through the management
+endpoints served at the NVOS address.
+
+The standalone `bmc-mock` binary does not serve an NVOS endpoint; the switch
+profiles are reachable through machine-a-tron and the in-process test support.

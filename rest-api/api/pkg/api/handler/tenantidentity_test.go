@@ -288,7 +288,7 @@ func TestReencryptTenantIdentitySecretsHandler_Handle(t *testing.T) {
 		{
 			name:      "tenant allocated only on another site is rejected before proxy dispatch",
 			body:      `{"organizationId":"` + otherSiteTenantOrg + `"}`,
-			wantError: "Tenant organization does not have an allocation on the Site",
+			wantError: "Tenant organization is not associated with the Site",
 		},
 	}
 	for _, tt := range tests {

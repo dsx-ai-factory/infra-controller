@@ -842,6 +842,20 @@ impl ApiClient {
         Ok(self.0.update_domain(request).await?)
     }
 
+    pub(crate) async fn create_domain(
+        &self,
+        name: String,
+        vpc_id: Option<VpcId>,
+        default_ttl: Option<u32>,
+    ) -> CarbideCliResult<::rpc::protos::dns::Domain> {
+        let request = ::rpc::protos::dns::CreateDomainRequest {
+            name,
+            vpc_id,
+            default_ttl,
+        };
+        Ok(self.0.create_domain(request).await?)
+    }
+
     pub(crate) async fn machine_insert_health_report_override(
         &self,
         id: &MachineId,
@@ -1054,6 +1068,39 @@ impl ApiClient {
             .await?;
 
         Ok(all.devices)
+    }
+
+    /// List every parked address reservation matching the filter, listing the
+    /// address ids first and then fetching their full rows in bounded,
+    /// concurrently-buffered chunks -- the same paged pattern as the other
+    /// `get_all_*` listings. An empty id list short-circuits before any
+    /// `*ByIds` call.
+    pub(crate) async fn get_all_reserved_addresses(
+        &self,
+        page_size: usize,
+        reserved_by_mac: Option<String>,
+        ip_address: Option<String>,
+    ) -> CarbideCliResult<Vec<::rpc::forge::ReservedAddress>> {
+        let ids = self
+            .0
+            .admin_find_reserved_address_ids(::rpc::forge::AdminFindReservedAddressesRequest {
+                reserved_by_mac,
+                ip_address,
+            })
+            .await?
+            .ip_addresses;
+
+        let mut all = Vec::with_capacity(ids.len());
+        stream::iter(ids.chunks(self.effective_chunk_size(page_size).await?))
+            .map(|chunk| self.0.admin_find_reserved_addresses_by_ids(chunk.to_vec()))
+            .buffered(PAGED_LIST_FETCH_CONCURRENCY)
+            .try_for_each(|resp| {
+                all.extend(resp.reserved_addresses);
+                futures::future::ok(())
+            })
+            .await?;
+
+        Ok(all)
     }
 
     pub(crate) async fn get_machines_by_ids(
@@ -1442,11 +1489,9 @@ impl ApiClient {
                     bmc_username: switch.bmc_username,
                     bmc_password: switch.bmc_password,
                     switch_serial_number: switch.switch_serial_number,
-                    nvos_mac_addresses: switch
-                        .nvos_mac_addresses
-                        .iter()
-                        .map(|m| m.to_string())
-                        .collect(),
+                    nvos_interfaces: crate::expected_switch::common::nvos_interfaces_wire(
+                        &switch.nvos_interfaces,
+                    ),
                     nvos_username: switch.nvos_username,
                     nvos_password: switch.nvos_password,
                     bmc_ip_address: switch
@@ -1952,7 +1997,6 @@ impl ApiClient {
     }
 
     /// Build an InstanceAllocationRequest from CLI args and machine info.
-    #[allow(deprecated)]
     pub(crate) async fn build_instance_request(
         &self,
         machine: Machine,
@@ -1961,6 +2005,10 @@ impl ApiClient {
         modified_by: Option<String>,
     ) -> CarbideCliResult<rpc::InstanceAllocationRequest> {
         let mut vf_function_id = 0;
+        let discovery_info = machine
+            .status
+            .as_ref()
+            .and_then(|status| status.discovery_info.as_ref());
         let (interface_configs, tenant_org, vpc_id) = if let Some(vpc_id) =
             allocate_instance.flat_vpc_id
         {
@@ -2043,15 +2091,13 @@ impl ApiClient {
             tracing::debug!(vfs_per_pf, "VFs per PF",);
 
             let mut next_device_instance = HashMap::new();
-
-            let Some(interfaces) = machine.discovery_info.map(|di| di.network_interfaces) else {
-                return Err(CarbideCliError::GenericError(format!(
-                    "no interface information for machine: {}",
-                    machine.id.unwrap_or_default()
-                )));
+            let Some(discovery_info) = discovery_info else {
+                return Err(CarbideCliError::GenericError(
+                    "Machine discovery info is required for subnet allocation.".to_string(),
+                ));
             };
 
-            let mut interface_iter = interfaces.iter().filter(|iface| {
+            let mut interface_iter = discovery_info.network_interfaces.iter().filter(|iface| {
                 iface
                     .pci_properties
                     .as_ref()
@@ -2122,7 +2168,7 @@ impl ApiClient {
                 None,
             )
         } else if !allocate_instance.vpc_prefix_id.is_empty() {
-            let Some(discovery_info) = &machine.discovery_info else {
+            let Some(discovery_info) = discovery_info else {
                 return Err(CarbideCliError::GenericError(
                     "Machine discovery info is required for VPC prefix allocation.".to_string(),
                 ));
@@ -2476,6 +2522,79 @@ impl ApiClient {
             include_history,
         };
         Ok(self.0.get_machine_validation_runs(request).await?)
+    }
+
+    pub(crate) async fn find_machine_validation_run_items(
+        &self,
+        validation_id: MachineValidationId,
+    ) -> CarbideCliResult<Vec<rpc::MachineValidationRunItem>> {
+        let ids = self
+            .0
+            .find_machine_validation_run_item_ids(rpc::MachineValidationRunItemSearchFilter {
+                validation_id: Some(validation_id),
+            })
+            .await?
+            .run_item_ids;
+        let mut items = Vec::new();
+        // Sites can configure a small find-by-IDs limit; one ID is always valid.
+        for id in ids {
+            items.extend(
+                self.0
+                    .find_machine_validation_run_items_by_ids(
+                        rpc::MachineValidationRunItemsByIdsRequest {
+                            run_item_ids: vec![id],
+                        },
+                    )
+                    .await?
+                    .run_items,
+            );
+        }
+        Ok(items)
+    }
+
+    pub(crate) async fn get_machine_validation_attempt(
+        &self,
+        attempt_id: &str,
+    ) -> CarbideCliResult<rpc::MachineValidationAttempt> {
+        Ok(self
+            .0
+            .get_machine_validation_attempt(rpc::MachineValidationAttemptGetRequest {
+                attempt_id: Some(::rpc::common::Uuid {
+                    value: attempt_id.to_owned(),
+                }),
+            })
+            .await?)
+    }
+
+    pub(crate) async fn find_machine_validation_attempts(
+        &self,
+        run_item_id: &str,
+    ) -> CarbideCliResult<rpc::MachineValidationAttemptList> {
+        Ok(self
+            .0
+            .find_machine_validation_attempts(rpc::MachineValidationAttemptSearchFilter {
+                run_item_id: Some(::rpc::common::Uuid {
+                    value: run_item_id.to_owned(),
+                }),
+            })
+            .await?)
+    }
+
+    pub(crate) async fn get_machine_validation_attempt_logs(
+        &self,
+        attempt_id: &str,
+        after_sequence: u32,
+    ) -> CarbideCliResult<rpc::MachineValidationAttemptLogList> {
+        Ok(self
+            .0
+            .get_machine_validation_attempt_logs(rpc::MachineValidationAttemptLogGetRequest {
+                attempt_id: Some(::rpc::common::Uuid {
+                    value: attempt_id.to_owned(),
+                }),
+                after_sequence,
+                limit: 100,
+            })
+            .await?)
     }
 
     pub(crate) async fn on_demand_machine_validation(
@@ -3303,21 +3422,22 @@ mod tests {
                     ]);
                 }
                 let args = AllocateInstance::try_parse_from(command).unwrap();
-                // The allocation builder still reads the legacy discovery field.
-                #[allow(deprecated)]
                 let machine = Machine {
-                    discovery_info: Some(DiscoveryInfo {
-                        network_interfaces: ["00:11:22:33:44:55", "00:11:22:33:44:66"]
-                            .into_iter()
-                            .map(|mac_address| NetworkInterface {
-                                mac_address: mac_address.to_string(),
-                                pci_properties: Some(PciDeviceProperties {
-                                    vendor: "Mellanox".to_string(),
-                                    device: "BlueField-3".to_string(),
-                                    ..Default::default()
-                                }),
-                            })
-                            .collect(),
+                    status: Some(rpc::MachineStatus {
+                        discovery_info: Some(DiscoveryInfo {
+                            network_interfaces: ["00:11:22:33:44:55", "00:11:22:33:44:66"]
+                                .into_iter()
+                                .map(|mac_address| NetworkInterface {
+                                    mac_address: mac_address.to_string(),
+                                    pci_properties: Some(PciDeviceProperties {
+                                        vendor: "Mellanox".to_string(),
+                                        device: "BlueField-3".to_string(),
+                                        ..Default::default()
+                                    }),
+                                })
+                                .collect(),
+                            ..Default::default()
+                        }),
                         ..Default::default()
                     }),
                     ..Default::default()

@@ -42,6 +42,8 @@ const derivedTestProfile = "GB200_NVL72R1_C2G4_WiWynn_NVIDIA_WiWynn"
 
 type readbackCancelKey struct{}
 
+type expectedRackMutationHookKey struct{}
+
 type expectedRackDBContextHook struct {
 	t       *testing.T
 	updates *atomic.Int64
@@ -59,22 +61,26 @@ func (h expectedRackDBContextHook) AfterQuery(_ context.Context, event *bun.Quer
 	}
 }
 
-func mockExpectedRackReadback(t *testing.T, client *tmocks.Client, mutation *mock.Call, bulk bool) {
+func mockExpectedRackReadback(t *testing.T, client *tmocks.Client, mutation *mock.Call, batch bool) {
 	t.Helper()
 	var racks []*corev1.ExpectedRack
 	var mutationCtx context.Context
 	mutation.Run(func(args mock.Arguments) {
 		mutationCtx = args.Get(0).(context.Context)
-		if bulk {
+		if batch {
 			racks = args.Get(3).(*corev1.ExpectedRackList).ExpectedRacks
 		} else {
 			racks = []*corev1.ExpectedRack{args.Get(3).(*corev1.ExpectedRack)}
 		}
 		for _, rack := range racks {
 			require.Empty(t, rack.GetRackProfileId().GetId(), "caller profile must not reach Core")
+			require.Nil(t, rack.RackGroupId, "Core must infer the group from rack membership")
 		}
 		if cancel, ok := mutationCtx.Value(readbackCancelKey{}).(context.CancelFunc); ok {
 			cancel()
+		}
+		if hook, ok := mutationCtx.Value(expectedRackMutationHookKey{}).(func()); ok {
+			hook()
 		}
 	})
 	client.On("ExecuteWorkflow", mock.Anything, mock.Anything, "InvokeCoreGRPC", mock.Anything).Return(func(ctx context.Context, _ tclient.StartWorkflowOptions, _ interface{}, args ...interface{}) tclient.WorkflowRun {
@@ -88,16 +94,22 @@ func mockExpectedRackReadback(t *testing.T, client *tmocks.Client, mutation *moc
 		for _, rack := range racks {
 			stored := proto.Clone(rack).(*corev1.ExpectedRack)
 			stored.RackProfileId = &corev1.RackProfileId{Id: derivedTestProfile}
-			if bulk {
+			if stored.RackGroupId == nil {
+				stored.RackGroupId = &corev1.RackGroupId{Id: "group-derived"}
+			}
+			if batch {
 				stored.RackProfileId.Id += "_" + stored.GetRackId().GetId()
 			}
 			if stored.GetRackId().GetId() == "readback-empty-profile" {
 				stored.RackProfileId = nil
 			}
+			if stored.GetRackId().GetId() == "readback-empty-group" {
+				stored.RackGroupId = nil
+			}
 			result.ExpectedRacks = append(result.ExpectedRacks, stored)
 		}
 		var message proto.Message = result
-		if bulk {
+		if batch {
 			slices.Reverse(result.ExpectedRacks)
 			require.Equal(t, corev1.Forge_GetAllExpectedRacks_FullMethodName, request.FullMethod)
 		} else {
@@ -371,6 +383,16 @@ func TestCreateExpectedRackHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusBadGateway,
 		},
 		{
+			name:        "missing Core group rolls back local create",
+			requestBody: model.APIExpectedRackCreateRequest{SiteID: site.ID.String(), RackID: "readback-empty-group"},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusBadGateway,
+		},
+		{
 			name:        "expired mutation budget does not start readback",
 			requestBody: model.APIExpectedRackCreateRequest{SiteID: site.ID.String(), RackID: "readback-starved"},
 			setupContext: func(c echo.Context) {
@@ -463,7 +485,7 @@ func TestCreateExpectedRackHandler_Handle(t *testing.T) {
 			if tt.expectedStatus != rec.Code {
 				t.Errorf("Response: %v", rec.Body.String())
 			}
-			if tt.requestBody.RackID == "readback-empty-profile" || tt.requestBody.RackID == "readback-starved" {
+			if tt.requestBody.RackID == "readback-empty-profile" || tt.requestBody.RackID == "readback-empty-group" || tt.requestBody.RackID == "readback-starved" {
 				count, err := dbSession.DB.NewSelect().Model((*cdbm.ExpectedRack)(nil)).Where("rack_id = ?", tt.requestBody.RackID).Count(context.Background())
 				require.NoError(t, err)
 				assert.Zero(t, count)
@@ -480,6 +502,9 @@ func TestCreateExpectedRackHandler_Handle(t *testing.T) {
 				stored, err := erDAO.Get(ctx, nil, response.ID, nil, false)
 				require.NoError(t, err)
 				assert.Equal(t, derivedTestProfile, stored.RackProfileID)
+				wantGroup := "group-derived"
+				assert.Equal(t, &wantGroup, response.RackGroupID)
+				assert.Equal(t, &wantGroup, stored.RackGroupID)
 				if tt.requestBody.Name != nil {
 					assert.Equal(t, *tt.requestBody.Name, response.Name, "Name in response should match request")
 				}
@@ -1784,7 +1809,7 @@ func TestReplaceAllExpectedRacksHandler_Handle(t *testing.T) {
 			err := handler.Handle(c)
 
 			if tt.expectedStatus == http.StatusOK && len(tt.requestBody.ExpectedRacks) > 0 {
-				assert.EqualValues(t, 1, profileUpdates.Load(), "profiles must be written in one batch")
+				assert.EqualValues(t, 2, profileUpdates.Load(), "profiles and groups each use one batch regardless of rack count")
 			} else {
 				assert.Zero(t, profileUpdates.Load(), "empty or invalid replacements must not write profiles")
 			}
@@ -1821,6 +1846,8 @@ func TestReplaceAllExpectedRacksHandler_Handle(t *testing.T) {
 					stored, err := cdbm.NewExpectedRackDAO(dbSession).Get(ctx, nil, er.ID, nil, false)
 					require.NoError(t, err)
 					assert.Equal(t, er.RackProfileID, stored.RackProfileID)
+					assert.Equal(t, er.RackGroupID, stored.RackGroupID)
+					assert.Equal(t, new("group-derived"), er.RackGroupID)
 					if expected.Name != nil {
 						assert.Equal(t, *expected.Name, stored.Name)
 					}
@@ -1848,6 +1875,93 @@ func TestReplaceAllExpectedRacksHandler_Handle(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("concurrent requests reject the competing replacement", testReplaceAllExpectedRacksHandlerConcurrentRequests)
+}
+
+func testReplaceAllExpectedRacksHandlerConcurrentRequests(t *testing.T) {
+	dbSession := testExpectedRackInitDB(t)
+	t.Cleanup(func() { dbSession.Close() })
+	ctx := context.Background()
+	org := "test-org"
+	_, site, _ := testExpectedRackSetupTestData(t, dbSession, org)
+	user := &cdbm.User{
+		ID:          uuid.New(),
+		StarfleetID: cutil.GetPtr("concurrent-rack-user"),
+		OrgData: cdbm.OrgData{org: cdbm.Org{
+			Name: org, Roles: []string{"FORGE_PROVIDER_ADMIN"},
+		}},
+	}
+	_, err := dbSession.DB.NewInsert().Model(user).Exec(ctx)
+	require.NoError(t, err)
+
+	cfg := common.GetTestConfig()
+	tcfg, _ := cfg.GetTemporalConfig()
+	pool := sc.NewClientPool(tcfg)
+	client := &tmocks.Client{}
+	pool.IDClientMap[site.ID.String()] = client
+	run := &tmocks.WorkflowRun{}
+	run.On("GetID").Return("concurrent-rack-workflow")
+	run.On("Get", mock.Anything, mock.Anything).Return(nil).Once()
+	mutation := client.On("ExecuteWorkflow", mock.Anything, mock.Anything, "ReplaceAllExpectedRacks", mock.Anything).Return(run, nil).Once()
+	mockExpectedRackReadback(t, client, mutation, true)
+	t.Cleanup(func() {
+		client.AssertExpectations(t)
+		run.AssertExpectations(t)
+	})
+
+	handler := NewReplaceAllExpectedRacksHandler(dbSession, pool, cfg)
+	invoke := func(requestCtx context.Context, rackID string) (*httptest.ResponseRecorder, error) {
+		body, marshalErr := json.Marshal(model.APIReplaceAllExpectedRacksRequest{
+			SiteID: site.ID.String(),
+			ExpectedRacks: []*model.APIExpectedRackCreateRequest{{
+				SiteID: site.ID.String(), RackID: rackID,
+			}},
+		})
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		req := httptest.NewRequest(http.MethodPut, "/v2/org/"+org+"/nico/expected-rack/all", bytes.NewReader(body))
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		req = req.WithContext(requestCtx)
+		rec := httptest.NewRecorder()
+		request := echo.New().NewContext(req, rec)
+		request.Set("user", user)
+		request.SetParamNames("orgName")
+		request.SetParamValues(org)
+		return rec, handler.Handle(request)
+	}
+
+	var second *httptest.ResponseRecorder
+	var secondErr error
+	firstCtx := context.WithValue(ctx, expectedRackMutationHookKey{}, func() {
+		second, secondErr = invoke(ctx, "rack-b")
+	})
+	first, firstErr := invoke(firstCtx, "rack-a")
+	require.NoError(t, firstErr)
+	require.NoError(t, secondErr)
+	require.Equal(t, http.StatusOK, first.Code, first.Body.String())
+	require.Equal(t, http.StatusConflict, second.Code, second.Body.String())
+
+	var response []model.APIExpectedRack
+	require.NoError(t, json.Unmarshal(first.Body.Bytes(), &response))
+	require.Len(t, response, 1)
+	require.Equal(t, "rack-a", response[0].RackID)
+
+	var stored []cdbm.ExpectedRack
+	require.NoError(t, dbSession.DB.NewSelect().Model(&stored).Where("site_id = ?", site.ID).Scan(ctx))
+	require.Len(t, stored, 1)
+	require.Equal(t, "rack-a", stored[0].RackID)
+
+	var coreRequest *corev1.ExpectedRackList
+	for _, call := range client.Calls {
+		if call.Arguments.Get(2) == "ReplaceAllExpectedRacks" {
+			coreRequest = call.Arguments.Get(3).(*corev1.ExpectedRackList)
+		}
+	}
+	require.NotNil(t, coreRequest)
+	require.Len(t, coreRequest.ExpectedRacks, 1)
+	require.Equal(t, "rack-a", coreRequest.ExpectedRacks[0].GetRackId().GetId())
 }
 
 func TestDeleteAllExpectedRacksHandler_Handle(t *testing.T) {
@@ -1928,6 +2042,29 @@ func TestDeleteAllExpectedRacksHandler_Handle(t *testing.T) {
 			},
 		}
 	}
+
+	t.Run("concurrent complete mutation returns 409", func(t *testing.T) {
+		lockTx, err := cdb.BeginTx(ctx, dbSession, nil)
+		require.NoError(t, err)
+		defer func() { require.NoError(t, lockTx.Rollback()) }()
+		lockID := cdb.GetAdvisoryLockIDFromString(expectedInventoryMutationLockPrefix + site.ID.String())
+		require.NoError(t, lockTx.TryAcquireAdvisoryLock(ctx, lockID, nil))
+
+		callsBefore := len(mockTemporalClient.Calls)
+		req := httptest.NewRequest(http.MethodDelete, "/v2/org/"+org+"/expected-rack/all?siteId="+site.ID.String(), nil)
+		rec := httptest.NewRecorder()
+		c := e.NewContext(req, rec)
+		c.Set("user", createMockUser(org))
+		c.SetParamNames("orgName")
+		c.SetParamValues(org)
+
+		require.NoError(t, handler.Handle(c))
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		require.Len(t, mockTemporalClient.Calls, callsBefore, "lock conflict must not reach Core")
+		count, err := dbSession.DB.NewSelect().Model((*cdbm.ExpectedRack)(nil)).Where("site_id = ?", site.ID).Count(ctx)
+		require.NoError(t, err)
+		require.Equal(t, 3, count)
+	})
 
 	tests := []struct {
 		name           string

@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 
@@ -216,13 +215,13 @@ func (c *RedfishClient) UploadFirmwareByPath(firmwarePath string) (*http.Respons
 
 // UploadFirmware uploads firmware from an io.Reader via the Redfish UpdateService.
 func (c *RedfishClient) UploadFirmware(fw io.Reader) (*http.Response, error) {
-	req, err := http.NewRequest("POST", c.ClientConfig.Endpoint+"/redfish/v1/UpdateService", fw)
+	req, err := http.NewRequest("POST", c.Endpoint+"/redfish/v1/UpdateService", fw)
 	if err != nil {
 		return nil, err
 	}
 
 	req.Header.Set("Content-Type", "application/octet-stream")
-	req.SetBasicAuth(c.ClientConfig.Username, c.ClientConfig.Password)
+	req.SetBasicAuth(c.Username, c.Password)
 
 	return c.APIClient.HTTPClient.Do(req)
 }
@@ -260,7 +259,7 @@ func (c *RedfishClient) QueryPowerSubsystem() (*redfish.PowerSubsystem, error) {
 // QueryPowerSupply fetches and hydrates a PowerSupply by URI, including sensors.
 func (c *RedfishClient) QueryPowerSupply(uri string) (*powersupply.PowerSupply, error) {
 	// Ensure the full URL is used
-	fullURI := fmt.Sprintf("%s%s", c.ClientConfig.Endpoint, uri)
+	fullURI := fmt.Sprintf("%s%s", c.Endpoint, uri)
 
 	powerSupply := new(powersupply.PowerSupply)
 
@@ -271,7 +270,7 @@ func (c *RedfishClient) QueryPowerSupply(uri string) (*powersupply.PowerSupply, 
 	}
 
 	// Set basic authentication
-	req.SetBasicAuth(c.ClientConfig.Username, c.ClientConfig.Password)
+	req.SetBasicAuth(c.Username, c.Password)
 
 	resp, err := c.APIClient.HTTPClient.Do(req)
 	if err != nil {
@@ -280,7 +279,7 @@ func (c *RedfishClient) QueryPowerSupply(uri string) (*powersupply.PowerSupply, 
 	defer resp.Body.Close()
 
 	// Read the response body
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}

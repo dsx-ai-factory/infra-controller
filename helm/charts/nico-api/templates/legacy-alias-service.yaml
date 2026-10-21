@@ -57,8 +57,5 @@ spec:
     - name: metrics
       port: 1080
       protocol: TCP
-    - name: profiler
-      port: 1081
-      protocol: TCP
 {{- end }}
 {{- end }}

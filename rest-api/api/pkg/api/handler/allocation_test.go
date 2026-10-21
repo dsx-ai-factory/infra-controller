@@ -19,12 +19,10 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
 	"github.com/google/uuid"
@@ -188,6 +186,14 @@ func TestAllocationHandler_Create(t *testing.T) {
 	tenantSitePrefix := testIPBlockBuildTenantSitePrefix(t, dbSession, "private-site-prefix", site, ip, tenant1, "192.169.0.0", 16, cdbm.IPBlockStatusReady, ipu)
 
 	ipbFG := testIPBlockBuildIPBlock(t, dbSession, "testipbFG", site, ip, nil, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.170.0.0", 16, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, ipu)
+	ipbV6 := testIPBlockBuildIPBlock(t, dbSession, "ipv6-prefix-length", site, ip, nil, cdbm.IPBlockRoutingTypeDatacenterOnly, "2001:db8::", 64, cdbm.IPBlockProtocolVersionV6, false, cdbm.IPBlockStatusReady, ipu)
+	_, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipbV6.Prefix, ipbV6.PrefixLength, ipbV6.RoutingType, ipbV6.InfrastructureProviderID.String(), ipbV6.SiteID.String())
+	require.NoError(t, err)
+	invalidV6Body, err := json.Marshal(model.APIAllocationCreateRequest{
+		Name: "invalid-ipv6-prefix-length", TenantID: tenant1.ID.String(), SiteID: site.ID.String(),
+		AllocationConstraints: []model.APIAllocationConstraintCreateRequest{{ResourceType: cdbm.AllocationResourceTypeIPBlock, ResourceTypeID: ipbV6.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 336}},
+	})
+	require.NoError(t, err)
 
 	acBadInstanceTypeDoesNotExist := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: uuid.New().String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 5}
 	acBadInstanceTypeProviderMismatch := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: it2.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 5}
@@ -267,7 +273,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 	assert.NotNil(t, parentPrefIBP2)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal call
 	tmc1 := &tmocks.Client{}
@@ -325,7 +331,28 @@ func TestAllocationHandler_Create(t *testing.T) {
 		checkFullGrant       bool
 		verifyChildSpanner   bool
 		tmc                  *tmocks.Client
+		assertState          func(t *testing.T)
 	}{
+		{
+			name:               "reject IPv6 length before narrowing",
+			reqOrgName:         ipOrg1,
+			reqBody:            string(invalidV6Body),
+			user:               ipu,
+			expectedErr:        true,
+			expectedStatus:     http.StatusBadRequest,
+			expectedIpamErrMsg: "prefix length must be between 64 and 128",
+			assertState: func(t *testing.T) {
+				count, err := cdbm.NewAllocationDAO(dbSession).GetCount(ctx, nil, cdbm.AllocationFilterInput{Name: cutil.GetPtr("invalid-ipv6-prefix-length")})
+				require.NoError(t, err)
+				assert.Zero(t, count)
+				constraints, _, err := cdbm.NewAllocationConstraintDAO(dbSession).GetAll(ctx, nil, cdbm.AllocationConstraintFilterInput{ResourceTypeIDs: []uuid.UUID{ipbV6.ID}}, cdbp.PageInput{}, nil)
+				require.NoError(t, err)
+				assert.Empty(t, constraints)
+				usage, err := ipam.GetIpamUsageForIPBlock(ctx, ipamStorage, ipbV6)
+				require.NoError(t, err)
+				assert.Zero(t, usage.AcquiredPrefixes)
+			},
+		},
 		{
 			name:           "error when User not found in request context",
 			reqOrgName:     ipOrg1,
@@ -498,12 +525,13 @@ func TestAllocationHandler_Create(t *testing.T) {
 			expectedStatus:     http.StatusConflict,
 		},
 		{
-			name:           "error when Allocation Constraint value is larger than parent IP Block size",
-			reqOrgName:     ipOrg1,
-			reqBody:        string(errAllocationConstraintHasBlockSizeLargerThanParent),
-			user:           ipu,
-			expectedErr:    true,
-			expectedStatus: http.StatusConflict,
+			name:               "error when Allocation Constraint value is larger than parent IP Block size",
+			reqOrgName:         ipOrg1,
+			reqBody:            string(errAllocationConstraintHasBlockSizeLargerThanParent),
+			user:               ipu,
+			expectedErr:        true,
+			expectedIpamErrMsg: "Could not create child IPAM entry for Allocation Constraint. Details: child prefix length must be at least the source prefix length: got 15, minimum 16",
+			expectedStatus:     http.StatusConflict,
 		},
 		{
 			name:             "error when Allocation with same name already exists",
@@ -551,7 +579,6 @@ func TestAllocationHandler_Create(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cipbh := CreateAllocationHandler{
@@ -564,6 +591,9 @@ func TestAllocationHandler_Create(t *testing.T) {
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusCreated)
 			assert.Equal(t, tc.expectedStatus, rec.Code)
+			if tc.assertState != nil {
+				tc.assertState(t)
+			}
 			if !tc.expectedErr {
 				rsp := &model.APIAllocation{}
 				err := json.Unmarshal(rec.Body.Bytes(), rsp)
@@ -748,8 +778,7 @@ func TestAllocationHandler_Create(t *testing.T) {
 		ec.SetParamNames("orgName")
 		ec.SetParamValues(ipOrg1)
 		ec.Set("user", ipu)
-		requestCtx := context.WithValue(raceCtx, otelecho.TracerKey, tracer) //nolint:staticcheck // Middleware owns the context key.
-		ec.SetRequest(ec.Request().WithContext(requestCtx))
+		ec.SetRequest(ec.Request().WithContext(raceCtx))
 
 		handlerStarted = true
 		go func() {
@@ -847,9 +876,8 @@ func testCreateAllocation(t *testing.T, dbSession *cdb.Session, ipamStorage cipa
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
-	ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 	ec.SetRequest(ec.Request().WithContext(ctx))
 
 	// Mock Temporal Site Client pool for ALlocaiton creation
@@ -1002,7 +1030,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1055,7 +1083,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySiteIDs:   []string{site1.ID.String()},
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedCnt:    paginator.DefaultLimit,
+			expectedCnt:    cdbp.DefaultLimit,
 			expectedTotal:  &totalCount,
 		},
 		{
@@ -1107,7 +1135,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryIncludeRelations3:        nil,
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1120,7 +1148,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryIncludeRelations3:        nil,
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1130,7 +1158,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryTenantIDs: []string{tenant1.ID.String()},
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedCnt:    paginator.DefaultLimit,
+			expectedCnt:    cdbp.DefaultLimit,
 			expectedTotal:  &totalCount,
 		},
 		{
@@ -1141,7 +1169,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySiteIDs:   []string{site1.ID.String()},
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedCnt:    paginator.DefaultLimit,
+			expectedCnt:    cdbp.DefaultLimit,
 			expectedTotal:  &totalCount,
 		},
 		{
@@ -1152,7 +1180,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryTenantIDs:                []string{tenant1.ID.String()},
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1163,7 +1191,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySiteIDs:                  []string{site1.ID.String()},
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1175,7 +1203,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySiteIDs:                  []string{site1.ID.String()},
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1189,7 +1217,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			expectedErr:                       false,
 			expectedInfrastructureProviderOrg: cutil.GetPtr(ip.Org),
 			expectedStatus:                    http.StatusOK,
-			expectedCnt:                       paginator.DefaultLimit,
+			expectedCnt:                       cdbp.DefaultLimit,
 			expectedTotal:                     &totalCount,
 		},
 		{
@@ -1205,7 +1233,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			expectedTenantOrg:                 cutil.GetPtr(tenant1.Org),
 			expectedErr:                       false,
 			expectedStatus:                    http.StatusOK,
-			expectedCnt:                       paginator.DefaultLimit,
+			expectedCnt:                       cdbp.DefaultLimit,
 			expectedTotal:                     &totalCount,
 		},
 		{
@@ -1220,7 +1248,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			expectedSiteName:                  cutil.GetPtr(site1.Name),
 			expectedErr:                       false,
 			expectedStatus:                    http.StatusOK,
-			expectedCnt:                       paginator.DefaultLimit,
+			expectedCnt:                       cdbp.DefaultLimit,
 			expectedTotal:                     &totalCount,
 		},
 		{
@@ -1270,7 +1298,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySearch:                   cutil.GetPtr("allocation-"),
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1294,7 +1322,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySearch:                   cutil.GetPtr("allocation Registered"),
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1342,7 +1370,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryStatuses:                 []string{cdbm.AllocationStatusRegistered},
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1448,7 +1476,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryTenantIDs: []string{tenant1.ID.String(), tenant2.ID.String()},
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedCnt:    paginator.DefaultLimit,
+			expectedCnt:    cdbp.DefaultLimit,
 			expectedTotal:  &totalCount,
 		},
 		{
@@ -1459,7 +1487,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySiteIDs:   []string{site1.ID.String(), site2.ID.String()},
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedCnt:    paginator.DefaultLimit,
+			expectedCnt:    cdbp.DefaultLimit,
 			expectedTotal:  &totalCount,
 		},
 		{
@@ -1471,7 +1499,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryStatuses:                 []string{cdbm.AllocationStatusRegistered, cdbm.AllocationStatusPending},
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1618,8 +1646,6 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			if tc.user != nil {
 				ec.Set("user", tc.user)
 			}
-
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
@@ -1770,7 +1796,7 @@ func TestAllocationHandler_GetByID(t *testing.T) {
 	assert.NotNil(t, aIPB)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -1966,7 +1992,6 @@ func TestAllocationHandler_GetByID(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := GetAllocationHandler{
@@ -2107,7 +2132,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal call
 	tmc1 := &tmocks.Client{}
@@ -2300,7 +2325,6 @@ func TestAllocationHandler_Update(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := UpdateAllocationHandler{
@@ -2528,7 +2552,7 @@ func TestAllocationHandler_Delete(t *testing.T) {
 	vpcPrefix := testAllocationBuildVpcPrefix(t, dbSession, tenant1, vpc1, "testVPCPrefix", childVpcPrefixIBP)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock Temporal call
 	tmc1 := &tmocks.Client{}
@@ -2760,7 +2784,6 @@ func TestAllocationHandler_Delete(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			dah := DeleteAllocationHandler{
@@ -2829,6 +2852,59 @@ func TestAllocationHandler_Delete(t *testing.T) {
 				span := oteltrace.SpanFromContext(ec.Request().Context())
 				assert.True(t, span.SpanContext().IsValid())
 			}
+		})
+	}
+
+	cases := []struct {
+		name          string
+		providerGrant bool
+		siteOverride  *bool
+		revokeGrant   bool
+	}{
+		{name: "last allocation preserves provider grant", providerGrant: true},
+		{name: "last allocation preserves site grant", siteOverride: cutil.GetPtr(true)},
+		{name: "last allocation preserves site denial overriding provider grant", providerGrant: true, siteOverride: cutil.GetPtr(false)},
+		{name: "last allocation removes association after provider grant is revoked", providerGrant: true, revokeGrant: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tenant := common.TestBuildTenant(t, dbSession, tc.name, uuid.NewString(), tnu)
+			var account *cdbm.TenantAccount
+			if tc.providerGrant {
+				account = common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tenant.ID, tenant.Org, cdbm.TenantAccountStatusReady, tnu)
+			} else {
+				account = common.TestBuildTenantAccount(t, dbSession, ip, &tenant.ID, tenant.Org, cdbm.TenantAccountStatusReady, tnu)
+			}
+			ts := cdbm.TestBuildTenantSite(t, dbSession, tenant, site, &cdbm.TenantSiteConfig{TargetedInstanceCreation: tc.siteOverride}, tnu)
+			allocation := common.TestBuildAllocation(t, dbSession, site, tenant, tc.name, tnu)
+			if tc.revokeGrant {
+				_, err := cdbm.NewTenantAccountDAO(dbSession).Update(ctx, nil, cdbm.TenantAccountUpdateInput{
+					TenantAccountID: account.ID, Config: &cdbm.TenantAccountConfig{TargetedInstanceCreation: false},
+				})
+				require.NoError(t, err)
+			}
+			e := echo.New()
+			rec := httptest.NewRecorder()
+			ec := e.NewContext(httptest.NewRequest(http.MethodDelete, "/", nil), rec)
+			ec.SetParamNames("orgName", "id")
+			ec.SetParamValues(ipOrg1, allocation.ID.String())
+			ec.Set("user", ipu)
+			handler := DeleteAllocationHandler{dbSession: dbSession, cfg: cfg}
+			err := handler.Handle(ec)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+			_, err = cdbm.NewAllocationDAO(dbSession).GetByID(ctx, nil, allocation.ID, nil)
+			require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+			remaining, err := cdbm.NewTenantSiteDAO(dbSession).GetByID(ctx, nil, ts.ID, nil)
+			if tc.revokeGrant {
+				require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+				account, err = cdbm.NewTenantAccountDAO(dbSession).GetByID(ctx, nil, account.ID, nil)
+				require.NoError(t, err)
+				assert.False(t, account.Config.TargetedInstanceCreation)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.siteOverride, remaining.Config.TargetedInstanceCreation)
 		})
 	}
 }
@@ -2901,7 +2977,7 @@ func TestInstanceTypeAllocationForMultipleTenants(t *testing.T) {
 		"CreateTenant", mock.Anything).Return(wrun, nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                 string
@@ -2950,7 +3026,6 @@ func TestInstanceTypeAllocationForMultipleTenants(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cipbh := CreateAllocationHandler{

@@ -1,0 +1,41 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+[package]
+name = "carbide-resource-pool-api"
+description = "Resource pool provider API and conformance support"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+# Share the local provider and contract checks with transport implementations.
+test-support = ["dep:tokio"]
+
+[dependencies]
+prost = { workspace = true }
+tokio = { workspace = true, features = ["macros", "time"], optional = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+
+[dev-dependencies]
+carbide-resource-pool-api = { path = ".", features = ["test-support"] }
+carbide-test-support = { path = "../test-support" }
+tokio = { workspace = true, features = [
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "sync",
+  "time",
+] }
+tokio-stream = { workspace = true, features = ["net"] }
+tokio-util = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }
+
+[lints]
+workspace = true

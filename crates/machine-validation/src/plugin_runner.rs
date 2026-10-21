@@ -42,6 +42,7 @@ const MAX_ERROR_OUTPUT_SIZE: usize = 4096;
 const MAX_INPUT_SIZE: usize = 64 * 1024;
 const PLUGIN_UID: u32 = 65532;
 const PLUGIN_GID: u32 = 65532;
+const PLUGIN_CONTRACT_DIR_ENV: &str = "NICO_MV_CONTRACT_DIR";
 const CONTAINER_CLEANUP_TIMEOUT_SECONDS: u64 = 30;
 const CONTAINER_REMOVE_ATTEMPTS: u8 = 3;
 const MAX_LOG_CHUNK_BYTES: usize = 4096;
@@ -455,15 +456,17 @@ fn plugin_runtime_args(
         "--rm".to_owned(),
         "--network".to_owned(),
         "none".to_owned(),
+        "--env".to_owned(),
+        format!("{PLUGIN_CONTRACT_DIR_ENV}={}", contract_dir.display()),
         "--mount".to_owned(),
         format!(
-            "type=bind,src={},dst={},options=rbind:ro",
+            "type=bind,src={},dst={},readonly",
             input_dir.display(),
             input_path.display()
         ),
         "--mount".to_owned(),
         format!(
-            "type=bind,src={},dst={},options=rbind:rw",
+            "type=bind,src={},dst={}",
             output_dir.display(),
             output_path.display()
         ),
@@ -481,8 +484,10 @@ fn plugin_runtime_args(
         PluginPrivilege::Privileged => args.push("--privileged".to_owned()),
         PluginPrivilege::FullHost => args.extend([
             "--privileged".to_owned(),
+            "--pid".to_owned(),
+            "host".to_owned(),
             "--mount".to_owned(),
-            "type=bind,src=/,dst=/host,options=rbind:rw".to_owned(),
+            "type=bind,src=/,dst=/host".to_owned(),
         ]),
     }
 
@@ -668,9 +673,24 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["--security-opt", "no-new-privileges"])
         );
-        assert!(args.iter().any(|arg| arg.contains("/opt/forge/mv/input")));
-        assert!(args.iter().any(|arg| arg.contains("/opt/forge/mv/output")));
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                "--mount",
+                "type=bind,src=/tmp/input,dst=/opt/forge/mv/input,readonly",
+            ]
+        }));
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                "--mount",
+                "type=bind,src=/tmp/output,dst=/opt/forge/mv/output",
+            ]
+        }));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--env", "NICO_MV_CONTRACT_DIR=/opt/forge/mv"])
+        );
         assert!(!args.iter().any(|arg| arg == "--privileged"));
+        assert!(!args.iter().any(|arg| arg == "--pid"));
         assert!(!args.iter().any(|arg| arg.contains("dst=/host")));
     }
 
@@ -693,6 +713,12 @@ mod tests {
             args.iter()
                 .any(|arg| arg.contains("dst=/var/lib/nico/plugin-contract/output"))
         );
+        assert!(args.windows(2).any(|pair| {
+            pair == [
+                "--env",
+                "NICO_MV_CONTRACT_DIR=/var/lib/nico/plugin-contract",
+            ]
+        }));
     }
 
     #[test]
@@ -714,6 +740,7 @@ mod tests {
         );
 
         assert!(args.iter().any(|arg| arg == "--privileged"));
+        assert!(!args.iter().any(|arg| arg == "--pid"));
         assert!(!args.iter().any(|arg| arg.contains("dst=/host")));
     }
 
@@ -728,10 +755,8 @@ mod tests {
         );
 
         assert!(args.iter().any(|arg| arg == "--privileged"));
-        assert!(
-            args.iter()
-                .any(|arg| arg.contains("dst=/host,options=rbind:rw"))
-        );
+        assert!(args.windows(2).any(|pair| pair == ["--pid", "host"]));
+        assert!(args.iter().any(|arg| arg == "type=bind,src=/,dst=/host"));
     }
 
     #[test]

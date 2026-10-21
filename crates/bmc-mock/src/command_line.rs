@@ -294,6 +294,11 @@ pub(super) struct MachineArgs {
 
 #[derive(Clone, ClapArgs, Debug)]
 pub(super) struct LibvirtArgs {
+    #[clap(long, value_name = "PATH", requires = "libvirt_domain", conflicts_with_all = ["targz", "ip_router", "enable_ipmi_simulation"],
+        help = "Persist generated BMC state as plaintext JSON",
+        long_help = "Persist generated BMC state as plaintext JSON at PATH. Load before serving; initialize an absent file from profile defaults. The parent directory must exist. Invalid or unreadable state fails startup. State refresh indications trigger asynchronous saving; failed writes are retried without rejecting account updates. Unsaved changes may be lost on abrupt termination. Use a separate file per BMC and a single writer. Supported only with the libvirt backend; internal, archive and IPMI simulation modes do not support file persistence.")]
+    pub(super) state_file: Option<std::path::PathBuf>,
+
     #[clap(
         long,
         conflicts_with_all = ["targz", "ip_router"],

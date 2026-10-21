@@ -24,9 +24,11 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use carbide_dpa::DpaInfo;
 use carbide_dpa_manager::DpaMonitor;
-use carbide_dpf::DpuDeploymentType;
 use carbide_dpf::repository::DpuServiceInterfaceRepository;
-use carbide_extension_service_controller::context::ExtensionServiceStateHandlerServices;
+use carbide_dpf::{DpfInterceptBridging, DpuDeploymentType, ServiceVpcSlots};
+use carbide_extension_service_controller::context::{
+    ExtensionServiceStateHandlerServices, ServiceVpcRegistrationConfig,
+};
 use carbide_extension_service_controller::handler::ExtensionServiceStateHandler;
 use carbide_extension_service_controller::io::ExtensionServiceStateControllerIO;
 use carbide_firmware::FirmwareDownloader;
@@ -55,10 +57,11 @@ use carbide_preingestion_manager::PreingestionManager;
 use carbide_rack::bms_client::BmsDsxExchangeHandle;
 use carbide_rack_controller::config::RackConfig;
 use carbide_rack_controller::context::RackStateHandlerServices;
+use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_rack_controller::handler::RackStateHandler;
 use carbide_rack_controller::io::RackStateControllerIO;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
-use carbide_secrets::certificates::CertificateProvider;
+use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry};
 use carbide_secrets::credentials::{CredentialManager, CredentialReader};
 use carbide_site_explorer::{AuthenticatedBmcClient, EndpointExplorationService, SiteExplorer};
 use carbide_spdm_controller::context::SpdmStateHandlerServices;
@@ -74,7 +77,6 @@ use carbide_vpc_prefix_controller::io::VpcPrefixStateControllerIO;
 use db::Transaction;
 use db::machine::{update_dpu_asns, update_dpu_loopback_ips_v6};
 use db::resource_pool::DefineResourcePoolError;
-use db::work_lock_manager::WorkLockManagerHandle;
 use eyre::WrapErr;
 use futures_util::TryFutureExt;
 use itertools::Itertools;
@@ -84,7 +86,11 @@ use model::expected_machine::ExpectedMachine;
 use model::ib::DEFAULT_IB_FABRIC_NAME;
 use model::machine::HostHealthConfig;
 use model::network_segment::NetworkDefinition;
-use model::resource_pool::{self, ResourcePoolDef};
+use model::resource_pool::binding::{
+    INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolSelection,
+    ResourcePoolValueDomain,
+};
+use model::resource_pool::{self, ResourcePoolConfig, ResourcePoolDef, ValueType};
 use model::route_server::RouteServerSourceType;
 use model::vpc::VpcDefinition;
 use opentelemetry::metrics::Meter;
@@ -98,12 +104,16 @@ use tokio_util::sync::CancellationToken;
 
 use crate::api::Api;
 use crate::api::metrics::ApiMetricsEmitter;
-use crate::cfg::file::{CarbideConfig, InitialObjectsConfig, ListenMode, VmaasConfig};
+use crate::bootstrap::{RuntimeInputs, RuntimePrelude};
+use crate::cfg::file::{
+    CarbideConfig, DpfDeploymentConfig, DpfExtraService, InitialObjectsConfig, ListenMode,
+    VmaasConfig,
+};
 use crate::cfg::load::all_configuration_files;
+use crate::cfg::resource_pool::ResourcePoolBackendConfig;
 use crate::dpa::handler::start_svpc_handler;
-use crate::dynamic_settings::DynamicSettings;
 use crate::handlers::machine_validation::apply_config_on_startup;
-use crate::listener::{AdminUiRoutesBuilder, ApiListenMode};
+use crate::listener::ApiListenMode;
 use crate::logging::log_limiter::LogLimiter;
 use crate::logging::service_health_metrics::{
     ServiceHealthContext, start_export_service_health_metrics,
@@ -248,23 +258,52 @@ fn create_redfish_pool(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Enter api-core's private service runtime with fully prepared resources.
+///
+/// `admin_ui_routes_builder` is how the admin web UI's pages (everything under
+/// `/admin`) get plugged in, particularly via `Box::new(carbide_api_web::routes)`.
+/// It's passed in rather than called directly to avoid a dependency cycle — see
+/// [`AdminUiRoutesBuilder`] for why.
+///
+/// The admin UI is only mounted if the `enable_admin_ui` config flag is true (the default).
+///
+/// Returns the effective API listener address after startup completes.
 #[tracing::instrument(skip_all)]
-pub(crate) async fn start_runtime(
-    join_set: &mut JoinSet<()>,
-    carbide_config: Arc<CarbideConfig>,
-    initial_objects: Option<InitialObjectsConfig>,
-    meter: Meter,
-    per_object_prometheus_registry: Option<prometheus::Registry>,
-    dynamic_settings: DynamicSettings,
-    credential_manager: Arc<dyn CredentialManager>,
-    certificate_provider: Arc<dyn CertificateProvider>,
-    db_pool: PgPool,
-    work_lock_manager_handle: WorkLockManagerHandle,
-    secrets_context: Option<crate::secrets::SecretsContext>,
-    admin_ui_routes_builder: Option<AdminUiRoutesBuilder>,
-    cancel_token: CancellationToken,
-) -> eyre::Result<SocketAddr> {
+pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<SocketAddr> {
+    // Destructure inputs
+    let RuntimeInputs {
+        carbide_config,
+        initial_objects,
+        meter,
+        per_object_metrics,
+        join_set,
+        runtime_prelude: RuntimePrelude { dynamic_settings },
+        credential_manager,
+        certificate_provider,
+        db_pool,
+        work_lock_manager_handle,
+        secrets_context,
+        admin_ui_routes_builder,
+        cancel_token,
+    } = runtime_inputs;
+
+    // Seed data is the initial networks, VPCs, and resource pools defined in
+    // `initial_objects_file` or the older sections in the main API config.
+    // Check pool selectors and merge their definitions before opening clients
+    // or writing to the database. Authoritative instances also merge networks
+    // and VPCs here, then create them once the API has its required pools.
+    let pool_config = resolve_resource_pool_config(&carbide_config, initial_objects.as_ref())?;
+    let seed_data = if carbide_config.listen_only {
+        tracing::info!("Not populating initial seed data in database, as listen_only=true");
+        None
+    } else {
+        Some(SeedData::resolve(
+            &carbide_config,
+            initial_objects.as_ref(),
+            pool_config.definitions,
+        )?)
+    };
+
     let (shared_redfish_pool, bmc_credential_ops) =
         create_redfish_pool(&carbide_config, credential_manager.clone())?;
     // Ordinary BMC traffic goes through nico-bmc-proxy when configured,
@@ -337,34 +376,42 @@ pub(crate) async fn start_runtime(
         true => carbide_config.ib_fabrics.keys().cloned().collect(),
     };
 
-    // Resolve initial seed data up-front so any configuration conflicts surface
-    // before we touch the database. The actual reconcile/creation runs inside
-    // `initialize_and_start_controllers`.
-    let seed_data = if carbide_config.listen_only {
-        tracing::info!("Not populating initial seed data in database, as listen_only=true");
-        None
+    // Record which backend allocates each pool's values, or check its saved binding,
+    // before adding any pool values. This also checks pools already in the
+    // database that are no longer in the config. Listen-only replicas check
+    // these bindings and record any missing ones for existing pools, but do
+    // not create pools or add values from the config.
+    let mut txn = Transaction::begin(&db_pool).await?;
+    let pool_definition_source = if carbide_config.listen_only {
+        PoolDefinitionSource::ListenOnly
     } else {
-        Some(SeedData::resolve(
-            &carbide_config,
-            initial_objects.as_ref(),
-        )?)
+        PoolDefinitionSource::SeedConfiguration
     };
-
-    // Note: Normally we want initialize_and_start_controllers to be responsible for populating
-    // information into the database, but resource pools, route servers, and configured site
-    // prefixes need to be defined first. The controllers rely on a fully-hydrated Api object, which
-    // relies on route_servers and common_pools being populated, while site-prefix inventory must
-    // reflect the complete configured set before the API starts serving it. So if we're configured
-    // for listen_only, strictly read them from the database (assuming another instance has populated
-    // them), otherwise, populate them now.
-    //
-    // Pool reconciliation specifically must happen before `create_common_pools` runs below, because
-    // that call queries `resource_pool` and bails if any mandatory pool is missing or empty.
+    let registry =
+        ResourcePoolRegistry::resolve(pool_definition_source, &mut txn, &pool_config.selections)
+            .await?;
+    // Ordinary seed definitions keep their stored values when TOML ranges or
+    // types change. PKey initialization adds configured integer ranges later,
+    // so it must not reuse a pool that already contains IP addresses.
+    for fabric_id in &ib_fabric_ids {
+        let name = resource_pool::common::ib_pkey_pool_name(fabric_id);
+        if let Some(pool) = registry.get(&name) {
+            eyre::ensure!(
+                pool.binding.value_domain == ResourcePoolValueDomain::Integer,
+                "PKey pool `{name}` requires integer values, but its stored value domain is {}",
+                pool.binding.value_domain,
+            );
+        }
+    }
     if let Some(seed_data) = seed_data.as_ref() {
-        // Determine the authoritative list of resource_pools to seed into the database
-        let mut txn = Transaction::begin(&db_pool).await?;
+        // Pool inventory is the set of values, such as VNIs or IP addresses,
+        // that NICo can allocate. Seed new pools here, preserving existing
+        // inventory when its configured ranges change. `create_common_pools`
+        // below requires the mandatory pools to exist and have free values
+        // before it builds the handles used by the API and controllers. Route
+        // servers and site prefixes also need to reflect the config before
+        // the API starts serving requests.
         db::resource_pool::reconcile_pool_defs(&mut txn, &seed_data.initial_pools).await?;
-
         // We'll always update whatever route servers are in the config
         // to the database, and then leverage the enable_route_servers
         // flag where needed to determine if we actually want to use
@@ -384,9 +431,13 @@ pub(crate) async fn start_runtime(
         db::site_prefix::reconcile_configured(&mut txn, &carbide_config.site_fabric_prefixes)
             .await?;
 
-        // Persisted roots can be retiring after the final configured root is
-        // removed, so current configuration alone cannot decide whether
-        // legacy VpcPrefix lineage must be repaired and validated.
+        // Older `VpcPrefix` records may have no `site_prefix_id`. Match each
+        // to its containing operator-managed site prefix where possible,
+        // rejecting ambiguous matches. If site prefixes are configured,
+        // every VPC prefix must have a match before startup can continue.
+        // A site prefix removed from the config stays in `Deleting` until
+        // its VPC prefixes are gone, so check the database even
+        // when no site prefixes remain in the config.
         if db::site_prefix::operator_managed_prefixes_exist(&mut txn).await? {
             let lineage =
                 db::site_prefix::backfill_vpc_prefix_site_prefix_lineage(&mut txn).await?;
@@ -404,9 +455,10 @@ pub(crate) async fn start_runtime(
                 lineage.ambiguous,
             );
         }
+    }
+    txn.commit().await?;
 
-        txn.commit().await?;
-
+    if !carbide_config.listen_only {
         // Idempotently seed the dedicated site-wide lockdown IKM (v0) from the
         // site-wide BMC root, so existing sites converge onto the decoupled
         // lockdown key without operator action. No-op once seeded; if the BMC
@@ -580,13 +632,20 @@ pub(crate) async fn start_runtime(
         None
     };
 
-    let dpf_sdk = initialize_dpf_sdk(
-        &carbide_config,
-        credential_manager.clone(),
-        db_pool.clone(),
-        join_set,
-    )
-    .await?;
+    // Shutdown may interrupt one-way Kubernetes migration safely because each startup rediscovers
+    // remaining old resources and server-side applies the complete desired state.
+    let dpf_sdk = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            return Err(eyre::eyre!("DPF initialization canceled during shutdown"));
+        }
+        result = initialize_dpf_sdk(
+            &carbide_config,
+            credential_manager.clone(),
+            db_pool.clone(),
+            join_set,
+        ) => result?,
+    };
 
     let component_manager = if let Some(cd_config) = &carbide_config.component_manager {
         match component_manager::component_manager::build_component_manager(
@@ -639,9 +698,35 @@ pub(crate) async fn start_runtime(
         None
     };
 
+    let console_log_source = crate::console_logs::build_source(
+        carbide_config.ssh_console_url.as_ref(),
+        carbide_config.tls.as_ref(),
+        join_set,
+        cancel_token.clone(),
+    )
+    .await?;
+
+    let default_redirect_policy = reqwest::redirect::Policy::default();
+
+    let firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher> = Arc::new(
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                let initial_origin = attempt.previous().first().map(reqwest::Url::origin);
+
+                if initial_origin == Some(attempt.url().origin()) {
+                    default_redirect_policy.redirect(attempt)
+                } else {
+                    attempt.error("firmware-object redirect changed the configured origin")
+                }
+            }))
+            .build()
+            .wrap_err("failed to build the firmware-object HTTP client")?,
+    );
+
     let api_service = Arc::new(Api {
         certificate_provider,
         common_pools,
+        resource_pool_registry: registry,
         credential_manager,
         node_jwt_validator,
         database_connection: db_pool.clone(),
@@ -668,8 +753,11 @@ pub(crate) async fn start_runtime(
         machine_state_handler_enqueuer: Enqueuer::new(db_pool),
         metric_emitter: ApiMetricsEmitter::new(&meter),
         component_manager,
+        firmware_object_fetcher,
         bms_client: std::sync::OnceLock::new(),
         secrets_context,
+        console_log_source,
+        cancel_token: cancel_token.clone(),
     });
 
     if carbide_config.listen_only {
@@ -681,7 +769,7 @@ pub(crate) async fn start_runtime(
             api_service.clone(),
             site_explorer_machine_info_provider,
             meter.clone(),
-            per_object_prometheus_registry,
+            per_object_metrics,
             ipmi_tool.clone(),
             seed_data,
             cancel_token.clone(),
@@ -694,7 +782,7 @@ pub(crate) async fn start_runtime(
     // top-level binary always supplies the builder; the decision to use it lives
     // here, next to the parsed config.
     let admin_ui_routes_builder = if carbide_config.enable_admin_ui {
-        admin_ui_routes_builder
+        Some(admin_ui_routes_builder)
     } else {
         tracing::info!("admin web UI disabled via enable_admin_ui=false");
         None
@@ -772,7 +860,7 @@ async fn reject_unscoped_initialization_with_scoped_interfaces<R: DpuServiceInte
         "Checking for scoped DPUServiceInterfaces before initializing unscoped interfaces"
     );
     let scoped_interfaces = scoped_service_interface_names(
-        DpuServiceInterfaceRepository::list(repo, carbide_dpf::NAMESPACE)
+        DpuServiceInterfaceRepository::list(repo, carbide_dpf::NAMESPACE, None)
             .await
             .map_err(|error| eyre::eyre!("failed to list DPF service interfaces: {error}"))?
             .into_iter()
@@ -811,6 +899,123 @@ fn scoped_service_interface_names(
             .then_some(name)
         })
         .collect()
+}
+
+/// Builds startup interfaces and mandatory services from one effective topology projection.
+///
+/// Keeping both results behind this seam prevents API service endpoints from drifting from the
+/// interface inventory validated by the DPF SDK.
+fn build_dpf_interfaces_and_services(
+    carbide_config: &CarbideConfig,
+    deployment: &DpfDeploymentConfig,
+    deployment_type: DpuDeploymentType,
+    service_vpc_slots: ServiceVpcSlots,
+    intercept_bridging: Option<&DpfInterceptBridging>,
+) -> (
+    Vec<carbide_dpf::types::DpuServiceInterfaceTemplateDefinition>,
+    Vec<carbide_dpf::ServiceDefinition>,
+) {
+    let interfaces = carbide_dpf::build_deployment_dpu_interfaces(
+        deployment_type,
+        carbide_config.dpu_config.num_of_vfs,
+        intercept_bridging,
+    );
+    let services = carbide_config
+        .dpf
+        .resolved_services_for(deployment, deployment_type);
+
+    // Warn when an Astra deployment has Weave services but no ewethers config.
+    if deployment_type == DpuDeploymentType::Bf4Astra
+        && carbide_config.ewethers_config.is_none()
+        && services.extra.keys().any(|service| {
+            matches!(
+                service,
+                DpfExtraService::DocaWeaveDhcpAgent | DpfExtraService::DocaWeaveFlowController
+            )
+        })
+    {
+        tracing::warn!(
+            deployment = %deployment.deployment_name,
+            "Weave services are configured without ewethers_config; NICo's DPA/Astra paths remain disabled. Configure ewethers with the appropriate enable flags and overlay subnet values"
+        );
+    }
+
+    let mandatory_services = crate::dpf_services::mandatory_services(
+        &services,
+        &carbide_config.dpf.dpu_agent_bootstrap_ca,
+        &interfaces,
+        service_vpc_slots,
+        &carbide_config.node_auth,
+        carbide_config.ewethers_config.as_ref(),
+    );
+    (interfaces, mandatory_services)
+}
+
+/// Builds the startup deployment from its effective inventory so operator limits and mandatory
+/// service attachments are validated together. BF4 uses a single `BlueFieldSoftware` source whose
+/// CR carries the complete PSID-to-PLDM mapping.
+fn build_dpf_init_config(
+    carbide_config: &CarbideConfig,
+    deployment: &DpfDeploymentConfig,
+    deployment_type: DpuDeploymentType,
+    bluefield_software: Option<carbide_dpf::BlueFieldSoftwareParams>,
+    configured_service_vpc_slots: ServiceVpcSlots,
+    intercept_bridging: Option<&DpfInterceptBridging>,
+) -> eyre::Result<carbide_dpf::InitDpfResourcesConfig> {
+    // Astra consumes topology-derived endpoints but not generic service-VPC reservations.
+    let (service_vpc_slots, additional_managed_sf, max_active_service_vpc_interfaces_per_dpu) =
+        match deployment_type {
+            DpuDeploymentType::Bf4Astra => (ServiceVpcSlots::default(), 0, 0),
+            DpuDeploymentType::Bf3
+            | DpuDeploymentType::Bf3Gb200
+            | DpuDeploymentType::Bf4Generic => (
+                configured_service_vpc_slots,
+                carbide_config.dpu_config.additional_managed_sf,
+                carbide_config
+                    .dpu_config
+                    .max_active_service_vpc_interfaces_per_dpu,
+            ),
+        };
+    let (interfaces, services) = build_dpf_interfaces_and_services(
+        carbide_config,
+        deployment,
+        deployment_type,
+        service_vpc_slots,
+        intercept_bridging,
+    );
+    let mut builder = carbide_dpf::InitDpfResourcesConfigBuilder::default()
+        .bfb_url(deployment.bfb_url.clone().unwrap_or_default())
+        .flavor_name(deployment.flavor_name.clone())
+        .deployment_name(deployment.deployment_name.clone())
+        .deployment_scoped_service_interfaces(
+            carbide_config.dpf.deployment_scoped_service_interfaces,
+        )
+        .services(services)
+        .num_of_vfs(carbide_config.dpu_config.num_of_vfs)
+        .pf_total_sf_reserved(carbide_config.dpf.pf_total_sf_reserved)
+        .additional_managed_sf(additional_managed_sf)
+        .service_vpc_slots(service_vpc_slots)
+        .max_active_service_vpc_interfaces_per_dpu(max_active_service_vpc_interfaces_per_dpu)
+        .max_sf_per_pf(deployment.max_sf_per_pf)
+        .interfaces(interfaces)
+        .extra_bfcfg_parameters(carbide_config.dpf.resolved_bfcfg_parameters_for(deployment))
+        .enable_delay_host_init(deployment.enable_delay_host_init)
+        .deployment_type(deployment_type);
+    if let Some(bluefield_software) = bluefield_software {
+        builder = builder.bluefield_software(bluefield_software);
+    }
+    if let Some(intercept_bridging) = intercept_bridging.cloned() {
+        builder = builder.intercept_bridging(intercept_bridging);
+    }
+    if let Some(proxy) = carbide_config.dpf.proxy.clone() {
+        builder = builder.proxy(proxy);
+    }
+    builder.build().map_err(|err| {
+        eyre::eyre!(
+            "invalid {} DPF initialization configuration: {err}",
+            deployment.deployment_name
+        )
+    })
 }
 
 /// Initialize the DPF SDK and create all required Kubernetes CRs.
@@ -857,17 +1062,34 @@ async fn initialize_dpf_sdk(
         carbide_config.vmaas_config.as_ref(),
         carbide_config.dpu_config.num_of_vfs,
     )?;
-    let effective_interfaces = carbide_dpf::build_effective_dpu_interfaces(
-        carbide_config.dpu_config.num_of_vfs,
-        intercept_bridging.as_ref(),
-    );
 
-    let astra_interfaces = carbide_dpf::sdk::build_dpu_interfaces_vec();
+    // BF3 interface vector drops pf1hpf from the static interface list
+    // because the flavor hides port 2. However, if user has configured
+    // pf1 explicitly for VMaaS, we accept it for compatibility, but log
+    // a warning regards this.
+    if let Some(identity) = carbide_config
+        .vmaas_config
+        .as_ref()
+        .and_then(|config| config.bridging.as_ref())
+        .and_then(|bridging| {
+            bridging
+                .host_representor_intercept_bridging
+                .values()
+                .find_map(|interface| {
+                    let identity = interface.dpf_interface?;
+                    (identity.pf_id == 1).then_some(identity)
+                })
+        })
+    {
+        tracing::warn!(
+            controller_id = identity.controller_id,
+            pf_id = identity.pf_id,
+            "VMaaS intercept-bridging configuration added PF1 for BF3 although the BF3 flavor hides port 2"
+        );
+    }
 
-    let service_vpc_slots =
-        carbide_dpf::ServiceVpcSlots::new(carbide_config.dpu_config.service_vpc_slot_count)
-            .map_err(|error| eyre::eyre!("invalid DPF service-VPC configuration: {error}"))?;
-    let additional_managed_sf = carbide_config.dpu_config.additional_managed_sf;
+    let service_vpc_slots = ServiceVpcSlots::new(carbide_config.dpu_config.service_vpc_slot_count)
+        .map_err(|error| eyre::eyre!("invalid DPF service-VPC configuration: {error}"))?;
 
     let repo = carbide_dpf::KubeRepository::new()
         .await
@@ -895,71 +1117,19 @@ async fn initialize_dpf_sdk(
     // Soon v2 flag will be removed and will become only mode for dpf handling.
     let deployment_type_labels = build_deployment_type_labels(carbide_config);
 
-    // Builds the SDK init config for one DPUDeployment. BF4 uses a single
-    // `BlueFieldSoftware` source whose CR carries the complete PSID→PLDM mapping.
+    // Build each deployment's validated initialization configuration from its effective inventory.
     let make_init_config =
-        |deployment: &crate::cfg::file::DpfDeploymentConfig,
+        |deployment: &DpfDeploymentConfig,
          deployment_type: DpuDeploymentType,
          bluefield_software: Option<carbide_dpf::BlueFieldSoftwareParams>| {
-            let services = carbide_config
-                .dpf
-                .resolved_services_for(deployment, deployment_type);
-            let interfaces = match deployment_type {
-                DpuDeploymentType::Bf4Astra => &astra_interfaces,
-                DpuDeploymentType::Bf3
-                | DpuDeploymentType::Bf3Gb200
-                | DpuDeploymentType::Bf4Generic => &effective_interfaces,
-            };
-            let (service_vpc_slots, additional_managed_sf) = match deployment_type {
-                DpuDeploymentType::Bf4Astra => (carbide_dpf::ServiceVpcSlots::default(), 0),
-                DpuDeploymentType::Bf3
-                | DpuDeploymentType::Bf3Gb200
-                | DpuDeploymentType::Bf4Generic => (service_vpc_slots, additional_managed_sf),
-            };
-            let mut builder = carbide_dpf::InitDpfResourcesConfigBuilder::default()
-                .bfb_url(deployment.bfb_url.clone().unwrap_or_default())
-                .flavor_name(deployment.flavor_name.clone())
-                .deployment_name(deployment.deployment_name.clone())
-                .deployment_scoped_service_interfaces(
-                    carbide_config.dpf.deployment_scoped_service_interfaces,
-                )
-                .services(crate::dpf_services::mandatory_services(
-                    &services,
-                    &carbide_config.dpf.dpu_agent_bootstrap_ca,
-                    interfaces,
-                    service_vpc_slots,
-                    &carbide_config.node_auth,
-                ))
-                .num_of_vfs(carbide_config.dpu_config.num_of_vfs)
-                .pf_total_sf_reserved(carbide_config.dpf.pf_total_sf_reserved)
-                .additional_managed_sf(additional_managed_sf)
-                .service_vpc_slots(service_vpc_slots)
-                .interfaces(interfaces.clone())
-                .extra_bfcfg_parameters(
-                    carbide_config.dpf.resolved_bfcfg_parameters_for(deployment),
-                )
-                .enable_delay_host_init(deployment.enable_delay_host_init)
-                .deployment_type(deployment_type);
-            if let Some(bluefield_software) = bluefield_software {
-                builder = builder.bluefield_software(bluefield_software);
-            }
-            if let Some(intercept_bridging) = match deployment_type {
-                DpuDeploymentType::Bf4Astra => None,
-                DpuDeploymentType::Bf3
-                | DpuDeploymentType::Bf3Gb200
-                | DpuDeploymentType::Bf4Generic => intercept_bridging.clone(),
-            } {
-                builder = builder.intercept_bridging(intercept_bridging);
-            }
-            if let Some(proxy) = carbide_config.dpf.proxy.clone() {
-                builder = builder.proxy(proxy);
-            }
-            builder.build().map_err(|err| {
-                eyre::eyre!(
-                    "invalid {} DPF initialization configuration: {err}",
-                    deployment.deployment_name
-                )
-            })
+            build_dpf_init_config(
+                carbide_config,
+                deployment,
+                deployment_type,
+                bluefield_software,
+                service_vpc_slots,
+                intercept_bridging.as_ref(),
+            )
         };
 
     let bf3 = &carbide_config.dpf.deployments.bf3;
@@ -1021,14 +1191,47 @@ async fn initialize_dpf_sdk(
         .await
         .map_err(|err| eyre::eyre!("failed to initialize DPF SDK: {err}"))?;
 
-    for (name, config) in init_configs {
-        sdk.create_initialization_objects(&config)
+    // Each config was validated by build() before the shared Secret write; retain deployment context on failure.
+    for (name, config) in &init_configs {
+        sdk.create_initialization_objects(config)
             .await
             .map_err(|err| eyre::eyre!("failed to initialize {name} DPF deployment: {err}"))?;
     }
 
+    // Cleanup stale PF1 interfaces for BF3. For scoped deployment this is
+    // unconditional, for unscoped we only cleanup if BF4 is not present.
+    let bf4_configured = carbide_config.dpf.deployments.bf4_generic.is_some()
+        || carbide_config.dpf.deployments.bf4_astra.is_some();
+    let cleanup_configs = init_configs
+        .iter()
+        .filter(|(_, config)| {
+            matches!(
+                config.deployment_type(),
+                DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200
+            )
+        })
+        .map(|(_, config)| config)
+        .collect::<Vec<_>>();
+    if let Err(error) = sdk
+        .cleanup_stale_pf1_interfaces(&cleanup_configs, bf4_configured)
+        .await
+    {
+        tracing::warn!(error = %error, "Failed to clean up obsolete PF1 interfaces");
+    }
+
+    // Get astra config route prefixes for dpu device registration.
+    let astra_config = carbide_config
+        .ewethers_config
+        .as_ref()
+        .map(|config| config.astra.clone())
+        .unwrap_or_default();
+
     Ok(Some(Arc::new(DpfSdkOps::new(
         Arc::new(sdk),
+        carbide_dpf::AstraRoutePrefixes {
+            rail_route_prefix_len: astra_config.underlay_rail_route_prefix_len,
+            software_plane_route_prefix_len: astra_config.underlay_software_plane_route_prefix_len,
+        },
         db_pool,
         join_set,
     )?)))
@@ -1079,16 +1282,166 @@ fn build_deployment_type_labels(
     map
 }
 
+/// `validate_resource_pool_config` checks backend definitions, pool selectors,
+/// and supported IB fabrics before the binary opens external connections.
+/// It merges both pool sources, rejects conflicting definitions, and requires a
+/// pools table unless `listen_only` is enabled. Using pools from the main API
+/// config emits the existing deprecation warning.
+///
+/// `start_runtime` repeats this resolution because callers can bypass the binary
+/// entry point. Neither path contacts providers or reads certificate files.
+#[doc(hidden)]
+pub fn validate_resource_pool_config(
+    carbide_config: &CarbideConfig,
+    initial_objects: Option<&InitialObjectsConfig>,
+) -> eyre::Result<()> {
+    resolve_resource_pool_config(carbide_config, initial_objects).map(|_| ())
+}
+
+#[derive(Debug)]
+struct ResourcePoolStartupConfig {
+    definitions: HashMap<String, ResourcePoolDef>,
+    selections: HashMap<String, ResourcePoolSelection>,
+}
+
+fn resolve_resource_pool_config(
+    carbide_config: &CarbideConfig,
+    initial_objects: Option<&InitialObjectsConfig>,
+) -> eyre::Result<ResourcePoolStartupConfig> {
+    carbide_config.validate_resource_pool_backends()?;
+    let ib_enabled = carbide_config
+        .ib_config
+        .as_ref()
+        .is_some_and(|config| config.enabled);
+    if ib_enabled {
+        // Reject unsupported fabrics before startup can persist their bindings.
+        eyre::ensure!(
+            carbide_config.ib_fabrics.len() <= 1,
+            "only a single IB fabric definition is supported"
+        );
+        if let Some(fabric_id) = carbide_config.ib_fabrics.keys().next() {
+            eyre::ensure!(
+                fabric_id == DEFAULT_IB_FABRIC_NAME,
+                "ib_fabrics contains an entry \"{fabric_id}\", but only \"{DEFAULT_IB_FABRIC_NAME}\" is supported"
+            );
+        }
+    }
+    let initial_pools = initial_objects.and_then(|objects| objects.pools.as_ref());
+    let legacy_pools = carbide_config.pools.as_ref();
+
+    // Check both sources before merging. A duplicate in the other file must not
+    // hide an invalid backend reference or a remote selection.
+    for source in [initial_pools, legacy_pools].into_iter().flatten() {
+        for (name, pool) in source {
+            resolve_pool_selection(
+                carbide_config,
+                name,
+                pool.definition.pool_type.into(),
+                pool.backend.as_deref(),
+                pool.remote_pool.as_deref(),
+            )?;
+        }
+    }
+    let pools = SeedData::merge_objects(
+        initial_pools,
+        legacy_pools,
+        carbide_config,
+        !carbide_config.listen_only,
+    )?;
+    let mut definitions = HashMap::new();
+    let mut selections = HashMap::new();
+    for (name, pool) in pools.iter() {
+        selections.insert(
+            name.clone(),
+            resolve_pool_selection(
+                carbide_config,
+                name,
+                pool.definition.pool_type.into(),
+                pool.backend.as_deref(),
+                pool.remote_pool.as_deref(),
+            )?,
+        );
+        definitions.insert(name.clone(), pool.definition.clone());
+    }
+
+    for (fabric_id, fabric) in &carbide_config.ib_fabrics {
+        let name = resource_pool::common::ib_pkey_pool_name(fabric_id);
+        let selection = resolve_pool_selection(
+            carbide_config,
+            &name,
+            ValueType::Integer,
+            fabric.backend.as_deref(),
+            fabric.remote_pool.as_deref(),
+        )?;
+        if !ib_enabled {
+            continue;
+        }
+        if let Some(ordinary) = selections.get(&name) {
+            eyre::ensure!(
+                ordinary.value_domain == selection.value_domain,
+                "resource pool `{name}` conflicts with the PKey pool for IB fabric `{fabric_id}`",
+            );
+        } else {
+            selections.insert(name, selection);
+        }
+    }
+    Ok(ResourcePoolStartupConfig {
+        definitions,
+        selections,
+    })
+}
+
+fn resolve_pool_selection(
+    carbide_config: &CarbideConfig,
+    name: &str,
+    value_type: ValueType,
+    backend_name: Option<&str>,
+    remote_pool: Option<&str>,
+) -> eyre::Result<ResourcePoolSelection> {
+    eyre::ensure!(
+        !name.trim().is_empty(),
+        "resource pool name must not be empty"
+    );
+    if let Some(backend_name) = backend_name {
+        let backend = carbide_config
+            .resource_pool_backends
+            .get(backend_name)
+            .ok_or_else(|| {
+                eyre::eyre!("resource pool `{name}` references unknown backend `{backend_name}`")
+            })?;
+        eyre::ensure!(
+            matches!(backend, ResourcePoolBackendConfig::Integrated),
+            "resource pool `{name}` selects gRPC backend `{backend_name}`; v2.4 requires integrated allocation",
+        );
+    }
+    let remote_pool = remote_pool.unwrap_or(name);
+    eyre::ensure!(
+        remote_pool == name,
+        "integrated resource pool `{name}` requires remote_pool to equal its logical name",
+    );
+    Ok(ResourcePoolSelection {
+        pool_name: name.to_owned(),
+        value_domain: value_type.into(),
+        backend_name: backend_name.map(str::to_owned),
+        backend_kind: ResourcePoolBackendKind::Integrated,
+        authority_id: INTEGRATED_AUTHORITY_ID.to_owned(),
+        remote_pool: remote_pool.to_owned(),
+    })
+}
+
 #[derive(Debug)]
 struct SeedData<'a> {
     initial_networks: Cow<'a, HashMap<String, NetworkDefinition>>,
     initial_vpcs: Cow<'a, HashMap<String, VpcDefinition>>,
-    initial_pools: Cow<'a, HashMap<String, ResourcePoolDef>>,
+    initial_pools: HashMap<String, ResourcePoolDef>,
 }
 
 trait SeedKind: Clone + PartialEq {
     fn name() -> &'static str;
     fn source_description(cfg: &CarbideConfig, name: &str) -> String;
+    fn equivalent(&self, other: &Self) -> bool {
+        self == other
+    }
 }
 
 impl SeedKind for NetworkDefinition {
@@ -1121,7 +1474,14 @@ impl SeedKind for VpcDefinition {
     }
 }
 
-impl SeedKind for ResourcePoolDef {
+impl SeedKind for ResourcePoolConfig {
+    fn equivalent(&self, other: &Self) -> bool {
+        // `resolve_resource_pool_config` checks both sources before this merge.
+        // They select the same Integrated allocator and pool name, so different
+        // backend configuration names do not change the pool.
+        self.definition == other.definition
+    }
+
     fn name() -> &'static str {
         "Resource pool"
     }
@@ -1137,12 +1497,12 @@ impl SeedKind for ResourcePoolDef {
 }
 
 impl<'a> SeedData<'a> {
-    /// Determines the authoritative set of seed data definitions to reconcile
-    /// against the database at startup, merging e.g. `InitialObjectsConfig.networks`
-    /// with the legacy `CarbideConfig.networks` source.
+    /// `resolve` merges and validates the initial networks and VPCs, and groups
+    /// them with the pool definitions from `resolve_resource_pool_config`.
     fn resolve(
         carbide_config: &'a CarbideConfig,
         initial_objects: Option<&'a InitialObjectsConfig>,
+        initial_pools: HashMap<String, ResourcePoolDef>,
     ) -> eyre::Result<Self> {
         let initial_networks = Self::merge_objects(
             initial_objects.and_then(|io| io.networks.as_ref()),
@@ -1162,13 +1522,6 @@ impl<'a> SeedData<'a> {
             false,
         )?;
         db_init::validate_initial_vpcs(&initial_vpcs)?;
-
-        let initial_pools = Self::merge_objects(
-            initial_objects.and_then(|io| io.pools.as_ref()),
-            carbide_config.pools.as_ref(),
-            carbide_config,
-            true,
-        )?;
 
         Ok(Self {
             initial_networks,
@@ -1216,7 +1569,7 @@ impl<'a> SeedData<'a> {
                     .iter()
                     .filter(|(name, legacy_def)| {
                         io.get(name.as_str())
-                            .is_some_and(|new_def| new_def != *legacy_def)
+                            .is_some_and(|new_def| !new_def.equivalent(legacy_def))
                     })
                     .map(|(name, _)| name.as_str())
                     .collect();
@@ -1266,6 +1619,21 @@ impl<'a> SeedData<'a> {
     }
 }
 
+/// Builds `ServiceVpcRegistrationConfig` from parsed slot and deployment-family settings so
+/// `initialize_and_start_controllers` and its focused test use identical inputs.
+fn service_vpc_registration_config(
+    carbide_config: &CarbideConfig,
+) -> eyre::Result<ServiceVpcRegistrationConfig> {
+    Ok(ServiceVpcRegistrationConfig {
+        slots: carbide_dpf::ServiceVpcSlots::new(carbide_config.dpu_config.service_vpc_slot_count)
+            .map_err(|error| eyre::eyre!("invalid service-VPC slot inventory: {error}"))?,
+        enabled_address_families: carbide_config
+            .dpf
+            .deployments
+            .service_vpc_address_families(),
+    })
+}
+
 /// Initialize and spawn all controllers and background tasks.
 ///
 /// All background tasks will be spawned into `join_set`, which can be awaited with
@@ -1292,6 +1660,7 @@ async fn initialize_and_start_controllers<'a>(
         work_lock_manager_handle,
         rms_client,
         component_manager,
+        firmware_object_fetcher,
         dpf_sdk,
         credential_manager,
         ..
@@ -1371,23 +1740,6 @@ async fn initialize_and_start_controllers<'a>(
     let ib_config = carbide_config.ib_config.clone().unwrap_or_default();
 
     if ib_config.enabled {
-        // These are some sanity checks until full multi-fabric support is available
-        // Right now there is only one fabric supported, and it needs to be called `default`
-        if carbide_config.ib_fabrics.len() > 1 {
-            return Err(eyre::eyre!(
-                "only a single IB fabric definition is allowed at the moment"
-            ));
-        }
-
-        if !carbide_config.ib_fabrics.is_empty() {
-            let fabric_id = carbide_config.ib_fabrics.iter().next().unwrap().0;
-            if fabric_id != DEFAULT_IB_FABRIC_NAME {
-                return Err(eyre::eyre!(
-                    "ib_fabrics contains an entry \"{fabric_id}\", but only \"{DEFAULT_IB_FABRIC_NAME}\" is supported at the moment"
-                ));
-            }
-        }
-
         // Populate IB specific resource pools
         let mut txn = Transaction::begin(db_pool).await?;
 
@@ -1421,6 +1773,7 @@ async fn initialize_and_start_controllers<'a>(
                 db_pool,
                 &seed_data.initial_vpcs,
                 common_pools.ethernet.pool_vpc_vni.as_ref(),
+                &api_service.resource_pool_registry,
             )
             .await?;
         }
@@ -1462,7 +1815,8 @@ async fn initialize_and_start_controllers<'a>(
         );
     }
 
-    let downloader = FirmwareDownloader::new();
+    let downloader =
+        FirmwareDownloader::with_config(carbide_config.firmware_global.downloads.clone())?;
     let upload_limiter = Arc::new(Semaphore::new(carbide_config.firmware_global.max_uploads));
 
     // Create state change emitter with DSX Exchange Event Bus hook if enabled
@@ -1807,6 +2161,13 @@ async fn initialize_and_start_controllers<'a>(
         ))
         .build_and_spawn(join_set, cancel_token.clone())?;
 
+    StateController::<crate::vpc_peering_controller::VpcPeeringDeletion>::builder()
+        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .processor_id(state_controller_id.clone())
+        .services(Arc::new(db_pool.clone()))
+        .state_handler(Arc::new(crate::vpc_peering_controller::VpcPeeringDeletion))
+        .build_and_spawn(join_set, cancel_token.clone())?;
+
     StateController::<VpcPrefixStateControllerIO>::builder()
         .database(db_pool.clone(), work_lock_manager_handle.clone())
         .meter("carbide_vpc_prefixes", meter.clone())
@@ -1835,6 +2196,7 @@ async fn initialize_and_start_controllers<'a>(
             ExtensionServiceStateHandlerServices {
                 db_pool: db_pool.clone(),
                 dpf_sdk: dpf_sdk.clone(),
+                service_vpc: service_vpc_registration_config(carbide_config)?,
             }
             .into(),
         )
@@ -1920,21 +2282,6 @@ async fn initialize_and_start_controllers<'a>(
         .build_and_spawn(join_set, cancel_token.clone())
         .expect("Unable to build PowerShelfStateController");
 
-    let default_redirect_policy = reqwest::redirect::Policy::default();
-
-    let firmware_object_fetcher = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
-            let initial_origin = attempt.previous().first().map(reqwest::Url::origin);
-
-            if initial_origin == Some(attempt.url().origin()) {
-                default_redirect_policy.redirect(attempt)
-            } else {
-                attempt.error("firmware-object redirect changed the configured origin")
-            }
-        }))
-        .build()
-        .wrap_err("failed to build the firmware-object HTTP client")?;
-
     StateController::<RackStateControllerIO>::builder()
         .database(db_pool.clone(), work_lock_manager_handle.clone())
         .meter("carbide_racks", meter.clone())
@@ -1952,10 +2299,11 @@ async fn initialize_and_start_controllers<'a>(
                 rack_firmware_update_manager: rack_firmware_update_manager.clone(),
                 credential_manager: credential_manager.clone(),
                 component_manager: component_manager.clone().map(Arc::new),
-                nmx_cluster_switch_mtls_services: carbide_config
-                    .rack_state_controller
-                    .effective_nmx_cluster_switch_mtls_services_as_i32(),
-                firmware_object_fetcher: Arc::new(firmware_object_fetcher.clone()),
+                switch_mtls_services: carbide_config
+                    .switch_state_controller
+                    .switch_mtls_services
+                    .clone(),
+                firmware_object_fetcher: firmware_object_fetcher.clone(),
                 per_object_metrics_registry: per_object_metrics_registry.clone(),
             }
             .into(),
@@ -2077,6 +2425,11 @@ async fn initialize_and_start_controllers<'a>(
         // only way the value gets in, sparing a constructor parameter
         // through `SiteExplorer::new` and every test fixture.
         config.retained_boot_interface_window = carbide_config.retained_boot_interface_window;
+        config.admin_fnn_enabled = carbide_config
+            .fnn
+            .as_ref()
+            .and_then(|fnn| fnn.admin_vpc.as_ref())
+            .is_some_and(|admin| admin.enabled);
         if let Some(window) = config.retained_boot_interface_window {
             tracing::info!(
                 window_seconds = window.num_seconds(),
@@ -2130,7 +2483,7 @@ async fn initialize_and_start_controllers<'a>(
             preingestion_manager.with_rack_firmware(
                 carbide_config.rack_profiles.clone(),
                 manager.compute_tray.clone(),
-                Arc::new(firmware_object_fetcher),
+                firmware_object_fetcher.clone(),
             )
         }
         _ => preingestion_manager,
@@ -2198,6 +2551,7 @@ mod tests {
     use figment::Figment;
     use figment::providers::{Format, Toml};
     use model::expected_machine::HostDpuPolicy;
+    use model::extension_service::ServiceVpcAddressFamily;
     use model::network_segment::{NetworkDefinition, NetworkDefinitionSegmentType};
     use model::resource_pool::ResourcePoolType;
     use model::resource_pool::define::ResourcePoolDef;
@@ -2320,6 +2674,130 @@ mod tests {
         assert_eq!(
             normalize_dpf_intercept_bridging(Some(&first), 16).unwrap(),
             normalize_dpf_intercept_bridging(Some(&second), 16).unwrap()
+        );
+    }
+
+    /// Verifies Astra startup wires one sparse topology into mandatory services and SDK validation,
+    /// because SDK-only tests bypass API-core forwarding.
+    #[test]
+    fn astra_init_config_wires_topology_into_services_and_sdk_validation() {
+        // Select one sparse VF, enable required interface scoping, and set non-default capacity
+        // knobs so Astra's three generic-reservation exclusions are observable.
+        let mut config = crate::test_support::default_config::with_dpf_intercept_topology(&[4]);
+        config.dpf.deployment_scoped_service_interfaces = true;
+        config.dpu_config.num_of_vfs = 16;
+        config.dpu_config.additional_managed_sf = 17;
+        config.dpu_config.max_active_service_vpc_interfaces_per_dpu = 23;
+        let topology = normalize_dpf_intercept_bridging(
+            config.vmaas_config.as_ref(),
+            config.dpu_config.num_of_vfs,
+        )
+        .unwrap()
+        .expect("the configured DPF topology must normalize");
+
+        // Astra uses software provisioning; the remaining defaults provide ordinary services.
+        let deployment = DpfDeploymentConfig {
+            bfb_url: None,
+            ..Default::default()
+        };
+        let bluefield_software = carbide_dpf::BlueFieldSoftwareParams {
+            os_iso: "http://example.com/astra.iso".to_string(),
+            pldm_fw_bundle: Some(BTreeMap::from([(
+                "psid".to_string(),
+                "http://example.com/astra.pldm".to_string(),
+            )])),
+        };
+        let service_vpc_slots =
+            ServiceVpcSlots::new(1).expect("the test service-VPC slot count must be valid");
+
+        // Inspect production's shared startup seam so every mandatory endpoint and its order are
+        // pinned.
+        let (_, services) = build_dpf_interfaces_and_services(
+            &config,
+            &deployment,
+            DpuDeploymentType::Bf4Astra,
+            ServiceVpcSlots::default(),
+            Some(&topology),
+        );
+        let service_endpoints: BTreeMap<_, _> = services
+            .iter()
+            .map(|service| {
+                (
+                    service.name.as_str(),
+                    service
+                        .interfaces
+                        .iter()
+                        .map(|interface| (interface.name.as_str(), interface.network.as_str()))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            service_endpoints[carbide_dpf::types::DOCA_HBN_SERVICE_NAME],
+            vec![
+                ("p0_if", "mybrhbn"),
+                ("p1_if", "mybrhbn"),
+                ("pf0hpf_if", "mybrhbn"),
+                ("pf0vf4_if", "mybrhbn"),
+            ]
+        );
+        assert_eq!(
+            service_endpoints[carbide_dpf::types::DHCP_SERVER_SERVICE_NAME],
+            vec![
+                ("d_pf0hpf_if", "mybrsfc-dhcp"),
+                ("d_pf0vf4_if", "mybrsfc-dhcp"),
+            ]
+        );
+        assert_eq!(
+            service_endpoints[carbide_dpf::types::FMDS_SERVICE_NAME],
+            vec![("f_pf0hpf_if", "mybrsfc-fmds")]
+        );
+
+        // The full builder must accept those endpoints while excluding every generic reservation.
+        let init_config = build_dpf_init_config(
+            &config,
+            &deployment,
+            DpuDeploymentType::Bf4Astra,
+            Some(bluefield_software.clone()),
+            service_vpc_slots,
+            Some(&topology),
+        )
+        .expect("Astra startup must assemble one validated topology-backed configuration");
+
+        assert_eq!(init_config.deployment_type(), DpuDeploymentType::Bf4Astra);
+
+        // Use a bridge accepted by shared topology validation but reserved by this deployment's
+        // fixed OVS topology, so only forwarding into SDK validation can expose the conflict.
+        let conflicting_topology = carbide_dpf::DpfInterceptBridging::new(
+            vec![carbide_dpf::DpfInterceptBridge::new(
+                carbide_dpf::DpfInterfaceIdentity {
+                    controller_id: 1,
+                    pf_id: 0,
+                    vf_id: None,
+                },
+                "br-xplane",
+                "p-pf",
+            )],
+            config.dpu_config.num_of_vfs,
+        )
+        .expect("the deployment-independent topology must be valid");
+
+        // SDK validation compares the source topology with deployment-specific OVS reservations,
+        // so this rejection proves the complete topology reached the initialization builder.
+        let error = build_dpf_init_config(
+            &config,
+            &deployment,
+            DpuDeploymentType::Bf4Astra,
+            Some(bluefield_software),
+            service_vpc_slots,
+            Some(&conflicting_topology),
+        )
+        .expect_err("startup must forward topology into SDK validation");
+        assert!(
+            error
+                .to_string()
+                .contains("conflicts with BF4 Astra aggregate xplane bridge"),
+            "{error}"
         );
     }
 
@@ -2486,6 +2964,134 @@ mod tests {
             ))
             .extract()
             .expect("minimal CarbideConfig parses")
+    }
+
+    /// Verifies `service_vpc_registration_config` preserves the exact slot count and isolated
+    /// deployment-family sets parsed from DPF configuration.
+    #[test]
+    fn service_vpc_registration_config_preserves_slots_and_deployment_families() {
+        // Configure asymmetric family membership so each startup field remains independently
+        // observable.
+        let mut config = minimal_carbide_config();
+        config.dpu_config.service_vpc_slot_count = 2;
+        config
+            .dpf
+            .deployments
+            .bf3
+            .service_vpc_enabled_address_families =
+            [ServiceVpcAddressFamily::Ipv4].into_iter().collect();
+        config.dpf.deployments.bf4_generic = Some(crate::cfg::file::DpfDeploymentConfig {
+            service_vpc_enabled_address_families: [ServiceVpcAddressFamily::Ipv6]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        });
+
+        // Build the same registration inventory supplied to the production controller.
+        let registration = service_vpc_registration_config(&config)
+            .expect("bounded slot inventory and parsed deployment families are valid");
+
+        // Require the exact slot count and every concrete deployment entry.
+        assert_eq!(registration.slots.len(), 2);
+        assert_eq!(
+            registration.enabled_address_families,
+            BTreeMap::from([
+                (
+                    DpuDeploymentType::Bf3,
+                    BTreeSet::from([ServiceVpcAddressFamily::Ipv4]),
+                ),
+                (
+                    DpuDeploymentType::Bf3Gb200,
+                    BTreeSet::from([ServiceVpcAddressFamily::Ipv4]),
+                ),
+                (
+                    DpuDeploymentType::Bf4Generic,
+                    BTreeSet::from([ServiceVpcAddressFamily::Ipv6]),
+                ),
+            ])
+        );
+    }
+
+    /// Verifies startup forwards the operator ceiling rather than accepting the SDK default.
+    /// The complete pool fits managed demand in the ceiling cases, so only the declared ceiling distinguishes them.
+    /// Endpoint overcommit and Astra assembly also verify startup preserves platform-specific reservations.
+    #[test]
+    fn dpf_init_config_preserves_the_deployment_sf_ceiling() {
+        // The ceiling cases use one slot and one endpoint (30 SFs); the 31-SF pool isolates ceiling forwarding.
+        let mut config = minimal_carbide_config();
+        config.dpu_config.service_vpc_slot_count = 1;
+        config.dpf.pf_total_sf_reserved = 31;
+        let slots = carbide_dpf::ServiceVpcSlots::new(1).expect("bounded test slot count");
+        for (ceiling, active_limit, expected_error) in [
+            // A sufficient pool still fails when it exceeds the operator's declared ceiling.
+            (
+                30,
+                1,
+                Some(("requires PF_TOTAL_SF=31", "exceeding the SF ceiling 30")),
+            ),
+            // Raising only that ceiling accepts the same pool and complete service inventory.
+            (31, 1, None),
+            // Three endpoint reservations overcommit the unchanged pool, proving startup forwards admission capacity.
+            (
+                31,
+                3,
+                Some((
+                    "configured DPF managed SFs (32)",
+                    "dpf.pf_total_sf_reserved pool (31)",
+                )),
+            ),
+        ] {
+            // Change only the case's ceiling and endpoint commitment, keeping the inventory and pool fixed.
+            config.dpf.deployments.bf3.max_sf_per_pf = ceiling;
+            config.dpu_config.max_active_service_vpc_interfaces_per_dpu = active_limit;
+            let result = build_dpf_init_config(
+                &config,
+                &config.dpf.deployments.bf3,
+                DpuDeploymentType::Bf3,
+                None,
+                slots,
+                None,
+            );
+
+            // Check the intended failure boundary, with a successful control for the same assembly.
+            if let Some((expected_demand, expected_boundary)) = expected_error {
+                let error = result
+                    .expect_err("startup must reject the configured capacity boundary")
+                    .to_string();
+                assert!(error.contains(expected_demand), "{error}");
+                assert!(error.contains(expected_boundary), "{error}");
+            } else {
+                result.expect("pool equal to the declared ceiling must be accepted");
+            }
+        }
+
+        // Global service reservations are reachable alongside Astra, which must clear them before SDK validation.
+        config.dpf.deployment_scoped_service_interfaces = true;
+        config.dpu_config.max_active_service_vpc_interfaces_per_dpu = 1;
+        config.dpu_config.additional_managed_sf = 1;
+
+        // Astra uses software provisioning; defaults provide the remaining deployment settings and ordinary services.
+        let deployment = crate::cfg::file::DpfDeploymentConfig {
+            bfb_url: None,
+            ..Default::default()
+        };
+
+        // Each leaked reservation is independently rejected by SDK validation, so success proves all three are cleared.
+        build_dpf_init_config(
+            &config,
+            &deployment,
+            DpuDeploymentType::Bf4Astra,
+            Some(carbide_dpf::BlueFieldSoftwareParams {
+                os_iso: "http://example.com/astra.iso".to_string(),
+                pldm_fw_bundle: Some(BTreeMap::from([(
+                    "psid".to_string(),
+                    "http://example.com/astra.pldm".to_string(),
+                )])),
+            }),
+            slots,
+            None,
+        )
+        .expect("Astra startup must omit global service-VPC and managed-SF reservations");
     }
 
     #[test]
@@ -2749,14 +3355,15 @@ mod tests {
                 source: SeedSource::InitialObjects,
             } => {
                 config.pools = None;
-                initial_objects.pools = Some(seed_map(&[("test-pool", ipv4_pool("10.0.0.0/24"))]));
+                initial_objects.pools =
+                    Some(seed_map(&[("test-pool", ipv4_pool("10.0.0.0/24").into())]));
                 use_initial_objects = true;
             }
             ResolveInput::Object {
                 kind: SeedObjectKind::Pool,
                 source: SeedSource::LegacyConfig,
             } => {
-                config.pools = Some(seed_map(&[("test-pool", ipv4_pool("10.0.0.0/24"))]));
+                config.pools = Some(seed_map(&[("test-pool", ipv4_pool("10.0.0.0/24").into())]));
             }
             ResolveInput::ConflictingNetwork => {
                 initial_objects.networks =
@@ -2807,7 +3414,14 @@ mod tests {
             }
         }
 
-        match SeedData::resolve(&config, use_initial_objects.then_some(&initial_objects)) {
+        match resolve_resource_pool_config(&config, use_initial_objects.then_some(&initial_objects))
+            .and_then(|pools| {
+                SeedData::resolve(
+                    &config,
+                    use_initial_objects.then_some(&initial_objects),
+                    pools.definitions,
+                )
+            }) {
             Ok(seed_data) => Ok(SeedSummary {
                 networks: seed_data.initial_networks.keys().cloned().collect(),
                 vpcs: seed_data.initial_vpcs.keys().cloned().collect(),
@@ -2947,6 +3561,231 @@ attributes = { attribute1 = "site", additional_attribute3 = "site" }
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn pool_sources_compare_effective_integrated_defaults() {
+        let mut config = minimal_carbide_config();
+        config.resource_pool_backends = HashMap::from([
+            ("primary".to_owned(), ResourcePoolBackendConfig::Integrated),
+            ("alias".to_owned(), ResourcePoolBackendConfig::Integrated),
+        ]);
+        let definition = ipv4_pool("10.0.0.0/24");
+        let initial_objects = InitialObjectsConfig {
+            pools: Some(HashMap::from([(
+                "test-pool".to_owned(),
+                ResourcePoolConfig {
+                    definition: definition.clone(),
+                    backend: Some("primary".to_owned()),
+                    remote_pool: Some("test-pool".to_owned()),
+                },
+            )])),
+            networks: None,
+            vpcs: None,
+        };
+        for backend in [None, Some("alias")] {
+            config.pools = Some(HashMap::from([(
+                "test-pool".to_owned(),
+                ResourcePoolConfig {
+                    definition: definition.clone(),
+                    backend: backend.map(str::to_owned),
+                    remote_pool: None,
+                },
+            )]));
+            let resolved = resolve_resource_pool_config(&config, Some(&initial_objects)).unwrap();
+            assert_eq!(resolved.definitions["test-pool"], definition);
+            assert_eq!(resolved.selections["test-pool"].remote_pool, "test-pool");
+            assert_eq!(
+                resolved.selections["test-pool"].backend_name.as_deref(),
+                Some("primary")
+            );
+        }
+        config
+            .pools
+            .as_mut()
+            .unwrap()
+            .get_mut("test-pool")
+            .unwrap()
+            .definition = ipv4_pool("10.0.1.0/24");
+        let error = resolve_resource_pool_config(&config, Some(&initial_objects))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("conflicting definitions"), "{error}");
+        assert!(error.contains("test-pool"), "{error}");
+    }
+
+    #[test]
+    fn listen_only_accepts_no_configured_pools() {
+        let mut config = minimal_carbide_config();
+        config.listen_only = true;
+        config.pools = None;
+        let resolved = resolve_resource_pool_config(&config, None).unwrap();
+        assert!(resolved.definitions.is_empty());
+        assert!(resolved.selections.is_empty());
+    }
+
+    #[test]
+    fn pool_preflight_rejects_invalid_unused_backend() {
+        let mut config = minimal_carbide_config();
+        config.pools = Some(HashMap::new());
+        config.resource_pool_backends.insert(
+            "unused".to_owned(),
+            ResourcePoolBackendConfig::Grpc {
+                endpoint: "https://allocator.example?unsupported=true"
+                    .parse()
+                    .unwrap(),
+                tls: None,
+            },
+        );
+
+        let error = validate_resource_pool_config(&config, None).unwrap_err();
+        let error = format!("{error:#}");
+        assert!(
+            error.contains("invalid resource-pool backend \"unused\""),
+            "{error}"
+        );
+        assert!(
+            error.contains("endpoint must not contain credentials, a query, or a fragment"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn pool_fabric_selections_follow_ib_enablement() {
+        let mut config = minimal_carbide_config();
+        config.pools = Some(HashMap::new());
+        config.resource_pool_backends.insert(
+            "fabric-local".to_owned(),
+            ResourcePoolBackendConfig::Integrated,
+        );
+        config.ib_fabrics = toml::from_str(
+            r#"
+            [default]
+            endpoints = ["https://ufm.example"]
+            pkeys = [{ start = "1", end = "100" }]
+            backend = "fabric-local"
+            "#,
+        )
+        .unwrap();
+        let name = resource_pool::common::ib_pkey_pool_name("default");
+        let expected = ResourcePoolSelection {
+            pool_name: name.clone(),
+            value_domain: model::resource_pool::binding::ResourcePoolValueDomain::Integer,
+            backend_name: Some("fabric-local".to_owned()),
+            backend_kind: ResourcePoolBackendKind::Integrated,
+            authority_id: INTEGRATED_AUTHORITY_ID.to_owned(),
+            remote_pool: name.clone(),
+        };
+        let fabric = config.ib_fabrics[DEFAULT_IB_FABRIC_NAME].clone();
+        check_cases(
+            [
+                Case {
+                    scenario: "enabled IB accepts no configured fabrics",
+                    input: (true, vec![]),
+                    expect: Yields(HashMap::new()),
+                },
+                Case {
+                    scenario: "enabled IB resolves the default fabric binding",
+                    input: (true, vec![DEFAULT_IB_FABRIC_NAME]),
+                    expect: Yields(HashMap::from([(name, expected)])),
+                },
+                Case {
+                    scenario: "enabled IB rejects an unsupported fabric name",
+                    input: (true, vec!["other"]),
+                    expect: FailsWith(format!(
+                        "ib_fabrics contains an entry \"other\", but only \"{DEFAULT_IB_FABRIC_NAME}\" is supported"
+                    )),
+                },
+                Case {
+                    scenario: "enabled IB rejects multiple fabrics before resolving selections",
+                    input: (true, vec![DEFAULT_IB_FABRIC_NAME, "other"]),
+                    expect: FailsWith("only a single IB fabric definition is supported".to_owned()),
+                },
+                Case {
+                    scenario: "disabled IB leaves unsupported fabrics unbound",
+                    input: (false, vec![DEFAULT_IB_FABRIC_NAME, "other"]),
+                    expect: Yields(HashMap::new()),
+                },
+            ],
+            |(enabled, fabric_ids)| {
+                let mut config = config.clone();
+                config.ib_config = Some(carbide_ib_fabric::config::IBFabricConfig {
+                    enabled,
+                    ..Default::default()
+                });
+                config.ib_fabrics = fabric_ids
+                    .into_iter()
+                    .map(|fabric_id| (fabric_id.to_owned(), fabric.clone()))
+                    .collect();
+                resolve_resource_pool_config(&config, None)
+                    .map(|resolved| {
+                        assert!(resolved.definitions.is_empty());
+                        resolved.selections
+                    })
+                    .map_err(|error| error.to_string())
+            },
+        );
+
+        // A disabled fabric still validates its explicitly configured selectors.
+        config
+            .ib_fabrics
+            .get_mut(DEFAULT_IB_FABRIC_NAME)
+            .unwrap()
+            .remote_pool = Some("another-pool".to_owned());
+        let error = resolve_resource_pool_config(&config, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ib_fabrics.default.pkey"), "{error}");
+        assert!(
+            error.contains("requires remote_pool to equal its logical name"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn pool_preflight_rejects_invalid_legacy_selection_hidden_by_duplicate() {
+        let mut config = minimal_carbide_config();
+        config.resource_pool_backends = HashMap::from([
+            ("local".to_owned(), ResourcePoolBackendConfig::Integrated),
+            (
+                "remote".to_owned(),
+                ResourcePoolBackendConfig::Grpc {
+                    endpoint: "http://unused.invalid:50051".parse().unwrap(),
+                    tls: None,
+                },
+            ),
+        ]);
+        let pool: ResourcePoolConfig = ipv4_pool("10.0.0.0/24").into();
+        let initial_objects = InitialObjectsConfig {
+            pools: Some(HashMap::from([("test-pool".to_owned(), pool.clone())])),
+            networks: None,
+            vpcs: None,
+        };
+        value_scenarios!(
+            run = |(backend, remote_pool, expected)| {
+                let mut config = config.clone();
+                config.pools = Some(HashMap::from([(
+                    "test-pool".to_owned(),
+                    ResourcePoolConfig {
+                        backend: backend.map(str::to_owned),
+                        remote_pool: remote_pool.map(str::to_owned),
+                        ..pool.clone()
+                    },
+                )]));
+                let error = validate_resource_pool_config(&config, Some(&initial_objects))
+                    .unwrap_err().to_string();
+                assert!(error.contains(expected), "{error}");
+                assert!(error.contains("test-pool"), "{error}");
+            };
+            "every explicit backend must name a supported definition" {
+                (Some("missing"), None, "unknown backend") => (),
+                (Some("remote"), None, "v2.4 requires integrated") => (),
+            }
+            "Integrated SQL inventory requires the logical pool name" {
+                (Some("local"), Some("different"), "logical name") => (),
+                (None, Some(""), "logical name") => (),
+            }
+        );
     }
 
     #[test]

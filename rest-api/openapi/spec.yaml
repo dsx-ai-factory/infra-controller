@@ -42,9 +42,11 @@ tags:
       Once the Provider and the Tenant are initialized, the user can create resources by making calls to the appropriate endpoints.
 
       ### Creating Site-Level IP Blocks
-      To use a NICo Site, the Provider or Service Account holder must create IP Blocks for each network overlay defined in the Site configuration TOML file.
+      NICo creates a Site-level IP Block for each `site_fabric_prefixes` entry in the Site configuration TOML file when the Site reports its configuration. It names each one after its prefix, for example `site-fabric-ipv4-10-0-0-0-16` for `10.0.0.0/16`. A prefix inside an RFC 1918 or RFC 4193 private range gets a `DatacenterOnly` IP Block, and any other prefix gets a `Public` one. A prefix that already has a Site IP Block of either routing type doesn't get another one.
 
-      To create an IP Block, the user must make a call to the [Create IP Block endpoint](#tag/IP-Block/operation/create-ipblock).
+      When a prefix is removed from the Site configuration or resized, NICo removes the IP Block it created for the old prefix once no Allocations use it. Renaming an IP Block that NICo created keeps NICo from removing it. A new prefix that overlaps a remaining Site IP Block doesn't get an IP Block until the overlap is gone. The Site's other IP Block changes still apply. An empty `site_fabric_prefixes` list doesn't remove any IP Blocks.
+
+      To create any other IP Block, the user must make a call to the [Create IP Block endpoint](#tag/IP-Block/operation/create-ipblock). It rejects a range that overlaps an existing Site IP Block.
 
       > **Note:** From this point onwards, a brief outline is provided for the typical API call flows for various use cases.
 
@@ -52,6 +54,7 @@ tags:
 
       - Retrieve available Sites using the [Retrieve All Sites endpoint](#tag/Site/operation/get-all-site) and choose a Site to create resources in. For _Disconnected_ NICo installations where NICo
       REST is deployed alongside NICo Core, typically there will be a single Site available.
+      - Retrieve the Site IP Blocks using the [Retrieve All IP Blocks endpoint](#tag/IP-Block/operation/get-all-ipblock).
       - For each Site IP Block, create a Network Allocation for the Tenant entity with the full prefix length using the [Create Allocation endpoint](#tag/Allocation/operation/create-allocation).
       This will create a Tenant IP Block for each Site IP Block.
         - Creating an Allocation will create the Tenant in NICo Core.
@@ -74,6 +77,7 @@ tags:
       [Create Instance Type/Machine Association endpoint](#tag/Instance-Type/operation/create-instance-type-machine-association)
       - Create a Compute Allocation for Tenant using the [Create Compute Allocation endpoint](#tag/Allocation/operation/create-allocation) referencing the Instance Type.
         - Creating any type of Allocation for a Tenant will create the Tenant in NICo Core.
+      - Retrieve the Site IP Blocks using the [Retrieve All IP Blocks endpoint](#tag/IP-Block/operation/get-all-ipblock).
       - Create a Network Allocation for Tenant using the [Create Allocation endpoint](#tag/Allocation/operation/create-allocation) referencing a Site IP Block.
         - Creating a Network Allocation will create a Tenant IP Block.
 
@@ -190,6 +194,10 @@ tags:
     description: |-
       Expected Switch identifies an NVLink Switch that is expected to be discovered at a Site. Infrastructure Providers can pre-register Expected Switches using BMC, NVOS credentials
       and serial numbers to help with NVLink Switch discovery and ingestion.
+
+      Deprecation history:
+
+      - `nvosMacAddresses` is deprecated in favor of `nvosInterfaces`. Its request value is accepted but ignored on create, replace-all, and PATCH, including empty arrays. PATCH preserves stored ports and primary selection unless `nvosInterfaces` is supplied. Responses continue returning the flat MAC list derived from stored interfaces.
   - name: SKU
     x-displayName: SKU
     description: |-
@@ -236,31 +244,19 @@ tags:
   - name: Machine
     description: |-
       Machine is a physical server that contains CPUs, GPUs, memory, storage, and networking hardware. Machines are the physical building blocks of a Site.
+
+      Machine-scoped operations manage attached DPUs, health reports, validation runs and results, BMC and chassis resets, power, decommissioning, and status history.
   - name: DPU Machine
     description: |-
       A DPU (Data Processing Unit) is a programmable network device installed in a Machine that runs its own operating system, so NICo tracks each DPU as a Machine of its own alongside the host Machine it is attached to. NICo provisions the DPU and uses it to enforce network isolation and Machine trust for the host, including when that host moves between Tenants.
 
-      These endpoints are read-only and Site-scoped, reporting the DPU Machines that NICo Core discovered at the Site. A host Machine lists the DPUs attached to it in `associatedDpuMachineIds`, and `dpuNetworkConfig` is only populated when retrieving a single DPU Machine with `includeNetworkConfig` set to `true`. To re-provision a Machine's DPUs, see the DPU Reprovision tag.
-  - name: Machine Validation
-    description: |-
-      Machine Validation is the mechanism through which a series of validation tests are executed against a Machine verify its integrity. The tests are run for each Machine on ingestion, they can also be run on-demand.
-  - name: BMC Reset
-    x-displayName: BMC Reset
-    description: |-
-      BMC Reset allows resetting a Machine's BMC
-  - name: DPU Reprovision
-    x-displayName: DPU Reprovision
-    description: |-
-      DPU Reprovision allows re-provisioning Machine's DPUs
-  - name: Machine Capability
-    description: |-
-      Machine Capability defines the hardware capabilities of a Machine. Machine Capabilities can be used to group Machines into Instance Types.
+      These endpoints are read-only and Site-scoped, reporting the DPU Machines that NICo Core discovered at the Site. A host Machine lists the DPUs attached to it in `associatedDpuMachineIds`, and `dpuNetworkConfig` is only populated when retrieving a single DPU Machine with `includeNetworkConfig` set to `true`. To re-provision a Machine's DPUs, use the DPU reprovision operation under Machine.
   - name: Rack
     description: |-
       Rack is a physical enclosure that contains a number of Machines. Racks are the physical building blocks of a Site.
   - name: Domain
     description: |-
-      Domain endpoints group fabric-scoped operations by domain type. The `nvlink` subpath operates on NVLink Domains, which span one or more Racks, and submits asynchronous work for every Rack in each selected Domain.
+      Domain endpoints expose fabric inventory and operations by domain type. The `nvlink` subpath provides NVLink Domain detail and list reads, power control, and firmware updates.
   - name: Tray
     description: |-
       Tray represents a component within a Rack.
@@ -285,7 +281,7 @@ tags:
     description: |-
       IP Block is a contiguous block of IP addresses defined by a prefix and prefix length.
 
-      It can be used by the Provider to describe the overlay network of a particular Site. Providers can also use Allocations to delegate portions of these IP Blocks to Tenants.
+      It can be used by the Provider to describe the overlay network of a particular Site. NICo creates an IP Block for each fabric prefix the Site reports. Providers can also use Allocations to delegate portions of these IP Blocks to Tenants.
   - name: DPU Extension Service
     x-displayName: DPU Extension Service
     description: |-
@@ -1267,6 +1263,8 @@ paths:
               description: Pagination result in JSON format
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
       operationId: get-site-status-history
       description: |-
         Retrieve a specific Site status history
@@ -2574,7 +2572,7 @@ paths:
 
         Tenant IP Blocks are created via Allocation.
 
-        A conflicting name or address range returns 409. `DatacenterOnly` creation also returns 409 when another Site fabric IP Block update holds the shared Site lock, including another `DatacenterOnly` create or Site Config import. Retry the request.
+        A conflicting name or address range returns 409. A range conflicts when it overlaps any root IP Block of the Site, whatever its routing type. Creation also returns 409 when another Site fabric IP Block update holds the shared Site lock, including another create or Site Config import. Retry the request.
       requestBody:
         content:
           application/json:
@@ -2722,6 +2720,8 @@ paths:
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix. Only root IP Blocks can be deleted if there are no allocations associated with them.
 
+        If the IP Block's prefix is still in the Site's `site_fabric_prefixes`, NICo creates a new IP Block for it the next time the Site reports its configuration.
+
         Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and private IP Block records linked to a `TenantManaged` SitePrefix return 404. A Site fabric root linked to an `OperatorManaged` SitePrefix cannot be deleted through this endpoint and returns 409.
       tags:
         - IP Block
@@ -2765,7 +2765,9 @@ paths:
       description: |-
         Update an existing IP Block
 
-        Org must have an Infrastructure Provider. Specified IP Block must have been created by the Provider and requesting user must have `PROVIDER_ADMIN` role. Only root IP Blocks can be patched.
+        Org must have an Infrastructure Provider. Specified IP Block must belong to the Provider and requesting user must have `PROVIDER_ADMIN` role. Only root IP Blocks can be patched.
+
+        Renaming an IP Block that NICo created from a Site fabric prefix keeps NICo from removing it.
 
         Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and private IP Block records linked to a `TenantManaged` SitePrefix return 404.
       requestBody:
@@ -3227,6 +3229,8 @@ paths:
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-vpc
@@ -3259,10 +3263,46 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '400':
+          description: The VPC ID is invalid, the VPC does not belong to the requested organization, its Site is not Registered, or it still has associated Subnets, VPC Prefixes, or Instances.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                deletion-precondition-not-satisfied:
+                  value:
+                    source: nico
+                    message: Cannot delete VPC, one or more Subnets exist for this VPC
+                    data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another VPC power operation is in progress, or an Instance was associated with the VPC after the initial deletion checks.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                power-operation-in-progress:
+                  value:
+                    source: nico
+                    message: Another power operation is already in progress for the VPC
+                    data: null
+        '412':
+          description: Deletion was rejected because a Site precondition was not satisfied. Core cannot delete the VPC while it still has peerings, including peerings in Deleting. Delete the peerings and wait for them to disappear, then retry. The VPC's REST status is unchanged when Core rejects the request.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: The request failed because of an unexpected database, workflow, or Site communication error, including a workflow timeout.
+          $ref: '#/components/responses/GenericHttpError'
       description: |-
         Delete a specific VPC by ID.
+
+        Deletion requires the VPC's Site to be `Registered` and requires that no Subnets, VPC Prefixes, or Instances reference the VPC. Delete those dependent resources first.
+
+        First delete all VPC peerings involving this VPC. Wait until each peering's GET endpoint returns `404`; a peering in `Deleting` still prevents VPC deletion. REST returns `412` when Core reports that a peering remains.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       tags:
@@ -3623,6 +3663,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
       operationId: get-all-vpc-peering
       description: |-
         Get all VPC peerings.
@@ -3797,21 +3839,47 @@ paths:
         - VPC Peering
       operationId: delete-vpc-peering
       description: |-
-        Delete a VPC peering by ID.
+        Request deletion of a VPC peering by ID.
+
+        The peering remains visible with status `Deleting` while Core waits for affected DPUs to apply the removal of peering permissions. Poll this peering's GET endpoint until it returns `404` before deleting either VPC. REST removes the record after Site inventory confirms the peering is gone, so completion can take longer than the DPU update.
+
+        Repeating DELETE while the REST record still exists returns `202` if Core accepts the request or has already removed the peering. Once the REST record is gone, DELETE returns `404`.
+
+        A Site precondition failure returns `412` and leaves the peering's REST status unchanged. This can happen when a concurrent network update prevents deletion from being accepted. Retry the request; contact support if it continues to fail.
 
         Tenant Admin can delete only peerings where both VPCs belong to their tenant.
         Provider Admin can delete only multi-tenant peerings in sites they provide.
 
         User must have authorization role with `TENANT_ADMIN` or `PROVIDER_ADMIN` suffix.
       responses:
-        '204':
-          description: No Content
+        '202':
+          description: Deletion request was accepted. The peering remains in Deleting until Site inventory confirms removal.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              examples:
+                accepted:
+                  value:
+                    message: Deletion request was accepted
         '400':
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Site rejected deletion because a precondition was not satisfied. The peering's REST status is unchanged. Retry the request; contact support if it continues to fail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                precondition-failed:
+                  value:
+                    source: nico
+                    message: Site rejected VPC Peering deletion because a precondition was not satisfied. Retry the request; contact support if it continues to fail.
+                    data: null
   '/v2/org/{org}/nico/vpc-prefix':
     parameters:
       - schema:
@@ -3934,6 +4002,8 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
         The VPC must be Ready and use FNN, and its Site must be Registered. `ipBlockId` must identify a Ready tenant IP Block at the VPC's Site. The selected IP Block determines whether the VPC Prefix uses IPv4 or IPv6.
+
+        Specify exactly one allocation selector. `prefixLength` lets NICo IPAM choose an available CIDR. `prefix` requests an exact, network-aligned CIDR contained by the selected IP Block. Both modes share the same allocation state; an unavailable explicit CIDR is rejected rather than replaced. A prefix equal to its IP Block reserves the whole block.
       requestBody:
         content:
           application/json:
@@ -3995,10 +4065,20 @@ paths:
       summary: Delete VPC Prefix
       operationId: delete-vpc-prefix
       responses:
-        '204':
-          description: No Content
+        '202':
+          description: Accepted
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Site rejected deletion because a precondition was not satisfied. The VPC Prefix's REST status is unchanged. Retry the request; contact support if it continues to fail.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
       description: |-
         Delete a specific VPC Prefix by ID.
 
@@ -4416,6 +4496,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Machine with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
     get:
@@ -4490,6 +4573,76 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Machine
+  '/v2/org/{org}/nico/expected-machine/all':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    put:
+      summary: Replace all Expected Machines
+      operationId: replace-all-expected-machine
+      description: |-
+        Replace the complete Expected Machine set for one Site. Entries omitted from the request are deleted, and entries in the request are created with new REST IDs. The `expectedMachines` array may be empty to clear the Site's set.
+
+        Every entry must use the top-level `siteId`. BMC MAC addresses and chassis serial numbers must be unique within the replacement set. Referenced SKUs must exist at the Site.
+
+        Org must have an Infrastructure Provider entity and the caller must have Provider Admin access, or the caller must be a Tenant Admin with effective `TargetedInstanceCreation` access to the Site.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpectedMachineList'
+      responses:
+        '200':
+          description: Expected Machines replaced successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExpectedMachine'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Machine replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
+      tags:
+        - Expected Machine
+    delete:
+      summary: Delete all Expected Machines
+      operationId: delete-all-expected-machine
+      description: |-
+        Delete the complete Expected Machine set for the Site identified by `siteId`.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also delete Expected Machines if they have an account with the Site's Infrastructure Provider.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site whose Expected Machines should be deleted
+      responses:
+        '204':
+          description: All Expected Machines deleted successfully
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Machine deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
   '/v2/org/{org}/nico/expected-machine/label/key':
@@ -4736,6 +4889,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Machine update is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
     delete:
@@ -4759,6 +4915,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Machine deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
   '/v2/org/{org}/nico/expected-machine/batch':
@@ -4829,6 +4988,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This batch Expected Machine creation is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
     patch:
@@ -4896,6 +5058,9 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
+        '409':
+          description: One or more target Expected Machines changed before they could be locked, or another complete Expected Inventory mutation is in progress for the same Site. The batch can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
   '/v2/org/{org}/nico/expected-power-shelf':
@@ -4945,6 +5110,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Power Shelf with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
     get:
@@ -5018,6 +5186,78 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+      tags:
+        - Expected Power Shelf
+  '/v2/org/{org}/nico/expected-power-shelf/all':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    put:
+      summary: Replace all Expected Power Shelves
+      operationId: replace-all-expected-power-shelf
+      description: |-
+        Replace the complete Expected Power Shelf set for one Site. Entries omitted from the request are deleted, and entries in the request are created with new REST IDs. The `expectedPowerShelves` array may be empty to clear the Site's set.
+
+        Every entry must use the top-level `siteId`. BMC MAC addresses and shelf serial numbers must be unique within the replacement set.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also replace Expected Power Shelves if they have an account with the Site's Infrastructure Provider.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpectedPowerShelfList'
+      responses:
+        '200':
+          description: Expected Power Shelves replaced successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExpectedPowerShelf'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Power Shelf replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
+      tags:
+        - Expected Power Shelf
+    delete:
+      summary: Delete all Expected Power Shelves
+      operationId: delete-all-expected-power-shelf
+      description: |-
+        Delete the complete Expected Power Shelf set for the Site identified by `siteId`.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also delete Expected Power Shelves if they have an account with the Site's Infrastructure Provider.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site whose Expected Power Shelves should be deleted
+      responses:
+        '204':
+          description: All Expected Power Shelves deleted successfully
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Power Shelf deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
   '/v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId}':
@@ -5111,6 +5351,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Power Shelf update is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
     delete:
@@ -5134,6 +5377,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Power Shelf deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
   '/v2/org/{org}/nico/expected-rack':
@@ -5190,6 +5436,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Rack with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
     get:
@@ -5324,6 +5573,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
   '/v2/org/{org}/nico/expected-rack/all':
@@ -5365,6 +5617,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
     delete:
@@ -5393,6 +5648,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
   '/v2/org/{org}/nico/expected-rack/{id}':
@@ -5474,7 +5732,7 @@ paths:
         description: |-
           Expected Rack update request.
 
-          Provide a non-null value for at least one of rackId, rackProfileId, name, description, or labels. An empty object or a body containing only id is rejected with HTTP 400. Providing the existing rackId alone satisfies this requirement; changing rackId is rejected. Empty names and descriptions are invalid. An empty labels object counts as an update and clears all existing labels.
+          Provide a non-null value for at least one of rackId, name, description, or labels. An empty object or a body containing only id is rejected with HTTP 400. Providing the existing rackId alone satisfies this requirement; changing rackId is rejected. Empty names and descriptions are invalid. An empty labels object counts as an update and clears all existing labels.
         required: true
       responses:
         '200':
@@ -5489,6 +5747,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack update is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
     delete:
@@ -5511,6 +5772,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
   '/v2/org/{org}/nico/expected-rack-group':
@@ -5545,6 +5809,7 @@ paths:
                   siteId: f97df110-f4de-492e-8849-4a6af68026b0
                   rackGroupId: nvl5-gp1-jhb01
                   topology: gb200_nvl72r1_c2g4
+                  protocol: NVLINK_V6
                   racks: [{rackId: rack-01, members: [{type: NVSwitch, manufacturer: NVIDIA, id: switch-01}]}, {rackId: rack-02, members: []}]
                   name: NVL rack group 1
                   description: Production NVL rack group in row A
@@ -5569,6 +5834,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Rack Group with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
     get:
@@ -5678,6 +5946,7 @@ paths:
                     - siteId: f97df110-f4de-492e-8849-4a6af68026b0
                       rackGroupId: nvl5-gp1-jhb01
                       topology: gb200_nvl72r1_c2g4
+                      protocol: NVLINK_V6
                       racks: [{rackId: rack-01, members: []}, {rackId: rack-02, members: []}]
                       name: NVL rack group 1
                       description: Production NVL rack group in row A
@@ -5690,6 +5959,7 @@ paths:
                     - siteId: f97df110-f4de-492e-8849-4a6af68026b0
                       rackGroupId: nvl5-gp2-jhb01
                       topology: gb200_nvl72r1_c2g4
+                      protocol: NVLINK_V6
                       racks: [{rackId: rack-03, members: []}, {rackId: rack-04, members: []}]
                       name: NVL rack group 2
                       description: Production NVL rack group in row A
@@ -5714,6 +5984,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
   '/v2/org/{org}/nico/expected-rack-group/all':
@@ -5755,6 +6028,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
     delete:
@@ -5783,6 +6059,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
   '/v2/org/{org}/nico/expected-rack-group/{id}':
@@ -5883,6 +6162,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack Group update is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
     delete:
@@ -5905,6 +6187,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack Group deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
   '/v2/org/{org}/nico/expected-switch':
@@ -5939,9 +6224,11 @@ paths:
                   switchSerialNumber: SWITCH-12345
                   nvOsUsername: nvadmin
                   nvOsPassword: nvpassword123
-                  nvosMacAddresses:
-                    - '00:1A:2B:3C:4D:60'
-                    - '00:1A:2B:3C:4D:61'
+                  nvosInterfaces:
+                    - macAddress: '00:1A:2B:3C:4D:60'
+                      isPrimary: true
+                    - macAddress: '00:1A:2B:3C:4D:61'
+                      isPrimary: false
                   labels:
                     environment: production
                     rack: A1
@@ -5958,6 +6245,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: An Expected Switch with a conflicting BMC or NVOS identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
     get:
@@ -6033,6 +6323,78 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
       tags:
         - Expected Switch
+  '/v2/org/{org}/nico/expected-switch/all':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    put:
+      summary: Replace all Expected Switches
+      operationId: replace-all-expected-switch
+      description: |-
+        Replace the complete Expected Switch set for one Site. Entries omitted from the request are deleted, and entries in the request are created with new REST IDs. The `expectedSwitches` array may be empty to clear the Site's set.
+
+        Every entry must use the top-level `siteId`. BMC MAC addresses, switch serial numbers, and NVOS MAC addresses must be unique within the replacement set.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also replace Expected Switches if they have an account with the Site's Infrastructure Provider.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpectedSwitchList'
+      responses:
+        '200':
+          description: Expected Switches replaced successfully
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExpectedSwitch'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Switch replacement is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
+      tags:
+        - Expected Switch
+    delete:
+      summary: Delete all Expected Switches
+      operationId: delete-all-expected-switch
+      description: |-
+        Delete the complete Expected Switch set for the Site identified by `siteId`.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also delete Expected Switches if they have an account with the Site's Infrastructure Provider.
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          name: siteId
+          in: query
+          required: true
+          description: ID of the Site whose Expected Switches should be deleted
+      responses:
+        '204':
+          description: All Expected Switches deleted successfully
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Switch deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
+      tags:
+        - Expected Switch
   '/v2/org/{org}/nico/expected-switch/{expectedSwitchId}':
     parameters:
       - schema:
@@ -6104,9 +6466,11 @@ paths:
                   switchSerialNumber: SWITCH-54321
                   nvOsUsername: newnvadmin
                   nvOsPassword: newnvpassword123
-                  nvosMacAddresses:
-                    - '00:1A:2B:3C:4D:62'
-                    - '00:1A:2B:3C:4D:63'
+                  nvosInterfaces:
+                    - macAddress: '00:1A:2B:3C:4D:62'
+                      isPrimary: true
+                    - macAddress: '00:1A:2B:3C:4D:63'
+                      isPrimary: false
                   labels:
                     environment: staging
                     rack: B2
@@ -6128,6 +6492,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: An Expected Switch with a conflicting NVOS identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
     delete:
@@ -6151,6 +6518,9 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Switch deletion is rejected before data is mutated and can be retried.
+          $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
   '/v2/org/{org}/nico/sku':
@@ -6906,7 +7276,7 @@ paths:
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
-        The Tenant must be associated with the Site and hold an Allocation on it. Omit `vni` to let the Site allocate one; a requested `vni` that is already allocated or outside the Site's pool is rejected.
+        The Tenant must have an Allocation or TargetedInstanceCreation on the Site. Omit `vni` to let the Site allocate one; a requested `vni` that is already allocated or outside the Site's pool is rejected.
       requestBody:
         content:
           application/json:
@@ -7336,8 +7706,7 @@ paths:
                           vendor: Mellanox Technologies
                           count: 2
                       machineInstanceTypes:
-                        - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
-                          machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
+                        - machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
                           instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
                           created: '2019-08-24T14:15:22Z'
                           updated: '2019-08-24T14:15:22Z'
@@ -7363,8 +7732,7 @@ paths:
                           count: 2
                           deviceType: DPU
                       machineInstanceTypes:
-                        - id: 0327339b-f3b7-4de3-9468-7dc29f9f6914
-                          machineId: fm100dsg23d2f4tq4tt5m2hgib5pcldrm3gvefbduau7gj3itgc3iqg3lpg
+                        - machineId: fm100dsg23d2f4tq4tt5m2hgib5pcldrm3gvefbduau7gj3itgc3iqg3lpg
                           instanceTypeId: 771b066a-f2ff-4550-a65d-baef8551167d
                           created: '2025-05-24T14:15:22Z'
                           updated: '2025-05-24T14:15:22Z'
@@ -7771,13 +8139,11 @@ paths:
               examples:
                 example-1:
                   value:
-                    - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
-                      machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
+                    - machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
                       instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
-                    - id: f690ffcd-06b7-430c-9c2a-b9afd18d77c3
-                      machineId: fm100htrh18t1lrjg2pqagkh3sfigr9m65dejvkq168ako07sc0uibpp5q0
+                    - machineId: fm100htrh18t1lrjg2pqagkh3sfigr9m65dejvkq168ako07sc0uibpp5q0
                       instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
@@ -7835,18 +8201,15 @@ paths:
               examples:
                 example-1:
                   value:
-                    - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
-                      machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
+                    - machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
                       instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
-                    - id: f690ffcd-06b7-430c-9c2a-b9afd18d77c3
-                      machineId: fm100ht68sf2m52idrpslcjkpdj5r3tb3j5o0bkfubhoglbq47u18nknfog
+                    - machineId: fm100ht68sf2m52idrpslcjkpdj5r3tb3j5o0bkfubhoglbq47u18nknfog
                       instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
-                    - id: f690ffcd-06b7-430c-9c2a-b9afd18d77c3
-                      machineId: fm100htrh18t1lrjg2pqagkh3sfigr9m65dejvkq168ako07sc0uibpp5q0
+                    - machineId: fm100htrh18t1lrjg2pqagkh3sfigr9m65dejvkq168ako07sc0uibpp5q0
                       instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
@@ -7861,7 +8224,7 @@ paths:
 
         Org must have an Infrastructure Provider entity that owns the Instance Type and the Machine. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
-        The Machine's capabilities must be a superset of the Instance Type's required capabilities for the association to succeed.
+        Each capability specified by the Instance Type must have a matching capability on the Machine. Specified fields—including count, cores, and threads—require exact equality; omitted or null optional fields impose no constraint. The Machine may have additional capabilities that the Instance Type does not specify.
       requestBody:
         content:
           application/json:
@@ -8511,7 +8874,7 @@ paths:
                 release-pending:
                   value:
                     source: nico
-                    message: 'Machine: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g is assigned to an Instance, cannot be used for new Instance'
+                    message: 'Machine: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g has status: InUse that does not allow Instance creation'
                     data: null
                     retryable: true
                 validation-error:
@@ -8521,6 +8884,19 @@ paths:
                     data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: The request conflicts with an existing resource or operation, such as an already assigned machine or a power operation in progress for the VPC.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                release-pending:
+                  value:
+                    source: nico
+                    message: 'Machine: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g is assigned to an Instance, cannot be used for new Instance'
+                    data: null
+                    retryable: true
         '412':
           description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted.
           $ref: '#/components/responses/GenericHttpError'
@@ -8554,6 +8930,11 @@ paths:
         Create an Instance for Tenant.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
+
+        A request targeting an already assigned `machineId` returns HTTP 409. A `Ready` response does not
+        reserve the Machine: another request can assign it before creation is processed.
+        `allowUnhealthyMachine` does not bypass the assignment check. Honor the `retryable`
+        classification below before retrying, or select another available Machine.
 
         Machine-unavailable errors are retryable only when a unique current Instance
         belongs to this Tenant and is Terminating. Other current occupants are not
@@ -8742,6 +9123,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Insufficient compatible Machines are available, or another resource conflict prevents batch creation.
+          $ref: '#/components/responses/GenericHttpError'
         '412':
           description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted.
           $ref: '#/components/responses/GenericHttpError'
@@ -8959,6 +9343,8 @@ paths:
                     updated: '2019-08-24T14:15:22Z'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
       operationId: get-instance
       description: |
         Get an Instance by ID
@@ -9147,6 +9533,9 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: A resource conflict prevents the update.
+          $ref: '#/components/responses/GenericHttpError'
         '412':
           description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted.
           $ref: '#/components/responses/GenericHttpError'
@@ -9777,7 +10166,7 @@ paths:
             type: string
           in: query
           name: nvLinkDomainId
-          description: Filter NVLink Interfaces by NVLink Domain ID.  Can be specified multiple times to filter on more than one ID.
+          description: Filter NVLink Interfaces by Core-reported NVLink domain UUID, not the rack group ID returned by the Domain API. Can be specified multiple times to filter on more than one UUID.
         - schema:
             type: string
             enum:
@@ -10319,10 +10708,26 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '400':
+          description: The Operating System ID is invalid, an Image Operating System has an associated Site that is not Registered, or the Operating System is being used by one or more Instances.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                operating-system-in-use:
+                  value:
+                    source: nico
+                    message: Operating System is being used by one or more Instances and cannot be deleted
+                    data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
       description: |-
         Delete an Operating System by ID
+
+        An Operating System being used by one or more Instances cannot be deleted. Delete the associated Instances before retrying.
 
         If the Operating System has `infrastructureProviderId` set, then org must have an Infrastructure Provider entity and its ID should match the Operating System Infrastructure Provider ID. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -10885,11 +11290,11 @@ paths:
                     labels:
                       RackIdentifier: GVX11F01C02
                       ServerName: SITE1-C03-Server-02
-                    status: Ready
+                    status: InUse
                     isUsableByTenant: true
                     statusHistory:
-                      - status: Ready
-                        message: Machine is online and ready
+                      - status: InUse
+                        message: Machine is assigned to an Instance
                         created: '2019-08-24T14:15:22Z'
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
@@ -11017,11 +11422,26 @@ paths:
                           numaNode: 1
                           description: 'MT28908 Family [ConnectX-6]'
                           slot: '0000:ca:00.0'
-                    status: Ready
+                      lldpNeighbors:
+                        - macAddress: '02:00:00:00:01:b0'
+                          localPort: enp1s0np0
+                          name: leaf-switch-01
+                          description: Cumulus Linux
+                          ipAddresses:
+                            - 10.0.2.194
+                          chassisIdType: mac
+                          chassisIdValue: '02:00:00:00:01:d4'
+                          remotePortType: ifname
+                          remotePortValue: swp1
+                          medInventory:
+                            serial: SN0000000002
+                            manufacturer: 'https://www.mellanox.com'
+                            model: BlueField-3 DPU
+                    status: InUse
                     isUsableByTenant: true
                     statusHistory:
-                      - status: Ready
-                        message: Machine is online and ready
+                      - status: InUse
+                        message: Machine is assigned to an Instance
                         created: '2019-08-24T14:15:22Z'
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
@@ -11138,14 +11558,16 @@ paths:
                         message: Machine has one or more health alerts that prevent allocation
                         created: '2019-08-28T14:15:22Z'
                         updated: '2019-08-28T14:15:22Z'
-                      - status: Ready
-                        message: Machine is online and ready
+                      - status: InUse
+                        message: Machine is assigned to an Instance
                         created: '2019-08-24T14:15:22Z'
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
       operationId: get-machine
       description: |
         Org must have either an Infrastructure Provider entity or a Tenant entity.
@@ -11245,11 +11667,11 @@ paths:
                     labels:
                       RackIdentifier: GVX11F01C02
                       ServerName: SITE1-C03-Server-02
-                    status: Ready
+                    status: InUse
                     isUsableByTenant: true
                     statusHistory:
-                      - status: Ready
-                        message: Machine is online and ready
+                      - status: InUse
+                        message: Machine is assigned to an Instance
                         created: '2019-08-24T14:15:22Z'
                         updated: '2019-08-24T14:15:22Z'
                     created: '2019-08-24T14:15:22Z'
@@ -11342,7 +11764,7 @@ paths:
     patch:
       summary: Reset Machine BMC
       tags:
-        - BMC Reset
+        - Machine
       requestBody:
         required: true
         content:
@@ -11369,6 +11791,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: reset-machine-bmc
+      x-fern-sdk-group-name:
+        - machine
+        - bmc
       description: |-
         Reset the BMC of a specific Machine. When an Instance is attached to the
         Machine, `acknowledgeAttachedInstance` must be `true`.
@@ -11457,7 +11882,7 @@ paths:
     patch:
       summary: Reprovision Machine DPUs
       tags:
-        - DPU Reprovision
+        - Machine
       requestBody:
         required: true
         content:
@@ -11484,6 +11909,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: reprovision-machine-dpu
+      x-fern-sdk-group-name:
+        - machine
+        - dpu
       description: |-
         Trigger DPU reprovisioning for a Machine. Before calling this operation,
         create a Machine health report containing an alert whose ID is
@@ -11528,6 +11956,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: get-all-machine-health-report
+      x-fern-sdk-group-name:
+        - machine
+        - healthReports
       description: |-
         Get all health reports for a specific Machine.
 
@@ -11560,6 +11991,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: create-or-update-machine-health-report
+      x-fern-sdk-group-name:
+        - machine
+        - healthReports
       description: |-
         Add or update health report override for a specific Machine.
         
@@ -11602,6 +12036,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: delete-machine-health-report
+      x-fern-sdk-group-name:
+        - machine
+        - healthReports
       description: |-
         Remove a health report override for a specific Machine.
 
@@ -11746,7 +12183,7 @@ paths:
     get:
       summary: Retrieve Machine validation runs
       tags:
-        - Machine Validation
+        - Machine
       responses:
         '200':
           description: Machine validation runs
@@ -11765,6 +12202,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: get-all-machine-validation-runs
+      x-fern-sdk-group-name:
+        - machine
+        - validation
       description: |-
         Retrieve validation runs for a specific Machine.
 
@@ -11772,7 +12212,7 @@ paths:
     post:
       summary: Create an on-demand Machine validation run
       tags:
-        - Machine Validation
+        - Machine
       requestBody:
         content:
           application/json:
@@ -11794,6 +12234,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: start-machine-validation
+      x-fern-sdk-group-name:
+        - machine
+        - validation
       description: |-
         Create an on-demand Machine validation run. The Machine must be in a state accepted by NICo Core.
 
@@ -11815,7 +12258,7 @@ paths:
     get:
       summary: Retrieve Machine validation results
       tags:
-        - Machine Validation
+        - Machine
       responses:
         '200':
           description: Machine validation results
@@ -11834,6 +12277,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: get-all-machine-validation-results
+      x-fern-sdk-group-name:
+        - machine
+        - validation
       description: |-
         Retrieve validation results for a specific Machine.
 
@@ -12111,6 +12557,17 @@ paths:
                       placementInRack:
                         slotNumber: 1
                         trayIndex: 0
+                      lldpNeighbors:
+                        - macAddress: '02:00:00:00:02:a0'
+                          localPort: p0
+                          name: leaf-switch-01
+                          description: Cumulus Linux
+                          ipAddresses:
+                            - 10.0.3.1
+                          chassisIdType: mac
+                          chassisIdValue: '02:00:00:00:02:d4'
+                          remotePortType: ifname
+                          remotePortValue: swp10
         '400':
           $ref: '#/components/responses/GenericHttpError'
         '403':
@@ -12120,6 +12577,9 @@ paths:
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: get-dpu-machines
+      x-fern-sdk-group-name:
+        - machine
+        - dpu
   '/v2/org/{org}/nico/machine/gpu/stats':
     parameters:
       - schema:
@@ -12397,6 +12857,140 @@ paths:
           name: orderBy
           description: |-
             Ordering for pagination query. TYPE_ASC orders capability type ascending and TYPE_DESC orders it descending. Defaults to TYPE_ASC. Ties are ordered by name, frequency, capacity, vendor, count, deviceType, inactiveDevices, and internal ID, all ascending with null values last.
+  '/v2/org/{org}/nico/domain/nvlink':
+    parameters:
+      - name: org
+        in: path
+        required: true
+        description: Name of the Org
+        schema:
+          type: string
+    get:
+      summary: Retrieve all NVLink Domains
+      operationId: get-all-nvlink-domain
+      description: |-
+        Retrieve NVLink Domains for a Flow-enabled Site. Requires an Infrastructure Provider and the PROVIDER_ADMIN role. Set includeComponents=true to include components.
+      tags:
+        - Domain
+      parameters:
+        - name: includeComponents
+          in: query
+          description: Include component details in the response.
+          schema:
+            type: boolean
+            default: false
+        - name: siteId
+          in: query
+          required: true
+          description: ID of the Site
+          schema:
+            type: string
+            format: uuid
+        - name: name
+          in: query
+          description: Filter by Domain name. Repeated values are ORed.
+          schema:
+            type: array
+            items:
+              type: string
+        - name: pageNumber
+          in: query
+          description: Page number
+          schema:
+            $ref: '#/components/schemas/PageNumber'
+        - name: pageSize
+          in: query
+          description: Number of results per page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: orderBy
+          in: query
+          description: Order by name; immutable Rack UUID ascending breaks ties.
+          schema:
+            type: string
+            enum: [NAME_ASC, NAME_DESC]
+            default: NAME_ASC
+      responses:
+        '200':
+          description: OK
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+              description: JSON-encoded pagination metadata
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NVLinkDomain'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '412':
+          description: Site does not have NICo Flow enabled.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
+  '/v2/org/{org}/nico/domain/nvlink/{id}':
+    parameters:
+      - name: org
+        in: path
+        required: true
+        description: Name of the Org
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        description: Case-sensitive NVLink Domain ID
+        schema:
+          type: string
+          minLength: 1
+          pattern: '\S'
+    get:
+      summary: Retrieve an NVLink Domain
+      operationId: get-nvlink-domain
+      description: |-
+        Retrieve an NVLink Domain for a Flow-enabled Site. Requires an Infrastructure Provider and the PROVIDER_ADMIN role. Set includeComponents=true to include components.
+      tags:
+        - Domain
+      parameters:
+        - name: includeComponents
+          in: query
+          description: Include component details in the response.
+          schema:
+            type: boolean
+            default: false
+        - name: siteId
+          in: query
+          required: true
+          description: ID of the Site
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NVLinkDomain'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: Site does not have NICo Flow enabled.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
   '/v2/org/{org}/nico/domain/nvlink/power':
     parameters:
       - schema:
@@ -12409,7 +13003,7 @@ paths:
       summary: Power control NVLink Domains
       operationId: power-control-nvlink-domains
       description: |-
-        Power control one or more NVLink Domains identified by UUID. Flow resolves each NVLink Domain to its member Racks and creates one task per Rack.
+        Power control one or more NVLink Domains identified by their case-sensitive IDs.
 
         Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
         Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
@@ -12539,6 +13133,7 @@ paths:
                       taskStats:
                         pendingTaskCount: 0
                         activeTaskCount: 0
+                      health: null
                       location:
                         region: us-east-1
                         datacenter: DC-01
@@ -12561,6 +13156,7 @@ paths:
                           powerState: 'on'
                           leakStatus: Leaking
                           leakHandlingStatus: ShuttingDown
+                          health: null
           headers:
             X-Pagination:
               schema:
@@ -12629,6 +13225,7 @@ paths:
                     taskStats:
                       pendingTaskCount: 0
                       activeTaskCount: 0
+                    health: null
                     location:
                       region: us-east-1
                       datacenter: DC-01
@@ -12651,6 +13248,7 @@ paths:
                         powerState: 'on'
                         leakStatus: NoLeak
                         leakHandlingStatus: None
+                        health: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -12734,6 +13332,7 @@ paths:
                               macAddress: 'AA:BB:CC:DD:EE:01'
                               ipAddress: 10.0.0.101
                           powerState: 'on'
+                          health: null
                       - type: Mismatch
                         id: comp-2
                         macAddress: null
@@ -12953,6 +13552,7 @@ paths:
                               macAddress: 'AA:BB:CC:DD:EE:01'
                               ipAddress: 10.0.0.101
                           powerState: 'on'
+                          health: null
                       - type: Mismatch
                         id: comp-2
                         macAddress: null
@@ -13120,16 +13720,14 @@ paths:
             schema:
               $ref: '#/components/schemas/BatchRackFirmwareUpdateRequest'
             examples:
-              all-racks-latest:
-                value:
-                  siteId: 550e8400-e29b-41d4-a716-446655440000
-              filtered-with-version:
+              filtered-with-sot:
+                description: Abbreviated RMS SOT example, not executable input. Supply a complete document covering every component type selected by the operation rule.
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
                   filter:
                     names:
                       - Rack-001
-                  version: '24.11.0'
+                  version: '{"ProductName":"ExampleRackSystem","Milestones":[{"Name":"example-release","State":"Onboarded","BoardSKUs":[{"Name":"Example-Switch-Tray","Type":"Switch Tray","Components":{"Software":[],"Firmware":[{"Component":"BMC+CPLD","Version":"1.2.3","Type":"Prod","FileNames":["switch-firmware.fwpkg"],"Locations":[{"Location":"/firmware/example/switch-firmware.fwpkg","LocationType":"FILE","PackageName":"","Type":"Firmware","FileName":"switch-firmware.fwpkg"}]}]}}]}]}'
       responses:
         '200':
           description: OK
@@ -13179,13 +13777,11 @@ paths:
             schema:
               $ref: '#/components/schemas/FirmwareUpdateRequest'
             examples:
-              with-version:
+              with-sot:
+                description: Abbreviated RMS SOT example, not executable input. Supply a complete document covering every component type selected by the operation rule.
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  version: '24.11.0'
-              without-version:
-                value:
-                  siteId: 550e8400-e29b-41d4-a716-446655440000
+                  version: '{"ProductName":"ExampleRackSystem","Milestones":[{"Name":"example-release","State":"Onboarded","BoardSKUs":[{"Name":"Example-Switch-Tray","Type":"Switch Tray","Components":{"Software":[],"Firmware":[{"Component":"BMC+CPLD","Version":"1.2.3","Type":"Prod","FileNames":["switch-firmware.fwpkg"],"Locations":[{"Location":"/firmware/example/switch-firmware.fwpkg","LocationType":"FILE","PackageName":"","Type":"Firmware","FileName":"switch-firmware.fwpkg"}]}]}}]}]}'
       responses:
         '200':
           description: OK
@@ -13435,6 +14031,7 @@ paths:
                       taskStats:
                         pendingTaskCount: 0
                         activeTaskCount: 0
+                      health: null
           headers:
             X-Pagination:
               schema:
@@ -14821,7 +15418,8 @@ paths:
         description: Name of the Org
       - schema:
           type: string
-          format: uuid
+          minLength: 1
+          pattern: '\S'
         name: id
         in: path
         required: true
@@ -14830,7 +15428,7 @@ paths:
       summary: Power control an NVLink Domain
       operationId: power-control-nvlink-domain
       description: |-
-        Power control an NVLink Domain identified by UUID. Flow resolves the NVLink Domain to its member Racks and creates one task per Rack.
+        Power control an NVLink Domain identified by its case-sensitive ID.
 
         Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
         Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
@@ -14880,7 +15478,7 @@ paths:
       summary: Firmware update NVLink Domains
       operationId: firmware-update-nvlink-domains
       description: |-
-        Update firmware for one or more NVLink Domains identified by UUID. Flow resolves each NVLink Domain to its member Racks and creates one task per Rack.
+        Update firmware for one or more NVLink Domains identified by their case-sensitive IDs.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -14928,7 +15526,8 @@ paths:
         description: Name of the Org
       - schema:
           type: string
-          format: uuid
+          minLength: 1
+          pattern: '\S'
         name: id
         in: path
         required: true
@@ -14937,7 +15536,7 @@ paths:
       summary: Firmware update an NVLink Domain
       operationId: firmware-update-nvlink-domain
       description: |-
-        Update firmware for an NVLink Domain identified by UUID. Flow resolves the NVLink Domain to its member Racks and creates one task per Rack.
+        Update firmware for an NVLink Domain identified by its case-sensitive ID.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -15036,6 +15635,7 @@ paths:
                     taskStats:
                       pendingTaskCount: 0
                       activeTaskCount: 0
+                    health: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -15508,15 +16108,19 @@ paths:
             schema:
               $ref: '#/components/schemas/BatchTrayFirmwareUpdateRequest'
             examples:
-              all-trays-latest:
+              legacy-compute-from-catalog:
+                description: Requires Flow's compute component manager to be configured as nicolegacy (the default is nico). Core selects the configured host firmware bundle.
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-              filtered-with-version:
+                  filter:
+                    type: Compute
+              filtered-with-sot:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
                   filter:
                     rackId: rack-01
-                  version: '24.11.0'
+                    type: NVSwitch
+                  version: '{"ProductName":"ExampleRackSystem","Milestones":[{"Name":"example-release","State":"Onboarded","BoardSKUs":[{"Name":"Example-Switch-Tray","Type":"Switch Tray","Components":{"Software":[],"Firmware":[{"Component":"BMC+CPLD","Version":"1.2.3","Type":"Prod","FileNames":["switch-firmware.fwpkg"],"Locations":[{"Location":"/firmware/example/switch-firmware.fwpkg","LocationType":"FILE","PackageName":"","Type":"Firmware","FileName":"switch-firmware.fwpkg"}]}]}}]}]}'
       responses:
         '200':
           description: OK
@@ -15565,11 +16169,12 @@ paths:
             schema:
               $ref: '#/components/schemas/FirmwareUpdateRequest'
             examples:
-              with-version:
+              with-sot:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
-                  version: '24.11.0'
-              without-version:
+                  version: '{"ProductName":"ExampleRackSystem","Milestones":[{"Name":"example-release","State":"Onboarded","BoardSKUs":[{"Name":"Example-Switch-Tray","Type":"Switch Tray","Components":{"Software":[],"Firmware":[{"Component":"BMC+CPLD","Version":"1.2.3","Type":"Prod","FileNames":["switch-firmware.fwpkg"],"Locations":[{"Location":"/firmware/example/switch-firmware.fwpkg","LocationType":"FILE","PackageName":"","Type":"Firmware","FileName":"switch-firmware.fwpkg"}]}]}}]}]}'
+              legacy-compute-from-catalog:
+                description: Requires Flow's compute component manager to be configured as nicolegacy (the default is nico). Core selects the configured host firmware bundle.
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
       responses:
@@ -16199,6 +16804,8 @@ paths:
                 $ref: '#/components/schemas/DpuExtensionService'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
       description: |-
         Retrieve a DPU Extension Service for the current Tenant by ID
 
@@ -16811,8 +17418,6 @@ paths:
             enum:
               - NAME_ASC
               - NAME_DESC
-              - STATUS_ASC
-              - STATUS_DESC
               - CREATED_ASC
               - CREATED_DESC
               - UPDATED_ASC
@@ -19142,7 +19747,7 @@ components:
           type: string
           description: Redfish power control action to apply to the Machine. ACPowercycle is not supported on Viking systems.
           enum:
-            - On
+            - 'On'
             - GracefulShutdown
             - ForceOff
             - GracefulRestart
@@ -19386,11 +19991,13 @@ components:
         - machine:
             total: 27
             initializing: 8
-            assigned: 12
+            reset: 0
             ready: 5
+            inUse: 12
             error: 2
             decommissioning: 0
             decommissioned: 0
+            maintenance: 0
             unknown: 0
           ipBlock:
             total: 4
@@ -19419,14 +20026,27 @@ components:
       title: MachineCountByStatus
       type: object
       description: Describes count of Machines in various statuses
+      required:
+        - total
+        - initializing
+        - reset
+        - inUse
+        - ready
+        - error
+        - decommissioning
+        - decommissioned
+        - maintenance
+        - unknown
       examples:
         - total: 27
           initializing: 8
-          assigned: 12
+          reset: 0
           ready: 5
+          inUse: 12
           error: 2
           decommissioning: 0
           decommissioned: 0
+          maintenance: 0
           unknown: 0
       properties:
         total:
@@ -19438,9 +20058,9 @@ components:
         reset:
           type: integer
           description: 'Number of Machines in Reset status'
-        assigned:
+        inUse:
           type: integer
-          description: 'Number of Machines in Assigned status'
+          description: 'Number of Machines in use by Tenant Instances'
         ready:
           type: integer
           description: 'Number of Machines in Ready status'
@@ -19453,6 +20073,9 @@ components:
         decommissioned:
           type: integer
           description: 'Number of Machines in Decommissioned status'
+        maintenance:
+          type: integer
+          description: 'Number of Machines in Maintenance status'
         unknown:
           type: integer
           description: 'Number of Machines in Unknown status'
@@ -19808,8 +20431,10 @@ components:
             - 'null'
           description: 'Org of the Tenant'
         tenantContact:
-          $ref: '#/components/schemas/User'
-          description: 'Contact user for the Tenant'
+          oneOf:
+            - $ref: '#/components/schemas/User'
+            - type: 'null'
+          description: 'Contact user for the Tenant.'
         allocationCount:
           type: integer
           description: 'Number of Allocations for the Tenant Account'
@@ -19856,7 +20481,7 @@ components:
         - exactly one entry must omit siteIds or provide an empty siteIds array
         - each siteId may appear at most once across all entries
         - every provided siteId must be a valid Site UUID
-        - every provided siteId must identify a Site associated with the Tenant and owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400
+        - every provided siteId must identify a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400
 
         PATCH uses replace semantics: previously configured per-site overrides whose siteId is omitted from the new payload are cleared.
       required:
@@ -19864,7 +20489,7 @@ components:
       properties:
         siteIds:
           type: array
-          description: Sites to configure. An omitted or empty array identifies the Tenant Account default entry. Each value must be a valid Site UUID, may appear only once across all siteCapabilities entries in the same request, must be associated with the Tenant, and must be owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400.
+          description: Sites to configure. An omitted or empty array identifies the Tenant Account default entry. Each value must be a valid Site UUID, may appear only once across all siteCapabilities entries in the same request, and must be owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400.
           items:
             type: string
             format: uuid
@@ -19913,7 +20538,7 @@ components:
         Tenant Admins may accept an invite via `tenantContactId` only.
         Requests containing both fields are rejected with 400.
 
-        When `siteCapabilities` is included, the replace payload must contain at least one entry, include exactly one entry with empty or omitted `siteIds`, and must not repeat any `siteId` across entries. Every provided `siteId` must be a valid UUID for a Site associated with the Tenant and owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400. Previously configured per-site overrides whose `siteId` is omitted from the replacement payload are cleared.
+        When `siteCapabilities` is included, the replace payload must contain at least one entry, include exactly one entry with empty or omitted `siteIds`, and must not repeat any `siteId` across entries. Every provided `siteId` must be a valid UUID for a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400. Previously configured per-site overrides whose `siteId` is omitted from the replacement payload are cleared.
       examples:
         - tenantContactId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
         - siteCapabilities:
@@ -19940,7 +20565,7 @@ components:
             - must contain exactly one entry with omitted or empty siteIds
             - must not repeat any siteId across entries
             - every provided siteId must be a valid Site UUID
-            - every provided siteId must identify a Site associated with the Tenant and owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400
+            - every provided siteId must identify a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400
           items:
             $ref: '#/components/schemas/TenantAccountSiteCapability'
     Site:
@@ -20864,7 +21489,7 @@ components:
         slaacEnabled:
           type: boolean
           readOnly: true
-          description: Whether this VPC uses SLAAC allocation mode for instance IPv6 interfaces. When true, Core allocates a `/64` to each interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. This value is fixed when the VPC is created. NICo does not yet configure router advertisements (RAs); that support is tracked by https://github.com/NVIDIA/infra-controller/issues/2398.
+          description: Whether this VPC uses SLAAC allocation mode for instance IPv6 interfaces. When true, Core allocates a `/64` to each interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. This value is fixed when the VPC is created. The DPU sends router advertisements (RAs) on routed FNN interfaces. With SLAAC enabled, it sends them only when the interface prefix is exactly a `/64`.
         routingProfile:
           type:
             - string
@@ -20908,8 +21533,10 @@ components:
             - 'null'
           description: ID of the Network Security Group attached to the VPC
         networkSecurityGroupPropagationDetails:
-          $ref: '#/components/schemas/NetworkSecurityGroupPropagationDetails'
-          description: Propagation details for the attached Network Security Group
+          oneOf:
+            - $ref: '#/components/schemas/NetworkSecurityGroupPropagationDetails'
+            - type: 'null'
+          description: Propagation details for the attached Network Security Group. Null when no propagation details are available, including when no Network Security Group is attached
         nvLinkLogicalPartitionId:
           type:
             - string
@@ -21060,7 +21687,6 @@ components:
         - Pending
         - Provisioning
         - Ready
-        - Configuring
         - Deleting
         - Error
     VpcCreateRequest:
@@ -21122,7 +21748,7 @@ components:
         slaacEnabled:
           type: boolean
           default: false
-          description: When true, Core allocates a `/64` to each instance interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. It is supported only for FNN VPCs and fixed during creation. False or omission disables SLAAC. Before persistence, REST requires `vpcSlaac` in the latest successfully stored configuration inventory for the selected Site. Periodic Site inventory reports whether Core supports this feature, so the stored value can lag a Core rollout. False or missing `vpcSlaac` returns 412 before REST persistence or workflow dispatch. This flag does not verify DPU agent versions. When a new API server release is deployed, DPU agents roll forward, and instance network configuration may fail transiently until eligible agents converge. NICo does not yet configure router advertisements (RAs); that support is tracked by https://github.com/NVIDIA/infra-controller/issues/2398.
+          description: When true, Core allocates a `/64` to each instance interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. It is supported only for FNN VPCs and fixed during creation. False or omission disables SLAAC. Before persistence, REST requires `vpcSlaac` in the latest successfully stored configuration inventory for the selected Site. Periodic Site inventory reports whether Core supports this feature, so the stored value can lag a Core rollout. False or missing `vpcSlaac` returns 412 before REST persistence or workflow dispatch. This flag does not verify DPU agent versions. When a new API server release is deployed, DPU agents roll forward, and instance network configuration may fail transiently until eligible agents converge. The DPU sends router advertisements (RAs) on routed FNN interfaces. With SLAAC enabled, it sends them only when the interface prefix is exactly a `/64`.
         routingProfile:
           type:
             - string
@@ -21547,7 +22173,7 @@ components:
     VpcPeeringStatus:
       title: VpcPeeringStatus
       type: string
-      description: Status values for VPC peering objects
+      description: Status values for VPC peering objects. Deleting means removal is pending; wait until the peering's GET endpoint returns 404 before deleting either VPC.
       enum:
         - Pending
         - Configuring
@@ -21676,7 +22302,6 @@ components:
         - Provisioning
         - Ready
         - Deleting
-        - Deleted
         - Error
     VpcPrefixCreateRequest:
       title: VpcPrefixCreateRequest
@@ -21686,7 +22311,11 @@ components:
           vpcId: 5e28ad7c-5fb7-46d6-a28a-fc0ba6fdc4a3
           ipBlockId: 8c1d1a06-90a2-4863-8ee1-6029265b9f0a
           prefixLength: 20
-      description: Request data for creating VPC Prefix
+        - name: application-network
+          vpcId: 0b1c53a0-a27e-4714-98d7-0cd3bc579db2
+          ipBlockId: 20d7dd4f-ae43-4245-a9d9-d093296009c4
+          prefix: 10.217.98.0/25
+      description: Specify exactly one non-null allocation selector. Use `prefixLength` for automatic allocation or `prefix` to reserve an exact CIDR. The allocated prefix is immutable.
       properties:
         name:
           type: string
@@ -21701,22 +22330,80 @@ components:
           type: string
           format: uuid
           description: ID of the Ready tenant IPv4 or IPv6 IP Block to allocate the VPC Prefix from. The block must be at the FNN VPC's Site.
+        prefix:
+          type: [string, 'null']
+          minLength: 1
+          description: Exact network-aligned IPv4 or IPv6 CIDR to reserve. Accepted IPv6 text is canonicalized before persistence and response. IPv4 accepts `/8` through `/31`. IPv6 accepts `/8` through `/63` when the FNN VPC has `slaacEnabled=true`, or `/8` through `/126` otherwise. The CIDR must be contained by the selected IP Block, match its address family, and not overlap an existing reservation. An IPv4-mapped IPv6 CIDR is not accepted. Mutually exclusive with `prefixLength`.
         prefixLength:
-          type: integer
+          type: [integer, 'null']
           minimum: 8
           maximum: 126
-          description: Prefix length for the VPC Prefix. IPv4 accepts 8 through 31. IPv6 accepts 8 through 63 when the FNN VPC has `slaacEnabled=true`, or 8 through 126 otherwise. The selected IP Block must contain a prefix of the requested length.
+          description: Prefix length for automatic allocation. IPv4 accepts 8 through 31. IPv6 accepts 8 through 63 when the FNN VPC has `slaacEnabled=true`, or 8 through 126 otherwise. The selected IP Block must contain a prefix of the requested length. Mutually exclusive with `prefix`.
+      oneOf:
+        - title: VpcPrefixAutomaticCreateRequest
+          required:
+            - name
+            - vpcId
+            - ipBlockId
+            - prefixLength
+          properties:
+            name:
+              type: string
+              minLength: 2
+              maxLength: 256
+            vpcId:
+              type: string
+              format: uuid
+            ipBlockId:
+              type: string
+              format: uuid
+            prefixLength:
+              type: integer
+              minimum: 8
+              maximum: 126
+          not:
+            required:
+              - prefix
+            properties:
+              prefix:
+                type: string
+        - title: VpcPrefixExplicitCreateRequest
+          required:
+            - name
+            - vpcId
+            - ipBlockId
+            - prefix
+          properties:
+            name:
+              type: string
+              minLength: 2
+              maxLength: 256
+            vpcId:
+              type: string
+              format: uuid
+            ipBlockId:
+              type: string
+              format: uuid
+            prefix:
+              type: string
+              minLength: 1
+              description: Exact network-aligned IPv4 or IPv6 CIDR to reserve. Accepted IPv6 text is canonicalized before persistence and response. IPv4 accepts `/8` through `/31`. IPv6 accepts `/8` through `/63` when the FNN VPC has `slaacEnabled=true`, or `/8` through `/126` otherwise.
+          not:
+            required:
+              - prefixLength
+            properties:
+              prefixLength:
+                type: integer
       required:
         - name
         - vpcId
         - ipBlockId
-        - prefixLength
     VpcPrefixUpdateRequest:
       title: VpcPrefixUpdateRequest
       type: object
       examples:
         - name: east-vpc-traffic-net
-      description: Request data for updating a VPC Prefix
+      description: Request data for updating a VPC Prefix. The allocated `prefix`, `prefixLength`, and `ipBlockId` are immutable.
       properties:
         name:
           type: string
@@ -22372,6 +23059,16 @@ components:
             - integer
             - 'null'
           description: 'Virtual function the attachment uses. Not currently supported'
+        bridgeName:
+          type:
+            - string
+            - 'null'
+          description: 'OVS bridge the attachment uses. Set only for an `OVS` attachment'
+        ovnNetworkName:
+          type:
+            - string
+            - 'null'
+          description: 'OVN network the OVS attachment maps onto. Set only for an `OVS` attachment, and optional even then'
         macAddress:
           type:
             - string
@@ -22748,7 +23445,12 @@ components:
           type:
             - string
             - 'null'
-          description: Authentication type for image URL, e.g., 'Basic' or 'Bearer'
+          enum:
+            - Basic
+            - Bearer
+            - ''
+            - null
+          description: Authentication type for image URL. An empty string means the credentials were cleared through an update.
         imageAuthToken:
           type:
             - string
@@ -22897,12 +23599,18 @@ components:
           type:
             - string
             - 'null'
-          description: 'Optional auth type: Basic or Bearer'
+          enum:
+            - Basic
+            - Bearer
+            - ''
+            - null
+          description: 'Optional auth type: Basic or Bearer. An empty string is treated as no auth type.'
         authToken:
           type:
             - string
             - 'null'
-          description: 'Optional auth token. Redacted in API responses.'
+          writeOnly: true
+          description: 'Optional auth token. Accepted in create/update requests and never returned in API responses.'
         cacheStrategy:
           type: string
           enum:
@@ -23127,7 +23835,12 @@ components:
           type:
             - string
             - 'null'
-          description: 'Authentication type for image URL, if needed, e.g., basic/bearer/token; required if imageAuthToken is specified'
+          enum:
+            - Basic
+            - Bearer
+            - ''
+            - null
+          description: 'Authentication type for image URL, if needed; required if imageAuthToken is specified. An empty string is treated as not specified.'
         imageAuthToken:
           type:
             - string
@@ -23249,12 +23962,17 @@ components:
           type:
             - string
             - 'null'
-          description: 'Authentication type for image URL, if needed, e.g., basic/bearer/token; required if imageAuthToken is specified. Can be updated independently without re-sending imageUrl/imageSha.'
+          enum:
+            - Basic
+            - Bearer
+            - ''
+            - null
+          description: 'Authentication type for image URL, if needed; required if imageAuthToken is specified. Can be updated independently without re-sending imageUrl/imageSha. Set to an empty string to clear the stored value, null leaves it unchanged.'
         imageAuthToken:
           type:
             - string
             - 'null'
-          description: 'Auth token to retrieve the image from image URL, required if imageAuthType is specified. Can be updated independently without re-sending imageUrl/imageSha.'
+          description: 'Auth token to retrieve the image from image URL, required if imageAuthType is specified. Can be updated independently without re-sending imageUrl/imageSha. Set to an empty string to clear the stored value, null leaves it unchanged.'
         imageDisk:
           type:
             - string
@@ -23353,8 +24071,7 @@ components:
               threads: 36
               count: 2
           machineInstanceTypes:
-            - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
-              machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
+            - machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
               instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
               created: '2019-08-24T14:15:22Z'
               updated: '2019-08-24T14:15:22Z'
@@ -23668,7 +24385,8 @@ components:
           type:
             - string
             - 'null'
-          description: 'Device Type of the Capability component, if available'
+          enum: [DPU, SpectrumX, NVLink, null]
+          description: 'Optional device type. `Network` accepts `DPU` or `SpectrumX`; `GPU` accepts `NVLink`; other capability types require omission or null. Omitted or null leaves device type unconstrained for every capability type. Empty strings are rejected'
     Instance:
       title: Instance
       type: object
@@ -23995,9 +24713,9 @@ components:
             format: uuid
         sshKeyGroups:
           type: array
-          description: IDs of SSH Key Groups associated with this Instance
+          description: SSH Key Groups associated with this Instance, in summary form
           items:
-            $ref: '#/components/schemas/SshKeyGroup'
+            $ref: '#/components/schemas/SshKeyGroupSummary'
         tpmEkCertificate:
           type:
             - string
@@ -24041,6 +24759,7 @@ components:
         - Rebooting
         - Terminating
         - Error
+        - Unknown
     InstanceCreateRequest:
       title: InstanceCreateRequest
       type: object
@@ -24273,7 +24992,7 @@ components:
         spectrumXAttachments:
           type: array
           maxItems: 64
-          description: 'Associate one or more SpectrumX Partitions with this Instance. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
+          description: 'Associate one or more SpectrumX Partitions with this Instance. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`. A nonempty list is validated against the individual Machine capabilities persisted by inventory reconciliation, not Instance Type capability summaries. The selected Machine must satisfy every attachment; Instance Type placement considers only compatible Machines. Invalid explicit-machine selectors return 400. If available Instance Type candidates are all incompatible, the 400 response identifies SpectrumX capabilities as the reason. Final allocation remains authoritative because persisted inventory can lag behind the Site.'
           items:
             $ref: '#/components/schemas/InstanceSpectrumXAttachmentCreateOrUpdateRequest'
         dpuExtensionServiceDeployments:
@@ -24449,7 +25168,7 @@ components:
         spectrumXAttachments:
           type: array
           maxItems: 64
-          description: 'SpectrumX Partition attachments shared across all Instances in the batch. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
+          description: 'SpectrumX Partition attachments shared across all Instances in the batch. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`. Every selected Machine must satisfy the entire list using its individual persisted capabilities, not Instance Type capability summaries. Compatible capacity is checked before selecting an NVLink domain when topology optimization is enabled. Insufficient compatible capacity returns 409 without allocating any Machines. The response identifies SpectrumX when filtering reduces otherwise sufficient capacity below the requested count, and identifies both SpectrumX and topology constraints when filtering removes candidates and no single NVLink domain has enough compatible Machines. Final allocation remains authoritative because persisted inventory can lag behind the Site.'
           items:
             $ref: '#/components/schemas/InstanceSpectrumXAttachmentCreateOrUpdateRequest'
         dpuExtensionServiceDeployments:
@@ -24648,9 +25367,11 @@ components:
           items:
             $ref: '#/components/schemas/InfiniBandInterfaceCreateRequest'
         spectrumXAttachments:
-          type: array
+          type:
+            - array
+            - 'null'
           maxItems: 64
-          description: 'Update SpectrumX Partition attachments of the Instance. Omitting this field leaves the Instance''s SpectrumX attachments unchanged; an explicit (possibly empty) list replaces them entirely. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
+          description: 'Update SpectrumX Partition attachments of the Instance. Omission or null leaves attachments unchanged; an explicit list replaces them entirely. An empty list removes attachments without capability validation. A nonempty list, including an unchanged list, is validated against the Instance''s individual Machine capabilities persisted by inventory reconciliation before any update is persisted. Instance Type capability summaries are not used. Missing capabilities or invalid selectors return 400. Final Site validation remains authoritative because persisted inventory can lag behind the Site. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`.'
           items:
             $ref: '#/components/schemas/InstanceSpectrumXAttachmentCreateOrUpdateRequest'
         nvLinkInterfaces:
@@ -24663,6 +25384,37 @@ components:
           description: Updated set of DPU Extension Services to deploy to the DPUs of this Instance
           items:
             $ref: '#/components/schemas/DpuExtensionServiceDeploymentRequest'
+    InstanceDeleteHealthIssue:
+      title: InstanceDeleteHealthIssue
+      type: object
+      examples:
+        - category: Network
+          summary: Machine has DPU connectivity error
+          details: Tenant observed repeated link flaps on the DPU uplink.
+      description: Tenant-reported Machine issue that necessitates Instance deletion. Categories match the Core `IssueCategory` values.
+      required:
+        - category
+        - summary
+      properties:
+        category:
+          type: string
+          enum:
+            - Hardware
+            - Network
+            - Performance
+            - Other
+          description: High-level category for the tenant-reported issue.
+        summary:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: Brief description of the issue for operators.
+        details:
+          type:
+            - string
+            - 'null'
+          maxLength: 8192
+          description: Diagnostic information, logs, ticket numbers, etc.
     InstanceDeleteRequest:
       title: InstanceDeleteRequest
       type: object
@@ -24675,7 +25427,7 @@ components:
       description: Request data to delete Instance
       properties:
         machineHealthIssue:
-          $ref: '#/components/schemas/MachineHealthIssue'
+          $ref: '#/components/schemas/InstanceDeleteHealthIssue'
           description: Information regarding issue with the underlying Machine experienced by Tenant
         isRepairTenant:
           type:
@@ -24716,10 +25468,14 @@ components:
           vpcId: bdd3d1af-b4a8-4675-a59c-56548716ef45
           ipFamilies:
             - IPv4
+            - IPv6
           isPhysical: true
           macAddress: 2F-FC-34-AE-9C-2D
           ipAddresses:
             - 200.32.11.196
+          ipPrefixes:
+            - 200.32.11.0/24
+            - 2001:db8::/64
           status: Ready
           created: '2019-08-24T14:15:22Z'
           updated: '2019-08-24T14:15:22Z'
@@ -24811,6 +25567,14 @@ components:
           description: A list of IPv4 or IPv6 addresses
           items:
             type: string
+        ipPrefixes:
+          type: array
+          readOnly: true
+          description: Reported IPv4 or IPv6 prefixes in CIDR notation, ordered IPv4 before IPv6. This list is independent of `ipAddresses`; SLAAC can report an IPv6 prefix without a fixed host address. Match prefixes and addresses by address family, not list position. Empty when no prefixes are available.
+          items:
+            type: string
+          examples:
+            - ['192.0.2.0/24', '2001:db8::/64']
         requestedIpAddress:
           type:
             - string
@@ -25092,6 +25856,8 @@ components:
           deviceInstance: 3
           attachmentType: OVS
           virtualFunctionId: null
+          bridgeName: br-spx0
+          ovnNetworkName: spx-net-a
       description: Request data to attach a SpectrumX Partition to an Instance
       properties:
         spectrumXPartitionId:
@@ -25100,11 +25866,12 @@ components:
           description: ID of the SpectrumX Partition the attachment should associate with
         device:
           type: string
-          description: 'SpectrumX device to attach over, matching the device description reported for the Machine''s SpectrumX interfaces'
+          description: 'Exact, case-sensitive name of a persisted Machine capability with type `Network` and device type `SpectrumX`. Generic network and DPU capabilities do not satisfy this selector.'
         deviceInstance:
           type: integer
           minimum: 0
-          description: 'Index of the device, used to identify which interface card to attach the Partition to'
+          maximum: 4294967295
+          description: 'Zero-based interface index within the matching SpectrumX device-description group. Must be strictly less than the persisted capability count on the Machine.'
         attachmentType:
           type: string
           enum:
@@ -25117,6 +25884,22 @@ components:
             - integer
             - 'null'
           description: Must be omitted, as virtual functions are not currently supported
+        bridgeName:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 32
+          pattern: '^[a-zA-Z0-9_.-]+$'
+          description: 'OVS bridge to attach over. Required for an `OVS` attachment and must be omitted for any other type'
+        ovnNetworkName:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 256
+          pattern: '^[a-zA-Z0-9_-]+$'
+          description: 'OVN network the OVS attachment maps onto. Optional for an `OVS` attachment and must be omitted for any other type'
       required:
         - spectrumXPartitionId
         - device
@@ -25155,7 +25938,7 @@ components:
             - string
             - 'null'
           format: uuid
-          description: ID of the NVLink Domain associated with this Interface
+          description: Core-reported NVLink domain UUID associated with this Interface, not the rack group ID returned by the Domain API.
         deviceInstance:
           type: integer
           description: 'Index of the device, used to identify the GPU associated with this Interface'
@@ -25319,6 +26102,7 @@ components:
       type: object
       description: Rack represents a physical rack in the datacenter
       required:
+        - health
         - nvLinkDomainIds
         - operationStatus
         - taskStats
@@ -25335,6 +26119,11 @@ components:
           taskStats:
             pendingTaskCount: 0
             activeTaskCount: 0
+          health:
+            source: rack-aggregate-health
+            observedAt: '2026-09-28T12:00:00Z'
+            successes: []
+            alerts: []
           location:
             region: us-east-1
             datacenter: DC-01
@@ -25357,6 +26146,11 @@ components:
               powerState: 'on'
               leakStatus: Leaking
               leakHandlingStatus: ShuttingDown
+              health:
+                source: aggregate-host-health
+                observedAt: '2026-09-28T12:00:00Z'
+                successes: []
+                alerts: []
       properties:
         id:
           type: string
@@ -25389,10 +26183,9 @@ components:
             Operability phase aggregated from tray operationStatus values.
         nvLinkDomainIds:
           type: array
-          description: IDs of the NVLink Domains containing this Rack. Empty when the Rack is not assigned to an NVLink Domain.
+          description: Domain external IDs (rack group IDs) containing this Rack. Empty when no rack-group Domain is assigned.
           items:
             type: string
-            format: uuid
         location:
           $ref: '#/components/schemas/RackLocation'
           description: 'Physical or logical location of the Rack'
@@ -25403,6 +26196,11 @@ components:
             $ref: '#/components/schemas/RackComponent'
         taskStats:
           $ref: '#/components/schemas/TaskStats'
+        health:
+          oneOf:
+            - $ref: '#/components/schemas/AggregateHealth'
+            - type: 'null'
+          description: Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
     RackLocation:
       title: RackLocation
       type: object
@@ -25505,6 +26303,8 @@ components:
       title: RackComponent
       type: object
       description: A component within a Rack (e.g. compute node, switch, PDU)
+      required:
+        - health
       properties:
         id:
           type: string
@@ -25572,6 +26372,11 @@ components:
           description: Whether the component is considered leaking coolant
         leakHandlingStatus:
           $ref: '#/components/schemas/LeakHandlingStatus'
+        health:
+          oneOf:
+            - $ref: '#/components/schemas/AggregateHealth'
+            - type: 'null'
+          description: Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
     BMCInfo:
       title: BMCInfo
       type: object
@@ -25591,6 +26396,7 @@ components:
       type: object
       description: 'Tray represents a component within a rack (e.g. compute node, NVSwitch, power shelf)'
       required:
+        - health
         - nvLinkDomainId
         - taskStats
       examples:
@@ -25618,6 +26424,11 @@ components:
           taskStats:
             pendingTaskCount: 3
             activeTaskCount: 1
+          health:
+            source: aggregate-host-health
+            observedAt: '2026-09-28T12:00:00Z'
+            successes: []
+            alerts: []
       properties:
         id:
           type: string
@@ -25628,7 +26439,8 @@ components:
             - Compute
             - NVSwitch
             - PowerShelf
-          description: Type of the tray
+            - Unknown
+          description: Type of the tray. `Unknown` is reported when the component type is not recognized.
         name:
           type: string
           description: Name of the tray
@@ -25684,10 +26496,14 @@ components:
           type:
             - string
             - 'null'
-          format: uuid
-          description: ID of the NVLink Domain containing this Tray's Rack. Null when the Rack is not assigned to an NVLink Domain.
+          description: Domain external ID (rack group ID) containing this Tray's Rack. Null when no rack-group Domain is assigned.
         taskStats:
           $ref: '#/components/schemas/TaskStats'
+        health:
+          oneOf:
+            - $ref: '#/components/schemas/AggregateHealth'
+            - type: 'null'
+          description: Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
     TrayPosition:
       title: TrayPosition
       type: object
@@ -25747,6 +26563,44 @@ components:
           minimum: 0
           description: |-
             Restrict to trays at this rack slot (matches `position.slotId`). Requires `rackId` or `rackName`. Composes with the rest of the filter via AND.
+    NVLinkDomain:
+      title: NVLinkDomain
+      type: object
+      description: NVLink Domain inventory and its components.
+      required: [id, name, rackGroupId, nmxcClusterId, topology, operationStatus, components]
+      properties:
+        id:
+          type: string
+          description: Case-sensitive Domain external ID, equal to its rack group ID.
+        rackGroupId:
+          type: string
+          description: Rack group ID, identical to id.
+        nmxcClusterId:
+          type: [string, 'null']
+          format: uuid
+          description: NMX-C cluster UUID observed on the group's switches. Null when no valid observation is available. Conflicting observations are logged and preserve the last valid cluster without interrupting inventory sync.
+        name:
+          type: string
+          description: Domain display name. Empty for newly inventory-created Domains; inventory sync preserves existing names.
+        topology:
+          type: [string, 'null']
+          description: Common member-rack profile ID without the qualified vendor and optional _NO_POWERSHELF suffix. Null when unavailable, unrecognized, or inconsistent across member racks.
+        operationStatus:
+          type: string
+          description: Operability phase aggregated across member racks, not the Core lifecycle state.
+        components:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/RackComponent'
+          description: Components belonging to this Domain. Null when includeComponents is false; an empty array when requested but none are known.
+      examples:
+        - id: group-01
+          rackGroupId: group-01
+          nmxcClusterId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
+          name: ''
+          topology: GB200_NVL72R1_C2G4
+          operationStatus: Ready
+          components: []
     BatchUpdateNVLinkDomainPowerStateRequest:
       title: BatchUpdateNVLinkDomainPowerStateRequest
       type: object
@@ -25766,8 +26620,9 @@ components:
           uniqueItems: true
           items:
             type: string
-            format: uuid
-          description: UUIDs of the NVLink Domains to power control. IDs must be unique after UUID normalization (case-insensitive).
+            minLength: 1
+            pattern: '\S'
+          description: Nonblank, case-sensitive IDs of the NVLink Domains to power control. Exact duplicate IDs are rejected.
         state:
           type: string
           enum:
@@ -25820,7 +26675,12 @@ components:
           type:
             - string
             - 'null'
-          description: Target firmware version. When empty, null, or omitted, use the default firmware version for each targeted component.
+          description: |-
+            Target firmware input. NVLink Domain targets resolve to their member
+            racks. For rack-scale RMS components, an omitted, null, empty, or
+            whitespace-only value uses the owning rack profile's configured
+            firmware object. Resolution or fetch failures are reported by the
+            asynchronous task.
         ruleId:
           type: string
           format: uuid
@@ -25867,13 +26727,19 @@ components:
           uniqueItems: true
           items:
             type: string
-            format: uuid
-          description: UUIDs of the NVLink Domains to update. IDs must be unique after UUID normalization (case-insensitive).
+            minLength: 1
+            pattern: '\S'
+          description: Nonblank, case-sensitive IDs of the NVLink Domains to update. Exact duplicate IDs are rejected.
         version:
           type:
             - string
             - 'null'
-          description: Target firmware version. When empty, null, or omitted, use the default firmware version for each targeted component.
+          description: |-
+            Target firmware input. NVLink Domain targets resolve to their member
+            racks. For rack-scale RMS components, an omitted, null, empty, or
+            whitespace-only value uses the owning rack profile's configured
+            firmware object. Resolution or fetch failures are reported by the
+            asynchronous task.
         ruleId:
           type: string
           format: uuid
@@ -26015,14 +26881,44 @@ components:
             - string
             - 'null'
           description: |-
-            Firmware input serialized as a string: either one shared value for
-            all selected trays or a JSON mapping from tray type (`compute`,
-            `nvswitch`, `powershelf`) to firmware input.
+            Target firmware input serialized as a string. Its format is a
+            contract between the caller and the component backend
+            selected for the target. The REST API and Flow orchestration
+            otherwise preserve this value. Flow only unwraps the optional
+            per-tray mapping described below before passing the value to the
+            selected component manager.
+
+            Flow's built-in firmware rule includes Compute and NVSwitch stages.
+            Do not use a compute-specific host-catalog component map as shared
+            input for other backends. For mixed backends, use the per-tray
+            mapping below with values appropriate to each selected backend.
+
+            For RMS-backed rack-scale firmware updates, use the complete SOT
+            firmware-object JSON document, not a release version such as
+            `24.11.0`. A SOT
+            document is an object with `ProductName` and `Milestones` at the
+            top level. Each milestone contains `Name`, `State`, and
+            `BoardSKUs`; each board SKU contains `Name`, `Type`, and
+            `Components`. Component groups contain `Software` and `Firmware`
+            entries describing `Component`, `Version`, `Type`, `FileNames`,
+            artifact `Locations`, and optional `SubComponents`. Obtain the
+            complete document from the SOT release process; the abbreviated
+            examples are not executable input. Supply a complete document
+            covering all component types selected by the operation rule.
+
+            The string can contain either one shared firmware input for all
+            selected trays or a JSON mapping from tray type (`compute`,
+            `nvswitch`, `powershelf`) to firmware input. Each mapping value
+            must satisfy its selected backend's contract. Flow forwards object
+            values as raw JSON and unquotes string values.
             These exact lowercase top-level keys are reserved for per-tray
             mappings; a shared JSON object must not contain any of them.
-            A missing tray type in the mapping receives an empty input, which
-            does not guarantee a skipped update. Empty, null, or omitted input
-            is handled by the selected backend and operation rule.
+            A missing tray type in the mapping skips that component type.
+            A non-empty, non-layered value is forwarded unchanged.
+            For rack-scale RMS components, an omitted, null, empty, or
+            whitespace-only value uses the owning rack profile's configured
+            firmware object. Resolution or fetch failures are reported by the
+            asynchronous task.
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
@@ -26191,8 +27087,8 @@ components:
       examples:
         - id: 550e8400-e29b-41d4-a716-446655440000
           status: Running
-          description: Power on rack components
-          message: 'Processing 3 of 5 components'
+          description: Update rack firmware
+          message: Firmware update in progress
           ruleId: 7c9e6679-7425-40de-944b-e07fc1f90ae7
           report:
             version: 1
@@ -26205,6 +27101,8 @@ components:
                   - componentType: Compute
                     status: completed
                     totalComponents: 4
+                    succeededComponents: 4
+                    failedComponents: 0
                     startedAt: '2026-06-08T18:00:00Z'
                     finishedAt: '2026-06-08T18:00:42Z'
               - number: 2
@@ -26214,10 +27112,14 @@ components:
                   - componentType: NVLSwitch
                     status: running
                     totalComponents: 2
+                    succeededComponents: 0
+                    failedComponents: 0
                     startedAt: '2026-06-08T18:00:42Z'
                   - componentType: PowerShelf
                     status: skipped
                     totalComponents: 0
+                    succeededComponents: 0
+                    failedComponents: 0
     TaskStats:
       title: TaskStats
       type: object
@@ -27139,9 +28041,13 @@ components:
       type: object
       description: |
         Execution state of one rule sequence step. Pairs 1:1 with the rule's ordered steps within the containing stage and shares its index.
+        Unresolved components (`totalComponents - succeededComponents - failedComponents`) have no reported terminal outcome, even if the step has failed or timed out.
       required:
         - componentType
         - status
+        - totalComponents
+        - succeededComponents
+        - failedComponents
       properties:
         componentType:
           type: string
@@ -27151,14 +28057,15 @@ components:
         totalComponents:
           type: integer
           description: |
-            Count of components of `componentType` this step targets. Surfaced here because the task representation does not include the per-type component map.
-        completedComponents:
+            Count of components of `componentType` this step targets, including zero for skipped steps.
+        succeededComponents:
           type: integer
           description: |
-            Reserved for a future best-effort activity contract that reports per-component outcomes. Not written under the current fail-fast contract and omitted by the producer.
+            Number of requested components reported as successfully completed, combining the latest successful poll of the current batch with outcomes from completed batches. May decrease if a component is absent from a later poll. Zero when no successful outcomes have been reported.
         failedComponents:
           type: integer
-          description: Reserved (see `completedComponents`).
+          description: |
+            Number of requested components reported as `Failed`, using the same counting rules as `succeededComponents`. Zero when no failed outcomes have been reported.
         startedAt:
           type: string
           format: date-time
@@ -27221,14 +28128,45 @@ components:
             - string
             - 'null'
           description: |-
-            Firmware input serialized as a string: either one shared value for
-            all selected trays or a JSON mapping from tray type (`compute`,
-            `nvswitch`, `powershelf`) to firmware input.
+            Target firmware input serialized as a string. Its format is a
+            contract between the caller and the component backend
+            selected for the target. The REST API and Flow orchestration
+            otherwise preserve this value. Flow only unwraps the optional
+            per-tray mapping described below before passing the value to the
+            selected component manager.
+
+            For compatibility, when Flow's compute component manager is
+            explicitly configured as `nicolegacy` (the default is `nico`),
+            use a compute tray endpoint without `version` or `targets` for
+            on-demand host updates. Core selects the configured host firmware
+            bundle.
+
+            For RMS-backed rack-scale firmware updates, use the complete SOT
+            firmware-object JSON document, not a release version such as
+            `24.11.0`. A SOT
+            document is an object with `ProductName` and `Milestones` at the
+            top level. Each milestone contains `Name`, `State`, and
+            `BoardSKUs`; each board SKU contains `Name`, `Type`, and
+            `Components`. Component groups contain `Software` and `Firmware`
+            entries describing `Component`, `Version`, `Type`, `FileNames`,
+            artifact `Locations`, and optional `SubComponents`. Obtain the
+            complete document from the SOT release process; the abbreviated
+            examples are not executable input. Supply a complete document
+            covering all component types selected by the operation rule.
+
+            The string can contain either one shared firmware input for all
+            selected trays or a JSON mapping from tray type (`compute`,
+            `nvswitch`, `powershelf`) to firmware input. Each mapping value
+            must satisfy its selected backend's contract. Flow forwards object
+            values as raw JSON and unquotes string values.
             These exact lowercase top-level keys are reserved for per-tray
             mappings; a shared JSON object must not contain any of them.
-            A missing tray type in the mapping receives an empty input, which
-            does not guarantee a skipped update. Empty, null, or omitted input
-            is handled by the selected backend and operation rule.
+            A missing tray type in the mapping skips that component type.
+            A non-empty, non-layered value is forwarded unchanged.
+            For rack-scale RMS components, an omitted, null, empty, or
+            whitespace-only value uses the owning rack profile's configured
+            firmware object. Resolution or fetch failures are reported by the
+            asynchronous task.
         targets:
           type: array
           items:
@@ -27252,14 +28190,14 @@ components:
               - switch trays (NvSwitchComponent): currently bmc, cpld, bios, nvos
               - powershelf trays (PowerShelfComponent): currently pmc, psu
               - compute trays (ComputeTrayComponent): currently bmc, bios
-                (currently NOT honored end-to-end: the NICo compute-firmware
-                path goes through SetFirmwareUpdateTimeWindow + auto-update,
-                which has no per-target selection; the request is logged
-                and the whole bundle is applied. Will be honored once
-                compute moves to UpdateComponentFirmware.)
+
+            The default `nico` compute component manager forwards BMC and BIOS
+            selections through `UpdateComponentFirmware`. The opt-in
+            `nicolegacy` manager schedules the whole configured host firmware
+            bundle; it does not honor BMC or BIOS sub-target selection.
             Omitted or empty means "update everything in the bundle"
             (the historical default) for compute-tray-internal targets.
-            Unknown names are rejected. Requires `version` to be set.
+            Unknown names are rejected.
             The special target `dpu`, valid only on compute trays,
             requests DPU reprovisioning on each matched host. Unlike
             the other targets, `dpu` is NOT covered by the
@@ -27302,8 +28240,8 @@ components:
         - siteId: 550e8400-e29b-41d4-a716-446655440000
           filter:
             type: NVSwitch
-          version: '24.11.0'
-          targets: [bmc, nvos]
+          version: '{"ProductName":"ExampleRackSystem","Milestones":[{"Name":"example-release","State":"Onboarded","BoardSKUs":[{"Name":"Example-Switch-Tray","Type":"Switch Tray","Components":{"Software":[],"Firmware":[{"Component":"BMC+CPLD","Version":"1.2.3","Type":"Prod","FileNames":["switch-firmware.fwpkg"],"Locations":[{"Location":"/firmware/example/switch-firmware.fwpkg","LocationType":"FILE","PackageName":"","Type":"Firmware","FileName":"switch-firmware.fwpkg"}]}]}}]}]}'
+          targets: [bmc]
     UpdatePowerStateRequest:
       title: UpdatePowerStateRequest
       type: object
@@ -27436,14 +28374,45 @@ components:
             - string
             - 'null'
           description: |-
-            Firmware input serialized as a string: either one shared value for
-            all selected trays or a JSON mapping from tray type (`compute`,
-            `nvswitch`, `powershelf`) to firmware input.
+            Target firmware input serialized as a string. Its format is a
+            contract between the caller and the component backend
+            selected for the target. The REST API and Flow orchestration
+            otherwise preserve this value. Flow only unwraps the optional
+            per-tray mapping described below before passing the value to the
+            selected component manager.
+
+            For compatibility, when Flow's compute component manager is
+            explicitly configured as `nicolegacy` (the default is `nico`),
+            use a compute tray endpoint without `version` or `targets` for
+            on-demand host updates. Core selects the configured host firmware
+            bundle.
+
+            For RMS-backed rack-scale firmware updates, use the complete SOT
+            firmware-object JSON document, not a release version such as
+            `24.11.0`. A SOT
+            document is an object with `ProductName` and `Milestones` at the
+            top level. Each milestone contains `Name`, `State`, and
+            `BoardSKUs`; each board SKU contains `Name`, `Type`, and
+            `Components`. Component groups contain `Software` and `Firmware`
+            entries describing `Component`, `Version`, `Type`, `FileNames`,
+            artifact `Locations`, and optional `SubComponents`. Obtain the
+            complete document from the SOT release process; the abbreviated
+            examples are not executable input. Supply a complete document
+            covering all component types selected by the operation rule.
+
+            The string can contain either one shared firmware input for all
+            selected trays or a JSON mapping from tray type (`compute`,
+            `nvswitch`, `powershelf`) to firmware input. Each mapping value
+            must satisfy its selected backend's contract. Flow forwards object
+            values as raw JSON and unquotes string values.
             These exact lowercase top-level keys are reserved for per-tray
             mappings; a shared JSON object must not contain any of them.
-            A missing tray type in the mapping receives an empty input, which
-            does not guarantee a skipped update. Empty, null, or omitted input
-            is handled by the selected backend and operation rule.
+            A missing tray type in the mapping skips that component type.
+            A non-empty, non-layered value is forwarded unchanged.
+            For rack-scale RMS components, an omitted, null, empty, or
+            whitespace-only value uses the owning rack profile's configured
+            firmware object. Resolution or fetch failures are reported by the
+            asynchronous task.
         targets:
           type: array
           items:
@@ -27467,14 +28436,14 @@ components:
               - switch trays (NvSwitchComponent): currently bmc, cpld, bios, nvos
               - powershelf trays (PowerShelfComponent): currently pmc, psu
               - compute trays (ComputeTrayComponent): currently bmc, bios
-                (currently NOT honored end-to-end: the NICo compute-firmware
-                path goes through SetFirmwareUpdateTimeWindow + auto-update,
-                which has no per-target selection; the request is logged
-                and the whole bundle is applied. Will be honored once
-                compute moves to UpdateComponentFirmware.)
+
+            The default `nico` compute component manager forwards BMC and BIOS
+            selections through `UpdateComponentFirmware`. The opt-in
+            `nicolegacy` manager schedules the whole configured host firmware
+            bundle; it does not honor BMC or BIOS sub-target selection.
             Omitted or empty means "update everything in the bundle"
             (the historical default) for compute-tray-internal targets.
-            Unknown names are rejected. Requires `version` to be set.
+            Unknown names are rejected.
             The special target `dpu`, valid only on compute trays,
             requests DPU reprovisioning on the matched host. Unlike
             the other targets, `dpu` is NOT covered by the
@@ -27514,11 +28483,10 @@ components:
             maintenance.
       examples:
         - siteId: 550e8400-e29b-41d4-a716-446655440000
-          version: '24.11.0'
+          version: '{"ProductName":"ExampleRackSystem","Milestones":[{"Name":"example-release","State":"Onboarded","BoardSKUs":[{"Name":"Example-Switch-Tray","Type":"Switch Tray","Components":{"Software":[],"Firmware":[{"Component":"BMC+CPLD","Version":"1.2.3","Type":"Prod","FileNames":["switch-firmware.fwpkg"],"Locations":[{"Location":"/firmware/example/switch-firmware.fwpkg","LocationType":"FILE","PackageName":"","Type":"Firmware","FileName":"switch-firmware.fwpkg"}]}]}}]}]}'
         - siteId: 550e8400-e29b-41d4-a716-446655440000
-          version: '24.11.0'
-          targets: [bmc, nvos]
-        - siteId: 550e8400-e29b-41d4-a716-446655440000
+          version: '{"ProductName":"ExampleRackSystem","Milestones":[{"Name":"example-release","State":"Onboarded","BoardSKUs":[{"Name":"Example-Switch-Tray","Type":"Switch Tray","Components":{"Software":[],"Firmware":[{"Component":"BMC+CPLD","Version":"1.2.3","Type":"Prod","FileNames":["switch-firmware.fwpkg"],"Locations":[{"Location":"/firmware/example/switch-firmware.fwpkg","LocationType":"FILE","PackageName":"","Type":"Firmware","FileName":"switch-firmware.fwpkg"}]}]}}]}]}'
+          targets: [bmc]
     FirmwareUpdateResponse:
       title: FirmwareUpdateResponse
       type: object
@@ -27614,11 +28582,11 @@ components:
           labels:
             RackIdentifier: GVX11F01C02
             ServerName: SITE1-C03-Server-02
-          status: Ready
-          isUsableByTenant: true
+          status: Error
+          isUsableByTenant: false
           statusHistory:
-            - status: Ready
-              message: Machine is online and ready
+            - status: Error
+              message: Machine has one or more health probe alerts that prevents allocation
               created: '2019-08-24T14:15:22Z'
               updated: '2019-08-24T14:15:22Z'
           created: '2019-08-24T14:15:22Z'
@@ -27648,7 +28616,7 @@ components:
             - string
             - 'null'
           format: uuid
-          description: ID of the Instance if this Machine is assigned to one
+          description: ID of the associated Instance, or null when unassigned. The association remains during termination until Instance inventory confirms deletion. A non-null value precludes Ready status.
         tenantId:
           type:
             - string
@@ -27724,7 +28692,6 @@ components:
           description: 'User-specified Machine labels'
         status:
           $ref: '#/components/schemas/MachineStatus'
-          description: 'Status represents the status of the machine'
           readOnly: true
         isUsableByTenant:
           type: boolean
@@ -27750,7 +28717,14 @@ components:
     MachineStatus:
       title: MachineStatus
       type: string
-      description: Status values for Machine objects
+      description: >-
+        Machine status combines the observed Core lifecycle with REST Instance assignment.
+        A Ready Machine becomes InUse when REST assigns it, and remains InUse if Core reports
+        Ready while the REST assignment still exists. Error, Maintenance, Initializing, and
+        other non-Ready states retain precedence. When Instance deletion clears the assignment,
+        InUse returns to Ready only if the retained Core snapshot reports Ready; otherwise
+        fresh Machine inventory establishes the next status. Ready is not a reservation and
+        does not guarantee that a subsequent Instance creation will succeed.
       enum:
         - Initializing
         - Ready
@@ -27814,6 +28788,7 @@ components:
     MachineHealthIssue:
       title: MachineHealthIssue
       type: object
+      description: Tenant-reported Machine issue attached to a Machine online repair request. The category is serialized as `issue_category` in the Core `HealthProbeAlert` payload.
       required:
         - category
         - summary
@@ -27830,15 +28805,13 @@ components:
             - Other
           description: High-level category for the tenant-reported issue.
         summary:
-          type:
-            - string
-            - 'null'
-          maxLength: 512
+          type: string
+          minLength: 1
+          maxLength: 1024
           description: Brief description of the issue for operators.
         details:
-          type:
-            - string
-            - 'null'
+          type: string
+          minLength: 1
           maxLength: 8192
           description: Diagnostic information, logs, ticket numbers, etc.
     MachineOnlineRepairPolicy:
@@ -27912,7 +28885,7 @@ components:
               acceptRepairTeamAccess: true
               acceptInstanceDeletionRisk: true
         - healthIssue:
-            category: Storage
+            category: Hardware
             summary: Disk errors on OSD
             details: 'Ticket FORGE-12345; smartctl logs attached'
       description: 'Request data to update Machine. Instance Type attribute updates, maintenance attribute updates, labels updates, and in-pool online repair (enter or exit) must be specified in separate requests. They cannot be processed at the same time.'
@@ -27939,9 +28912,10 @@ components:
           type:
             - string
             - 'null'
-          description: Optional message describing the reason for moving Machine into maintenance mode. Can be updated by Provider or privileged Tenant.
+          description: Describes the reason for moving Machine into maintenance mode. Required when `setMaintenanceMode` is `true`. Omit or set to null when `setMaintenanceMode` is omitted, null, or `false`; a non-null message is rejected in those cases. Can be updated by Provider or privileged Tenant.
           minLength: 5
           maxLength: 256
+          pattern: '[^ \t\n\f\r]'
         labels:
           description: 'Machine labels will be overwritten, include existing labels to preserve them. Can be updated by Provider or privileged Tenant.'
           $ref: '#/components/schemas/Labels'
@@ -28078,6 +29052,21 @@ components:
             isAboveSLA: false
             updated: '2026-01-15T12:00:00Z'
             slaSeconds: 300
+          lldpNeighbors:
+            - macAddress: '02:00:00:00:01:b0'
+              localPort: enp1s0np0
+              name: leaf-switch-01
+              description: Cumulus Linux
+              ipAddresses:
+                - 10.0.2.194
+              chassisIdType: mac
+              chassisIdValue: '02:00:00:00:01:d4'
+              remotePortType: ifname
+              remotePortValue: swp1
+              medInventory:
+                serial: SN0000000002
+                manufacturer: 'https://www.mellanox.com'
+                model: BlueField-3 DPU
       properties:
         dmiData:
           $ref: '#/components/schemas/MachineDMIData'
@@ -28105,6 +29094,11 @@ components:
             - $ref: '#/components/schemas/MachineLifecycleState'
             - type: 'null'
           description: 'Lifecycle state details for the Machine'
+        lldpNeighbors:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineLldpNeighbor'
+          description: 'LLDP neighbors observed on the machine NICs, as last reported by the machine (scout or DPU agent). Empty when the machine has not reported any neighbors.'
     MachineLifecycleState:
       title: MachineLifecycleState
       type: object
@@ -28135,6 +29129,90 @@ components:
           type: integer
           format: int64
           description: 'Defined SLA for the current lifecycle state in seconds'
+    MachineLldpNeighbor:
+      title: MachineLldpNeighbor
+      type: object
+      description: Describes an LLDP neighbor observed on one of the Machine NICs
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - medInventory
+      examples:
+        - macAddress: '02:00:00:00:01:b0'
+          localPort: enp1s0np0
+          name: leaf-switch-01
+          description: Cumulus Linux
+          ipAddresses:
+            - 10.0.2.194
+            - 'fe80::ff:fe00:1d4'
+          chassisIdType: mac
+          chassisIdValue: '02:00:00:00:01:d4'
+          remotePortType: ifname
+          remotePortValue: swp1
+          medInventory:
+            serial: SN0000000002
+            manufacturer: 'https://www.mellanox.com'
+            model: BlueField-3 DPU
+      properties:
+        macAddress:
+          type: string
+          description: 'MAC address of the Machine NIC on which the neighbor was observed'
+        localPort:
+          type: string
+          description: 'Name of the Machine local interface on which the neighbor was observed'
+        name:
+          type: string
+          description: 'System name advertised by the neighbor'
+        description:
+          type: string
+          description: 'System description advertised by the neighbor'
+        ipAddresses:
+          type: array
+          items:
+            type: string
+          description: 'Management addresses advertised by the neighbor'
+        chassisIdType:
+          type: string
+          description: 'LLDP chassis id subtype advertised by the neighbor (e.g. mac, local)'
+        chassisIdValue:
+          type: string
+          description: 'LLDP chassis id value advertised by the neighbor'
+        remotePortType:
+          type: string
+          description: 'LLDP port id subtype advertised by the neighbor (e.g. ifname, mac)'
+        remotePortValue:
+          type: string
+          description: 'LLDP port id value advertised by the neighbor'
+        medInventory:
+          oneOf:
+            - $ref: '#/components/schemas/MachineLldpMedInventory'
+            - type: 'null'
+          description: 'LLDP-MED inventory advertised by the neighbor. Always present; null when the neighbor does not advertise one.'
+      required:
+        - medInventory
+    MachineLldpMedInventory:
+      title: MachineLldpMedInventory
+      type: object
+      description: LLDP-MED inventory advertised by an LLDP neighbor (e.g. a BlueField DPU)
+      examples:
+        - serial: SN0000000002
+          manufacturer: 'https://www.mellanox.com'
+          model: BlueField-3 DPU
+      properties:
+        serial:
+          type:
+            - string
+            - 'null'
+          description: 'Serial number advertised by the neighbor'
+        manufacturer:
+          type:
+            - string
+            - 'null'
+          description: 'Manufacturer advertised by the neighbor'
+        model:
+          type:
+            - string
+            - 'null'
+          description: 'Model advertised by the neighbor'
     MachineBMCInfo:
       title: MachineBMCInfo
       type: object
@@ -28277,6 +29355,106 @@ components:
             - string
             - 'null'
           description: 'PCI BusId of the Machine''s GPU'
+    AggregateHealth:
+      title: AggregateHealth
+      type: object
+      description: Describes an aggregate hardware health report and its probe results and alerts
+      required:
+        - source
+        - observedAt
+        - successes
+        - alerts
+      examples:
+        - source: aggregate-host-health
+          observedAt: null
+          successes:
+            - id: FanSpeed
+              target: System Board Fan1A
+            - id: PowerSupply
+              target: PS1 Status
+          alerts:
+            - id: FailedValidationTest
+              target: DcgmFullShort
+              inAlertSince: null
+              message: Failed validation test
+              tenantMessage: null
+              classifications:
+                - PreventAllocations
+      properties:
+        source:
+          type: string
+          description: Describes how the health report was generated
+        observedAt:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: Date/time when health report was generated
+        successes:
+          type: array
+          items:
+            $ref: '#/components/schemas/HealthProbeSuccess'
+          description: Results from successful health probes for the resource
+        alerts:
+          type: array
+          items:
+            $ref: '#/components/schemas/HealthProbeAlert'
+          description: Results from failed health probes for the resource
+    HealthProbeSuccess:
+      title: HealthProbeSuccess
+      type: object
+      description: Describes a successful health probe result
+      required:
+        - id
+        - target
+      properties:
+        id:
+          type: string
+          description: Health probe identifier
+        target:
+          type:
+            - string
+            - 'null'
+          description: Specific component targeted by health probe
+    HealthProbeAlert:
+      title: HealthProbeAlert
+      type: object
+      description: Describes a failed health probe result
+      required:
+        - id
+        - target
+        - inAlertSince
+        - message
+        - tenantMessage
+        - classifications
+      properties:
+        id:
+          type: string
+          description: Health probe identifier
+        target:
+          type:
+            - string
+            - 'null'
+          description: Specific component targeted by health probe
+        inAlertSince:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: Date/time since the alert has been in effect
+        message:
+          type: string
+          description: Details of the failed health probe result
+        tenantMessage:
+          type:
+            - string
+            - 'null'
+          description: 'Information provided by Tenant, if any'
+        classifications:
+          type: array
+          items:
+            type: string
+          description: 'Classifications for this alert, category or impact'
     MachineHealth:
       title: MachineHealth
       type: object
@@ -28518,18 +29696,11 @@ components:
       type: object
       description: Associates a machine with an Instance Type
       examples:
-        - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
-          machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
+        - machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
           instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
           created: '2019-08-24T14:15:22Z'
           updated: '2019-08-24T14:15:22Z'
       properties:
-        id:
-          type: string
-          format: uuid
-          readOnly: true
-          description: 'Deprecated: Use `machineId` when identifying a Machine/Instance Type association. This field will be removed on July 9th, 2026 0:00 UTC.'
-          deprecated: true
         machineId:
           type: string
           description: 'ID of the associated Machine'
@@ -28557,7 +29728,7 @@ components:
       description: |-
         Associates one or more Machines with an Instance Type.
 
-        The Machine's capabilities must be a superset of the Instance Type's required capabilities for the association to succeed.
+        Each capability specified by the Instance Type must have a matching capability on the Machine. Specified fields—including count, cores, and threads—require exact equality; omitted or null optional fields impose no constraint. The Machine may have additional capabilities that the Instance Type does not specify.
       examples:
         - machineIds:
             - fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
@@ -28582,6 +29753,56 @@ components:
             - boolean
             - 'null'
           description: When true, the server is not locked down during host lifecycle management. When omitted, the existing value is preserved.
+    ExpectedMachineInterface:
+      title: ExpectedMachineInterface
+      type: object
+      description: Expected interface declaration. Each supplied list entry replaces the corresponding declaration, so preserve all returned attributes when editing it. Core validates role, primary selection, and allocation against the Site configuration.
+      examples:
+        - macAddress: '02:00:00:00:00:10'
+          nicType: CX9
+          fixedIp: '192.0.2.10'
+          primary: true
+          role: Host
+      properties:
+        macAddress:
+          type: string
+          pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
+          description: MAC address of the expected interface. Accepts six colon- or hyphen-separated octets in either case; stored and returned in uppercase colon-separated form, for example AA:BB:CC:DD:EE:FF. The same MAC may have separate IPv4 and IPv6 declarations.
+        nicType:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Optional NIC type. Use `CX9` for ConnectX-9 interfaces on Astra hosts.
+        fixedIp:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Optional fixed IPv4 or IPv6 address for the interface. It must not be unspecified, multicast, or IPv4 limited broadcast. REST preserves repeated MAC declarations without enforcing uniqueness by MAC and address family; Core applies allocation validation.
+        fixedMask:
+          type: [string, 'null']
+          description: Optional legacy mask string, forwarded unchanged. Omission or null clears it when replacing the declaration.
+        fixedGateway:
+          type: [string, 'null']
+          description: Optional IPv4 or IPv6 gateway. Omission, null, or an empty string clears it when replacing the declaration.
+        primary:
+          type: [boolean, 'null']
+          description: Host boot-interface selection. At most one Host interface per machine may set true. Omission or null clears the declaration. DpuOs and DpuBmc must omit it; HostBmc also accepts false.
+        networkSegmentType:
+          type: [string, 'null']
+          enum: [Tenant, Admin, Underlay, HostInband, null]
+          description: Optional segment constraint that takes precedence over nicType. Omission or null clears it. For explicit allocation policies and DPU roles it constrains relay-selected or fixed-address segments; legacy Host declarations without an explicit policy use it only for initial DHCP segment selection.
+        role:
+          type: [string, 'null']
+          enum: [Unspecified, Host, DpuOs, DpuBmc, HostBmc, null]
+          description: Interface owner. On create, omission, null, or Unspecified means Host. On update, omission or null preserves a matching stored role; Unspecified resets it to Host. At most one HostBmc is allowed, with the same MAC as bmcMacAddress.
+        ipAllocation:
+          type: [string, 'null']
+          enum: [Unspecified, Dynamic, Fixed, Retained, null]
+          description: On create, omission, null, or Unspecified infers Fixed from fixedIp, otherwise Retained for HostBmc and Dynamic for other roles. On update, omission or null preserves a matching stored policy while fixedIp presence is unchanged; Unspecified resets inference. Fixed requires fixedIp; Dynamic and Retained forbid it. Explicit Fixed, inferred DPU Fixed, and inferred HostBmc Fixed with a segment constraint require a containing managed prefix; legacy Host or inferred HostBmc Fixed without a constraint may use static assignments. Retained keeps a DHCP-allocated address for the interface row lifetime.
+      required:
+        - macAddress
     ExpectedMachine:
       title: ExpectedMachine
       type: object
@@ -28598,6 +29819,10 @@ components:
           fallbackDPUSerialNumbers:
             - DPU-001
             - DPU-002
+          interfaces:
+            - macAddress: '02:00:00:00:00:10'
+              nicType: CX9
+              fixedIp: '192.0.2.10'
           skuId: lenovo.sr650v2.cpu.1
           machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
           rackId: rack-01
@@ -28631,6 +29856,11 @@ components:
           description: Serial numbers of the Expected Machine's fallback DPUs (Data Processing Units)
           items:
             type: string
+        interfaces:
+          type: array
+          description: Expected host NIC declarations in their configured order
+          items:
+            $ref: '#/components/schemas/ExpectedMachineInterface'
         skuId:
           type:
             - string
@@ -28734,6 +29964,10 @@ components:
           fallbackDPUSerialNumbers:
             - DPU-001
             - DPU-002
+          interfaces:
+            - macAddress: '02:00:00:00:00:10'
+              nicType: CX9
+              fixedIp: '192.0.2.10'
           skuId: lenovo.sr650v2.cpu.1
           rackId: rack-01
           isDpfEnabled: true
@@ -28774,6 +30008,13 @@ components:
           description: Serial numbers of the Expected Machine's fallback DPUs (Data Processing Units)
           items:
             type: string
+        interfaces:
+          type:
+            - array
+            - 'null'
+          description: Optional expected host NIC declarations. Omission or null creates an empty list.
+          items:
+            $ref: '#/components/schemas/ExpectedMachineInterface'
         skuId:
           type:
             - string
@@ -28788,7 +30029,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
         name:
           type:
             - string
@@ -28845,6 +30086,34 @@ components:
         - siteId
         - bmcMacAddress
         - chassisSerialNumber
+    ExpectedMachineList:
+      title: ExpectedMachineList
+      type: object
+      description: Complete replacement set of Expected Machines for one Site. Every entry must use the top-level `siteId`; the array may be empty to clear the set.
+      examples:
+        - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+          expectedMachines:
+            - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+              bmcMacAddress: '00:1A:2B:3C:4D:5E'
+              chassisSerialNumber: CHASSIS-12345
+              defaultBmcUsername: admin
+              defaultBmcPassword: password123
+              labels:
+                rack: A1
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site whose Expected Machines should be replaced
+        expectedMachines:
+          type: array
+          description: Full desired Expected Machine set; BMC MAC addresses and chassis serial numbers must be unique
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ExpectedMachineCreateRequest'
+      required:
+        - siteId
+        - expectedMachines
     ExpectedMachineUpdateRequest:
       title: ExpectedMachineUpdateRequest
       type: object
@@ -28863,6 +30132,10 @@ components:
           skuId: sku-xyz789
           rackId: rack-02
           isDpfEnabled: false
+          interfaces:
+            - macAddress: '02:00:00:00:00:10'
+              nicType: CX9
+              fixedIp: '192.0.2.10'
           manufacturer: Lenovo
           labels:
             environment: staging
@@ -28916,6 +30189,13 @@ components:
           description: Serial numbers of the Expected Machine's fallback DPUs (Data Processing Units)
           items:
             type: string
+        interfaces:
+          type:
+            - array
+            - 'null'
+          description: Complete expected host NIC list. Omission or null preserves the current list; an explicit empty list clears it.
+          items:
+            $ref: '#/components/schemas/ExpectedMachineInterface'
         skuId:
           type:
             - string
@@ -28931,7 +30211,7 @@ components:
             - string
             - 'null'
           description: |-
-            Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value.
+            Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast. An empty string clears the value. Omission or null preserves the current value.
         name:
           type:
             - string
@@ -29132,7 +30412,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
         rackId:
           type:
             - string
@@ -29183,6 +30463,34 @@ components:
         - siteId
         - bmcMacAddress
         - shelfSerialNumber
+    ExpectedPowerShelfList:
+      title: ExpectedPowerShelfList
+      type: object
+      description: Complete replacement set of Expected Power Shelves for one Site. Every entry must use the top-level `siteId`; the array may be empty to clear the set.
+      examples:
+        - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+          expectedPowerShelves:
+            - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+              bmcMacAddress: '00:1A:2B:3C:4D:70'
+              shelfSerialNumber: SHELF-12345
+              defaultBmcUsername: admin
+              defaultBmcPassword: password123
+              labels:
+                rack: A1
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site whose Expected Power Shelves should be replaced
+        expectedPowerShelves:
+          type: array
+          description: Full desired Expected Power Shelf set; BMC MAC addresses and shelf serial numbers must be unique
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ExpectedPowerShelfCreateRequest'
+      required:
+        - siteId
+        - expectedPowerShelves
     ExpectedPowerShelfUpdateRequest:
       title: ExpectedPowerShelfUpdateRequest
       type: object
@@ -29247,7 +30555,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value. It must not be unspecified, multicast, or IPv4 limited broadcast.
         rackId:
           type:
             - string
@@ -29338,6 +30646,10 @@ components:
         rackProfileId:
           type: string
           description: Identifier of the Rack Profile this rack conforms to
+        rackGroupId:
+          type: [string, 'null']
+          description: External rack group ID selected and persisted at creation together with rackProfileId. Null for legacy rows without a recorded group; metadata updates preserve it.
+          example: group-01
         name:
           type: string
           description: Human-readable name of the Expected Rack
@@ -29362,7 +30674,7 @@ components:
       title: ExpectedRackCreateRequest
       type: object
       description: |-
-        Request data to create a new Expected Rack. Core finds the unique ExpectedRackGroup containing rackId and derives the profile as UPPERCASE_TOPOLOGY_ComputeManufacturer_SwitchManufacturer_PowerShelfManufacturer. Manufacturer case is preserved; absent power shelves use NO_POWERSHELF. Compute and switch members are required, each type must have one manufacturer, and the generated ID must exist in Core rack profile configuration.
+        Request data to create a new Expected Rack. Core finds the unique ExpectedRackGroup containing rackId; zero or multiple matches return an explicit validation error. rackGroupId is output-only, not a creation parameter. Core persists the inferred group ID and derives the profile as UPPERCASE_TOPOLOGY_VENDOR, appending _NO_POWERSHELF when that rack has no power shelf members. For protocol NVLINK_V6, a topology beginning with `gb` followed by digits and `_` is normalized to the `vr_` topology family for profile derivation, and Core records a warning. Across that rack's compute, switch, and power shelf manufacturers, case-insensitive matches select WIWYNN first, then LENOVO, then SMC (including Supermicro); otherwise the vendor is NVIDIA. For example, WiWynn compute trays, NVIDIA switches, and NVIDIA power shelves produce GB200_NVL72R1_C2G4_WIWYNN; without power shelf members they produce GB200_NVL72R1_C2G4_WIWYNN_NO_POWERSHELF. Compute and switch members are required, manufacturers must be nonblank, and the generated ID must exist in Core rack profile configuration.
 
         The `rackId` is an operator-supplied string identifier (not a UUID) that must be unique within the Site. Chassis identity and physical location information are conveyed via well-known label keys in `labels`:
         - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model`
@@ -29460,7 +30772,7 @@ components:
       description: |-
         Request data to update an existing Expected Rack.
 
-        Provide a non-null value for at least one of `rackId`, `rackProfileId`, `name`, `description`, or `labels`. An empty object or a body containing only `id` is rejected with HTTP 400. Providing the existing `rackId` alone satisfies this requirement; changing `rackId` is rejected. Empty names and descriptions are invalid. An empty `labels` object counts as an update and clears all existing labels.
+        Provide a non-null value for at least one of `rackId`, `name`, `description`, or `labels`. An empty object or a body containing only `id` is rejected with HTTP 400. Providing the existing `rackId` alone satisfies this requirement; changing `rackId` is rejected. Empty names and descriptions are invalid. An empty `labels` object counts as an update and clears all existing labels.
 
         For single updates, omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
 
@@ -29532,6 +30844,7 @@ components:
           rackGroupId: nvl5-gp1-jhb01
           siteId: f97df110-f4de-492e-8849-4a6af68026b0
           topology: gb200_nvl72r1_c2g4
+          protocol: NVLINK_V6
           racks:
             - rackId: rack-01
               members:
@@ -29575,6 +30888,11 @@ components:
         topology:
           type: string
           description: External group-level NVLink topology identifier.
+        protocol:
+          type:
+            - string
+            - 'null'
+          description: Rack fabric protocol. Null only for declarations created before protocol became required.
         racks:
           type: array
           description: Ordered racks and their devices. Arrays are always present, including empty lists. Rack IDs and device identity tuples are unique across the group, with case-sensitive comparison.
@@ -29614,6 +30932,7 @@ components:
         - siteId: f97df110-f4de-492e-8849-4a6af68026b0
           rackGroupId: nvl5-gp1-jhb01
           topology: gb200_nvl72r1_c2g4
+          protocol: NVLINK_V6
           racks:
             - rackId: rack-01
               members:
@@ -29647,6 +30966,11 @@ components:
           minLength: 1
           maxLength: 128
           description: External group-level NVLink topology identifier, non-blank and at most 128 characters.
+        protocol:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Rack fabric protocol, non-blank and at most 128 characters. `NVLINK_V6` enables GB-to-VR profile topology normalization.
         racks:
           type:
             - array
@@ -29677,6 +31001,7 @@ components:
         - siteId
         - rackGroupId
         - topology
+        - protocol
     ExpectedRackGroupList:
       title: ExpectedRackGroupList
       type: object
@@ -29688,6 +31013,7 @@ components:
             - siteId: f97df110-f4de-492e-8849-4a6af68026b0
               rackGroupId: nvl5-gp1-jhb01
               topology: gb200_nvl72r1_c2g4
+              protocol: NVLINK_V6
               racks: [{rackId: rack-01, members: []}, {rackId: rack-02, members: []}]
               name: NVL rack group 1
               description: Production NVL rack group in row A
@@ -29700,6 +31026,7 @@ components:
             - siteId: f97df110-f4de-492e-8849-4a6af68026b0
               rackGroupId: nvl5-gp2-jhb01
               topology: gb200_nvl72r1_c2g4
+              protocol: NVLINK_V6
               racks: [{rackId: rack-03, members: []}, {rackId: rack-04, members: []}]
               name: NVL rack group 2
               description: Production NVL rack group in row A
@@ -29734,6 +31061,7 @@ components:
           properties:
             rackGroupId: {type: 'null'}
             topology: {type: 'null'}
+            protocol: {type: 'null'}
             racks: {type: 'null'}
             name: {type: 'null'}
             description: {type: 'null'}
@@ -29745,7 +31073,7 @@ components:
 
         For updates (`PATCH /expected-rack-group/{id}`), omit `id` or set it to `null` to use the ID from the URL path. A supplied string must match the URL path UUID in lowercase, hyphenated form. Empty strings, invalid UUIDs, and mismatched IDs are rejected with HTTP 400.
 
-        Provide a non-null value for at least one of `rackGroupId`, `topology`, `racks`, `name`, `description`, or `labels`. An empty object, a body containing only `id`, or a body with all six fields omitted or set to `null` returns HTTP 400. Empty arrays for `racks`, empty objects for `labels`, and empty strings for `name` or `description` count as updates and clear those values.
+        Provide a non-null value for at least one of `rackGroupId`, `topology`, `protocol`, `racks`, `name`, `description`, or `labels`. An empty object, a body containing only `id`, or a body with all seven fields omitted or set to `null` returns HTTP 400. Empty arrays for `racks`, empty objects for `labels`, and empty strings for `name` or `description` count as updates and clear those values.
 
         The `rackGroupId` field is immutable on update. Providing its existing value alone satisfies the update requirement and still updates the modification time and sends the group to Core. Changing it returns HTTP 400.
 
@@ -29754,6 +31082,7 @@ components:
         - `location.region`, `location.datacenter`, `location.room`, `location.position`
       examples:
         - topology: gb300_nvl72r1_c2g4
+          protocol: NVLINK_V6
           racks: [{rackId: rack-01, members: []}, {rackId: rack-02, members: []}, {rackId: rack-03, members: []}]
           name: NVL rack group 1 (updated)
           description: Production NVL rack group in row A, expanded membership
@@ -29786,6 +31115,13 @@ components:
           minLength: 1
           maxLength: 128
           description: Optional replacement topology identifier, non-blank and at most 128 characters.
+        protocol:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 128
+          description: Optional replacement rack fabric protocol, non-blank and at most 128 characters. `NVLINK_V6` enables GB-to-VR profile topology normalization.
         racks:
           type:
             - array
@@ -29813,7 +31149,7 @@ components:
           propertyNames:
             pattern: '^[\x00-\x7F]+$'
           description: |-
-            User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location. Omission or null preserves existing labels; an empty object clears them. When labels is null, provide a non-null value for at least one of `rackGroupId`, `topology`, `racks`, `name`, or `description`.
+            User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location. Omission or null preserves existing labels; an empty object clears them. When labels is null, provide a non-null value for at least one of `rackGroupId`, `topology`, `protocol`, `racks`, `name`, or `description`.
     ExpectedRackGroupRack:
       type: object
       additionalProperties: false
@@ -29861,6 +31197,21 @@ components:
           type: string
           minLength: 1
           description: Non-blank opaque external device inventory identifier.
+    NvosInterface:
+      title: NvosInterface
+      type: object
+      additionalProperties: false
+      description: One NVOS ethernet port of an Expected Switch.
+      required:
+        - macAddress
+      properties:
+        macAddress:
+          type: string
+          pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
+          description: MAC address of this NVOS ethernet port.
+        isPrimary:
+          type: boolean
+          description: Whether this port is the primary (eth0) NVOS port that NICo manages through RMS. At most one port per switch can be primary; when no port is marked, the first port on a multi-port switch defaults to primary and a single-port switch is always its own primary.
     ExpectedSwitch:
       title: ExpectedSwitch
       type: object
@@ -29874,6 +31225,11 @@ components:
           bmcMacAddress: '00:1A:2B:3C:4D:5E'
           bmcIpAddress: '192.168.1.100'
           switchSerialNumber: SWITCH-12345
+          nvosInterfaces:
+            - macAddress: '00:1A:2B:3C:4D:60'
+              isPrimary: true
+            - macAddress: '00:1A:2B:3C:4D:61'
+              isPrimary: false
           nvosMacAddresses:
             - '00:1A:2B:3C:4D:60'
             - '00:1A:2B:3C:4D:61'
@@ -29902,10 +31258,16 @@ components:
         switchSerialNumber:
           type: string
           description: Serial number of the Expected Switch
+        nvosInterfaces:
+          type: array
+          description: NVOS ethernet ports of the Expected Switch, with the primary (eth0) port flagged. Array order is not stable across inventory synchronization; identify ports by MAC and use isPrimary for selection.
+          items:
+            $ref: '#/components/schemas/NvosInterface'
         nvosMacAddresses:
           type: array
           uniqueItems: true
-          description: MAC addresses of the Expected Switch's NvOS management interfaces
+          deprecated: true
+          description: Deprecated flat NVOS MAC list retained for v2 compatibility. Use `nvosInterfaces`. Responses emit both fields, and this array contains the same MACs in the same order as `nvosInterfaces`.
           items:
             type: string
             pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
@@ -29986,9 +31348,11 @@ components:
           switchSerialNumber: SWITCH-12345
           nvOsUsername: nvadmin
           nvOsPassword: nvpassword123
-          nvosMacAddresses:
-            - '00:1A:2B:3C:4D:60'
-            - '00:1A:2B:3C:4D:61'
+          nvosInterfaces:
+            - macAddress: '00:1A:2B:3C:4D:60'
+              isPrimary: true
+            - macAddress: '00:1A:2B:3C:4D:61'
+              isPrimary: false
           rackId: rack-01
           manufacturer: NVIDIA
           labels:
@@ -30007,14 +31371,13 @@ components:
           type:
             - string
             - 'null'
-          maxLength: 16
-          description: Username for accessing the Expected Switch's BMC
+          description: Username for accessing the Expected Switch's BMC (no API length limit; the BMC's username policy still applies)
         defaultBmcPassword:
           type:
             - string
             - 'null'
-          maxLength: 20
-          description: Password for accessing the Expected Switch's BMC
+          maxLength: 255
+          description: Password for accessing the Expected Switch's BMC (up to 255 characters; the BMC's password policy still applies)
         switchSerialNumber:
           type: string
           minLength: 1
@@ -30030,10 +31393,17 @@ components:
             - string
             - 'null'
           description: NvOS password for the Expected Switch
+        nvosInterfaces:
+          type: array
+          minItems: 1
+          description: Required NVOS ethernet ports of the Expected Switch. Mark one entry primary to choose eth0; when none is marked, the first entry on a multi-port switch defaults to primary and a single-port switch is always its own primary. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
+          items:
+            $ref: '#/components/schemas/NvosInterface'
         nvosMacAddresses:
           type: array
           uniqueItems: true
-          description: MAC addresses of the Expected Switch's NvOS management interfaces
+          deprecated: true
+          description: Deprecated and ignored. This field never configures NVOS ports or primary selection, regardless of its contents. Use `nvosInterfaces`, including in replace-all entries. Supplying both fields is allowed; only `nvosInterfaces` takes effect.
           items:
             type: string
             pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
@@ -30046,7 +31416,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
         name:
           type:
             - string
@@ -30092,6 +31462,38 @@ components:
         - siteId
         - bmcMacAddress
         - switchSerialNumber
+        - nvosInterfaces
+    ExpectedSwitchList:
+      title: ExpectedSwitchList
+      type: object
+      description: Complete replacement set of Expected Switches for one Site. Every entry must use the top-level `siteId`; the array may be empty to clear the set.
+      examples:
+        - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+          expectedSwitches:
+            - siteId: f97df110-f4de-492e-8849-4a6af68026b0
+              bmcMacAddress: '00:1A:2B:3C:4D:60'
+              switchSerialNumber: SWITCH-12345
+              nvosInterfaces:
+                - macAddress: '00:1A:2B:3C:4D:61'
+                  isPrimary: true
+              defaultBmcUsername: admin
+              defaultBmcPassword: password123
+              labels:
+                rack: A1
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site whose Expected Switches should be replaced
+        expectedSwitches:
+          type: array
+          description: Full desired Expected Switch set; BMC MAC addresses, serial numbers, and NVOS MAC addresses must be unique
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ExpectedSwitchCreateRequest'
+      required:
+        - siteId
+        - expectedSwitches
     ExpectedSwitchUpdateRequest:
       title: ExpectedSwitchUpdateRequest
       type: object
@@ -30105,9 +31507,11 @@ components:
           switchSerialNumber: SWITCH-54321
           nvOsUsername: newnvadmin
           nvOsPassword: newnvpassword123
-          nvosMacAddresses:
-            - '00:1A:2B:3C:4D:62'
-            - '00:1A:2B:3C:4D:63'
+          nvosInterfaces:
+            - macAddress: '00:1A:2B:3C:4D:62'
+              isPrimary: true
+            - macAddress: '00:1A:2B:3C:4D:63'
+              isPrimary: false
           rackId: rack-02
           manufacturer: NVIDIA
           labels:
@@ -30139,16 +31543,15 @@ components:
             - string
             - 'null'
           minLength: 1
-          maxLength: 16
-          description: Username for accessing the Expected Switch's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
+          description: Username for accessing the Expected Switch's BMC (no API length limit; the BMC's username policy still applies). Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
         defaultBmcPassword:
           type:
             - string
             - 'null'
           minLength: 1
           writeOnly: true
-          maxLength: 20
-          description: Password for accessing the Expected Switch's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
+          maxLength: 255
+          description: Password for accessing the Expected Switch's BMC (up to 255 characters; the BMC's password policy still applies). Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
         switchSerialNumber:
           type:
             - string
@@ -30169,10 +31572,17 @@ components:
           minLength: 1
           writeOnly: true
           description: NvOS password for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsUsername. Provide both fields when setting NVOS credentials for the first time.
+        nvosInterfaces:
+          type: array
+          minItems: 1
+          description: Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array is rejected because a switch must keep at least one NVOS port. Mark one entry primary to choose eth0. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
+          items:
+            $ref: '#/components/schemas/NvosInterface'
         nvosMacAddresses:
           type: array
           uniqueItems: true
-          description: MAC addresses of the Expected Switch's NvOS management interfaces
+          deprecated: true
+          description: Deprecated and ignored. Omitted, null, empty, and nonempty values all leave stored ports and primary selection unchanged. Use `nvosInterfaces` to replace ports. Supplying both fields is allowed; only `nvosInterfaces` takes effect.
           items:
             type: string
             pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
@@ -30185,7 +31595,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+          description: Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. An empty string clears the value. Omission or null preserves the current value. It must not be unspecified, multicast, or IPv4 limited broadcast.
         name:
           type:
             - string
@@ -30408,10 +31818,10 @@ components:
           items:
             $ref: '#/components/schemas/SkuInfinibandDevice'
         tpm:
-          type: array
-          description: TPM components
-          items:
-            $ref: '#/components/schemas/SkuTpm'
+          oneOf:
+            - $ref: '#/components/schemas/SkuTpm'
+            - type: 'null'
+          description: TPM component, null when the SKU has none
     SkuCpu:
       title: SkuCpu
       type: object
@@ -30790,7 +32200,6 @@ components:
           readOnly: true
         availablePrefixes:
           type: array
-          format: uuid
           description: |
             Example prefixes available to acquire
           items:
@@ -31092,7 +32501,7 @@ components:
     NetworkSecurityGroupRule:
       title: NetworkSecurityGroupRule
       type: object
-      description: Aggregation of Network Security Group rules
+      description: A Network Security Group rule matching either IPv4 or IPv6 traffic. Each rule must use the same IP version for its source and destination prefixes. A group can contain both IPv4 and IPv6 rules.
       properties:
         name:
           type:
@@ -31120,7 +32529,7 @@ components:
           example: 80-81
         protocol:
           type: string
-          description: 'Network protocol matched by the rule'
+          description: 'Network protocol matched by the rule. ICMP requires IPv4 prefixes; ICMP6 requires IPv6 prefixes. TCP, UDP, and ANY support either IP version.'
           enum:
             - TCP
             - UDP
@@ -31142,11 +32551,11 @@ components:
           description: 'Rule priority used to order evaluation'
         sourcePrefix:
           type: string
-          description: 'Source CIDR prefix matched by the rule'
+          description: 'Source IPv4 or IPv6 CIDR prefix matched by the rule. Must use the same IP version as destinationPrefix.'
           example: 10.5.44.0/24
         destinationPrefix:
           type: string
-          description: 'Destination CIDR prefix matched by the rule'
+          description: 'Destination IPv4 or IPv6 CIDR prefix matched by the rule. Must use the same IP version as sourcePrefix.'
           example: 10.5.44.0/24
       required:
         - direction
@@ -31343,6 +32752,60 @@ components:
         - Synced
         - Error
         - Deleting
+    SshKeyGroupSummary:
+      title: SshKeyGroupSummary
+      type: object
+      description: Summarizes an SSH Key Group
+      required:
+        - id
+        - name
+        - status
+        - created
+        - updated
+      examples:
+        - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+          name: reno-integration-sre
+          description: SRE access SSH keys for Reno Integration
+          version: fbc692b61ffef6fbfc38a3833f6b7e7ae508da75
+          status: Syncing
+          created: '2019-08-24T14:15:22Z'
+          updated: '2019-08-24T14:15:22Z'
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+          description: Unique UUID v4 identifier for the SSH Key Group
+        name:
+          type: string
+          readOnly: true
+          description: Name of the SSH Key Group
+        description:
+          type:
+            - string
+            - 'null'
+          readOnly: true
+          description: Description of the SSH Key Group
+        version:
+          type:
+            - string
+            - 'null'
+          readOnly: true
+          description: Keyset version of the SSH Key Group
+        status:
+          $ref: '#/components/schemas/SshKeyGroupStatus'
+          readOnly: true
+          description: Status of the SSH Key Group
+        created:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Date/time when the SSH Key Group was created
+        updated:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Date/time when the SSH Key Group was last updated
     SshKeyGroupSiteAssociation:
       title: SshKeyGroupSiteAssociation
       type: object
@@ -31753,6 +33216,8 @@ components:
         - repoURL
         - chartName
         - chartVersion
+        - serviceID
+        - deployInCluster
         - security
       properties:
         repoURL:
@@ -31768,6 +33233,15 @@ components:
           type: string
           minLength: 1
           description: Helm chart version
+        serviceID:
+          type: string
+          minLength: 1
+          description: Required immutable DPF workload identity. Its value must be unique case-insensitively among active NICo-managed DPF Helm services.
+        deployInCluster:
+          type: boolean
+          enum:
+            - false
+          description: Required DPF deployment location. NICo currently accepts only an explicit false value, which deploys the chart on DPUs.
         security:
           $ref: '#/components/schemas/DpuExtensionServiceDpfHelmChartSecurity'
         values:
@@ -31878,7 +33352,7 @@ components:
           serviceType: DpfHelmChart
           dpuTarget: AllActive
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
-          data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","security":{"privileged":true,"spiffe":{}},"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
+          data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","serviceID":"storage-client-v2","deployInCluster":false,"security":{"privileged":true,"spiffe":{}},"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
       properties:
         name:
           type: string
@@ -32342,9 +33816,7 @@ components:
       properties:
         source:
           type: string
-          description: Source of the error.
-          enum:
-            - nico
+          description: 'Source of the error, taken from `api.name` in the REST API server configuration file (`/app/config.yaml` in the supplied Kubernetes deployment; default API name `nico`). This is a configurable string, for example `nico` or `carbide`'
         message:
           type: string
           description: Message describing the error
@@ -32510,8 +33982,75 @@ components:
         tenants:
           type: array
           items:
-            $ref: '#/components/schemas/InstanceTypeStats'
+            $ref: '#/components/schemas/MachineInstanceTypeTenantStats'
           description: 'Per-tenant breakdown for this instance type'
+    MachineInstanceTypeTenantStats:
+      title: MachineInstanceTypeTenantStats
+      description: Per-tenant allocation stats for one Instance Type
+      type: object
+      required:
+        - id
+        - name
+        - allocated
+        - usedMachineStats
+      examples:
+        - id: f97df110-f4de-492e-8849-4a6af68026b0
+          name: qygdmg8oqik8
+          allocated: 4
+          usedMachineStats:
+            total: 4
+            initializing: 0
+            ready: 1
+            inUse: 3
+            error: 0
+            maintenance: 0
+            unknown: 0
+          allocations:
+            - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+              name: Echo Studios Allocations
+              allocated: 4
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: 'Unique UUID v4 identifier for the Tenant'
+        name:
+          type: string
+          description: 'Name of the Tenant'
+        allocated:
+          type: integer
+          description: 'Number of Machines allocated to this Tenant for this Instance Type'
+        usedMachineStats:
+          $ref: '#/components/schemas/MachineStatusBreakdown'
+          description: 'Usage status of Machines for this Tenant and Instance Type'
+        allocations:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineInstanceTypeTenantAllocationStats'
+          description: 'Individual Allocations for this Tenant and Instance Type'
+    MachineInstanceTypeTenantAllocationStats:
+      title: MachineInstanceTypeTenantAllocationStats
+      description: Stats for a single Allocation within a Tenant's Instance Type stats
+      type: object
+      required:
+        - id
+        - name
+        - allocated
+      examples:
+        - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+          name: Echo Studios Allocations
+          allocated: 4
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: 'Unique UUID v4 identifier for the Allocation'
+        name:
+          type: string
+          description: 'Name of the Allocation'
+        allocated:
+          type: integer
+          description: 'Number of Machines in this Allocation for the Instance Type'
     InstanceTypeStats:
       title: InstanceTypeStats
       description: Stats for an instance type including allocation details
@@ -32960,7 +34499,7 @@ components:
             and whitespace-containing strings are rejected, not treated as
             site-wide scope. The value is matched case-insensitively and is
             lowercased before the Tenant lookup and before it reaches Core. The
-            tenant must have an allocation and tenant identity configuration on
+            tenant must be associated with and have tenant identity configuration on
             the Site; only that organization's secrets are re-wrapped. The URL
             `{org}` separately identifies the provider authorizing the
             operation. If omitted or null, every row in the Site's tenant
@@ -33173,6 +34712,11 @@ components:
         placementInRack:
           $ref: '#/components/schemas/PlacementInRack'
           description: 'Physical placement of the DPU Machine within its Rack, when known'
+        lldpNeighbors:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineLldpNeighbor'
+          description: 'LLDP neighbors observed on the DPU ports, as last reported by the DPU agent. Empty when the DPU has not reported any neighbors.'
       required:
         - id
         - infrastructureProviderId
@@ -33180,6 +34724,7 @@ components:
         - hostMachineId
         - state
         - dpuNetworkConfig
+        - lldpNeighbors
     DpuMachineSummary:
       title: DpuMachineSummary
       type: object
@@ -33271,6 +34816,11 @@ components:
             - $ref: '#/components/schemas/PlacementInRack'
             - type: 'null'
           description: 'Physical placement of the DPU Machine within its Rack, when known'
+        lldpNeighbors:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineLldpNeighbor'
+          description: 'LLDP neighbors observed on the DPU ports, as last reported by the DPU agent. Empty when the DPU has not reported any neighbors.'
       required:
         - id
         - infrastructureProviderId
@@ -33287,6 +34837,7 @@ components:
         - dpuNetworkConfig
         - lastRebooted
         - placementInRack
+        - lldpNeighbors
     DpuMachineInterface:
       title: DpuMachineInterface
       type: object
@@ -33695,6 +35246,18 @@ components:
               value:
                 source: nico
                 message: Error handling API request
+                data: null
+    ConflictError:
+      description: Error response when the request conflicts with an existing resource or operation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/NICoAPIError'
+          examples:
+            example-1:
+              value:
+                source: nico
+                message: Expected Inventory for this Site is being updated; retry the request
                 data: null
     GatewayTimeoutError:
       description: |-

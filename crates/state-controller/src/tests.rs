@@ -156,7 +156,7 @@ async fn test_delete_outdated_iterations(pool: sqlx::PgPool) -> eyre::Result<()>
 
 #[derive(Debug, Default)]
 pub(crate) struct TestStateControllerIO {
-    history_writes: AtomicUsize,
+    pub(crate) history_writes: AtomicUsize,
 }
 
 #[derive(Debug, Clone)]

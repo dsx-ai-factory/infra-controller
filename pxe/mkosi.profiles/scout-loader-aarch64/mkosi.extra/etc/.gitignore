@@ -6,3 +6,7 @@
 !hostname
 !modprobe.d
 !modprobe.d/*.conf
+!systemd/
+!systemd/system/
+!systemd/system/systemd-network-generator.service.d/
+!systemd/system/systemd-network-generator.service.d/50-forge-scout-network.conf

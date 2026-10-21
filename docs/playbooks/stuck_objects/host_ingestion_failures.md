@@ -99,7 +99,7 @@ may correlate with a specific Scout release:
 
 ```bash
 nico-admin-cli -a <api-url> -f json machine show <host-machine-id> \
-  | jq -r '.last_scout_observed_version // "unknown"'
+  | jq -r '.status.last_scout_observed_version // "unknown"'
 ```
 
 The `last_scout_observed_version` value is updated whenever Scout registers the

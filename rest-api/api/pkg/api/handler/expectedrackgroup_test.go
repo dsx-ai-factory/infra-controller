@@ -18,6 +18,7 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -59,12 +60,14 @@ func TestReplaceAllExpectedRackGroupsHandler_Handle(t *testing.T) {
 			require.Contains(t, rec.Body.String(), "expectedRackGroups")
 		})
 	}
+
+	t.Run("concurrent requests reject the competing replacement", testReplaceAllExpectedRackGroupsHandlerConcurrentRequests)
 }
 
 func TestCreateExpectedRackGroupHandler_Handle(t *testing.T) {
 	testRackGroupMutation(t, "CreateExpectedRackGroup")
 	ctx, rec := rackGroupValidationContext(http.MethodPost,
-		`{"siteId":"550e8400-e29b-41d4-a716-446655440000","rackGroupId":"group","topology":"t","name":"机架"}`)
+		`{"siteId":"550e8400-e29b-41d4-a716-446655440000","rackGroupId":"group","topology":"t","protocol":"NVLINK_V6","name":"机架"}`)
 	require.NoError(t, NewCreateExpectedRackGroupHandler(nil, nil, nil).Handle(ctx))
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	require.Contains(t, rec.Body.String(), "name")
@@ -93,6 +96,129 @@ func TestDeleteExpectedRackGroupHandler_Handle(t *testing.T) {
 
 func TestDeleteAllExpectedRackGroupsHandler_Handle(t *testing.T) {
 	testRackGroupMutation(t, "DeleteAllExpectedRackGroups")
+	t.Run("concurrent complete mutation returns 409", testDeleteAllExpectedRackGroupsHandlerLockConflict)
+}
+
+func testDeleteAllExpectedRackGroupsHandlerLockConflict(t *testing.T) {
+	session := testExpectedRackInitDB(t)
+	t.Cleanup(func() { session.Close() })
+	ctx := context.Background()
+	require.NoError(t, session.DB.ResetModel(ctx, (*cdbm.ExpectedRackGroup)(nil)))
+	_, site, _ := testExpectedRackSetupTestData(t, session, "test")
+	user := &cdbm.User{
+		ID: uuid.New(), StarfleetID: cutil.GetPtr("delete-all-rack-group-user"),
+		OrgData: cdbm.OrgData{"test": cdbm.Org{Name: "test", Roles: []string{"FORGE_PROVIDER_ADMIN"}}},
+	}
+	_, err := session.DB.NewInsert().Model(user).Exec(ctx)
+	require.NoError(t, err)
+	original, err := cdbm.NewExpectedRackGroupDAO(session).Create(ctx, nil, cdbm.ExpectedRackGroupCreateInput{
+		ExpectedRackGroupID: uuid.New(), SiteID: site.ID, RackGroupID: "retained-group",
+		Topology: "retained-topology", CreatedBy: user.ID,
+	})
+	require.NoError(t, err)
+
+	client := &tmocks.Client{}
+	pool := sc.NewClientPool(nil)
+	pool.IDClientMap[site.ID.String()] = client
+	lockTx, err := cdb.BeginTx(ctx, session, nil)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, lockTx.Rollback()) }()
+	lockID := cdb.GetAdvisoryLockIDFromString(expectedInventoryMutationLockPrefix + site.ID.String())
+	require.NoError(t, lockTx.TryAcquireAdvisoryLock(ctx, lockID, nil))
+
+	c, rec := rackGroupValidationContext(http.MethodDelete, "")
+	c.Set("user", user)
+	c.SetParamValues("test", original.ID.String())
+	query := c.Request().URL.Query()
+	query.Set("siteId", site.ID.String())
+	c.Request().URL.RawQuery = query.Encode()
+	require.NoError(t, NewDeleteAllExpectedRackGroupsHandler(session, pool, common.GetTestConfig()).Handle(c))
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	client.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+
+	stored, err := cdbm.NewExpectedRackGroupDAO(session).Get(ctx, nil, original.ID, nil, false)
+	require.NoError(t, err)
+	require.Equal(t, original, stored)
+}
+
+func testReplaceAllExpectedRackGroupsHandlerConcurrentRequests(t *testing.T) {
+	session := testExpectedRackInitDB(t)
+	t.Cleanup(func() { session.Close() })
+	ctx := context.Background()
+	require.NoError(t, session.DB.ResetModel(ctx, (*cdbm.ExpectedRackGroup)(nil)))
+	_, site, _ := testExpectedRackSetupTestData(t, session, "test")
+	user := &cdbm.User{
+		ID:          uuid.New(),
+		StarfleetID: cutil.GetPtr("concurrent-rack-group-user"),
+		OrgData: cdbm.OrgData{"test": cdbm.Org{
+			Name: "test", Roles: []string{"FORGE_PROVIDER_ADMIN"},
+		}},
+	}
+	_, err := session.DB.NewInsert().Model(user).Exec(ctx)
+	require.NoError(t, err)
+
+	cfg := common.GetTestConfig()
+	pool := sc.NewClientPool(nil)
+	client := &tmocks.Client{}
+	pool.IDClientMap[site.ID.String()] = client
+	run := &tmocks.WorkflowRun{}
+	run.On("Get", mock.Anything, mock.Anything).Return(nil).Once()
+
+	handler := NewReplaceAllExpectedRackGroupsHandler(session, pool, cfg)
+	var invoke func(context.Context, string) (*httptest.ResponseRecorder, error)
+	var second *httptest.ResponseRecorder
+	var secondErr error
+	var coreRequest corev1.ExpectedRackGroupList
+	client.On("ExecuteWorkflow", mock.Anything, mock.Anything, "InvokeCoreGRPC", mock.Anything).Run(func(args mock.Arguments) {
+		request := args.Get(3).(grpcproxy.Request)
+		require.Equal(t, corev1.Forge_ReplaceAllExpectedRackGroups_FullMethodName, request.FullMethod)
+		require.NoError(t, protojson.Unmarshal(request.RequestJSON, &coreRequest))
+		second, secondErr = invoke(ctx, "group-b")
+	}).Return(run, nil).Once()
+	t.Cleanup(func() {
+		client.AssertExpectations(t)
+		run.AssertExpectations(t)
+	})
+
+	invoke = func(requestCtx context.Context, rackGroupID string) (*httptest.ResponseRecorder, error) {
+		body, marshalErr := json.Marshal(apim.APIReplaceAllExpectedRackGroupsRequest{
+			SiteID: site.ID.String(),
+			ExpectedRackGroups: []*apim.APIExpectedRackGroupCreateRequest{{
+				SiteID: site.ID.String(), RackGroupID: rackGroupID, Topology: "topology", Protocol: "NVLINK_V6",
+				Racks: []apim.APIExpectedRackGroupRack{},
+			}},
+		})
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		req := httptest.NewRequest(http.MethodPut, "/v2/org/test/nico/expected-rack-group/all", strings.NewReader(string(body)))
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		req = req.WithContext(requestCtx)
+		rec := httptest.NewRecorder()
+		request := echo.New().NewContext(req, rec)
+		request.Set("user", user)
+		request.SetParamNames("orgName")
+		request.SetParamValues("test")
+		return rec, handler.Handle(request)
+	}
+
+	first, firstErr := invoke(ctx, "group-a")
+	require.NoError(t, firstErr)
+	require.NoError(t, secondErr)
+	require.Equal(t, http.StatusOK, first.Code, first.Body.String())
+	require.Equal(t, http.StatusConflict, second.Code, second.Body.String())
+
+	var response []apim.APIExpectedRackGroup
+	require.NoError(t, json.Unmarshal(first.Body.Bytes(), &response))
+	require.Len(t, response, 1)
+	require.Equal(t, "group-a", response[0].RackGroupID)
+
+	var stored []cdbm.ExpectedRackGroup
+	require.NoError(t, session.DB.NewSelect().Model(&stored).Where("site_id = ?", site.ID).Scan(ctx))
+	require.Len(t, stored, 1)
+	require.Equal(t, "group-a", stored[0].RackGroupID)
+	require.Len(t, coreRequest.ExpectedRackGroups, 1)
+	require.Equal(t, "group-a", coreRequest.ExpectedRackGroups[0].GetRackGroupId().GetId())
 }
 
 type rackGroupConcurrentInsertHook struct {
@@ -224,7 +350,7 @@ func testRackGroupMutation(t *testing.T, workflowName string) {
 				user.OrgData = cdbm.OrgData{"other": cdbm.Org{Name: "other", Roles: []string{"FORGE_PROVIDER_ADMIN"}}}
 				_, _, _ = testExpectedRackSetupTestData(t, session, "other")
 			}
-			method, body := http.MethodPost, fmt.Sprintf(`{"siteId":%q,"rackGroupId":"new","topology":"new","racks":[{"rackId":"rack-01","members":[{"type":"NVSwitch","manufacturer":"NVIDIA","id":"switch-01"}]},{"rackId":"rack-02","members":[]}]}`, site.ID.String())
+			method, body := http.MethodPost, fmt.Sprintf(`{"siteId":%q,"rackGroupId":"new","topology":"new","protocol":"NVLINK_V6","racks":[{"rackId":"rack-01","members":[{"type":"NVSwitch","manufacturer":"NVIDIA","id":"switch-01"}]},{"rackId":"rack-02","members":[]}]}`, site.ID.String())
 			status := http.StatusCreated
 			var handle func(echo.Context) error
 			switch workflowName {
@@ -376,7 +502,7 @@ func testRackGroupRead(t *testing.T, list bool) {
 	require.NoError(t, err)
 	racks := []cdbm.ExpectedRackGroupRack{{RackID: "rack-01", Members: []cdbm.ExpectedRackGroupMember{{Type: cdbm.ExpectedRackGroupMemberTypeNVSwitch, Manufacturer: "NVIDIA", ID: "switch-01"}}}}
 	dao := cdbm.NewExpectedRackGroupDAO(session)
-	first, err := dao.Create(ctx, nil, cdbm.ExpectedRackGroupCreateInput{ExpectedRackGroupID: uuid.New(), SiteID: site.ID, RackGroupID: "group-a", Topology: "topology", Racks: racks, CreatedBy: user.ID})
+	first, err := dao.Create(ctx, nil, cdbm.ExpectedRackGroupCreateInput{ExpectedRackGroupID: uuid.New(), SiteID: site.ID, RackGroupID: "group-a", Topology: "topology", Protocol: cutil.GetPtr("NVLINK_V6"), Racks: racks, CreatedBy: user.ID})
 	require.NoError(t, err)
 	_, err = dao.Create(ctx, nil, cdbm.ExpectedRackGroupCreateInput{ExpectedRackGroupID: uuid.New(), SiteID: site.ID, RackGroupID: "group-b", Topology: "topology", CreatedBy: user.ID})
 	require.NoError(t, err)
@@ -426,11 +552,13 @@ func testRackGroupRead(t *testing.T, list bool) {
 					return
 				}
 				require.Equal(t, "group-a", rows[0].RackGroupID)
+				require.Equal(t, cutil.GetPtr("NVLINK_V6"), rows[0].Protocol)
 				require.Equal(t, apim.NewAPIExpectedRackGroup(first).Racks, rows[0].Racks)
 			} else {
 				var row apim.APIExpectedRackGroup
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &row))
 				require.Equal(t, "group-a", row.RackGroupID)
+				require.Equal(t, cutil.GetPtr("NVLINK_V6"), row.Protocol)
 				require.Equal(t, apim.NewAPIExpectedRackGroup(first).Racks, row.Racks)
 			}
 		})

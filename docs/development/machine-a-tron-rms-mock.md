@@ -1,4 +1,4 @@
-# Machine-a-tron RMS Mock
+# Machine-a-tron RMS Mock <Badge intent="info">v2.3</Badge> <Badge intent="launch" minimal>New</Badge>
 
 machine-a-tron hosts a mock of the Rack Management Service (RMS) gRPC API, so
 the NICo rack workflows that call RMS run against a simulated fleet with no RMS

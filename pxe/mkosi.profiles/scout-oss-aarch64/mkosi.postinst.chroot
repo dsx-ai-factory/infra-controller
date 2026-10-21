@@ -69,6 +69,9 @@ mkdir -p /etc/cloud/cloud.cfg.d
 cat >/etc/cloud/cloud.cfg.d/99-nico-scout.cfg <<'CLOUD_CFG'
 # Managed by the NICo Scout image build; see mkosi.postinst.chroot.
 ssh_quiet_keygen: true
+# Scout's networkd configuration manages its interfaces. Cloud-init must not
+# generate fallback DHCP configuration.
+network: {config: disabled}
 CLOUD_CFG
 
 # ============================================================================

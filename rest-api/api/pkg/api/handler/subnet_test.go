@@ -19,7 +19,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
@@ -279,7 +278,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -439,7 +438,7 @@ func TestSubnetHandler_Create(t *testing.T) {
 			reqBody:        string(errBodyIpamFail),
 			user:           tnu,
 			expectedErr:    true,
-			expectedErrMsg: "Could not create IPAM entry for Subnet. Details: given length:15 must be greater than prefix length:16",
+			expectedErrMsg: "Could not create IPAM entry for Subnet. Details: child prefix length must be at least the source prefix length: got 15, minimum 16",
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
@@ -550,7 +549,6 @@ func TestSubnetHandler_Create(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cipbh := CreateSubnetHandler{
@@ -628,9 +626,8 @@ func testCreateSubnet(t *testing.T, dbSession *cdb.Session, scp *sc.ClientPool, 
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
-	ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 	ec.SetRequest(ec.Request().WithContext(ctx))
 
 	tc := &tmocks.Client{}
@@ -704,6 +701,7 @@ func TestSubnetHandler_GetAll(t *testing.T) {
 
 	ts1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg1, tenant1.ID, site.ID, tnu.ID)
 	assert.NotNil(t, ts1)
+	common.TestBuildAllocation(t, dbSession, site, tenant1, "test-allocation-1", ipu)
 
 	vpc1 := testSubnetBuildVpc(t, dbSession, ip, tenant1, site, tnOrg1, "testVPC", cutil.GetPtr(cdbm.VpcEthernetVirtualizer), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
 	vpc2 := testSubnetBuildVpc(t, dbSession, ip, tenant2, site2, tnOrg1, "testVPC", cutil.GetPtr(cdbm.VpcEthernetVirtualizer), cdbm.VpcStatusReady, cutil.GetPtr(uuid.New()))
@@ -763,7 +761,7 @@ func TestSubnetHandler_GetAll(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                   string
@@ -1065,7 +1063,6 @@ func TestSubnetHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gash := GetAllSubnetHandler{
@@ -1230,7 +1227,7 @@ func TestSubnetHandler_Get(t *testing.T) {
 	require.NoError(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                   string
@@ -1391,7 +1388,6 @@ func TestSubnetHandler_Get(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := GetSubnetHandler{
@@ -1534,7 +1530,7 @@ func TestSubnetHandler_Update(t *testing.T) {
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -1677,7 +1673,6 @@ func TestSubnetHandler_Update(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tah := UpdateSubnetHandler{
@@ -1898,7 +1893,7 @@ func TestSubnetHandler_Delete(t *testing.T) {
 	assert.NotNil(t, ifc2)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -2028,7 +2023,6 @@ func TestSubnetHandler_Delete(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			tClient := tempClient

@@ -16,8 +16,13 @@ nico-admin-cli managed-host reset [--extended]
 
 ## DESCRIPTION
 
-Reset a managed host: tear down its instance and DPF resources, then
-re-ingest
+Reset a managed host: remove its Instance and DPF resources, then
+re-ingest it.
+
+If the host still has an Instance, Reset waits for every attached DPU to
+acknowledge Admin networking before deleting the Instance and releasing
+its network resources. An unreachable DPU can keep Reset waiting
+indefinitely. A started Reset cannot be canceled.
 
 ## OPTIONS
 
@@ -46,9 +51,9 @@ Print help (see a summary with -h)
 ## Examples
 
 ```sh
-nico-admin-cli managed-host reset set --machine 12345678-1234-5678-90ab-cdef01234567 --update-message "recovering wedged DPU"
-nico-admin-cli managed-host reset set --machine 12345678-1234-5678-90ab-cdef01234567 --allow-reset-with-instance --update-message "forced recovery"
-nico-admin-cli managed-host reset clear --machine 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli managed-host reset set --machine fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg --update-message "recovering wedged DPU"
+nico-admin-cli managed-host reset set --machine fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg --allow-reset-with-instance --update-message "forced recovery"
+nico-admin-cli managed-host reset clear --machine fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
 nico-admin-cli managed-host reset list
 ```
 

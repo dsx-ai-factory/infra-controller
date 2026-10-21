@@ -106,6 +106,12 @@ Run `make help` from the repo root to list the individual image targets
 `images-bfb-arm`). The sections below document the per-image build commands that
 these targets wrap, for when you need to build or debug a single image.
 
+The machine lifecycle test image is built separately with
+`make images-machine-lifecycle`, honoring `NICO_ARCHES`, `IMAGE_REGISTRY`, and
+`IMAGE_TAG` like the targets above. It is a QA tool rather than part of the
+deployable stack, so `images-all` does not include it. See
+`tests/machine-lifecycle/README.md` for what the image runs.
+
 ### Verifying the build
 
 After `make images-all` or `make images-all-arm` completes, verify that each

@@ -4,6 +4,7 @@
 
 {% block content %}
 <div id="json">
+	<a id="console-logs-link" href="/admin/machine/{{ id }}/console-logs">Console Logs</a>
 	{% if !Self::logs_link_template().is_empty() %}
 	<a id="logs-link" href="" target="_blank">Logs</a>
 	{% endif %}

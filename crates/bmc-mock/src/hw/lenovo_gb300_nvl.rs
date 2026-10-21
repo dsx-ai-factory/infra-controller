@@ -296,6 +296,7 @@ impl LenovoGB300Nvl<'_> {
                     .build()
                 })
                 .collect(),
+            advertise_legacy_http_push_uri: true,
             host_bmc_inventory_id: Some("BMC".to_string()),
             host_uefi_inventory_id: None,
             ..Default::default()

@@ -13,8 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::str::FromStr;
+
 use ::rpc::forge as rpc;
 use carbide_uuid::machine::MachineId;
+use model::lldp::LldpNeighbor;
+use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
@@ -30,23 +34,44 @@ pub(crate) async fn report_lldp_neighbors(
 ) -> Result<Response<()>, Status> {
     log_request_data(&request);
 
-    let request = request.into_inner();
-    let machine_id = convert_and_log_machine_id(request.machine_id.as_ref())?;
+    let machine_id = convert_and_log_machine_id(request.get_ref().machine_id.as_ref())?;
+    if !api.runtime_config.bypass_rbac {
+        let id_str = request
+            .extensions()
+            .get::<crate::auth::AuthContext>()
+            .and_then(|ctx| ctx.get_spiffe_machine_id())
+            .ok_or_else(|| {
+                CarbideError::ClientCertificateMissingInformation(
+                    "LLDP report must include a valid machine SPIFFE certificate".into(),
+                )
+            })?;
+        let caller_machine_id = MachineId::from_str(id_str).map_err(|_| {
+            CarbideError::ClientCertificateMissingInformation(
+                "machine ID in SPIFFE certificate is invalid".into(),
+            )
+        })?;
+        if caller_machine_id != machine_id {
+            return Err(CarbideError::PermissionDeniedError(format!(
+                "machine {caller_machine_id} cannot report LLDP neighbors for machine {machine_id}"
+            ))
+            .into());
+        }
+    }
     let report = request
+        .into_inner()
         .report
         .ok_or(CarbideError::MissingArgument("report"))?;
 
-    handle_lldp_report(api, &machine_id, &report).await?;
+    let mut txn = api.txn_begin().await?;
+    handle_lldp_report(&mut txn, &machine_id, report).await?;
+    txn.commit().await?;
     Ok(Response::new(()))
 }
 
-// Nothing is awaited yet because the handler only classifies and logs; the persistence PR adds
-// the database writes.
-#[expect(clippy::unused_async, reason = "persistence lands in the next PR")]
 pub(crate) async fn handle_lldp_report(
-    _api: &Api,
+    txn: &mut PgConnection,
     machine_id: &MachineId,
-    report: &rpc::LldpReport,
+    report: rpc::LldpReport,
 ) -> Result<(), CarbideError> {
     let result = rpc::LldpReportResult::try_from(report.result).map_err(|_| {
         CarbideError::InvalidArgument(format!("unknown LLDP report result {}", report.result))
@@ -59,13 +84,13 @@ pub(crate) async fn handle_lldp_report(
             "LLDP report result is unspecified".to_string(),
         )),
         rpc::LldpReportResult::Updated => {
-            tracing::debug!(
-                %machine_id,
-                interfaces = report.interfaces.len(),
-                "Received LLDP neighbor report (not persisted yet)"
-            );
-            // TODO Add handling logic in the next PR
-            Ok(())
+            let neighbors = report
+                .interfaces
+                .into_iter()
+                .map(LldpNeighbor::try_from)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(CarbideError::from)?;
+            store_neighbors(txn, machine_id, &neighbors).await
         }
         // The reporter has already confirmed nothing changed, so what nico-api
         // holds is still current.
@@ -76,9 +101,22 @@ pub(crate) async fn handle_lldp_report(
         // The machine could not read its neighbors. This repeats on every poll while
         // collection keeps failing, and the reporter re-sends its full snapshot on
         // recovery.
+        // TODO: decide whether stored neighbors should be cleared or marked stale after a
+        // failed collection instead of being kept as the last known topology.
         rpc::LldpReportResult::CollectionFailed => {
             tracing::warn!(%machine_id, "Reporter could not collect LLDP neighbors");
             Ok(())
         }
     }
+}
+
+/// Replace the machine's stored neighbors with new ones.
+async fn store_neighbors(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+    neighbors: &[LldpNeighbor],
+) -> Result<(), CarbideError> {
+    db::machine_lldp_neighbor::replace_all(txn, machine_id, neighbors).await?;
+    tracing::debug!(%machine_id, neighbors = neighbors.len(), "Stored LLDP neighbors");
+    Ok(())
 }

@@ -37,6 +37,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Internal dependencies. PLEASE KEEP ALPHABETIZED ORDER.
+cert-manager = { path = "../cert-manager" }
 carbide-api-core = { path = "../api-core", default-features = false }
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-web = { path = "../api-web" }
@@ -48,12 +49,14 @@ carbide-metrics-utils = { path = "../metrics-utils" }
 carbide-secrets = { path = "../secrets" }
 carbide-site-explorer = { path = "../site-explorer" }
 carbide-version = { path = "../version" }
+carbide-utils = { path = "../utils", default-features = false, features = ["shutdown-handler"] }
 logfmt = { path = "../logfmt" }
 metrics-endpoint = { path = "../metrics-endpoint" }
 spancounter = { path = "../spancounter" }
 sqlx-query-tracing = { path = "../sqlx-query-tracing" }
 
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
+async-trait = { workspace = true }
 clap = { workspace = true }
 eyre = { workspace = true }
 ipnetwork = { workspace = true }

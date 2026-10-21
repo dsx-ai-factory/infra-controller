@@ -99,10 +99,11 @@ func TestAuthProcessor(t *testing.T) {
 	testServer := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
 		if strings.Contains(req.URL.Path, "/kas") {
 			res.WriteHeader(http.StatusOK)
-			res.Write([]byte(legacyKasJwks))
+			// Mock response writes are best-effort if the client closes the connection.
+			_, _ = res.Write([]byte(legacyKasJwks))
 		} else if strings.Contains(req.URL.Path, "/ssa") {
 			res.WriteHeader(http.StatusOK)
-			res.Write([]byte(ssaJwks))
+			_, _ = res.Write([]byte(ssaJwks))
 		} else {
 			res.WriteHeader(http.StatusNotFound)
 		}
@@ -518,10 +519,10 @@ func TestValidateJWTTokens_WithoutExpiration(t *testing.T) {
 	testServer := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
 		if strings.Contains(req.URL.Path, "/kas") {
 			res.WriteHeader(http.StatusOK)
-			res.Write([]byte(legacyKasJwks))
+			_, _ = res.Write([]byte(legacyKasJwks))
 		} else if strings.Contains(req.URL.Path, "/ssa") {
 			res.WriteHeader(http.StatusOK)
-			res.Write([]byte(ssaJwks))
+			_, _ = res.Write([]byte(ssaJwks))
 		} else {
 			res.WriteHeader(http.StatusNotFound)
 		}
@@ -705,11 +706,11 @@ func TestHandlerInterface_TokenOriginRouting(t *testing.T) {
 		case strings.Contains(req.URL.Path, "/ssa"):
 			res.Header().Set("Content-Type", "application/json")
 			res.WriteHeader(http.StatusOK)
-			res.Write([]byte(ssaJwks))
+			_, _ = res.Write([]byte(ssaJwks))
 		case strings.Contains(req.URL.Path, "/kas"):
 			res.Header().Set("Content-Type", "application/json")
 			res.WriteHeader(http.StatusOK)
-			res.Write([]byte(legacyKasJwks))
+			_, _ = res.Write([]byte(legacyKasJwks))
 		default:
 			res.WriteHeader(http.StatusNotFound)
 		}
@@ -861,7 +862,7 @@ func TestProcessorInterface_ErrorScenarios(t *testing.T) {
 				return httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
 					res.Header().Set("Content-Type", "application/json")
 					res.WriteHeader(http.StatusOK)
-					res.Write([]byte(ssaJwks))
+					_, _ = res.Write([]byte(ssaJwks))
 				}))
 			},
 			issuer:        ssaIssuer,
@@ -878,7 +879,7 @@ func TestProcessorInterface_ErrorScenarios(t *testing.T) {
 				return httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
 					res.Header().Set("Content-Type", "application/json")
 					res.WriteHeader(http.StatusOK)
-					res.Write([]byte(legacyKasJwks))
+					_, _ = res.Write([]byte(legacyKasJwks))
 				}))
 			},
 			issuer:        kasIssuer,
@@ -892,7 +893,7 @@ func TestProcessorInterface_ErrorScenarios(t *testing.T) {
 				return httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
 					res.Header().Set("Content-Type", "application/json")
 					res.WriteHeader(http.StatusOK)
-					res.Write([]byte(ssaJwks))
+					_, _ = res.Write([]byte(ssaJwks))
 				}))
 			},
 			issuer:        ssaIssuer,
@@ -977,7 +978,7 @@ func TestProcessorInterface_Mapping(t *testing.T) {
 	testServer := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
 		res.Header().Set("Content-Type", "application/json")
 		res.WriteHeader(http.StatusOK)
-		res.Write([]byte(ssaJwks)) // Use valid JWKS
+		_, _ = res.Write([]byte(ssaJwks)) // Use valid JWKS
 	}))
 	defer testServer.Close()
 

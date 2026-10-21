@@ -13,7 +13,8 @@
 {{- $supplementalCmName := default "" (get $supplementalNetworkConfig "name") -}}
 {{- $supplementalCmKey := default "supplemental.json" (get $supplementalNetworkConfig "key") -}}
 {{- /* The agent's config.toml is needed by any section that sets a key in it. */ -}}
-{{- $agentConfigEnabled := or .Values.fmds.sign_proxy_url $supplementalCmName -}}
+{{- $prometheusDisabled := eq (toString .Values.prometheusEnabled) "false" -}}
+{{- $agentConfigEnabled := or .Values.fmds.sign_proxy_url $supplementalCmName .Values.metricsPort $prometheusDisabled -}}
 {{- $podAnnotations := .Values.serviceDaemonSet.annotations -}}
 {{- if $agentConfigEnabled -}}
 {{- $podAnnotations = omit $podAnnotations "checksum/machine-identity-config" -}}
@@ -155,6 +156,16 @@ spec:
             - "--dhcp-server-interface-prepend={{ .Values.dhcp_server.interface_prepend }}"
             {{ end }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if not $prometheusDisabled }}
+          ports:
+            - name: metrics
+              containerPort: {{ include "nico-dpu-agent.metricsPort" . | int }}
+              protocol: TCP
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- end }}
           {{- with toYaml .Values.serviceDaemonSet.resources }}
           resources:
             limits:

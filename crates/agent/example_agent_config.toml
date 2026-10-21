@@ -32,6 +32,8 @@ address = "0.0.0.0:7777"
 
 [telemetry]
 metrics-address = "0.0.0.0:8888"
+# Set to false to stop serving /metrics and /ready (readiness is bound to this endpoint). Default: true.
+prometheus-enabled = true
 
 # Optional [machine-identity]: rate limits and timeouts for GET …/meta-data/identity (e.g. /latest/meta-data/identity).
 # If you omit this section, defaults are: requests-per-second=3, burst=8,

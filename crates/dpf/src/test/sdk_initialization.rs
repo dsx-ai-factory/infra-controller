@@ -48,6 +48,8 @@ use crate::sdk::ResourceLabeler;
 use crate::types::*;
 
 const TEST_NS: &str = "sdk-init-ns";
+const MIGRATION_MARKER_SERVICE_NAME: &str = "migration-marker";
+const MIGRATION_MARKER_RESOURCE_NAME: &str = "migration-marker-bf4astra";
 
 fn ns_key(ns: &str, name: &str) -> String {
     format!("{}/{}", ns, name)
@@ -59,6 +61,21 @@ fn resource_key<T: Resource>(r: &T) -> String {
         r.meta().namespace.as_deref().unwrap_or(""),
         r.meta().name.as_deref().unwrap_or("")
     )
+}
+
+/// Consumes one keyed repository failure so the same persisted mock can succeed on retry.
+fn consume_service_interface_failure(
+    failures: &DashMap<String, ()>,
+    key: &str,
+    operation: &str,
+) -> Result<(), DpfError> {
+    // Consume the injected failure so a restart can retry against the retained repository state.
+    if failures.remove(key).is_some() {
+        return Err(DpfError::InvalidState(format!(
+            "injected DPUServiceInterface {operation} failure for {key}"
+        )));
+    }
+    Ok(())
 }
 
 /// Stores test resources in shared Arc-backed maps so every clone observes the same cluster state.
@@ -74,9 +91,17 @@ struct InitializationMock {
     service_configs: Arc<DashMap<String, DPUServiceConfiguration>>,
     nads: Arc<DashMap<String, DPUServiceNAD>>,
     service_interfaces: Arc<DashMap<String, DPUServiceInterface>>,
+    service_interface_get_failures: Arc<DashMap<String, ()>>, // Fails one GET per key.
+    service_interface_apply_failures: Arc<DashMap<String, ()>>, // Fails one APPLY per key.
+    service_interface_delete_failures: Arc<DashMap<String, ()>>, // Fails one DELETE per key.
     blocked_service_interface_deletes: Arc<DashMap<String, ()>>,
+    deferred_service_interface_deletes: Arc<DashMap<String, ()>>,
+    deferred_service_interface_applies: Arc<DashMap<String, ()>>, // Holds named applies.
+    service_interface_delete_requests: Arc<DashMap<String, usize>>,
     service_interface_delete_started: Arc<Notify>,
     service_interface_delete_release: Arc<Notify>,
+    service_interface_apply_started: Arc<Notify>, // Signals the held apply.
+    service_interface_apply_release: Arc<Notify>, // Releases a held apply.
     configs: Arc<DashMap<String, BTreeMap<String, String>>>,
     secrets: Arc<DashMap<String, BTreeMap<String, Vec<u8>>>>,
 }
@@ -152,6 +177,85 @@ fn unscoped_astra_config() -> InitDpfResourcesConfig {
         deployment_type: DpuDeploymentType::Bf4Astra,
         ..Default::default()
     }
+}
+
+/// Establishes the exact topology-free scoped Astra state emitted by predecessor initialization so
+/// migration tests exercise a real persisted starting point rather than a hand-built approximation.
+async fn seed_pre_topology_scoped_astra(
+    mock: &InitializationMock,
+) -> crate::sdk::DpfSdk<InitializationMock, InitializationLabeler> {
+    // Supply the runtime configuration required while rendering Astra's fixed xplane files.
+    mock.configs.insert(
+        ns_key(TEST_NS, "ra2.2-runtime"),
+        BTreeMap::from([(
+            "RA2.2-runtime.yaml".to_string(),
+            "runtimeConfig:\n  roce: []\n".to_string(),
+        )]),
+    );
+
+    // Apply the predecessor inventory through the public split-initialization path.
+    let sdk = crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+        .with_labeler(InitializationLabeler)
+        .build_without_resources()
+        .await
+        .unwrap();
+    sdk.create_initialization_objects(&InitDpfResourcesConfig {
+        deployment_scoped_service_interfaces: true,
+        ..unscoped_astra_config()
+    })
+    .await
+    .expect("topology-free scoped Astra initialization must establish the old state");
+
+    sdk
+}
+
+/// Provides a topology-backed migration config with a marker that distinguishes predecessor
+/// publication from successful completion.
+fn topology_backed_astra_config_with_marker() -> InitDpfResourcesConfig {
+    // Extend the normal service registry with one resource that appears only after publication.
+    let mut services = crate::services::default_services(&crate::ServiceRegistryConfig::default());
+    services.push(ServiceDefinition::new(
+        MIGRATION_MARKER_SERVICE_NAME,
+        "repo",
+        "chart",
+        "1.0.0",
+    ));
+    // Layer scoped topology onto the topology-free predecessor so callers exercise migration.
+    InitDpfResourcesConfig {
+        deployment_scoped_service_interfaces: true,
+        intercept_bridging: Some(configured_intercept_bridging()),
+        services,
+        ..unscoped_astra_config()
+    }
+}
+
+/// Asserts migration-only service resources remain unpublished so initial and restarted attempts
+/// can be observed before their interface inventory is complete.
+async fn assert_astra_migration_marker_unpublished(mock: &InitializationMock) {
+    // The marker resources must remain absent until the migration's topology interfaces are complete.
+    assert!(
+        DpuServiceTemplateRepository::get(mock, MIGRATION_MARKER_RESOURCE_NAME, TEST_NS)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        DpuServiceConfigurationRepository::get(mock, MIGRATION_MARKER_RESOURCE_NAME, TEST_NS)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // The predecessor remains published but must not reference the unpublished marker service.
+    let predecessor_deployment = DpuDeploymentRepository::get(mock, "astra-deployment", TEST_NS)
+        .await
+        .unwrap()
+        .expect("the predecessor deployment must remain published");
+    assert!(
+        !predecessor_deployment
+            .spec
+            .services
+            .contains_key(MIGRATION_MARKER_SERVICE_NAME)
+    );
 }
 
 /// Asserts every DPF initialization CR store is empty so both public paths prove no-write safety.
@@ -416,12 +520,15 @@ impl DpuServiceNADRepository for InitializationMock {
 #[async_trait]
 impl DpuServiceInterfaceRepository for InitializationMock {
     async fn get(&self, name: &str, ns: &str) -> Result<Option<DPUServiceInterface>, DpfError> {
-        Ok(self
-            .service_interfaces
-            .get(&ns_key(ns, name))
-            .map(|r| r.clone()))
+        let key = ns_key(ns, name);
+        consume_service_interface_failure(&self.service_interface_get_failures, &key, "get")?;
+        Ok(self.service_interfaces.get(&key).map(|r| r.clone()))
     }
-    async fn list(&self, ns: &str) -> Result<Vec<DPUServiceInterface>, DpfError> {
+    async fn list(
+        &self,
+        ns: &str,
+        _label_selector: Option<&str>,
+    ) -> Result<Vec<DPUServiceInterface>, DpfError> {
         let prefix = format!("{}/", ns);
         Ok(self
             .service_interfaces
@@ -431,19 +538,62 @@ impl DpuServiceInterfaceRepository for InitializationMock {
             .collect())
     }
     async fn apply(&self, iface: &DPUServiceInterface) -> Result<DPUServiceInterface, DpfError> {
+        let key = resource_key(iface);
+        consume_service_interface_failure(&self.service_interface_apply_failures, &key, "apply")?;
+        // A canceled task leaves earlier applies persisted while this selected replacement remains
+        // absent, matching an interrupted sequence of Kubernetes requests.
+        if self.deferred_service_interface_applies.contains_key(&key) {
+            self.service_interface_apply_started.notify_one();
+            self.service_interface_apply_release.notified().await;
+        }
+
+        self.service_interfaces.insert(key, iface.clone());
+        Ok(iface.clone())
+    }
+
+    async fn create(&self, iface: &DPUServiceInterface) -> Result<DPUServiceInterface, DpfError> {
         self.service_interfaces
             .insert(resource_key(iface), iface.clone());
         Ok(iface.clone())
     }
 
+    async fn patch(
+        &self,
+        _name: &str,
+        _namespace: &str,
+        _patch: serde_json::Value,
+    ) -> Result<DPUServiceInterface, DpfError> {
+        Err(DpfError::InvalidState(
+            "initialization must not patch retained dynamic service interfaces".to_string(),
+        ))
+    }
+
     async fn delete(&self, name: &str, ns: &str) -> Result<(), DpfError> {
         let key = ns_key(ns, name);
+        self.service_interface_delete_requests
+            .entry(key.clone())
+            .and_modify(|count| *count += 1)
+            .or_insert(1);
+        consume_service_interface_failure(&self.service_interface_delete_failures, &key, "delete")?;
+        if self.deferred_service_interface_deletes.contains_key(&key) {
+            self.service_interface_delete_started.notify_one();
+            return Ok(());
+        }
         if self.blocked_service_interface_deletes.contains_key(&key) {
             self.service_interface_delete_started.notify_one();
             self.service_interface_delete_release.notified().await;
         }
         self.service_interfaces.remove(&key);
         Ok(())
+    }
+
+    async fn delete_if_current(
+        &self,
+        name: &str,
+        ns: &str,
+        _preconditions: &DpfDeletePreconditions,
+    ) -> Result<(), DpfError> {
+        <Self as DpuServiceInterfaceRepository>::delete(self, name, ns).await
     }
 }
 
@@ -591,6 +741,33 @@ async fn test_create_initialization_objects() {
             .is_none()
     );
 
+    assert!(
+        DpuServiceInterfaceRepository::get(&mock, "pf1hpf", TEST_NS)
+            .await
+            .unwrap()
+            .is_none(),
+        "BF3 must not create a ServiceInterface for the hidden host PF1"
+    );
+    let deployment = deployment.unwrap();
+    assert!(
+        deployment
+            .spec
+            .service_chains
+            .unwrap()
+            .switches
+            .iter()
+            .all(|switch| {
+                switch.ports.iter().all(|port| {
+                    port.service_interface.as_ref().is_none_or(|interface| {
+                        interface
+                            .match_labels
+                            .get("interface")
+                            .is_none_or(|name| name != "pf1hpf")
+                    })
+                })
+            })
+    );
+
     let secret = K8sConfigRepository::get_secret(&mock, "bmc-shared-password", TEST_NS)
         .await
         .unwrap();
@@ -621,27 +798,56 @@ async fn sf_overflow_fails_before_initialization_writes() {
 }
 
 /// Verifies one-shot Astra initialization rejects global interfaces before its first write.
+/// Qualified local SF references must also fail before writes so SDK namespace forwarding
+/// cannot bypass the direct SF-consumer boundary.
 #[tokio::test]
 async fn unscoped_astra_builder_initialization_writes_nothing() {
-    // Attempt an otherwise valid Astra initialization through the public builder.
-    let mock = InitializationMock::default();
-    let result = crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
-        .with_labeler(InitializationLabeler)
-        .initialize(&unscoped_astra_config())
-        .await;
+    // Target namespace qualification is the variable; the existing fixture supplies Astra defaults.
+    let mut qualified = unscoped_astra_config();
+    qualified.deployment_scoped_service_interfaces = true; // Pass the earlier scoping check.
+    qualified.services.push(ServiceDefinition {
+        interfaces: vec![ServiceInterface {
+            name: "direct_dhcp_if".to_string(), // Absent from effective service chains.
+            network: format!("{TEST_NS}/mybrsfc-dhcp-bf4astra"), // Names the local rendered NAD.
+        }],
+        service_nads: vec![ServiceNAD {
+            name: "mybrsfc-dhcp".to_string(), // Emitted with the Astra deployment suffix.
+            bridge: Some("br-sfc".to_string()),
+            resource_type: ServiceNADResourceType::Sf, // Makes the unchained consumer unsupported.
+            ipam: Some(false),
+            mtu: Some(1500),
+        }],
+        ..ServiceDefinition::new(DHCP_SERVER_SERVICE_NAME, "repo", "chart", "1")
+    });
 
-    // Pure preflight must reject before the builder writes even its shared Secret.
-    let Err(error) = result else {
-        panic!("unscoped Astra initialization must fail");
-    };
-    assert!(matches!(&error, DpfError::ConfigError(_)));
-    assert!(
-        error
-            .to_string()
-            .contains("BF4 Astra requires deployment_scoped_service_interfaces=true")
-    );
-    assert!(mock.secrets.is_empty());
-    assert_no_initialization_crs(&mock);
+    for (config, expected_error) in [
+        // Retain protection against global interfaces binding Astra nodes.
+        (
+            unscoped_astra_config(),
+            "BF4 Astra requires deployment_scoped_service_interfaces=true",
+        ),
+        // The SDK must supply its namespace before committing even the shared Secret.
+        (
+            qualified,
+            "BF4 Astra does not support direct SF-NAD consumers outside service chains",
+        ),
+    ] {
+        // Exercise the public initializer with a fresh repository for each failure boundary.
+        let mock = InitializationMock::default();
+        let result =
+            crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+                .with_labeler(InitializationLabeler)
+                .initialize(&config)
+                .await;
+
+        // Require the intended preflight failure and prove it precedes all initialization writes.
+        let Err(DpfError::ConfigError(message)) = result else {
+            panic!("invalid Astra initialization must fail during preflight");
+        };
+        assert_eq!(message, expected_error);
+        assert!(mock.secrets.is_empty());
+        assert_no_initialization_crs(&mock);
+    }
 }
 
 /// Verifies split-phase Astra initialization preserves its existing Secret and writes no CRs.
@@ -675,92 +881,327 @@ async fn unscoped_astra_split_initialization_writes_no_resources() {
     assert_no_initialization_crs(&mock);
 }
 
-/// Verifies the public initialization path rejects split HBN topology and emits matching
-/// configuration and chain references when the SDK-generated service interface is supplied.
+/// Verifies public initialization persists aligned HBN configuration and chain references.
+/// BF3's legacy BFB path and generic BF4's scoped software path must both retain slot wiring.
+/// Complete five-slot DHCP attachments must retain their bridges and MTU while ordinary DHCP/FMDS
+/// NADs keep their existing rendering and deployment-specific references; the flavor must render the configured pool.
 #[tokio::test]
 async fn service_vpc_initialization_keeps_hbn_configuration_and_chain_aligned() {
-    let mock = InitializationMock::default();
-    let slots = crate::ServiceVpcSlots::new(1).unwrap();
-    let interfaces = crate::build_effective_dpu_interfaces(crate::DEFAULT_DPU_NUM_OF_VFS, None);
-    let mut hbn_interfaces = interfaces
-        .iter()
-        .filter_map(|interface| {
-            interface.chained_svc_if.as_ref().and_then(|chains| {
-                chains
-                    .iter()
-                    .find(|(service, _)| service == DOCA_HBN_SERVICE_NAME)
-                    .map(|(_, name)| ServiceInterface {
-                        name: name.clone(),
-                        network: DOCA_HBN_SERVICE_NETWORK.to_string(),
-                    })
+    for (deployment_type, sf_pool, sf_bar_size, resource_suffix, interface_suffix) in [
+        // Legacy BF3 keeps unsuffixed references and the BFB path with 27 base SFs.
+        (DpuDeploymentType::Bf3, 42, 10, "", ""),
+        // Generic BF4 keeps scoped references and the software path with 28 base SFs.
+        (DpuDeploymentType::Bf4Generic, 43, 14, "-bf4generic", "-bf4"),
+    ] {
+        let mock = InitializationMock::default();
+        // Five slots and five endpoint reservations complete each platform's base inventory.
+        let slots = crate::ServiceVpcSlots::new(5).expect("valid five-slot inventory");
+        let interfaces = crate::build_deployment_dpu_interfaces(
+            deployment_type,
+            crate::DEFAULT_DPU_NUM_OF_VFS,
+            None,
+        );
+        // Retain the ordinary chained services so multiple NAD rendering also proves startup compatibility.
+        let chained_service = |name: &str, network: &str| ServiceDefinition {
+            interfaces: interfaces
+                .iter()
+                .flat_map(|interface| interface.chained_svc_if.iter().flatten())
+                .filter(|(service, _)| service == name)
+                .map(|(_, name)| ServiceInterface {
+                    name: name.clone(),
+                    network: network.to_string(),
+                })
+                .collect(),
+            service_nads: if name == DOCA_HBN_SERVICE_NAME {
+                Vec::new()
+            } else {
+                vec![ServiceNAD {
+                    name: network.to_string(),
+                    bridge: Some("br-sfc".to_string()),
+                    resource_type: ServiceNADResourceType::Sf,
+                    ipam: Some(false),
+                    mtu: Some(1500),
+                }]
+            },
+            ..ServiceDefinition::new(name, "repo", "chart", "1")
+        };
+        let mut hbn = chained_service(DOCA_HBN_SERVICE_NAME, DOCA_HBN_SERVICE_NETWORK);
+        slots.append_hbn_interfaces(&mut hbn.interfaces);
+        let mut dhcp = chained_service(DHCP_SERVER_SERVICE_NAME, "mybrsfc-dhcp");
+        slots.append_dhcp_interfaces(&mut dhcp);
+        let fmds = chained_service(FMDS_SERVICE_NAME, "mybrsfc-fmds");
+        let builder = InitDpfResourcesConfigBuilder::default()
+            .deployment_type(deployment_type)
+            .services(vec![hbn, dhcp, fmds])
+            .service_vpc_slots(slots)
+            .max_active_service_vpc_interfaces_per_dpu(5)
+            .pf_total_sf_reserved(sf_pool)
+            .deployment_scoped_service_interfaces(!interface_suffix.is_empty())
+            .interfaces(interfaces);
+        // Follow each platform's provisioning source so the BF3 case exercises the BFB path.
+        let config = if deployment_type == DpuDeploymentType::Bf3 {
+            builder.bfb_url("http://example.com/bf3.bfb")
+        } else {
+            builder.bluefield_software(BlueFieldSoftwareParams {
+                os_iso: "http://example.com/bf4.iso".to_string(),
+                pldm_fw_bundle: Some(BTreeMap::from([(
+                    "psid".to_string(),
+                    "http://example.com/fw.pldm".to_string(),
+                )])),
             })
-        })
-        .collect();
-    slots.append_hbn_interfaces(&mut hbn_interfaces);
-    let hbn = ServiceDefinition {
-        interfaces: hbn_interfaces,
-        ..ServiceDefinition::new(DOCA_HBN_SERVICE_NAME, "repo", "chart", "1")
-    };
-    let config = InitDpfResourcesConfigBuilder::default()
-        .services(vec![hbn])
-        .service_vpc_slots(slots)
-        .interfaces(interfaces)
+        }
         .build()
         .expect("service-VPC initialization test configuration must be valid");
 
-    crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
-        .initialize(&config)
-        .await
-        .unwrap();
+        // Apply the complete inventory through the public SDK initializer.
+        // Startup's split initialization shares the same resource creation implementation.
+        crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+            .with_labeler(InitializationLabeler)
+            .initialize(&config)
+            .await
+            .unwrap();
 
-    let hbn_config = DpuServiceConfigurationRepository::get(&mock, DOCA_HBN_SERVICE_NAME, TEST_NS)
+        // Read persisted CRs rather than trusting the input definitions or apply return values.
+        let hbn_config = DpuServiceConfigurationRepository::get(
+            &mock,
+            &format!("{DOCA_HBN_SERVICE_NAME}{resource_suffix}"),
+            TEST_NS,
+        )
         .await
         .unwrap()
         .expect("HBN service configuration must exist");
-    let hbn_interfaces = hbn_config.spec.interfaces.unwrap();
-    assert!(hbn_interfaces.iter().any(|interface| {
-        interface.name == "iface_svc_0" && interface.network == DOCA_HBN_SERVICE_NETWORK
-    }));
+        let hbn_interfaces = hbn_config.spec.interfaces.unwrap();
+        assert!(hbn_interfaces.iter().any(|interface| {
+            interface.name == "iface_svc_0" && interface.network == DOCA_HBN_SERVICE_NETWORK
+        }));
 
-    let deployment = DpuDeploymentRepository::get(&mock, "dpu-deployment", TEST_NS)
-        .await
-        .unwrap()
-        .expect("DPU deployment must exist");
-    let slot_switch = deployment
-        .spec
-        .service_chains
-        .unwrap()
-        .switches
-        .into_iter()
-        .find(|switch| {
-            switch.ports.iter().any(|port| {
-                port.service
-                    .as_ref()
-                    .is_some_and(|service| service.interface == "iface_svc_0")
+        let deployment = DpuDeploymentRepository::get(&mock, "dpu-deployment", TEST_NS)
+            .await
+            .unwrap()
+            .expect("DPU deployment must exist");
+        let slot_switch = deployment
+            .spec
+            .service_chains
+            .unwrap()
+            .switches
+            .into_iter()
+            .find(|switch| {
+                switch.ports.iter().any(|port| {
+                    port.service
+                        .as_ref()
+                        .is_some_and(|service| service.interface == "iface_svc_0")
+                })
             })
-        })
-        .expect("service-VPC chain must reference the HBN interface");
-    assert!(slot_switch.ports.iter().any(|port| {
-        port.service_interface.as_ref().is_some_and(|interface| {
-            interface.match_labels.get("interface").map(String::as_str)
-                == Some("service-vpc-slot-0")
-        })
-    }));
+            .expect("service-VPC chain must reference the HBN interface");
+        assert!(slot_switch.ports.iter().any(|port| {
+            port.service_interface.as_ref().is_some_and(|interface| {
+                interface.match_labels.get("interface").map(String::as_str)
+                    == Some("service-vpc-slot-0")
+            })
+        }));
+
+        // DHCP consumes exactly one direct SF per slot and references each slot's own NAD.
+        let dhcp_config = DpuServiceConfigurationRepository::get(
+            &mock,
+            &format!("{DHCP_SERVER_SERVICE_NAME}{resource_suffix}"),
+            TEST_NS,
+        )
+        .await
+        .expect("DHCP configuration lookup succeeds")
+        .expect("DHCP configuration exists");
+        let listeners = dhcp_config.spec.interfaces.expect("DHCP listeners exist");
+        assert_eq!(
+            listeners
+                .iter()
+                .filter(|listener| listener.name.starts_with("d_iface_svc_"))
+                .count(),
+            5
+        );
+        assert_eq!(mock.nads.len(), 7);
+        let switches = DpuDeploymentRepository::get(&mock, "dpu-deployment", TEST_NS)
+            .await
+            .expect("deployment lookup succeeds")
+            .expect("deployment exists")
+            .spec
+            .service_chains
+            .expect("chains exist")
+            .switches;
+        for (index, listener) in listeners
+            .iter()
+            .filter(|listener| listener.name.starts_with("d_iface_svc_"))
+            .enumerate()
+        {
+            assert_eq!(listener.name, format!("d_iface_svc_{index}"));
+            assert!(listener.name.len() <= 15);
+            assert_eq!(
+                listener.network,
+                format!("service-vpc-dhcp-slot{index}{resource_suffix}")
+            );
+            let nad = DpuServiceNADRepository::get(&mock, &listener.network, TEST_NS)
+                .await
+                .expect("slot NAD lookup succeeds")
+                .expect("slot NAD exists");
+            assert_eq!(
+                nad.spec.bridge.as_deref(),
+                Some(format!("br-svc-{index}").as_str())
+            );
+            assert_eq!(nad.spec.ipam, Some(false));
+            assert_eq!(nad.spec.service_mtu, Some(crate::SERVICE_VPC_MTU));
+            assert!(matches!(
+                nad.spec.resource_type,
+                crate::crds::dpuservicenads_generated::DpuServiceNadResourceType::Sf
+            ));
+            let patch = DpuServiceInterfaceRepository::get(
+                &mock,
+                &format!("service-vpc-slot-{index}{interface_suffix}"),
+                TEST_NS,
+            )
+            .await
+            .expect("patch lookup succeeds")
+            .expect("slot patch exists");
+            // Legacy BF3 keeps selector-free parents; generic BF4 selects its deployment's DPU nodes.
+            let node_selector = patch.spec.template.spec.node_selector;
+            assert_eq!(node_selector.is_some(), !interface_suffix.is_empty());
+            assert_eq!(
+                node_selector.and_then(|selector| selector.match_labels),
+                (!interface_suffix.is_empty()).then(|| BTreeMap::from([(
+                    "svc.dpu.nvidia.com/owned-by-dpudeployment".to_string(),
+                    format!("{TEST_NS}_dpu-deployment")
+                )]))
+            );
+            assert_eq!(
+                patch
+                    .spec
+                    .template
+                    .spec
+                    .template
+                    .spec
+                    .patch
+                    .expect("patch endpoint")
+                    .peer_bridge,
+                format!("br-svc-{index}")
+            );
+            assert!(
+                switches
+                    .iter()
+                    .any(|switch| switch.ports.iter().any(|port| {
+                        port.service.as_ref().is_some_and(|service| {
+                            service.name == DOCA_HBN_SERVICE_NAME
+                                && service.interface == format!("iface_svc_{index}")
+                        })
+                    }))
+            );
+        }
+
+        // Ordinary service NADs retain their bridge, resource type, IPAM and MTU after the multi-NAD change.
+        for (service, network) in [
+            // DHCP's ordinary listeners keep their deployment-specific br-sfc SF network beside the new slot NADs.
+            (DHCP_SERVER_SERVICE_NAME, "mybrsfc-dhcp"),
+            // FMDS remains a separate ordinary br-sfc SF consumer with the same rendering contract.
+            (FMDS_SERVICE_NAME, "mybrsfc-fmds"),
+        ] {
+            let network = format!("{network}{resource_suffix}");
+            let nad = DpuServiceNADRepository::get(&mock, &network, TEST_NS)
+                .await
+                .expect("ordinary NAD lookup succeeds")
+                .expect("ordinary NAD exists");
+            assert_eq!(nad.spec.bridge.as_deref(), Some("br-sfc"));
+            assert_eq!(nad.spec.ipam, Some(false));
+            assert_eq!(nad.spec.service_mtu, Some(1500));
+            assert!(matches!(
+                nad.spec.resource_type,
+                crate::crds::dpuservicenads_generated::DpuServiceNadResourceType::Sf
+            ));
+            let service_config = DpuServiceConfigurationRepository::get(
+                &mock,
+                &format!("{service}{resource_suffix}"),
+                TEST_NS,
+            )
+            .await
+            .expect("ordinary service configuration lookup succeeds")
+            .expect("ordinary service configuration exists");
+            let ordinary_interfaces = service_config
+                .spec
+                .interfaces
+                .expect("ordinary service interfaces exist")
+                .into_iter()
+                .filter(|interface| !interface.name.starts_with("d_iface_svc_"))
+                .collect::<Vec<_>>();
+            assert!(!ordinary_interfaces.is_empty());
+            assert!(
+                ordinary_interfaces
+                    .iter()
+                    .all(|interface| interface.network == network)
+            );
+        }
+
+        // The persisted flavor renders each platform's configured SF pool and bootstraps all five isolated bridges.
+        let flavor_name = deployment
+            .spec
+            .dpus
+            .flavor
+            .expect("deployment flavor reference");
+        let flavor = DpuFlavorRepository::get(&mock, &flavor_name, TEST_NS)
+            .await
+            .expect("flavor lookup succeeds")
+            .expect("flavor exists");
+        let parameters = flavor.spec.nvconfig.expect("NVConfig exists")[0]
+            .parameters
+            .clone()
+            .expect("NVConfig parameters");
+        assert!(parameters.contains(&format!("PF_TOTAL_SF={sf_pool}")));
+        assert!(parameters.contains(&format!("PF_SF_BAR_SIZE={sf_bar_size}")));
+        let ovs = flavor
+            .spec
+            .ovs
+            .expect("OVS configuration")
+            .raw_config_script
+            .expect("OVS bootstrap");
+        for index in 0..5 {
+            assert!(ovs.contains(&format!("_ovs-vsctl --may-exist add-br br-svc-{index}")));
+        }
+        assert!(flavor.spec.dpu_resources.is_none());
+        assert!(flavor.spec.system_reserved_resources.is_none());
+    }
 }
 
+/// Verifies partial HBN inventory fails preflight so DHCP completeness cannot conceal a missing HBN SF.
 #[test]
 fn service_vpc_config_rejects_missing_hbn_interface() {
-    let result = InitDpfResourcesConfigBuilder::default()
-        .services(vec![ServiceDefinition::new(
-            DOCA_HBN_SERVICE_NAME,
-            "repo",
-            "chart",
-            "1",
-        )])
-        .service_vpc_slots(crate::ServiceVpcSlots::new(1).unwrap())
-        .build();
+    // Keep every base HBN endpoint but omit the slot interface; DHCP is complete.
+    let slots = crate::ServiceVpcSlots::new(1).expect("valid slot count");
+    let interfaces = crate::build_deployment_dpu_interfaces(
+        DpuDeploymentType::Bf3,
+        crate::DEFAULT_DPU_NUM_OF_VFS,
+        None,
+    );
+    let hbn = ServiceDefinition {
+        interfaces: interfaces
+            .iter()
+            .flat_map(|interface| interface.chained_svc_if.iter().flatten())
+            .filter(|(service, _)| service == DOCA_HBN_SERVICE_NAME)
+            .map(|(_, name)| ServiceInterface {
+                name: name.clone(),
+                network: DOCA_HBN_SERVICE_NETWORK.to_string(),
+            })
+            .collect(),
+        ..ServiceDefinition::new(DOCA_HBN_SERVICE_NAME, "repo", "chart", "1")
+    };
+    let mut dhcp = ServiceDefinition::new(DHCP_SERVER_SERVICE_NAME, "repo", "chart", "1");
+    slots.append_dhcp_interfaces(&mut dhcp);
+    let error = InitDpfResourcesConfigBuilder::default()
+        .services(vec![hbn, dhcp])
+        .interfaces(interfaces)
+        .service_vpc_slots(slots)
+        .build()
+        .expect_err("missing HBN slot interface");
 
-    assert!(matches!(result, Err(DpfError::ConfigError(_))));
+    // Require the HBN error so a missing-DHCP or capacity error cannot satisfy this proof.
+    assert!(
+        matches!(&error, DpfError::ConfigError(message)
+            if message == "doca-hbn interface inventory must exactly match the resolved DPF HBN chains"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -851,8 +1292,8 @@ async fn test_create_initialization_objects_bluefield_software() {
     drop(sdk);
 }
 
-/// Verifies ordinary and GB200 BF3, generic BF4, and Astra coexist while each
-/// deployment retains its own flavor, interfaces, service chains, and selectors.
+/// Verifies every DPF profile consumes one intercept topology while retaining isolated flavors,
+/// interfaces, chains, and selectors so Astra's fixed xplane resources cannot cross-bind.
 #[tokio::test]
 async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
     // Build one SDK so all four deployment classes share the production namespace.
@@ -912,11 +1353,11 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             .flavor_name("bf4-flavor")
             .services(services.clone())
             .deployment_scoped_service_interfaces(true)
-            .intercept_bridging(topology)
+            .intercept_bridging(topology.clone())
             .deployment_type(DpuDeploymentType::Bf4Generic)
             .build()
             .expect("scoped generic BF4 test configuration must be valid"),
-        // Astra proves its fixed BF4+CX9 inventory remains isolated from both configured classes.
+        // Astra proves the shared PF/VF topology composes with its fixed CX/xplane interfaces.
         InitDpfResourcesConfigBuilder::default()
             .bluefield_software(BlueFieldSoftwareParams {
                 os_iso: "http://example.com/astra.iso".to_string(),
@@ -929,12 +1370,14 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             .flavor_name("astra-flavor")
             .services(services)
             .deployment_scoped_service_interfaces(true)
+            .intercept_bridging(topology)
             .enable_delay_host_init(true)
             .deployment_type(DpuDeploymentType::Bf4Astra)
             .build()
             .expect("scoped Astra test configuration must be valid"),
     ];
 
+    // Provide the Astra runtime ConfigMap required while rendering its fixed xplane files.
     mock.configs.insert(
         ns_key(TEST_NS, "ra2.2-runtime"),
         BTreeMap::from([(
@@ -960,7 +1403,7 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
     assert_eq!(mock.flavor_templates.len(), 1);
 
     // The effective inventories must produce exact, non-overlapping scoped resource names.
-    let interfaces = DpuServiceInterfaceRepository::list(&mock, TEST_NS)
+    let interfaces = DpuServiceInterfaceRepository::list(&mock, TEST_NS, None)
         .await
         .unwrap();
     let interface_names = interfaces
@@ -968,17 +1411,16 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
         .map(|interface| interface.metadata.name.clone().unwrap())
         .collect::<BTreeSet<_>>();
     let mut expected_interface_names = BTreeSet::new();
-    for suffix in ["bf3", "bf3gb200", "bf4"] {
+    for suffix in ["bf3", "bf3gb200", "bf4", "astra"] {
         for logical_name in ["p0", "p1", "c2pf3", "c2pf3vf4"] {
             expected_interface_names.insert(format!("{logical_name}-{suffix}"));
         }
     }
-    // Astra ignores configured intercept topology and retains its static BF4+CX logical inventory.
-    let mut astra_chainable_logical_names = ["p0", "p1", "pf0hpf", "pf1hpf"]
+    // Astra retains its fixed xplane resources around the shared replacement PF/VF inventory.
+    let astra_chainable_logical_names = ["p0", "p1", "c2pf3", "c2pf3vf4"]
         .into_iter()
         .map(|name| name.to_string())
         .collect::<BTreeSet<_>>();
-    astra_chainable_logical_names.extend((0..14).map(|vf_id| format!("pf0vf{vf_id}")));
     let mut astra_logical_names = astra_chainable_logical_names.clone();
     let astra_xplane_group_ids = [
         "r0swpln0", "r1swpln0", "r0swpln1", "r1swpln1", "r2swpln0", "r3swpln0", "r2swpln1",
@@ -1031,8 +1473,8 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
         }
     }
 
-    // All three configured classes must serialize the same exact DPF-owned Patch pairs.
-    for suffix in ["bf3", "bf3gb200", "bf4"] {
+    // All four configured classes must serialize the same exact topology Patch pairs.
+    for suffix in ["bf3", "bf3gb200", "bf4", "astra"] {
         for (logical_name, peer_bridge, peer_patch_name) in [
             ("c2pf3", "br-pf3", "p-pf3"),
             ("c2pf3vf4", "br-vf4", "p-vf4"),
@@ -1255,8 +1697,14 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
         Some(&expected_astra_labels)
     );
     let astra_switches = &astra.spec.service_chains.as_ref().unwrap().switches;
-    // Astra service-to-service chains must select the static logical names constructed above, not
-    // the configured BF3/BF4 `c2pf3` topology.
+    // Each service chain and fixed xplane pair must appear once; the set checks below hide
+    // duplicates.
+    assert_eq!(
+        astra_switches.len(),
+        astra_chainable_logical_names.len() + astra_xplane_group_ids.len()
+    );
+    // Astra service-to-service chains must select the configured topology logical names while its
+    // fixed xplane-to-CX chains remain present.
     let astra_chain_interfaces = astra_switches
         .iter()
         .filter(|switch| switch.ports.iter().any(|port| port.service.is_some()))
@@ -1294,8 +1742,8 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             })
             .collect::<BTreeSet<_>>()
     );
-    // Astra's flavor derives PF_TOTAL_SF from static service endpoints and the DOCA Weave DHCP
-    // Agent PF allocation, and must not render configured peer bridges.
+    // One selected PF and one VF produce seven topology-backed endpoints. Astra adds eight Weave
+    // DHCP Agent SFs and four headroom SFs, so this fixture must emit exactly PF_TOTAL_SF=19.
     assert!(astra.spec.dpus.flavor.is_none());
     let astra_template = DpuFlavorTemplateRepository::get(
         &mock,
@@ -1314,18 +1762,13 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             serde_yaml::from_value(body["spec"].clone()).unwrap()
         },
     };
-    let astra_interfaces = crate::sdk::build_astra_dpu_interfaces_vec();
-    let expected_astra_pf_total_sf =
-        crate::sdk::calculate_astra_pf_total_sf(astra_interfaces.as_slice())
-            .expect("canonical Astra inventory must have valid SF capacity");
-    let expected_astra_pf_total_sf_parameter = format!("PF_TOTAL_SF={expected_astra_pf_total_sf}");
     assert!(
         astra_flavor.spec.nvconfig.as_ref().unwrap()[0]
             .parameters
             .as_ref()
             .unwrap()
             .iter()
-            .any(|parameter| parameter == &expected_astra_pf_total_sf_parameter)
+            .any(|parameter| parameter == "PF_TOTAL_SF=19")
     );
     assert!(
         astra_flavor.spec.nvconfig.as_ref().unwrap()[0]
@@ -1342,20 +1785,559 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             .and_then(|readiness| readiness.gate),
         Some(DpuFlavorServiceReadinessGate::DpuServiceCriticalPodsReady)
     ));
-    assert!(
-        !astra_flavor
-            .spec
-            .ovs
-            .as_ref()
-            .and_then(|ovs| ovs.raw_config_script.as_ref())
-            .unwrap()
-            .contains("br-pf3")
-    );
+
+    // Astra must resolve BF4 identities before fixed OVS setup, then add configured intercept bridges afterward.
+    let astra_ovs = astra_flavor
+        .spec
+        .ovs
+        .as_ref()
+        .and_then(|ovs| ovs.raw_config_script.as_ref())
+        .unwrap();
+    assert!(astra_ovs.contains("resolve_dpf_pf 'c2pf3'"));
+    assert!(astra_ovs.contains("_ovs-vsctl --may-exist add-br 'br-pf3'"));
+    assert!(astra_ovs.contains("_ovs-vsctl --may-exist add-br 'br-vf4'"));
+    let resolution = astra_ovs.find("resolve_dpf_pf 'c2pf3'").unwrap();
+    let fixed_ovs_setup = astra_ovs.find("/etc/mellanox/ovs-script.sh").unwrap();
+    let fixed_xplane_setup = astra_ovs.find("/etc/mellanox/xplane-bridge.sh").unwrap();
+    let intercept_bridge_setup = astra_ovs
+        .find("_ovs-vsctl --may-exist add-br 'br-pf3'")
+        .unwrap();
+    assert!(resolution < fixed_ovs_setup);
+    assert!(fixed_xplane_setup < intercept_bridge_setup);
+
+    // The flavor ACL must cover the selected topology-backed HBN endpoints and omit an unselected
+    // VF.
+    let astra_dhcp_acl = astra_flavor
+        .spec
+        .config_files
+        .as_ref()
+        .unwrap()
+        .iter()
+        .find(|file| file.path.ends_with("/10-dhcp.rules"))
+        .and_then(|file| file.raw.as_ref())
+        .unwrap();
+    assert!(astra_dhcp_acl.contains("pf0hpf_if"));
+    assert!(astra_dhcp_acl.contains("pf0vf4_if"));
+    assert!(!astra_dhcp_acl.contains("pf0vf0_if"));
     drop(sdk);
 }
 
+/// Verifies the one-way Astra migration deletes exactly the old scoped PF/VF set and a restarted
+/// attempt resumes an accepted deletion, preventing interruption from leaving old and new
+/// inventories together.
+#[tokio::test(start_paused = true)]
+async fn topology_backed_astra_initialization_replaces_pre_topology_scoped_pf_vfs_in_order() {
+    // Create the scoped topology-free Astra state emitted by the predecessor startup path.
+    let mock = InitializationMock::default();
+    let sdk = seed_pre_topology_scoped_astra(&mock).await;
+
+    // Seed one static PF from each unrelated scoped class. Cloning preserves the complete PF
+    // fixture, while the non-Astra name keeps it outside the exact migration set. The owner label
+    // only keeps the fixture consistent with its deployment class.
+    let scoped_pf = DpuServiceInterfaceRepository::get(&mock, "pf0hpf-astra", TEST_NS)
+        .await
+        .unwrap()
+        .expect("the predecessor Astra state must contain its static PF");
+    for (name, deployment_name) in [
+        // BF3 proves cleanup cannot broaden to another deployment's static PF generation.
+        ("pf0hpf-bf3", "bf3-deployment"),
+        // Generic BF4 differs by suffix and protects the other supported BF generation.
+        ("pf0hpf-bf4", "bf4-deployment"),
+    ] {
+        let mut interface = scoped_pf.clone();
+        interface.metadata.name = Some(name.to_string());
+        interface
+            .spec
+            .template
+            .spec
+            .node_selector
+            .as_mut()
+            .expect("the cloned scoped interface must retain its selector")
+            .match_labels = Some(BTreeMap::from([(
+            "svc.dpu.nvidia.com/owned-by-dpudeployment".to_string(),
+            format!("{TEST_NS}_{deployment_name}"),
+        )]));
+        mock.service_interfaces
+            .insert(resource_key(&interface), interface);
+    }
+
+    // Pin the predecessor PF/VF generation so migration cleanup cannot silently broaden.
+    let pre_topology_names = ["pf0hpf-astra", "pf1hpf-astra"]
+        .into_iter()
+        .map(str::to_string)
+        .chain((0..=13).map(|vf_id| format!("pf0vf{vf_id}-astra")))
+        .collect::<BTreeSet<_>>();
+    let initial_names = DpuServiceInterfaceRepository::list(&mock, TEST_NS, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|interface| interface.metadata.name)
+        .collect::<BTreeSet<_>>();
+    assert!(pre_topology_names.is_subset(&initial_names));
+
+    // Hold one accepted delete behind its simulated finalizer so ordering remains observable.
+    let deferred_name = "pf0vf13-astra";
+    let deferred_key = ns_key(TEST_NS, deferred_name);
+    mock.deferred_service_interface_deletes
+        .insert(deferred_key.clone(), ());
+    let delete_started = mock.service_interface_delete_started.notified();
+    let topology_config = InitDpfResourcesConfig {
+        deployment_scoped_service_interfaces: true,
+        intercept_bridging: Some(configured_intercept_bridging()),
+        ..unscoped_astra_config()
+    };
+    let first_attempt_config = topology_config.clone();
+    let mut initialization = tokio::spawn(async move {
+        sdk.create_initialization_objects(&first_attempt_config)
+            .await
+    });
+
+    // The delete must start before task completion so a cleanup regression fails instead of
+    // hanging.
+    tokio::select! {
+        _ = delete_started => {}
+        result = &mut initialization => {
+            panic!(
+                "topology migration completed before submitting its deferred delete: {result:?}"
+            );
+        }
+    }
+    tokio::task::yield_now().await;
+
+    // Every historical PF/VF receives one delete request, and retained resources are untouched.
+    assert_eq!(
+        mock.service_interface_delete_requests.len(),
+        pre_topology_names.len()
+    );
+    for name in &pre_topology_names {
+        assert_eq!(
+            *mock
+                .service_interface_delete_requests
+                .get(&ns_key(TEST_NS, name))
+                .unwrap_or_else(|| panic!("missing delete request for {name}")),
+            1
+        );
+    }
+    for retained_name in [
+        "p0-astra",
+        "p1-astra",
+        "p-brcx-r0swpln0-to-br-sfc-astra",
+        "p-br-xplane-r0swpln0-to-br-sfc-astra",
+        "pf0hpf-bf3",
+        "pf0hpf-bf4",
+    ] {
+        assert!(
+            !mock
+                .service_interface_delete_requests
+                .contains_key(&ns_key(TEST_NS, retained_name)),
+            "{retained_name} must not be deleted by the PF/VF migration"
+        );
+        assert!(
+            DpuServiceInterfaceRepository::get(&mock, retained_name, TEST_NS)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    // An accepted delete is not completion: replacements remain absent while it still exists.
+    assert!(
+        DpuServiceInterfaceRepository::get(&mock, deferred_name, TEST_NS)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    for replacement_name in ["c2pf3-astra", "c2pf3vf4-astra"] {
+        assert!(
+            DpuServiceInterfaceRepository::get(&mock, replacement_name, TEST_NS)
+                .await
+                .unwrap()
+                .is_none(),
+            "{replacement_name} must not coexist with the old scoped PF/VF generation"
+        );
+    }
+
+    // Crossing the ten-minute diagnostic deadline must not release cleanup or apply replacements.
+    tokio::time::advance(Duration::from_secs(10 * 60 + 1)).await;
+    assert!(
+        !initialization.is_finished(),
+        "migration must keep waiting after the blocked-cleanup deadline"
+    );
+    assert!(
+        DpuServiceInterfaceRepository::get(&mock, "c2pf3-astra", TEST_NS)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Interrupt startup while the accepted deletion is still waiting on its finalizer.
+    initialization.abort();
+    assert!(
+        initialization
+            .await
+            .expect_err("the interrupted initialization task must not complete")
+            .is_cancelled()
+    );
+
+    // A fresh SDK over the same persisted state must rediscover and resubmit the stale resource.
+    let retry_sdk =
+        crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+            .with_labeler(InitializationLabeler)
+            .build_without_resources()
+            .await
+            .unwrap();
+    let delete_retried = mock.service_interface_delete_started.notified();
+    let mut retry = tokio::spawn(async move {
+        retry_sdk
+            .create_initialization_objects(&topology_config)
+            .await
+    });
+    tokio::select! {
+        _ = delete_retried => {}
+        result = &mut retry => {
+            panic!("retry completed before resubmitting its deferred delete: {result:?}");
+        }
+    }
+    assert_eq!(
+        *mock
+            .service_interface_delete_requests
+            .get(&deferred_key)
+            .expect("retry must record the deferred delete"),
+        2,
+        "restart must resubmit an accepted deletion whose resource still exists"
+    );
+
+    // Complete the finalizer only after retry is waiting, then require normal convergence.
+    mock.deferred_service_interface_deletes
+        .remove(&deferred_key);
+    mock.service_interfaces.remove(&deferred_key);
+    tokio::time::advance(Duration::from_secs(10)).await;
+    retry.await.unwrap().unwrap();
+
+    // The final state contains topology resources and none of the old scoped PF/VF resources.
+    let final_names = DpuServiceInterfaceRepository::list(&mock, TEST_NS, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|interface| interface.metadata.name)
+        .collect::<BTreeSet<_>>();
+    assert!(pre_topology_names.is_disjoint(&final_names));
+    assert!(final_names.contains("c2pf3-astra"));
+    assert!(final_names.contains("c2pf3vf4-astra"));
+    for retained_name in [
+        "p0-astra",
+        "p1-astra",
+        "p-brcx-r0swpln0-to-br-sfc-astra",
+        "p-br-xplane-r0swpln0-to-br-sfc-astra",
+        "pf0hpf-bf3",
+        "pf0hpf-bf4",
+    ] {
+        assert!(final_names.contains(retained_name));
+    }
+}
+
+/// Verifies restart waits for a missing interface before publishing its services and deployment,
+/// preventing interrupted startup from exposing references before the topology is complete.
 #[tokio::test]
-async fn scoped_initialization_prunes_unscoped_interfaces() {
+async fn topology_backed_astra_initialization_retries_partial_replacements_before_publication() {
+    // Establish the predecessor resources that the migration must replace.
+    let mock = InitializationMock::default();
+    let sdk = seed_pre_topology_scoped_astra(&mock).await;
+
+    // Retain predecessor defaults and add one marker whose resources identify new publication.
+    let topology_config = topology_backed_astra_config_with_marker();
+
+    // Hold the second configured replacement before persistence so the first remains observable.
+    let deferred_replacement_name = "c2pf3vf4-astra";
+    let deferred_replacement_key = ns_key(TEST_NS, deferred_replacement_name);
+    mock.deferred_service_interface_applies
+        .insert(deferred_replacement_key.clone(), ());
+    let replacement_apply_started = mock.service_interface_apply_started.notified();
+    let first_attempt_config = topology_config.clone();
+    let mut initialization = tokio::spawn(async move {
+        sdk.create_initialization_objects(&first_attempt_config)
+            .await
+    });
+    tokio::select! {
+        _ = replacement_apply_started => {}
+        result = &mut initialization => {
+            panic!("initialization completed before reaching its deferred replacement: {result:?}");
+        }
+    }
+
+    // Cleanup completed and one replacement persisted, but the held replacement remains absent.
+    for stale_name in ["pf0hpf-astra", "pf0vf13-astra"] {
+        assert!(
+            DpuServiceInterfaceRepository::get(&mock, stale_name, TEST_NS)
+                .await
+                .unwrap()
+                .is_none(),
+            "{stale_name} must be deleted before replacement application"
+        );
+    }
+    assert!(
+        DpuServiceInterfaceRepository::get(&mock, "c2pf3-astra", TEST_NS)
+            .await
+            .unwrap()
+            .is_some(),
+        "the first configured replacement must persist before interruption"
+    );
+    assert!(
+        DpuServiceInterfaceRepository::get(&mock, deferred_replacement_name, TEST_NS)
+            .await
+            .unwrap()
+            .is_none(),
+        "the deferred replacement must remain absent before interruption"
+    );
+
+    // Neither service resources nor the updated deployment may precede the complete interface set.
+    assert_astra_migration_marker_unpublished(&mock).await;
+
+    // Cancel the partial attempt while its missing replacement is still held.
+    initialization.abort();
+    assert!(
+        initialization
+            .await
+            .expect_err("the interrupted initialization task must not complete")
+            .is_cancelled()
+    );
+    // Restart against the partial persisted state while the same replacement remains blocked.
+    let retry_sdk =
+        crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+            .with_labeler(InitializationLabeler)
+            .build_without_resources()
+            .await
+            .unwrap();
+    let replacement_retry_started = mock.service_interface_apply_started.notified();
+    let mut retry = tokio::spawn(async move {
+        retry_sdk
+            .create_initialization_objects(&topology_config)
+            .await
+    });
+    tokio::select! {
+        _ = replacement_retry_started => {}
+        result = &mut retry => {
+            panic!("retry completed before reaching its deferred replacement: {result:?}");
+        }
+    }
+
+    // The restarted attempt must remain unpublished while its replacement is still absent.
+    assert!(
+        DpuServiceInterfaceRepository::get(&mock, deferred_replacement_name, TEST_NS)
+            .await
+            .unwrap()
+            .is_none(),
+        "the deferred replacement must remain absent while retry is blocked"
+    );
+    assert_astra_migration_marker_unpublished(&mock).await;
+
+    // Release the replacement only after retry ordering is observable, then require convergence.
+    mock.deferred_service_interface_applies
+        .remove(&deferred_replacement_key);
+    mock.service_interface_apply_release.notify_one();
+    retry.await.unwrap().unwrap();
+
+    // Retry publishes the missing replacement before the marker service and updated deployment.
+    assert!(
+        DpuServiceInterfaceRepository::get(&mock, deferred_replacement_name, TEST_NS)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        DpuServiceTemplateRepository::get(&mock, MIGRATION_MARKER_RESOURCE_NAME, TEST_NS)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        DpuServiceConfigurationRepository::get(&mock, MIGRATION_MARKER_RESOURCE_NAME, TEST_NS)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let deployment = DpuDeploymentRepository::get(&mock, "astra-deployment", TEST_NS)
+        .await
+        .unwrap()
+        .expect("retry must publish the updated Astra deployment");
+    assert!(
+        deployment
+            .spec
+            .services
+            .contains_key(MIGRATION_MARKER_SERVICE_NAME)
+    );
+}
+
+/// Verifies DELETE, deletion-confirmation GET, and replacement APPLY errors after partial
+/// migration persistence preserve publication ordering and converge on restart. This prevents a
+/// transient repository error from stranding the one-way migration.
+#[tokio::test]
+async fn astra_migration_retries_repository_errors_after_partial_persistence() {
+    /// Selects boundaries with distinct persisted states so the table avoids redundant error
+    /// permutations.
+    #[derive(Clone, Copy)]
+    enum RepositoryFailure {
+        Delete,
+        DeletionGet,
+        ReplacementApply,
+    }
+
+    let topology_config = topology_backed_astra_config_with_marker();
+    let cleanup_error = "failed to remove pre-topology scoped Astra PF/VF DPUServiceInterfaces";
+    let failure_cases = [
+        // DELETE can reject one stale mutation while earlier cleanup remains persisted.
+        (
+            RepositoryFailure::Delete,
+            "delete",
+            cleanup_error,
+            true,
+            false,
+        ),
+        // GET differs because every delete was accepted before confirmation failed.
+        (
+            RepositoryFailure::DeletionGet,
+            "get",
+            cleanup_error,
+            true,
+            false,
+        ),
+        // APPLY leaves cleanup complete and an earlier replacement persisted.
+        (
+            RepositoryFailure::ReplacementApply,
+            "apply",
+            "failed to apply DPUServiceInterfaces",
+            false,
+            true,
+        ),
+    ];
+
+    // Only the repository boundary varies; every row uses a fresh complete predecessor fixture.
+    for (failure, operation, expected_context, failed_stale_present, first_replacement_present) in
+        failure_cases
+    {
+        // Model a prior attempt that persisted one deletion before this repository error.
+        let mock = InitializationMock::default();
+        let sdk = seed_pre_topology_scoped_astra(&mock).await;
+        mock.service_interfaces
+            .remove(&ns_key(TEST_NS, "pf0hpf-astra"));
+
+        // Each selected resource leaves a different migration phase observable after the error.
+        let failed_stale_key = ns_key(TEST_NS, "pf1hpf-astra");
+        let first_replacement_key = ns_key(TEST_NS, "c2pf3-astra");
+        let failed_replacement_key = ns_key(TEST_NS, "c2pf3vf4-astra");
+        match failure {
+            RepositoryFailure::Delete => {
+                mock.service_interface_delete_failures
+                    .insert(failed_stale_key.clone(), ());
+            }
+            RepositoryFailure::DeletionGet => {
+                // Preserve one accepted deletion until the confirmation read is attempted.
+                mock.deferred_service_interface_deletes
+                    .insert(failed_stale_key.clone(), ());
+                mock.service_interface_get_failures
+                    .insert(failed_stale_key.clone(), ());
+            }
+            RepositoryFailure::ReplacementApply => {
+                mock.service_interface_apply_failures
+                    .insert(failed_replacement_key.clone(), ());
+            }
+        }
+
+        // Cleanup failures retain the repository source; every boundary reports its recovery context.
+        let error = sdk
+            .create_initialization_objects(&topology_config)
+            .await
+            .expect_err("the injected repository operation must fail initialization");
+        let message = match failure {
+            RepositoryFailure::Delete | RepositoryFailure::DeletionGet => {
+                let DpfError::MigrationFailed { context, source } = error else {
+                    panic!("unexpected {operation} failure: {error}");
+                };
+                let DpfError::InvalidState(source_message) = source.as_ref() else {
+                    panic!("unexpected {operation} source: {source}");
+                };
+                assert!(
+                    source_message
+                        .contains(&format!("injected DPUServiceInterface {operation} failure")),
+                    "{source_message}"
+                );
+                context
+            }
+            RepositoryFailure::ReplacementApply => {
+                let DpfError::InvalidState(message) = error else {
+                    panic!("unexpected {operation} failure: {error}");
+                };
+                assert!(
+                    message.contains(&format!("injected DPUServiceInterface {operation} failure")),
+                    "{message}"
+                );
+                message
+            }
+        };
+        assert!(message.contains(expected_context), "{message}");
+
+        // Persisted state must stop at the failed boundary without publishing dependent services.
+        assert_eq!(
+            mock.service_interfaces.contains_key(&failed_stale_key),
+            failed_stale_present,
+            "{operation} failure must preserve its stale-resource phase"
+        );
+        assert_eq!(
+            mock.service_interfaces.contains_key(&first_replacement_key),
+            first_replacement_present,
+            "{operation} failure must preserve its replacement phase"
+        );
+        assert!(
+            !mock
+                .service_interfaces
+                .contains_key(&failed_replacement_key)
+        );
+        assert_astra_migration_marker_unpublished(&mock).await;
+        // Discard the failed SDK while preserving its shared repository state for restart.
+        drop(sdk);
+
+        // Release the accepted delete; one-shot failures let a fresh SDK replay persisted state.
+        if matches!(failure, RepositoryFailure::DeletionGet) {
+            mock.deferred_service_interface_deletes
+                .remove(&failed_stale_key);
+        }
+        let retry_sdk =
+            crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+                .with_labeler(InitializationLabeler)
+                .build_without_resources()
+                .await
+                .unwrap();
+        retry_sdk
+            .create_initialization_objects(&topology_config)
+            .await
+            .expect("retry must converge from the partially persisted migration");
+
+        // Retry must remove the remaining stale object and converge with both replacements published.
+        assert!(!mock.service_interfaces.contains_key(&failed_stale_key));
+        assert!(mock.service_interfaces.contains_key(&first_replacement_key));
+        assert!(
+            mock.service_interfaces
+                .contains_key(&failed_replacement_key)
+        );
+        let deployment = DpuDeploymentRepository::get(&mock, "astra-deployment", TEST_NS)
+            .await
+            .unwrap()
+            .expect("retry must publish the updated deployment");
+        assert!(
+            deployment
+                .spec
+                .services
+                .contains_key(MIGRATION_MARKER_SERVICE_NAME)
+        );
+    }
+}
+
+/// Verifies scoped initialization prunes only legacy unscoped interfaces and preserves dynamic
+/// parents unchanged.
+/// Extension-service parents use nonempty selectors and must retain their exact specification
+/// across initialization.
+#[tokio::test]
+async fn scoped_initialization_prunes_unscoped_interfaces_and_preserves_dynamic_parents() {
     let definitions = crate::sdk::build_dpu_interfaces_vec();
 
     // Legacy-to-scoped: legacy interfaces are pruned, including stale interfaces from a
@@ -1385,13 +2367,47 @@ async fn scoped_initialization_prunes_unscoped_interfaces() {
         .insert(resource_key(&stale_c2pf3), stale_c2pf3);
     let sdk = crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
         .with_labeler(InitializationLabeler)
-        .initialize(&InitDpfResourcesConfig {
-            bfb_url: "http://example.com/test.bfb".to_string(),
-            deployment_scoped_service_interfaces: true,
-            ..Default::default()
-        })
+        .build_without_resources()
         .await
         .unwrap();
+
+    // A dynamic extension-service parent has a nonempty selector and is outside static migration
+    // ownership.
+    let dynamic_name = "extsvc-00000000-0000-0000-0000-000000000001-if0-svc";
+    let dynamic_before = sdk
+        .create_detached_dpu_service_interface(&DetachedDpuServiceInterfaceDefinition {
+            name: dynamic_name.to_string(),
+            namespace: TEST_NS.to_string(),
+            labels: BTreeMap::from([(
+                "nico/extension-service-id".to_string(),
+                "00000000-0000-0000-0000-000000000001".to_string(),
+            )]),
+            node_selector_labels: BTreeMap::from([(
+                "nico/extsvc-00000000-0000-0000-0000-000000000001".to_string(),
+                "true".to_string(),
+            )]),
+            template_labels: BTreeMap::new(),
+            interface: DetachedDpuServiceInterface::Service {
+                service_id: "extsvc-00000000-0000-0000-0000-000000000001".to_string(),
+                interface_name: "svc0".to_string(),
+                network: format!("{TEST_NS}/service-vpc-ipv4"),
+            },
+        })
+        .await
+        .expect("create dynamic extension-service interface");
+
+    // Run the public split initialization path so cleanup sees static and dynamic resources
+    // together.
+    sdk.create_initialization_objects(&InitDpfResourcesConfig {
+        bfb_url: "http://example.com/test.bfb".to_string(),
+        deployment_scoped_service_interfaces: true,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    // Legacy resources are replaced, while the selected dynamic parent is neither deleted nor
+    // overwritten.
     assert!(
         DpuServiceInterfaceRepository::get(&mock, "p1", TEST_NS)
             .await
@@ -1410,7 +2426,265 @@ async fn scoped_initialization_prunes_unscoped_interfaces() {
             .unwrap()
             .is_none()
     );
+    let dynamic_after = DpuServiceInterfaceRepository::get(&mock, dynamic_name, TEST_NS)
+        .await
+        .unwrap()
+        .expect("dynamic interface survives initialization");
+    assert_eq!(
+        serde_json::to_value(dynamic_after.spec).expect("checked spec serializes"),
+        dynamic_before.spec
+    );
+    assert!(
+        !mock
+            .service_interface_delete_requests
+            .contains_key(&ns_key(TEST_NS, dynamic_name,))
+    );
     drop(sdk);
+}
+
+/// Scoped cleanup is independent of BF4; shared unscoped PF1 is removed only without BF4.
+#[tokio::test]
+async fn stale_pf1_cleanup_checks_bf4_only_for_unscoped_interfaces() {
+    for (deployment_type, scoped, bf4_configured, deleted_name) in [
+        (DpuDeploymentType::Bf3, true, false, Some("pf1hpf-bf3")),
+        (DpuDeploymentType::Bf3, true, true, Some("pf1hpf-bf3")),
+        (
+            DpuDeploymentType::Bf3Gb200,
+            true,
+            false,
+            Some("pf1hpf-bf3gb200"),
+        ),
+        (
+            DpuDeploymentType::Bf3Gb200,
+            true,
+            true,
+            Some("pf1hpf-bf3gb200"),
+        ),
+        (DpuDeploymentType::Bf3, false, false, Some("pf1hpf")),
+        (DpuDeploymentType::Bf3, false, true, None),
+    ] {
+        let mock = InitializationMock::default();
+        let definition = crate::sdk::build_dpu_interfaces_vec()
+            .into_iter()
+            .find(|interface| interface.name == "pf1hpf")
+            .unwrap();
+        for name in ["pf1hpf", "pf1hpf-bf3", "pf1hpf-bf3gb200", "pf1hpf-bf4"] {
+            let mut interface = crate::sdk::build_service_interface(&definition, TEST_NS);
+            interface.metadata.name = Some(name.to_string());
+            mock.service_interfaces
+                .insert(resource_key(&interface), interface);
+        }
+        let sdk =
+            crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+                .build_without_resources()
+                .await
+                .unwrap();
+        let config = InitDpfResourcesConfig {
+            deployment_type,
+            deployment_scoped_service_interfaces: scoped,
+            ..Default::default()
+        };
+        sdk.cleanup_stale_pf1_interfaces(&[&config], bf4_configured)
+            .await
+            .unwrap();
+        for name in ["pf1hpf", "pf1hpf-bf3", "pf1hpf-bf3gb200", "pf1hpf-bf4"] {
+            assert_eq!(
+                mock.service_interfaces.contains_key(&ns_key(TEST_NS, name)),
+                Some(name) != deleted_name,
+                "deployment={deployment_type:?}, scoped={scoped}, bf4_configured={bf4_configured}, interface={name}"
+            );
+        }
+    }
+}
+
+/// BF4 profiles and explicitly configured PF1 prevent cleanup.
+#[tokio::test]
+async fn stale_pf1_cleanup_preserves_requested_interfaces() {
+    let pf1 = crate::sdk::build_dpu_interfaces_vec()
+        .into_iter()
+        .find(|interface| interface.name == "pf1hpf")
+        .unwrap();
+    let topology = DpfInterceptBridging::new(
+        vec![DpfInterceptBridge {
+            identity: DpfInterfaceIdentity {
+                controller_id: 0,
+                pf_id: 1,
+                vf_id: None,
+            },
+            bridge: "br-host".to_string(),
+            patch_port: "host-patch".to_string(),
+        }],
+        crate::DEFAULT_DPU_NUM_OF_VFS,
+    )
+    .unwrap();
+    for config in [
+        InitDpfResourcesConfig {
+            deployment_type: DpuDeploymentType::Bf4Generic,
+            ..Default::default()
+        },
+        InitDpfResourcesConfig {
+            intercept_bridging: Some(topology),
+            ..Default::default()
+        },
+        InitDpfResourcesConfig {
+            interfaces: vec![pf1.clone()],
+            ..Default::default()
+        },
+    ] {
+        let mock = InitializationMock::default();
+        let interface = crate::sdk::build_service_interface(&pf1, TEST_NS);
+        mock.service_interfaces
+            .insert(resource_key(&interface), interface);
+        let sdk =
+            crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+                .build_without_resources()
+                .await
+                .unwrap();
+        sdk.cleanup_stale_pf1_interfaces(&[&config], false)
+            .await
+            .unwrap();
+        assert!(
+            mock.service_interfaces
+                .contains_key(&ns_key(TEST_NS, "pf1hpf"))
+        );
+    }
+}
+
+/// A successful delete request is insufficient: wait until DPF removes the template.
+#[tokio::test(start_paused = true)]
+async fn stale_pf1_cleanup_waits_for_actual_deletion() {
+    let mock = InitializationMock::default();
+    let definition = crate::sdk::build_dpu_interfaces_vec()
+        .into_iter()
+        .find(|interface| interface.name == "pf1hpf")
+        .unwrap();
+    let interface = crate::sdk::build_service_interface(&definition, TEST_NS);
+    mock.service_interfaces
+        .insert(resource_key(&interface), interface);
+    mock.deferred_service_interface_deletes
+        .insert(ns_key(TEST_NS, "pf1hpf"), ());
+    let sdk = crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+        .build_without_resources()
+        .await
+        .unwrap();
+    let cleanup = tokio::spawn(async move {
+        sdk.cleanup_stale_pf1_interfaces(&[&InitDpfResourcesConfig::default()], false)
+            .await
+    });
+    mock.service_interface_delete_started.notified().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(
+        !cleanup.is_finished(),
+        "cleanup must wait while the interface still exists"
+    );
+    mock.service_interfaces.remove(&ns_key(TEST_NS, "pf1hpf"));
+    cleanup.await.unwrap().unwrap();
+}
+
+/// The deadline covers both a blocked delete request and accepted deletion with stuck finalizers.
+#[tokio::test(start_paused = true)]
+async fn stale_pf1_cleanup_times_out() {
+    for block_delete_request in [true, false] {
+        let mock = InitializationMock::default();
+        let definition = crate::sdk::build_dpu_interfaces_vec()
+            .into_iter()
+            .find(|interface| interface.name == "pf1hpf")
+            .unwrap();
+        let interface = crate::sdk::build_service_interface(&definition, TEST_NS);
+        mock.service_interfaces
+            .insert(resource_key(&interface), interface);
+        let deletes = if block_delete_request {
+            &mock.blocked_service_interface_deletes
+        } else {
+            &mock.deferred_service_interface_deletes
+        };
+        deletes.insert(ns_key(TEST_NS, "pf1hpf"), ());
+        let sdk =
+            crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+                .build_without_resources()
+                .await
+                .unwrap();
+        let cleanup = tokio::spawn(async move {
+            sdk.cleanup_stale_pf1_interfaces(&[&InitDpfResourcesConfig::default()], false)
+                .await
+        });
+        mock.service_interface_delete_started.notified().await;
+        tokio::time::advance(Duration::from_secs(119)).await;
+        assert!(
+            !cleanup.is_finished(),
+            "cleanup must allow the two-minute window"
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let error = cleanup.await.unwrap().unwrap_err();
+        assert!(matches!(error, DpfError::Timeout { ref details, .. }
+            if details.contains("sdk-init-ns") && details.contains("pf1hpf") && details.contains("two minutes")));
+        assert!(
+            mock.service_interfaces
+                .contains_key(&ns_key(TEST_NS, "pf1hpf")),
+            "timing out must leave the interface for DPF to finish deleting"
+        );
+    }
+}
+
+/// Send both scoped deletes before waiting, or a single deduplicated unscoped delete.
+/// The whole batch shares one two-minute deadline, even when delete requests are blocked.
+#[tokio::test(start_paused = true)]
+async fn stale_pf1_cleanup_batches_deletes_with_one_deadline() {
+    for scoped in [true, false] {
+        let mock = InitializationMock::default();
+        let definition = crate::sdk::build_dpu_interfaces_vec()
+            .into_iter()
+            .find(|interface| interface.name == "pf1hpf")
+            .unwrap();
+        let names = if scoped {
+            vec!["pf1hpf-bf3", "pf1hpf-bf3gb200"]
+        } else {
+            vec!["pf1hpf"]
+        };
+        for name in &names {
+            let mut interface = crate::sdk::build_service_interface(&definition, TEST_NS);
+            interface.metadata.name = Some((*name).to_string());
+            mock.service_interfaces
+                .insert(resource_key(&interface), interface);
+            mock.blocked_service_interface_deletes
+                .insert(ns_key(TEST_NS, name), ());
+        }
+        let sdk =
+            crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+                .build_without_resources()
+                .await
+                .unwrap();
+        let cleanup = tokio::spawn(async move {
+            let bf3 = InitDpfResourcesConfig {
+                deployment_scoped_service_interfaces: scoped,
+                ..Default::default()
+            };
+            let gb200 = InitDpfResourcesConfig {
+                deployment_type: DpuDeploymentType::Bf3Gb200,
+                deployment_scoped_service_interfaces: scoped,
+                ..Default::default()
+            };
+            sdk.cleanup_stale_pf1_interfaces(&[&bf3, &gb200], false)
+                .await
+        });
+        mock.service_interface_delete_started.notified().await;
+        assert_eq!(mock.service_interface_delete_requests.len(), names.len());
+        for name in &names {
+            assert_eq!(
+                *mock
+                    .service_interface_delete_requests
+                    .get(&ns_key(TEST_NS, name))
+                    .unwrap(),
+                1
+            );
+        }
+        tokio::time::advance(Duration::from_secs(119)).await;
+        assert!(!cleanup.is_finished());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let error = cleanup.await.unwrap().unwrap_err();
+        assert!(matches!(error, DpfError::Timeout { ref details, .. }
+            if names.iter().all(|name| details.contains(name))));
+    }
 }
 
 #[tokio::test]

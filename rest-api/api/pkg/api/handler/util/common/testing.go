@@ -30,7 +30,6 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -743,22 +742,15 @@ func TestBuildVpcPeering(t *testing.T, dbSession *cdb.Session, vpc1ID, vpc2ID uu
 	return vp
 }
 
-// TestCommonTraceProviderSetup creates a test provider and spanner
-func TestCommonTraceProviderSetup(t *testing.T, ctx context.Context) (trace.Tracer, trace.SpanContext, context.Context) {
-	// OTEL spanner configuration
-	provider := trace.NewNoopTracerProvider()
+// TestCommonTraceProviderSetup returns ctx carrying a remote parent span context
+func TestCommonTraceProviderSetup(t *testing.T, ctx context.Context) context.Context {
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 	sc := trace.NewSpanContext(trace.SpanContextConfig{
 		TraceID: trace.TraceID{0x01},
 		SpanID:  trace.SpanID{0x01},
 	})
 
-	// Start echo test parent tracer/spanner
-	ctx = trace.ContextWithRemoteSpanContext(ctx, sc)
-	tracer := provider.Tracer(otelecho.TracerName)
-	tracer.Start(ctx, "Test-Echo-Spanner")
-
-	return tracer, sc, ctx
+	return trace.ContextWithRemoteSpanContext(ctx, sc)
 }
 
 func TestBuildAuditEntry(t *testing.T, dbSession *cdb.Session, orgName string, userID *uuid.UUID, statusCode int) *cdbm.AuditEntry {

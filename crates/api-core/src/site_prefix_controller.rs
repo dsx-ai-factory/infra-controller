@@ -15,7 +15,8 @@
  * limitations under the License.
  */
 
-//! Makes tenant SitePrefixes usable after the required DPUs apply protection.
+//! Makes tenant SitePrefixes usable after the required DPUs apply protection,
+//! and retires them after their exact children have been physically removed.
 
 use carbide_uuid::site_prefix::SitePrefixId;
 use chrono::{DateTime, Utc};
@@ -95,15 +96,26 @@ impl StateControllerIO for SitePrefixReadiness {
         &self,
         txn: &mut PgConnection,
     ) -> Result<Vec<SitePrefixId>, DatabaseError> {
-        db::site_prefix::find_ids(
-            txn,
-            SitePrefixSearchFilter {
-                authority: Some(SitePrefixAuthority::TenantManaged),
-                lifecycle_state: Some(SitePrefixLifecycleState::Provisioning),
-                ..Default::default()
-            },
-        )
-        .await
+        let mut ids = Vec::new();
+        for lifecycle_state in [
+            SitePrefixLifecycleState::Provisioning,
+            SitePrefixLifecycleState::Deleting,
+        ] {
+            ids.extend(
+                db::site_prefix::find_ids(
+                    &mut *txn,
+                    SitePrefixSearchFilter {
+                        authority: Some(SitePrefixAuthority::TenantManaged),
+                        lifecycle_state: Some(lifecycle_state),
+                        ..Default::default()
+                    },
+                )
+                .await?,
+            );
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        Ok(ids)
     }
 
     async fn load_object_state(
@@ -200,8 +212,21 @@ impl StateHandler for SitePrefixReadiness {
         _controller_state: &SitePrefixLifecycleState,
         ctx: &mut StateHandlerContext<Self>,
     ) -> Result<StateHandlerOutcome<SitePrefixLifecycleState>, StateHandlerError> {
+        if !matches!(
+            state.status.lifecycle_state,
+            SitePrefixLifecycleState::Provisioning | SitePrefixLifecycleState::Deleting
+        ) {
+            return Ok(StateHandlerOutcome::do_nothing());
+        }
         let mut txn = ctx.services.begin().await?;
-        let requested_at = db::site_prefix::isolation_requested_at(&mut txn, *object_id).await?;
+        // Retirement only drains exact child references; it neither waits for
+        // another DPU acknowledgement nor generates a new isolation request.
+        let requested_at = if state.status.lifecycle_state == SitePrefixLifecycleState::Provisioning
+        {
+            db::site_prefix::isolation_requested_at(&mut txn, *object_id).await?
+        } else {
+            None
+        };
         if let Some(requested_at) = requested_at {
             // A stale negative only delays readiness. Avoid holding the routing
             // lock through this scan: a queued writer also delays later readers.
@@ -221,7 +246,7 @@ impl StateHandler for SitePrefixReadiness {
             return Ok(StateHandlerOutcome::deleted().with_txn(txn));
         };
         if current.status.authority != SitePrefixAuthority::TenantManaged
-            || current.status.lifecycle_state != SitePrefixLifecycleState::Provisioning
+            || current.status.lifecycle_state != state.status.lifecycle_state
         {
             return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
         }
@@ -229,6 +254,19 @@ impl StateHandler for SitePrefixReadiness {
             return Err(StateHandlerError::IterationInvalidated {
                 source_ref: std::panic::Location::caller(),
             });
+        }
+
+        if current.status.lifecycle_state == SitePrefixLifecycleState::Deleting {
+            let vpc_prefix_count =
+                db::vpc_prefix::count_vpc_prefixes_by_site_prefix_id(&mut *txn, *object_id).await?;
+            if vpc_prefix_count > 0 {
+                return Ok(StateHandlerOutcome::wait(format!(
+                    "waiting for {vpc_prefix_count} VPC prefix references to be physically removed"
+                ))
+                .with_txn(txn));
+            }
+            db::site_prefix::final_delete(*object_id, &mut txn).await?;
+            return Ok(StateHandlerOutcome::deleted().with_txn(txn));
         }
 
         let isolation_required = matches!(

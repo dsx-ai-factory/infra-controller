@@ -5,6 +5,7 @@ package inventorysync
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
 
 // These tests exercise the mirror's write paths against a real database —
@@ -88,7 +90,195 @@ func computeSpec(mfr, serial, mac string) expectedComponentSpec {
 	}
 }
 
+func TestSyncExpectedFromCore(t *testing.T) {
+	ctx, pool := mirrorTestPool(t)
+	t.Cleanup(func() { pool.Close() })
+	dbConf, err := cdb.ConfigFromEnv()
+	require.NoError(t, err)
+	dbConf.DBName = pool.DBName
+
+	const rackExternalID = "rack-01"
+	var rackID uuid.UUID
+	componentIDs := make(map[string]uuid.UUID)
+
+	for _, step := range []struct {
+		name            string
+		rackName        string
+		machineName     string
+		switchName      string
+		includeShelf    bool
+		machineError    error
+		reconnect       bool
+		wantMachineName string
+	}{
+		{
+			name:            "initial poll resolves components to the newly mirrored rack",
+			rackName:        "rack-initial",
+			machineName:     "machine-initial",
+			switchName:      "switch-initial",
+			includeShelf:    true,
+			wantMachineName: "machine-initial",
+		},
+		{
+			name:            "failed machine pull preserves machines while other snapshots apply",
+			rackName:        "rack-updated",
+			machineName:     "machine-updated",
+			switchName:      "switch-updated",
+			machineError:    errors.New("machine inventory temporarily unavailable"),
+			wantMachineName: "machine-initial",
+		},
+		{
+			name:            "fresh session retries the deferred machine update without replacing rows",
+			rackName:        "rack-updated",
+			machineName:     "machine-updated",
+			switchName:      "switch-updated",
+			reconnect:       true,
+			wantMachineName: "machine-updated",
+		},
+	} {
+		ok := t.Run(step.name, func(t *testing.T) {
+			if step.reconnect {
+				// Keep the database from the previous polls; a new fixture would
+				// discard the persisted state this recovery needs to reuse.
+				pool.Close()
+				reconnected, err := cdb.NewSessionFromConfig(ctx, dbConf)
+				require.NoError(t, err, "reconnect to the original Flow database")
+				pool = reconnected
+			}
+
+			mockClient := nicoapi.NewMockClient()
+			mockClient.AddExpectedRackDetail(coreRackNamed(rackExternalID, step.rackName, "NVIDIA", "RACK-01"))
+			mockClient.AddExpectedMachineDetail(nicoapi.ExpectedMachineDetail{
+				ExpectedMachineID:   "00000000-0000-4000-8000-000000000001",
+				BMCMACAddress:       "aa:bb:cc:dd:ee:01",
+				ChassisSerialNumber: "MACHINE-01",
+				RackID:              rackExternalID,
+				Name:                step.machineName,
+			})
+			mockClient.AddExpectedSwitchDetail(nicoapi.ExpectedSwitchDetail{
+				ExpectedSwitchID:   "00000000-0000-4000-8000-000000000002",
+				BMCMACAddress:      "aa:bb:cc:dd:ee:02",
+				SwitchSerialNumber: "SWITCH-01",
+				RackID:             rackExternalID,
+				Name:               step.switchName,
+			})
+			if step.includeShelf {
+				mockClient.AddExpectedPowerShelfDetail(nicoapi.ExpectedPowerShelfDetail{
+					ExpectedPowerShelfID: "00000000-0000-4000-8000-000000000003",
+					BMCMACAddress:        "aa:bb:cc:dd:ee:03",
+					ShelfSerialNumber:    "SHELF-01",
+					RackID:               rackExternalID,
+					Name:                 "shelf-initial",
+				})
+			}
+			var client nicoapi.Client = mockClient
+			if step.machineError != nil {
+				client = &errExpectedMachinesClient{Client: mockClient, err: step.machineError}
+			}
+
+			syncExpectedFromCore(ctx, pool, client)
+
+			var racks []model.Rack
+			err = pool.DB.NewSelect().Model(&racks).WhereAllWithDeleted().Scan(ctx)
+			require.NoError(t, err, "reload racks")
+			require.Len(t, racks, 1, "rack row count")
+			rack := racks[0]
+			if rackID == uuid.Nil {
+				rackID = rack.ID
+			}
+			assert.NotEqual(t, uuid.Nil, rack.ID, "rack ID")
+			assert.Equal(t, rackID, rack.ID, "rack ID remains stable across polls")
+			assert.Equal(t, strPtr(rackExternalID), rack.ExternalID, "rack external ID")
+			assert.Equal(t, step.rackName, rack.Name, "rack name")
+			assert.Nil(t, rack.DeletedAt, "rack remains active")
+
+			for _, want := range []struct {
+				componentType devicetypes.ComponentType
+				name          string
+				deleted       bool
+			}{
+				{componentType: devicetypes.ComponentTypeCompute, name: step.wantMachineName},
+				{componentType: devicetypes.ComponentTypeNVSwitch, name: step.switchName},
+				{componentType: devicetypes.ComponentTypePowerShelf, name: "shelf-initial", deleted: !step.includeShelf},
+			} {
+				componentType := devicetypes.ComponentTypeToString(want.componentType)
+				components, err := getAllComponentsByTypeIncludingDeleted(ctx, pool.DB, componentType)
+				require.NoError(t, err, "%s reload", componentType)
+				require.Len(t, components, 1, "%s row count", componentType)
+				component := components[0]
+				originalID, exists := componentIDs[componentType]
+				if !exists {
+					originalID = component.ID
+					componentIDs[componentType] = originalID
+				}
+				assert.NotEqual(t, uuid.Nil, component.ID, "%s ID", componentType)
+				assert.Equal(t, originalID, component.ID, "%s ID remains stable across polls", componentType)
+				assert.Equal(t, rackID, component.RackID, "%s references the mirrored rack", componentType)
+				assert.Equal(t, want.name, component.Name, "%s name", componentType)
+				assert.Equal(t, want.deleted, component.DeletedAt != nil, "%s soft deletion", componentType)
+			}
+		})
+		if !ok {
+			return
+		}
+	}
+}
+
 // --- rack mirror ----------------------------------------------------------
+
+func TestMirrorExpectedRacks_ProfileID(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		existing   bool
+		adopt      bool
+		oldProfile *string
+		profile    string
+	}{
+		{name: "insert", profile: "GB200_NVL72R1_C2G4_WIWYNN"},
+		{name: "populate predecessor rack", existing: true, adopt: true, profile: "GB200_NVL72R1_C2G4_LENOVO"},
+		{name: "replace old profile", existing: true, oldProfile: strPtr("GB200_NVL72R1_C2G4_WiWynn_NVIDIA_WiWynn"), profile: "GB200_NVL72R1_C2G4_WIWYNN"},
+		{name: "absent profile clears value", existing: true, oldProfile: strPtr("old-profile")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, pool := mirrorTestPool(t)
+			core := coreRack("rack-01", "NVIDIA", "SN-01")
+			core.RackProfileID = test.profile
+			var original model.Rack
+			if test.existing {
+				original = model.Rack{Name: core.Name, Manufacturer: "NVIDIA", SerialNumber: "SN-01", RackProfileID: test.oldProfile}
+				if !test.adopt {
+					original.ExternalID = strPtr(core.RackID)
+				}
+				require.NoError(t, original.Create(ctx, pool.DB))
+			}
+			result := mirrorExpectedRacks(ctx, pool, []nicoapi.ExpectedRackDetail{core})
+			if test.existing {
+				assert.Equal(t, 1, result.updated)
+			} else {
+				assert.Equal(t, 1, result.inserted)
+			}
+			var stored model.Rack
+			require.NoError(t, pool.DB.NewSelect().Model(&stored).Where("external_id = ?", core.RackID).Scan(ctx))
+			if test.existing {
+				assert.Equal(t, original.ID, stored.ID)
+			}
+			if test.profile == "" {
+				assert.Nil(t, stored.RackProfileID)
+			} else {
+				require.NotNil(t, stored.RackProfileID)
+				assert.Equal(t, test.profile, *stored.RackProfileID)
+			}
+			result = mirrorExpectedRacks(ctx, pool, []nicoapi.ExpectedRackDetail{core})
+			assert.Zero(t, result.updated, "identical snapshots do not rewrite the rack")
+			patch := (&model.Rack{Name: "renamed"}).BuildPatch(&stored)
+			require.NotNil(t, patch)
+			require.NoError(t, patch.Patch(ctx, pool.DB))
+			var renamed model.Rack
+			require.NoError(t, pool.DB.NewSelect().Model(&renamed).Where("id = ?", stored.ID).Scan(ctx))
+			assert.Equal(t, stored.RackProfileID, renamed.RackProfileID, "metadata patches preserve the synchronized profile")
+		})
+	}
+}
 
 // A successful but empty Core response soft-deletes both mirror-adopted and
 // legacy racks because no remaining row can be adopted from this snapshot.
@@ -366,6 +556,7 @@ func TestMirrorRacks_CoreMetadataCorrectionConvergesExistingExternalID(t *testin
 	domain := model.NVLDomain{Name: "domain-a"}
 	require.NoError(t, domain.Create(ctx, pool.DB))
 	ingestedAt := time.Now().UTC().Truncate(time.Microsecond)
+	health := &types.HealthReport{Source: "rack-aggregate-health", Successes: []types.HealthProbeSuccess{}, Alerts: []types.HealthProbeAlert{}}
 
 	r := model.Rack{
 		Name:         "rack-a12",
@@ -377,6 +568,7 @@ func TestMirrorRacks_CoreMetadataCorrectionConvergesExistingExternalID(t *testin
 		NVLDomainID:  domain.ID,
 		Status:       model.RackStatusIngested,
 		IngestedAt:   &ingestedAt,
+		Health:       health,
 	}
 	require.NoError(t, r.Create(ctx, pool.DB))
 
@@ -409,6 +601,7 @@ func TestMirrorRacks_CoreMetadataCorrectionConvergesExistingExternalID(t *testin
 	}, got.Location)
 	assert.Equal(t, domain.ID, got.NVLDomainID)
 	assert.Equal(t, model.RackStatusIngested, got.Status)
+	assert.Equal(t, health, got.Health, "health is runtime-owned, must survive")
 	require.NotNil(t, got.IngestedAt)
 	assert.Equal(t, ingestedAt, got.IngestedAt.UTC())
 }
@@ -648,11 +841,12 @@ func TestMirrorComponents_ResurrectOnReReport(t *testing.T) {
 }
 
 // #5: an UPDATE must touch only mirror-managed columns and leave runtime-owned
-// columns (external_id, power_state, firmware_version) intact.
+// columns (external_id, power_state, firmware_version, health) intact.
 func TestMirrorComponents_UpdatePreservesRuntimeColumns(t *testing.T) {
 	ctx, pool := mirrorTestPool(t)
 
 	on := nicoapi.PowerStateOn
+	health := &types.HealthReport{Source: "aggregate-host-health", Successes: []types.HealthProbeSuccess{}, Alerts: []types.HealthProbeAlert{}}
 	c := model.Component{
 		Type:            compType(),
 		Manufacturer:    "Mfg",
@@ -661,6 +855,7 @@ func TestMirrorComponents_UpdatePreservesRuntimeColumns(t *testing.T) {
 		ComponentID:     strPtr("runtime-ext-id"),
 		PowerState:      &on,
 		FirmwareVersion: "9.9.9",
+		Health:          health,
 	}
 	require.NoError(t, c.Create(ctx, pool.DB))
 	hostBMC := model.BMC{
@@ -684,6 +879,7 @@ func TestMirrorComponents_UpdatePreservesRuntimeColumns(t *testing.T) {
 	require.NotNil(t, got.PowerState)
 	assert.Equal(t, nicoapi.PowerStateOn, *got.PowerState, "power_state is runtime-owned, must survive")
 	assert.Equal(t, "9.9.9", got.FirmwareVersion, "firmware_version is runtime-owned, must survive")
+	assert.Equal(t, health, got.Health, "health is runtime-owned, must survive")
 }
 
 func TestMirrorComponents_PositionPresence(t *testing.T) {

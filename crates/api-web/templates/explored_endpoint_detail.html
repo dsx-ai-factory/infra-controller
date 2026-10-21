@@ -318,6 +318,7 @@
 		<tr>
 			<th>Boot Order</th>
 			<td>
+				{% if loop.first %}
 				<div style="margin-bottom: 12px;">
 					<form id="set_first_boot_order" method="POST" action="/admin/explored-endpoint/{{ endpoint.address }}/set-dpu-first-boot-order" onsubmit="action_reminder(event)">
 						<div style="display: flex; gap: 8px; align-items: center;">
@@ -335,6 +336,7 @@
 				{% if let Some(status) = action_status %}
 				{% if status.action == action_status::Type::SetFirstBootOrder %}
 				{{ status.action_result_script()|safe }}
+				{% endif %}
 				{% endif %}
 				{% endif %}
 				<div style="max-height: 300px; overflow: auto;">

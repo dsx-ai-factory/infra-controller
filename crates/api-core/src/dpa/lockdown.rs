@@ -369,10 +369,13 @@ mod tests {
         assert_ne!(key1, key2);
     }
 
+    /// Pin the host/MAC key identity and prove the derived value passes the
+    /// runner validation used by scout for both locking and unlocking.
     #[test]
     fn test_known_vector() {
-        // This test pins a known derivation to detect accidental
-        // algorithm changes.
+        use libmlx::lockdown::error::MlxError;
+        use libmlx::lockdown::lockdown::LockdownManager;
+
         let root = b"test-site-wide-root-secret";
         let ctx = KdfContext {
             mac_address: "00:11:22:33:44:55".to_string(),
@@ -383,6 +386,21 @@ mod tests {
         // Check against a hardcoded expected value — if this changes,
         // the KDF construction unexpectedly changed.
         assert_eq!(key, "efc63727086fa25c");
+
+        // Scout uses this manager. Dry-run exercises its runner's validation,
+        // but does not prove subprocess argument forwarding or hardware support.
+        let manager = LockdownManager::with_dry_run(true).unwrap();
+        for (operation, result) in [
+            // Lock validation must accept the value pinned by the KDF vector.
+            ("lock", manager.lock_device("0000:01:00.0", &key)),
+            // Unlocking validates independently and must accept the same key.
+            ("unlock", manager.unlock_device("0000:01:00.0", &key)),
+        ] {
+            assert!(
+                matches!(result, Err(MlxError::DryRun(_))),
+                "{operation} rejected the derived key: {result:?}"
+            );
+        }
     }
 
     #[test]

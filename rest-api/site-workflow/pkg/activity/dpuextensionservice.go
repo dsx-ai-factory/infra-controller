@@ -67,9 +67,7 @@ func dpuExtensionServiceFindByIDs(ctx context.Context, grpcClient *cclient.CoreG
 
 func dpuExtensionServicePagedInventory(allItemIDs []string, pagedItems []*corev1.DpuExtensionService, input *pagedInventoryInput) *corev1.DpuExtensionServiceInventory {
 	itemIDs := []string{}
-	for _, id := range allItemIDs {
-		itemIDs = append(itemIDs, id)
-	}
+	itemIDs = append(itemIDs, allItemIDs...)
 
 	inventory := &corev1.DpuExtensionServiceInventory{
 		DpuExtensionServices: pagedItems,

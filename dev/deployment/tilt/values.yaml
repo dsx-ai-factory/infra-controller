@@ -76,6 +76,10 @@ nico-api:
       mtu = 9000
       reserve_first = 2
 
+      # DPU OOB and switch NVOS leases. mat-k8s-controller publishes each
+      # switch's NVOS lease as a Service externalIP so NICo can reach the NMX-C
+      # mock at that address, so like the BMC segment below this range must
+      # stay outside the ServiceCIDR and the pod CIDR.
       [networks.DEV-K3S-DPU-ACORN-0]
       type = "underlay"
       prefix = "192.168.128.0/18"
@@ -130,6 +134,18 @@ nico-api:
       run_interval = "10s"
       concurrency_limit = 100
 
+      # NMX-C is served by machine-a-tron's hosted mock at each simulated
+      # switch's NVOS address. The mock rides on machine-a-tron's own TLS
+      # certificate, issued by the same local CA as nico-roots and carrying
+      # the shared SAN below (nico-machine-a-tron.certificate.extraDnsNames),
+      # so one authority verifies every rack. No client certificate: the mock
+      # does not require client authentication.
+      [nvlink_config]
+      enabled = true
+      allow_insecure = false
+      nmx_c_tls_ca_cert_path = "/var/run/secrets/nico-roots/ca.crt"
+      nmx_c_tls_authority = "mat-mock.nvidia.com"
+
 nico-bmc-proxy:
   enabled: true
   replicas: 1
@@ -166,7 +182,10 @@ nico-bmc-proxy:
       additional_issuer_cns = []
 
       [auth.acls]
-      "trusted-certificate" = ["/**"]
+      "trusted-certificate" = [
+        "GET /redfish/v1/Registries/%23*",
+        "/**",
+      ]
 
       [carbide_api]
       api_url = "https://nico-api.nico-system.svc.cluster.local:1079"
@@ -187,8 +206,10 @@ nico-ssh-console-rs:
   enabled: true
   configFiles:
     config: |
-      listen_address = "[::]:22"
-      metrics_address = "[::]:9009"
+      listen_address = "*:22"
+      api_listen_address = "*:1079"
+      api_allowed_client_spiffe_id = "spiffe://nico.local/nico-system/sa/nico-api"
+      metrics_address = "*:9009"
       carbide_url = "https://nico-api.nico-system.svc.cluster.local:1079"
       forge_root_ca_path = "/var/run/secrets/spiffe.io/ca.crt"
       client_cert_path = "/var/run/secrets/spiffe.io/tls.crt"
@@ -232,6 +253,7 @@ nico-machine-a-tron:
         cleanup_on_quit = false
         register_expected_machines = true
         api_refresh_interval = "2s"
+        generate_console_logs = true
 
         [ufm_mock]
         enabled = true
@@ -240,8 +262,8 @@ nico-machine-a-tron:
 
         [racks.gb200]
         type = "wiwynn_gb200_nvl72"
-        rack_profile_id = "NVL72"
-        ids = ["rack-001"]
+        rack_profile_id = "GB200_NVL72R1_C2G4_WIWYNN"
+        ids = ["rack-001", "rack-002"]
         dpu_reboot_delay = 20
         host_reboot_delay = 10
         acceleration_factor = 0.01
@@ -269,9 +291,10 @@ nico-machine-a-tron:
       racks:
         gb200:
           type: wiwynn_gb200_nvl72
-          rack_profile_id: NVL72
+          rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
           ids:
             - rack-001
+            - rack-002
           dpu_reboot_delay: 20
           host_reboot_delay: 10
           oob_dhcp_relay_address: 10.200.0.1

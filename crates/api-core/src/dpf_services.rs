@@ -33,7 +33,7 @@ use carbide_dpf::{
 
 use crate::cfg::file::{
     DpfBootstrapCaObjectKind, DpfDpuAgentBootstrapCa, DpfExtraService,
-    DpfResolvedMandatoryServicesConfig, DpfServiceConfig, NodeAuthConfig,
+    DpfResolvedMandatoryServicesConfig, DpfServiceConfig, EwEthersConfig, NodeAuthConfig,
 };
 
 /// Default DOCA helm registry (DPUServiceTemplate source.repoURL).
@@ -629,13 +629,13 @@ pub(crate) fn dhcp_server_service(
 
         service_daemon_set_annotations: Some(BTreeMap::new()),
 
-        service_nad: Some(ServiceNAD {
+        service_nads: vec![ServiceNAD {
             name: DHCP_SERVER_SERVICE_NAD_NAME.to_string(),
             bridge: Some("br-sfc".to_string()),
             resource_type: ServiceNADResourceType::Sf,
             ipam: Some(false),
             mtu: Some(DHCP_SERVER_SERVICE_MTU),
-        }),
+        }],
 
         ..ServiceDefinition::new(
             &cfg.name,
@@ -679,13 +679,13 @@ pub(crate) fn fmds_service(
 
         service_daemon_set_annotations: Some(BTreeMap::new()),
 
-        service_nad: Some(ServiceNAD {
+        service_nads: vec![ServiceNAD {
             name: FMDS_SERVICE_NAD_NAME.to_string(),
             bridge: Some("br-sfc".to_string()),
             resource_type: ServiceNADResourceType::Sf,
             ipam: Some(false),
             mtu: Some(FMDS_SERVICE_MTU),
-        }),
+        }],
 
         ..ServiceDefinition::new(
             &cfg.name,
@@ -807,7 +807,24 @@ fn weave_flow_controller_underlay_interfaces() -> Vec<serde_json::Value> {
         .collect()
 }
 
-pub(crate) fn doca_weave_flow_controller_service(cfg: &DpfServiceConfig) -> ServiceDefinition {
+pub(crate) fn doca_weave_flow_controller_service(
+    cfg: &DpfServiceConfig,
+    ewethers_config: Option<&EwEthersConfig>,
+) -> ServiceDefinition {
+    let overlay_network_prefix_len = ewethers_config
+        .map(|config| config.subnet_mask)
+        .unwrap_or_else(EwEthersConfig::default_subnet_mask);
+    let default_astra_config = crate::cfg::file::AstraConfig::default();
+    let astra_config = ewethers_config
+        .map(|config| &config.astra)
+        .unwrap_or(&default_astra_config);
+    let underlay_config_map_data = serde_json::json!({
+        "nicIDType": "mac",
+        "overlayNetworkPrefixLength": overlay_network_prefix_len,
+        "softwarePlaneIDBitLength": astra_config.underlay_ip_software_plane_id_bit_len,
+        "railIDBitLength": astra_config.underlay_ip_rail_id_bit_len,
+        "interfaces": weave_flow_controller_underlay_interfaces(),
+    });
     let mut helm_values = serde_json::json!({
         "weaveFlowController": {
             "containers": {
@@ -826,13 +843,7 @@ pub(crate) fn doca_weave_flow_controller_service(cfg: &DpfServiceConfig) -> Serv
         config_values: Some(serde_json::json!({
             "weaveFlowController": {
                 "enabled": true,
-                "underlayConfigMapData": {
-                    "nicIDType": "mac",
-                    "overlayNetworkPrefixLength": 11,
-                    "softwarePlaneIDBitLength": 8,
-                    "railIDBitLength": 4,
-                    "interfaces": weave_flow_controller_underlay_interfaces(),
-                }
+                "underlayConfigMapData": underlay_config_map_data
             }
         })),
         ..ServiceDefinition::new(
@@ -873,11 +884,15 @@ pub(crate) fn mandatory_services(
     interfaces: &[DpuServiceInterfaceTemplateDefinition],
     service_vpc_slots: ServiceVpcSlots,
     node_auth: &NodeAuthConfig,
+    ewethers_config: Option<&EwEthersConfig>,
 ) -> Vec<ServiceDefinition> {
+    // Slot listeners attach directly to their own bridge, so each needs its own NAD.
+    let mut dhcp = dhcp_server_service(&resolved.base.dhcp_server, interfaces);
+    service_vpc_slots.append_dhcp_interfaces(&mut dhcp);
     let mut service_vec = vec![
         dts_service(&resolved.base.dts),
         doca_hbn_service(&resolved.base.doca_hbn, interfaces, service_vpc_slots),
-        dhcp_server_service(&resolved.base.dhcp_server, interfaces),
+        dhcp,
         dpu_agent_service(&resolved.base.dpu_agent, bootstrap_ca),
         // Not `node_auth.enabled` directly: an operator staging a disable
         // moves fmds off tokens first, while the API still accepts them.
@@ -895,7 +910,7 @@ pub(crate) fn mandatory_services(
                 service_vec.push(doca_weave_dhcp_agent_service(cfg))
             }
             DpfExtraService::DocaWeaveFlowController => {
-                service_vec.push(doca_weave_flow_controller_service(cfg))
+                service_vec.push(doca_weave_flow_controller_service(cfg, ewethers_config))
             }
             DpfExtraService::DocaXplane => service_vec.push(doca_xplane_service(cfg)),
         }
@@ -908,11 +923,12 @@ pub(crate) fn mandatory_services(
 mod tests {
     use carbide_dpf::sdk::{build_dpu_interfaces_vec, build_effective_dpu_interfaces};
     use carbide_dpf::types::{
-        DpfInterceptBridge, DpfInterceptBridging, DpfInterfaceIdentity,
+        DpfInterceptBridge, DpfInterceptBridging, DpfInterfaceIdentity, DpuDeploymentType,
         DpuServiceInterfaceTemplateType,
     };
     use carbide_dpf::{
-        build_service_configuration, build_service_interface, build_service_template,
+        build_deployment_dpu_interfaces, build_service_configuration, build_service_interface,
+        build_service_nad, build_service_template,
     };
     use carbide_test_support::value_scenarios;
     use url::Url;
@@ -921,7 +937,42 @@ mod tests {
 
     const TEST_NS: &str = "dpf-operator-system";
 
+    /// HBN configuration follows the platform inventory used to build service chains.
+    #[test]
+    fn default_hbn_omits_hidden_bf3_host_pf1() {
+        for (deployment_type, has_pf1) in [
+            (DpuDeploymentType::Bf3, false),
+            (DpuDeploymentType::Bf3Gb200, false),
+            (DpuDeploymentType::Bf4Generic, true),
+        ] {
+            let interfaces = build_deployment_dpu_interfaces(deployment_type, 16, None);
+            let hbn = doca_hbn_service(
+                &default_doca_hbn_service(),
+                &interfaces,
+                ServiceVpcSlots::default(),
+            );
+            assert_eq!(
+                hbn.interfaces
+                    .iter()
+                    .any(|interface| interface.name == "pf1hpf_if"),
+                has_pf1
+            );
+            assert!(
+                hbn.interfaces
+                    .iter()
+                    .any(|interface| interface.name == "p1_if")
+            );
+            let startup_yaml =
+                hbn.config_values.as_ref().unwrap()["configuration"]["startupYAMLJ2"]
+                    .as_str()
+                    .unwrap();
+            assert_eq!(startup_yaml.contains("pf1hpf_if:"), has_pf1);
+        }
+    }
+
     /// Verifies every service definition consumes the same configured effective inventory.
+    /// Mandatory-service assembly must pass slots to DHCP as well as HBN to avoid listener gaps.
+    /// Zero slots preserve ordinary NAD references so rollout retains existing BF3 attachments.
     #[test]
     fn configured_inventory_drives_hbn_dhcp_and_fmds_definitions() {
         // Build a complete replacement inventory containing one PF and one VF.
@@ -951,41 +1002,135 @@ mod tests {
         .expect("configured service inventory fixture must be valid");
         let interfaces = build_effective_dpu_interfaces(16, Some(&topology));
 
-        // HBN receives p0, p1, the PF, the VF, and the configured external attachment; its SF
-        // count and startup YAML agree.
-        let service_vpc_slots = ServiceVpcSlots::new(1).unwrap();
-        let hbn = doca_hbn_service(&default_doca_hbn_service(), &interfaces, service_vpc_slots);
-        assert_eq!(hbn.interfaces.len(), 5);
-        assert_eq!(
-            hbn.helm_values.as_ref().unwrap()["resources"]["nvidia.com/bf_sf"],
-            5
-        );
-        let startup_yaml = hbn.config_values.as_ref().unwrap()["configuration"]["startupYAMLJ2"]
-            .as_str()
-            .unwrap();
-        assert!(
-            startup_yaml.contains("pf0hpf_if:")
-                && startup_yaml.contains("pf0vf4_if:")
-                && startup_yaml.contains("iface_svc_0:")
-        );
+        let suffix = carbide_dpf::sdk::deployment_cr_suffix(DpuDeploymentType::Bf3);
+        for slot_count in [
+            // Disabled slots retain the ordinary DHCP/FMDS attachments and no fixed listeners.
+            0,
+            // A positive slot extends the same assembled inventory with a bridge-specific listener.
+            1,
+        ] {
+            // Validate the actual mandatory-service list with its matching inventory and topology.
+            let service_vpc_slots =
+                ServiceVpcSlots::new(slot_count).expect("bounded test slot count");
+            let config = crate::cfg::file::DpfConfig::default();
+            let services = mandatory_services(
+                &config.resolved_services_for(&config.deployments.bf3, DpuDeploymentType::Bf3),
+                &config.dpu_agent_bootstrap_ca,
+                &interfaces,
+                service_vpc_slots,
+                &NodeAuthConfig::default(),
+                None,
+            );
+            carbide_dpf::InitDpfResourcesConfigBuilder::default()
+                .deployment_type(DpuDeploymentType::Bf3)
+                .deployment_scoped_service_interfaces(true)
+                .num_of_vfs(16)
+                .services(services.clone())
+                .interfaces(interfaces.clone())
+                .intercept_bridging(topology.clone())
+                .service_vpc_slots(service_vpc_slots)
+                .build()
+                .expect("production service attachments must match the resolved inventory");
+            let hbn = services
+                .iter()
+                .find(|service| service.name == DOCA_HBN_SERVICE_NAME)
+                .expect("mandatory HBN service");
+            let dhcp = services
+                .iter()
+                .find(|service| service.name == DHCP_SERVER_SERVICE_NAME)
+                .expect("mandatory DHCP service");
+            let fmds = services
+                .iter()
+                .find(|service| service.name == FMDS_SERVICE_NAME)
+                .expect("mandatory FMDS service");
 
-        // DHCP receives both configured entries, while FMDS receives only the PF.
-        let dhcp = dhcp_server_service(&default_dhcp_server_service(), &interfaces);
-        let fmds = fmds_service(&default_fmds_service(), &interfaces, false);
-        assert_eq!(
-            dhcp.interfaces
+            // HBN's generated interfaces, SF request, and startup YAML must describe the same inventory.
+            assert_eq!(hbn.interfaces.len(), 4 + slot_count as usize);
+            assert_eq!(
+                hbn.helm_values.as_ref().unwrap()["resources"]["nvidia.com/bf_sf"],
+                4 + slot_count
+            );
+            let startup_yaml =
+                hbn.config_values.as_ref().unwrap()["configuration"]["startupYAMLJ2"]
+                    .as_str()
+                    .unwrap();
+            assert!(startup_yaml.contains("pf0hpf_if:") && startup_yaml.contains("pf0vf4_if:"));
+            assert_eq!(startup_yaml.contains("iface_svc_0:"), slot_count > 0);
+
+            // Render every assembled NAD so the zero-slot case pins exactly the two ordinary attachments.
+            let rendered_nads: BTreeMap<_, _> = services
                 .iter()
-                .map(|interface| interface.name.as_str())
-                .collect::<Vec<_>>(),
-            ["d_pf0hpf_if", "d_pf0vf4_if"]
-        );
-        assert_eq!(
-            fmds.interfaces
+                .flat_map(|service| &service.service_nads)
+                .map(|nad| (nad.name.clone(), build_service_nad(nad, TEST_NS, suffix)))
+                .collect();
+            let mut expected_nads = vec!["mybrsfc-dhcp", "mybrsfc-fmds"];
+            if slot_count > 0 {
+                expected_nads.push("service-vpc-dhcp-slot0");
+            }
+            assert_eq!(
+                services
+                    .iter()
+                    .map(|service| service.service_nads.len())
+                    .sum::<usize>(),
+                expected_nads.len()
+            );
+            assert_eq!(
+                rendered_nads.keys().map(String::as_str).collect::<Vec<_>>(),
+                expected_nads
+            );
+            for (name, nad) in &rendered_nads {
+                let expected_bridge = if name == "service-vpc-dhcp-slot0" {
+                    "br-svc-0"
+                } else {
+                    "br-sfc"
+                };
+                assert_eq!(nad.metadata.name.as_deref(), Some(name.as_str()));
+                assert_eq!(nad.spec.bridge.as_deref(), Some(expected_bridge));
+                assert_eq!(nad.spec.ipam, Some(false));
+                assert_eq!(nad.spec.service_mtu, Some(1500));
+                assert!(matches!(
+                    nad.spec.resource_type,
+                    carbide_dpf::crds::dpuservicenads_generated::DpuServiceNadResourceType::Sf
+                ));
+            }
+
+            // Render references using production naming; BF3 keeps its ordinary service/NAD names unchanged.
+            let nad_rename = rendered_nads
                 .iter()
-                .map(|interface| interface.name.as_str())
-                .collect::<Vec<_>>(),
-            ["f_pf0hpf_if"]
-        );
+                .map(|(name, nad)| {
+                    (
+                        name.clone(),
+                        nad.metadata.name.clone().expect("rendered NAD name"),
+                    )
+                })
+                .collect();
+            let mut expected_dhcp = vec![
+                ("d_pf0hpf_if", "mybrsfc-dhcp"),
+                ("d_pf0vf4_if", "mybrsfc-dhcp"),
+            ];
+            if slot_count > 0 {
+                expected_dhcp.push(("d_iface_svc_0", "service-vpc-dhcp-slot0"));
+            }
+            for (service, expected_interfaces) in [
+                // DHCP keeps both configured representors and adds only the requested slot listener.
+                (dhcp, expected_dhcp),
+                // FMDS remains PF-only and keeps its ordinary NAD in either slot mode.
+                (fmds, vec![("f_pf0hpf_if", "mybrsfc-fmds")]),
+            ] {
+                let rendered = build_service_configuration(service, TEST_NS, suffix, &nad_rename);
+                assert_eq!(
+                    rendered
+                        .spec
+                        .interfaces
+                        .as_ref()
+                        .expect("mandatory service interfaces")
+                        .iter()
+                        .map(|interface| (interface.name.as_str(), interface.network.as_str()))
+                        .collect::<Vec<_>>(),
+                    expected_interfaces
+                );
+            }
+        }
     }
 
     /// Verifies operator Helm values cannot disconnect HBN's SF request from its interfaces.
@@ -1194,7 +1339,7 @@ mod tests {
                     ),
                     DpfExtraService::DocaWeaveFlowController => (
                         default_doca_weave_flow_controller_service(),
-                        doca_weave_flow_controller_service,
+                        |cfg| doca_weave_flow_controller_service(cfg, None),
                     ),
                     DpfExtraService::DocaXplane => (
                         default_doca_xplane_service(),
@@ -1331,7 +1476,8 @@ mod tests {
 
     #[test]
     fn weave_flow_controller_service_emits_underlay_config_values() {
-        let svc = doca_weave_flow_controller_service(&default_doca_weave_flow_controller_service());
+        let svc =
+            doca_weave_flow_controller_service(&default_doca_weave_flow_controller_service(), None);
         let helm_values = svc.helm_values.expect("helm_values must be set");
         assert_eq!(
             helm_values["weaveFlowController"]["containers"]["weaveFlowController"]["image"]["repository"],
@@ -1355,14 +1501,9 @@ mod tests {
             config["weaveFlowController"]["underlayConfigMapData"]["overlayNetworkPrefixLength"],
             11
         );
-        assert_eq!(
-            config["weaveFlowController"]["underlayConfigMapData"]["softwarePlaneIDBitLength"],
-            8
-        );
-        assert_eq!(
-            config["weaveFlowController"]["underlayConfigMapData"]["railIDBitLength"],
-            4
-        );
+        let underlay = &config["weaveFlowController"]["underlayConfigMapData"];
+        assert_eq!(underlay["softwarePlaneIDBitLength"], 8);
+        assert_eq!(underlay["railIDBitLength"], 4);
 
         let interfaces = config["weaveFlowController"]["underlayConfigMapData"]["interfaces"]
             .as_array()
@@ -1376,6 +1517,53 @@ mod tests {
             interfaces.as_slice(),
             weave_flow_controller_underlay_interfaces().as_slice()
         );
+    }
+
+    #[test]
+    fn weave_flow_controller_service_uses_ewethers_overrides() {
+        let resolved = DpfResolvedMandatoryServicesConfig {
+            base: serde_json::from_value(serde_json::json!({}))
+                .expect("mandatory services build from their serde defaults"),
+            extra: BTreeMap::from([(
+                DpfExtraService::DocaWeaveFlowController,
+                default_doca_weave_flow_controller_service(),
+            )]),
+        };
+        let ewethers_config = EwEthersConfig {
+            subnet_mask: 24,
+            astra: crate::cfg::file::AstraConfig {
+                underlay_ip_rail_id_bit_len: 5,
+                underlay_ip_software_plane_id_bit_len: 7,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let service = mandatory_services(
+            &resolved,
+            &DpfDpuAgentBootstrapCa::default(),
+            &[],
+            ServiceVpcSlots::default(),
+            &NodeAuthConfig::default(),
+            Some(&ewethers_config),
+        )
+        .into_iter()
+        .find(|service| service.name == DOCA_WEAVE_FLOW_CONTROLLER_SERVICE_NAME)
+        .expect("Weave flow controller must be present");
+        let configuration =
+            build_service_configuration(&service, TEST_NS, "bf4astra", &BTreeMap::new());
+        let values = configuration
+            .spec
+            .service_configuration
+            .expect("serviceConfiguration must be set")
+            .helm_chart
+            .expect("helmChart must be set")
+            .values
+            .expect("helmChart values must be set");
+        let underlay = &values["weaveFlowController"]["underlayConfigMapData"];
+
+        assert_eq!(underlay["overlayNetworkPrefixLength"], 24);
+        assert_eq!(underlay["softwarePlaneIDBitLength"], 7);
+        assert_eq!(underlay["railIDBitLength"], 5);
     }
 
     // ---- dpu_service_interfaces ----
@@ -1638,6 +1826,7 @@ mod tests {
                 &[],
                 ServiceVpcSlots::default(),
                 node_auth,
+                None,
             )
             .into_iter()
             .find(|s| s.name == FMDS_SERVICE_NAME)

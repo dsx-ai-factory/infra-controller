@@ -540,7 +540,7 @@ func (jcfg *JwksConfig) GetSubjectPrefix() string {
 
 // hasAnyAudience checks if the token has any of the configured audiences.
 func (jcfg *JwksConfig) hasAnyAudience(claims jwt.MapClaims, audiences []string) bool {
-	if audiences == nil || len(audiences) == 0 {
+	if len(audiences) == 0 {
 		return true
 	}
 

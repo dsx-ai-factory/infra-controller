@@ -491,11 +491,27 @@
                 </li>
 
                 <li>
+                  <a href="#v1.GetListOfNVLinkDomainsRequest"><span class="badge">M</span>GetListOfNVLinkDomainsRequest</a>
+                </li>
+
+                <li>
+                  <a href="#v1.GetListOfNVLinkDomainsResponse"><span class="badge">M</span>GetListOfNVLinkDomainsResponse</a>
+                </li>
+
+                <li>
                   <a href="#v1.GetListOfRacksRequest"><span class="badge">M</span>GetListOfRacksRequest</a>
                 </li>
 
                 <li>
                   <a href="#v1.GetListOfRacksResponse"><span class="badge">M</span>GetListOfRacksResponse</a>
+                </li>
+
+                <li>
+                  <a href="#v1.GetNVLinkDomainRequest"><span class="badge">M</span>GetNVLinkDomainRequest</a>
+                </li>
+
+                <li>
+                  <a href="#v1.GetNVLinkDomainResponse"><span class="badge">M</span>GetNVLinkDomainResponse</a>
                 </li>
 
                 <li>
@@ -548,6 +564,26 @@
 
                 <li>
                   <a href="#v1.GetTasksByIDsResponse"><span class="badge">M</span>GetTasksByIDsResponse</a>
+                </li>
+
+                <li>
+                  <a href="#v1.GetTrayPowerDetailsRequest"><span class="badge">M</span>GetTrayPowerDetailsRequest</a>
+                </li>
+
+                <li>
+                  <a href="#v1.GetTrayPowerDetailsResponse"><span class="badge">M</span>GetTrayPowerDetailsResponse</a>
+                </li>
+
+                <li>
+                  <a href="#v1.HealthProbeAlert"><span class="badge">M</span>HealthProbeAlert</a>
+                </li>
+
+                <li>
+                  <a href="#v1.HealthProbeSuccess"><span class="badge">M</span>HealthProbeSuccess</a>
+                </li>
+
+                <li>
+                  <a href="#v1.HealthReport"><span class="badge">M</span>HealthReport</a>
                 </li>
 
                 <li>
@@ -636,6 +672,10 @@
 
                 <li>
                   <a href="#v1.NVLDomainTargets"><span class="badge">M</span>NVLDomainTargets</a>
+                </li>
+
+                <li>
+                  <a href="#v1.NVLinkDomain"><span class="badge">M</span>NVLinkDomain</a>
                 </li>
 
                 <li>
@@ -803,7 +843,19 @@
                 </li>
 
                 <li>
+                  <a href="#v1.PowerActionDetails"><span class="badge">M</span>PowerActionDetails</a>
+                </li>
+
+                <li>
+                  <a href="#v1.PowerActualDetails"><span class="badge">M</span>PowerActualDetails</a>
+                </li>
+
+                <li>
                   <a href="#v1.PowerControlTaskOperation"><span class="badge">M</span>PowerControlTaskOperation</a>
+                </li>
+
+                <li>
+                  <a href="#v1.PowerDesiredDetails"><span class="badge">M</span>PowerDesiredDetails</a>
                 </li>
 
                 <li>
@@ -815,7 +867,19 @@
                 </li>
 
                 <li>
+                  <a href="#v1.PowerOperations"><span class="badge">M</span>PowerOperations</a>
+                </li>
+
+                <li>
                   <a href="#v1.PowerResetRackRequest"><span class="badge">M</span>PowerResetRackRequest</a>
+                </li>
+
+                <li>
+                  <a href="#v1.PowerTaskDetails"><span class="badge">M</span>PowerTaskDetails</a>
+                </li>
+
+                <li>
+                  <a href="#v1.PowerTaskDetailsList"><span class="badge">M</span>PowerTaskDetailsList</a>
                 </li>
 
                 <li>
@@ -912,6 +976,10 @@
 
                 <li>
                   <a href="#v1.TaskStats"><span class="badge">M</span>TaskStats</a>
+                </li>
+
+                <li>
+                  <a href="#v1.TrayPowerDetails"><span class="badge">M</span>TrayPowerDetails</a>
                 </li>
 
                 <li>
@@ -1053,6 +1121,14 @@
 
                 <li>
                   <a href="#v1.PowerControlOperation"><span class="badge">E</span>PowerControlOperation</a>
+                </li>
+
+                <li>
+                  <a href="#v1.PowerDetailsReadError"><span class="badge">E</span>PowerDetailsReadError</a>
+                </li>
+
+                <li>
+                  <a href="#v1.PowerTaskRelevance"><span class="badge">E</span>PowerTaskRelevance</a>
                 </li>
 
                 <li>
@@ -1717,6 +1793,20 @@ not returned as a conflict against the proposed replacement operation. </p></td>
                   <td><a href="#v1.LeakHandlingStatus">LeakHandlingStatus</a></td>
                   <td></td>
                   <td><p>Flow&#39;s leakage-handling status for this component. </p></td>
+                </tr>
+
+                <tr>
+                  <td>health</td>
+                  <td><a href="#v1.HealthReport">HealthReport</a></td>
+                  <td></td>
+                  <td><p>Latest Core aggregate health snapshot mirrored by inventory sync. </p></td>
+                </tr>
+
+                <tr>
+                  <td>nvl_domain_external_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p>Owning rack&#39;s domain external ID (rack group ID). </p></td>
                 </tr>
 
             </tbody>
@@ -3545,7 +3635,7 @@ backend applies the update. </p></td>
                   <td>order_by</td>
                   <td><a href="#v1.OrderBy">OrderBy</a></td>
                   <td>optional</td>
-                  <td><p> </p></td>
+                  <td><p>Defaults to name ascending. Component UUID ascending breaks equal-field ties. </p></td>
                 </tr>
 
             </tbody>
@@ -3702,7 +3792,7 @@ backend applies the update. </p></td>
                   <td>pagination</td>
                   <td><a href="#v1.Pagination">Pagination</a></td>
                   <td>optional</td>
-                  <td><p> </p></td>
+                  <td><p>Results are ordered by name ascending, then UUID ascending. </p></td>
                 </tr>
 
             </tbody>
@@ -3725,6 +3815,82 @@ backend applies the update. </p></td>
                 <tr>
                   <td>nvl_domains</td>
                   <td><a href="#v1.NVLDomain">NVLDomain</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>total</td>
+                  <td><a href="#int32">int32</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetListOfNVLinkDomainsRequest">GetListOfNVLinkDomainsRequest</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>info</td>
+                  <td><a href="#v1.StringQueryInfo">StringQueryInfo</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>with_components</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>pagination</td>
+                  <td><a href="#v1.Pagination">Pagination</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>order_by</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>NAME_ASC (default) or NAME_DESC. Equal names retain a stable inventory order. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetListOfNVLinkDomainsResponse">GetListOfNVLinkDomainsResponse</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>domains</td>
+                  <td><a href="#v1.NVLinkDomain">NVLinkDomain</a></td>
                   <td>repeated</td>
                   <td><p> </p></td>
                 </tr>
@@ -3778,6 +3944,13 @@ backend applies the update. </p></td>
                   <td>order_by</td>
                   <td><a href="#v1.OrderBy">OrderBy</a></td>
                   <td>optional</td>
+                  <td><p>Defaults to name ascending. Rack UUID ascending breaks equal-field ties. </p></td>
+                </tr>
+
+                <tr>
+                  <td>with_external_id_only</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
                   <td><p> </p></td>
                 </tr>
 
@@ -3808,6 +3981,61 @@ backend applies the update. </p></td>
                 <tr>
                   <td>total</td>
                   <td><a href="#int32">int32</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetNVLinkDomainRequest">GetNVLinkDomainRequest</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>with_components</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetNVLinkDomainResponse">GetNVLinkDomainResponse</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>domain</td>
+                  <td><a href="#v1.NVLinkDomain">NVLinkDomain</a></td>
                   <td></td>
                   <td><p> </p></td>
                 </tr>
@@ -4167,6 +4395,196 @@ and returns OperationRun.stats. </p></td>
 
 
 
+        <h3 id="v1.GetTrayPowerDetailsRequest">GetTrayPowerDetailsRequest</h3>
+        <p>Uses the same external component ID or BMC/PMC MAC selector as tray inventory.</p><p>Empty identifiers return InvalidArgument, missing identifiers NotFound, and</p><p>ambiguous identifiers FailedPrecondition. Only compute, NVLink switch, and</p><p>power shelf components are supported; other types return InvalidArgument.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetTrayPowerDetailsResponse">GetTrayPowerDetailsResponse</h3>
+        <p>Contains independently available power facts for the resolved inventory member.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>details</td>
+                  <td><a href="#v1.TrayPowerDetails">TrayPowerDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.HealthProbeAlert">HealthProbeAlert</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>target</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>in_alert_since</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>message</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>tenant_message</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>classifications</td>
+                  <td><a href="#string">string</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.HealthProbeSuccess">HealthProbeSuccess</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>target</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.HealthReport">HealthReport</h3>
+        <p>HealthReport is Flow's latest synchronized snapshot of Core aggregate health.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>source</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>triggered_by</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>observed_at</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>successes</td>
+                  <td><a href="#v1.HealthProbeSuccess">HealthProbeSuccess</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>alerts</td>
+                  <td><a href="#v1.HealthProbeAlert">HealthProbeAlert</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.Identifier">Identifier</h3>
         <p></p>
 
@@ -4273,7 +4691,8 @@ and returns OperationRun.stats. </p></td>
                   <td><a href="#v1.Pagination">Pagination</a></td>
                   <td>optional</td>
                   <td><p>Optional. Omit for offset 0 and limit 100. When present, offset must be
-non-negative and limit must be greater than zero. </p></td>
+non-negative and limit must be greater than zero. Results are ordered by
+UUID ascending. </p></td>
                 </tr>
 
             </tbody>
@@ -4315,7 +4734,7 @@ non-negative and limit must be greater than zero. </p></td>
 
 
         <h3 id="v1.ListOperationRulesRequest">ListOperationRulesRequest</h3>
-        <p></p>
+        <p>Results are ordered by creation time descending, then UUID descending.</p>
 
 
           <table class="field-table">
@@ -4391,7 +4810,7 @@ non-negative and limit must be greater than zero. </p></td>
 
 
         <h3 id="v1.ListOperationRunTargetsRequest">ListOperationRunTargetsRequest</h3>
-        <p>ListOperationRunTargetsRequest lists materialized rack execution targets for</p><p>one operation run. status UNKNOWN means no target-status filter is applied.</p><p>phase_scope UNKNOWN defaults to CURRENT_PHASE.</p>
+        <p>ListOperationRunTargetsRequest lists materialized rack execution targets for</p><p>one operation run. status UNKNOWN means no target-status filter is applied.</p><p>phase_scope UNKNOWN defaults to CURRENT_PHASE.</p><p>Results are ordered by phase index, then the unique sequence index.</p>
 
 
           <table class="field-table">
@@ -4467,7 +4886,7 @@ non-negative and limit must be greater than zero. </p></td>
 
 
         <h3 id="v1.ListOperationRunsRequest">ListOperationRunsRequest</h3>
-        <p>ListOperationRunsRequest lists operation runs, newest first by default.</p>
+        <p>ListOperationRunsRequest lists operation runs by creation time descending,</p><p>then UUID descending.</p>
 
 
           <table class="field-table">
@@ -4625,7 +5044,7 @@ non-negative and limit must be greater than zero. </p></td>
 
 
         <h3 id="v1.ListTaskSchedulesRequest">ListTaskSchedulesRequest</h3>
-        <p>ListTaskSchedulesRequest lists TaskSchedules with optional filters.</p><p>Results are ordered by creation time ascending.</p>
+        <p>ListTaskSchedulesRequest lists TaskSchedules with optional filters.</p><p>Results are ordered by creation time ascending, then UUID ascending.</p>
 
 
           <table class="field-table">
@@ -4721,7 +5140,7 @@ non-negative and limit must be greater than zero. </p></td>
                   <td>pagination</td>
                   <td><a href="#v1.Pagination">Pagination</a></td>
                   <td>optional</td>
-                  <td><p> </p></td>
+                  <td><p>Results are ordered by creation time descending, then UUID descending. </p></td>
                 </tr>
 
                 <tr>
@@ -4846,6 +5265,20 @@ accept this flag. </p></td>
                   <td><p> </p></td>
                 </tr>
 
+                <tr>
+                  <td>external_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>nmxc_cluster_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -4878,6 +5311,13 @@ accept this flag. </p></td>
                 </tr>
 
                 <tr>
+                  <td>external_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
                   <td>component_types</td>
                   <td><a href="#v1.ComponentType">ComponentType</a></td>
                   <td>repeated</td>
@@ -4906,6 +5346,72 @@ accept this flag. </p></td>
                   <td><a href="#v1.NVLDomainTarget">NVLDomainTarget</a></td>
                   <td>repeated</td>
                   <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.NVLinkDomain">NVLinkDomain</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>name</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>topology</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>operation_status</td>
+                  <td><a href="#v1.Phase">Phase</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>components</td>
+                  <td><a href="#v1.Component">Component</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>nmxc_cluster_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_group_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Same value as id: the domain&#39;s external ID. </p></td>
                 </tr>
 
             </tbody>
@@ -6435,6 +6941,68 @@ selected cohort is deterministic and auditable. </p></td>
 
 
 
+        <h3 id="v1.PowerActionDetails">PowerActionDetails</h3>
+        <p>A present Core value with no actions and no nested error means no tracked</p><p>maintenance was found. A nested error still makes that Core value unavailable.</p><p>Unsupported means the Core server did not provide action details; it must not</p><p>be interpreted as a successful empty action list.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>value</td>
+                  <td><a href="https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/rpc/proto/forge.proto">forge.ComponentPowerActionDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.PowerDetailsReadError">PowerDetailsReadError</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.PowerActualDetails">PowerActualDetails</h3>
+        <p>A Core observation, including its per-device failure, or a Flow read failure.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>value</td>
+                  <td><a href="https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/rpc/proto/forge.proto">forge.ComponentPowerObservation</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.PowerDetailsReadError">PowerDetailsReadError</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.PowerControlTaskOperation">PowerControlTaskOperation</h3>
         <p></p>
 
@@ -6457,6 +7025,37 @@ selected cohort is deterministic and auditable. </p></td>
                   <td><a href="#bool">bool</a></td>
                   <td></td>
                   <td><p>Bypasses the component readiness gate when the task executes. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.PowerDesiredDetails">PowerDesiredDetails</h3>
+        <p>Stored Core policy, including NotApplicable/Unavailable, or a Flow read failure.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>value</td>
+                  <td><a href="https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/rpc/proto/forge.proto">forge.ComponentPowerPolicy</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.PowerDetailsReadError">PowerDetailsReadError</a></td>
+                  <td></td>
+                  <td><p> </p></td>
                 </tr>
 
             </tbody>
@@ -6587,6 +7186,37 @@ the bypass is recorded in the server log. </p></td>
 
 
 
+        <h3 id="v1.PowerOperations">PowerOperations</h3>
+        <p>Core maintenance and Flow tasks are separate records without a correlation ID.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>actions</td>
+                  <td><a href="#v1.PowerActionDetails">PowerActionDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>tasks</td>
+                  <td><a href="#v1.PowerTaskDetailsList">PowerTaskDetailsList</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.PowerResetRackRequest">PowerResetRackRequest</h3>
         <p></p>
 
@@ -6642,6 +7272,118 @@ rack) are reported as not ready for the operation by their
 persisted ComponentOperationStatus. Intended for operator-supervised
 maintenance where tenant impact has been acknowledged out-of-band;
 the bypass is recorded in the server log. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.PowerTaskDetails">PowerTaskDetails</h3>
+        <p>Informational task details with recorded identities, not inferred live targets.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>operation</td>
+                  <td><a href="#v1.TaskOperation">TaskOperation</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>targets</td>
+                  <td><a href="#v1.ComponentsByType">ComponentsByType</a></td>
+                  <td></td>
+                  <td><p>Recorded Flow UUIDs grouped by type, including IDs no longer in inventory.
+Absent when no targets were recorded. </p></td>
+                </tr>
+
+                <tr>
+                  <td>status</td>
+                  <td><a href="#v1.TaskStatus">TaskStatus</a></td>
+                  <td></td>
+                  <td><p>Waiting, Pending, or Running. Running does not prove hardware dispatch. </p></td>
+                </tr>
+
+                <tr>
+                  <td>created_at</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>updated_at</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>started_at</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td></td>
+                  <td><p>Present only if the task store recorded an execution start. </p></td>
+                </tr>
+
+                <tr>
+                  <td>relevance</td>
+                  <td><a href="#v1.PowerTaskRelevance">PowerTaskRelevance</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.PowerTaskDetailsList">PowerTaskDetailsList</h3>
+        <p>Outstanding power tasks for the tray's current Flow rack, ordered by created_at,</p><p>then task ID, ascending. Missing rack assignment returns NotLinked. Tasks from</p><p>a former rack are excluded. Only recorded selections or power-shelf tasks</p><p>affecting this rack are included; tasks with no recorded targets are excluded.</p><p>More than 256 outstanding rack power tasks makes this entire section unavailable,</p><p>even if fewer target this tray. Error is absent on success, including empty;</p><p>entries is empty on failure. Non-power tasks and execution reports are excluded.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>entries</td>
+                  <td><a href="#v1.PowerTaskDetails">PowerTaskDetails</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.PowerDetailsReadError">PowerDetailsReadError</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
                 </tr>
 
             </tbody>
@@ -6804,6 +7546,27 @@ conflict_strategy is CONFLICT_STRATEGY_QUEUE. </p></td>
                   <td><a href="#v1.Phase">Phase</a></td>
                   <td></td>
                   <td><p>Operability phase aggregated from component phases. </p></td>
+                </tr>
+
+                <tr>
+                  <td>health</td>
+                  <td><a href="#v1.HealthReport">HealthReport</a></td>
+                  <td></td>
+                  <td><p>Latest Core aggregate health snapshot mirrored by inventory sync. </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_profile_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p>Core rack profile mirrored by expected inventory sync. </p></td>
+                </tr>
+
+                <tr>
+                  <td>nvl_domain_external_ids</td>
+                  <td><a href="#string">string</a></td>
+                  <td>repeated</td>
+                  <td><p>Public rack-group domain identities. </p></td>
                 </tr>
 
             </tbody>
@@ -7634,6 +8397,72 @@ e.g. &#34;Power Reset (forced)&#34; or &#34;Upgrade Firmware to v2.3.1&#34;. </p
 
 
 
+        <h3 id="v1.TrayPowerDetails">TrayPowerDetails</h3>
+        <p>Flow inventory identity remains usable before a managed Core ID exists.</p><p>Every section is populated with either its value or a categorized error.</p><p>Inventory and both child reads share at most 30 seconds from RPC entry, capped</p><p>at one second before a caller deadline. Completed sections survive another</p><p>section's failure. Core hardware, policy, and actions may describe different</p><p>instants from Flow tasks; Running tasks do not imply active Core actions.</p><p>The encoded proxy response is limited to 1,991,680 bytes (1945 KiB).</p><p>An oversized task section is replaced with LimitExceeded; if the rest exceeds the</p><p>limit, the RPC returns ResourceExhausted. No task targets are truncated.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>flow_component_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>core_component_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p>Absent until the inventory member has a managed Core identity. </p></td>
+                </tr>
+
+                <tr>
+                  <td>component_type</td>
+                  <td><a href="#v1.ComponentType">ComponentType</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p>Absent when this member has no Flow rack assignment. </p></td>
+                </tr>
+
+                <tr>
+                  <td>actual</td>
+                  <td><a href="#v1.PowerActualDetails">PowerActualDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>desired</td>
+                  <td><a href="#v1.PowerDesiredDetails">PowerDesiredDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>operations</td>
+                  <td><a href="#v1.PowerOperations">PowerOperations</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.TriggerTaskScheduleRequest">TriggerTaskScheduleRequest</h3>
         <p>TriggerTaskScheduleRequest fires a TaskSchedule immediately, regardless of</p><p>next_run_at or enabled state. The overlap policy is not consulted — all</p><p>scopes are submitted unconditionally. Returns an error for a one-time</p><p>schedule that has already fired.</p>
 
@@ -7766,7 +8595,7 @@ e.g. &#34;Power Reset (forced)&#34; or &#34;Upgrade Firmware to v2.3.1&#34;. </p
 
 
         <h3 id="v1.UpdateTaskScheduleRequest">UpdateTaskScheduleRequest</h3>
-        <p>UpdateTaskScheduleRequest updates the scheduling config of an existing</p><p>TaskSchedule. To modify which racks are targeted, use</p><p>AddTaskScheduleScope / RemoveTaskScheduleScope instead.</p><p>update_mask is required and controls which fields are written. Supported paths:</p><p>"schedule.name"           – display name</p><p>"schedule.overlap_policy" – overlap behaviour</p><p>"schedule.spec"           – full spec block (type + spec string + next_run_at recomputed)</p><p>"schedule.spec.timezone"  – timezone only (spec type/string unchanged)</p>
+        <p>UpdateTaskScheduleRequest updates the scheduling config of an existing</p><p>TaskSchedule. To modify which racks are targeted, use</p><p>AddTaskScheduleScope / RemoveTaskScheduleScope instead.</p><p>update_mask is required and controls which fields are written. Supported paths:</p><p>- `schedule.name` – display name</p><p>- `schedule.overlap_policy` – overlap behaviour</p><p>- `schedule.spec` – full spec block (type + spec string + next_run_at recomputed)</p><p>- `schedule.spec.timezone` – timezone only (spec type/string unchanged)</p>
 
 
           <table class="field-table">
@@ -8027,7 +8856,8 @@ bypass readiness checks or state-controller routing. </p></td>
                   <td>order_by</td>
                   <td><a href="#v1.OrderBy">OrderBy</a></td>
                   <td>optional</td>
-                  <td><p> </p></td>
+                  <td><p>Defaults to name ascending for targeted components. Stable component and
+drift identities break equal-field ties before drift pagination. </p></td>
                 </tr>
 
             </tbody>
@@ -9076,6 +9906,96 @@ graceful restart</p></td>
           </tbody>
         </table>
 
+        <h3 id="v1.PowerDetailsReadError">PowerDetailsReadError</h3>
+        <p>Flow lookup failures are distinct from errors returned inside Core values.</p><p>Dependency error strings and credentials are never included.</p>
+        <table class="enum-table">
+          <thead>
+            <tr><td>Name</td><td>Number</td><td>Description</td></tr>
+          </thead>
+          <tbody>
+
+              <tr>
+                <td>POWER_DETAILS_READ_ERROR_UNSPECIFIED</td>
+                <td>0</td>
+                <td><p>Not emitted as an error by this RPC.</p></td>
+              </tr>
+
+              <tr>
+                <td>POWER_DETAILS_READ_ERROR_NOT_LINKED</td>
+                <td>1</td>
+                <td><p>The section lacks its required identity: a managed Core ID for Core
+sections, or a Flow rack assignment for tasks.</p></td>
+              </tr>
+
+              <tr>
+                <td>POWER_DETAILS_READ_ERROR_NOT_CONFIGURED</td>
+                <td>2</td>
+                <td><p>Flow has no NICo provider client.</p></td>
+              </tr>
+
+              <tr>
+                <td>POWER_DETAILS_READ_ERROR_UNSUPPORTED</td>
+                <td>3</td>
+                <td><p>Core lacks the RPC or did not provide this section.</p></td>
+              </tr>
+
+              <tr>
+                <td>POWER_DETAILS_READ_ERROR_DEADLINE_EXCEEDED</td>
+                <td>4</td>
+                <td><p>A child read exceeded its caller or provider deadline.</p></td>
+              </tr>
+
+              <tr>
+                <td>POWER_DETAILS_READ_ERROR_READ_FAILED</td>
+                <td>5</td>
+                <td><p>The dependency returned an error other than unsupported/deadline.</p></td>
+              </tr>
+
+              <tr>
+                <td>POWER_DETAILS_READ_ERROR_INVALID_RESPONSE</td>
+                <td>6</td>
+                <td><p>A dependency returned the wrong identity/cardinality, an absent required
+value, or task data that cannot be converted to the declared operation.</p></td>
+              </tr>
+
+              <tr>
+                <td>POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED</td>
+                <td>7</td>
+                <td><p>The rack task count or encoded response exceeded its documented bound.</p></td>
+              </tr>
+
+          </tbody>
+        </table>
+
+        <h3 id="v1.PowerTaskRelevance">PowerTaskRelevance</h3>
+        <p>Why this task is included for the requested tray.</p>
+        <table class="enum-table">
+          <thead>
+            <tr><td>Name</td><td>Number</td><td>Description</td></tr>
+          </thead>
+          <tbody>
+
+              <tr>
+                <td>POWER_TASK_RELEVANCE_UNSPECIFIED</td>
+                <td>0</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>POWER_TASK_RELEVANCE_SELECTED</td>
+                <td>1</td>
+                <td><p>The task&#39;s recorded UUID/type selection explicitly includes this tray.</p></td>
+              </tr>
+
+              <tr>
+                <td>POWER_TASK_RELEVANCE_RACK_AFFECTED</td>
+                <td>2</td>
+                <td><p>The task selects a power shelf on this rack; the tray is not a selected target.</p></td>
+              </tr>
+
+          </tbody>
+        </table>
+
         <h3 id="v1.RackFilterField">RackFilterField</h3>
         <p>RackFilterField represents the supported filter field types for rack queries</p>
         <table class="enum-table">
@@ -9566,6 +10486,20 @@ becomes available, or can be cancelled explicitly via CancelTask.</p></td>
               </tr>
 
               <tr>
+                <td>GetNVLinkDomain</td>
+                <td><a href="#v1.GetNVLinkDomainRequest">GetNVLinkDomainRequest</a></td>
+                <td><a href="#v1.GetNVLinkDomainResponse">GetNVLinkDomainResponse</a></td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>GetListOfNVLinkDomains</td>
+                <td><a href="#v1.GetListOfNVLinkDomainsRequest">GetListOfNVLinkDomainsRequest</a></td>
+                <td><a href="#v1.GetListOfNVLinkDomainsResponse">GetListOfNVLinkDomainsResponse</a></td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
                 <td>ListTasks</td>
                 <td><a href="#v1.ListTasksRequest">ListTasksRequest</a></td>
                 <td><a href="#v1.ListTasksResponse">ListTasksResponse</a></td>
@@ -9792,6 +10726,15 @@ When pagination is omitted, offset defaults to 0 and limit defaults to 100.</p><
                 <td><a href="#v1.CancelOperationRunRequest">CancelOperationRunRequest</a></td>
                 <td><a href="#v1.OperationRun">OperationRun</a></td>
                 <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>GetTrayPowerDetails</td>
+                <td><a href="#v1.GetTrayPowerDetailsRequest">GetTrayPowerDetailsRequest</a></td>
+                <td><a href="#v1.GetTrayPowerDetailsResponse">GetTrayPowerDetailsResponse</a></td>
+                <td><p>Reads live Core power details and outstanding Flow power tasks independently.
+This is not an atomic snapshot and does not change power or task state.
+Caller cancellation fails the RPC; child read failures remain section errors.</p></td>
               </tr>
 
           </tbody>

@@ -68,6 +68,21 @@ impl HttpClient for SpanIsolatedHttpClient {
             .await
     }
 
+    async fn poll<T>(
+        &self,
+        url: Url,
+        credentials: &BmcCredentials,
+        custom_headers: &HeaderMap,
+    ) -> Result<ModificationResponse<T>, Self::Error>
+    where
+        T: DeserializeOwned + Send + Sync,
+    {
+        self.inner
+            .poll(url, credentials, custom_headers)
+            .instrument(Self::span())
+            .await
+    }
+
     async fn post<B, T>(
         &self,
         url: Url,

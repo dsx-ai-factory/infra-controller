@@ -40,6 +40,7 @@ carbide-api-db = { path = "../api-db", default-features = false, features = [
 carbide-api-model = { path = "../api-model", default-features = false }
 bmc-mock = { path = "../bmc-mock" }
 bmc-vendor = { path = "../bmc-vendor" }
+mqttea = { path = "../mqttea" }
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 
 #these are alphabetized

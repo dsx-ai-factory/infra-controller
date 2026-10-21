@@ -38,7 +38,8 @@ const (
 	// TenantReportedIssueAlertID is the ID of the tenant-reported issue health alert.
 	MachineTenantReportedIssueAlertID = "tenant-reported"
 	// MachineHealthIssueSummaryMaxLength is the maximum length of the summary of the MachineHealthIssue.
-	MachineHealthIssueSummaryMaxLength = 512
+	// Shared with the Instance delete health issue; Core proto does not constrain either field.
+	MachineHealthIssueSummaryMaxLength = 1024
 	// MachineHealthIssueDetailsMaxLength is the maximum length of the details of the MachineHealthIssue.
 	MachineHealthIssueDetailsMaxLength = 8192
 )
@@ -59,6 +60,8 @@ const (
 )
 
 // ValidHealthIssueCategories lists accepted HealthIssue.category values for online repair.
+// Online repair stores these values as strings in a HealthProbeAlert payload rather
+// than converting them through Core's IssueCategory enum.
 var ValidHealthIssueCategoriesMap = map[string]string{
 	HealthIssueHardware:    "HARDWARE",
 	HealthIssueNetwork:     "NETWORK",
@@ -68,7 +71,8 @@ var ValidHealthIssueCategoriesMap = map[string]string{
 	HealthIssueOther:       "OTHER",
 }
 
-// APIMachineHealthIssue describes the tenant-reported issue when requesting online repair.
+// APIMachineHealthIssue describes a tenant-reported machine issue.
+// Online repair and Instance deletion apply endpoint-specific validation.
 type APIMachineHealthIssue struct {
 	// Category is the type of the issue
 	Category string `json:"category"`
@@ -538,6 +542,79 @@ func (ib *APIMachineInfiniBandInterface) FromProto(protoIB *corev1.InfinibandInt
 	}
 }
 
+// APIMachineLldpMedInventory is the LLDP-MED inventory advertised by an LLDP neighbor
+type APIMachineLldpMedInventory struct {
+	// Serial is the serial number advertised by the neighbor
+	Serial *string `json:"serial"`
+	// Manufacturer is the manufacturer advertised by the neighbor
+	Manufacturer *string `json:"manufacturer"`
+	// Model is the model advertised by the neighbor
+	Model *string `json:"model"`
+}
+
+// FromProto populates an APIMachineLldpMedInventory from its protobuf form.
+func (mi *APIMachineLldpMedInventory) FromProto(protoMI *corev1.LldpMedInventory) {
+	if protoMI == nil {
+		return
+	}
+	mi.Serial = protoMI.Serial
+	mi.Manufacturer = protoMI.Manufacturer
+	mi.Model = protoMI.Model
+}
+
+// APIMachineLldpNeighbor is the data structure to capture API representation of an LLDP neighbor
+// observed on one of the Machine's NICs
+type APIMachineLldpNeighbor struct {
+	// MacAddress is the MAC address of the Machine's own NIC on which the neighbor was observed
+	MacAddress string `json:"macAddress"`
+	// LocalPort is the name of the Machine's local interface on which the neighbor was observed
+	LocalPort string `json:"localPort"`
+	// Name is the system name advertised by the neighbor
+	Name string `json:"name"`
+	// Description is the system description advertised by the neighbor
+	Description string `json:"description"`
+	// IpAddresses are the management addresses advertised by the neighbor
+	IpAddresses []string `json:"ipAddresses"`
+	// ChassisIdType is the LLDP chassis id subtype advertised by the neighbor (e.g. "mac", "local")
+	ChassisIdType string `json:"chassisIdType"`
+	// ChassisIdValue is the LLDP chassis id value advertised by the neighbor
+	ChassisIdValue string `json:"chassisIdValue"`
+	// RemotePortType is the LLDP port id subtype advertised by the neighbor (e.g. "ifname", "mac")
+	RemotePortType string `json:"remotePortType"`
+	// RemotePortValue is the LLDP port id value advertised by the neighbor
+	RemotePortValue string `json:"remotePortValue"`
+	// MedInventory is the LLDP-MED inventory advertised by the neighbor, or null when the
+	// neighbor does not advertise one.
+	MedInventory *APIMachineLldpMedInventory `json:"medInventory"`
+}
+
+// FromProto populates an APIMachineLldpNeighbor from its protobuf form.
+func (n *APIMachineLldpNeighbor) FromProto(protoN *corev1.InterfaceLldp) {
+	if protoN == nil {
+		return
+	}
+	n.MacAddress = protoN.MacAddress
+	n.IpAddresses = []string{}
+	lldp := protoN.Lldp
+	if lldp == nil {
+		return
+	}
+	n.LocalPort = lldp.LocalPort
+	n.Name = lldp.Name
+	n.Description = lldp.Description
+	if len(lldp.IpAddress) > 0 {
+		n.IpAddresses = append(n.IpAddresses, lldp.IpAddress...)
+	}
+	n.ChassisIdType = lldp.IdType
+	n.ChassisIdValue = lldp.IdValue
+	n.RemotePortType = lldp.RemotePortType
+	n.RemotePortValue = lldp.RemotePortValue
+	if lldp.MedInventory != nil {
+		n.MedInventory = &APIMachineLldpMedInventory{}
+		n.MedInventory.FromProto(lldp.MedInventory)
+	}
+}
+
 // APIMachineLifecycleState is the data structure to capture API representation of Machine lifecycle state
 type APIMachineLifecycleState struct {
 	// Value is the current lifecycle state value
@@ -564,6 +641,9 @@ type APIMachineMetadata struct {
 	InfiniBandInterfaces []APIMachineInfiniBandInterface `json:"infinibandInterfaces,omitempty"`
 	// LifecycleState is the machine lifecycle state details
 	LifecycleState *APIMachineLifecycleState `json:"lifecycleState,omitempty"`
+	// LldpNeighbors is the list of LLDP neighbors observed on the machine's NICs, as last reported by the machine.
+	// Always rendered, as [] when the machine has not reported any neighbors.
+	LldpNeighbors []APIMachineLldpNeighbor `json:"lldpNeighbors"`
 }
 
 // NewAPIMachine accepts a DB layer Machine object and returns an API object
@@ -602,6 +682,12 @@ func NewAPIMachine(dbm *cdbm.Machine, dbmcs []cdbm.MachineCapability, dbmis []cd
 		apim.InstanceType = NewAPIInstanceTypeSummary(dbm.InstanceType)
 	}
 
+	// Machine and Instance reads may straddle a committed allocation. Never
+	// expose Ready alongside an assignment, including rows awaiting inventory.
+	if dbm.IsAssigned || dbins != nil {
+		apim.Status = dbm.StatusForAssignment(true)
+	}
+
 	if dbins != nil {
 		apim.InstanceID = cutil.GetPtr(dbins.ID.String())
 		apim.Instance = NewAPIInstanceSummary(dbins)
@@ -629,8 +715,6 @@ func NewAPIMachine(dbm *cdbm.Machine, dbmcs []cdbm.MachineCapability, dbmis []cd
 		if machine := dbm.Metadata.Machine; machine != nil {
 			if status := machine.GetStatus(); status != nil && status.LastScoutObservedVersion != nil {
 				apim.ScoutVersion = status.LastScoutObservedVersion
-			} else {
-				apim.ScoutVersion = machine.LastScoutObservedVersion
 			}
 		}
 		for _, dpuID := range dbm.Metadata.GetStatus().GetAssociatedDpuMachineIds() {
@@ -712,6 +796,17 @@ func NewAPIMachine(dbm *cdbm.Machine, dbmcs []cdbm.MachineCapability, dbmis []cd
 					break
 				}
 			}
+		}
+
+		// LLDP neighbors reported by the machine (scout or DPU agent); [] when none were reported
+		apim.Metadata.LldpNeighbors = []APIMachineLldpNeighbor{}
+		for _, protoNeighbor := range machine.GetStatus().GetLldpNeighbors() {
+			if protoNeighbor == nil {
+				continue
+			}
+			neighbor := APIMachineLldpNeighbor{}
+			neighbor.FromProto(protoNeighbor)
+			apim.Metadata.LldpNeighbors = append(apim.Metadata.LldpNeighbors, neighbor)
 		}
 	}
 

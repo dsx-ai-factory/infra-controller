@@ -50,6 +50,7 @@ use crate::tests::common::postgres::wait_for_blocked_query;
 use crate::tests::common::rpc_builder::VpcCreationRequest;
 
 mod readiness;
+mod retirement;
 
 fn tenant_managed_site_prefix(
     prefix: &str,

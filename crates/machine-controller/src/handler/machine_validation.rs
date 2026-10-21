@@ -206,12 +206,13 @@ pub(crate) async fn handle_machine_validation_state(
             if !host_handler_params.machine_validation_config.enabled {
                 return skip_machine_validation(ctx, validation_id, mh_snapshot).await;
             }
-            // Handle reboot host case
-            handler_host_power_control(mh_snapshot, ctx, SystemPowerControl::ForceRestart).await?;
+            // A failed read leaves us in `RebootHost`, so load the run before rebooting.
             let machine_validation =
                 db::machine_validation::find_by_id(&mut ctx.services.db_reader, validation_id)
                     .await
                     .map_err(|err| StateHandlerError::GenericError(err.into()))?;
+
+            handler_host_power_control(mh_snapshot, ctx, SystemPowerControl::ForceRestart).await?;
 
             let next_state = ManagedHostState::Validation {
                 validation_state: ValidationState::MachineValidation {

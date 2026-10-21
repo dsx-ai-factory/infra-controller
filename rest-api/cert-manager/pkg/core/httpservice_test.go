@@ -6,7 +6,7 @@ package core
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -41,7 +41,7 @@ func TestHTTPServiceRoutes(t *testing.T) {
 		s.ServeHTTP(w, req)
 
 		resp := w.Result()
-		body, _ := ioutil.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body)
 		return string(body), resp.StatusCode
 	}
 
@@ -82,13 +82,14 @@ func TestHTTPServiceRoutes(t *testing.T) {
 	// test request body limit
 	{
 		s.HandleFunc("/echo", func(w http.ResponseWriter, r *http.Request) {
-			body, err := ioutil.ReadAll(r.Body)
+			body, err := io.ReadAll(r.Body)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			w.WriteHeader(http.StatusOK)
-			w.Write(body)
+			// Mock response writes are best-effort if the client closes the connection.
+			_, _ = w.Write(body)
 		}).Methods("POST")
 
 		body, code := run("POST", "/echo", "123")
@@ -112,7 +113,7 @@ func TestHTTPServiceRoutes(t *testing.T) {
 				case <-time.After(d):
 					log.Printf("SlowAPIcall done after %v", d)
 					w.WriteHeader(http.StatusOK)
-					w.Write([]byte("ok\n"))
+					_, _ = w.Write([]byte("ok\n"))
 				}
 			}
 		}
@@ -134,7 +135,7 @@ func TestHTTPServiceStart(t *testing.T) {
 
 	get := func(c *http.Client, url string) (string, int) {
 		resp, _ := c.Get(url)
-		body, _ := ioutil.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body)
 		return string(body), resp.StatusCode
 	}
 
@@ -260,4 +261,66 @@ func Test_recordingResponseWriter(t *testing.T) {
 
 	router.ServeHTTP(w1.writer, r)
 	assert.Equal(t, http.StatusTeapot, w1.statusCode)
+}
+
+func TestHTTPServiceDoneWaitsForActiveRequest(t *testing.T) {
+	ctx := WithDefaultLogger(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	release := make(chan struct{})
+	entered := make(chan struct{})
+
+	s := NewHTTPService("127.0.0.1:0")
+	s.ShutDownGracePeriod = 300 * time.Millisecond
+	s.HandleFunc("/block", func(w http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		<-release
+		w.WriteHeader(http.StatusOK)
+	})
+
+	ln, err := s.Start(ctx)
+	assert.Nil(t, err)
+
+	go func() {
+		c := &http.Client{Timeout: 10 * time.Second}
+		resp, err := c.Get(fmt.Sprintf("http://%s/block", ln.Addr().String()))
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+
+	<-entered
+
+	// Shutdown starts, but the handler is still running.
+	cancel()
+
+	select {
+	case <-s.Done():
+		t.Fatal("Done closed while a request was still in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// The handler outlives the drain deadline, so Close must end the wait.
+	select {
+	case <-s.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done never closed after the drain deadline")
+	}
+
+	close(release)
+}
+
+func TestHTTPServiceDoneClosesOnListenerFailure(t *testing.T) {
+	ctx := WithDefaultLogger(context.Background())
+
+	s := NewHTTPService("127.0.0.1:-1")
+	_, err := s.Start(ctx)
+	assert.NotNil(t, err)
+
+	select {
+	case <-s.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Done never closed after Start failed")
+	}
 }

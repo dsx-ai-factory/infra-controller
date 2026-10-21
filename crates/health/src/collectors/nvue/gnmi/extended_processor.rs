@@ -24,6 +24,7 @@ use std::time::Instant;
 
 use super::client::{typed_value_to_f64, typed_value_to_string};
 use super::proto::{self, PathElem};
+use super::reconciliation::{MetricReconciler, SharedMetricSources};
 use super::sample_processor::now_unix_secs;
 use super::subscriber::GnmiStreamMetrics;
 use crate::config::{NvueGnmiMetricConfig, NvueGnmiMetricOutput, NvueGnmiSubscriptionConfig};
@@ -39,7 +40,7 @@ pub(super) struct ExtendedGnmiProcessor {
     pub(super) subscription_name: String,
     pub(super) switch_id: String,
     mappings: HashMap<Vec<String>, NvueGnmiMetricConfig>,
-    retained_sources: HashMap<(String, String, String), Vec<PathElem>>,
+    pub(super) reconciliation: Arc<MetricReconciler>,
 }
 
 impl ExtendedGnmiProcessor {
@@ -48,6 +49,7 @@ impl ExtendedGnmiProcessor {
         data_sink: Option<Arc<dyn DataSink>>,
         event_context: EventContext,
         switch_id: String,
+        sources: Option<SharedMetricSources>,
     ) -> Self {
         let mappings = config
             .metrics
@@ -60,12 +62,16 @@ impl ExtendedGnmiProcessor {
             .collect();
 
         Self {
+            reconciliation: Arc::new(MetricReconciler::new(
+                data_sink.clone(),
+                event_context.clone(),
+                sources,
+            )),
             data_sink,
             event_context,
             subscription_name: config.name.clone(),
             switch_id,
             mappings,
-            retained_sources: HashMap::new(),
         }
     }
 
@@ -110,9 +116,7 @@ impl ExtendedGnmiProcessor {
         };
 
         stream_metrics.notifications_received_total.inc();
-        stream_metrics
-            .last_notification_timestamp
-            .set(now_unix_secs());
+        stream_metrics.set_last_notification_timestamp(now_unix_secs());
 
         let start = Instant::now();
         let emitted = self.process_notification(notification);
@@ -138,37 +142,12 @@ impl ExtendedGnmiProcessor {
         for path in &notification.delete {
             let combined = prefix.iter().chain(&path.elem).collect::<Vec<_>>();
 
-            let Some(sink) = &self.data_sink else {
-                continue;
-            };
-
             // A reading belongs to its last source, including when different
             // paths project to the same metric and labels.
-            self.retained_sources
-                .retain(|(key, metric_type, unit), source| {
-                    if source.len() < combined.len()
-                        || !source.iter().zip(&combined).all(|(actual, deleted)| {
-                            actual.name == deleted.name
-                                && deleted
-                                    .key
-                                    .iter()
-                                    .all(|(key, value)| actual.key.get(key) == Some(value))
-                        })
-                    {
-                        return true;
-                    }
-
-                    sink.prune_metric_key(&self.event_context, key, metric_type, unit);
-
-                    false
-                });
+            self.reconciliation.delete(&combined);
         }
 
         for update in &notification.update {
-            let Some(value) = update.val.as_ref() else {
-                continue;
-            };
-
             let update_path = update
                 .path
                 .as_ref()
@@ -176,6 +155,12 @@ impl ExtendedGnmiProcessor {
                 .unwrap_or_default();
 
             let combined = prefix.iter().chain(update_path).collect::<Vec<_>>();
+
+            self.reconciliation.touch(&combined);
+
+            let Some(value) = update.val.as_ref() else {
+                continue;
+            };
 
             let names = combined
                 .iter()
@@ -192,18 +177,18 @@ impl ExtendedGnmiProcessor {
                         continue;
                     };
 
-                    self.retained_sources.insert(
-                        (
-                            sample.key.clone(),
-                            sample.metric_type.clone(),
-                            sample.unit.clone(),
-                        ),
-                        combined.iter().map(|element| (*element).clone()).collect(),
-                    );
+                    self.reconciliation.record(&sample, &combined);
 
-                    sink.handle_event(
+                    let is_event_record = combined
+                        .iter()
+                        .map(|element| element.name.as_str())
+                        .take(2)
+                        .eq(["system-events", "system-event"]);
+
+                    sink.handle_classified_event(
                         &self.event_context,
                         &CollectorEvent::Metric(Box::new(sample)),
+                        is_event_record,
                     );
                 }
 
@@ -483,6 +468,7 @@ mod tests {
             Some(sink.clone()),
             event_context(),
             "switch-1".to_string(),
+            None,
         );
 
         (processor, sink)
@@ -537,6 +523,347 @@ mod tests {
 
     fn stream_metrics() -> GnmiStreamMetrics {
         super::super::subscriber::test_gnmi_stream_metrics()
+    }
+
+    #[test]
+    fn event_paths_are_excluded_from_prometheus_and_replay() {
+        use crate::processor::{EventProcessingPipeline, HealthReportProcessor};
+        use crate::sink::CompositeDataSink;
+
+        let mut config = subscription(NvueGnmiMetricOutput::Gauge {
+            unit: "count".into(),
+        });
+
+        config.prefix.clear();
+
+        config.paths = vec![vec!["interfaces".into()], vec!["system-events".into()]];
+        config.metrics[0].path.insert(0, "interfaces".into());
+        let mut event_mapping = config.metrics[0].clone();
+        event_mapping.path = ["system-events", "system-event", "state", "event-id"]
+            .map(str::to_string)
+            .into();
+
+        event_mapping.labels[0].element = "system-event".into();
+        event_mapping.labels[0].key = "event-id".into();
+        config.metrics.push(event_mapping);
+
+        let manager = Arc::new(MetricsManager::new("test").unwrap());
+        let captured = Arc::new(CapturingSink::default());
+        let prometheus = Arc::new(PrometheusSink::new(manager.clone(), "test_sink").unwrap());
+
+        let composite = Arc::new(CompositeDataSink::new(
+            vec![prometheus, captured.clone()],
+            manager.clone(),
+        ));
+
+        let pipeline = Arc::new(EventProcessingPipeline::new(
+            vec![Arc::new(HealthReportProcessor::new())],
+            composite,
+            manager.clone(),
+        ));
+
+        let mut processor = ExtendedGnmiProcessor::new(
+            &config,
+            Some(pipeline),
+            event_context(),
+            "switch-1".into(),
+            Some(Default::default()),
+        );
+
+        let ordinary = notification(
+            Some(proto::TypedValue {
+                value: Some(proto::typed_value::Value::UintVal(42)),
+            }),
+            true,
+        );
+
+        let mut event = ordinary.clone();
+        event.prefix.as_mut().unwrap().elem = vec![path_element("system-events", &[])];
+
+        event.update[0].path.as_mut().unwrap().elem = vec![
+            path_element("system-event", &[("event-id", "42")]),
+            path_element("state", &[]),
+            path_element("event-id", &[]),
+        ];
+
+        processor.process_notification(&ordinary);
+        processor.process_notification(&event);
+
+        let live = manager.export_telemetry().unwrap();
+
+        assert!(!live.contains("interface_name=\"42\""), "{live}");
+
+        processor.reconciliation.republish();
+
+        let exposition = manager.export_telemetry().unwrap();
+
+        assert!(
+            exposition.contains("interface_name=\"port-1\""),
+            "{exposition}"
+        );
+
+        assert!(
+            !exposition.contains("interface_name=\"42\""),
+            "{exposition}"
+        );
+
+        let samples = captured_metrics(&captured);
+
+        assert_eq!(
+            samples.len(),
+            4,
+            "both samples must also survive republication"
+        );
+
+        assert_eq!(
+            samples
+                .iter()
+                .filter(|sample| sample
+                    .labels
+                    .contains(&("interface_name".into(), "42".into()))
+                    && sample.value == 42.0
+                    && sample.metric_type == "interface_reading"
+                    && sample.unit == "count")
+                .count(),
+            2
+        );
+
+        // An excluded source can replace the hardware source for the same key.
+        event.update[0].path.as_mut().unwrap().elem[0]
+            .key
+            .insert("event-id".into(), "port-1".into());
+
+        processor.process_notification(&event);
+
+        processor.process_notification(&proto::Notification {
+            prefix: ordinary.prefix.clone(),
+            delete: vec![ordinary.update[0].path.clone().unwrap()],
+            ..Default::default()
+        });
+
+        processor.reconciliation.republish();
+
+        let after_delete = manager.export_telemetry().unwrap();
+
+        assert!(
+            !after_delete.contains("interface_name=\"port-1\""),
+            "{after_delete}"
+        );
+
+        processor.process_notification(&ordinary);
+
+        let restored = manager.export_telemetry().unwrap();
+
+        assert!(restored.contains("interface_name=\"port-1\""), "{restored}");
+    }
+
+    #[test]
+    fn reconciliation_preserves_present_and_live_touched_readings_without_replay() {
+        let output = NvueGnmiMetricOutput::StateSet {
+            states: vec!["up".into(), "down".into()],
+        };
+
+        let config = subscription(output.clone());
+        let (mut processor, sink) = processor(output);
+
+        let mut update = notification(
+            Some(proto::TypedValue {
+                value: Some(proto::typed_value::Value::StringVal("up".into())),
+            }),
+            true,
+        );
+
+        for id in [
+            "removed",
+            "present",
+            "val-less",
+            "empty-value",
+            "touched",
+            "recreated",
+            "unprojectable",
+            "live-val-less",
+        ] {
+            update.update[0].path.as_mut().unwrap().elem[0]
+                .key
+                .insert("name".into(), id.into());
+
+            processor.process_notification(&update);
+        }
+
+        let request = super::super::client::build_snapshot_request(
+            super::super::client::build_extended_subscribe_request(&config).unwrap(),
+        );
+
+        let mut snapshot = processor.reconciliation.begin(&request).unwrap();
+        let emitted = captured_metrics(&sink).len();
+
+        update.prefix.as_mut().unwrap().origin = "openconfig".into();
+        update.update[0].val.as_mut().unwrap().value =
+            Some(proto::typed_value::Value::StringVal("down".into()));
+
+        for (id, value) in [
+            ("present", update.update[0].val.clone()),
+            ("val-less", None),
+            ("empty-value", Some(proto::TypedValue::default())),
+        ] {
+            let mut present = update.clone();
+            present.update[0].path.as_mut().unwrap().elem[0]
+                .key
+                .insert("name".into(), id.into());
+
+            present.update[0].val = value;
+
+            snapshot
+                .process_response(&proto::SubscribeResponse {
+                    response: Some(proto::subscribe_response::Response::Update(present)),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+
+        assert_eq!(captured_metrics(&sink).len(), emitted);
+
+        let mut unrelated = update.clone();
+        unrelated.update[0]
+            .path
+            .as_mut()
+            .unwrap()
+            .elem
+            .last_mut()
+            .unwrap()
+            .name = "unmapped".into();
+
+        unrelated.update[0].val.as_mut().unwrap().value =
+            Some(proto::typed_value::Value::JsonVal(b"{}".to_vec()));
+
+        snapshot
+            .process_response(&proto::SubscribeResponse {
+                response: Some(proto::subscribe_response::Response::Update(unrelated)),
+                ..Default::default()
+            })
+            .unwrap();
+
+        for id in ["touched", "new", "recreated"] {
+            update.update[0].path.as_mut().unwrap().elem[0]
+                .key
+                .insert("name".into(), id.into());
+
+            if id == "recreated" {
+                let deleted = update.update[0].path.clone().unwrap();
+
+                processor.process_notification(&proto::Notification {
+                    prefix: update.prefix.clone(),
+                    delete: vec![deleted],
+                    ..Default::default()
+                });
+            }
+
+            processor.process_notification(&update);
+        }
+
+        update.update[0].path.as_mut().unwrap().elem[0]
+            .key
+            .insert("name".into(), "unprojectable".into());
+
+        update.update[0].val.as_mut().unwrap().value =
+            Some(proto::typed_value::Value::StringVal("unknown".into()));
+
+        processor.process_notification(&update);
+
+        update.update[0].path.as_mut().unwrap().elem[0]
+            .key
+            .insert("name".into(), "live-val-less".into());
+
+        update.update[0].val = None;
+        processor.process_notification(&update);
+
+        let prunes_before = sink.prunes.lock().unwrap().len();
+
+        assert_eq!(processor.reconciliation.finish(Some(snapshot)), 2);
+        let prunes = sink.prunes.lock().unwrap();
+
+        assert_eq!(prunes.len() - prunes_before, 2);
+
+        assert!(
+            prunes[prunes_before..]
+                .iter()
+                .all(|(key, _, _)| key.contains("removed"))
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn reconciliation_rejects_unsupported_snapshot_paths_and_values() {
+        let config = subscription(NvueGnmiMetricOutput::Gauge {
+            unit: "count".into(),
+        });
+
+        let request = super::super::client::build_snapshot_request(
+            super::super::client::build_extended_subscribe_request(&config).unwrap(),
+        );
+
+        let valid = notification(
+            Some(proto::TypedValue {
+                value: Some(proto::typed_value::Value::UintVal(1)),
+            }),
+            true,
+        );
+
+        type Invalidate = fn(&mut proto::Notification);
+
+        let cases: &[(&str, Invalidate)] = &[
+            ("target", |n| {
+                n.prefix.as_mut().unwrap().target = "other".into()
+            }),
+            ("origin", |n| {
+                n.prefix.as_mut().unwrap().origin = "other".into()
+            }),
+            ("scope", |n| {
+                n.prefix.as_mut().unwrap().elem[0].name = "components".into()
+            }),
+            ("keys", |n| {
+                n.update[0].path.as_mut().unwrap().elem[0].key =
+                    [("unknown".into(), "port-1".into())].into()
+            }),
+            ("missing key", |n| {
+                n.update[0].path.as_mut().unwrap().elem[0].key.clear()
+            }),
+            ("container path", |n| {
+                n.update[0].path.as_mut().unwrap().elem.pop();
+            }),
+            ("aggregate", |n| {
+                n.update[0].val.as_mut().unwrap().value =
+                    Some(proto::typed_value::Value::JsonVal(b"{}".to_vec()))
+            }),
+            ("legacy Delete", |n| {
+                n.delete.push(proto::Path {
+                    element: vec!["interface[name=port-1]".into()],
+                    ..Default::default()
+                })
+            }),
+        ];
+
+        for (name, invalidate) in cases {
+            let (mut processor, sink) = processor(config.metrics[0].output.clone());
+            processor.process_notification(&valid);
+            let mut snapshot = processor.reconciliation.begin(&request).unwrap();
+            let mut notification = valid.clone();
+
+            invalidate(&mut notification);
+
+            assert!(
+                snapshot
+                    .process_response(&proto::SubscribeResponse {
+                        response: Some(proto::subscribe_response::Response::Update(notification)),
+                        ..Default::default()
+                    })
+                    .is_err(),
+                "{name}"
+            );
+
+            assert_eq!(processor.reconciliation.finish(None), 0, "{name}");
+            assert!(sink.prunes.lock().unwrap().is_empty(), "{name}");
+        }
     }
 
     #[test]
@@ -757,8 +1084,13 @@ mod tests {
         let manager = Arc::new(MetricsManager::new("test").expect("metrics manager"));
         let sink = Arc::new(PrometheusSink::new(manager.clone(), "test_sink").expect("sink"));
 
-        let mut processor =
-            ExtendedGnmiProcessor::new(&config, Some(sink), event_context(), "switch-1".into());
+        let mut processor = ExtendedGnmiProcessor::new(
+            &config,
+            Some(sink),
+            event_context(),
+            "switch-1".into(),
+            None,
+        );
 
         let mut initial = notification(
             Some(proto::TypedValue {
@@ -817,8 +1149,13 @@ mod tests {
         let manager = Arc::new(MetricsManager::new("test").expect("metrics manager"));
         let sink = Arc::new(PrometheusSink::new(manager.clone(), "test_sink").expect("sink"));
 
-        let mut processor =
-            ExtendedGnmiProcessor::new(&config, Some(sink), event_context(), "switch-1".into());
+        let mut processor = ExtendedGnmiProcessor::new(
+            &config,
+            Some(sink),
+            event_context(),
+            "switch-1".into(),
+            None,
+        );
 
         let mut update = notification(
             Some(proto::TypedValue {
@@ -874,8 +1211,13 @@ mod tests {
         let manager = Arc::new(MetricsManager::new("test").expect("metrics manager"));
         let sink = Arc::new(PrometheusSink::new(manager.clone(), "test_sink").expect("sink"));
 
-        let mut processor =
-            ExtendedGnmiProcessor::new(&config, Some(sink), event_context(), "switch-1".into());
+        let mut processor = ExtendedGnmiProcessor::new(
+            &config,
+            Some(sink),
+            event_context(),
+            "switch-1".into(),
+            None,
+        );
 
         let mut update = notification(
             Some(proto::TypedValue {
@@ -951,8 +1293,13 @@ mod tests {
         let manager = Arc::new(MetricsManager::new("test").expect("metrics manager"));
         let sink = Arc::new(PrometheusSink::new(manager.clone(), "test_sink").expect("sink"));
 
-        let mut processor =
-            ExtendedGnmiProcessor::new(&config, Some(sink), event_context(), "switch-1".into());
+        let mut processor = ExtendedGnmiProcessor::new(
+            &config,
+            Some(sink),
+            event_context(),
+            "switch-1".into(),
+            None,
+        );
 
         let mut update = notification(
             Some(proto::TypedValue {

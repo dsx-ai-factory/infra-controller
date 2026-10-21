@@ -10,10 +10,11 @@ import (
 	"fmt"
 	"net/http"
 
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
+
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 
 	"go.opentelemetry.io/otel/attribute"
 	temporalClient "go.temporal.io/sdk/client"
@@ -25,7 +26,9 @@ import (
 	common "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 )
@@ -34,19 +37,17 @@ import (
 
 // CreateTenantAccountHandler is the API Handler for creating new TenantAccount
 type CreateTenantAccountHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewCreateTenantAccountHandler initializes and returns a new handler for creating TenantAccount
 func NewCreateTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) CreateTenantAccountHandler {
 	return CreateTenantAccountHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -62,7 +63,7 @@ func NewCreateTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Cli
 // @Success 201 {object} model.APITenantAccount
 // @Router /v2/org/{org}/nico/tenant/account [post]
 func (ctah CreateTenantAccountHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "Create", c, ctah.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -226,19 +227,17 @@ func (ctah CreateTenantAccountHandler) Handle(c echo.Context) error {
 
 // GetAllTenantAccountHandler is the API Handler for getting all TenantAccounts
 type GetAllTenantAccountHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllTenantAccountHandler initializes and returns a new handler for getting all TenantAccounts
 func NewGetAllTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllTenantAccountHandler {
 	return GetAllTenantAccountHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -261,7 +260,7 @@ func NewGetAllTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Cli
 // @Success 200 {object} []model.APITenantAccount
 // @Router /v2/org/{org}/nico/tenant/account [get]
 func (gatah GetAllTenantAccountHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "GetAll", c, gatah.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -297,7 +296,7 @@ func (gatah GetAllTenantAccountHandler) Handle(c echo.Context) error {
 
 	statusQuery := c.QueryParam("status")
 	if statusQuery != "" {
-		gatah.tracerSpan.SetAttribute(handlerSpan, attribute.String("status", statusQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
 		_, sok := cdbm.TenantAccountStatusMap[statusQuery]
 		if !sok {
 			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
@@ -308,7 +307,7 @@ func (gatah GetAllTenantAccountHandler) Handle(c echo.Context) error {
 
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
-		gatah.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Optional Provider-side tenantId narrowing filter. The Tenant branch
@@ -316,7 +315,7 @@ func (gatah GetAllTenantAccountHandler) Handle(c echo.Context) error {
 	var filterTenantIDs []uuid.UUID
 	tenantIdQuery := c.QueryParam("tenantId")
 	if tenantIdQuery != "" {
-		gatah.tracerSpan.SetAttribute(handlerSpan, attribute.String("tenantId", tenantIdQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("tenantId", tenantIdQuery))
 		id, serr := uuid.Parse(tenantIdQuery)
 		if serr != nil {
 			logger.Warn().Err(serr).Msg("error parsing tenantId in query into uuid")
@@ -496,19 +495,17 @@ func (gatah GetAllTenantAccountHandler) Handle(c echo.Context) error {
 
 // GetTenantAccountHandler is the API Handler for retrieving TenantAccount
 type GetTenantAccountHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetTenantAccountHandler initializes and returns a new handler to retrieve TenantAccount
 func NewGetTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetTenantAccountHandler {
 	return GetTenantAccountHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -527,7 +524,7 @@ func NewGetTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Client
 // @Success 200 {object} model.APITenantAccount
 // @Router /v2/org/{org}/nico/tenant/account/{id} [get]
 func (gtah GetTenantAccountHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "Get", c, gtah.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -538,7 +535,7 @@ func (gtah GetTenantAccountHandler) Handle(c echo.Context) error {
 	// Get tenant account ID from URL param
 	taStrID := c.Param("id")
 
-	gtah.tracerSpan.SetAttribute(handlerSpan, attribute.String("tenantaccount_id", taStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("tenantaccount_id", taStrID))
 
 	taID, err := uuid.Parse(taStrID)
 	if err != nil {
@@ -622,19 +619,19 @@ func (gtah GetTenantAccountHandler) Handle(c echo.Context) error {
 
 // UpdateTenantAccountHandler is the API Handler for updating a TenantAccount
 type UpdateTenantAccountHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewUpdateTenantAccountHandler initializes and returns a new handler for updating Tenant
-func NewUpdateTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) UpdateTenantAccountHandler {
+func NewUpdateTenantAccountHandler(dbSession *cdb.Session, scp *sc.ClientPool, tc temporalClient.Client, cfg *config.Config) UpdateTenantAccountHandler {
 	return UpdateTenantAccountHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -651,7 +648,7 @@ func NewUpdateTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Cli
 // @Success 200 {object} model.APITenantAccount
 // @Router /v2/org/{org}/nico/tenant/account/{id} [patch]
 func (utah UpdateTenantAccountHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "Update", c, utah.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -680,7 +677,7 @@ func (utah UpdateTenantAccountHandler) Handle(c echo.Context) error {
 	// Get tenant account ID from URL param
 	taStrID := c.Param("id")
 
-	utah.tracerSpan.SetAttribute(handlerSpan, attribute.String("tenantaccount_id", taStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("tenantaccount_id", taStrID))
 
 	taID, err := uuid.Parse(taStrID)
 	if err != nil {
@@ -726,6 +723,17 @@ func (utah UpdateTenantAccountHandler) Handle(c echo.Context) error {
 	return utah.handleTenantInviteAcceptance(c, ctx, logger, org, dbUser, taID, apiRequest)
 }
 
+// tenantAccountIssuedToTenant reports whether tn may accept the invitation ta. A linked
+// invitation belongs to the Tenant it names. An unlinked one belongs to the Tenant of the
+// org it was issued to: GET /service-account/current creates a Tenant without linking
+// earlier invitations, so a missing TenantID does not mean the invitation is foreign.
+func tenantAccountIssuedToTenant(ta *cdbm.TenantAccount, tn *cdbm.Tenant) bool {
+	if ta.TenantID == nil {
+		return ta.TenantOrg == tn.Org
+	}
+	return *ta.TenantID == tn.ID
+}
+
 func (utah UpdateTenantAccountHandler) handleTenantInviteAcceptance(c echo.Context, ctx context.Context, logger zerolog.Logger, org string, dbUser *cdbm.User, taID uuid.UUID, apiRequest model.APITenantAccountUpdateRequest) error {
 	taDAO := cdbm.NewTenantAccountDAO(utah.dbSession)
 
@@ -741,7 +749,7 @@ func (utah UpdateTenantAccountHandler) handleTenantInviteAcceptance(c echo.Conte
 		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Org does not have tenant", nil)
 	}
 
-	if ta.TenantID == nil || *ta.TenantID != tn.ID {
+	if !tenantAccountIssuedToTenant(ta, tn) {
 		logger.Warn().Msg("tenant in tenant account does not match tenant in org")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest,
 			"Tenant in org does not match tenant in TenantAccount", nil)
@@ -767,7 +775,7 @@ func (utah UpdateTenantAccountHandler) handleTenantInviteAcceptance(c echo.Conte
 	// Values needed after the transaction closure
 	var uta *cdbm.TenantAccount
 	var ssds []cdbm.StatusDetail
-	// Handle database updates -- both tenant account and status detail
+	// Handle database updates for both tenant account and status detail
 	err = cdb.WithTx(ctx, utah.dbSession, func(tx *cdb.Tx) error {
 		lockKey := fmt.Sprintf("tenant-account-invite-%s", taID.String())
 		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
@@ -781,7 +789,7 @@ func (utah UpdateTenantAccountHandler) handleTenantInviteAcceptance(c echo.Conte
 			logger.Warn().Err(derr).Msg("error retrieving TenantAccount DB entity within transaction")
 			return cutil.NewAPIError(http.StatusNotFound, "Could not retrieve TenantAccount to update", nil)
 		}
-		if lockedTA.TenantID == nil || *lockedTA.TenantID != tn.ID {
+		if !tenantAccountIssuedToTenant(lockedTA, tn) {
 			logger.Warn().Msg("tenant in tenant account does not match tenant in org")
 			return cutil.NewAPIError(http.StatusBadRequest,
 				"Tenant in org does not match tenant in TenantAccount", nil)
@@ -791,11 +799,15 @@ func (utah UpdateTenantAccountHandler) handleTenantInviteAcceptance(c echo.Conte
 			return cutil.NewAPIError(http.StatusBadRequest, "Tenant Account status is not Invited", nil)
 		}
 
-		uta, derr = taDAO.Update(ctx, tx, cdbm.TenantAccountUpdateInput{
+		updateInput := cdbm.TenantAccountUpdateInput{
 			TenantAccountID: taID,
 			TenantContactID: cutil.GetPtr(dbUser.ID),
 			Status:          cutil.GetPtr(cdbm.TenantAccountStatusReady),
-		})
+		}
+		if lockedTA.TenantID == nil {
+			updateInput.TenantID = &tn.ID
+		}
+		uta, derr = taDAO.Update(ctx, tx, updateInput)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error updating TenantAccount in DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update TenantAccount", nil)
@@ -877,6 +889,7 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Tenant Account does not have an associated Tenant", nil)
 	}
 
+	var newSiteIDs []uuid.UUID
 	err = cdb.WithTx(ctx, utah.dbSession, func(tx *cdb.Tx) error {
 		lockKey := fmt.Sprintf("tenant-account-capabilities-%s-%s", ta.TenantID.String(), ta.InfrastructureProviderID.String())
 		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
@@ -889,7 +902,7 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 		// checks and subsequent writes operate on the same transactional
 		// snapshot rather than the pre-transaction read used to derive the
 		// lock key.
-		ta, derr = taDAO.GetByID(ctx, tx, taID, nil)
+		ta, derr = taDAO.GetByID(ctx, tx, taID, []string{cdbm.TenantRelationName})
 		if derr != nil {
 			logger.Warn().Err(derr).Msg("error retrieving TenantAccount DB entity within transaction")
 			return cutil.NewAPIError(http.StatusNotFound, "Could not retrieve TenantAccount to update", nil)
@@ -942,10 +955,32 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 		}
 
 		for siteID := range siteUpdates {
+			lockKey = fmt.Sprintf("%s-%s-%s", ta.InfrastructureProviderID, siteID, ta.TenantID)
+			derr = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
+			if derr != nil {
+				return derr
+			}
 			ts, gerr := tsDAO.GetByTenantIDAndSiteID(ctx, tx, *ta.TenantID, siteID, []string{"Site"})
 			if gerr != nil {
 				if errors.Is(gerr, cdb.ErrDoesNotExist) {
-					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Site %s is not associated with Tenant", siteID.String()), nil)
+					site, serr := cdbm.NewSiteDAO(utah.dbSession).GetByID(ctx, tx, siteID, nil, false)
+					if serr != nil && !errors.Is(serr, cdb.ErrDoesNotExist) {
+						return serr
+					}
+					if serr != nil || site.InfrastructureProviderID != ta.InfrastructureProviderID {
+						return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Site %s is not owned by the Tenant Account Infrastructure Provider", siteID.String()), nil)
+					}
+					_, derr = tsDAO.Create(ctx, tx, cdbm.TenantSiteCreateInput{
+						TenantID: *ta.TenantID, TenantOrg: ta.TenantOrg, SiteID: siteID, CreatedBy: dbUser.ID,
+						Config: &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(siteUpdates[siteID])},
+					})
+					if derr != nil {
+						return derr
+					}
+					if siteUpdates[siteID] {
+						newSiteIDs = append(newSiteIDs, siteID)
+					}
+					continue
 				}
 				logger.Error().Err(gerr).Msg("error retrieving TenantSite for siteCapabilities update")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Tenant Account capabilities", nil)
@@ -981,16 +1016,37 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 			if _, listed := siteIDs[ts.SiteID]; listed {
 				continue
 			}
-			if ts.Config.TargetedInstanceCreation == nil {
+			lockKey = fmt.Sprintf("%s-%s-%s", ta.InfrastructureProviderID, ts.SiteID, ta.TenantID)
+			derr = tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
+			if derr != nil {
+				return derr
+			}
+			if ts.Config.TargetedInstanceCreation != nil {
+				_, derr = tsDAO.Update(ctx, tx, cdbm.TenantSiteUpdateInput{
+					TenantSiteID: ts.ID,
+					Config:       &cdbm.TenantSiteConfig{},
+				})
+				if derr != nil {
+					logger.Error().Err(derr).Msg("error clearing stale TenantSite capability override")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Tenant Account capabilities", nil)
+				}
+			}
+			// Omitted overrides are revoked by replacement; check the remaining privileges before cleanup.
+			enabled, derr := common.TenantHasTargetedInstanceCreation(ctx, tx, utah.dbSession, &cdbm.Tenant{ID: *ta.TenantID}, &common.TenantPrivilegeScope{SiteID: &ts.SiteID})
+			if derr != nil {
+				return derr
+			}
+			if enabled {
 				continue
 			}
-			_, derr = tsDAO.Update(ctx, tx, cdbm.TenantSiteUpdateInput{
-				TenantSiteID: ts.ID,
-				Config:       &cdbm.TenantSiteConfig{},
+			count, derr := cdbm.NewAllocationDAO(utah.dbSession).GetCount(ctx, tx, cdbm.AllocationFilterInput{
+				TenantIDs: []uuid.UUID{*ta.TenantID}, SiteIDs: []uuid.UUID{ts.SiteID},
 			})
+			if derr == nil && count == 0 {
+				derr = tsDAO.Delete(ctx, tx, ts.ID)
+			}
 			if derr != nil {
-				logger.Error().Err(derr).Msg("error clearing stale TenantSite capability override")
-				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Tenant Account capabilities", nil)
+				return derr
 			}
 		}
 
@@ -998,6 +1054,9 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 	})
 	if err != nil {
 		return common.HandleTxError(c, logger, err, "Failed to update Tenant Account capabilities")
+	}
+	for _, siteID := range newSiteIDs {
+		startTenantCreate(ctx, utah.scp, logger, ta.Tenant, siteID)
 	}
 
 	ta, err = taDAO.GetByID(ctx, nil, taID, nil)
@@ -1050,19 +1109,17 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 
 // DeleteTenantAccountHandler is the API Handler for deleting a TenantAccount
 type DeleteTenantAccountHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewDeleteTenantAccountHandler initializes and returns a new handler for deleting Tenant
 func NewDeleteTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) DeleteTenantAccountHandler {
 	return DeleteTenantAccountHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -1078,7 +1135,7 @@ func NewDeleteTenantAccountHandler(dbSession *cdb.Session, tc temporalClient.Cli
 // @Success 202
 // @Router /v2/org/{org}/nico/tenant/account/{id} [delete]
 func (dtah DeleteTenantAccountHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "Delete", c, dtah.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("TenantAccount", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1107,7 +1164,7 @@ func (dtah DeleteTenantAccountHandler) Handle(c echo.Context) error {
 	// Get tenant account ID from URL param
 	taStrID := c.Param("id")
 
-	dtah.tracerSpan.SetAttribute(handlerSpan, attribute.String("tenantaccount_id", taStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("tenantaccount_id", taStrID))
 
 	taID, err := uuid.Parse(taStrID)
 	if err != nil {
@@ -1140,30 +1197,53 @@ func (dtah DeleteTenantAccountHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "InfrastructureProvider for Org does not match InfrastructureProvider in TenantAccount", nil)
 	}
 
-	if ta.TenantID != nil {
-		// Verify that Tenant does not have any Allocations with the Provider
-		allocationDAO := cdbm.NewAllocationDAO(dtah.dbSession)
-		allocationFilter := cdbm.AllocationFilterInput{InfrastructureProviderIDs: []uuid.UUID{ip.ID}}
+	err = cdb.WithTx(ctx, dtah.dbSession, func(tx *cdb.Tx) error {
 		if ta.TenantID != nil {
+			// Serialize cleanup with ensurePrivilegedTenantSites.
+			lockKey := fmt.Sprintf("tenant-account-capabilities-%s-%s", ta.TenantID.String(), ta.InfrastructureProviderID.String())
+			err := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockKey), nil)
+			if err != nil {
+				return err
+			}
+
+			// Verify that Tenant does not have any Allocations with the Provider
+			allocationDAO := cdbm.NewAllocationDAO(dtah.dbSession)
+			allocationFilter := cdbm.AllocationFilterInput{InfrastructureProviderIDs: []uuid.UUID{ip.ID}}
 			allocationFilter.TenantIDs = append(allocationFilter.TenantIDs, *ta.TenantID)
-		}
-		aCount, err := allocationDAO.GetCount(ctx, nil, allocationFilter)
-		if err != nil {
-			logger.Error().Str("ip", ip.ID.String()).Str("tenant", ta.TenantID.String()).Err(err).Msg("error getting allocations")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Error getting allocations for InfrastructureProvider, Tenant", nil)
+			aCount, err := allocationDAO.GetCount(ctx, tx, allocationFilter)
+			if err != nil {
+				logger.Error().Str("ip", ip.ID.String()).Str("tenant", ta.TenantID.String()).Err(err).Msg("error getting allocations")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Error getting allocations for InfrastructureProvider, Tenant", nil)
+			}
+
+			if aCount > 0 {
+				logger.Warn().Str("tenant", ta.TenantID.String()).Msg("allocations exist for tenant")
+				return cutil.NewAPIError(http.StatusBadRequest, "Allocations exist for Tenant", nil)
+			}
+
+			// Delete Tenant/Site associations with the Provider's Sites
+			tsDAO := cdbm.NewTenantSiteDAO(dtah.dbSession)
+			tss, _, err := tsDAO.GetAll(ctx, tx, cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{*ta.TenantID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, []string{"Site"})
+			if err != nil {
+				logger.Error().Err(err).Msg("error retrieving Tenant/Site associations")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete TenantAccount, DB error retrieving Tenant/Site associations", nil)
+			}
+			for _, ts := range tss {
+				if ts.Site != nil && ts.Site.InfrastructureProviderID == ip.ID {
+					err = tsDAO.Delete(ctx, tx, ts.ID)
+					if err != nil {
+						logger.Error().Err(err).Msg("error deleting Tenant/Site association")
+						return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete TenantAccount, DB error deleting Tenant/Site association", nil)
+					}
+				}
+			}
 		}
 
-		if aCount > 0 {
-			logger.Warn().Str("tenant", ta.TenantID.String()).Msg("allocations exist for tenant")
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Allocations exist for Tenant", nil)
-		}
-	}
-
-	// Delete TenantAccount in DB
-	err = taDAO.Delete(ctx, nil, taID)
+		// Delete TenantAccount in DB
+		return taDAO.Delete(ctx, tx, taID)
+	})
 	if err != nil {
-		logger.Error().Err(err).Msg("error deleting TenantAccount in DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to delete Tenant", nil)
+		return common.HandleTxError(c, logger, err, "Failed to delete Tenant")
 	}
 
 	// Create response

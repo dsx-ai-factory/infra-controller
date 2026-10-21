@@ -23,10 +23,10 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
@@ -36,21 +36,19 @@ import (
 
 // CreateVpcPeeringHandler is the API Handler for creating new VPC Peering
 type CreateVpcPeeringHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateVpcPeeringHandler initializes and returns a new handler for creating VPC Peering
 func NewCreateVpcPeeringHandler(dbSession *cdb.Session, tc tclient.Client, sc *sc.ClientPool, cfg *config.Config) CreateVpcPeeringHandler {
 	return CreateVpcPeeringHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        sc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       sc,
+		cfg:       cfg,
 	}
 }
 
@@ -66,7 +64,7 @@ func NewCreateVpcPeeringHandler(dbSession *cdb.Session, tc tclient.Client, sc *s
 // @Success 201 {object} model.APIVpcPeering
 // @Router /v2/org/{org}/nico/vpc-peering [post]
 func (cvph CreateVpcPeeringHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Create", "VpcPeering", c, cvph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Create", "VpcPeering", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -169,24 +167,16 @@ func (cvph CreateVpcPeeringHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Tenant Accounts for tenants of the VPC Peering, DB error", nil)
 			}
 			if taCount == 2 {
-				tsDAO := cdbm.NewTenantSiteDAO(cvph.dbSession)
-				tenantSites, _, serr := tsDAO.GetAll(
-					ctx,
-					nil,
-					cdbm.TenantSiteFilterInput{
-						TenantIDs: []uuid.UUID{vpc1.TenantID, vpc2.TenantID},
-						SiteIDs:   []uuid.UUID{site.ID},
-					},
-					cdbp.PageInput{},
-					nil,
-				)
-				if serr != nil {
-					logger.Error().Err(serr).Msg("error retrieving TenantSite for tenants of the VPC Peering")
-					return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Site access for tenants of the VPC Peering, DB error", nil)
+				providerAuthorized = true
+				for _, tenantID := range []uuid.UUID{vpc1.TenantID, vpc2.TenantID} {
+					hasSiteAccess, serr := common.TenantHasSiteAccess(ctx, nil, cvph.dbSession, &cdbm.Tenant{ID: tenantID}, site.ID)
+					if serr != nil {
+						logger.Error().Err(serr).Msg("error checking Site access for tenants of the VPC Peering")
+						return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Site access for tenants of the VPC Peering, DB error", nil)
+					}
+					providerAuthorized = providerAuthorized && hasSiteAccess
 				}
-				if len(tenantSites) == 2 {
-					providerAuthorized = true
-				} else {
+				if !providerAuthorized {
 					logger.Warn().Msg("Not all tenants have access to Site specified in request")
 				}
 			} else {
@@ -198,24 +188,14 @@ func (cvph CreateVpcPeeringHandler) Handle(c echo.Context) error {
 	tenantAuthorized := false
 	if tenant != nil && !providerAuthorized {
 		// Tenant Admin: tenant must have access to the site.
-		tsDAO := cdbm.NewTenantSiteDAO(cvph.dbSession)
-		tenantSites, _, err := tsDAO.GetAll(
-			ctx,
-			nil,
-			cdbm.TenantSiteFilterInput{
-				TenantIDs: []uuid.UUID{tenant.ID},
-				SiteIDs:   []uuid.UUID{site.ID},
-			},
-			paginator.PageInput{Limit: cutil.GetPtr(1)},
-			nil,
-		)
+		hasSiteAccess, err := common.TenantHasSiteAccess(ctx, nil, cvph.dbSession, tenant, site.ID)
 		if err != nil {
-			logger.Error().Err(err).Msg("error retrieving TenantSite from DB")
+			logger.Error().Err(err).Msg("error checking Tenant access to Site")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Site access for Tenant, DB error", nil)
 		}
 
 		// Tenant-only users can only create single-tenant peerings where both VPCs belong to them.
-		if len(tenantSites) > 0 && vpc1.TenantID == tenant.ID && vpc2.TenantID == tenant.ID {
+		if hasSiteAccess && vpc1.TenantID == tenant.ID && vpc2.TenantID == tenant.ID {
 			tenantAuthorized = true
 		} else {
 			if vpc1.TenantID != tenant.ID {
@@ -387,11 +367,20 @@ func (cvph CreateVpcPeeringHandler) Handle(c echo.Context) error {
 	// Best effort post-commit update: workflow completed, so mark peering as Ready.
 	// This is intentionally outside of the transaction so create does not fail if this update fails.
 	status := cdbm.VpcPeeringStatusConfiguring
-	uerr := vpcPeeringDAO.UpdateStatusByID(ctx, nil, vpcPeering.ID, cdbm.VpcPeeringStatusReady)
+	updated, uerr := vpcPeeringDAO.UpdateStatusByIDIfCurrent(ctx, nil, vpcPeering.ID, cdbm.VpcPeeringStatusConfiguring, cdbm.VpcPeeringStatusReady)
 	if uerr != nil {
 		logger.Warn().Err(uerr).Msg("best-effort update to Ready status failed after workflow completion")
-	} else {
+	} else if updated {
 		status = cdbm.VpcPeeringStatusReady
+	} else {
+		// A DELETE can commit after create releases its transaction. Keep its
+		// status in both the database and the create response.
+		current, rerr := vpcPeeringDAO.GetByID(ctx, nil, vpcPeering.ID, nil)
+		if rerr != nil {
+			logger.Warn().Err(rerr).Msg("best-effort reload of VPC Peering status failed after workflow completion")
+		} else {
+			status = current.Status
+		}
 	}
 
 	// Update API model with best-known status.
@@ -406,19 +395,17 @@ func (cvph CreateVpcPeeringHandler) Handle(c echo.Context) error {
 
 // GetAllVpcPeeringHandler is the API Handler for getting all VPC Peerings
 type GetAllVpcPeeringHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllVpcPeeringHandler initializes and returns a new handler for getting all VPC Peerings
 func NewGetAllVpcPeeringHandler(dbSession *cdb.Session, tc tclient.Client, cfg *config.Config) GetAllVpcPeeringHandler {
 	return GetAllVpcPeeringHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -442,7 +429,7 @@ func NewGetAllVpcPeeringHandler(dbSession *cdb.Session, tc tclient.Client, cfg *
 // @Success 200 {array} model.APIVpcPeering
 // @Router /v2/org/{org}/nico/vpc-peering [get]
 func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("GetAll", "VpcPeering", c, gavph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("GetAll", "VpcPeering", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -487,22 +474,11 @@ func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
 		}
 
 		if !providerSiteAuthorized && tenant != nil {
-			tsDAO := cdbm.NewTenantSiteDAO(gavph.dbSession)
-			tenantSites, _, err := tsDAO.GetAll(
-				ctx,
-				nil,
-				cdbm.TenantSiteFilterInput{
-					TenantIDs: []uuid.UUID{tenant.ID},
-					SiteIDs:   []uuid.UUID{site.ID},
-				},
-				paginator.PageInput{Limit: cutil.GetPtr(1)},
-				nil,
-			)
+			tenantSiteAuthorized, err = common.TenantHasSiteAccess(ctx, nil, gavph.dbSession, tenant, site.ID)
 			if err != nil {
-				logger.Error().Err(err).Msg("error retrieving TenantSite from DB")
+				logger.Error().Err(err).Msg("error checking Tenant access to Site")
 				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate Site access for Tenant, DB error", nil)
 			}
-			tenantSiteAuthorized = len(tenantSites) > 0
 		}
 
 		if !providerSiteAuthorized && !tenantSiteAuthorized {
@@ -511,7 +487,7 @@ func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
 		}
 
 		filterInput.SiteIDs = []uuid.UUID{site.ID}
-		gavph.tracerSpan.SetAttribute(handlerSpan, attribute.String("site_id", siteIDStr), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("site_id", siteIDStr))
 	}
 
 	// Get isMultiTenant from query param if specified
@@ -534,7 +510,7 @@ func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
 	// Get status from query param
 	qStatuses := qParams["status"]
 	if len(qStatuses) > 0 {
-		gavph.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("status", qStatuses), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("status", qStatuses))
 		for _, status := range qStatuses {
 			if !cdbm.VpcPeeringStatusMap[status] {
 				logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", status))
@@ -547,7 +523,7 @@ func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
 	// Get vpcId from query param
 	vpcIDStrs := qParams["vpcId"]
 	if len(vpcIDStrs) > 0 {
-		gavph.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("vpcId", vpcIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("vpcId", vpcIDStrs))
 		vpcIDs := make([]uuid.UUID, 0, len(vpcIDStrs))
 		for _, vpcIDStr := range vpcIDStrs {
 			vpcID, err := uuid.Parse(vpcIDStr)
@@ -585,7 +561,7 @@ func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
 	// Get peerTenantId from query param
 	peerTenantIDStrs := qParams["peerTenantId"]
 	if len(peerTenantIDStrs) > 0 {
-		gavph.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("peerTenantId", peerTenantIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("peerTenantId", peerTenantIDStrs))
 		peerTenantIDs := make([]uuid.UUID, 0, len(peerTenantIDStrs))
 		for _, peerTenantIDStr := range peerTenantIDStrs {
 			peerTenantID, err := uuid.Parse(peerTenantIDStr)
@@ -716,19 +692,17 @@ func (gavph GetAllVpcPeeringHandler) Handle(c echo.Context) error {
 
 // GetVpcPeeringHandler is the API Handler for getting a VPC Peering
 type GetVpcPeeringHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	cfg       *config.Config
 }
 
 // NewGetVpcPeeringHandler initializes and returns a new handler to retrieve VPC Peering
 func NewGetVpcPeeringHandler(dbSession *cdb.Session, tc tclient.Client, cfg *config.Config) GetVpcPeeringHandler {
 	return GetVpcPeeringHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -745,7 +719,7 @@ func NewGetVpcPeeringHandler(dbSession *cdb.Session, tc tclient.Client, cfg *con
 // @Success 200 {object} model.APIVpcPeering
 // @Router /v2/org/{org}/nico/vpc-peering/{id} [get]
 func (gvph GetVpcPeeringHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Get", "VpcPeering", c, gvph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Get", "VpcPeering", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -764,7 +738,7 @@ func (gvph GetVpcPeeringHandler) Handle(c echo.Context) error {
 
 	peeringID := c.Param("id")
 	logger = logger.With().Str("Peering ID", peeringID).Logger()
-	gvph.tracerSpan.SetAttribute(handlerSpan, attribute.String("peering_id", peeringID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("peering_id", peeringID))
 
 	// Parse and validate peering ID
 	peeringUUID, err := uuid.Parse(peeringID)
@@ -870,37 +844,35 @@ func (gvph GetVpcPeeringHandler) Handle(c echo.Context) error {
 
 // DeleteVpcPeeringHandler is the API Handler for deleting a VPC Peering
 type DeleteVpcPeeringHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteVpcPeeringHandler initializes and returns a new handler for deleting VPC Peering
 func NewDeleteVpcPeeringHandler(dbSession *cdb.Session, tc tclient.Client, sc *sc.ClientPool, cfg *config.Config) DeleteVpcPeeringHandler {
 	return DeleteVpcPeeringHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        sc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       sc,
+		cfg:       cfg,
 	}
 }
 
 // Handle godoc
 // @Summary Delete a VPC Peering
-// @Description Delete a VPC Peering by ID.
+// @Description Request VPC Peering deletion by ID. Poll GET until it returns 404 before deleting either VPC.
 // @Tags vpcpeering
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of VPC Peering"
-// @Success 204 "No Content"
+// @Success 202 {object} model.APIMessageResponse
 // @Router /v2/org/{org}/nico/vpc-peering/{id} [delete]
 func (dvph DeleteVpcPeeringHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Delete", "VpcPeering", c, dvph.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Delete", "VpcPeering", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -924,7 +896,7 @@ func (dvph DeleteVpcPeeringHandler) Handle(c echo.Context) error {
 	}
 	logger = logger.With().Str("VPC Peering ID", vpcPeeringID.String()).Logger()
 
-	dvph.tracerSpan.SetAttribute(handlerSpan, attribute.String("vpc_peering_id", vpcPeeringID.String()), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("vpc_peering_id", vpcPeeringID.String()))
 
 	// Get VPC Peering from DB by ID
 	vpcPeeringDAO := cdbm.NewVpcPeeringDAO(dvph.dbSession)
@@ -1050,11 +1022,18 @@ func (dvph DeleteVpcPeeringHandler) Handle(c echo.Context) error {
 		wferr := we.Get(workflowCtx, nil)
 		if wferr != nil {
 			var applicationErr *tp.ApplicationError
-			if errors.As(wferr, &applicationErr) && slices.Contains(swe.UnimplementedOrDeniedErrTypes(), applicationErr.Type()) {
-				logger.Error().Msg("feature not yet implemented on target Site")
-				return cutil.NewAPIError(http.StatusNotImplemented, fmt.Sprintf("Feature not yet implemented on target Site: %s", wferr), nil)
+			if errors.As(wferr, &applicationErr) {
+				if slices.Contains(swe.ObjectNotFoundErrTypes(), applicationErr.Type()) {
+					// A repeated request may arrive after Core finishes removal but
+					// before inventory removes the REST record.
+					wferr = nil
+				} else if slices.Contains(swe.UnimplementedOrDeniedErrTypes(), applicationErr.Type()) {
+					logger.Error().Msg("feature not yet implemented on target Site")
+					return cutil.NewAPIError(http.StatusNotImplemented, fmt.Sprintf("Feature not yet implemented on target Site: %s", wferr), nil)
+				}
 			}
-
+		}
+		if wferr != nil {
 			var timeoutErr *tp.TimeoutError
 			if errors.As(wferr, &timeoutErr) || wferr == context.DeadlineExceeded || workflowCtx.Err() != nil {
 				logger.Error().Err(wferr).Msg("failed to delete VPC Peering, timeout occurred executing workflow on Site.")
@@ -1066,6 +1045,10 @@ func (dvph DeleteVpcPeeringHandler) Handle(c echo.Context) error {
 			}
 
 			logger.Error().Err(wferr).Msg("failed to synchronously execute Temporal workflow to delete VPC Peering")
+			statusCode, _ := common.UnwrapWorkflowError(wferr)
+			if statusCode == http.StatusPreconditionFailed {
+				return cutil.NewAPIError(http.StatusPreconditionFailed, "Site rejected VPC Peering deletion because a precondition was not satisfied. Retry the request; contact support if it continues to fail.", nil)
+			}
 			return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to execute sync workflow to delete VPC Peering on Site: %s", wferr), nil)
 		}
 
@@ -1085,14 +1068,9 @@ func (dvph DeleteVpcPeeringHandler) Handle(c echo.Context) error {
 		return timeoutResp()
 	}
 
-	// Best effort post-commit cleanup: remove VPC Peering from DB.
-	// This is intentionally outside of the transaction so delete does not fail if this cleanup fails.
-	derr := vpcPeeringDAO.Delete(ctx, nil, vpcPeering.ID)
-	if derr != nil {
-		logger.Warn().Err(derr).Msg("best-effort delete of VPC Peering from DB failed after workflow completion")
-	}
-
+	// Core accepts the request before DPUs finish removing peering permissions.
+	// Keep Deleting visible until inventory confirms the peering is gone.
 	logger.Info().Msg("finishing API handler")
 
-	return c.NoContent(http.StatusNoContent)
+	return c.JSON(http.StatusAccepted, model.NewAPIDeletionAcceptedResponse())
 }

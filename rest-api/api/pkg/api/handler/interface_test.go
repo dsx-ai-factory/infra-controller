@@ -12,16 +12,6 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -29,6 +19,15 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 	temporalClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
+
+	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 )
 
 func TestGetAllInterfaceHandler_Handle(t *testing.T) {
@@ -109,11 +108,9 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 	inst1 := testInstanceBuildInstance(t, dbSession, "test-instance-2", tn1.ID, ip.ID, st1.ID, &ist1.ID, vpc1.ID, cutil.GetPtr(mc1.ID), &os1.ID, nil, cdbm.InstanceStatusReady)
 	assert.NotNil(t, inst1)
 
-	ifcs := []*cdbm.Interface{}
 	for i := 0; i < 25; i++ {
 		instsub1 := testInstanceBuildInstanceInterface(t, dbSession, inst1.ID, &subnets[i].ID, nil, nil, cdbm.InterfaceStatusProvisioning)
 		assert.NotNil(t, instsub1)
-		ifcs = append(ifcs, instsub1)
 	}
 
 	e := echo.New()
@@ -121,7 +118,7 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                      string
@@ -401,7 +398,6 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.reqOrg, tt.args.reqInstanceID)
 			ec.Set("user", tt.args.reqUser)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
@@ -491,10 +487,9 @@ func TestNewGetAllInterfaceHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: GetAllInterfaceHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}

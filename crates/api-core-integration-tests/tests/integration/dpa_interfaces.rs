@@ -229,17 +229,6 @@ async fn find_machines_includes_spectrum_x_capabilities(
         ]
     );
 
-    #[allow(deprecated)]
-    {
-        assert_eq!(
-            machine_with_devices.capabilities,
-            machine_with_devices
-                .status
-                .as_ref()
-                .and_then(|status| status.capabilities.clone()),
-        );
-    }
-
     Ok(())
 }
 

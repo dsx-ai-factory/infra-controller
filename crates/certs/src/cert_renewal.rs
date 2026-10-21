@@ -24,12 +24,11 @@ use ::rpc::forge_tls_client::{self, ApiConfig, ForgeClientConfig};
 use carbide_host_support::registration;
 use carbide_instrument::{Event, Outcome, emit};
 use eyre::Context;
-use forge_tls::client_config::ClientCert;
+use forge_tls::client_config::{ClientCert, MAX_CERT_RENEWAL_TIME_SECS};
 use rand::RngExt;
 
 /// Certificates are renewed between in these 2 time intervals
 const MIN_CERT_RENEWAL_TIME_SECS: u64 = 5 * 24 * 60 * 60; // 5 days
-const MAX_CERT_RENEWAL_TIME_SECS: u64 = 7 * 24 * 60 * 60; // 7 days
 
 const MIN_CERT_RENEWAL_FAILURE_TIME_SECS: u64 = 60; // 1 min
 const MAX_CERT_RENEWAL_FAILURE_TIME_SECS: u64 = 5 * 60; // 5min

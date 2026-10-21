@@ -15,20 +15,27 @@
  * limitations under the License.
  */
 
+mod snapshot;
+
 use std::collections::HashMap;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, RwLock};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use carbide_uuid::rack::RackId;
 use prometheus::{Counter, Gauge, Histogram, HistogramOpts, IntGauge, Opts};
 use tokio::sync::OnceCell;
+use tokio::time::{Instant, Sleep};
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
+use self::snapshot::{Reconciliation, ReconciliationProcessor};
 use super::client::{
     GnmiClient, GnmiClientConfig, GnmiSubscription, build_extended_subscribe_request,
+    build_on_change_subscribe_request, build_sample_subscribe_request, build_snapshot_request,
     nvue_interface_subscribe_paths, nvue_leak_sensor_subscribe_path, nvue_subscribe_paths,
     system_events_prefix, system_events_subscribe_path,
 };
@@ -72,14 +79,26 @@ pub(crate) struct GnmiStreamMetrics {
     pub(crate) reconnections_total: Counter,
     pub(crate) server_initiated_closures_total: Counter,
     pub(crate) connection_established_timestamp: Gauge,
+    pub(crate) connection_established_timestamp_seconds: Gauge,
     pub(crate) notifications_received_total: Counter,
     pub(crate) last_notification_timestamp: Gauge,
+    pub(crate) last_notification_timestamp_seconds: Gauge,
     pub(crate) notification_processing_seconds: Histogram,
     pub(crate) stream_errors_total: Counter,
     pub(crate) monitored_entities: Gauge,
 }
 
 impl GnmiStreamMetrics {
+    fn set_connection_established_timestamp(&self, timestamp: f64) {
+        self.connection_established_timestamp.set(timestamp);
+        self.connection_established_timestamp_seconds.set(timestamp);
+    }
+
+    pub(crate) fn set_last_notification_timestamp(&self, timestamp: f64) {
+        self.last_notification_timestamp.set(timestamp);
+        self.last_notification_timestamp_seconds.set(timestamp);
+    }
+
     fn new(
         registry: &prometheus::Registry,
         prefix: &str,
@@ -141,6 +160,17 @@ impl GnmiStreamMetrics {
         )?;
         registry.register(Box::new(connection_established_timestamp.clone()))?;
 
+        let connection_established_timestamp_seconds = Gauge::with_opts(
+            Opts::new(
+                format!(
+                    "{prefix}_nvue_gnmi{stream_name}_connection_established_timestamp_seconds"
+                ),
+                "Unix timestamp in seconds when current connection was established. Compute uptime via time() - this_metric.",
+            )
+            .const_labels(const_labels.clone()),
+        )?;
+        registry.register(Box::new(connection_established_timestamp_seconds.clone()))?;
+
         let notifications_received_total = Counter::with_opts(
             Opts::new(
                 format!("{prefix}_nvue_gnmi{stream_name}_notifications_received_total"),
@@ -158,6 +188,15 @@ impl GnmiStreamMetrics {
             .const_labels(const_labels.clone()),
         )?;
         registry.register(Box::new(last_notification_timestamp.clone()))?;
+
+        let last_notification_timestamp_seconds = Gauge::with_opts(
+            Opts::new(
+                format!("{prefix}_nvue_gnmi{stream_name}_last_notification_timestamp_seconds"),
+                "Unix timestamp in seconds of most recent notification",
+            )
+            .const_labels(const_labels.clone()),
+        )?;
+        registry.register(Box::new(last_notification_timestamp_seconds.clone()))?;
 
         let notification_processing_seconds = Histogram::with_opts(
             HistogramOpts::new(
@@ -194,8 +233,10 @@ impl GnmiStreamMetrics {
             reconnections_total,
             server_initiated_closures_total,
             connection_established_timestamp,
+            connection_established_timestamp_seconds,
             notifications_received_total,
             last_notification_timestamp,
+            last_notification_timestamp_seconds,
             notification_processing_seconds,
             stream_errors_total,
             monitored_entities,
@@ -218,6 +259,7 @@ struct GnmiStreamConfig {
     client_provider: GnmiClientProvider,
     paths: Vec<proto::Path>,
     sample_interval_nanos: u64,
+    reconcile_interval: Duration,
 }
 
 fn request_path_names(paths: &[proto::Path]) -> Vec<String> {
@@ -243,16 +285,44 @@ struct GnmiSampleStreamState {
 }
 
 struct GnmiOnChangeStreamState {
+    reconcile_interval: Duration,
     client_provider: GnmiClientProvider,
     stream_metrics: GnmiStreamMetrics,
     processor: GnmiOnChangeProcessor,
 }
 
 struct ExtendedGnmiStreamState {
+    reconcile_interval: Duration,
     client_provider: GnmiClientProvider,
     request: proto::SubscribeRequest,
     stream_metrics: GnmiStreamMetrics,
     processor: ExtendedGnmiProcessor,
+}
+
+/// Endpoint-owned incremental readings retained through collector metadata replacement.
+#[derive(Default)]
+pub(crate) struct GnmiRetainedCache {
+    event_rows: super::on_change_processor::SharedEventRows,
+    extended: HashMap<String, super::reconciliation::SharedMetricSources>,
+}
+
+#[cfg(test)]
+impl GnmiRetainedCache {
+    /// Seeds a retained reading to exercise discovery's cache handoff without a live stream.
+    pub(crate) fn seed_metric(&mut self, subscription: &str, sample: crate::sink::MetricSample) {
+        let key = (
+            sample.key.clone(),
+            sample.metric_type.clone(),
+            sample.unit.clone(),
+        );
+
+        let sources = self.extended.entry(subscription.to_string()).or_default();
+
+        sources
+            .lock()
+            .unwrap()
+            .insert(key, (Vec::new(), Some(sample)));
+    }
 }
 
 struct GnmiCollectorPlan {
@@ -264,12 +334,6 @@ struct GnmiCollectorPlan {
     sample_event_context: EventContext,
     on_change_event_context: Option<EventContext>,
     extended_event_context: Option<EventContext>,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum ExtendedStreamExit {
-    Cancelled,
-    Reconnect,
 }
 
 #[derive(Clone)]
@@ -301,10 +365,106 @@ struct GnmiUsernamePassword {
     password: Option<String>,
 }
 
-/// Carries the stream name and optional requested paths into connection logs.
+/// Carries built-in or additional stream identity and requested paths into logs.
+#[derive(Clone, Copy)]
 struct StreamDiagnostics<'a> {
-    stream: Option<&'static str>,
+    switch_id: &'a str,
+    stream: Option<&'a str>,
+    subscription: Option<&'a str>,
     paths: Option<&'a [proto::Path]>,
+}
+
+/// Owns an RPC and its initial-sync deadline across every subscription mode.
+///
+/// Terminal responses release both RPC directions before yielding the failure.
+/// EOF is emitted once so callers distinguish a clean closure from a failure.
+/// In-band errors terminate the RPC before and after synchronization.
+struct SubscriptionResponses<S> {
+    stream: Option<S>,
+    sync_timer: Option<Pin<Box<Sleep>>>,
+    sync_timeout: Duration,
+}
+
+impl<S> SubscriptionResponses<S> {
+    fn new(stream: S, sync_timeout: Duration) -> Self {
+        Self {
+            stream: Some(stream),
+            sync_timer: Some(Box::pin(tokio::time::sleep(sync_timeout))),
+            sync_timeout,
+        }
+    }
+
+    /// Releases the RPC when its cumulative initial-sync deadline expires.
+    fn expire(&mut self, now: Instant) -> Option<tonic::Status> {
+        if self.sync_timer.as_ref()?.deadline() > now {
+            return None;
+        }
+
+        self.stream = None;
+        self.sync_timer = None;
+
+        Some(tonic::Status::deadline_exceeded(format!(
+            "gNMI stream did not synchronize within {:?}",
+            self.sync_timeout
+        )))
+    }
+}
+
+impl<S> Stream for SubscriptionResponses<S>
+where
+    S: Stream<Item = Result<proto::SubscribeResponse, tonic::Status>> + Unpin,
+{
+    type Item = Result<Option<proto::SubscribeResponse>, tonic::Status>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let owner = self.get_mut();
+
+        if let Some(timer) = &mut owner.sync_timer
+            && timer.as_mut().poll(cx).is_ready()
+            && let Some(error) = owner.expire(Instant::now())
+        {
+            return Poll::Ready(Some(Err(error)));
+        }
+
+        let Some(stream) = owner.stream.as_mut() else {
+            return Poll::Ready(None);
+        };
+
+        let result = match Pin::new(stream).poll_next(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Some(Ok(response))) => {
+                match response.response.as_ref() {
+                    Some(proto::subscribe_response::Response::SyncResponse(true)) => {
+                        owner.sync_timer = None;
+                    }
+                    #[allow(deprecated, reason = "accept legacy in-band gNMI errors")]
+                    Some(proto::subscribe_response::Response::Error(error)) => {
+                        let code = i32::try_from(error.code)
+                            .map(tonic::Code::from_i32)
+                            .unwrap_or(tonic::Code::Unknown);
+
+                        owner.stream = None;
+                        owner.sync_timer = None;
+
+                        return Poll::Ready(Some(Err(tonic::Status::new(
+                            code,
+                            error.message.clone(),
+                        ))));
+                    }
+                    _ => {}
+                }
+
+                return Poll::Ready(Some(Ok(Some(response))));
+            }
+            Poll::Ready(Some(Err(error))) => Err(error),
+            Poll::Ready(None) => Ok(None),
+        };
+
+        owner.stream = None;
+        owner.sync_timer = None;
+
+        Poll::Ready(Some(result))
+    }
 }
 
 /// Processes responses until `sync_response=true` completes initial synchronization.
@@ -317,7 +477,7 @@ struct StreamDiagnostics<'a> {
 /// gauge set until that stream ends.
 async fn await_stream_synchronization<S, F>(
     cancel_token: &CancellationToken,
-    responses: &mut S,
+    responses: &mut SubscriptionResponses<S>,
     client_provider: &GnmiClientProvider,
     credential_generation: u64,
     stream_metrics: &GnmiStreamMetrics,
@@ -330,56 +490,36 @@ where
 {
     let receive_until_synchronized = async {
         loop {
-            let Some(response) = responses.next().await else {
+            let Some(response) = responses.next().await.transpose()?.flatten() else {
                 return Ok(false);
             };
-
-            let response = response?;
 
             match response.response.as_ref() {
                 Some(proto::subscribe_response::Response::SyncResponse(true)) => {
                     return Ok(true);
                 }
                 Some(proto::subscribe_response::Response::SyncResponse(false)) => continue,
-                #[allow(deprecated, reason = "accept the legacy in-band gNMI error response")]
-                Some(proto::subscribe_response::Response::Error(error)) => {
-                    let code = i32::try_from(error.code)
-                        .map(tonic::Code::from_i32)
-                        .unwrap_or(tonic::Code::Unknown);
-
-                    return Err(tonic::Status::new(code, error.message.clone()));
-                }
                 _ => process_response(&response)?,
             }
         }
     };
 
-    let result = cancel_token
-        .run_until_cancelled(tokio::time::timeout(
-            client_provider.request_timeout,
-            receive_until_synchronized,
-        ))
-        .await;
+    let Some(result) = cancel_token
+        .run_until_cancelled(receive_until_synchronized)
+        .await
+    else {
+        stream_metrics.connection_state.set(SHUTDOWN);
 
-    let result = match result {
-        None => {
-            stream_metrics.connection_state.set(SHUTDOWN);
+        tracing::info!(
+            switch_id = %diagnostics.switch_id,
+            stream = diagnostics.stream,
+            subscription = diagnostics.subscription,
+            requested_paths = ?diagnostics.paths.map(request_path_names),
+            rack_id = client_provider.rack_id.as_ref().map(tracing::field::display),
+            "gNMI stream synchronization cancelled"
+        );
 
-            tracing::info!(
-                switch_id = %client_provider.switch_id,
-                stream = diagnostics.stream,
-                requested_paths = ?diagnostics.paths.map(request_path_names),
-                rack_id = client_provider.rack_id.as_ref().map(tracing::field::display),
-                "gNMI stream synchronization cancelled"
-            );
-
-            return None;
-        }
-        Some(Ok(result)) => result,
-        Some(Err(_)) => Err(tonic::Status::deadline_exceeded(format!(
-            "gNMI stream did not synchronize within {:?}",
-            client_provider.request_timeout
-        ))),
+        return None;
     };
 
     match result {
@@ -396,14 +536,17 @@ where
             stream_metrics.stream_errors_total.inc();
             stream_metrics.reconnections_total.inc();
 
-            client_provider
-                .refresh_status_auth_if_needed(&error, credential_generation)
+            cancel_token
+                .run_until_cancelled(
+                    client_provider.refresh_status_auth_if_needed(&error, credential_generation),
+                )
                 .await;
 
             tracing::warn!(
                 error = ?error,
-                switch_id = %client_provider.switch_id,
+                switch_id = %diagnostics.switch_id,
                 stream = diagnostics.stream,
+                subscription = diagnostics.subscription,
                 requested_paths = ?diagnostics.paths.map(request_path_names),
                 rack_id = client_provider.rack_id.as_ref().map(tracing::field::display),
                 "gNMI stream failed before synchronization; backing off"
@@ -488,53 +631,7 @@ struct GnmiStreamOpenError {
     credential_generation: Option<u64>,
 }
 
-async fn subscribe_sample_with_cached_credentials(
-    client_provider: &GnmiClientProvider,
-    paths: &[proto::Path],
-    sample_interval_nanos: u64,
-) -> Result<(GnmiSubscription, u64), GnmiStreamOpenError> {
-    let (client, credential_generation) =
-        client_provider
-            .new_client()
-            .await
-            .map_err(|error| GnmiStreamOpenError {
-                error,
-                credential_generation: None,
-            })?;
-    let stream = client
-        .subscribe_sample(paths, sample_interval_nanos)
-        .await
-        .map_err(|error| GnmiStreamOpenError {
-            error,
-            credential_generation: Some(credential_generation),
-        })?;
-    Ok((stream, credential_generation))
-}
-
-async fn subscribe_on_change_with_cached_credentials(
-    client_provider: &GnmiClientProvider,
-    prefix: &proto::Path,
-    paths: &[proto::Path],
-) -> Result<(GnmiSubscription, u64), GnmiStreamOpenError> {
-    let (client, credential_generation) =
-        client_provider
-            .new_client()
-            .await
-            .map_err(|error| GnmiStreamOpenError {
-                error,
-                credential_generation: None,
-            })?;
-    let stream = client
-        .subscribe_on_change(prefix, paths)
-        .await
-        .map_err(|error| GnmiStreamOpenError {
-            error,
-            credential_generation: Some(credential_generation),
-        })?;
-    Ok((stream, credential_generation))
-}
-
-async fn subscribe_extended_with_cached_credentials(
+async fn subscribe_with_cached_credentials(
     client_provider: &GnmiClientProvider,
     request: proto::SubscribeRequest,
 ) -> Result<(GnmiSubscription, u64), GnmiStreamOpenError> {
@@ -686,7 +783,10 @@ fn build_gnmi_collector_plan(
     collector_registry: &CollectorRegistry,
     data_sink: Option<Arc<dyn DataSink>>,
     switch_id: String,
+    retained: &mut GnmiRetainedCache,
 ) -> Result<GnmiCollectorPlan, HealthError> {
+    gnmi_config.validate().map_err(HealthError::GnmiError)?;
+
     if let Some(paths) = &gnmi_config.paths.interface_paths {
         for (index, path) in paths.iter().enumerate() {
             if !supports_interface_path(path) {
@@ -703,6 +803,7 @@ fn build_gnmi_collector_plan(
     let endpoint_key = endpoint.key();
     let sample_event_context = EventContext::from_endpoint(endpoint, NVUE_GNMI_SAMPLE_STREAM_ID);
     let extended_context = EventContext::from_endpoint(endpoint, EXTENDED_GNMI_STREAM_ID);
+    let reconcile_interval = gnmi_config.reconcile_interval.unwrap_or_default();
 
     let extended_event_context =
         (!gnmi_config.additional_subscriptions.is_empty()).then(|| extended_context.clone());
@@ -716,17 +817,19 @@ fn build_gnmi_collector_plan(
         client_provider: client_provider.clone(),
         paths: nvue_subscribe_paths(&gnmi_config.paths),
         sample_interval_nanos: gnmi_config.sample_interval.as_nanos() as u64,
+        reconcile_interval,
     };
 
     let sample = GnmiSampleStreamState {
         config: sample_config,
         stream_metrics: sample_stream_metrics,
-        processor: GnmiSampleProcessor {
-            data_sink: data_sink.clone(),
-            event_context: sample_event_context.clone(),
-            switch_id: switch_id.clone(),
-            diagnostic_stream: None,
-        },
+        processor: GnmiSampleProcessor::new(
+            data_sink.clone(),
+            sample_event_context.clone(),
+            switch_id.clone(),
+            None,
+            !reconcile_interval.is_zero(),
+        ),
     };
 
     // Keep selected paths on their own stream so a rejected leaf does not
@@ -743,14 +846,16 @@ fn build_gnmi_collector_plan(
                 client_provider: client_provider.clone(),
                 paths: nvue_interface_subscribe_paths(&gnmi_config.paths),
                 sample_interval_nanos: gnmi_config.sample_interval.as_nanos() as u64,
+                reconcile_interval,
             },
             stream_metrics,
-            processor: GnmiSampleProcessor {
-                data_sink: data_sink.clone(),
-                event_context: sample_event_context.clone(),
-                switch_id: switch_id.clone(),
-                diagnostic_stream: Some(INTERFACE_STREAM_NAME),
-            },
+            processor: GnmiSampleProcessor::new(
+                data_sink.clone(),
+                sample_event_context.clone(),
+                switch_id.clone(),
+                Some(INTERFACE_STREAM_NAME),
+                !reconcile_interval.is_zero(),
+            ),
         })
     } else {
         None
@@ -768,14 +873,16 @@ fn build_gnmi_collector_plan(
                 client_provider: client_provider.clone(),
                 paths: vec![nvue_leak_sensor_subscribe_path()],
                 sample_interval_nanos: gnmi_config.sample_interval.as_nanos() as u64,
+                reconcile_interval,
             },
             stream_metrics,
-            processor: GnmiSampleProcessor {
-                data_sink: data_sink.clone(),
-                event_context: sample_event_context.clone(),
-                switch_id: switch_id.clone(),
-                diagnostic_stream: Some(LEAK_SENSOR_STREAM_NAME),
-            },
+            processor: GnmiSampleProcessor::new(
+                data_sink.clone(),
+                sample_event_context.clone(),
+                switch_id.clone(),
+                Some(LEAK_SENSOR_STREAM_NAME),
+                !reconcile_interval.is_zero(),
+            ),
         })
     } else {
         None
@@ -790,6 +897,7 @@ fn build_gnmi_collector_plan(
         labels.insert("subscription".to_string(), subscription.name.clone());
 
         extended.push(ExtendedGnmiStreamState {
+            reconcile_interval,
             client_provider: client_provider.clone(),
             request: build_extended_subscribe_request(subscription)?,
             stream_metrics: GnmiStreamMetrics::new(registry, prefix, "_extended", labels)?,
@@ -798,6 +906,13 @@ fn build_gnmi_collector_plan(
                 data_sink.clone(),
                 extended_context.clone(),
                 switch_id.clone(),
+                Some(
+                    retained
+                        .extended
+                        .entry(subscription.name.clone())
+                        .or_default()
+                        .clone(),
+                ),
             ),
         });
     }
@@ -823,6 +938,7 @@ fn build_gnmi_collector_plan(
         on_change_event_context = Some(event_context.clone());
 
         Some(GnmiOnChangeStreamState {
+            reconcile_interval,
             client_provider,
             stream_metrics,
             processor: GnmiOnChangeProcessor::new(
@@ -831,6 +947,7 @@ fn build_gnmi_collector_plan(
                 data_sink,
                 event_context,
                 switch_id,
+                Some(retained.event_rows.clone()),
             ),
         })
     } else {
@@ -856,12 +973,9 @@ pub(crate) fn spawn_gnmi_collector(
     collector_registry: Arc<CollectorRegistry>,
     data_sink: Option<Arc<dyn DataSink>>,
     tls_config: Option<MtlsProfileConfig>,
+    retained: &mut GnmiRetainedCache,
 ) -> Result<Collector, HealthError> {
-    let switch_id = endpoint
-        .metadata
-        .as_ref()
-        .and_then(|m| m.serial_number().map(str::to_string))
-        .unwrap_or_else(|| endpoint.key());
+    let switch_id = endpoint.log_identity().into_owned();
 
     let switch_connect_host = endpoint.switch_connect_host_for_uri().into_owned();
 
@@ -886,7 +1000,17 @@ pub(crate) fn spawn_gnmi_collector(
         &collector_registry,
         data_sink.clone(),
         switch_id,
+        retained,
     )?;
+
+    // Plan construction must succeed before cached readings reach the new contexts.
+    if let Some(state) = &plan.on_change {
+        state.processor.republish();
+    }
+
+    for state in &plan.extended {
+        state.processor.reconciliation.republish();
+    }
 
     let sample_enabled = !plan.sample.config.paths.is_empty();
 
@@ -943,6 +1067,7 @@ pub(crate) fn spawn_gnmi_collector(
                 state.client_provider,
                 state.stream_metrics,
                 state.processor,
+                state.reconcile_interval,
             ))
         });
 
@@ -988,188 +1113,33 @@ pub(crate) fn spawn_gnmi_collector(
 }
 
 async fn gnmi_extended_task(cancel_token: CancellationToken, mut state: ExtendedGnmiStreamState) {
-    let mut backoff = ExponentialBackoff::new(&BackoffConfig {
-        initial: Duration::from_secs(2),
-        max: Duration::from_secs(60),
-    });
+    let subscription_name = state.processor.subscription_name.clone();
+    let reconciliation = state.processor.reconciliation.clone();
 
-    loop {
-        state.stream_metrics.connection_state.set(CONNECTING);
-
-        let Some(stream) = cancel_token
-            .run_until_cancelled(subscribe_extended_with_cached_credentials(
-                &state.client_provider,
-                state.request.clone(),
-            ))
-            .await
-        else {
-            state.stream_metrics.connection_state.set(SHUTDOWN);
-            return;
-        };
-
-        match stream {
-            Err(error) => {
-                state.stream_metrics.connection_state.set(TRANSIENT_FAILURE);
-                state.stream_metrics.reconnections_total.inc();
-
-                if let Some(credential_generation) = error.credential_generation {
-                    state
-                        .client_provider
-                        .refresh_auth_if_needed(&error.error, credential_generation)
-                        .await;
-                }
-
-                tracing::warn!(
-                    error = ?error.error,
-                    switch_id = %state.processor.switch_id,
-                    subscription = %state.processor.subscription_name,
-                    rack_id = state.client_provider.rack_id.as_ref().map(tracing::field::display),
-                    "extended gNMI stream connection failed; backing off"
-                );
-            }
-            Ok((mut stream, credential_generation)) => 'connected: {
-                state.stream_metrics.connection_state.set(READY);
-                state
-                    .stream_metrics
-                    .connection_established_timestamp
-                    .set(now_unix_secs());
-
-                let _connection_guard =
-                    StreamingConnectionGuard::inc(state.stream_metrics.connected.clone());
-
-                let Some(_synchronization_guard) = await_stream_synchronization(
-                    &cancel_token,
-                    &mut stream,
-                    &state.client_provider,
-                    credential_generation,
-                    &state.stream_metrics,
-                    StreamDiagnostics {
-                        stream: None,
-                        paths: None,
-                    },
-                    |response| {
-                        state
-                            .processor
-                            .process_subscribe_response(response, &state.stream_metrics)
-                            .map(|_| ())
-                    },
-                )
-                .await
-                else {
-                    break 'connected;
-                };
-
-                tracing::info!(
-                    switch_id = %state.processor.switch_id,
-                    subscription = %state.processor.subscription_name,
-                    rack_id = state.client_provider.rack_id.as_ref().map(tracing::field::display),
-                    "extended gNMI stream connected"
-                );
-
-                backoff.reset();
-
-                if consume_extended_stream(
-                    &cancel_token,
-                    &mut state,
-                    &mut stream,
-                    credential_generation,
-                    &mut backoff,
-                )
-                .await
-                    == ExtendedStreamExit::Cancelled
-                {
-                    return;
-                }
-            }
-        }
-
-        if cancel_token
-            .run_until_cancelled(tokio::time::sleep(backoff.next_delay()))
-            .await
-            .is_none()
-        {
-            state.stream_metrics.connection_state.set(SHUTDOWN);
-            return;
-        }
-    }
-}
-
-async fn consume_extended_stream(
-    cancel_token: &CancellationToken,
-    state: &mut ExtendedGnmiStreamState,
-    stream: &mut GnmiSubscription,
-    credential_generation: u64,
-    backoff: &mut ExponentialBackoff,
-) -> ExtendedStreamExit {
-    loop {
-        let Some(message) = cancel_token.run_until_cancelled(stream.message()).await else {
-            state.stream_metrics.connection_state.set(SHUTDOWN);
-
-            tracing::info!(
-                switch_id = %state.processor.switch_id,
-                subscription = %state.processor.subscription_name,
-                rack_id = state.client_provider.rack_id.as_ref().map(tracing::field::display),
-                "extended gNMI stream cancelled"
-            );
-
-            return ExtendedStreamExit::Cancelled;
-        };
-
-        match message {
-            Ok(Some(response)) => {
-                match state
-                    .processor
-                    .process_subscribe_response(&response, &state.stream_metrics)
-                {
-                    Ok(true) => backoff.reset(),
-                    Ok(false) => {}
-                    Err(error) => {
-                        state
-                            .client_provider
-                            .refresh_status_auth_if_needed(&error, credential_generation)
-                            .await;
-
-                        state.stream_metrics.connection_state.set(TRANSIENT_FAILURE);
-
-                        state.stream_metrics.reconnections_total.inc();
-                        return ExtendedStreamExit::Reconnect;
-                    }
-                }
-            }
-            Ok(None) => {
-                state.stream_metrics.connection_state.set(IDLE);
-                state.stream_metrics.server_initiated_closures_total.inc();
-
-                tracing::info!(
-                    switch_id = %state.processor.switch_id,
-                    subscription = %state.processor.subscription_name,
-                    rack_id = state.client_provider.rack_id.as_ref().map(tracing::field::display),
-                    "extended gNMI stream closed by server; reconnecting"
-                );
-
-                return ExtendedStreamExit::Reconnect;
-            }
-            Err(error) => {
-                state.stream_metrics.connection_state.set(TRANSIENT_FAILURE);
-                state.stream_metrics.stream_errors_total.inc();
-                state.stream_metrics.reconnections_total.inc();
-                state
-                    .client_provider
-                    .refresh_status_auth_if_needed(&error, credential_generation)
-                    .await;
-
-                tracing::warn!(
-                    error = ?error,
-                    switch_id = %state.processor.switch_id,
-                    subscription = %state.processor.subscription_name,
-                    rack_id = state.client_provider.rack_id.as_ref().map(tracing::field::display),
-                    "extended gNMI stream error; reconnecting"
-                );
-
-                return ExtendedStreamExit::Reconnect;
-            }
-        }
-    }
+    run_subscription(
+        &cancel_token,
+        &state.client_provider,
+        &state.stream_metrics,
+        StreamDiagnostics {
+            switch_id: &state.client_provider.switch_id,
+            stream: None,
+            subscription: Some(&subscription_name),
+            paths: None,
+        },
+        Some(Reconciliation {
+            processor: ReconciliationProcessor::Metrics(&reconciliation),
+            interval: state.reconcile_interval,
+            request: build_snapshot_request(state.request.clone()),
+            stream_name: &subscription_name,
+        }),
+        || subscribe_with_cached_credentials(&state.client_provider, state.request.clone()),
+        |response| {
+            state
+                .processor
+                .process_subscribe_response(response, &state.stream_metrics)
+        },
+    )
+    .await;
 }
 
 async fn gnmi_sample_task(
@@ -1178,46 +1148,126 @@ async fn gnmi_sample_task(
     stream_metrics: GnmiStreamMetrics,
     sample_processor: GnmiSampleProcessor,
 ) {
+    let request = build_sample_subscribe_request(&config.paths, config.sample_interval_nanos);
+
     run_gnmi_sample_task(
         &cancel_token,
         &config,
         &stream_metrics,
         &sample_processor,
-        || {
-            subscribe_sample_with_cached_credentials(
-                &config.client_provider,
-                &config.paths,
-                config.sample_interval_nanos,
-            )
-        },
+        || subscribe_with_cached_credentials(&config.client_provider, request.clone()),
     )
     .await;
 }
 
-/// Runs the SAMPLE reconnect loop with an injectable stream opener.
-///
-/// Production uses the cached-credential subscriber; tests inject streams to
-/// exercise timeout and retry behavior without a network server.
+/// Adapts the SAMPLE processor to the same runtime used by additional streams.
+/// The injectable opener also preserves the existing timeout/retry unit boundary.
 async fn run_gnmi_sample_task<S, F, Fut>(
     cancel_token: &CancellationToken,
     config: &GnmiStreamConfig,
     stream_metrics: &GnmiStreamMetrics,
     sample_processor: &GnmiSampleProcessor,
-    mut subscribe: F,
+    subscribe: F,
 ) where
     S: Stream<Item = Result<proto::SubscribeResponse, tonic::Status>> + Send + Unpin,
     F: FnMut() -> Fut + Send,
     Fut: Future<Output = Result<(S, u64), GnmiStreamOpenError>> + Send,
 {
+    // Selected interface diagnostics identify the leaves rejected by the switch.
+    let paths = (sample_processor.diagnostic_stream == Some(INTERFACE_STREAM_NAME))
+        .then_some(config.paths.as_slice());
+
+    run_subscription(
+        cancel_token,
+        &config.client_provider,
+        stream_metrics,
+        StreamDiagnostics {
+            switch_id: &sample_processor.switch_id,
+            stream: sample_processor.diagnostic_stream,
+            subscription: None,
+            paths,
+        },
+        sample_processor
+            .reconciliation
+            .as_deref()
+            .map(|reconciliation| Reconciliation {
+                processor: ReconciliationProcessor::Metrics(reconciliation),
+                interval: config.reconcile_interval,
+                request: build_snapshot_request(build_sample_subscribe_request(
+                    &config.paths,
+                    config.sample_interval_nanos,
+                )),
+                stream_name: sample_processor
+                    .diagnostic_stream
+                    .unwrap_or(NVUE_GNMI_SAMPLE_STREAM_ID),
+            }),
+        subscribe,
+        |response| {
+            sample_processor.process_subscribe_response(response, stream_metrics);
+            Ok(false)
+        },
+    )
+    .await;
+}
+
+async fn gnmi_on_change_task(
+    cancel_token: CancellationToken,
+    client_provider: GnmiClientProvider,
+    stream_metrics: GnmiStreamMetrics,
+    on_change_processor: GnmiOnChangeProcessor,
+    reconcile_interval: Duration,
+) {
+    let request =
+        build_on_change_subscribe_request(&system_events_prefix(), &system_events_subscribe_path());
+
+    run_subscription(
+        &cancel_token,
+        &client_provider,
+        &stream_metrics,
+        StreamDiagnostics {
+            switch_id: &on_change_processor.switch_id,
+            stream: Some(&on_change_processor.collector_name),
+            subscription: None,
+            paths: None,
+        },
+        Some(Reconciliation {
+            processor: ReconciliationProcessor::Events(&on_change_processor, &stream_metrics),
+            interval: reconcile_interval,
+            request: build_snapshot_request(request.clone()),
+            stream_name: &on_change_processor.collector_name,
+        }),
+        || subscribe_with_cached_credentials(&client_provider, request.clone()),
+        |response| {
+            on_change_processor.process_subscribe_response(response, &stream_metrics);
+            Ok(false)
+        },
+    )
+    .await;
+}
+
+/// Runs opening, initial synchronization, telemetry delivery and reconnects.
+///
+/// Processors keep their metric and delete semantics across reconnects.
+/// Synchronized streams release the RPC and readiness guards before credential refresh.
+/// Credential refresh observes cancellation so shutdown does not wait for its timeout.
+async fn run_subscription<S, F, Fut, P>(
+    cancel_token: &CancellationToken,
+    client_provider: &GnmiClientProvider,
+    stream_metrics: &GnmiStreamMetrics,
+    diagnostics: StreamDiagnostics<'_>,
+    reconciliation: Option<Reconciliation<'_>>,
+    mut subscribe: F,
+    mut process_response: P,
+) where
+    S: Stream<Item = Result<proto::SubscribeResponse, tonic::Status>> + Send + Unpin,
+    F: FnMut() -> Fut + Send,
+    Fut: Future<Output = Result<(S, u64), GnmiStreamOpenError>> + Send,
+    P: FnMut(&proto::SubscribeResponse) -> Result<bool, tonic::Status>,
+{
     let mut backoff = ExponentialBackoff::new(&BackoffConfig {
         initial: Duration::from_secs(2),
         max: Duration::from_secs(60),
     });
-
-    // Identify requested leaves in selected interface stream diagnostics so
-    // operators can correct a path rejected by the switch.
-    let diagnostic_paths = (sample_processor.diagnostic_stream == Some(INTERFACE_STREAM_NAME))
-        .then_some(config.paths.as_slice());
 
     loop {
         stream_metrics.connection_state.set(CONNECTING);
@@ -1228,47 +1278,46 @@ async fn run_gnmi_sample_task<S, F, Fut>(
         };
 
         match stream {
-            Err(e) => {
+            Err(error) => {
                 stream_metrics.connection_state.set(TRANSIENT_FAILURE);
                 stream_metrics.reconnections_total.inc();
-                if let Some(credential_generation) = e.credential_generation {
-                    config
-                        .client_provider
-                        .refresh_auth_if_needed(&e.error, credential_generation)
+
+                if let Some(generation) = error.credential_generation {
+                    cancel_token
+                        .run_until_cancelled(
+                            client_provider.refresh_auth_if_needed(&error.error, generation),
+                        )
                         .await;
                 }
+
                 tracing::warn!(
-                    error = ?e.error,
-                    switch_id = %sample_processor.switch_id,
-                    stream = sample_processor.diagnostic_stream,
-                    requested_paths = ?diagnostic_paths.map(request_path_names),
-                    rack_id = config.client_provider.rack_id.as_ref().map(tracing::field::display),
-                    "nvue_gnmi SAMPLE: connection failed, backing off"
+                    error = ?error.error,
+                    switch_id = %diagnostics.switch_id,
+                    stream = diagnostics.stream,
+                    subscription = diagnostics.subscription,
+                    requested_paths = ?diagnostics.paths.map(request_path_names),
+                    rack_id = client_provider.rack_id.as_ref().map(tracing::field::display),
+                    "gNMI stream connection failed; backing off"
                 );
             }
-            Ok((mut stream, credential_generation)) => 'connected: {
-                stream_metrics.connection_state.set(READY);
-                stream_metrics
-                    .connection_established_timestamp
-                    .set(now_unix_secs());
+            Ok((stream, generation)) => 'connected: {
+                let mut stream =
+                    SubscriptionResponses::new(stream, client_provider.request_timeout);
 
-                let _connection_guard =
+                stream_metrics.connection_state.set(READY);
+                stream_metrics.set_connection_established_timestamp(now_unix_secs());
+
+                let connection_guard =
                     StreamingConnectionGuard::inc(stream_metrics.connected.clone());
 
-                let Some(_synchronization_guard) = await_stream_synchronization(
+                let Some(synchronization_guard) = await_stream_synchronization(
                     cancel_token,
                     &mut stream,
-                    &config.client_provider,
-                    credential_generation,
+                    client_provider,
+                    generation,
                     stream_metrics,
-                    StreamDiagnostics {
-                        stream: sample_processor.diagnostic_stream,
-                        paths: diagnostic_paths,
-                    },
-                    |response| {
-                        sample_processor.process_subscribe_response(response, stream_metrics);
-                        Ok(())
-                    },
+                    diagnostics,
+                    |response| process_response(response).map(|_| ()),
                 )
                 .await
                 else {
@@ -1276,87 +1325,49 @@ async fn run_gnmi_sample_task<S, F, Fut>(
                 };
 
                 backoff.reset();
+
                 tracing::info!(
-                    switch_id = %sample_processor.switch_id,
-                    stream = sample_processor.diagnostic_stream,
-                    rack_id = config.client_provider.rack_id.as_ref().map(tracing::field::display),
-                    "nvue_gnmi SAMPLE: stream connected"
+                    switch_id = %diagnostics.switch_id,
+                    stream = diagnostics.stream,
+                    subscription = diagnostics.subscription,
+                    rack_id = client_provider.rack_id.as_ref().map(tracing::field::display),
+                    "gNMI stream synchronized"
                 );
 
-                loop {
-                    let Some(msg) = cancel_token.run_until_cancelled(stream.next()).await else {
-                        stream_metrics.connection_state.set(SHUTDOWN);
-                        tracing::info!(
-                            switch_id = %sample_processor.switch_id,
-                            stream = sample_processor.diagnostic_stream,
-                            rack_id = config.client_provider.rack_id.as_ref().map(tracing::field::display),
-                            "nvue_gnmi SAMPLE: cancelled, shutting down"
-                        );
-                        return;
-                    };
+                let live = consume_subscription(
+                    cancel_token,
+                    &mut stream,
+                    client_provider,
+                    stream_metrics,
+                    diagnostics,
+                    |response| {
+                        let processed = process_response(response)?;
 
-                    match msg {
-                        Some(Ok(resp)) => {
-                            // Some targets report path rejection in-band rather than
-                            // closing the RPC. Retry the selected stream and surface
-                            // the rejected path set instead of treating it as healthy.
-                            #[allow(
-                                deprecated,
-                                reason = "accept the legacy in-band gNMI error response"
-                            )]
-                            if let Some(proto::subscribe_response::Response::Error(error)) =
-                                &resp.response
-                                && diagnostic_paths.is_some()
-                            {
-                                stream_metrics.connection_state.set(TRANSIENT_FAILURE);
-                                stream_metrics.stream_errors_total.inc();
-                                stream_metrics.reconnections_total.inc();
-                                tracing::warn!(
-                                    grpc_status_code = error.code,
-                                    error = %error.message,
-                                    switch_id = %sample_processor.switch_id,
-                                    stream = sample_processor.diagnostic_stream,
-                                    requested_paths = ?diagnostic_paths.map(request_path_names),
-                                    "nvue_gnmi SAMPLE: selected interface path request rejected, reconnecting"
-                                );
-
-                                break;
-                            }
-
-                            sample_processor.process_subscribe_response(&resp, stream_metrics);
-                        }
-                        None => {
-                            stream_metrics.connection_state.set(IDLE);
-                            stream_metrics.server_initiated_closures_total.inc();
-                            tracing::info!(
-                                switch_id = %sample_processor.switch_id,
-                                stream = sample_processor.diagnostic_stream,
-                                requested_paths = ?diagnostic_paths.map(request_path_names),
-                                rack_id = config.client_provider.rack_id.as_ref().map(tracing::field::display),
-                                "nvue_gnmi SAMPLE: stream closed by server, reconnecting"
-                            );
+                        if processed {
                             backoff.reset();
-                            break;
                         }
-                        Some(Err(e)) => {
-                            stream_metrics.connection_state.set(TRANSIENT_FAILURE);
-                            stream_metrics.stream_errors_total.inc();
-                            stream_metrics.reconnections_total.inc();
-                            config
-                                .client_provider
-                                .refresh_status_auth_if_needed(&e, credential_generation)
-                                .await;
-                            tracing::warn!(
-                                error = ?e,
-                                switch_id = %sample_processor.switch_id,
-                                stream = sample_processor.diagnostic_stream,
-                                requested_paths = ?diagnostic_paths.map(request_path_names),
-                                rack_id = config.client_provider.rack_id.as_ref().map(tracing::field::display),
-                                "nvue_gnmi SAMPLE: stream error, reconnecting"
-                            );
-                            break;
-                        }
-                    }
+
+                        Ok(())
+                    },
+                );
+
+                let result = if let Some(reconciliation) = &reconciliation {
+                    reconciliation.consume(live, client_provider).await
+                } else {
+                    live.await
+                };
+
+                // Release readiness and the failed RPC before credential refresh can block.
+                drop(stream);
+                drop(synchronization_guard);
+                drop(connection_guard);
+
+                if let Err(error) = result {
+                    cancel_token
+                        .run_until_cancelled(
+                            client_provider.refresh_status_auth_if_needed(&error, generation),
+                        )
+                        .await;
                 }
             }
         }
@@ -1372,144 +1383,74 @@ async fn run_gnmi_sample_task<S, F, Fut>(
     }
 }
 
-async fn gnmi_on_change_task(
-    cancel_token: CancellationToken,
-    client_provider: GnmiClientProvider,
-    stream_metrics: GnmiStreamMetrics,
-    on_change_processor: GnmiOnChangeProcessor,
-) {
-    let mut backoff = ExponentialBackoff::new(&BackoffConfig {
-        initial: Duration::from_secs(2),
-        max: Duration::from_secs(60),
-    });
-    let prefix = system_events_prefix();
-    let paths = system_events_subscribe_path();
-
+/// Consumes synchronized telemetry without changing the processor's error counts.
+/// The caller releases the RPC and readiness guards before refreshing credentials.
+async fn consume_subscription<S, P>(
+    cancel_token: &CancellationToken,
+    stream: &mut SubscriptionResponses<S>,
+    client_provider: &GnmiClientProvider,
+    stream_metrics: &GnmiStreamMetrics,
+    diagnostics: StreamDiagnostics<'_>,
+    mut process_response: P,
+) -> Result<(), tonic::Status>
+where
+    S: Stream<Item = Result<proto::SubscribeResponse, tonic::Status>> + Unpin,
+    P: FnMut(&proto::SubscribeResponse) -> Result<(), tonic::Status>,
+{
     loop {
-        stream_metrics.connection_state.set(CONNECTING);
-
-        let Some(stream) = cancel_token
-            .run_until_cancelled(subscribe_on_change_with_cached_credentials(
-                &client_provider,
-                &prefix,
-                &paths,
-            ))
-            .await
-        else {
+        let Some(message) = cancel_token.run_until_cancelled(stream.next()).await else {
             stream_metrics.connection_state.set(SHUTDOWN);
-            return;
+
+            tracing::info!(
+                switch_id = %diagnostics.switch_id,
+                stream = diagnostics.stream,
+                subscription = diagnostics.subscription,
+                rack_id = client_provider.rack_id.as_ref().map(tracing::field::display),
+                "gNMI stream cancelled"
+            );
+
+            return Ok(());
         };
 
-        match stream {
-            Err(e) => {
-                stream_metrics.connection_state.set(TRANSIENT_FAILURE);
-                stream_metrics.reconnections_total.inc();
-                if let Some(credential_generation) = e.credential_generation {
-                    client_provider
-                        .refresh_auth_if_needed(&e.error, credential_generation)
-                        .await;
+        match message.unwrap_or(Ok(None)) {
+            Ok(Some(response)) => {
+                if let Err(error) = process_response(&response) {
+                    stream_metrics.connection_state.set(TRANSIENT_FAILURE);
+                    stream_metrics.reconnections_total.inc();
+                    return Err(error);
                 }
-                tracing::warn!(
-                    error = ?e.error,
-                    switch_id = %on_change_processor.switch_id,
-                    stream = %on_change_processor.collector_name,
-                    rack_id = client_provider.rack_id.as_ref().map(tracing::field::display),
-                    "nvue_gnmi ON_CHANGE: connection failed, backing off"
-                );
             }
-            Ok((mut stream, credential_generation)) => 'connected: {
-                stream_metrics.connection_state.set(READY);
-                stream_metrics
-                    .connection_established_timestamp
-                    .set(now_unix_secs());
+            Ok(None) => {
+                stream_metrics.connection_state.set(IDLE);
+                stream_metrics.server_initiated_closures_total.inc();
 
-                let _connection_guard =
-                    StreamingConnectionGuard::inc(stream_metrics.connected.clone());
-
-                let Some(_synchronization_guard) = await_stream_synchronization(
-                    &cancel_token,
-                    &mut stream,
-                    &client_provider,
-                    credential_generation,
-                    &stream_metrics,
-                    StreamDiagnostics {
-                        stream: None,
-                        paths: None,
-                    },
-                    |response| {
-                        on_change_processor.process_subscribe_response(response, &stream_metrics);
-                        Ok(())
-                    },
-                )
-                .await
-                else {
-                    break 'connected;
-                };
-
-                backoff.reset();
                 tracing::info!(
-                    switch_id = %on_change_processor.switch_id,
-                    stream = %on_change_processor.collector_name,
+                    switch_id = %diagnostics.switch_id,
+                    stream = diagnostics.stream,
+                    subscription = diagnostics.subscription,
                     rack_id = client_provider.rack_id.as_ref().map(tracing::field::display),
-                    "nvue_gnmi ON_CHANGE: stream connected"
+                    "gNMI stream closed by server; reconnecting"
                 );
 
-                loop {
-                    let Some(msg) = cancel_token.run_until_cancelled(stream.message()).await else {
-                        stream_metrics.connection_state.set(SHUTDOWN);
-                        tracing::info!(
-                            switch_id = %on_change_processor.switch_id,
-                            stream = %on_change_processor.collector_name,
-                            rack_id = client_provider.rack_id.as_ref().map(tracing::field::display),
-                            "nvue_gnmi ON_CHANGE: cancelled, shutting down"
-                        );
-                        return;
-                    };
-
-                    match msg {
-                        Ok(Some(resp)) => {
-                            on_change_processor.process_subscribe_response(&resp, &stream_metrics);
-                        }
-                        Ok(None) => {
-                            stream_metrics.connection_state.set(IDLE);
-                            stream_metrics.server_initiated_closures_total.inc();
-                            tracing::info!(
-                                switch_id = %on_change_processor.switch_id,
-                                stream = %on_change_processor.collector_name,
-                                rack_id = client_provider.rack_id.as_ref().map(tracing::field::display),
-                                "nvue_gnmi ON_CHANGE: stream closed by server, reconnecting"
-                            );
-                            backoff.reset();
-                            break;
-                        }
-                        Err(e) => {
-                            stream_metrics.connection_state.set(TRANSIENT_FAILURE);
-                            stream_metrics.stream_errors_total.inc();
-                            stream_metrics.reconnections_total.inc();
-                            client_provider
-                                .refresh_status_auth_if_needed(&e, credential_generation)
-                                .await;
-                            tracing::warn!(
-                                error = ?e,
-                                switch_id = %on_change_processor.switch_id,
-                                stream = %on_change_processor.collector_name,
-                                rack_id = client_provider.rack_id.as_ref().map(tracing::field::display),
-                                "nvue_gnmi ON_CHANGE: stream error, reconnecting"
-                            );
-                            break;
-                        }
-                    }
-                }
+                return Ok(());
             }
-        }
+            Err(error) => {
+                stream_metrics.connection_state.set(TRANSIENT_FAILURE);
+                stream_metrics.stream_errors_total.inc();
+                stream_metrics.reconnections_total.inc();
 
-        if cancel_token
-            .run_until_cancelled(tokio::time::sleep(backoff.next_delay()))
-            .await
-            .is_none()
-        {
-            stream_metrics.connection_state.set(SHUTDOWN);
-            return;
+                tracing::warn!(
+                    error = ?error,
+                    switch_id = %diagnostics.switch_id,
+                    stream = diagnostics.stream,
+                    subscription = diagnostics.subscription,
+                    requested_paths = ?diagnostics.paths.map(request_path_names),
+                    rack_id = client_provider.rack_id.as_ref().map(tracing::field::display),
+                    "gNMI stream error; reconnecting"
+                );
+
+                return Err(error);
+            }
         }
     }
 }
@@ -1559,6 +1500,7 @@ mod tests {
 
     enum ProviderResponse {
         Credentials(BmcCredentials),
+        CredentialsThenPending(BmcCredentials),
         Error(&'static str),
         Pending,
     }
@@ -1593,10 +1535,18 @@ mod tests {
             &'a self,
             endpoint: &'a BmcAddr,
         ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
+            let previous_calls = self.calls.fetch_add(1, Ordering::SeqCst);
             self.observed_addrs.lock().unwrap().push(endpoint.clone());
+
             let response = match &self.response {
                 ProviderResponse::Credentials(credentials) => Ok(credentials.clone()),
+                ProviderResponse::CredentialsThenPending(credentials) => {
+                    if previous_calls > 0 {
+                        return Box::pin(std::future::pending());
+                    }
+
+                    Ok(credentials.clone())
+                }
                 ProviderResponse::Error(message) => {
                     Err(HealthError::GenericError((*message).to_string()))
                 }
@@ -1628,6 +1578,34 @@ mod tests {
             .expect("extended connection metric should be registered");
 
         assert_eq!(connection.get_metric().len(), 2);
+    }
+
+    #[test]
+    fn timestamp_gauges_expose_seconds_names_with_legacy_values() {
+        let registry = prometheus::Registry::new();
+        let metrics = GnmiStreamMetrics::new(&registry, "test", "", test_labels()).unwrap();
+
+        metrics.set_connection_established_timestamp(123.0);
+        metrics.set_last_notification_timestamp(456.0);
+
+        let families = registry.gather();
+        let exposed = |name: &str| {
+            families
+                .iter()
+                .find(|family| family.name() == name)
+                .unwrap_or_else(|| panic!("{name} should be registered"))
+                .get_metric()[0]
+                .get_gauge()
+                .value()
+        };
+
+        for (legacy, expected) in [
+            ("test_nvue_gnmi_connection_established_timestamp", 123.0),
+            ("test_nvue_gnmi_last_notification_timestamp", 456.0),
+        ] {
+            assert_eq!(exposed(legacy), expected);
+            assert_eq!(exposed(&format!("{legacy}_seconds")), expected);
+        }
     }
 
     #[tokio::test]
@@ -1664,6 +1642,7 @@ mod tests {
                 collector_registry,
                 None,
                 None,
+                &mut Default::default(),
             )
             .expect("gNMI collector should initialize");
 
@@ -1770,9 +1749,9 @@ mod tests {
     }
 
     fn test_sample_processor(diagnostic_stream: Option<&'static str>) -> GnmiSampleProcessor {
-        GnmiSampleProcessor {
-            data_sink: None,
-            event_context: EventContext {
+        GnmiSampleProcessor::new(
+            None,
+            EventContext {
                 endpoint_key: "test-endpoint".to_string(),
                 addr: test_addr(),
                 collector_type: NVUE_GNMI_SAMPLE_STREAM_ID,
@@ -1780,9 +1759,10 @@ mod tests {
                 rack_id: None,
                 labels: Default::default(),
             },
-            switch_id: "switch-1".to_string(),
+            "switch-1".to_string(),
             diagnostic_stream,
-        }
+            false,
+        )
     }
 
     fn test_labels() -> HashMap<String, String> {
@@ -1792,14 +1772,57 @@ mod tests {
         ])
     }
 
+    #[tokio::test]
+    #[allow(deprecated, reason = "exercise legacy in-band gNMI error handling")]
+    async fn synchronized_stream_releases_rpc_on_in_band_error() {
+        let responses = tokio_stream::iter([
+            Ok(proto::SubscribeResponse {
+                response: Some(proto::subscribe_response::Response::SyncResponse(true)),
+                ..Default::default()
+            }),
+            Ok(proto::SubscribeResponse {
+                response: Some(proto::subscribe_response::Response::Error(proto::Error {
+                    code: tonic::Code::NotFound as u32,
+                    message: "unsupported leaf".into(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }),
+            Ok(proto::SubscribeResponse {
+                response: Some(proto::subscribe_response::Response::Update(
+                    proto::Notification::default(),
+                )),
+                ..Default::default()
+            }),
+        ]);
+
+        let mut owner = SubscriptionResponses::new(responses, Duration::from_secs(1));
+
+        assert!(owner.next().await.unwrap().is_ok());
+        assert!(owner.sync_timer.is_none());
+
+        let error = owner.next().await.unwrap().unwrap_err();
+
+        assert_eq!(error.code(), tonic::Code::NotFound);
+
+        assert!(
+            owner.stream.is_none(),
+            "release RPC before returning failure"
+        );
+
+        assert!(owner.next().await.is_none(), "report failure only once");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn initial_stream_without_sync_times_out() {
-        let mut responses = tokio_stream::pending();
+        let responses = tokio_stream::pending();
         let metrics = test_gnmi_stream_metrics();
 
         let client_provider = test_client_provider(RecordingProvider::responding_with(
             ProviderResponse::Pending,
         ));
+
+        let mut responses = SubscriptionResponses::new(responses, client_provider.request_timeout);
 
         let result = await_stream_synchronization(
             &CancellationToken::new(),
@@ -1808,6 +1831,8 @@ mod tests {
             0,
             &metrics,
             StreamDiagnostics {
+                switch_id: &client_provider.switch_id,
+                subscription: None,
                 stream: None,
                 paths: None,
             },
@@ -1825,12 +1850,14 @@ mod tests {
 
     #[tokio::test]
     async fn initial_stream_eof_is_recorded_as_server_closure() {
-        let mut responses = tokio_stream::empty();
+        let responses = tokio_stream::empty();
         let metrics = test_gnmi_stream_metrics();
 
         let client_provider = test_client_provider(RecordingProvider::responding_with(
             ProviderResponse::Pending,
         ));
+
+        let mut responses = SubscriptionResponses::new(responses, client_provider.request_timeout);
 
         let result = await_stream_synchronization(
             &CancellationToken::new(),
@@ -1839,6 +1866,8 @@ mod tests {
             0,
             &metrics,
             StreamDiagnostics {
+                switch_id: &client_provider.switch_id,
+                subscription: None,
                 stream: None,
                 paths: None,
             },
@@ -1868,7 +1897,7 @@ mod tests {
         let (_client, credential_generation) =
             client_provider.new_client().await.expect("client builds");
 
-        let mut responses = tokio_stream::once(Ok(proto::SubscribeResponse {
+        let responses = tokio_stream::once(Ok(proto::SubscribeResponse {
             response: Some(proto::subscribe_response::Response::Error(proto::Error {
                 code: tonic::Code::Unauthenticated as u32,
                 message: "expired gNMI credentials".to_string(),
@@ -1879,6 +1908,8 @@ mod tests {
 
         let metrics = test_gnmi_stream_metrics();
 
+        let mut responses = SubscriptionResponses::new(responses, client_provider.request_timeout);
+
         let result = await_stream_synchronization(
             &CancellationToken::new(),
             &mut responses,
@@ -1886,6 +1917,8 @@ mod tests {
             credential_generation,
             &metrics,
             StreamDiagnostics {
+                switch_id: &client_provider.switch_id,
+                subscription: None,
                 stream: None,
                 paths: None,
             },
@@ -1904,7 +1937,7 @@ mod tests {
 
     #[tokio::test]
     async fn initial_stream_processes_updates_until_true_sync() {
-        let mut responses = tokio_stream::iter([
+        let responses = tokio_stream::iter([
             Ok(proto::SubscribeResponse {
                 response: Some(proto::subscribe_response::Response::Update(
                     proto::Notification::default(),
@@ -1929,6 +1962,8 @@ mod tests {
 
         let mut processed_updates = 0;
 
+        let mut responses = SubscriptionResponses::new(responses, client_provider.request_timeout);
+
         let result = await_stream_synchronization(
             &CancellationToken::new(),
             &mut responses,
@@ -1936,6 +1971,8 @@ mod tests {
             0,
             &metrics,
             StreamDiagnostics {
+                switch_id: &client_provider.switch_id,
+                subscription: None,
                 stream: None,
                 paths: None,
             },
@@ -1956,12 +1993,14 @@ mod tests {
         let cancel_token = CancellationToken::new();
         cancel_token.cancel();
 
-        let mut responses = tokio_stream::pending();
+        let responses = tokio_stream::pending();
         let metrics = test_gnmi_stream_metrics();
 
         let client_provider = test_client_provider(RecordingProvider::responding_with(
             ProviderResponse::Pending,
         ));
+
+        let mut responses = SubscriptionResponses::new(responses, client_provider.request_timeout);
 
         let result = await_stream_synchronization(
             &cancel_token,
@@ -1970,6 +2009,8 @@ mod tests {
             0,
             &metrics,
             StreamDiagnostics {
+                switch_id: &client_provider.switch_id,
+                subscription: None,
                 stream: None,
                 paths: None,
             },
@@ -1996,6 +2037,7 @@ mod tests {
             client_provider,
             paths: Vec::new(),
             sample_interval_nanos: 1,
+            reconcile_interval: Duration::ZERO,
         };
 
         let metrics = test_gnmi_stream_metrics();
@@ -2049,6 +2091,224 @@ mod tests {
         assert_eq!(metrics.synchronized.get(), 0);
     }
 
+    async fn wait_for_stream_condition(condition: impl Fn() -> bool) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("stream condition should become observable");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_auth_refresh_cancels_without_waiting_for_provider_timeout() {
+        for (phase, opening_failure) in [("opening", true), ("pre-sync", false)] {
+            let cancel_token = CancellationToken::new();
+
+            let provider = RecordingProvider::responding_with(
+                ProviderResponse::CredentialsThenPending(BmcCredentials::UsernamePassword {
+                    username: "admin".to_string(),
+                    password: None,
+                }),
+            );
+
+            let client_provider = test_client_provider(provider.clone());
+            let metrics = test_gnmi_stream_metrics();
+
+            let (_, generation) = client_provider
+                .new_client()
+                .await
+                .expect("initial credentials");
+
+            let mut attempts = 0;
+
+            let run = run_subscription(
+                &cancel_token,
+                &client_provider,
+                &metrics,
+                StreamDiagnostics {
+                    switch_id: &client_provider.switch_id,
+                    stream: None,
+                    subscription: None,
+                    paths: None,
+                },
+                None,
+                || {
+                    attempts += 1;
+
+                    let status = tonic::Status::unauthenticated("expired credentials");
+
+                    let result = if opening_failure {
+                        Err(GnmiStreamOpenError {
+                            error: HealthError::GnmiStatus(status),
+                            credential_generation: Some(generation),
+                        })
+                    } else {
+                        let stream: TestStream = Box::pin(tokio_stream::once(Err(status)));
+                        Ok((stream, generation))
+                    };
+
+                    std::future::ready(result)
+                },
+                |_| Ok(false),
+            );
+
+            let cancel_during_refresh = async {
+                wait_for_stream_condition(|| provider.calls.load(Ordering::SeqCst) == 2).await;
+
+                cancel_token.cancel();
+            };
+
+            tokio::time::timeout(Duration::from_secs(1), async {
+                tokio::join!(run, cancel_during_refresh);
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{phase} refresh must not delay shutdown"));
+
+            assert_eq!(metrics.connection_state.get(), SHUTDOWN, "{phase}");
+            assert_eq!(metrics.connected.get(), 0, "{phase}");
+            assert_eq!(metrics.synchronized.get(), 0, "{phase}");
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 2, "{phase}");
+            assert_eq!(attempts, 1, "no retry after cancelling {phase} refresh");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(deprecated, reason = "exercise legacy in-band gNMI error recovery")]
+    async fn sample_post_sync_errors_release_readiness_and_retry() {
+        for (diagnostic_stream, code, expected_fetches) in [
+            (None, tonic::Code::Unavailable, 1),
+            (Some(INTERFACE_STREAM_NAME), tonic::Code::Unavailable, 1),
+            (Some(LEAK_SENSOR_STREAM_NAME), tonic::Code::Unimplemented, 1),
+            (None, tonic::Code::Unauthenticated, 2),
+        ] {
+            let cancel_token = CancellationToken::new();
+
+            let provider = RecordingProvider::responding_with(
+                ProviderResponse::CredentialsThenPending(BmcCredentials::UsernamePassword {
+                    username: "nvos-admin".to_string(),
+                    password: None,
+                }),
+            );
+
+            let config = GnmiStreamConfig {
+                client_provider: test_client_provider(provider.clone()),
+                paths: Vec::new(),
+                sample_interval_nanos: 1,
+                reconcile_interval: Duration::ZERO,
+            };
+
+            let (_, generation) = config
+                .client_provider
+                .new_client()
+                .await
+                .expect("initial credentials");
+
+            let metrics = test_gnmi_stream_metrics();
+            let processor = test_sample_processor(diagnostic_stream);
+
+            let sync = proto::SubscribeResponse {
+                response: Some(proto::subscribe_response::Response::SyncResponse(true)),
+                ..Default::default()
+            };
+
+            let update = proto::SubscribeResponse {
+                response: Some(proto::subscribe_response::Response::Update(
+                    Default::default(),
+                )),
+                ..Default::default()
+            };
+
+            let (first_tx, first_rx) = tokio::sync::mpsc::channel(4);
+            let (retry_tx, retry_rx) = tokio::sync::mpsc::channel(4);
+            let (attempt_tx, mut attempt_rx) = tokio::sync::mpsc::channel(2);
+
+            let mut streams: VecDeque<TestStream> = VecDeque::from([
+                Box::pin(tokio_stream::wrappers::ReceiverStream::new(first_rx)) as TestStream,
+                Box::pin(tokio_stream::wrappers::ReceiverStream::new(retry_rx)) as TestStream,
+            ]);
+
+            let run = run_gnmi_sample_task(&cancel_token, &config, &metrics, &processor, || {
+                attempt_tx.try_send(()).expect("subscription attempt");
+
+                std::future::ready(Ok((streams.pop_front().expect("test stream"), generation)))
+            });
+
+            let observe = async {
+                attempt_rx.recv().await.expect("initial subscription");
+                first_tx.send(Ok(sync.clone())).await.expect("initial sync");
+                first_tx
+                    .send(Ok(update.clone()))
+                    .await
+                    .expect("initial update");
+
+                wait_for_stream_condition(|| metrics.notifications_received_total.get() == 1.0)
+                    .await;
+
+                assert_eq!(metrics.connected.get(), 1);
+                assert_eq!(metrics.synchronized.get(), 1);
+                assert_eq!(metrics.notifications_received_total.get(), 1.0);
+
+                first_tx
+                    .send(Ok(proto::SubscribeResponse {
+                        response: Some(proto::subscribe_response::Response::Error(proto::Error {
+                            code: code as u32,
+                            message: "post-sync subscription failure".to_string(),
+                            ..Default::default()
+                        })),
+                        ..Default::default()
+                    }))
+                    .await
+                    .expect("in-band error");
+
+                wait_for_stream_condition(|| metrics.stream_errors_total.get() == 1.0).await;
+
+                assert_eq!(metrics.connection_state.get(), TRANSIENT_FAILURE);
+                assert_eq!(metrics.connected.get(), 0);
+                assert_eq!(metrics.synchronized.get(), 0);
+                assert_eq!(metrics.stream_errors_total.get(), 1.0);
+                assert_eq!(metrics.reconnections_total.get(), 1.0);
+                assert_eq!(metrics.server_initiated_closures_total.get(), 0.0);
+                assert!(first_tx.is_closed(), "failed subscription must be dropped");
+
+                if code == tonic::Code::Unauthenticated {
+                    assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+
+                    cancel_token.cancel();
+                    return;
+                }
+
+                attempt_rx.recv().await.expect("replacement subscription");
+                wait_for_stream_condition(|| metrics.connected.get() == 1).await;
+
+                assert_eq!(metrics.connected.get(), 1);
+                assert_eq!(metrics.synchronized.get(), 0);
+
+                retry_tx.send(Ok(sync)).await.expect("replacement sync");
+                retry_tx.send(Ok(update)).await.expect("replacement update");
+
+                wait_for_stream_condition(|| metrics.notifications_received_total.get() == 2.0)
+                    .await;
+
+                assert_eq!(metrics.connection_state.get(), READY);
+                assert_eq!(metrics.synchronized.get(), 1);
+                assert_eq!(metrics.notifications_received_total.get(), 2.0);
+                assert_eq!(metrics.stream_errors_total.get(), 1.0);
+                assert_eq!(metrics.reconnections_total.get(), 1.0);
+
+                cancel_token.cancel();
+            };
+
+            tokio::join!(run, observe);
+
+            assert_eq!(metrics.connection_state.get(), SHUTDOWN);
+            assert_eq!(metrics.connected.get(), 0);
+            assert_eq!(metrics.synchronized.get(), 0);
+            assert_eq!(provider.calls.load(Ordering::SeqCst), expected_fetches);
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn unsupported_leak_stream_retries_without_interrupting_primary_stream() {
         let cancel_token = CancellationToken::new();
@@ -2061,6 +2321,7 @@ mod tests {
             client_provider,
             paths: Vec::new(),
             sample_interval_nanos: 1,
+            reconcile_interval: Duration::ZERO,
         };
 
         let primary_metrics = test_gnmi_stream_metrics();
@@ -2222,6 +2483,7 @@ mod tests {
                 collector_registry,
                 None,
                 None,
+                &mut Default::default(),
             )
             .expect("gNMI collector should initialize for leak sensor metrics");
 
@@ -2273,6 +2535,7 @@ mod tests {
             collector_registry,
             Some(sink.clone()),
             None,
+            &mut Default::default(),
         )
         .expect("leak-only gNMI collector should initialize");
 
@@ -2318,6 +2581,7 @@ mod tests {
             registry,
             Some(sink.clone()),
             None,
+            &mut Default::default(),
         )
         .expect("selected interface collector");
 
@@ -2343,7 +2607,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unmapped_interface_path_is_rejected_before_subscription() {
+    async fn invalid_gnmi_config_is_rejected_before_subscription() {
         let endpoint = test_bmc_endpoint(
             "55:66:77:88:99:cc"
                 .parse()
@@ -2358,26 +2622,44 @@ mod tests {
                 .expect("collector registry"),
         );
 
-        let mut config = NvueGnmiConfig::default();
-        config.paths.interface_paths = Some(vec![vec!["state".into(), "not-mapped".into()]]);
+        let mut unmapped = NvueGnmiConfig::default();
+        unmapped.paths.interface_paths = Some(vec![vec!["state".into(), "not-mapped".into()]]);
 
-        let result = spawn_gnmi_collector(
-            &endpoint,
-            &config,
-            RecordingProvider::responding_with(ProviderResponse::Pending),
-            registry,
-            None,
-            None,
-        );
+        let overflow = NvueGnmiConfig {
+            reconcile_interval: Some(Duration::MAX),
+            ..Default::default()
+        };
 
-        let error = result.err().expect("unmapped path must fail").to_string();
+        for (config, expected) in [
+            (
+                unmapped,
+                [
+                    "interface_paths[0]",
+                    "/interfaces/interface/state/not-mapped",
+                ],
+            ),
+            (overflow, ["reconcile_interval", "366 days"]),
+        ] {
+            let provider = RecordingProvider::responding_with(ProviderResponse::Pending);
 
-        assert!(error.contains("interface_paths[0]"), "{error}");
+            let result = spawn_gnmi_collector(
+                &endpoint,
+                &config,
+                provider.clone(),
+                registry.clone(),
+                None,
+                None,
+                &mut Default::default(),
+            );
 
-        assert!(
-            error.contains("/interfaces/interface/state/not-mapped"),
-            "{error}"
-        );
+            let error = result.err().expect("invalid config must fail").to_string();
+
+            for message in expected {
+                assert!(error.contains(message), "{error}");
+            }
+
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        }
     }
 
     #[tokio::test]

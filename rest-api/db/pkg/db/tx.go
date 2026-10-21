@@ -6,6 +6,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -25,6 +26,13 @@ type LockRetryOptions struct {
 	Delay   *time.Duration
 	Jitter  *time.Duration
 }
+
+type advisoryLockMode uint8
+
+const (
+	advisoryLockExclusive advisoryLockMode = iota
+	advisoryLockShared
+)
 
 // Tx is a thin wrapper around the bun.Tx object
 type Tx struct {
@@ -126,9 +134,47 @@ func WithTxResultOpts[T any](ctx context.Context, dbSession *Session, opts *sql.
 		return zero, err
 	}
 	if err := tx.Commit(); err != nil {
-		return zero, fmt.Errorf("commit tx: %w", err)
+		return zero, fmt.Errorf("%w: %w", ErrTransactionCommit, err)
 	}
 	return result, nil
+}
+
+// WithSavepoint runs fn inside a savepoint of tx. If fn returns an error, tx
+// rolls back to the savepoint, releases it, and returns that error. This also
+// releases any advisory lock fn acquired, and clears a failed statement that
+// would otherwise abort tx. If fn returns nil, the savepoint is released and
+// its writes and locks stay held until tx ends.
+//
+// Use it to take a lock on a candidate that may be rejected, so the lock does
+// not outlive the rejection. Failures of the savepoint statements themselves
+// are tagged with ErrTransactionSavepoint.
+//
+// A successful fn that writes or locks rows keeps a subtransaction ID until tx
+// ends. Postgres caches only 64 per backend before snapshots on every
+// connection slow down, so keep such calls in one tx below that.
+func (tx *Tx) WithSavepoint(ctx context.Context, fn func(sp *Tx) error) error {
+	sp, err := tx.tx.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrTransactionSavepoint, err)
+	}
+	err = fn(&Tx{tx: sp})
+	if err != nil {
+		// ROLLBACK TO SAVEPOINT leaves the savepoint open, so it is released too.
+		// Otherwise each rejected fn nests the next savepoint one level deeper until tx ends.
+		rerr := sp.Rollback()
+		if rerr == nil {
+			rerr = sp.Commit()
+		}
+		if rerr != nil {
+			return errors.Join(err, fmt.Errorf("%w: %w", ErrTransactionSavepoint, rerr))
+		}
+		return err
+	}
+	err = sp.Commit()
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrTransactionSavepoint, err)
+	}
+	return nil
 }
 
 // Commit wraps bun's Commit
@@ -156,14 +202,22 @@ func (tx *Tx) Rollback() error {
 // when the transaction commits or rollsback (or the transaction connection dies
 // which is equivalent to a rollback for the transaction)
 func (tx *Tx) AcquireAdvisoryLock(ctx context.Context, lockID uint64, blocking bool) error {
+	return tx.acquireAdvisoryLock(ctx, lockID, blocking, advisoryLockExclusive)
+}
+
+func (tx *Tx) acquireAdvisoryLock(ctx context.Context, lockID uint64, blocking bool, mode advisoryLockMode) error {
+	sharedSuffix := ""
+	if mode == advisoryLockShared {
+		sharedSuffix = "_shared"
+	}
 
 	if blocking {
-		query := fmt.Sprintf("SELECT pg_advisory_xact_lock(%d)", lockID)
+		query := fmt.Sprintf("SELECT pg_advisory_xact_lock%s(%d)", sharedSuffix, lockID)
 		_, err := tx.tx.Exec(query)
 		return err
 	}
 
-	query := fmt.Sprintf("pg_try_advisory_xact_lock(%d)", lockID)
+	query := fmt.Sprintf("pg_try_advisory_xact_lock%s(%d)", sharedSuffix, lockID)
 	value := false
 	err := tx.tx.NewSelect().ColumnExpr(query).Scan(ctx, &value)
 
@@ -205,8 +259,18 @@ func GetIDB(tx *Tx, dbSession *Session) bun.IDB {
 // retries will backoff exponentially starting with initial delay of 300ms (300ms, 600ms, 1200ms etc..)
 // with a max-jitter of 100ms.
 func (tx *Tx) TryAcquireAdvisoryLock(ctx context.Context, lockID uint64, options *LockRetryOptions) error {
+	return tx.tryAcquireAdvisoryLock(ctx, lockID, options, advisoryLockExclusive)
+}
+
+// TryAcquireSharedAdvisoryLock acquires a shared transaction-level advisory
+// lock using the same non-blocking retry policy as TryAcquireAdvisoryLock.
+func (tx *Tx) TryAcquireSharedAdvisoryLock(ctx context.Context, lockID uint64, options *LockRetryOptions) error {
+	return tx.tryAcquireAdvisoryLock(ctx, lockID, options, advisoryLockShared)
+}
+
+func (tx *Tx) tryAcquireAdvisoryLock(ctx context.Context, lockID uint64, options *LockRetryOptions, mode advisoryLockMode) error {
 	retriableFunc := func() error {
-		return tx.AcquireAdvisoryLock(ctx, lockID, false)
+		return tx.acquireAdvisoryLock(ctx, lockID, false, mode)
 	}
 
 	if options == nil {

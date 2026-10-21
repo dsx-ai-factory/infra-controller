@@ -391,7 +391,7 @@ func TestPromptMultiDPUInstanceInterfaces(t *testing.T) {
 		}
 
 		var got []map[string]interface{}
-		_, err := withStdin(t, "n\ny\nn\n", func() (string, error) {
+		_, err := withStdin(t, "192.0.2.11\nn\ny\n\nn\n", func() (string, error) {
 			var promptErr error
 			got, promptErr = promptMultiDPUInstanceInterfaces(session, networkConfig, readyItems)
 			return "", promptErr
@@ -402,6 +402,7 @@ func TestPromptMultiDPUInstanceInterfaces(t *testing.T) {
 			{
 				"device":         "dual-dpu-network",
 				"deviceInstance": 0,
+				"ipAddress":      "192.0.2.11",
 				"isPhysical":     true,
 				"vpcPrefixId":    "prefix-1",
 			},
@@ -661,7 +662,7 @@ func TestPromptInstanceInterfaces(t *testing.T) {
 					Status: "Ready",
 				},
 			},
-			input: "n\n",
+			input: "\nn\n",
 			want: []map[string]interface{}{
 				{
 					"isPhysical":  true,
@@ -680,14 +681,16 @@ func TestPromptInstanceInterfaces(t *testing.T) {
 					Status: "Ready",
 				},
 			},
-			input: "y\n3\nn\n",
+			input: "192.0.2.11\ny\n192.0.2.13\n3\nn\n",
 			want: []map[string]interface{}{
 				{
 					"isPhysical":  true,
+					"ipAddress":   "192.0.2.11",
 					"vpcPrefixId": "vpc-prefix-1",
 				},
 				{
 					"isPhysical":        false,
+					"ipAddress":         "192.0.2.13",
 					"virtualFunctionId": 3,
 					"vpcPrefixId":       "vpc-prefix-1",
 				},

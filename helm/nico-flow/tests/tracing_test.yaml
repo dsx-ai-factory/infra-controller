@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Flow tracing configuration
+templates:
+  - configmap.yaml
+  - deployment.yaml
+tests:
+  - it: explicitly disables export while retaining a configured endpoint
+    set:
+      flowConfig.tracing.enabled: false
+      extraEnv.flow:
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://collector:4317
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: grpc
+    asserts:
+      - matchRegex:
+          path: data["flowconfig.yaml"]
+          pattern: 'tracing:\n  enabled: false'
+        template: configmap.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_EXPORTER_OTLP_ENDPOINT
+            value: http://collector:4317
+        template: deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_EXPORTER_OTLP_PROTOCOL
+            value: grpc
+        template: deployment.yaml
+
+  - it: defaults the enable flag to true without configuring an endpoint
+    asserts:
+      - matchRegex:
+          path: data["flowconfig.yaml"]
+          pattern: 'tracing:\n  enabled: true'
+        template: configmap.yaml
+
+  - it: defaults to enabled when reused values have no tracing block
+    set:
+      flowConfig.tracing: null
+    asserts:
+      - matchRegex:
+          path: data["flowconfig.yaml"]
+          pattern: 'tracing:\n  enabled: true'
+        template: configmap.yaml
+
+  - it: defaults to enabled when the enable flag is null
+    set:
+      flowConfig.tracing.enabled: null
+    asserts:
+      - matchRegex:
+          path: data["flowconfig.yaml"]
+          pattern: 'tracing:\n  enabled: true'
+        template: configmap.yaml
+
+  - it: rejects a string enable flag
+    template: deployment.yaml
+    set:
+      flowConfig.tracing.enabled: invalid
+    asserts:
+      - failedTemplate:
+          errorMessage: 'flowConfig.tracing.enabled must be a boolean (true or false); got "invalid"'

@@ -23,17 +23,21 @@ pub mod arch;
 pub mod cmd;
 pub mod config;
 mod host_port_pair;
+mod listen_addr;
 pub mod managed_loop;
 pub mod memory_device_group;
 pub mod metrics;
 pub mod none_if_empty;
 pub mod periodic_timer;
 pub mod redfish;
+#[cfg(feature = "shutdown-handler")]
+pub mod shutdown_handler;
 pub mod sku;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
 pub use host_port_pair::{HostPortPair, HostPortParseError};
+pub use listen_addr::{ListenAddr, ParseListenAddrError};
 pub const DEFAULT_DPU_DMI_BOARD_SERIAL_NUMBER: &str = "Unspecified Base Board Serial Number";
 pub const DEFAULT_DPU_DMI_CHASSIS_SERIAL_NUMBER: &str = "Unspecified Chassis Board Serial Number";
 pub const DEFAULT_DMI_SYSTEM_MANUFACTURER: &str = "Unspecified System Manufacturer";

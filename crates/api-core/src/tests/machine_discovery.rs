@@ -32,9 +32,9 @@ use config_version::ConfigVersion;
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::hardware_info::{HardwareInfo, PciDeviceProperties, TpmEkCertificate};
-use model::machine::ManagedHostState;
 use model::machine::machine_id::from_hardware_info;
 use model::machine::machine_search_config::MachineSearchConfig;
+use model::machine::{HostPlatformConfigurationState, InstanceState, ManagedHostState, RetryInfo};
 use model::machine_boot_interface::BootInterfaceSelectionSource;
 use model::network_segment::NetworkSegmentType;
 use model::resource_pool::{ResourcePoolDef, ResourcePoolType};
@@ -46,7 +46,8 @@ use crate::test_support::builder::TestApiBuilder;
 use crate::test_support::fixture_config::{FixtureDefault, ManagedHostConfigExt as _};
 use crate::tests::common;
 use crate::tests::common::api_fixtures::instance::{
-    default_os_config, default_tenant_config, single_interface_network_config,
+    default_os_config, default_tenant_config, interface_network_config_with_devices,
+    single_interface_network_config,
 };
 use crate::tests::common::api_fixtures::tpm_attestation::{
     AK_NAME_SERIALIZED, AK_PUB_SERIALIZED, EK_PUB_SERIALIZED,
@@ -787,6 +788,199 @@ async fn test_discover_dpu_does_not_create_machine_when_site_explorer_creates_ma
         .is_none()
     );
 
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_released_instance_discovers_through_configured_secondary_dpu(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let host_config = env.managed_host_config().with_dpu_count(2);
+    let hardware_info = HardwareInfo::from(&host_config);
+    let managed_host = create_managed_host_with_config(&env, host_config).await;
+
+    let mut txn = env.pool.begin().await?;
+    let host = managed_host.host().db_machine(&mut txn).await;
+    let primary = host
+        .status
+        .interfaces
+        .iter()
+        .find(|interface| interface.primary_interface)
+        .expect("managed host must have a primary interface");
+    let secondary = host
+        .status
+        .interfaces
+        .iter()
+        .find(|interface| {
+            !interface.primary_interface && interface.attached_dpu_machine_id.is_some()
+        })
+        .expect("two-DPU host must have a secondary interface");
+    let secondary_device =
+        host.get_device_locator_for_dpu_id(&secondary.attached_dpu_machine_id.unwrap())?;
+    txn.rollback().await?;
+
+    let instance = managed_host
+        .instance_builer(&env)
+        .network(interface_network_config_with_devices(
+            &[segment_id],
+            &[secondary_device],
+        ))
+        .build()
+        .await;
+    let mut txn = env.pool.begin().await?;
+    let addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
+        txn.as_mut(),
+        &instance.id,
+        &segment_id,
+    )
+    .await?;
+    let [address] = addresses.as_slice() else {
+        panic!("instance must have one tenant address")
+    };
+    let tenant_ip = address.address;
+    txn.rollback().await?;
+
+    // Release boots Scout over the tenant network before switching to the
+    // admin network. Stop there, while the secondary PF still owns this IP.
+    env.api
+        .release_instance(Request::new(rpc::InstanceReleaseRequest {
+            id: Some(instance.id),
+            issue: None,
+            is_repair_tenant: None,
+            delete_attribution: None,
+        }))
+        .await?;
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &managed_host.host().id,
+        8,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::HostPlatformConfiguration {
+                platform_config_state: HostPlatformConfigurationState::CheckHostConfig,
+            },
+        },
+    )
+    .await;
+    managed_host.network_configured(&env).await;
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &managed_host.host().id,
+        2,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::WaitingForDpusToUp,
+        },
+    )
+    .await;
+    managed_host.network_configured(&env).await;
+    let discovery_state = ManagedHostState::Assigned {
+        instance_state: InstanceState::BootingWithDiscoveryImage {
+            retry: RetryInfo { count: 0 },
+        },
+    };
+    env.run_machine_state_controller_iteration_until_state_matches(
+        &managed_host.host().id,
+        1,
+        discovery_state.clone(),
+    )
+    .await;
+
+    let mut txn = env.pool.begin().await?;
+    let released_host = managed_host.host().db_machine(&mut txn).await;
+    assert_eq!(released_host.current_state(), &discovery_state);
+    assert_eq!(released_host.network_config.use_admin_network, Some(false));
+    let retained_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
+        txn.as_mut(),
+        &instance.id,
+        &segment_id,
+    )
+    .await?;
+    assert_eq!(retained_addresses.len(), 1);
+    assert_eq!(retained_addresses[0].address, tenant_ip);
+    let released_secondary = db::machine_interface::find_one(txn.as_mut(), secondary.id).await?;
+    assert_eq!(
+        released_secondary.machine_id,
+        Some(managed_host.host().id.into())
+    );
+    assert!(released_secondary.addresses.is_empty());
+    assert_eq!(released_secondary.domain_id, None);
+    assert!(!released_secondary.primary_interface);
+    txn.rollback().await?;
+
+    let pxe = env
+        .api
+        .get_pxe_instructions(Request::new(rpc::forge::PxeInstructionRequest {
+            arch: rpc::forge::MachineArchitecture::X86 as i32,
+            client_ip: Some(tenant_ip.to_string()),
+            ..Default::default()
+        }))
+        .await?
+        .into_inner();
+    assert!(
+        pxe.pxe_script
+            .contains(&format!("mac={} ", secondary.mac_address)),
+        "tenant PXE must select the configured secondary MAC: {}",
+        pxe.pxe_script
+    );
+    assert!(
+        pxe.pxe_script
+            .contains(&format!("machine_id={} ", secondary.id))
+    );
+    assert!(
+        !pxe.pxe_script
+            .contains(&format!("mac={} ", primary.mac_address))
+    );
+
+    let custom_user_data = "#cloud-config\nsecondary-interface-override";
+    let mut txn = env.pool.begin().await?;
+    db::machine_boot_override::create(
+        txn.as_mut(),
+        secondary.id,
+        None,
+        Some(custom_user_data.to_string()),
+    )
+    .await?
+    .expect("fixture must install the secondary cloud-init override");
+    txn.commit().await?;
+
+    let cloud_init = env
+        .api
+        .get_cloud_init_instructions(Request::new(rpc::forge::CloudInitInstructionsRequest {
+            ip: tenant_ip.to_string(),
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(
+        cloud_init.custom_cloud_init.as_deref(),
+        Some(custom_user_data)
+    );
+    assert_eq!(
+        cloud_init.metadata,
+        Some(rpc::forge::CloudInitMetaData {
+            instance_id: managed_host.host().id.to_string(),
+            cloud_name: "nvidia".to_string(),
+            platform: "forge".to_string(),
+            local_hostname: None,
+        })
+    );
+    let discovery = cloud_init.discovery_instructions.unwrap();
+    assert_eq!(discovery.domain, None);
+    let discovered_interface = discovery.machine_interface.unwrap();
+    assert_eq!(discovered_interface.id, Some(secondary.id));
+    assert_eq!(
+        discovered_interface.mac_address,
+        secondary.mac_address.to_string()
+    );
+
+    let response = secure_api_for(&env)
+        .discover_machine(discovery_request_from(
+            &hardware_info,
+            discovered_interface.id,
+            tenant_ip,
+        ))
+        .await?
+        .into_inner();
+    assert_eq!(response.machine_id, Some(managed_host.host().id.into()));
+    assert_eq!(response.machine_interface_id, Some(secondary.id));
     Ok(())
 }
 

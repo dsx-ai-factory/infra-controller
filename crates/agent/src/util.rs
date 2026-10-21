@@ -28,6 +28,7 @@ use forge_http_connector::resolver::{ForgeResolver, ForgeResolverOpts};
 use hickory_resolver::config::ResolverConfig;
 use hickory_resolver::proto::rr::Name;
 use hyper::service::Service;
+use rand::RngExt;
 use resolv_conf::Config;
 use rpc::forge::{
     InstancePhoneHomeLastContactRequest, ManagedHostNetworkConfigRequest, VersionRequest,
@@ -44,6 +45,11 @@ pub const HOST_RESOLV_CONF_PATH: &str = "/host-resolv.conf";
 /// File the init-container writes nameservers to on the shared `/data` volume,
 /// for the main container to read at startup.
 pub const NAMESERVERS_FILE_PATH: &str = "/data/nameservers";
+
+/// Spreads periodic requests by adding up to 10% to the configured wait.
+pub(super) fn jittered_interval(interval: Duration, rng: &mut impl rand::Rng) -> Duration {
+    interval.saturating_add(rng.random_range(Duration::ZERO..=interval / 10))
+}
 
 pub fn compare_lines(left: &str, right: &str, strip_behavior: Option<StripType>) -> CompareResult {
     let (left, right) = match strip_behavior {
@@ -373,7 +379,34 @@ pub fn get_host_boot_timestamp() -> Result<u64, eyre::Error> {
 
 #[cfg(test)]
 mod tests {
+    use rand::SeedableRng;
+
     use super::*;
+
+    #[test]
+    fn polling_jitter_preserves_minimum_and_bounds() {
+        for (scenario, interval, maximum) in [
+            ("positive", Duration::from_secs(10), Duration::from_secs(11)),
+            ("zero", Duration::ZERO, Duration::ZERO),
+        ] {
+            let mut rng = rand::rngs::StdRng::seed_from_u64(7543);
+            let delays: Vec<_> = (0..16)
+                .map(|_| jittered_interval(interval, &mut rng))
+                .collect();
+            for delay in &delays {
+                assert!(
+                    (interval..=maximum).contains(delay),
+                    "{scenario}: {delay:?}"
+                );
+            }
+            if !interval.is_zero() {
+                assert!(
+                    delays.windows(2).any(|pair| pair[0] != pair[1]),
+                    "{scenario}"
+                );
+            }
+        }
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

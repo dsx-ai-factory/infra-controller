@@ -27,6 +27,7 @@ use ::machine_a_tron::{
     BmcMockRegistry, DeviceHandle, DhcpType, LogFormat, MachineATronConfig, MachineConfig,
 };
 use api_test_helper::api_server::{TEST_BMC_DHCP_RELAY_ADDRESS, TEST_BMC_NETWORK_PREFIX};
+use api_test_helper::machine_a_tron::MachineATronHandle;
 use api_test_helper::utils::TestApiServerArgs;
 use api_test_helper::{
     IntegrationTestEnvironment, domain, instance, machine, metrics, scout_stream, subnet, tenant,
@@ -35,15 +36,23 @@ use api_test_helper::{
 use bmc_mock::test_support::TEST_MAC_POOL;
 use bmc_mock::{HardwareType, ListenerOrAddress};
 use carbide_uuid::machine::StableHostMachineId;
+use carbide_uuid::power_shelf::{PowerShelfId, PowerShelfIdSource, PowerShelfType};
+use carbide_uuid::rack::RackId;
 use carbide_uuid::site_prefix::SitePrefixId;
-use eyre::ContextCompat;
+use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
+use eyre::{ContextCompat, WrapErr};
 use futures::FutureExt;
 use futures::future::join_all;
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::machine_boot_interface::BootInterfaceSelectionSource;
 use model::metadata::Metadata;
+use model::power_shelf::{NewPowerShelf, PowerShelfConfig};
+use model::rack::RackConfig;
+use model::resource_pool::binding::INTEGRATED_AUTHORITY_ID;
+use model::resource_pool::{ResourcePoolBackendKind, ResourcePoolValueDomain};
 use model::site_prefix::{NewTenantManagedSitePrefix, SitePrefixLifecycleState};
+use model::switch::{NewSwitch, SwitchConfig};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
@@ -55,8 +64,15 @@ fn setup() {
 }
 
 /// Run multiple machine-a-tron integration tests in parallel against a shared carbide API instance.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_integration() -> eyre::Result<()> {
+#[test]
+fn test_integration() -> eyre::Result<()> {
+    utils::api_server_runtime_builder()
+        .build()?
+        .block_on(run_integration())
+}
+
+/// Runs the shared API lifecycle and parallel machine-a-tron assertions.
+async fn run_integration() -> eyre::Result<()> {
     // NOTE: These tests run two carbide-api servers, and the clients are configured to randomly
     // switch between them on every API call. This helps prevent issues that arise when multiple API
     // severs may be running in production.
@@ -97,6 +113,52 @@ async fn test_integration() -> eyre::Result<()> {
     )
     .await?
     .site_prefix;
+    // Switch, rack and power-shelf controller families only appear in the
+    // catalogue scrape once their controllers process an object.
+    db::rack::create(
+        &mut txn,
+        &RackId::new("metric-catalogue-rack"),
+        None,
+        &RackConfig::default(),
+        None,
+    )
+    .await?;
+    db::switch::create(
+        &mut txn,
+        &NewSwitch {
+            id: SwitchId::new(SwitchIdSource::Tpm, [1u8; 32], SwitchType::NvLink),
+            config: SwitchConfig {
+                name: "metric-catalogue-switch".to_string(),
+                enable_nmxc: false,
+                fabric_manager_config: None,
+            },
+            bmc_mac_address: None,
+            metadata: None,
+            rack_id: None,
+            slot_number: None,
+            tray_index: None,
+        },
+    )
+    .await?;
+    db::power_shelf::create(
+        &mut txn,
+        &NewPowerShelf {
+            id: PowerShelfId::new(
+                PowerShelfIdSource::ProductBoardChassisSerial,
+                [1u8; 32],
+                PowerShelfType::Rack,
+            ),
+            config: PowerShelfConfig {
+                name: "metric-catalogue-power-shelf".to_string(),
+                capacity: None,
+                voltage: None,
+            },
+            bmc_mac_address: None,
+            metadata: None,
+            rack_id: None,
+        },
+    )
+    .await?;
     txn.commit().await?;
     assert_eq!(
         site_prefix.status.lifecycle_state,
@@ -140,6 +202,21 @@ async fn test_integration() -> eyre::Result<()> {
         cancel_token.clone(),
     )
     .await?;
+    let first_startup_bindings = db::resource_pool::binding::all(&test_env.db_pool).await?;
+    let vni_binding = first_startup_bindings
+        .iter()
+        .find(|binding| binding.pool_name == "vni")
+        .context("first authoritative startup did not bind the configured VNI pool")?;
+    assert_eq!(vni_binding.value_domain, ResourcePoolValueDomain::Integer);
+    assert_eq!(
+        vni_binding.backend_kind,
+        ResourcePoolBackendKind::Integrated
+    );
+    assert_eq!(vni_binding.authority_id, INTEGRATED_AUTHORITY_ID);
+    assert_eq!(vni_binding.remote_pool, "vni");
+    assert_eq!(vni_binding.backend_name, None);
+    assert!(!vni_binding.binding_id.is_nil());
+
     let server_handle_2 = utils::start_api_server(
         &mut test_env,
         TestApiServerArgs {
@@ -155,6 +232,18 @@ async fn test_integration() -> eyre::Result<()> {
         cancel_token.clone(),
     )
     .await?;
+
+    assert_eq!(
+        db::resource_pool::binding::all(&test_env.db_pool).await?,
+        first_startup_bindings,
+        "the second server must reuse the first server's pool bindings"
+    );
+
+    // Observable MQTT instruments export their initial zeros without a broker
+    // connection. Register them on the server's meter for the catalogue scrape.
+    let mqtt_client =
+        mqttea::MqtteaClient::new("localhost", 1883, "test-metric-catalogue", None).await?;
+    mqtt_client.register_metrics(&server_handle_2.ready.meter, "test_catalogue");
 
     assert_ne!(test_env.carbide_api_addrs[0], test_env.carbide_api_addrs[1]);
     assert_ne!(
@@ -211,6 +300,12 @@ async fn test_integration() -> eyre::Result<()> {
 
     // Run several tests in parallel.
     let all_tests = join_all([
+        test_force_delete_waits_for_instance_dpu(
+            &test_env,
+            &bmc_address_registry,
+            &managed_segment_id,
+        )
+        .boxed(),
         test_machine_a_tron_multidpu(
             HardwareType::DellPowerEdgeR750,
             &test_env,
@@ -329,12 +424,12 @@ async fn test_integration() -> eyre::Result<()> {
         .boxed(),
     ]);
 
-    tokio::select! {
+    let mat_handles: Vec<MachineATronHandle> = tokio::select! {
         results = all_tests => results.into_iter().try_collect()?,
         _ = tokio::time::sleep(Duration::from_secs(20 * 60)) => {
             panic!("Tests did not complete after 20 minutes")
         }
-    }
+    };
 
     metrics::wait_for_metric_line(
         &test_env.carbide_metrics_addrs,
@@ -367,11 +462,52 @@ async fn test_integration() -> eyre::Result<()> {
             .any(|metric| metric.name == "carbide_scout_pci_evaluations_total"),
         "the MaT scout path must exercise PCI comparison observability",
     );
+    for object_type in ["switches", "racks", "power_shelves"] {
+        for (family, metric_type) in [
+            ("object_tasks_completed_total", "counter"),
+            ("per_state", "gauge"),
+        ] {
+            metrics::wait_for_metric_line(
+                &test_env.carbide_metrics_addrs,
+                &format!("# TYPE carbide_{object_type}_{family} {metric_type}\n"),
+            )
+            .await?;
+        }
+    }
     generate_core_metric_docs(&test_env.carbide_metrics_addrs);
+    drop(mqtt_client);
+
+    // MaT opens ScoutStream on its primary API address and shares ordinary RPCs across both.
+    // Keep it running until both servers have drained their connections.
+    let scout_stream_addrs = &test_env.carbide_api_addrs[..1];
+    let connections = scout_stream::connections(scout_stream_addrs).await?;
+    let machine_id = connections
+        .first()
+        .and_then(|connection| connection.machine_id)
+        .context("server must have a live ScoutStream before shutdown")?;
+    assert_eq!(
+        scout_stream::ping(scout_stream_addrs, machine_id).await?,
+        format!("pong from {machine_id}"),
+    );
 
     cancel_token.cancel();
-    server_handle_1.wait().await?;
-    server_handle_2.wait().await?;
+    let shutdown_result = tokio::time::timeout(Duration::from_secs(65), async {
+        let (first, second) = tokio::join!(server_handle_1.wait(), server_handle_2.wait());
+        first?;
+        second
+    })
+    .await
+    .wrap_err("API servers did not shut down while MaT remained running");
+    let mat_results = join_all(
+        mat_handles
+            .into_iter()
+            .map(MachineATronHandle::shutdown_without_api_cleanup),
+    )
+    .await;
+    shutdown_result??;
+    for result in mat_results {
+        result?;
+    }
     test_env.db_pool.close().await;
     bmc_mock_handle.stop().await?;
     Ok(())
@@ -499,8 +635,16 @@ pub(crate) const METRIC_DOC_PATH: &str = concat!(
 
 /// Run integration tests with machine-a-tron, asserting on metrics. This has to run as its own
 /// test, to make the values in the metrics buckets predictable.
-#[tokio::test(flavor = "multi_thread", worker_threads = 10)]
-async fn test_metrics_integration() -> eyre::Result<()> {
+#[test]
+fn test_metrics_integration() -> eyre::Result<()> {
+    utils::api_server_runtime_builder()
+        .worker_threads(10)
+        .build()?
+        .block_on(run_metrics_integration())
+}
+
+/// Runs the isolated API lifecycle and machine-a-tron metric assertions.
+async fn run_metrics_integration() -> eyre::Result<()> {
     let Some(mut test_env) =
         IntegrationTestEnvironment::try_from_environment(1, "api_server_test_metrics_integration")
             .await?
@@ -562,7 +706,7 @@ async fn test_metrics_integration() -> eyre::Result<()> {
     // should contain 0 entries.
     assert_eq!(0i64, db::test_support::dns::record_count(&db_pool).await);
 
-    run_machine_a_tron_machine_test(
+    let mat_handle = run_machine_a_tron_machine_test(
         HardwareType::DellPowerEdgeR750,
         1,
         1,
@@ -697,6 +841,7 @@ async fn test_metrics_integration() -> eyre::Result<()> {
         },
     ).await?;
 
+    mat_handle.shutdown().await?;
     sleep(time::Duration::from_millis(500)).await;
     bmc_mock_handle.stop().await?;
     cancel_token.cancel();
@@ -705,13 +850,105 @@ async fn test_metrics_integration() -> eyre::Result<()> {
     Ok(())
 }
 
+/// The opt-in RPC waits for a running simulated DPU to apply Admin networking.
+async fn test_force_delete_waits_for_instance_dpu(
+    test_env: &IntegrationTestEnvironment,
+    bmc_mock_registry: &BmcMockRegistry,
+    segment_id: &str,
+) -> eyre::Result<MachineATronHandle> {
+    run_machine_a_tron_machine_test(
+        HardwareType::DellPowerEdgeR750,
+        1,
+        1,
+        false,
+        test_env,
+        bmc_mock_registry,
+        UNDERLAY_DHCP_RELAY_ADDRESS,
+        |machine_handle| async move {
+            machine_handle
+                .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
+                .await?;
+            let machine_ids = [
+                machine_handle
+                    .observed_machine_id()
+                    .context("ready host has no observed machine ID")?,
+                machine_handle.dpus()[0]
+                    .observed_machine_id()
+                    .context("ready DPU has no observed machine ID")?,
+            ];
+            let host_id: StableHostMachineId = machine_ids[0].try_into()?;
+            let instance_id = instance::create(
+                &test_env.carbide_api_addrs,
+                &host_id,
+                segment_id,
+                None,
+                false,
+                true,
+                &[],
+            )
+            .await?;
+            let network_config =
+                db::machine::get_network_config(&test_env.db_pool, &machine_ids[0]).await?;
+            assert_eq!(network_config.value.use_admin_network, Some(false));
+
+            let request = rpc::forge::AdminForceDeleteMachineRequest {
+                host_query: host_id.to_string(),
+                delete_interfaces: true,
+                delete_bmc_interfaces: true,
+                wait_for_instance_dpu: true,
+                ..Default::default()
+            };
+            let response =
+                machine::force_delete(&test_env.carbide_api_addrs, request.clone()).await?;
+            assert!(!response.all_done);
+            let instance_id = instance_id.parse()?;
+            assert!(
+                db::instance::find_by_id(&test_env.db_pool, instance_id)
+                    .await?
+                    .is_some()
+            );
+
+            // Keep the actors running so the DPU acknowledges the Admin request.
+            tokio::time::timeout(Duration::from_secs(90), async {
+                loop {
+                    let response =
+                        machine::force_delete(&test_env.carbide_api_addrs, request.clone()).await?;
+                    if response.all_done {
+                        return Ok::<(), eyre::Report>(());
+                    }
+                    sleep(Duration::from_secs(1)).await;
+                }
+            })
+            .await
+            .wrap_err("timed out waiting for force deletion after the DPU acknowledgement")??;
+
+            assert!(
+                db::instance::find_by_id(&test_env.db_pool, instance_id)
+                    .await?
+                    .is_none(),
+                "force deletion must remove the assigned Instance",
+            );
+            for machine_id in machine_ids {
+                assert!(
+                    db::machine::find_one(&test_env.db_pool, &machine_id, Default::default())
+                        .await?
+                        .is_none(),
+                    "force deletion must remove machine {machine_id}",
+                );
+            }
+            Ok(())
+        },
+    )
+    .await
+}
+
 async fn test_machine_a_tron_multidpu(
     hw_type: HardwareType,
     test_env: &IntegrationTestEnvironment,
     bmc_mock_registry: &BmcMockRegistry,
     segment_id: &str,
     underlay_dhcp_relay_address: Ipv4Addr,
-) -> eyre::Result<()> {
+) -> eyre::Result<MachineATronHandle> {
     run_machine_a_tron_machine_test(
         hw_type,
         1,
@@ -820,7 +1057,7 @@ async fn test_machine_a_tron_zerodpu(
     test_env: &IntegrationTestEnvironment,
     bmc_mock_registry: &BmcMockRegistry,
     flat_vpc_id: &str,
-) -> eyre::Result<()> {
+) -> eyre::Result<MachineATronHandle> {
     run_machine_a_tron_machine_test(
         hw_type,
         1,
@@ -883,7 +1120,7 @@ async fn test_machine_a_tron_nic_mode(
     bmc_mock_registry: &BmcMockRegistry,
     flat_vpc_id: &str,
     host_inband_segment_id: &str,
-) -> eyre::Result<()> {
+) -> eyre::Result<MachineATronHandle> {
     run_machine_a_tron_machine_test(
         hw_type,
         1,
@@ -1062,7 +1299,7 @@ async fn test_machine_a_tron_dual_stack(
     v4_vpc_prefix_id: &str,
     v6_vpc_prefix_id: &str,
     underlay_dhcp_relay_address: Ipv4Addr,
-) -> eyre::Result<()> {
+) -> eyre::Result<MachineATronHandle> {
     run_machine_a_tron_machine_test(
         hw_type,
         1,
@@ -1178,7 +1415,7 @@ async fn test_machine_a_tron_dual_stack_l2(
     bmc_mock_registry: &BmcMockRegistry,
     dual_stack_segment_id: &str,
     underlay_dhcp_relay_address: Ipv4Addr,
-) -> eyre::Result<()> {
+) -> eyre::Result<MachineATronHandle> {
     run_machine_a_tron_machine_test(
         hw_type,
         1,
@@ -1245,7 +1482,7 @@ async fn test_machine_a_tron_scout_stream(
     test_env: &IntegrationTestEnvironment,
     bmc_mock_registry: &BmcMockRegistry,
     underlay_dhcp_relay_address: Ipv4Addr,
-) -> eyre::Result<()> {
+) -> eyre::Result<MachineATronHandle> {
     let scout_stream_api_addrs = vec![
         *test_env
             .carbide_api_addrs
@@ -1301,6 +1538,9 @@ async fn test_machine_a_tron_scout_stream(
     .await
 }
 
+/// Simulates `host_count` hosts of `hw_type` with machine-a-tron against the
+/// integration test API and hands the ingested state to the caller's check.
+/// Returns the running simulator group so the caller controls teardown order.
 #[allow(clippy::too_many_arguments)]
 async fn run_machine_a_tron_machine_test<F, O>(
     hw_type: HardwareType,
@@ -1311,7 +1551,7 @@ async fn run_machine_a_tron_machine_test<F, O>(
     bmc_mock_registry: &BmcMockRegistry,
     underlay_dhcp_relay_address: Ipv4Addr,
     run_assertions: F,
-) -> eyre::Result<()>
+) -> eyre::Result<MachineATronHandle>
 where
     F: Fn(DeviceHandle) -> O,
     O: Future<Output = eyre::Result<()>>,
@@ -1339,6 +1579,7 @@ where
                 host_reboot_delay: 1,
                 timing_overrides: Some(LifecycleTimingOverrides {
                     host: PartialLifecycleTimings {
+                        power_off_force: Some(Duration::from_millis(100)),
                         reboot: Some(Duration::from_secs(1)),
                         // ZERO disables the BMC self-reset offline window entirely,
                         // keeping ingestion at its pre-feature pace
@@ -1346,6 +1587,7 @@ where
                         ..Default::default()
                     },
                     dpu: PartialLifecycleTimings {
+                        power_off_force: Some(Duration::from_millis(100)),
                         reboot: Some(Duration::from_secs(1)),
                         // ZERO disables the BMC self-reset offline window entirely,
                         // keeping ingestion at its pre-feature pace
@@ -1391,6 +1633,7 @@ where
         mac_address_pool: None,
         ufm_mock: Default::default(),
         rms_mock: Default::default(),
+        nmxc_mock: Default::default(),
     };
 
     let (provisionable_handles, mat_handle) = api_test_helper::machine_a_tron::run_local(
@@ -1418,11 +1661,12 @@ where
     .await;
     let result_count = results.len();
     let assertion_result: eyre::Result<()> = results.into_iter().try_collect();
-    let shutdown_result = mat_handle.shutdown().await;
-
     assert_eq!(result_count, host_count as usize);
-    assertion_result?;
-    shutdown_result
+    if let Err(error) = assertion_result {
+        mat_handle.shutdown().await?;
+        return Err(error);
+    }
+    Ok(mat_handle)
 }
 
 fn assert_relay_selection(

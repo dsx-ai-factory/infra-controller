@@ -128,7 +128,11 @@ impl From<&DhcpError> for DropReason {
     fn from(error: &DhcpError) -> Self {
         match error {
             DhcpError::IoError(_) => Self::IoError,
-            DhcpError::SerdeYaml(_) => Self::ConfigParseFailure,
+            DhcpError::SerdeYaml(_) | DhcpError::Config(_) => Self::ConfigParseFailure,
+            DhcpError::ConfigFile { source, .. }
+            | DhcpError::ConfigRestore {
+                primary: source, ..
+            } => Self::from(source.as_ref()),
             DhcpError::MissingArgument(_) => Self::MissingArgument,
             DhcpError::MissingOption(_) => Self::MissingOption,
             DhcpError::UnhandledMessageType(_) => Self::UnhandledMessageType,
@@ -206,9 +210,13 @@ impl From<&DhcpError> for V6DropReason {
     fn from(error: &DhcpError) -> Self {
         match error {
             DhcpError::InvalidInput(_) => Self::InvalidInput,
-            DhcpError::SerdeYaml(_) | DhcpError::MultipleInterfacesProvidedOneSupported(_) => {
-                Self::InvalidConfiguration
-            }
+            DhcpError::SerdeYaml(_)
+            | DhcpError::Config(_)
+            | DhcpError::MultipleInterfacesProvidedOneSupported(_) => Self::InvalidConfiguration,
+            DhcpError::ConfigFile { source, .. }
+            | DhcpError::ConfigRestore {
+                primary: source, ..
+            } => Self::from(source.as_ref()),
             DhcpError::InvalidDhcpV6Lifetimes { .. } => Self::InvalidConfiguration,
             DhcpError::NoIpv6Configuration(_) => Self::NoIpv6Configuration,
             DhcpError::NotMyPacket(_) => Self::NotMyPacket,
@@ -1345,8 +1353,37 @@ mod tests {
         check_values(
             [
                 Check {
+                    scenario: "invalid DHCP configuration",
+                    input: DhcpError::Config(
+                        carbide_rpc_utils::dhcp::DhcpDataError::ParameterMissing(
+                            "DHCPv6 server identifier",
+                        ),
+                    ),
+                    expect: DropReason::ConfigParseFailure,
+                },
+                Check {
+                    scenario: "identity storage failure retains its category",
+                    input: DhcpError::ConfigFile {
+                        path: "dhcp.yaml.duid".to_string(),
+                        source: Box::new(DhcpError::IoError(std::io::Error::other("read failed"))),
+                    },
+                    expect: DropReason::IoError,
+                },
+                Check {
                     scenario: "io error",
                     input: DhcpError::IoError(std::io::Error::other("read failed")),
+                    expect: DropReason::IoError,
+                },
+                Check {
+                    scenario: "failed restoration keeps the primary I/O category",
+                    input: DhcpError::ConfigRestore {
+                        primary: Box::new(DhcpError::IoError(std::io::Error::other(
+                            "rename failed",
+                        ))),
+                        restore: Box::new(DhcpError::IoError(std::io::Error::other(
+                            "restore failed",
+                        ))),
+                    },
                     expect: DropReason::IoError,
                 },
                 Check {
@@ -1522,6 +1559,45 @@ mod tests {
     fn v6_drop_reason_preserves_distinct_failure_categories() {
         check_values(
             [
+                Check {
+                    scenario: "invalid DHCP configuration",
+                    input: DhcpError::Config(
+                        carbide_rpc_utils::dhcp::DhcpDataError::ParameterMissing(
+                            "DHCPv6 server identifier",
+                        ),
+                    ),
+                    expect: V6DropReason::InvalidConfiguration,
+                },
+                Check {
+                    scenario: "retained identity error preserves configuration category",
+                    input: DhcpError::ConfigFile {
+                        path: "dhcp.yaml.duid".to_string(),
+                        source: Box::new(DhcpError::Config(
+                            carbide_rpc_utils::dhcp::DhcpDataError::InvalidServerIdentifier,
+                        )),
+                    },
+                    expect: V6DropReason::InvalidConfiguration,
+                },
+                Check {
+                    scenario: "wrapped storage failure is not a configuration parse error",
+                    input: DhcpError::ConfigFile {
+                        path: "dhcp.yaml.duid".to_string(),
+                        source: Box::new(DhcpError::IoError(std::io::Error::other("read failed"))),
+                    },
+                    expect: V6DropReason::InvalidPacket,
+                },
+                Check {
+                    scenario: "failed restoration keeps the primary I/O category",
+                    input: DhcpError::ConfigRestore {
+                        primary: Box::new(DhcpError::IoError(std::io::Error::other(
+                            "rename failed",
+                        ))),
+                        restore: Box::new(DhcpError::IoError(std::io::Error::other(
+                            "restore failed",
+                        ))),
+                    },
+                    expect: V6DropReason::InvalidPacket,
+                },
                 // Nested relay envelopes remain distinct from malformed client traffic.
                 Check {
                     scenario: "nested relay",

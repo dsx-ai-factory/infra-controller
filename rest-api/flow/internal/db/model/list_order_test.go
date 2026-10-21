@@ -59,7 +59,7 @@ func TestInventoryLists_StableOrderBeforePagination(t *testing.T) {
 		mock.ExpectQuery(`ORDER BY "name" ASC, "id" ASC LIMIT 20`).
 			WillReturnRows(sqlmock.NewRows([]string{"id"}))
 
-		_, _, err := GetListOfRacks(t.Context(), db, info, nil, nil, page, nil, false)
+		_, _, err := GetListOfRacks(t.Context(), db, info, nil, nil, page, nil, false, false)
 
 		require.NoError(t, err)
 		require.NoError(t, mock.ExpectationsWereMet())
@@ -72,7 +72,7 @@ func TestInventoryLists_StableOrderBeforePagination(t *testing.T) {
 
 		_, _, err := GetListOfRacks(t.Context(), db, info, nil, nil, page, &dbquery.OrderBy{
 			Column: "manufacturer", Direction: dbquery.OrderDescending,
-		}, false)
+		}, false, false)
 
 		require.NoError(t, err)
 		require.NoError(t, mock.ExpectationsWereMet())

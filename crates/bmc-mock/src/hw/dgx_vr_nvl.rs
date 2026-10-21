@@ -126,7 +126,19 @@ impl DgxVrNvl<'_> {
                     secure_boot_available: false,
                     serial_number: None,
                     storage: None,
-                    processors: None,
+                    processors: Some(vec![
+                        redfish::processor::gpu(
+                            "HGX_Baseboard_0",
+                            "GPU_0",
+                            "/redfish/v1/Chassis/HGX_Chassis_0/Sensors/Voltage_1",
+                            &redfish::processor::GpuIdentity {
+                                uuid: "e523fe23-8f32-41d9-97e6-cd5f09d50434",
+                                serial_number: "1821526A74089",
+                                model: "Vera Rubin GPU",
+                            },
+                        )
+                        .with_mnnvlink_topology(26, 16),
+                    ]),
                     memory: None,
                 },
                 redfish::computer_system::SingleSystemConfig {

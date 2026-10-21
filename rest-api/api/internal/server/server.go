@@ -4,6 +4,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -27,22 +28,18 @@ import (
 	echoMiddleware "github.com/labstack/echo/v4/middleware"
 
 	tsdkClient "go.temporal.io/sdk/client"
-	tsdkConverter "go.temporal.io/sdk/converter"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api"
 	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
+	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authn "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authentication"
-	otprop "go.opentelemetry.io/contrib/propagators/ot"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/propagation"
-	"go.temporal.io/sdk/contrib/opentelemetry"
-	"go.temporal.io/sdk/interceptor"
 	"golang.org/x/time/rate"
 
 	// Imports for API doc generation
@@ -62,43 +59,17 @@ const (
 	WriteTimeout = 60 * time.Second
 )
 
-func InitTemporalClients(tcfg *cconfig.TemporalConfig, tracingEnabled bool) (tsdkClient.Client, tsdkClient.NamespaceClient, error) {
+func InitTemporalClients(tcfg *cconfig.TemporalConfig) (tsdkClient.Client, tsdkClient.NamespaceClient, error) {
 	var tc tsdkClient.Client
 	var tnc tsdkClient.NamespaceClient
 
 	tLogger := logur.LoggerToKV(zlogadapter.New(zerolog.New(os.Stderr)))
 
-	var (
-		tInterceptors []interceptor.ClientInterceptor
-		err           error
-	)
-
-	if tracingEnabled {
-		otelInterceptor, serr := opentelemetry.NewTracingInterceptor(opentelemetry.TracerOptions{TextMapPropagator: otel.GetTextMapPropagator()})
-		if serr != nil {
-			log.Panic().Err(serr).Msg("unable to get otelInterceptor")
-		}
-		tInterceptors = append(tInterceptors, otelInterceptor)
-	}
-
-	tOptions := tsdkClient.Options{
-		HostPort: tcfg.GetHostPort(),
-		// This client connects to `cloud` namespace
-		Namespace: tcfg.Namespace,
-		ConnectionOptions: tsdkClient.ConnectionOptions{
-			TLS: tcfg.ClientTLSCfg,
-		},
-		DataConverter: tsdkConverter.NewCompositeDataConverter(
-			tsdkConverter.NewNilPayloadConverter(),
-			tsdkConverter.NewByteSlicePayloadConverter(),
-			tsdkConverter.NewProtoJSONPayloadConverterWithOptions(tsdkConverter.ProtoJSONPayloadConverterOptions{
-				AllowUnknownFields: true,
-			}),
-			tsdkConverter.NewProtoPayloadConverter(),
-			tsdkConverter.NewJSONPayloadConverter(),
-		),
-		Interceptors: tInterceptors,
-		Logger:       tLogger,
+	// This client connects to the cloud namespace; shared options attach the
+	// OpenTelemetry interceptor when transport tracing is configured.
+	tOptions, err := ctemporal.ClientOptions(tcfg.GetHostPort(), tcfg.Namespace, tcfg.ClientTLSCfg, tLogger)
+	if err != nil {
+		return nil, nil, fmt.Errorf("unable to build Temporal client options: %w", err)
 	}
 
 	log.Info().Msg("creating Temporal client")
@@ -111,6 +82,7 @@ func InitTemporalClients(tcfg *cconfig.TemporalConfig, tracingEnabled bool) (tsd
 	log.Info().Msg("creating Temporal namespace client")
 	tnc, err = tsdkClient.NewNamespaceClient(tOptions)
 	if err != nil {
+		tc.Close()
 		log.Error().Err(err).Msg("failed to create Temporal Namespace client")
 		return nil, nil, err
 	}
@@ -188,21 +160,13 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 		log.Info().Msg("Rate limiter disabled")
 	}
 
-	if cfg.GetTracingEnabled() {
-		svcName := cfg.GetTracingServiceName()
-		if svcName != "" {
-			// Composite: WithPropagators replaces, so OT alone dropped W3C.
-			e.Use(otelecho.Middleware(svcName,
-				otelecho.WithSkipper(skipTracingRoutes),
-				otelecho.WithPropagators(propagation.NewCompositeTextMapPropagator(
-					propagation.TraceContext{},
-					propagation.Baggage{},
-					otprop.OT{},
-				)),
-			))
-		} else {
-			log.Warn().Msg("failed to get Tracing Service Name, skipping OTel middleware")
-		}
+	if cotel.TransportEnabled() {
+		// Bootstrap resolves the exported service.name independently, with
+		// OTEL_SERVICE_NAME taking precedence over the config fallback. This name
+		// identifies the HTTP server to the Echo instrumentation only.
+		e.Use(otelecho.Middleware(cfg.GetAPIName(), otelecho.WithSkipper(func(c echo.Context) bool {
+			return skipTracingRoutes(c, dbSession)
+		})))
 	}
 
 	// Sentry middleware
@@ -249,7 +213,7 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 
 	// Routes
 	// Common routes are service oriented e.g. health
-	commonAPIRoutes := api.NewSystemAPIRoutes()
+	commonAPIRoutes := api.NewSystemAPIRoutes(dbSession)
 	for _, commonAPIRoute := range commonAPIRoutes {
 		// Register route
 		e.Add(commonAPIRoute.Method, commonAPIRoute.Path, commonAPIRoute.Handler.Handle)
@@ -308,6 +272,18 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 	return e
 }
 
+// metricsMethodLabel returns the request method when it is a standard HTTP
+// method, and "unknown" otherwise, matching promhttp's bounded label behavior.
+func metricsMethodLabel(c echo.Context, _ error) string {
+	method := c.Request().Method
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace:
+		return method
+	}
+	return "unknown"
+}
+
 func InitMetricsServer(e *echo.Echo, namespace string) *echo.Echo {
 	ep := echo.New()
 	ep.HideBanner = true
@@ -317,6 +293,13 @@ func InitMetricsServer(e *echo.Echo, namespace string) *echo.Echo {
 		// its own "echo" for an empty one.
 		Subsystem: namespace,
 		Skipper:   api.MetricsURLSkipper,
+		// echoprometheus otherwise takes host and method from the request, and
+		// the caller controls both. Keep the published labels but bound their
+		// values so unauthenticated requests cannot create unbounded time series.
+		LabelFuncs: map[string]echoPrometheus.LabelValueFunc{
+			"host":   func(echo.Context, error) string { return namespace },
+			"method": metricsMethodLabel,
+		},
 	}
 
 	p := echoPrometheus.NewMiddlewareWithConfig(conf)
@@ -329,6 +312,6 @@ func InitMetricsServer(e *echo.Echo, namespace string) *echo.Echo {
 }
 
 // skipTracingRoutes returns true if the route should be skipped for tracing
-func skipTracingRoutes(c echo.Context) bool {
-	return api.IsSystemRoute(c.Path())
+func skipTracingRoutes(c echo.Context, dbSession *cdb.Session) bool {
+	return api.IsSystemRoute(c.Path(), dbSession)
 }

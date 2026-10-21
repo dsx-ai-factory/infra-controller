@@ -154,6 +154,17 @@ func (a *ExpectedRackAPIService) CreateExpectedRackExecute(r ApiCreateExpectedRa
 			}
 			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
 			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 409 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
 		}
 		return localVarReturnValue, localVarHTTPResponse, newErr
 	}
@@ -293,6 +304,17 @@ func (a *ExpectedRackAPIService) DeleteAllExpectedRackExecute(r ApiDeleteAllExpe
 			}
 			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
 			newErr.model = v
+			return localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 409 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
 		}
 		return localVarHTTPResponse, newErr
 	}
@@ -419,6 +441,17 @@ func (a *ExpectedRackAPIService) DeleteExpectedRackExecute(r ApiDeleteExpectedRa
 			return localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 409 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {
@@ -898,6 +931,17 @@ func (a *ExpectedRackAPIService) ReplaceAllExpectedRackExecute(r ApiReplaceAllEx
 			}
 			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
 			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 409 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
 		}
 		return localVarReturnValue, localVarHTTPResponse, newErr
 	}
@@ -1047,6 +1091,17 @@ func (a *ExpectedRackAPIService) ReplaceAllExpectedRackLegacyExecute(r ApiReplac
 			}
 			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
 			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 409 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
 		}
 		return localVarReturnValue, localVarHTTPResponse, newErr
 	}
@@ -1071,7 +1126,7 @@ type ApiUpdateExpectedRackRequest struct {
 	expectedRackUpdateRequest *ExpectedRackUpdateRequest
 }
 
-// Expected Rack update request.  Provide a non-null value for at least one of rackId, rackProfileId, name, description, or labels. An empty object or a body containing only id is rejected with HTTP 400. Providing the existing rackId alone satisfies this requirement; changing rackId is rejected. Empty names and descriptions are invalid. An empty labels object counts as an update and clears all existing labels.
+// Expected Rack update request.  Provide a non-null value for at least one of rackId, name, description, or labels. An empty object or a body containing only id is rejected with HTTP 400. Providing the existing rackId alone satisfies this requirement; changing rackId is rejected. Empty names and descriptions are invalid. An empty labels object counts as an update and clears all existing labels.
 func (r ApiUpdateExpectedRackRequest) ExpectedRackUpdateRequest(expectedRackUpdateRequest ExpectedRackUpdateRequest) ApiUpdateExpectedRackRequest {
 	r.expectedRackUpdateRequest = &expectedRackUpdateRequest
 	return r
@@ -1199,6 +1254,17 @@ func (a *ExpectedRackAPIService) UpdateExpectedRackExecute(r ApiUpdateExpectedRa
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 409 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

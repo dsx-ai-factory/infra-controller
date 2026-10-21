@@ -27,93 +27,138 @@ import (
 
 // TestPowerControlWorkflowWithBatching tests the new workflow-level batching implementation
 func TestPowerControlWorkflowWithBatching(t *testing.T) {
-	t.Run("batching with max_parallel=2", func(t *testing.T) {
-		// Create 5 compute nodes
+	t.Run("component actions respect max_parallel across every phase", func(t *testing.T) {
 		components := []*component.Component{
 			newTestComponent(uuid.New(), "compute-1", "ext-compute-1", devicetypes.ComponentTypeCompute),
 			newTestComponent(uuid.New(), "compute-2", "ext-compute-2", devicetypes.ComponentTypeCompute),
 			newTestComponent(uuid.New(), "compute-3", "ext-compute-3", devicetypes.ComponentTypeCompute),
-			newTestComponent(uuid.New(), "compute-4", "ext-compute-4", devicetypes.ComponentTypeCompute),
-			newTestComponent(uuid.New(), "compute-5", "ext-compute-5", devicetypes.ComponentTypeCompute),
 		}
-
-		// Define rule with max_parallel=2
-		ruleDef := &operationrules.RuleDefinition{
-			Version: "v1",
-			Steps: []operationrules.SequenceStep{
-				{
-					ComponentType: devicetypes.ComponentTypeCompute,
-					Stage:         1,
-					MaxParallel:   2, // Process 2 at a time
-					MainOperation: operationrules.ActionConfig{Name: operationrules.ActionPowerControl},
-				},
+		tests := []struct {
+			name         string
+			maxParallel  int
+			wantBatches  [][]string
+			legacyReplay bool
+		}{
+			{
+				name:        "one component per batch",
+				maxParallel: 1,
+				wantBatches: [][]string{{"ext-compute-1"}, {"ext-compute-2"}, {"ext-compute-3"}},
+			},
+			{
+				name:        "partial final batch",
+				maxParallel: 2,
+				wantBatches: [][]string{{"ext-compute-1", "ext-compute-2"}, {"ext-compute-3"}},
+			},
+			{
+				name:        "zero dispatches all components together",
+				maxParallel: 0,
+				wantBatches: [][]string{{"ext-compute-1", "ext-compute-2", "ext-compute-3"}},
+			},
+			{
+				name:         "legacy parent preserves unlimited child dispatch",
+				maxParallel:  1,
+				wantBatches:  [][]string{{"ext-compute-1", "ext-compute-2", "ext-compute-3"}},
+				legacyReplay: true,
 			},
 		}
 
-		testSuite := &testsuite.WorkflowTestSuite{}
-		env := testSuite.NewTestWorkflowEnvironment()
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				getPowerStatus := operationrules.ActionConfig{
+					Name:    operationrules.ActionGetPowerStatus,
+					Timeout: 2 * time.Second,
+				}
+				verifyReachability := operationrules.ActionConfig{
+					Name:         operationrules.ActionVerifyReachability,
+					Timeout:      2 * time.Second,
+					PollInterval: time.Second,
+					Parameters: map[string]any{
+						operationrules.ParamComponentTypes: []string{"Compute"},
+						operationrules.ParamRequireAll:     true,
+					},
+				}
+				ruleDef := &operationrules.RuleDefinition{
+					Version: "v1",
+					Steps: []operationrules.SequenceStep{
+						{
+							ComponentType: devicetypes.ComponentTypeCompute,
+							Stage:         1,
+							MaxParallel:   tc.maxParallel,
+							PreOperation:  []operationrules.ActionConfig{verifyReachability},
+							MainOperation: getPowerStatus,
+							PostOperation: []operationrules.ActionConfig{
+								{
+									Name:         operationrules.ActionVerifyPowerStatus,
+									Timeout:      2 * time.Second,
+									PollInterval: time.Second,
+									Parameters: map[string]any{
+										operationrules.ParamExpectedStatus: "on",
+									},
+								},
+								{
+									Name: operationrules.ActionSleep,
+									Parameters: map[string]any{
+										operationrules.ParamDuration: 5 * time.Second,
+									},
+								},
+							},
+						},
+					},
+				}
 
-		// Track concurrent activity executions
-		var mu sync.Mutex
-		activeConcurrent := 0
-		maxConcurrent := 0
+				testSuite := &testsuite.WorkflowTestSuite{}
+				env := testSuite.NewTestWorkflowEnvironment()
+				registerTaskUpdateActivities(env)
+				env.RegisterActivityWithOptions(mockGetPowerStatus, activity.RegisterOptions{
+					Name: activitypkg.NameGetPowerStatus,
+				})
+				env.RegisterWorkflowWithOptions(genericComponentStepWorkflow, temporalworkflow.RegisterOptions{Name: nameGenericComponentStepWorkflow})
+				if tc.legacyReplay {
+					env.OnGetVersion(
+						componentActionBatchingChangeID,
+						temporalworkflow.DefaultVersion,
+						temporalworkflow.Version(1),
+					).Return(temporalworkflow.DefaultVersion).Once()
+					env.OnGetVersion(
+						componentActionBatchingChangeID,
+						temporalworkflow.DefaultVersion,
+						temporalworkflow.Version(1),
+					).Return(temporalworkflow.Version(1)).Once()
+				}
 
-		// Mock PowerControl activity that tracks concurrency
-		mockPowerControlWithTracking := func(ctx context.Context, info interface{}, pcInfo interface{}) error {
-			mu.Lock()
-			activeConcurrent++
-			if activeConcurrent > maxConcurrent {
-				maxConcurrent = activeConcurrent
-			}
-			mu.Unlock()
+				var gotBatches [][]string
+				env.OnActivity(mockGetPowerStatus, mock.Anything, mock.Anything).Return(
+					func(_ context.Context, target common.Target) (map[string]operations.PowerStatus, error) {
+						gotBatches = append(gotBatches, append([]string(nil), target.Identifiers...))
+						statuses := make(map[string]operations.PowerStatus, target.Len())
+						for _, identifier := range target.Identifiers {
+							statuses[identifier] = operations.PowerStatusOn
+						}
+						return statuses, nil
+					},
+				)
 
-			// Simulate some work
-			// In real Temporal test, this would be instant due to time skipping
+				info := &operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOn}
+				reqInfo := taskdef.ExecutionInfo{
+					TaskID:         uuid.New(),
+					Components:     toWorkflowComponents(components),
+					RuleDefinition: ruleDef,
+				}
 
-			mu.Lock()
-			activeConcurrent--
-			mu.Unlock()
+				expectTaskUpdateActivities(env)
+				start := env.Now()
+				env.ExecuteWorkflow(powerControl, reqInfo, info)
 
-			return nil
+				assert.True(t, env.IsWorkflowCompleted())
+				assert.NoError(t, env.GetWorkflowError())
+				wantActivityBatches := make([][]string, 0, len(tc.wantBatches)*3)
+				for range 3 {
+					wantActivityBatches = append(wantActivityBatches, tc.wantBatches...)
+				}
+				assert.Equal(t, wantActivityBatches, gotBatches)
+				assert.Equal(t, 5*time.Second, env.Now().Sub(start))
+			})
 		}
-
-		env.RegisterActivityWithOptions(mockPowerControlWithTracking, activity.RegisterOptions{
-			Name: activitypkg.NamePowerControl,
-		})
-		registerTaskUpdateActivities(env)
-		env.RegisterActivityWithOptions(mockGetPowerStatus, activity.RegisterOptions{
-			Name: activitypkg.NameGetPowerStatus,
-		})
-		env.RegisterWorkflowWithOptions(genericComponentStepWorkflow, temporalworkflow.RegisterOptions{Name: nameGenericComponentStepWorkflow})
-
-		env.OnActivity(mockGetPowerStatus, mock.Anything, mock.Anything).Return(
-			func(ctx context.Context, target common.Target) (map[string]operations.PowerStatus, error) {
-				// Return "On" status for all components
-				return map[string]operations.PowerStatus{
-					"ext-compute-1": operations.PowerStatusOn,
-					"ext-compute-2": operations.PowerStatusOn,
-					"ext-compute-3": operations.PowerStatusOn,
-					"ext-compute-4": operations.PowerStatusOn,
-					"ext-compute-5": operations.PowerStatusOn,
-				}, nil
-			},
-		)
-
-		info := &operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOn}
-		reqInfo := taskdef.ExecutionInfo{
-			TaskID:         uuid.New(),
-			Components:     toWorkflowComponents(components),
-			RuleDefinition: ruleDef,
-		}
-
-		expectTaskUpdateActivities(env)
-		env.ExecuteWorkflow(powerControl, reqInfo, info)
-
-		assert.True(t, env.IsWorkflowCompleted())
-		assert.NoError(t, env.GetWorkflowError())
-
-		// Verify that max concurrency respected max_parallel=2
-		assert.LessOrEqual(t, maxConcurrent, 2, "Max concurrent activities should not exceed max_parallel=2")
 	})
 
 	t.Run("cross-type parallelism with different max_parallel", func(t *testing.T) {

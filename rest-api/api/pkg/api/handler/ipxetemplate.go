@@ -21,6 +21,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -31,19 +32,17 @@ import (
 
 // GetAllIpxeTemplateHandler is the API Handler for getting all iPXE templates
 type GetAllIpxeTemplateHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllIpxeTemplateHandler initializes and returns a new handler for getting all iPXE templates
 func NewGetAllIpxeTemplateHandler(dbSession *cdb.Session, tc tclient.Client, cfg *config.Config) GetAllIpxeTemplateHandler {
 	return GetAllIpxeTemplateHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -62,7 +61,7 @@ func NewGetAllIpxeTemplateHandler(dbSession *cdb.Session, tc tclient.Client, cfg
 // @Success 200 {object} []model.APIIpxeTemplate
 // @Router /v2/org/{org}/nico/ipxe-template [get]
 func (h GetAllIpxeTemplateHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IpxeTemplate", "GetAll", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IpxeTemplate", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -120,19 +119,12 @@ func (h GetAllIpxeTemplateHandler) Handle(c echo.Context) error {
 	}
 
 	if tenant != nil {
-		tsDAO := cdbm.NewTenantSiteDAO(h.dbSession)
-		tss, _, terr := tsDAO.GetAll(ctx, nil,
-			cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{tenant.ID}},
-			cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
-			nil,
-		)
+		tenantSiteIDs, terr := getTenantSiteIDs(ctx, h.dbSession, tenant)
 		if terr != nil {
 			logger.Error().Err(terr).Msg("error retrieving Tenant Site associations from DB")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant Site associations, DB error", nil)
 		}
-		for i := range tss {
-			tenantSites.Add(tss[i].SiteID)
-		}
+		tenantSites.Append(tenantSiteIDs...)
 	}
 
 	isAuthorized := func(id uuid.UUID) bool {
@@ -227,19 +219,17 @@ func (h GetAllIpxeTemplateHandler) Handle(c echo.Context) error {
 
 // GetIpxeTemplateHandler is the API Handler for retrieving a single iPXE template
 type GetIpxeTemplateHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	cfg       *config.Config
 }
 
 // NewGetIpxeTemplateHandler initializes and returns a new handler to retrieve an iPXE template
 func NewGetIpxeTemplateHandler(dbSession *cdb.Session, tc tclient.Client, cfg *config.Config) GetIpxeTemplateHandler {
 	return GetIpxeTemplateHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -255,7 +245,7 @@ func NewGetIpxeTemplateHandler(dbSession *cdb.Session, tc tclient.Client, cfg *c
 // @Success 200 {object} model.APIIpxeTemplate
 // @Router /v2/org/{org}/nico/ipxe-template/{id} [get]
 func (h GetIpxeTemplateHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IpxeTemplate", "Get", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("IpxeTemplate", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -281,7 +271,7 @@ func (h GetIpxeTemplateHandler) Handle(c echo.Context) error {
 	}
 
 	logger = logger.With().Str("IpxeTemplate ID", templateIDStr).Logger()
-	h.tracerSpan.SetAttribute(handlerSpan, attribute.String("ipxe_template_id", templateIDStr), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("ipxe_template_id", templateIDStr))
 
 	templateDAO := cdbm.NewIpxeTemplateDAO(h.dbSession)
 	tmpl, err := templateDAO.Get(ctx, nil, templateID)
@@ -358,18 +348,14 @@ func callerHasAccessToAnyAssociatedSite(
 		}
 	}
 
-	// Tenant path: any site reachable via a TenantSite association.
+	// Tenant path: any site the Tenant has access to.
 	if tenant != nil {
-		tsDAO := cdbm.NewTenantSiteDAO(dbSession)
-		tss, _, terr := tsDAO.GetAll(ctx, nil, cdbm.TenantSiteFilterInput{
-			TenantIDs: []uuid.UUID{tenant.ID},
-			SiteIDs:   siteIDs,
-		}, cdbp.PageInput{Limit: cutil.GetPtr(1)}, nil)
+		tenantSiteIDs, terr := getTenantSiteIDs(ctx, dbSession, tenant)
 		if terr != nil {
 			logger.Error().Err(terr).Msg("error retrieving Tenant Site associations for iPXE template authorization")
 			return false, terr
 		}
-		if len(tss) > 0 {
+		if mapset.NewSet(tenantSiteIDs...).ContainsAny(siteIDs...) {
 			return true, nil
 		}
 	}

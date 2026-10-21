@@ -92,9 +92,10 @@ When a query param is being deprecated:
 ## Guidance for Users
 
 If the deprecated item is an attribute that belongs to a request object used for create/update API endpoints:
-  - If a new attribute is introduced, either the new or deprecated attribute can be specified in request until expiry date
-  - If both new and deprecated attributes are specified in request data at the same time, an HTTP 400 response is returned informing preference for the new attribute
-  - Once the take action by date has passed and the deprecated attribute is included in create/update request, an HTTP 400 response is returned informing that the attribute has been deprecated
+
+- If a new attribute is introduced, either the new or deprecated attribute can be specified in request until expiry date
+- If both new and deprecated attributes are specified in request data at the same time, an HTTP 400 response is returned informing preference for the new attribute
+- Once the take action by date has passed and the deprecated attribute is included in create/update request, an HTTP 400 response is returned informing that the attribute has been deprecated
 
 Deprecation notices continue to be returned for one more release cycle after the take action by date.
 
@@ -133,6 +134,10 @@ Endpoints that have deprecations will be grouped here. Following deprecations ar
 ## Recent Deprecations
 
 Following deprecations were removed from the API in the recent past:
+
+### Machine
+
+- `observed_at` attribute on Machine health was deprecated in favor of `observedAt` and was removed on **September 10th, 2026 0:00 UTC**. Please use `observedAt` instead.
 
 ### Site
 

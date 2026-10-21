@@ -376,9 +376,12 @@ for identifying individual stuck objects.
 | `carbide_machine_dpu_info` | gauge | Host-to-DPU associations (one series per DPU). |
 | `carbide_machine_instance_info` | gauge | Machine-to-instance and tenant associations. |
 
-All metrics use labels `object_type` and `object_id`. State metrics add `state` and
-`substate` labels. These series exist only while true: transitions replace entries,
-deletions clear them immediately.
+The state metrics and `carbide_object_info` use labels `object_type` and `object_id`.
+State metrics add `state` and `substate` labels. The association metrics use their own
+labels instead: `carbide_machine_dpu_info` has `machine_id` and `dpu_id`, and
+`carbide_machine_instance_info` has `machine_id`, `instance_id`, and `tenant_org`.
+These series exist only while true: transitions replace entries, deletions clear them
+immediately.
 
 ### Configuration
 
@@ -478,9 +481,18 @@ For alerting rules using these metrics, see [alerts.md](alerts.md#5-per-object-a
 
 ## 5. Dashboards
 
-NICo ships three Grafana dashboards in the Helm chart at `helm/observability/dashboards/`.
+NICo ships six Grafana dashboards in the Helm chart at `helm/observability/dashboards/`.
 Import these JSON files into your Grafana instance or enable the Helm chart's dashboard
 provisioning.
+
+| Dashboard | File | Use it for |
+| --- | --- | --- |
+| Site Overview | `nico-overview.json` | the at-a-glance operational view of one site |
+| Site Detail | `nico-site-detail.json` | a deep per-subsystem view of one site |
+| Fleet | `nico-fleet.json` | comparing several sites on one Prometheus |
+| Object Lifecycle | `nico-lifecycle.json` | one object type's state machine in depth |
+| API Performance | `nico-api-performance.json` | control plane request rate and latency |
+| HW Health - BMC Performance | `nico-bmc-performance.json` | Redfish and BMC call behavior |
 
 ### Site overview dashboard
 
@@ -502,6 +514,114 @@ machines in transitional states that may need attention.
 **Health alerts** - Unhealthy hosts broken down by probe type and classification. Shows
 which health check is failing and what impact it has (PreventAllocations,
 PreventHostStateChanges, etc.).
+
+### Site detail dashboard
+
+The site detail board (`nico-site-detail.json`) carries every subsystem a site
+operator needs when the overview shows a problem but not its cause. It uses the same
+`$job` variable as the overview, plus a `$namespace` variable for the Kubernetes
+workload panels at the end.
+
+**Service health** - API status, build version, open tracing spans, Postgres connection
+pool and resource pool utilization. A pool at 100% utilization means new allocations from it fail.
+
+**Capacity and tenancy** - Host and GPU totals split into usable and in-use, per-tenant
+allocation, SKU and device-type breakdown, managed entity counts, and IP addresses per
+prefix.
+
+**Host lifecycle** - State distribution, above-SLA hosts, state-handler errors, entry
+and exit rates, mean time in state, and reboot attempts during discovery boot.
+
+**Host health** - Healthy percentage with maintenance and suppressed-alerting hosts
+discounted, probe and classification breakdowns, operator overrides, hosts missing a
+BIOS password, and rack, switch, and power shelf health.
+
+**Network segments and VPC prefixes** - State distribution, above-SLA objects,
+transitions, time in state, and handler errors for both object types.
+
+**InfiniBand** - Fabric count, UFM version, fabric errors, insecure configuration,
+UFM-visible ports and partitions, pkey mismatches, UFM write outcomes, monitor
+iteration latency, and the partition state machine.
+
+**NVLink partitioning** - Physical compared with logical partitions, NMX-C operation
+latency and timeouts, applied changes, configuration apply delay, and switch
+certificate expiry.
+
+**State controller performance** - Processor and enqueuer iteration latency, task
+enqueue, dispatch, completion, and requeue rates, per-state handler latency, and
+database queries attributed to each controller.
+
+**API requests** - Request and error rate by method, availability with and without
+caller-fault statuses counted against it, latency percentiles and histogram, per-instance
+request rate, and the admission control gate.
+
+**Secrets and transport** - Vault call rate, success ratio, errors by status code and
+token lifetime, Postgres secrets operations, inbound TLS handshakes, certificate
+reloads, and outbound TCP connect outcomes.
+
+**DPUs and firmware** - DPUs online compared with healthy, failing health checks,
+firmware and dpu-agent versions, host inventory component versions, and the DPU NIC and
+host firmware update backlogs.
+
+**Site explorer** - Whether exploration is enabled, last run status, endpoints explored
+and the success rate, failures by reason, expected inventory not found, inventory
+created, phase latency, BMC resets, and the preingestion pipeline.
+
+**Hardware health service** - Monitored endpoints and entities, collector iteration
+latency and failures, outbound call latency and errors by backend, and inventory refresh
+age.
+
+**Boot and network services** - PXE boot outcomes, DHCPv4 and DHCPv6 request and reply
+rates, dropped requests, DNS negative cache, and DHCP certificate expiry.
+
+**Serial console proxy** - BMC console connections tracked compared with healthy,
+connected clients, and stream errors.
+
+**Logs and Kubernetes workloads** - Log event rate by level, the noisiest components at
+WARN and ERROR, and per-container CPU, memory, restarts, and readiness. The Kubernetes
+panels need kube-state-metrics and cAdvisor.
+
+### Fleet dashboard
+
+The fleet board (`nico-fleet.json`) compares sites on one Prometheus. Most panels group
+by the `$site_label` variable; fleet-wide totals, such as Distinct API versions and the
+Fleet BMC connection panels, aggregate across all sites.
+
+On a central Prometheus fed by remote-write or federation, set `$site_label` to
+`forge_site`: the NICo observability bundle sets that as each site's external label, and
+Prometheus attaches external labels only when data leaves the server. Querying one site's
+own Prometheus leaves `forge_site` empty, so set `$site_label` to `job` there; each panel
+then shows one series per scrape job.
+
+**Fleet summary** - Sites reporting, sites with the API down, managed hosts and GPUs,
+above-SLA hosts, unhealthy hosts with and without an instance attached, and the number of
+distinct API versions deployed.
+
+**Capacity** - Fleet host and GPU occupancy, in-use and remaining-usable counts per site,
+and tenant footprint across sites.
+
+**Deployed versions** - API build per site, sites per build, and the dpu-agent, DPU
+firmware and host inventory component version spread.
+
+**Inventory and lifecycle** - Hosts, network segments and InfiniBand partitions managed
+per site, with the stuck objects of each type.
+
+**Host health** - Healthy percentage per site with maintenance and suppressed-alerting
+hosts discounted, unhealthy hosts, failing probes, alert classifications, overrides,
+hosts missing a BIOS password, and unhealthy DPUs.
+
+**InfiniBand fabrics** - Fabrics, errors, insecure fabrics, UFM versions, and pkey
+mismatches per site.
+
+**API service level** - Availability, request and error rate, mean and p95 latency,
+controller iteration latency, Vault availability, warning and error log rate, and the
+busiest pods.
+
+**Site explorer** - Hosts explored, managed hosts identified, failures, missing expected
+inventory, serial number mismatches, and incomplete preingestions per site.
+
+**Serial console proxy** - Connected BMC share, connection counts, and attached clients
+per site.
 
 ### Object lifecycle dashboard
 
@@ -544,12 +664,19 @@ contention is a common cause of API slowdowns.
 **Vault and transport** - Vault request rates, token refresh timing, TLS connection counts.
 Catches secret management issues before they cause auth failures.
 
+### BMC performance dashboard
+
+The BMC performance dashboard (`nico-bmc-performance.json`) covers the Redfish calls the
+hardware-health service makes, broken down by machine, BMC address, request path, and BMC
+model: availability, error counts and latency. Use it when hardware operations are slow
+or failing and you need to know whether the BMCs or NICo are responsible.
+
 ### Deploying dashboards
 
 **Option A: Helm provisioning (recommended)**
 
-Enable dashboard provisioning in your Helm values. The chart creates a ConfigMap that
-Grafana's sidecar picks up automatically:
+Enable dashboard provisioning in your Helm values. The chart creates one ConfigMap
+per dashboard, which Grafana's sidecar picks up automatically:
 
 ```yaml
 grafanaDashboards:

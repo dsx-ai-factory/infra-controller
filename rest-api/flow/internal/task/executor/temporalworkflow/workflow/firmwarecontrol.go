@@ -4,6 +4,7 @@
 package workflow
 
 import (
+	"maps"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -11,8 +12,10 @@ import (
 	"go.temporal.io/sdk/workflow"
 
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 // init registers the FirmwareControl workflow descriptor with the package registry.
@@ -32,6 +35,8 @@ var firmwareControlActivityOptions = workflow.ActivityOptions{
 		BackoffCoefficient: 2,
 	},
 }
+
+const firmwareLayeredComponentSelectionChangeID = "firmware-layered-component-selection"
 
 // firmwareControl orchestrates firmware updates using operation rules.
 // The execution sequence is driven by the RuleDefinition attached to the
@@ -54,16 +59,36 @@ func firmwareControl(
 	}
 
 	typeToTargets := buildTargets(&reqInfo)
+	executionTargets := typeToTargets
+	// Histories without this marker retain every component's rule steps.
+	selectionVersion := workflow.GetVersion(ctx, firmwareLayeredComponentSelectionChangeID, workflow.DefaultVersion, 1)
+	if selectionVersion != workflow.DefaultVersion {
+		executionTargets = selectFirmwareTargets(typeToTargets, info.TargetVersion)
+	}
 
 	report, err := executeRuleBasedOperation(
 		ctx,
 		reqInfo.TaskID,
+		executionTargets,
 		typeToTargets,
 		info,
 		reqInfo.RuleDefinition,
 	)
 
 	return updateFinishedTaskStatus(ctx, reqInfo.TaskID, err, report)
+}
+
+func selectFirmwareTargets(
+	targets map[devicetypes.ComponentType]common.Target,
+	targetVersion string,
+) map[devicetypes.ComponentType]common.Target {
+	selectedTargets := maps.Clone(targets)
+	for componentType := range selectedTargets {
+		if _, selected := extractComponentTargetVersion(targetVersion, componentType); !selected {
+			delete(selectedTargets, componentType)
+		}
+	}
+	return selectedTargets
 }
 
 // checkFirmwareUpdatePrerequisites validates that firmware update can proceed.

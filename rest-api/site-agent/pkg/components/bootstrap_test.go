@@ -4,6 +4,8 @@
 package elektra
 
 import (
+	"io"
+	"net/http"
 	"os"
 	"testing"
 	"time"
@@ -142,7 +144,17 @@ func Test_Bootstrap(t *testing.T) {
 
 				log.Info().Msg("Test Bootstrap get End")
 			case "saStatus":
-				computils.GetSAStatus(computils.SiteStatus)
+				resp, err := http.Get("http://localhost:" + computils.StatusPort() + computils.SiteStatus)
+				if err != nil {
+					t.Log(err)
+					return
+				}
+				defer resp.Body.Close()
+				body, err := io.ReadAll(resp.Body)
+				if err != nil {
+					t.Log(err)
+				}
+				t.Log(string(body))
 			}
 		})
 	}

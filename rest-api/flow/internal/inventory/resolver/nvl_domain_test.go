@@ -34,18 +34,18 @@ func TestResolveNVLDomainRackTargets(t *testing.T) {
 		wantLookups []identifier.Identifier
 	}{
 		{
-			name: "expands domains and preserves component filters",
+			name: "expands mixed external and legacy IDs and preserves component filters",
 			domains: []operation.NVLDomainTarget{
 				{
-					Identifier:     identifier.Identifier{ID: domainOneID},
+					Identifier:     identifier.Identifier{ExternalID: "rack-01"},
 					ComponentTypes: []devicetypes.ComponentType{devicetypes.ComponentTypeCompute},
 				},
 				{Identifier: identifier.Identifier{ID: domainTwoID}},
 			},
 			inventory: &fakeNVLDomainRackReader{
 				racksByDomain: map[identifier.Identifier][]*rack.Rack{
-					{ID: domainOneID}: {{Info: deviceinfo.DeviceInfo{ID: rackOneID}}},
-					{ID: domainTwoID}: {{Info: deviceinfo.DeviceInfo{ID: rackTwoID}}},
+					{ExternalID: "rack-01"}: {{Info: deviceinfo.DeviceInfo{ID: rackOneID}}},
+					{ID: domainTwoID}:       {{Info: deviceinfo.DeviceInfo{ID: rackTwoID}}},
 				},
 			},
 			want: []operation.RackTarget{
@@ -55,7 +55,7 @@ func TestResolveNVLDomainRackTargets(t *testing.T) {
 				},
 				{Identifier: identifier.Identifier{ID: rackTwoID}},
 			},
-			wantLookups: []identifier.Identifier{{ID: domainOneID}, {ID: domainTwoID}},
+			wantLookups: []identifier.Identifier{{ExternalID: "rack-01"}, {ID: domainTwoID}},
 		},
 		{
 			name: "reports lookup failure with domain index",
@@ -101,6 +101,7 @@ func TestResolveNVLDomainRackTargets(t *testing.T) {
 			)
 			if test.wantErr != "" {
 				require.EqualError(t, err, test.wantErr)
+				require.Nil(t, got)
 			} else {
 				require.NoError(t, err)
 				require.Equal(t, test.want, got)
@@ -119,6 +120,7 @@ type fakeNVLDomainRackReader struct {
 func (f *fakeNVLDomainRackReader) GetRacksForNVLDomain(
 	_ context.Context,
 	domain identifier.Identifier,
+	_ bool,
 ) ([]*rack.Rack, error) {
 	f.lookups = append(f.lookups, domain)
 	return f.racksByDomain[domain], f.errorsByDomain[domain]

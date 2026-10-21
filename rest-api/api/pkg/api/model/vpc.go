@@ -305,6 +305,7 @@ func (ascr APIVpcCreateRequest) Validate() error {
 		),
 		validation.Field(&ascr.RoutingProfile,
 			validation.When(ascr.RoutingProfile != nil,
+				validation.Required.Error("`routingProfile` must not be empty"),
 				validation.Length(3, 64).Error("`routingProfile` must contain at least 3 characters and a maximum of 64 characters"),
 				validation.Match(vpcRoutingProfileStartsWithLetterRegexp).Error("`routingProfile` must start with a letter"),
 				validation.Match(vpcRoutingProfileAllowedCharsRegexp).Error("`routingProfile` may only contain letters, numbers, or dashes"),

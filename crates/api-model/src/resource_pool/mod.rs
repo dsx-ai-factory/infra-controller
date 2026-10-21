@@ -14,15 +14,23 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+pub mod allocation;
+pub mod binding;
 pub mod common;
 pub mod define;
+pub mod remote;
 
 use std::fmt;
 use std::marker::PhantomData;
 use std::str::FromStr;
 
+pub use binding::{
+    ResourcePoolBackendKind, ResourcePoolBinding, ResourcePoolSelection, ResourcePoolValueDomain,
+};
 use chrono::{DateTime, Utc};
-pub use define::{Range, ResourcePoolDef, ResourcePoolType};
+pub use define::{
+    Range, ResourcePoolConfig, ResourcePoolDef, ResourcePoolType, parse_integer_range_bound,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
@@ -140,6 +148,17 @@ pub enum ValueType {
     Ipv6Prefix,
 }
 
+impl From<ResourcePoolType> for ValueType {
+    fn from(pool_type: ResourcePoolType) -> Self {
+        match pool_type {
+            ResourcePoolType::Integer => Self::Integer,
+            ResourcePoolType::Ipv4 => Self::Ipv4,
+            ResourcePoolType::Ipv6 => Self::Ipv6,
+            ResourcePoolType::Ipv6Prefix => Self::Ipv6Prefix,
+        }
+    }
+}
+
 impl fmt::Display for ValueType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -151,7 +170,8 @@ impl fmt::Display for ValueType {
     }
 }
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+/// `OwnerType` identifies the kind of entity holding a resource pool value.
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum OwnerType {
     /// owner_type for loopback_ip
     Machine,
@@ -162,7 +182,7 @@ pub enum OwnerType {
     /// owner_type for pkey
     IBPartition,
 
-    /// owner_type for vpc_cni
+    /// A VPC holding a VNI allocation.
     Vpc,
 
     /// owner_type for East West Networks

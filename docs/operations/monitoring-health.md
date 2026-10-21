@@ -21,6 +21,7 @@ For reference, see:
 - [Health Probe IDs](../architecture/health/health_probe_ids.md)
 - [Health Alert Classifications](../architecture/health/health_alert_classifications.md)
 - [Redfish Workflow](../architecture/redfish_workflow.md)
+- [Leak Detection and Handling](leak-detection-handling.md)
 
 ## Health Sources
 
@@ -41,6 +42,21 @@ more classifications. Classifications define operational impact. For example,
 `PreventAllocations` blocks new allocations while the alert is active, and
 `ExcludeFromStateMachineSla` excludes the host from state-machine SLA
 evaluation.
+
+## Rack and Tray Health Snapshots
+
+Rack and tray list and detail responses expose Core aggregate health in the
+nullable `health` field. Rack responses also expose component health when
+`includeComponents=true`. These values are Flow inventory snapshots, not live
+Core reads, so their freshness follows the inventory synchronization interval.
+Before the first successful synchronization, or when Core successfully reports
+no aggregate health, the field is `null`. A failed refresh or an omitted object
+preserves the last snapshot; an explicitly empty report clears it.
+
+Use the [Rack](api:GET/v2/org/:org/nico/rack) and
+[Tray](api:GET/v2/org/:org/nico/tray) inventory endpoints for these snapshots.
+For leak-specific fields and their location in responses, see
+[Leak Detection and Handling](leak-detection-handling.md#health-reporting-and-allocation-protection).
 
 ## Hardware Health Monitoring
 
@@ -259,10 +275,15 @@ On the Prometheus endpoint, series carry entity labels (`processor_id`,
 standard identity labels added by the sink (`machine_id`, `endpoint_ip`,
 `serial_number`, `rack_id`, ...), with `collector_type="metrics_collector"`.
 
-The OTLP sink (`[sinks.otlp]`) emits the same metric *names*, but places the
-identity context on OTLP resource attributes rather than datapoint labels;
-whether those appear as query labels depends on the backend (VictoriaMetrics,
-for example, flattens resource attributes onto every series).
+The OTLP sink (`[sinks.otlp]`) emits the same metric *names* and puts the
+identity context in two places: on OTLP resource attributes, and on each
+datapoint under the Prometheus sink's label names, custom endpoint labels
+included. A backend that keeps resource attributes off its series, such as the
+OpenTelemetry Collector's Prometheus exporter with its default settings, still
+gets every identity label. A backend that flattens resource attributes onto
+every series, such as VictoriaMetrics, also shows the resource attributes whose
+names differ, for example `switch_serial_number` beside `serial_number`, with
+the same value.
 
 Entity discovery runs as its own periodic task (`[collectors.discovery]`,
 always on) that walks each BMC's Redfish Systems and Chassis trees and
@@ -540,6 +561,7 @@ for common workflows:
 | `MarkHealthy` | Force healthy. |
 | `StopRebootForAutomaticRecoveryFromStateMachine` | Block automatic recovery reboots during manual work. |
 | `TenantReportedIssue` | Tenant-reported issue while releasing an instance. |
+| `RequestOnlineRepair` | Keep an unhealthy instance assigned until the online repair override is cleared. |
 | `RequestRepair` | Tenant-reported issue requiring repair. |
 
 Examples:

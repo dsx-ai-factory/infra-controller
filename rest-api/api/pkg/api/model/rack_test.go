@@ -36,8 +36,23 @@ func TestAPIRackJSONContract(t *testing.T) {
 		"operationStatus":"Unknown",
 		"nvLinkDomainIds":[],
 		"location":{"region":"","datacenter":"DC1","room":"","position":""},
-		"taskStats":{"pendingTaskCount":0,"activeTaskCount":0}
+		"taskStats":{"pendingTaskCount":0,"activeTaskCount":0},
+		"health":null
 	}`, string(got))
+}
+
+func TestAPIRackFromProtoClearsMissingHealth(t *testing.T) {
+	var rack APIRack
+	rack.FromProto(&flowv1.Rack{Health: &flowv1.HealthReport{}}, false)
+	assert.NotNil(t, rack.Health)
+	rack.FromProto(&flowv1.Rack{}, false)
+	assert.Nil(t, rack.Health)
+
+	var component APIRackComponent
+	component.FromProto(&flowv1.Component{Health: &flowv1.HealthReport{}})
+	assert.NotNil(t, component.Health)
+	component.FromProto(&flowv1.Component{})
+	assert.Nil(t, component.Health)
 }
 
 func TestAPIComponentDiffJSONContract(t *testing.T) {
@@ -78,8 +93,8 @@ func TestAPIComponentDiff_FromProto(t *testing.T) {
 func TestNewAPIRack(t *testing.T) {
 	description := "Test rack description"
 	model := "NVL72"
-	domainID := "59202b81-65fb-45ec-b3b8-91ab0ad3f34a"
-	domainID2 := "cfa95885-186f-49b7-993f-dccd417a67cb"
+	domainID := "group-01"
+	domainID2 := "group-02"
 
 	tests := []struct {
 		name           string
@@ -137,9 +152,10 @@ func TestNewAPIRack(t *testing.T) {
 				ExternalId: "core-rack-in-domain",
 				Info:       &flowv1.DeviceInfo{Id: &flowv1.UUID{Id: "flow-rack-uuid"}},
 				NvlDomainIds: []*flowv1.UUID{
-					{Id: domainID},
-					{Id: domainID2},
+					{Id: "59202b81-65fb-45ec-b3b8-91ab0ad3f34a"},
+					{Id: "cfa95885-186f-49b7-993f-dccd417a67cb"},
 				},
+				NvlDomainExternalIds: []string{domainID, domainID2},
 			},
 			want: &APIRack{
 				ID:              "core-rack-in-domain",

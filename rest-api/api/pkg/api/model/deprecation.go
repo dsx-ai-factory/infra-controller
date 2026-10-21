@@ -50,11 +50,12 @@ func NewAPIDeprecation(de DeprecatedEntity) APIDeprecation {
 		TakeActionBy: de.TakeActionBy,
 	}
 
-	if de.Type == DeprecationTypeAttribute {
+	switch de.Type {
+	case DeprecationTypeAttribute:
 		apiDeprecation.Attribute = &de.OldValue
-	} else if de.Type == DeprecationTypeQueryParam {
+	case DeprecationTypeQueryParam:
 		apiDeprecation.QueryParam = &de.OldValue
-	} else if de.Type == DeprecationTypeEndpoint {
+	case DeprecationTypeEndpoint:
 		apiDeprecation.Endpoint = &de.OldValue
 	}
 

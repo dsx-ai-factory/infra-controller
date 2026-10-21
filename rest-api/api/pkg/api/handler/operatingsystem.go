@@ -27,10 +27,10 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
@@ -236,13 +236,12 @@ func validateIpxeTemplateAvailableAtSites(ctx context.Context, dbSession *cdb.Se
 	return nil
 }
 
-// getTenantSiteIDs combines explicit membership with effective privileged site
-// access, matching the Site API. An empty result must remain non-nil so queries
+// getTenantSiteIDs combines Allocation sites with effective privileged site
+// access, matching common.TenantHasSiteAccess. An empty result must remain non-nil so queries
 // match no sites rather than removing the site restriction.
 func getTenantSiteIDs(ctx context.Context, dbSession *cdb.Session, tenant *cdbm.Tenant) ([]uuid.UUID, error) {
-	tsDAO := cdbm.NewTenantSiteDAO(dbSession)
-	tss, _, err := tsDAO.GetAll(ctx, nil,
-		cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{tenant.ID}},
+	as, _, err := cdbm.NewAllocationDAO(dbSession).GetAll(ctx, nil,
+		cdbm.AllocationFilterInput{TenantIDs: []uuid.UUID{tenant.ID}},
 		cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
 		nil,
 	)
@@ -254,8 +253,8 @@ func getTenantSiteIDs(ctx context.Context, dbSession *cdb.Session, tenant *cdbm.
 		return nil, err
 	}
 	siteIDs := mapset.NewSet[uuid.UUID]()
-	for _, ts := range tss {
-		siteIDs.Add(ts.SiteID)
+	for _, a := range as {
+		siteIDs.Add(a.SiteID)
 	}
 	for _, id := range privilegedIDs {
 		siteIDs.Add(id)
@@ -267,21 +266,19 @@ func getTenantSiteIDs(ctx context.Context, dbSession *cdb.Session, tenant *cdbm.
 
 // CreateOperatingSystemHandler is the API Handler for creating new OperatingSystem
 type CreateOperatingSystemHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateOperatingSystemHandler initializes and returns a new handler for creating OperatingSystem
 func NewCreateOperatingSystemHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) CreateOperatingSystemHandler {
 	return CreateOperatingSystemHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -297,7 +294,7 @@ func NewCreateOperatingSystemHandler(dbSession *cdb.Session, tc temporalClient.C
 // @Success 201 {object} model.APIOperatingSystem
 // @Router /v2/org/{org}/nico/operating-system [post]
 func (csh CreateOperatingSystemHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("OperatingSystem", "Create", c, csh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("OperatingSystem", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -458,8 +455,13 @@ func (csh CreateOperatingSystemHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Unable to associate Operating System with Site: %s, Site does not belong to provider", siteID.String()), nil)
 			}
 		} else {
-			// Validate the TenantSite exists for current tenant and this site
-			if _, ok := sttsmap[siteID]; !ok {
+			// Validate the current tenant has access to this site
+			ok, serr := common.TenantHasSiteAccess(ctx, nil, csh.dbSession, tenant, siteID)
+			if serr != nil {
+				logger.Error().Err(serr).Msg("error checking Tenant access to Site")
+				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create Operating System, DB error checking Site access", nil)
+			}
+			if !ok {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Unable to associate Operating System with Site: %s, Tenant does not have access to Site", siteID.String()), nil)
 			}
 
@@ -757,19 +759,17 @@ func reloadOperatingSystemForResponse(ctx context.Context, logger zerolog.Logger
 
 // GetAllOperatingSystemHandler is the API Handler for getting all OperatingSystems
 type GetAllOperatingSystemHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllOperatingSystemHandler initializes and returns a new handler for getting all OperatingSystems
 func NewGetAllOperatingSystemHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllOperatingSystemHandler {
 	return GetAllOperatingSystemHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -792,7 +792,7 @@ func NewGetAllOperatingSystemHandler(dbSession *cdb.Session, tc temporalClient.C
 // @Success 200 {object} []model.APIOperatingSystem
 // @Router /v2/org/{org}/nico/operating-system [get]
 func (gash GetAllOperatingSystemHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("OperatingSystem", "GetAll", c, gash.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("OperatingSystem", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -888,7 +888,6 @@ func (gash GetAllOperatingSystemHandler) Handle(c echo.Context) error {
 			sitesByID[site.ID] = site
 		}
 
-		tenantSiteIDs := make(map[uuid.UUID]struct{})
 		if tenant != nil {
 			var terr error
 			tenantSites, _, terr = tsDAO.GetAll(
@@ -906,9 +905,6 @@ func (gash GetAllOperatingSystemHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine if Tenant has access to Sites specified in query, DB error", nil)
 			}
 			tenantSitesLoaded = true
-			for _, ts := range tenantSites {
-				tenantSiteIDs[ts.SiteID] = struct{}{}
-			}
 		}
 
 		for _, siteID := range requestedSiteIDs {
@@ -916,8 +912,15 @@ func (gash GetAllOperatingSystemHandler) Handle(c echo.Context) error {
 			if !ok {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to retrieve Site specified in query", nil)
 			}
-			_, tenantHasAccess := tenantSiteIDs[siteID]
-			tenantHasAccess = tenantHasAccess || slices.Contains(tenantVisibleProviderSiteIDs, siteID)
+			tenantHasAccess := slices.Contains(tenantVisibleProviderSiteIDs, siteID)
+			if !tenantHasAccess && tenant != nil {
+				var aerr error
+				tenantHasAccess, aerr = common.TenantHasSiteAccess(ctx, nil, gash.dbSession, tenant, siteID)
+				if aerr != nil {
+					logger.Error().Err(aerr).Msg("error checking Tenant access to Site specified in query")
+					return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine if Tenant has access to Sites specified in query, DB error", nil)
+				}
+			}
 			providerHasAccess := ip != nil && site.InfrastructureProviderID == ip.ID
 			if !tenantHasAccess && !providerHasAccess {
 				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Caller is not associated with Site specified in query", nil)
@@ -928,7 +931,7 @@ func (gash GetAllOperatingSystemHandler) Handle(c echo.Context) error {
 
 	// Get query type from query param
 	if typeQuery := qParams["type"]; len(typeQuery) > 0 {
-		gash.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("type", typeQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("type", typeQuery))
 		for _, typeVal := range typeQuery {
 			_, ok := cdbm.OperatingSystemsTypeMap[typeVal]
 			if !ok {
@@ -943,12 +946,12 @@ func (gash GetAllOperatingSystemHandler) Handle(c echo.Context) error {
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
 		filter.SearchQuery = searchQuery
-		gash.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Get status from query param
 	if statusQuery := qParams["status"]; len(statusQuery) > 0 {
-		gash.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("status", statusQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("status", statusQuery))
 		for _, status := range statusQuery {
 			_, ok := cdbm.OperatingSystemStatusMap[status]
 			if !ok {
@@ -1140,19 +1143,17 @@ func (gash GetAllOperatingSystemHandler) Handle(c echo.Context) error {
 
 // GetOperatingSystemHandler is the API Handler for retrieving OperatingSystem
 type GetOperatingSystemHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetOperatingSystemHandler initializes and returns a new handler to retrieve OperatingSystem
 func NewGetOperatingSystemHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetOperatingSystemHandler {
 	return GetOperatingSystemHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -1169,7 +1170,7 @@ func NewGetOperatingSystemHandler(dbSession *cdb.Session, tc temporalClient.Clie
 // @Success 200 {object} model.APIOperatingSystem
 // @Router /v2/org/{org}/nico/operating-system/{id} [get]
 func (gsh GetOperatingSystemHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("OperatingSystem", "Get", c, gsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("OperatingSystem", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1193,7 +1194,7 @@ func (gsh GetOperatingSystemHandler) Handle(c echo.Context) error {
 	// Get os ID from URL param
 	osStrID := c.Param("id")
 
-	gsh.tracerSpan.SetAttribute(handlerSpan, attribute.String("operatingsystem_id", osStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("operatingsystem_id", osStrID))
 
 	sID, err := uuid.Parse(osStrID)
 	if err != nil {
@@ -1239,7 +1240,7 @@ func (gsh GetOperatingSystemHandler) Handle(c echo.Context) error {
 
 	// If caller has dual role (Tenant+Provider) we already know we can go forward.
 	// Otherwise we need additional checks:
-	if !(tenant != nil && ip != nil) {
+	if tenant == nil || ip == nil {
 		if ip != nil && !ownedByProvider {
 			logger.Warn().Msg("provider admin cannot view tenant-owned operating system")
 			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Operating System does not belong to the infrastructure provider in org", nil)
@@ -1341,21 +1342,19 @@ func (gsh GetOperatingSystemHandler) Handle(c echo.Context) error {
 
 // UpdateOperatingSystemHandler is the API Handler for updating a OperatingSystem
 type UpdateOperatingSystemHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateOperatingSystemHandler initializes and returns a new handler for updating OperatingSystem
 func NewUpdateOperatingSystemHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateOperatingSystemHandler {
 	return UpdateOperatingSystemHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1372,7 +1371,7 @@ func NewUpdateOperatingSystemHandler(dbSession *cdb.Session, tc temporalClient.C
 // @Success 200 {object} model.APIOperatingSystem
 // @Router /v2/org/{org}/nico/operating-system/{id} [patch]
 func (ush UpdateOperatingSystemHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("OperatingSystem", "Update", c, ush.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("OperatingSystem", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1388,7 +1387,7 @@ func (ush UpdateOperatingSystemHandler) Handle(c echo.Context) error {
 	// Get os ID from URL param
 	osStrID := c.Param("id")
 
-	ush.tracerSpan.SetAttribute(handlerSpan, attribute.String("operatingsystem_id", osStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("operatingsystem_id", osStrID))
 
 	osID, err := uuid.Parse(osStrID)
 	if err != nil {
@@ -1525,8 +1524,12 @@ func (ush UpdateOperatingSystemHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to update Operating System, Associated Site: %s is not in Registered state", dbosa.Site.Name), nil)
 			}
 
-			// Validate the TenantSite exists for current tenant and this site
-			_, ok := sttsmap[dbosa.SiteID]
+			// Validate the current tenant has access to this site
+			ok, serr := common.TenantHasSiteAccess(ctx, nil, ush.dbSession, tenant, dbosa.SiteID)
+			if serr != nil {
+				logger.Error().Err(serr).Msg("error checking Tenant access to Site")
+				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to update Operating System, DB error checking Site access", nil)
+			}
 			if !ok {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Unable to update associate Operating System with Site: %s, Tenant does not have access to Site", dbosa.Site.Name), nil)
 			}
@@ -1848,21 +1851,19 @@ func (ush UpdateOperatingSystemHandler) Handle(c echo.Context) error {
 
 // DeleteOperatingSystemHandler is the API Handler for deleting a OperatingSystem
 type DeleteOperatingSystemHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteOperatingSystemHandler initializes and returns a new handler for deleting OperatingSystem
 func NewDeleteOperatingSystemHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config) DeleteOperatingSystemHandler {
 	return DeleteOperatingSystemHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1878,7 +1879,7 @@ func NewDeleteOperatingSystemHandler(dbSession *cdb.Session, tc temporalClient.C
 // @Success 202
 // @Router /v2/org/{org}/nico/operating-system/{id} [delete]
 func (dsh DeleteOperatingSystemHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("OperatingSystem", "Delete", c, dsh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("OperatingSystem", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1894,7 +1895,7 @@ func (dsh DeleteOperatingSystemHandler) Handle(c echo.Context) error {
 	// Get operating system ID from URL param
 	osStrID := c.Param("id")
 
-	dsh.tracerSpan.SetAttribute(handlerSpan, attribute.String("operatingsystem_id", osStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("operatingsystem_id", osStrID))
 
 	osID, err := uuid.Parse(osStrID)
 	if err != nil {
@@ -1970,7 +1971,7 @@ func (dsh DeleteOperatingSystemHandler) Handle(c echo.Context) error {
 	if tenant != nil {
 		instanceFilter.TenantIDs = []uuid.UUID{tenant.ID}
 	}
-	instances, _, err := isDAO.GetAll(ctx, nil, instanceFilter, paginator.PageInput{}, nil)
+	instances, _, err := isDAO.GetAll(ctx, nil, instanceFilter, cdbp.PageInput{}, nil)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Instances for Operating System from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Instances for deleting operatingsystem", nil)

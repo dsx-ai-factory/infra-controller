@@ -21,14 +21,17 @@
 //! its switch, and per-node results aligned with the request.
 
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use librms::protos::rack_manager::rack_manager_client::RackManagerClient;
 use librms::protos::rack_manager_v2::rack_manager_v2_client::RackManagerV2Client;
 use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
 use mac_address::MacAddress;
-use rms_mock::SimNode;
+use rms_mock::{RmsMockConfig, SimNode, StaticInventory};
 
-use super::common::{a_switch, failing_nodes, node_info, serve_with, serve_with_config};
+use super::common::{
+    a_switch, failing_nodes, node_info, serve_inventory, serve_with, serve_with_config,
+};
 
 type Client = RackManagerClient<tonic::transport::Channel>;
 
@@ -226,11 +229,16 @@ async fn password_rotation_rejects_empty_credentials() {
 
 /// The rotation caller names one switch by its NVOS host endpoint alone,
 /// keeps the batch's `job_id` whatever the batch status says, and polls it
-/// as a parent with children until every related job is complete.
+/// as a parent with children until every related job is complete. The
+/// completed job hands the new credentials to the host, so the switch's
+/// NVOS accepts them from then on.
 #[tokio::test]
 async fn password_rotation_issues_a_parent_that_completes_with_its_child() {
-    let url = serve_with(vec![a_switch()]).await;
+    let inventory = Arc::new(StaticInventory::new(vec![a_switch()].into()));
+    let url = serve_inventory(inventory.clone(), RmsMockConfig::default()).await;
     let mut client = RackManagerClient::connect(url).await.unwrap();
+    let switch_bmc = a_switch().bmc_mac.expect("the switch has a BMC");
+    assert_eq!(inventory.switch_password(switch_bmc), None);
 
     let response = client
         .update_switch_system_password(password_request(vec![host_only_node_info(
@@ -271,6 +279,11 @@ async fn password_rotation_issues_a_parent_that_completes_with_its_child() {
         rms::JobExecutionState::Completed as i32,
         "the caller needs every related job complete, not just the parent"
     );
+    assert_eq!(
+        inventory.switch_password(switch_bmc),
+        Some(("admin".to_string(), "next-password".to_string())),
+        "the completed job set the switch's NVOS password"
+    );
 }
 
 /// A rotation selected to fail fails its parent and carries a failed child,
@@ -308,6 +321,49 @@ async fn a_faulted_password_rotation_fails_through_a_child_that_names_the_switch
     assert!(
         children[0].error_message.contains("switch-7"),
         "the child's message names the switch: {:?}",
+        children[0].error_message
+    );
+}
+
+/// A switch the inventory knows without a BMC address gives the mock nowhere
+/// to deliver the password, so its child fails and says so, rather than
+/// completing while the switch's NVOS keeps the old password.
+#[tokio::test]
+async fn a_switch_without_a_bmc_address_fails_its_rotation_naming_the_switch() {
+    let url = serve_with(vec![SimNode {
+        bmc_mac: None,
+        ..a_switch()
+    }])
+    .await;
+    let mut client = RackManagerClient::connect(url).await.unwrap();
+
+    let batch = client
+        .update_switch_system_password(password_request(vec![host_only_node_info(
+            "switch-7",
+            "10.233.32.7",
+        )]))
+        .await
+        .unwrap()
+        .into_inner()
+        .response
+        .unwrap();
+    assert_eq!(batch.status, rms::ReturnCode::Success as i32);
+
+    let final_poll = poll_parent(&mut client, &batch.job_id).await;
+    assert_eq!(
+        final_poll.job_states[0].execution_state,
+        rms::JobExecutionState::Failed as i32
+    );
+    let children = children_of(&final_poll, &batch.job_id);
+    assert_eq!(children.len(), 1);
+    assert_eq!(
+        children[0].execution_state,
+        rms::JobExecutionState::Failed as i32
+    );
+    assert!(
+        children[0].error_message.contains("switch-7")
+            && children[0].error_message.contains("BMC MAC"),
+        "the child's message names the switch and the missing address: {:?}",
         children[0].error_message
     );
 }

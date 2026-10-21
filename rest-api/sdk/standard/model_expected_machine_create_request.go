@@ -36,11 +36,13 @@ type ExpectedMachineCreateRequest struct {
 	ChassisSerialNumber string `json:"chassisSerialNumber"`
 	// Serial numbers of the Expected Machine's fallback DPUs (Data Processing Units)
 	FallbackDPUSerialNumbers []string `json:"fallbackDPUSerialNumbers,omitempty"`
+	// Optional expected host NIC declarations. Omission or null creates an empty list.
+	Interfaces []ExpectedMachineInterface `json:"interfaces,omitempty"`
 	// Optional ID of the SKU to associate with this Expected Machine
 	SkuId NullableString `json:"skuId,omitempty"`
 	// Optional rack identifier for this component
 	RackId NullableString `json:"rackId,omitempty"`
-	// Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
+	// Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
 	BmcIpAddress NullableString `json:"bmcIpAddress,omitempty"`
 	// Display name for this component
 	Name NullableString `json:"name,omitempty"`
@@ -274,6 +276,38 @@ func (o *ExpectedMachineCreateRequest) HasFallbackDPUSerialNumbers() bool {
 // SetFallbackDPUSerialNumbers gets a reference to the given []string and assigns it to the FallbackDPUSerialNumbers field.
 func (o *ExpectedMachineCreateRequest) SetFallbackDPUSerialNumbers(v []string) {
 	o.FallbackDPUSerialNumbers = v
+}
+
+// GetInterfaces returns the Interfaces field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *ExpectedMachineCreateRequest) GetInterfaces() []ExpectedMachineInterface {
+	if o == nil {
+		var ret []ExpectedMachineInterface
+		return ret
+	}
+	return o.Interfaces
+}
+
+// GetInterfacesOk returns a tuple with the Interfaces field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *ExpectedMachineCreateRequest) GetInterfacesOk() ([]ExpectedMachineInterface, bool) {
+	if o == nil || IsNil(o.Interfaces) {
+		return nil, false
+	}
+	return o.Interfaces, true
+}
+
+// HasInterfaces returns a boolean if a field has been set.
+func (o *ExpectedMachineCreateRequest) HasInterfaces() bool {
+	if o != nil && !IsNil(o.Interfaces) {
+		return true
+	}
+
+	return false
+}
+
+// SetInterfaces gets a reference to the given []ExpectedMachineInterface and assigns it to the Interfaces field.
+func (o *ExpectedMachineCreateRequest) SetInterfaces(v []ExpectedMachineInterface) {
+	o.Interfaces = v
 }
 
 // GetSkuId returns the SkuId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -834,6 +868,9 @@ func (o ExpectedMachineCreateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize["chassisSerialNumber"] = o.ChassisSerialNumber
 	if o.FallbackDPUSerialNumbers != nil {
 		toSerialize["fallbackDPUSerialNumbers"] = o.FallbackDPUSerialNumbers
+	}
+	if o.Interfaces != nil {
+		toSerialize["interfaces"] = o.Interfaces
 	}
 	if o.SkuId.IsSet() {
 		toSerialize["skuId"] = o.SkuId.Get()

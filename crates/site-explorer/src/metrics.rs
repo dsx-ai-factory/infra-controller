@@ -979,7 +979,7 @@ impl SiteExplorerInstruments {
             meter
                 .u64_observable_gauge("carbide_site_explorer_created_machines_count")
                 .with_description(
-                    "Number of machine pairs created by Site Explorer after identification",
+                    "Number of machine pairs created by Site Explorer after identification in the last SiteExplorer run",
                 )
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {
@@ -1117,7 +1117,7 @@ impl SiteExplorerInstruments {
             meter
                 .u64_observable_gauge("carbide_site_explorer_created_power_shelves_count")
                 .with_description(
-                    "Number of power shelves created by Site Explorer after identification",
+                    "Number of power shelves created by Site Explorer after identification in the last SiteExplorer run",
                 )
                 .with_callback(move |observer| {
                     metrics.if_available(|metrics, attrs| {

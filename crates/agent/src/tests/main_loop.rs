@@ -17,6 +17,74 @@
 
 use super::*;
 
+#[test]
+fn ipv6_only_network_requires_dhcp_acceptance() {
+    for (scenario, loopback, dhcp_changed, expected_error) in [
+        (
+            "missing primary loopback",
+            "",
+            None,
+            Some("missing loopback IP"),
+        ),
+        ("IPv6-only accepted", "2001:db8::1", Some(true), None),
+        (
+            "IPv6-only already applied",
+            "2001:db8::1",
+            Some(false),
+            None,
+        ),
+        (
+            "IPv6 primary rejection",
+            "2001:db8::1",
+            None,
+            Some("IPv6-only network update is waiting for DHCP"),
+        ),
+        ("legacy independent update", "192.0.2.10", None, None),
+        (
+            "malformed primary",
+            "not-an-address",
+            Some(true),
+            Some("invalid primary loopback IP: not-an-address"),
+        ),
+    ] {
+        let mut config = comparison_network_config();
+        config.managed_host_config.as_mut().unwrap().loopback_ip = loopback.to_string();
+        let dhcp_result = dhcp_changed.ok_or_else(|| eyre::eyre!("injected DHCP rejection"));
+        let result = require_dhcp_before_ipv6_only_network_update(&config, &dhcp_result);
+        match expected_error {
+            Some(expected) => assert!(
+                format!("{:#}", result.expect_err(scenario)).contains(expected),
+                "{scenario}"
+            ),
+            None => assert!(result.is_ok(), "{scenario}: {result:?}"),
+        }
+    }
+}
+
+/// A failed stop must not prevent secondary-admin isolation, while DPUs that
+/// configure DHCP must still wait for acceptance before applying IPv6 networking.
+#[test]
+fn dhcp_stop_failure_does_not_block_secondary_admin_isolation() {
+    use carbide_test_support::Outcome::{Fails, Yields};
+    use carbide_test_support::scenarios;
+
+    scenarios!(run = |(is_primary_dpu, use_admin_network)| {
+        let mut config = comparison_network_config();
+        config.managed_host_config.as_mut().unwrap().loopback_ip = "2001:db8::1".to_string();
+        config.is_primary_dpu = is_primary_dpu;
+        config.use_admin_network = use_admin_network;
+        let dhcp_result = Err(eyre::eyre!("injected DHCP operation failure"));
+
+        require_dhcp_before_ipv6_only_network_update(&config, &dhcp_result).map_err(drop)
+    };
+        // Only this role stops DHCP instead of applying a replacement config.
+        "secondary admin" { (false, true) => Yields(()) }
+        // Neither being secondary nor using the admin network alone bypasses it.
+        "secondary tenant" { (false, false) => Fails }
+        "primary admin" { (true, true) => Fails }
+    );
+}
+
 /// Builds a routing profile with multiple entries in each set-like
 /// collection used by the fingerprint tests.
 fn comparison_routing_profile() -> rpc::RoutingProfile {
@@ -172,6 +240,8 @@ fn comparison_interface(id: &str, vlan_id: u32, vni: u32) -> rpc::FlatInterfaceC
 /// ordering comparison cases.
 fn comparison_network_config() -> ManagedHostNetworkConfigResponse {
     ManagedHostNetworkConfigResponse {
+        service_interfaces: vec![],
+        service_vpc_slot_inventory: None,
         asn: 65_000,
         dhcp_servers: vec!["10.10.0.1".to_string(), "10.10.0.2".to_string()],
         vni_device: "vxlan48".to_string(),
@@ -254,6 +324,7 @@ enum RenderedInputChange {
     SiteFabricPrefix,
     SiteFabricNullRoute,
     AdminInterfaceVni,
+    AdminIpv6Prefix,
     TenantInterfaceVni,
     TenantInterfaceIp,
     TenantIpv6Prefix,
@@ -303,6 +374,14 @@ impl RenderedInputChange {
                     .as_mut()
                     .expect("comparison fixture has an admin interface")
                     .vni += 1;
+            }
+            Self::AdminIpv6Prefix => {
+                config
+                    .admin_interface
+                    .as_mut()
+                    .expect("comparison fixture has an admin interface")
+                    .addresses[0]
+                    .prefix = "2001:db8:1::/64".to_string();
             }
             Self::TenantInterfaceVni => config.tenant_interfaces[1].vni += 1,
             Self::TenantInterfaceIp => {
@@ -414,6 +493,14 @@ fn current_network_version_detects_rendered_input_changes() {
 
     value_scenarios!(run = |change| {
         let mut config = comparison_network_config();
+        if matches!(change, RenderedInputChange::AdminIpv6Prefix) {
+            config.use_admin_network = true;
+            config
+                .admin_interface
+                .as_mut()
+                .expect("comparison fixture has an admin interface")
+                .is_l2_segment = true;
+        }
         let mut current = CurrentNetworkVersion::default();
         current.update_from(&config, None);
         change.apply(&mut config);
@@ -436,6 +523,8 @@ fn current_network_version_detects_rendered_input_changes() {
         }
         "interface rendering inputs" {
             RenderedInputChange::AdminInterfaceVni => false,
+            // Admin prefix replacement changes the SVI VRR/RA desired state.
+            RenderedInputChange::AdminIpv6Prefix => false,
             RenderedInputChange::TenantInterfaceVni => false,
             RenderedInputChange::TenantInterfaceIp => false,
             // Prefix replacement must replace the advertised desired state.

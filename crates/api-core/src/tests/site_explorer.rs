@@ -120,11 +120,10 @@ async fn rejected_admin_address_reconciliation_rolls_back(
     let host_id = mh.host().id;
     let creator = MachineCreator::new(
         env.pool.clone(),
-        env.config.site_explorer.clone(),
+        (&env.config.site_explorer).into(),
         env.common_pools.clone(),
         Arc::new(env.config.rack_profiles.clone()),
         None,
-        env.test_credential_manager.clone(),
         false,
     );
     let host_bmc_ip = host_bmc_ip(&env, &mh).await?;
@@ -672,10 +671,6 @@ async fn test_get_machine_position_info(pool: PgPool) -> Result<(), Box<dyn std:
         revision_id: Some(3),
         ..Default::default()
     }];
-    report.physical_slot_number = Some(5);
-    report.compute_tray_index = Some(2);
-    report.topology_id = Some(10);
-    report.revision_id = Some(3);
     assert_eq!(
         db::explored_endpoints::try_update(
             bmc_ip,

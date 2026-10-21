@@ -66,6 +66,7 @@ mod metrics;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock_api_server;
 mod tls;
+mod tracing_setup;
 
 static CONFIG: Lazy<RwLock<CarbideDhcpContext>> =
     Lazy::new(|| RwLock::new(CarbideDhcpContext::default()));
@@ -373,7 +374,7 @@ pub unsafe extern "C" fn hook_set_config_ntp_servers_ipv6(servers: *const c_char
     }
 }
 
-/// Take the optional IPv6 provisioning-server address reserved for future DHCPv6 boot options.
+/// Take the optional IPv6 provisioning-server address for DHCPv6 HTTP boot URLs.
 ///
 /// # Safety
 /// Function is unsafe as it dereferences a raw pointer given to it. Caller is responsible

@@ -26,6 +26,7 @@ on:
     paths:
       - 'fern/**'
       - 'docs/**'
+      - 'RELEASE.md'
       - '.github/workflows/fern-docs-ci.yml'
   push:
     branches:
@@ -33,6 +34,7 @@ on:
     paths:
       - 'fern/**'
       - 'docs/**'
+      - 'RELEASE.md'
       - '.github/workflows/fern-docs-ci.yml'
 
 permissions:

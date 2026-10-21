@@ -8,6 +8,11 @@ returns networking to the admin side. NICo then runs cleanup and sanitization
 workflows, performs the configured trust checks, and validates the host. When
 the host is eligible for allocation again, NICo returns it to `Ready`.
 
+Tenant cleanup keeps the hardware owned by the same NICo installation. To
+remove a device from service or prepare it for a clean re-ingest, follow
+[Decommission NICo-managed hardware](../decommissioning/index.md) after tenant
+cleanup finishes.
+
 Refer to the following resources for more information:
 
 - [Managed Host State Diagrams](../architecture/state_machines/managedhost.md)
@@ -151,22 +156,25 @@ copy of the VPC VRF. The DPU also removes the host-to-DPU BGP session in the
 tenant VRF, per-interface routing policy, and any routes previously leaked to
 the underlay.
 
-**Prevent unknown or released hosts from using network resources.** The
-release flow is convergence-gated. The state machine blocks until either the
-DPU confirms that all tenant interfaces have moved onto the admin overlay or
-the machine carries a health alert that prevents reuse. This gate prevents a
-released instance from lingering as a "ghost instance." NICo returns tenant IP,
-VNI, and DPU-loopback allocations to their pools and deletes the instance
-record. Force-delete tears down the same fabric state through the same APIs.
+**Prevent unknown or released hosts from using network resources.** An accepted
+release request marks the instance for deletion; cleanup continues in the
+background. Before releasing network allocations and deleting the instance
+record, the controller waits for the DPUs to confirm the switch to the admin
+network. A health alert does not replace that confirmation.
 
-**Prevent cross-tenant leakage of IPs, connectivity, or metadata.** NICo does
-not report the instance as deleted until every fabric—Ethernet, InfiniBand, and
-NVLink—reports that the host has been removed from all tenant partitions.
-Addresses and VNIs return to their pools only after teardown. The released
-instance's DNS records are also removed. These actions prevent the next tenant
-from inheriting a live address or reaching the prior tenant. The DPU metadata
-service is reconfigured for the post-tenant phase so that a later occupant
-cannot read the prior tenant's metadata or identity.
+Force deletion is different. It requests external fabric cleanup, but a new
+deletion does not wait for DPU acknowledgement by default. Deleting the records
+does not prove that the DPU has stopped forwarding tenant traffic. Refer to the
+[optional DPU acknowledgement wait](../playbooks/force_delete.md#optional-dpu-acknowledgement-wait)
+for when to use the wait and what it confirms.
+
+**Understand what release confirms.** Release does not wait for confirmation
+from every fabric. If InfiniBand state cannot be observed, cleanup can finish
+with an `IbCleanupPending` alert that prevents new allocations until the IB
+monitor confirms cleanup. This path does not wait for NVLink removal.
+
+NICo also removes the instance's DNS records and reconfigures the DPU metadata
+service so the next tenant cannot read the prior tenant's metadata or identity.
 
 Verify network cleanup from the per-host cleanup state and DPU/machine network
 status:

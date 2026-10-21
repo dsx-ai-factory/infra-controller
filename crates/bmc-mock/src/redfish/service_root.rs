@@ -76,6 +76,13 @@ async fn get_service_root<C: Callbacks>(State(state): State<BmcState<C>>) -> Res
     } else {
         builder
     };
+    // Attestation clients read this link to decide whether the BMC has
+    // anything to attest, so only a configured collection is advertised.
+    let builder = if state.component_integrities.is_some() {
+        builder.component_integrity_collection(&redfish::component_integrity::collection())
+    } else {
+        builder
+    };
     builder
         .manager_collection(&redfish::manager::collection())
         .update_service(&redfish::update_service::resource())
@@ -140,6 +147,10 @@ impl ServiceRootBuilder {
 
     fn manager_collection(self, v: &redfish::Collection<'_>) -> Self {
         self.apply_patch(v.nav_property("Managers"))
+    }
+
+    fn component_integrity_collection(self, v: &redfish::Collection<'_>) -> Self {
+        self.apply_patch(v.nav_property("ComponentIntegrity"))
     }
 
     fn update_service(self, v: &redfish::Resource<'_>) -> Self {

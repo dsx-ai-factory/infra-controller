@@ -88,7 +88,7 @@ fn from_host_conf_v6(
         mtu,
         prefix: ipv6.prefix.clone(),
         gateway: None,
-        booturl: None,
+        booturl: value.booturl.clone(),
         last_invalidation_time: None,
         ntp_servers: vec![],
     })

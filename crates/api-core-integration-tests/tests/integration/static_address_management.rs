@@ -22,6 +22,8 @@ use carbide_api_core::test_support::network_segment::create_static_assignments_s
 use carbide_test_harness::TestNetworkSegment;
 use carbide_test_harness::prelude::*;
 use mac_address::MacAddress;
+use model::allocation_type::AllocationType;
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use rpc::forge::{
     AssignStaticAddressRequest, AssignStaticAddressStatus, DhcpDiscovery,
     FindInterfaceAddressesRequest, RemoveStaticAddressRequest, RemoveStaticAddressStatus,
@@ -803,6 +805,92 @@ async fn test_assign_external_ipv6_matching_link_address_moves_to_dual_stack_sta
             .iter()
             .any(|prefix| prefix.prefix.is_ipv6()),
         "static-assignments should include an IPv6 placeholder"
+    );
+    txn.rollback().await?;
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_managed_static_address_requires_dhcp_ack_after_external_assignment(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let StaticAddressTestEnv {
+        env, admin_segment, ..
+    } = init(pool).await;
+    let mac = MacAddress::from_str("aa:bb:cc:dd:ee:2b").unwrap();
+    let managed_ipv4: IpAddr = "192.0.2.215".parse().unwrap();
+    let external_ipv6: IpAddr = "2001:db8:ffff::215".parse().unwrap();
+
+    let mut txn = env.db_txn().await;
+    let interface = db::machine_interface::validate_existing_mac_and_create(
+        &mut txn,
+        mac,
+        std::slice::from_ref(&admin_segment.relay_address),
+        None,
+        None,
+    )
+    .await?;
+    txn.commit().await?;
+
+    // The IPv6 assignment moves the interface to `static-assignments`,
+    // even though its IPv4 reservation still belongs to the admin prefix.
+    for (ip_address, status) in [
+        (managed_ipv4, AssignStaticAddressStatus::ReplacedDhcp),
+        (external_ipv6, AssignStaticAddressStatus::Assigned),
+    ] {
+        let response = env
+            .api()
+            .assign_static_address(Request::new(AssignStaticAddressRequest {
+                interface_id: Some(interface.id),
+                ip_address: ip_address.to_string(),
+            }))
+            .await?
+            .into_inner();
+        assert_eq!(response.status(), status);
+    }
+
+    let mut txn = env.db_txn().await;
+    db::bmc_suppression::upsert(
+        &mut txn,
+        &NewBmcSuppression {
+            bmc_mac_address: mac,
+            subsystem: BmcSuppressionSubsystem::Dhcp,
+            source: BmcSuppressionSource::Decommissioning,
+            reason: "decommissioning".to_string(),
+        },
+    )
+    .await?;
+    assert!(
+        db::bmc_suppression::is_dhcp_acknowledgement_pending(&mut *txn, mac).await?,
+        "the managed IPv4 reservation still requires acknowledgement with external IPv6 present"
+    );
+    txn.commit().await?;
+
+    // Removing IPv6 leaves the interface on `static-assignments` with
+    // only the managed IPv4 reservation, which still requires the wait.
+    let response = env
+        .api()
+        .remove_static_address(Request::new(RemoveStaticAddressRequest {
+            interface_id: Some(interface.id),
+            ip_address: external_ipv6.to_string(),
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(response.status(), RemoveStaticAddressStatus::Removed);
+
+    let mut txn = env.db_txn().await;
+    let updated = db::machine_interface::find_one(&mut *txn, interface.id).await?;
+    let static_segment = db::network_segment::static_assignments(&mut txn).await?;
+    assert_eq!(updated.segment_id, static_segment.id);
+    let addresses =
+        db::machine_interface_address::find_for_interface(&mut txn, interface.id).await?;
+    assert_eq!(addresses.len(), 1);
+    assert_eq!(addresses[0].address, managed_ipv4);
+    assert_eq!(addresses[0].allocation_type, AllocationType::Static);
+    assert!(
+        db::bmc_suppression::is_dhcp_acknowledgement_pending(&mut *txn, mac).await?,
+        "removing external IPv6 must not exempt the remaining managed IPv4 reservation"
     );
     txn.rollback().await?;
 

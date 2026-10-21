@@ -12,7 +12,6 @@ nico-admin-cli-expected-rack-add - Add expected rack
 nico-admin-cli expected-rack add [--meta-name]
 [--meta-description] [--label] [--extended]
 [--sort-by] [-h|--help] <RACK_ID>
-<RACK_PROFILE_ID>
 ```
 
 ## DESCRIPTION
@@ -63,15 +62,11 @@ Print help (see a summary with -h)
 
 Rack ID of the expected rack
 
-`<RACK_PROFILE_ID>`
-
-Rack profile ID of the expected rack
-
 ## Examples
 
 ```sh
-nico-admin-cli expected-rack add 12345678-1234-5678-90ab-cdef01234567 abcdef01-2345-6789-abcd-ef0123456789
-nico-admin-cli expected-rack add 12345678-1234-5678-90ab-cdef01234567 abcdef01-2345-6789-abcd-ef0123456789 --meta-name rack-01 --label DATACENTER:XYZ
+nico-admin-cli expected-rack add rack-01
+nico-admin-cli expected-rack add rack-01 --meta-name rack-01 --label DATACENTER:XYZ
 ```
 
 ---

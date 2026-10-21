@@ -133,6 +133,30 @@ impl<IO: StateControllerIO> StateController<IO> {
                 break;
             }
         }
+
+        // Immediately emit the latest set of metrics
+        self.processor.emit_metrics();
+    }
+
+    /// Processes already-queued test work without running the periodic enqueuer.
+    /// This distinguishes transition-driven retries from a later full-object scan.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn run_queued_iterations(&mut self) {
+        self.processor.object_metrics.clear();
+        loop {
+            self.processor.last_metric_emission_time = std::time::Instant::now();
+            if let Err(err) = self
+                .processor
+                .run_single_iteration(std::time::Duration::MAX, true)
+                .await
+            {
+                tracing::error!(error = %err, "State processor iteration error");
+            }
+            if self.processor.object_tasks.is_empty() {
+                break;
+            }
+        }
+
         // Immediately emit the latest set of metrics
         self.processor.emit_metrics();
     }

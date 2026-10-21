@@ -20,7 +20,11 @@ use std::cmp::{max, min};
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_uuid::vpc::VpcId;
 use carbide_uuid::vpc_peering::VpcPeeringId;
+use config_version::ConfigVersion;
 use ipnetwork::IpNetwork;
+use model::controller_outcome::PersistentStateHandlerOutcome;
+use model::instance::InstanceSearchFilter;
+use model::machine::{LoadSnapshotOptions, ManagedHostStateSnapshot};
 use model::vpc::VpcPeering;
 use sqlx::PgConnection;
 use uuid::Uuid;
@@ -57,7 +61,7 @@ pub async fn create(
             WHERE NOT EXISTS (
                 SELECT 1 FROM vpc_peerings WHERE id = $1 OR (vpc1_id = $2 AND vpc2_id = $3)
             )
-            RETURNING *
+            RETURNING id, vpc1_id, vpc2_id, deletion_version
         "#;
 
     match sqlx::query_as::<_, VpcPeering>(query)
@@ -104,7 +108,7 @@ pub async fn find_by_ids(
     txn: &mut PgConnection,
     ids: Vec<VpcPeeringId>,
 ) -> Result<Vec<VpcPeering>, DatabaseError> {
-    let query = "SELECT * FROM vpc_peerings WHERE id=ANY($1)";
+    let query = "SELECT id, vpc1_id, vpc2_id, deletion_version FROM vpc_peerings WHERE id=ANY($1)";
     let vpc_peering_list = sqlx::query_as::<_, VpcPeering>(query)
         .bind(ids)
         .fetch_all(txn)
@@ -114,18 +118,105 @@ pub async fn find_by_ids(
     Ok(vpc_peering_list)
 }
 
-pub async fn delete(
+/// Locks one retained peering while its deletion request or completion is checked.
+pub async fn find_by_id_for_update(
     txn: &mut PgConnection,
-    vpc_peer_id: VpcPeeringId,
-) -> Result<VpcPeering, DatabaseError> {
-    let query = "DELETE FROM vpc_peerings WHERE id=$1 RETURNING *";
-    let vpc_peering = sqlx::query_as::<_, VpcPeering>(query)
-        .bind(vpc_peer_id)
-        .fetch_one(txn)
+    id: VpcPeeringId,
+) -> Result<Option<VpcPeering>, DatabaseError> {
+    let query =
+        "SELECT id, vpc1_id, vpc2_id, deletion_version FROM vpc_peerings WHERE id=$1 FOR UPDATE";
+    sqlx::query_as(query)
+        .bind(id)
+        .fetch_optional(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
+        .map_err(|error| DatabaseError::query(query, error))
+}
 
-    Ok(vpc_peering)
+/// Lists only peerings whose permission removal has been requested.
+pub async fn find_deleting_ids(txn: &mut PgConnection) -> Result<Vec<VpcPeeringId>, DatabaseError> {
+    let query = "SELECT id FROM vpc_peerings WHERE deletion_version IS NOT NULL ORDER BY id";
+    sqlx::query_scalar(query)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// Records deletion in the same transaction that requests every receiver update.
+/// The caller holds the routing and peering locks and checks that it is active.
+pub async fn mark_deleting(txn: &mut PgConnection, id: VpcPeeringId) -> Result<(), DatabaseError> {
+    let query = "UPDATE vpc_peerings SET deletion_version = $2 WHERE id = $1";
+    sqlx::query(query)
+        .bind(id)
+        .bind(ConfigVersion::initial())
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
+}
+
+/// Physically removes a peering after the caller checks every receiver under
+/// the routing and peering locks. Active rows are never removed here.
+pub async fn final_delete(txn: &mut PgConnection, id: VpcPeeringId) -> Result<(), DatabaseError> {
+    let query = "DELETE FROM vpc_peerings WHERE id = $1 AND deletion_version IS NOT NULL";
+    sqlx::query(query)
+        .bind(id)
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
+}
+
+/// Stores the last deletion wait or error without changing its initial request.
+pub async fn update_controller_state_outcome(
+    txn: &mut PgConnection,
+    id: VpcPeeringId,
+    outcome: PersistentStateHandlerOutcome,
+) -> Result<(), DatabaseError> {
+    let query = "UPDATE vpc_peerings SET controller_state_outcome = $2 WHERE id = $1";
+    sqlx::query(query)
+        .bind(id)
+        .bind(sqlx::types::Json(outcome))
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
+}
+
+/// Finds hosts that can still use either endpoint's permissions. Instance
+/// search includes current, old, and requested network configurations and
+/// retained address reservations, including deleting Instances.
+pub async fn find_receivers(
+    txn: &mut PgConnection,
+    peering: &VpcPeering,
+) -> Result<Vec<ManagedHostStateSnapshot>, DatabaseError> {
+    let mut instance_ids = Vec::new();
+    for vpc_id in [peering.vpc_id, peering.peer_vpc_id] {
+        instance_ids.extend(
+            crate::instance::find_ids(
+                &mut *txn,
+                InstanceSearchFilter {
+                    vpc_id: Some(vpc_id.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await?,
+        );
+    }
+    instance_ids.sort_unstable();
+    instance_ids.dedup();
+    let mut hosts = crate::managed_host::load_by_instance_ids(
+        txn,
+        &instance_ids,
+        LoadSnapshotOptions::default(),
+    )
+    .await?
+    .into_iter()
+    // This existing predicate also handles acknowledged Admin returns and
+    // terminal decommissioning; an Instance row alone is not forwarding.
+    .filter(ManagedHostStateSnapshot::needs_site_prefix_isolation)
+    .collect::<Vec<_>>();
+    hosts.sort_unstable_by_key(|host| host.host_snapshot.id);
+    Ok(hosts)
 }
 
 pub async fn get_vpc_peer_ids(
@@ -152,10 +243,31 @@ pub async fn get_vpc_peer_ids(
     Ok(vpc_peer_ids)
 }
 
+/// Returns retained peers for admission, including permissions whose removal
+/// has not yet been acknowledged. DPU rendering uses [`get_active_vpc_peer_vnis`].
 pub async fn get_vpc_peer_vnis(
     txn: &mut PgConnection,
     vpc_id: VpcId,
     virtualization_types: Vec<VpcVirtualizationType>,
+) -> Result<Vec<(VpcId, i32)>, DatabaseError> {
+    get_peer_vnis(txn, vpc_id, virtualization_types, false).await
+}
+
+/// Returns only active imports for DPU rendering. Admission must instead use
+/// [`get_vpc_peer_vnis`] so permissions awaiting acknowledgement still conflict.
+pub async fn get_active_vpc_peer_vnis(
+    txn: &mut PgConnection,
+    vpc_id: VpcId,
+    virtualization_types: Vec<VpcVirtualizationType>,
+) -> Result<Vec<(VpcId, i32)>, DatabaseError> {
+    get_peer_vnis(txn, vpc_id, virtualization_types, true).await
+}
+
+async fn get_peer_vnis(
+    txn: &mut PgConnection,
+    vpc_id: VpcId,
+    virtualization_types: Vec<VpcVirtualizationType>,
+    active_only: bool,
 ) -> Result<Vec<(VpcId, i32)>, DatabaseError> {
     let query = r#"
             SELECT vpcs.id, (vpcs.status->>'vni')::integer
@@ -166,30 +278,19 @@ pub async fn get_vpc_peer_vnis(
             END
             WHERE (vp.vpc1_id = $1 OR vp.vpc2_id = $1)
               AND vpcs.network_virtualization_type = ANY($2)
+              AND (NOT $3 OR vp.deletion_version IS NULL)
         "#;
 
     let vpc_id: Uuid = vpc_id.into();
     let peer_vpc_vnis = sqlx::query_as(query)
         .bind(vpc_id)
         .bind(virtualization_types)
+        .bind(active_only)
         .fetch_all(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
     Ok(peer_vpc_vnis)
-}
-
-pub async fn delete_by_vpc_id(txn: &mut PgConnection, vpc_id: VpcId) -> Result<(), DatabaseError> {
-    let query = "DELETE FROM vpc_peerings vp WHERE vp.vpc1_id =$1 OR vp.vpc2_id = $1 RETURNING *";
-
-    let vpc_id: Uuid = vpc_id.into();
-    sqlx::query_as::<_, VpcPeering>(query)
-        .bind(vpc_id)
-        .fetch_all(txn)
-        .await
-        .map_err(|e| DatabaseError::query(query, e))?;
-
-    Ok(())
 }
 
 pub async fn get_prefixes_by_vpcs(

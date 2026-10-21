@@ -34,6 +34,7 @@ import (
 	dpsclient "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/dps"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -52,12 +53,20 @@ const (
 
 // CreateInstanceHandler is the API Handler for creating new Instance
 type CreateInstanceHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	dps        dpsclient.PowerProvisioner
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
+	dps       dpsclient.PowerProvisioner
+}
+
+// stringPtrEqual reports whether two optional strings hold the same value,
+// treating nil (absent) and a set value as distinct.
+func stringPtrEqual(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // buildInstanceNetworkConfig assembles the workflow
@@ -176,12 +185,11 @@ func instanceInterfaceVpcSelection(ifc *cdbm.Interface) (*corev1.InstanceInterfa
 // NewCreateInstanceHandler initializes and returns a new handler for creating Instance
 func NewCreateInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config, dps dpsclient.PowerProvisioner) CreateInstanceHandler {
 	return CreateInstanceHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		dps:        dps,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
+		dps:       dps,
 	}
 }
 
@@ -338,7 +346,8 @@ func (cih CreateInstanceHandler) buildInstanceCreateRequestOsConfig(c echo.Conte
 	// Options below should all have been set by the
 	// earlier call to ValidateAndSetOperatingSystemData
 
-	if os.Type == cdbm.OperatingSystemTypeIPXE {
+	switch os.Type {
+	case cdbm.OperatingSystemTypeIPXE:
 		return &corev1.InstanceOperatingSystemConfig{
 			RunProvisioningInstructionsOnEveryBoot: *apiRequest.AlwaysBootWithCustomIpxe,
 			PhoneHomeEnabled:                       *apiRequest.PhoneHomeEnabled,
@@ -349,7 +358,7 @@ func (cih CreateInstanceHandler) buildInstanceCreateRequestOsConfig(c echo.Conte
 			},
 			UserData: apiRequest.UserData,
 		}, osID, nil
-	} else if os.Type == cdbm.OperatingSystemTypeTemplatedIPXE {
+	case cdbm.OperatingSystemTypeTemplatedIPXE:
 		if apiErr := validateTemplatedIpxeOsForSite(ctx, cih.dbSession, logger, os, site.ID); apiErr != nil {
 			return nil, nil, apiErr
 		}
@@ -363,7 +372,7 @@ func (cih CreateInstanceHandler) buildInstanceCreateRequestOsConfig(c echo.Conte
 			},
 			UserData: apiRequest.UserData,
 		}, osID, nil
-	} else {
+	default:
 		return &corev1.InstanceOperatingSystemConfig{
 			PhoneHomeEnabled: *apiRequest.PhoneHomeEnabled,
 			Variant: &corev1.InstanceOperatingSystemConfig_OsImageId{
@@ -433,7 +442,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 
 	// ==================== Step 1: Authentication & Authorization ====================
 
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Instance", "Create", c, cih.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Instance", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1316,7 +1325,9 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			updateInput := cdbm.MachineUpdateInput{
 				MachineID:  machine.ID,
 				IsAssigned: cutil.GetPtr(true),
+				Status:     cutil.GetPtr(machine.StatusForAssignment(true)),
 			}
+			statusChanged := machine.Status != *updateInput.Status
 			machine, err = mDAO.Update(ctx, tx, updateInput)
 			if err != nil {
 				if err == cdb.ErrDoesNotExist {
@@ -1324,6 +1335,18 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				}
 				logger.Error().Err(err).Msg("error retrieving Machine from DB by ID")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Machine with ID specified in request data", nil)
+			}
+
+			if statusChanged {
+				_, err = cdbm.NewStatusDetailDAO(cih.dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
+					EntityID: machine.ID,
+					Status:   machine.Status,
+					Message:  cutil.GetPtr(cdbm.MachineStatusInUseMessage),
+				})
+				if err != nil {
+					logger.Error().Err(err).Msg("failed to create Machine status detail")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to record Machine status change", nil)
+				}
 			}
 
 			instanceTypeID = machine.InstanceTypeID
@@ -1377,7 +1400,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			alconstraints, err := common.GetAllocationConstraintsForInstanceType(ctx, tx, cih.dbSession, tenant.ID, instanceType, tnas)
 			if err != nil {
 				if err == common.ErrAllocationConstraintNotFound {
-					return cutil.NewAPIError(http.StatusInternalServerError, "No Allocations for specified Instance Type were found for current Tenant", nil)
+					return cutil.NewAPIError(http.StatusForbidden, "No Allocations for specified Instance Type were found for current Tenant", nil)
 				}
 				logger.Error().Err(err).Msg("error retrieving Allocation Constraints from DB for InstanceType and Allocation")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Allocations for specified Instance Type, DB error", nil)
@@ -1419,6 +1442,9 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				if errors.As(err, &ibSelErr) {
 					return cutil.NewAPIError(http.StatusBadRequest, ibSelErr.Error(), ibSelErr.ValidationError())
 				}
+				if errors.Is(err, common.ErrSpectrumXMachineSelection) {
+					return cutil.NewAPIError(http.StatusBadRequest, err.Error(), nil)
+				}
 				if err == common.ErrInstanceTypeMachineNotFound {
 					return cutil.NewAPIError(http.StatusBadRequest,
 						"No Machines are available for specified Instance Type", nil)
@@ -1433,6 +1459,15 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 		logger.Info().Str("MachineID", machine.ID).
 			Interface("MachineLabelSelector", apiRequest.MachineLabelSelector).
 			Msg("selected Machine for Instance creation")
+
+		// Instance Type placement already validated each candidate. Explicit
+		// placement validates the selected machine using the same DB projection.
+		if apiRequest.MachineID != nil {
+			apiErr := common.ValidateMachineSpectrumXAttachments(ctx, tx, cih.dbSession, machine.ID, apiRequest.SpectrumXAttachments)
+			if apiErr != nil {
+				return apiErr
+			}
+		}
 
 		mcDAO := cdbm.NewMachineCapabilityDAO(cih.dbSession)
 
@@ -1944,7 +1979,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create DPU Extension Service Deployment for Instance, DB error", nil)
 			}
 
-			des, _ := desIDMap[desdID]
+			des := desIDMap[desdID]
 			desd.DpuExtensionService = des
 
 			desds = append(desds, *desd)
@@ -1998,6 +2033,8 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				DeviceInstance:       *sac.DeviceInstance,
 				AttachmentType:       sac.AttachmentType,
 				VirtualFunctionID:    sac.VirtualFunctionID,
+				BridgeName:           sac.BridgeName,
+				OvnNetworkName:       sac.OvnNetworkName,
 				Status:               cdbm.SpectrumXAttachmentStatusPending,
 				CreatedBy:            dbUser.ID,
 			})
@@ -2157,7 +2194,11 @@ func instanceCreateUncertainError(apiErr *cutil.APIError, instance *cdbm.Instanc
 // The caller holds the machine row/advisory locks in tx. Do not filter by tenant:
 // that would hide a conflicting occupant. GetAll excludes soft-deleted instances.
 func (cih CreateInstanceHandler) machineUnavailableError(ctx context.Context, tx *cdb.Tx, logger zerolog.Logger, machine *cdbm.Machine, tenantID uuid.UUID, message string) *cutil.APIError {
-	apiErr := cutil.NewAPIError(http.StatusBadRequest, message, nil)
+	code := http.StatusBadRequest
+	if machine.IsAssigned {
+		code = http.StatusConflict
+	}
+	apiErr := cutil.NewAPIError(code, message, nil)
 	instances, total, err := cdbm.NewInstanceDAO(cih.dbSession).GetAll(ctx, tx,
 		cdbm.InstanceFilterInput{MachineIDs: []string{machine.ID}, SiteIDs: []uuid.UUID{machine.SiteID}},
 		cdbp.PageInput{Limit: cutil.GetPtr(2)}, nil)
@@ -2177,23 +2218,21 @@ func (cih CreateInstanceHandler) machineUnavailableError(ctx context.Context, tx
 
 // UpdateInstanceHandler is the API Handler for updating an Instance
 type UpdateInstanceHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	dps        dpsclient.PowerProvisioner
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
+	dps       dpsclient.PowerProvisioner
 }
 
 // NewUpdateInstanceHandler initializes and returns a new handler for updating Instance
 func NewUpdateInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config, dps dpsclient.PowerProvisioner) UpdateInstanceHandler {
 	return UpdateInstanceHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		dps:        dps,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
+		dps:       dps,
 	}
 }
 
@@ -2229,10 +2268,7 @@ func (uih UpdateInstanceHandler) handleReboot(c echo.Context, logger *zerolog.Lo
 		powerStatusMessage := cutil.GetPtr("received Instance reboot request, processing")
 
 		// Check if instance request for rebooting with ipxe
-		rebootWithCustomIpxe := false
-		if apiRequest.RebootWithCustomIpxe != nil && *apiRequest.RebootWithCustomIpxe {
-			rebootWithCustomIpxe = true
-		}
+		rebootWithCustomIpxe := apiRequest.RebootWithCustomIpxe != nil && *apiRequest.RebootWithCustomIpxe
 
 		// Check if instance request for updating before reboot
 		applyUpdatesOnReboot := false
@@ -2552,7 +2588,8 @@ func (uih UpdateInstanceHandler) buildInstanceUpdateRequestOsConfig(c echo.Conte
 	}
 
 	if os != nil {
-		if os.Type == cdbm.OperatingSystemTypeIPXE {
+		switch os.Type {
+		case cdbm.OperatingSystemTypeIPXE:
 			return &corev1.InstanceOperatingSystemConfig{
 				RunProvisioningInstructionsOnEveryBoot: alwaysBootWithCustomIpxe,
 				PhoneHomeEnabled:                       phoneHomeEnabled,
@@ -2563,7 +2600,7 @@ func (uih UpdateInstanceHandler) buildInstanceUpdateRequestOsConfig(c echo.Conte
 				},
 				UserData: userData,
 			}, osID, nil
-		} else if os.Type == cdbm.OperatingSystemTypeTemplatedIPXE {
+		case cdbm.OperatingSystemTypeTemplatedIPXE:
 			if apiErr := validateTemplatedIpxeOsForSite(ctx, uih.dbSession, logger, os, site.ID); apiErr != nil {
 				return nil, nil, apiErr
 			}
@@ -2577,7 +2614,7 @@ func (uih UpdateInstanceHandler) buildInstanceUpdateRequestOsConfig(c echo.Conte
 				},
 				UserData: userData,
 			}, osID, nil
-		} else if os.Type == cdbm.OperatingSystemTypeImage {
+		case cdbm.OperatingSystemTypeImage:
 			return &corev1.InstanceOperatingSystemConfig{
 				PhoneHomeEnabled: phoneHomeEnabled,
 				Variant: &corev1.InstanceOperatingSystemConfig_OsImageId{
@@ -2615,7 +2652,7 @@ func (uih UpdateInstanceHandler) buildInstanceUpdateRequestOsConfig(c echo.Conte
 // @Success 200 {object} model.APIInstance
 // @Router /v2/org/{org}/nico/instance/{id} [patch]
 func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Instance", "Update", c, uih.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Instance", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -2648,7 +2685,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Instance ID in URL", nil)
 	}
 
-	uih.tracerSpan.SetAttribute(handlerSpan, attribute.String("instance_id", instanceStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("instance_id", instanceStrID))
 
 	// Add the instance ID to the log fields now that we know we have a valid one.
 	logger = logger.With().Str("Instance ID", instanceID.String()).Logger()
@@ -2770,10 +2807,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	// Check for reboot request
-	instanceRebootRequest := false
-	if apiRequest.TriggerReboot != nil && *apiRequest.TriggerReboot {
-		instanceRebootRequest = true
-	}
+	instanceRebootRequest := apiRequest.TriggerReboot != nil && *apiRequest.TriggerReboot
 
 	// If this was only a reboot request, handle it and return.
 	if instanceRebootRequest {
@@ -3381,7 +3415,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		}
 
 		if des.TenantID != tenant.ID {
-			logger.Warn().Str("Tenant ID", tenant.ID.String()).Str("DPU Extension Service ID", desID.String()).Msg("DPU Extension Service does not belong to current Tenant")
+			logger.Warn().Str("DPU Extension Service ID", desID.String()).Msg("DPU Extension Service does not belong to current Tenant")
 			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("DPU Extension Service: %s does not belong to current Tenant", desID.String()), nil)
 		}
 
@@ -3506,6 +3540,13 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			logger.Error().Msgf("NVLink interfaces validation failed: %s", err)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate NVLink interfaces specified in request", err)
 		}
+	}
+
+	// Omission preserves attachments; an empty replacement must allow removal
+	// even after the corresponding capability disappears from inventory.
+	apiErr = common.ValidateMachineSpectrumXAttachments(ctx, nil, uih.dbSession, machine.ID, apiRequest.SpectrumXAttachments)
+	if apiErr != nil {
+		return apiErr.Send(c)
 	}
 
 	// Values populated inside the transaction closure that are needed for the response.
@@ -3737,7 +3778,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				}
 
 				if sshkeygroup.TenantID != ui.TenantID {
-					logger.Warn().Str("Tenant ID", ui.TenantID.String()).Str("SSH Key Group ID", skgID.String()).Msg("SSH Key Group does not belong to current Tenant")
+					logger.Warn().Str("SSH Key Group ID", skgID.String()).Msg("SSH Key Group does not belong to current Tenant")
 					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to update Instance, SSH Key Group with ID: %s does not belong to Tenant", skgID), nil)
 				}
 
@@ -3945,11 +3986,12 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 						existingReadyIbIfcsCount++
 					} else {
 						if mostRecentIbIfc.Updated.After(time.Now().Add(-InfiniBandInterfaceStatusSyncGraceWindow)) {
-							if mostRecentIbIfc.Status == cdbm.InfiniBandInterfaceStatusPending {
+							switch mostRecentIbIfc.Status {
+							case cdbm.InfiniBandInterfaceStatusPending:
 								existingPendingIbIfcsCount++
-							} else if mostRecentIbIfc.Status == cdbm.InfiniBandInterfaceStatusDeleting {
+							case cdbm.InfiniBandInterfaceStatusDeleting:
 								existingDeletingIbIfcsCount++
-							} else if mostRecentIbIfc.Status == cdbm.InfiniBandInterfaceStatusError {
+							case cdbm.InfiniBandInterfaceStatusError:
 								reIssueInfiniBandInterfaces = true
 							}
 						} else {
@@ -4073,6 +4115,41 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				existing, reusable := existingSxAByKey[requestedSxA.Key()]
 				if reusable {
 					retainedSxAIDs[existing.ID] = true
+
+					// The reuse key covers partition, device, device instance and attachment
+					// type but not the OVS metadata, so a request that changes only its bridge
+					// name or OVN network name still reuses this row. Persist the new metadata
+					// and carry the updated row forward; otherwise the Site keeps the stale
+					// bridge and the response reports it too.
+					if !stringPtrEqual(existing.BridgeName, apiSxA.BridgeName) ||
+						!stringPtrEqual(existing.OvnNetworkName, apiSxA.OvnNetworkName) {
+						updated, uerr := sxaDAO.Update(ctx, tx, cdbm.SpectrumXAttachmentUpdateInput{
+							SpectrumXAttachmentID: existing.ID,
+							BridgeName:            apiSxA.BridgeName,
+							OvnNetworkName:        apiSxA.OvnNetworkName,
+						})
+						if uerr != nil {
+							logger.Error().Err(uerr).Msg("failed to update SpectrumX Attachment metadata in DB")
+							return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SpectrumX Attachment for Instance, DB error", nil)
+						}
+
+						// Update only writes provided values, so a dropped OVN network name is
+						// cleared explicitly.
+						if apiSxA.OvnNetworkName == nil && existing.OvnNetworkName != nil {
+							updated, uerr = sxaDAO.Clear(ctx, tx, cdbm.SpectrumXAttachmentClearInput{
+								SpectrumXAttachmentID: existing.ID,
+								OvnNetworkName:        true,
+							})
+							if uerr != nil {
+								logger.Error().Err(uerr).Msg("failed to clear SpectrumX Attachment OVN network name in DB")
+								return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update SpectrumX Attachment for Instance, DB error", nil)
+							}
+						}
+
+						newOrExistingSxAs = append(newOrExistingSxAs, *updated)
+						continue
+					}
+
 					newOrExistingSxAs = append(newOrExistingSxAs, existing)
 					continue
 				}
@@ -4085,6 +4162,8 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					DeviceInstance:       *apiSxA.DeviceInstance,
 					AttachmentType:       apiSxA.AttachmentType,
 					VirtualFunctionID:    apiSxA.VirtualFunctionID,
+					BridgeName:           apiSxA.BridgeName,
+					OvnNetworkName:       apiSxA.OvnNetworkName,
 					Status:               cdbm.SpectrumXAttachmentStatusPending,
 					CreatedBy:            dbUser.ID,
 				})
@@ -4174,7 +4253,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 						logger.Error().Err(serr).Msg("error creating Instance DpuExtensionServiceDeployment record in DB")
 						return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create DPU Extension Service Deployment for Instance, DB error", nil)
 					}
-					des, _ := desIDMap[desdID]
+					des := desIDMap[desdID]
 					newDesd.DpuExtensionService = des
 					updateDesds = append(updateDesds, *newDesd)
 					updatedDesdMap[desvID] = newDesd
@@ -4245,11 +4324,12 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 						existingReadyNvlIfcsCount++
 					} else {
 						if mostRecentNvlIfc.Updated.After(time.Now().Add(-NVLinkInterfaceStatusSyncGraceWindow)) {
-							if mostRecentNvlIfc.Status == cdbm.NVLinkInterfaceStatusPending {
+							switch mostRecentNvlIfc.Status {
+							case cdbm.NVLinkInterfaceStatusPending:
 								existingPendingNvlIfcsCount++
-							} else if mostRecentNvlIfc.Status == cdbm.NVLinkInterfaceStatusDeleting {
+							case cdbm.NVLinkInterfaceStatusDeleting:
 								existingDeletingNvlIfcsCount++
-							} else if mostRecentNvlIfc.Status == cdbm.NVLinkInterfaceStatusError {
+							case cdbm.NVLinkInterfaceStatusError:
 								reIssueNVLinkInterfaces = true
 							}
 						} else {
@@ -4353,7 +4433,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			description = *ui.Description
 		}
 
-		interfaceConfigs := make([]*corev1.InstanceInterfaceConfig, len(newdbIfcs))
+		interfaceConfigs := []*corev1.InstanceInterfaceConfig{}
 		for i := range newdbIfcs {
 			ifc := &newdbIfcs[i]
 			if ifc.Status == cdbm.InterfaceStatusDeleting {
@@ -4409,7 +4489,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				interfaceConfig.RoutingProfile = ifc.InlineRoutingProfile.ToProto()
 			}
 
-			interfaceConfigs[i] = interfaceConfig
+			interfaceConfigs = append(interfaceConfigs, interfaceConfig)
 		}
 
 		// Populate InfiniBand Interface details for Site Controller request
@@ -4722,19 +4802,17 @@ func AttachVpcNsgPropagationDetailsToApiInstance(c echo.Context, ctx context.Con
 
 // GetInstanceHandler is the API Handler for getting an Instance
 type GetInstanceHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetInstanceHandler initializes and returns a new handler for getting Instance
 func NewGetInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetInstanceHandler {
 	return GetInstanceHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -4751,7 +4829,7 @@ func NewGetInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg
 // @Success 200 {object} model.APIInstance
 // @Router /v2/org/{org}/nico/instance/{id} [get]
 func (gih GetInstanceHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Instance", "Get", c, gih.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Instance", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -4792,7 +4870,7 @@ func (gih GetInstanceHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Instance ID in URL", nil)
 	}
 
-	gih.tracerSpan.SetAttribute(handlerSpan, attribute.String("instance_id", instanceStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("instance_id", instanceStrID))
 
 	// Get Instance
 	instanceDAO := cdbm.NewInstanceDAO(gih.dbSession)
@@ -4958,19 +5036,17 @@ func (gih GetInstanceHandler) Handle(c echo.Context) error {
 
 // GetAllInstanceHandler is the API Handler for retrieving all Instances
 type GetAllInstanceHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	cfg       *config.Config
 }
 
 // NewGetAllInstanceHandler initializes and returns a new handler for retreiving all Instances
 func NewGetAllInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *config.Config) GetAllInstanceHandler {
 	return GetAllInstanceHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		cfg:       cfg,
 	}
 }
 
@@ -4998,7 +5074,7 @@ func NewGetAllInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, 
 // @Success 200 {array} []model.APIInstance
 // @Router /v2/org/{org}/nico/instance [get]
 func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Instance", "GetAll", c, gaih.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Instance", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -5090,7 +5166,7 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 	siteIDStrs := qParams["siteId"]
 
 	for _, siteIDStr := range siteIDStrs {
-		gaih.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("siteId", siteIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("siteId", siteIDStrs))
 		parsedID, err := uuid.Parse(siteIDStr)
 		if err != nil {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid site ID %v in query", siteIDStr), nil)
@@ -5113,44 +5189,18 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 		if len(sites) != len(siteIDs) {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find one or more Sites specified in query", nil)
 		}
-	} else {
-		tsDAO := cdbm.NewTenantSiteDAO(gaih.dbSession)
-		tss, _, err := tsDAO.GetAll(ctx, nil, cdbm.TenantSiteFilterInput{TenantIDs: []uuid.UUID{tenant.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, []string{cdbm.SiteRelationName})
-		if err != nil {
-			logger.Error().Err(err).Msg("error retrieving Sites for Tenant from DB")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Sites for Tenant, DB error", nil)
-		}
-		for _, ts := range tss {
-			// Check if Site relation was loaded successfully
-			if ts.Site != nil {
-				sitesByID[ts.Site.ID] = ts.Site
-			}
-		}
 	}
 
-	// Check TenantSite entry
-	if len(siteIDs) > 0 {
-		tsDAO := cdbm.NewTenantSiteDAO(gaih.dbSession)
-		_, count, err := tsDAO.GetAll(
-			ctx,
-			nil,
-			cdbm.TenantSiteFilterInput{
-				TenantIDs: []uuid.UUID{tenant.ID},
-				SiteIDs:   siteIDs,
-			},
-			cdbp.PageInput{},
-			nil,
-		)
-		if err != nil {
-			logger.Error().Err(err).Msg("error retrieving TenantSite entry")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine Tenant's association with Site", nil)
-		}
-
-		// We've ensured that the set of siteIDs is unique earlier,
-		// so if the counts don't match, then something wasn't found.
-		if count != len(siteIDs) {
+	// Check Tenant access to each Site
+	for _, siteID := range siteIDs {
+		err := common.ValidateTenantSiteAccess(ctx, nil, gaih.dbSession, &tenant, siteID)
+		if errors.Is(err, cdb.ErrDoesNotExist) {
 			return cutil.NewAPIErrorResponse(c, http.StatusForbidden,
 				"Tenant is not associated with one or more of the Sites specified in query", nil)
+		}
+		if err != nil {
+			logger.Error().Err(err).Msg("error checking Tenant access to Site")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to determine Tenant's association with Site", nil)
 		}
 	}
 
@@ -5160,14 +5210,13 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 	searchQuery := common.GetSearchQuery(c)
 	if searchQuery != nil {
 		filter.SearchQuery = searchQuery
-		gaih.tracerSpan.SetAttribute(handlerSpan, attribute.String("query", *searchQuery), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
 	// Get status from query param
 	if statusStrings := qParams["status"]; len(statusStrings) != 0 {
-		gaih.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("status", statusStrings), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("status", statusStrings))
 		for _, status := range statusStrings {
-			gaih.tracerSpan.SetAttribute(handlerSpan, attribute.String("status", status), logger)
 			_, ok := cdbm.InstanceStatusMap[status]
 			if !ok {
 				logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", status))
@@ -5179,7 +5228,7 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 
 	// Get VPC IDs from query param
 	if vpcIDStrs := qParams["vpcId"]; len(vpcIDStrs) != 0 {
-		gaih.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("vpcId", vpcIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("vpcId", vpcIDStrs))
 		for _, vpcIDStr := range vpcIDStrs {
 			// Check for Vpc existence
 			vpc, verr := common.GetVpcFromIDString(ctx, nil, vpcIDStr, nil, gaih.dbSession)
@@ -5199,7 +5248,7 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 
 	// Get instance type IDs from query param
 	if instanceTypeIDStrs := qParams["instanceTypeId"]; len(instanceTypeIDStrs) != 0 {
-		gaih.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("instanceTypeId", instanceTypeIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("instanceTypeId", instanceTypeIDStrs))
 		for _, instanceTypeStr := range instanceTypeIDStrs {
 			// Check for instance type existence
 			instanceType, verr := common.GetInstanceTypeFromIDString(ctx, nil, instanceTypeStr, gaih.dbSession)
@@ -5224,7 +5273,7 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 
 	// Get operating system IDs from query param
 	if operatingSystemIDStrs := qParams["operatingSystemId"]; len(operatingSystemIDStrs) != 0 {
-		gaih.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("operatingSystemId", operatingSystemIDStrs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("operatingSystemId", operatingSystemIDStrs))
 		operatingSystemDAO := cdbm.NewOperatingSystemDAO(gaih.dbSession)
 		for _, operatingSystemStr := range operatingSystemIDStrs {
 			parsedID, err := uuid.Parse(operatingSystemStr)
@@ -5247,7 +5296,7 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 
 	// Get machine IDs from query param
 	if machineIDs := qParams["machineId"]; len(machineIDs) != 0 {
-		gaih.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("machineId", machineIDs), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("machineId", machineIDs))
 		machineDAO := cdbm.NewMachineDAO(gaih.dbSession)
 		machines, _, err := machineDAO.GetAll(ctx, nil, cdbm.MachineFilterInput{MachineIDs: machineIDs, ExcludeMetadata: true}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 		if err != nil {
@@ -5281,13 +5330,13 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 
 	// Get instance name from query param
 	if name := c.QueryParam("name"); name != "" {
-		gaih.tracerSpan.SetAttribute(handlerSpan, attribute.String("name", name), logger)
+		cotel.SetAttribute(handlerSpan, attribute.String("name", name))
 		filter.Names = []string{name}
 	}
 
 	// Get IP addresses from query param and filter by interface IPs
 	if ipAddresses := qParams["ipAddress"]; len(ipAddresses) != 0 {
-		gaih.tracerSpan.SetAttribute(handlerSpan, attribute.StringSlice("ipAddress", ipAddresses), logger)
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("ipAddress", ipAddresses))
 		// Core stores these addresses in compressed form, and the database
 		// compares them as text. Leave invalid filters unchanged to match nothing.
 		for i, value := range ipAddresses {
@@ -5335,6 +5384,25 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 	if serr != nil {
 		logger.Error().Err(serr).Msg("error retrieving Instances for this Site")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Instances for Site", nil)
+	}
+
+	// Get Sites for Instances that weren't loaded from the siteId query
+	unloadedSiteIDs := goset.NewSet[uuid.UUID]()
+	for _, ins := range dbInstances {
+		_, loaded := sitesByID[ins.SiteID]
+		if !loaded {
+			unloadedSiteIDs.Add(ins.SiteID)
+		}
+	}
+	if unloadedSiteIDs.Cardinality() > 0 {
+		sites, _, err := stDAO.GetAll(ctx, nil, cdbm.SiteFilterInput{SiteIDs: unloadedSiteIDs.ToSlice()}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if err != nil {
+			logger.Error().Err(err).Msg("error retrieving Sites for Instances from DB")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Sites for Instances, DB error", nil)
+		}
+		for _, site := range sites {
+			sitesByID[site.ID] = &site
+		}
 	}
 
 	// Make a map for instanceID -> ref Instance
@@ -5646,23 +5714,21 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 
 // DeleteInstanceHandler is the API Handler for deleting an Instance
 type DeleteInstanceHandler struct {
-	dbSession  *cdb.Session
-	tc         temporalClient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	dps        dpsclient.PowerProvisioner
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        temporalClient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
+	dps       dpsclient.PowerProvisioner
 }
 
 // NewDeleteInstanceHandler initializes and r`eturns a new handler for deleting an Instance
 func NewDeleteInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, scp *sc.ClientPool, cfg *config.Config, dps dpsclient.PowerProvisioner) DeleteInstanceHandler {
 	return DeleteInstanceHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		dps:        dps,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
+		dps:       dps,
 	}
 }
 
@@ -5678,7 +5744,7 @@ func NewDeleteInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, 
 // @Success 202
 // @Router /v2/org/{org}/nico/instance/{id} [delete]
 func (dih DeleteInstanceHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Instance", "Delete", c, dih.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Instance", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -5711,7 +5777,7 @@ func (dih DeleteInstanceHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Instance ID in URL", nil)
 	}
 
-	dih.tracerSpan.SetAttribute(handlerSpan, attribute.String("instance_id", instanceStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("instance_id", instanceStrID))
 
 	// Get Instance
 	instanceDAO := cdbm.NewInstanceDAO(dih.dbSession)
@@ -5917,15 +5983,13 @@ func (dih DeleteInstanceHandler) Handle(c echo.Context) error {
 
 // GetInstanceStatusDetailsHandler is the API Handler for getting Instance StatusDetail records
 type GetInstanceStatusDetailsHandler struct {
-	dbSession  *cdb.Session
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
 }
 
 // NewGetInstanceStatusDetailsHandler initializes and returns a new handler to retrieve Instance StatusDetail records
 func NewGetInstanceStatusDetailsHandler(dbSession *cdb.Session) GetInstanceStatusDetailsHandler {
 	return GetInstanceStatusDetailsHandler{
-		dbSession:  dbSession,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }
 
@@ -5941,7 +6005,7 @@ func NewGetInstanceStatusDetailsHandler(dbSession *cdb.Session) GetInstanceStatu
 // @Success 200 {object} []model.APIStatusDetail
 // @Router /v2/org/{org}/nico/instance/{id}/status-history [get]
 func (gisdh GetInstanceStatusDetailsHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Instance", "Get", c, gisdh.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Instance", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -5982,7 +6046,7 @@ func (gisdh GetInstanceStatusDetailsHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Instance ID in URL", nil)
 	}
 
-	gisdh.tracerSpan.SetAttribute(handlerSpan, attribute.String("instance_id", instanceStrID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("instance_id", instanceStrID))
 
 	// Get Instance
 	instanceDAO := cdbm.NewInstanceDAO(gisdh.dbSession)

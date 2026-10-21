@@ -25,24 +25,22 @@ import (
 
 // ResetMachineBMCHandler resets a Machine BMC.
 type ResetMachineBMCHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewResetMachineBMCHandler returns a new ResetMachineBMCHandler.
 func NewResetMachineBMCHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) ResetMachineBMCHandler {
 	return ResetMachineBMCHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
 // Handle godoc
 // @Summary Reset Machine BMC
 // @Description Reset a Machine BMC.
-// @Tags bmc-reset
+// @Tags machine
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
@@ -52,7 +50,7 @@ func NewResetMachineBMCHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *
 // @Success 202 {object} model.APIMessageResponse
 // @Router /v2/org/{org}/nico/machine/{machineId}/bmc/reset [patch]
 func (h ResetMachineBMCHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "ResetBmc", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("Machine", "ResetBmc", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

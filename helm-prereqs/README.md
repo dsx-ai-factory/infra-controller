@@ -50,11 +50,16 @@ helm-prereqs/
 ├── clean.sh                    # Teardown script - removes everything in reverse order
 ├── unseal_vault.sh             # Vault init + unseal (called by setup.sh Phase 4)
 ├── bootstrap_ssh_host_key.sh   # SSH host key generation (called by setup.sh Phase 4)
+├── check-external-service-vips.py  # Core VIP preflight (called by preflight.sh)
+├── check-mat-service-cidr.py   # machine-a-tron BMC network vs ServiceCIDR preflight
+├── ingestion-rate-report.sh    # machine-a-tron ingestion curves from the database timestamps
 ├── helmfile.yaml               # Helmfile release definitions for all prerequisite components
 ├── Chart.yaml                  # nico-prereqs Helm chart metadata
 ├── values.yaml                 # Top-level values (siteName, PostgreSQL tuning)
 ├── values/
 │   ├── nico-core.yaml           # NICo Core deployment values (hostname, siteConfig, VIPs)
+│   ├── nico-core-simulation.yaml  # NICo Core values for a machine-a-tron simulation site
+│   ├── machine-a-tron*.yaml     # machine-a-tron chart values: Override Mode and the scale profiles
 │   ├── nico-rest.yaml           # NICo REST deployment values (Keycloak config)
 │   ├── nico-site-agent.yaml     # Site-agent deployment values (DB config, gRPC settings)
 │   └── metallb-config.yaml     # MetalLB IP pools, BGP peers, and advertisements
@@ -88,11 +93,13 @@ config it edits.
    `perPodAnnotations` for `nico-ntp` / `nico-dns`) must match a VIP from the
    pools you carved out in step 1.
    → `values/nico-core.yaml`.
-5. **Set the DHCP hook parameters.** `nico-dhcp.config.kea.hookParameters`
-   (`nameservers`, `ntpServer`, `provisioningServer`) tells DHCP clients
-   where to find DNS / NTP / PXE. These must equal the VIPs you set in step 4.
-   The chart default is `127.0.0.1` — leaving it there silently breaks DPU
-   bring-up.
+5. **Set the DHCP hook parameters.** Under `nico-dhcp.config.kea.hookParameters`,
+   set `nameservers` to the VIP of Unbound or another recursive resolver that
+   resolves site, infrastructure, and external names. Do not use a `nico-dns`
+   VIP; it serves authoritative zones only. Set `ntpServer` and
+   `provisioningServer` to their corresponding NTP and PXE Service VIPs from
+   step 4. Replace the chart placeholders with addresses reachable from the
+   DPU network.
    → `values/nico-core.yaml`.
 6. **Decide how the `.forge` compatibility zone is served.** Built-in unbound
    (enable in `values/nico-core.yaml`) or your external DNS. Required for
@@ -210,10 +217,10 @@ The tables below summarize the keys that must be set per site.
 | `temporal.useHaPostgres` | `false` | No | Move Temporal's default/visibility stores onto `nico-pg-cluster` instead of `postgres.postgres`. Named `useHaPostgres`, not `enabled`, because it only moves the database — it doesn't gate whether Temporal is deployed. See [Consolidating Temporal/Keycloak onto nico-pg-cluster](#consolidating-temporalkeycloak-onto-nico-pg-cluster). |
 | `keycloak.useHaPostgres` | `false` | No | Move Keycloak's database onto `nico-pg-cluster` instead of `postgres.postgres`. Distinct from `nico-rest-api.config.keycloak.enabled` in `values/nico-rest.yaml`, which controls whether Keycloak is deployed at all — this toggle provisions the database regardless, so it just goes unused if Keycloak itself isn't deployed. |
 | `siteCredentials.enabled` | `false` | No | Render the site-wide BMC root and the Unified Extensible Firmware Interface (UEFI) site defaults as a credential-file Secret for `nico-api`. Refer to [Site Credentials Secret](#site-credentials-secret). |
-| `siteCredentials.secretName` | `"nico-site-credentials"` | No | Name of that Secret in `nico-system`. It must match `nico-api.credentials.file.existingSecret.name` in the Core values. |
-| `siteCredentials.bmcRoot.username` / `.password` | `"root"` / `""` | When enabled | Site-wide BMC root password that site-explorer rotates every BMC to. The render fails when the password is empty. It must also differ from the factory defaults, which is not checked. The username is stored but not used by NICo. |
-| `siteCredentials.uefi.dpu.username` / `.password` | `""` / `""` | When enabled | DPU UEFI site default. The password must be non-empty and the username is not used. |
-| `siteCredentials.uefi.host.username` / `.password` | `""` / `""` | When enabled | Host UEFI site default, same rules. |
+| `siteCredentials.secretName` | `"nico-site-credentials"` | No | Name of that Secret in `nico-system`. It must match `nico-api.credentials.file.existingSecret.name` in the Core values and, on a machine-a-tron site, `machineATron.siteCredentialsSecret.name` in the machine-a-tron values. |
+| `siteCredentials.bmcRoot.username` / `.password` | `"root"` / `""` | No | Site-wide BMC root password that site-explorer rotates every BMC to. Leave the password empty to generate a random 32-character value on the first install, which upgrades keep. An explicit value must differ from the factory defaults, which is not checked. The username is stored but not used by NICo. |
+| `siteCredentials.uefi.dpu.username` / `.password` | `""` / `""` | No | DPU UEFI site default. An empty password is generated in the same way. The username is not used. |
+| `siteCredentials.uefi.host.username` / `.password` | `""` / `""` | No | Host UEFI site default, same rules. |
 
 #### Site Credentials Secret
 
@@ -227,7 +234,7 @@ This is the same credential-file Secret the manual recipe above creates, with
 the two UEFI defaults added. The chart writes nothing to Vault. With the default
 `bmcSiteWideRootSource: local_first`, `nico-api` reads the file ahead of the
 persistent backends, after the environment source if one is configured, so an
-entry left in Vault by an earlier seeding is shadowed rather than removed; set
+entry left in Vault by an earlier seeding is shadowed rather than removed. Set
 `local` to make the file authoritative for version 0 as described above. Only
 the passwords are used: site-explorer logs in with each BMC's own account and
 `credential add-bmc --kind=site-wide-root` stores an empty username, so the
@@ -254,23 +261,47 @@ values unchanged after ingestion starts. Leave `NICO_DPF_BMC_ROOT_PASSWORD`
 unset: it makes setup point `existingSecret` at its own
 `nico-bmc-v0-credentials` Secret, and setup fails when the Core values already
 name this one. Pass the passwords through a values file or `--set-string`, not
-`--set`: it coerces a value that looks numeric and has no leading zero, so
+`--set`. `--set` coerces a value that looks numeric and has no leading zero, so
 `123` becomes a number and the render fails, while `0123` stays a string. The
-render fails when a password is missing or not a string.
+render fails when a password is not a string.
 
-With `siteCredentials` the passwords sit in clear text in the operator's values
-file and in the Helm release history (`helm get values`), and base64-encoded in
-the rendered Secret. That fits machine-a-tron and development sites, which the
-defaults target. For a production site, create the Secret out of band (External
+A password left empty is generated. The chart reads the release's Secret with a
+Helm `lookup` and keeps the value of the same entry, so `helm upgrade` does not
+rotate it. Without such an entry it draws 32 random alphanumeric characters. An
+existing credential file that does not parse, or an entry without a string
+password, fails the render instead of being replaced. Fix or remove that Secret
+first. An explicit value always wins. `helm template` and a client-side `--dry-run` have
+no cluster, so they print fresh values on every render, while `helm install` and
+`helm upgrade` keep them. Use `helm upgrade --dry-run=server` to preview the
+kept values. Read the generated passwords back with:
+
+```bash
+kubectl -n nico-system get secret nico-site-credentials -o jsonpath='{.data.credentials\.yaml}' | base64 -d
+```
+
+Uninstalling the release or setting `siteCredentials.enabled: false` deletes the
+Secret, so the next install generates new passwords. Save the output of that
+command first when devices are already rotated to the old value.
+
+With `siteCredentials` an explicit password sits in clear text in the operator's
+values file and in the Helm release history (`helm get values`). A generated
+password sits only in the rendered manifest (`helm get manifest`) and in the
+Secret. That fits machine-a-tron and development sites, which the defaults
+target. For a production site, create the Secret out of band (External
 Secrets Operator, Sealed Secrets, or a Vault sync) and point
 `nico-api.credentials.file.existingSecret` at it, as the manual recipe above
 does without this block.
 
-On a machine-a-tron site, `setup-machine-a-tron.sh` Phase 4 still seeds the
-same three credentials in Vault and the file shadows them. Keep the chart
-passwords equal to the script's `BMC_PASSWORD` and `UEFI_*_PASSWORD` values,
-`NicoSiteRoot1` and `bluefield` by default, which are for simulated hardware
-only.
+On a machine-a-tron site, the machine-a-tron chart reads
+`bmc_site_wide_root.password` from this Secret when it renders, so a generated
+password reaches the mocks without a manual step. With the scale profiles the
+mock BMCs start at the site root without a copy of the password in the
+machine-a-tron values. `helm-prereqs/values/machine-a-tron.yaml` disables the
+lookup (`machineATron.siteCredentialsSecret.name: ""`) so Override Mode
+exercises credential rotation from the factory defaults.
+`machineATron.hostBmcPassword` and `machineATron.dpuBmcPassword` override the
+looked-up value. Refer to
+[Helm-Only Deployment](../helm/charts/nico-machine-a-tron/README.md#helm-only-deployment).
 
 ### `values/nico-core.yaml`
 
@@ -289,13 +320,14 @@ VIP requirements below apply to enabled external `LoadBalancer` Services.
 | `siteConfig.[pools.lo-ip]` ranges | `{ start = "10.180.62.84", end = "10.180.62.86" }` | **Yes** | Loopback IP range for bare-metal hosts |
 | `siteConfig.[pools.vlan-id]` ranges | `{ start = "100", end = "501" }` | **Yes** | VLAN ID allocation range |
 | `siteConfig.[pools.vni]` ranges | `{ start = "1024500", end = "1024800" }` | **Yes** | VXLAN Network Identifier range |
-| `siteConfig.[networks.admin]` | example values | **Yes** | Admin network: `type = "admin"`, `prefix`, `mtu`, and `reserve_first`. Every IPv4 prefix requires a `gateway`. DPU provisioning requires an IPv4 admin prefix. Refer to [Initial Network Configuration](../docs/provisioning/ip-and-network-configuration.md#initial-network-configuration) for IPv6 fields, valid combinations, and compatibility. |
+| `siteConfig.[networks.admin]` | example values | **Yes** | Admin network: `type = "admin"`, `prefix`, `mtu`, and `reserve_first`. Every IPv4 prefix requires a `gateway`. IPv6-only admin requires a configured FNN site and compatible Core and DPU-agent builds. Retain IPv4 DPU loopbacks and IPv4 VXLAN tunnel endpoints; this does not restrict the address families of physical underlay segments. Non-FNN admin requires an IPv4 prefix and gateway. Refer to [Initial Network Configuration](../docs/provisioning/ip-and-network-configuration.md#initial-network-configuration) for settings and compatibility requirements. |
 | `siteConfig.[networks.<underlay>]` | `[networks.RNO1-M04-D04-IPMITOR-01]` | **Yes** | One block per underlay data-plane L3 segment to create at startup, with `type = "underlay"` and the same field requirements. Rename the block to match your site segment name. Add additional blocks for each underlay segment. |
-| `nico-api / nico-dhcp / nico-dns / nico-pxe / nico-ssh-console-rs .externalService.annotations.metallb.universe.tf/loadBalancerIPs` | example IPs | **Yes** | Single MetalLB VIP per service. Must be inside the matching IPAddressPool from `metallb-config.yaml` (external pool for `nico-api`, internal pool for the rest). |
-| `nico-ntp.externalService.perPodAnnotations` | 3-element example list | **Yes** | `nico-ntp` is a StatefulSet — one MetalLB VIP per replica (3 by default). List entry `[0]` goes on the LB Service for pod `nico-ntp-0`, `[1]` on `nico-ntp-1`, etc. These three VIPs are what DPUs sync clocks against. |
-| `nico-dhcp.config.kea.hookParameters.nameservers` | `"127.0.0.1"` (chart default) | **Yes** | IP(s) advertised to DHCP clients as their DNS resolver. Must be the `nico-dns` VIP (or whichever DNS the DPUs should use). Leaving the `127.0.0.1` chart default silently breaks DPU name resolution. |
-| `nico-dhcp.config.kea.hookParameters.ntpServer` | `"127.0.0.1"` (chart default) | **Yes** | Comma-separated IPs advertised to DHCP clients as their NTP servers. Must match the three `nico-ntp.externalService.perPodAnnotations` VIPs. DPU pre-ingestion fails on clock divergence if this is left at the default. |
-| `nico-dhcp.config.kea.hookParameters.provisioningServer` | `"127.0.0.1"` (chart default) | **Yes** | IP advertised as the PXE / provisioning server. Must be the `nico-pxe` VIP. |
+| `nico-api / nico-dhcp / nico-pxe / nico-ssh-console-rs .externalService.annotations.metallb.universe.tf/loadBalancerIPs` | example IPs | **Yes** | Single MetalLB VIP per service. Must be inside the matching IPAddressPool from `metallb-config.yaml` (external pool for `nico-api`, internal pool for the rest). |
+| `nico-dns.externalService.perPodAnnotations` | 2-element example list | **Yes** | Each list entry supplies annotations for one replica's UDP and TCP Services. Use VIPs from matching MetalLB pools. Refer to [`nico-dns` External Services](../docs/configuration/dns.md#nico-dns-external-services) for IPv6-only and dual-stack values, defaults, and primary-family restrictions. |
+| `nico-ntp.externalService.perPodAnnotations` | 3-element example list | **Yes** | `nico-ntp` is a StatefulSet — one MetalLB VIP per replica (3 by default). List entry `[0]` goes on the LB Service for pod `nico-ntp-0`, `[1]` on `nico-ntp-1`, etc. These VIPs are what DPUs sync clocks against. |
+| `nico-dhcp.config.kea.hookParameters.nameservers` | `"REPLACE_WITH_NICO_DNS_VIP"` (chart default) | **Yes** | Comma-separated IPv4 addresses advertised to DHCP clients as DNS resolvers in option 6. The placeholder name and chart comment refer to `nico-dns`, but this setting requires a recursive resolver. Set it to the VIP of Unbound or another recursive resolver that can resolve site, infrastructure, and external names. Do not use a `nico-dns` VIP, which serves authoritative zones only. |
+| `nico-dhcp.config.kea.hookParameters.ntpServer` | `"REPLACE_WITH_NICO_NTP_VIPS"` (chart default) | **Yes** | Comma-separated IPs advertised to DHCP clients as their NTP servers. Must include one `nico-ntp.externalService.perPodAnnotations` VIP per configured replica. |
+| `nico-dhcp.config.kea.hookParameters.provisioningServer` | `"REPLACE_WITH_NICO_PXE_VIP"` (chart default) | **Yes** | IP advertised as the PXE / provisioning server. Must be the `nico-pxe` VIP. |
 
 ### `values/nico-rest.yaml`
 
@@ -331,7 +363,7 @@ VIP requirements below apply to enabled external `LoadBalancer` Services.
 ## Setup options
 
 `setup.sh` runs preflight validation automatically before making cluster changes.
-Core VIP validation requires Python 3 with PyYAML installed in the `python3` environment. It parses `--core-values` as YAML, so indentation and Boolean capitalization do not affect VIP validation for enabled external `LoadBalancer` Services. Existing `externalService` configurations may omit VIP annotations for automatic allocation; explicitly blank annotations are errors. An enabled DHCPv6 external Service requires an explicit IPv6 VIP annotation. Configurable `externalService.type` values such as `NodePort` and `ClusterIP` do not require VIPs; the DHCPv6 external Service always uses `LoadBalancer`. Missing parser dependencies or invalid YAML produce a preflight error. This VIP check is skipped with `--skip-core`.
+Core VIP validation requires Python 3 with PyYAML installed in the `python3` environment. It parses `--core-values` as YAML, so indentation and Boolean capitalization do not affect VIP validation for enabled external `LoadBalancer` Services. Existing `externalService` configurations may omit VIP annotations for automatic allocation; explicitly blank annotations are errors. An enabled DHCPv6 external Service requires an explicit IPv6 VIP annotation. Configurable `externalService.type` values such as `NodePort` and `ClusterIP` do not require VIPs; the DHCPv6 external Service always uses `LoadBalancer`. Missing parser dependencies or invalid YAML produce a preflight error. This VIP check is skipped with `--skip-core`. A VIP used by more than one Service is a warning unless every Service on it has the same `allow-shared-ip` value, the same `externalTrafficPolicy`, and distinct protocol and port pairs, and `Local` Services share only within one chart; these warnings do not stop `setup.sh`.
 
 It supports these common deployment modes:
 
@@ -869,8 +901,12 @@ responsible for resolving them. Two ways to do that:
    fill the addresses with the VIPs you've already assigned to the
    corresponding service above (those live in the same file under each
    chart's `externalService.annotations.metallb.universe.tf/loadBalancerIPs`).
-2. Assign a MetalLB VIP to unbound itself (so DPUs can reach it via DHCP
-   option 6). Add it as another `externalService` entry the same way.
+2. Assign an IPv4 MetalLB VIP to unbound itself and advertise it through
+   DHCP option 6. Add it as another `externalService` entry the same way.
+   IPv6 resolver addresses use DHCPv6 option 23 instead. For IPv6-only or
+   dual-stack resolver VIPs, refer to
+   [Unbound External Services](../docs/configuration/dns.md#unbound-external-services)
+   for address-family settings, IPv4 defaults, and Service update restrictions.
 3. Re-run `setup.sh`. The chart deploys unbound with the `.forge` zone
    pre-populated; DPUs reach it via DHCP-served DNS.
 4. Verify with `helm-prereqs/health-check.sh` — the `.forge DNS Endpoint
@@ -941,6 +977,49 @@ It checks component readiness, Vault and PostgreSQL health, required secrets and
 certificates, External Secrets sync status, LoadBalancer VIP assignment, and
 basic in-cluster connectivity. Failures exit non-zero; warnings and skipped
 probes are reported without failing the run.
+
+## Manually Renewing the Site Agent Temporal certificate
+
+The Site Agent connects to Temporal with a client certificate from Site Manager
+that is valid for `90` days, and the cloud worker renews it automatically. Once
+the certificate is within `10` days of expiry, the daily `rotate-certs-and-otps`
+workflow in the Temporal `cloud` namespace rolls the Site's OTP. The Site Agent
+then uses the new OTP to download a new certificate.
+
+Only renew the certificate by hand if that automated rotation failed, such as
+when:
+
+- a `rotate-certs-and-otps` run fails for the Site
+- `RotateTemporalCertAccessOTP` fails in the Site's Temporal namespace
+- the certificate has already expired, so the Site Agent can no longer reach
+  Temporal to receive a new OTP
+
+Renewing by hand restarts the Site Agent, and rolling the OTP while an automated
+rotation is in progress makes that rotation fail.
+
+To renew it, run this from the repo root with the Site's cluster as the current
+kubeconfig context:
+
+```bash
+helm-prereqs/renew-site-agent-temporal-cert.sh --dry-run
+helm-prereqs/renew-site-agent-temporal-cert.sh
+```
+
+The script finds the namespace that holds the `nico-rest-site-agent-config`
+ConfigMap and reads the Site ID from its `CLUSTER_ID`. It stops if that ID does
+not match the registration Secret the Site Agent mounts (`site-registration` by
+default), or if the current context cannot patch that Secret, delete the Site
+Agent pod, and port-forward. It reaches Site Manager through a port-forward on a
+free local port and verifies its certificate against the CA and `creds-url` host
+in the registration Secret, as bootstrap does. It then rolls the Site's OTP,
+writes the new OTP to the registration Secret, and restarts
+`nico-rest-site-agent-0` twice: once to download the new certificate and once to
+load it. It succeeds when the Site Agent logs that its Temporal worker started.
+
+`--dry-run` reports the certificate expiry and Site Manager bootstrap state
+without changing anything, and `--yes` skips the confirmation prompt. Set
+`REST_NS` to skip namespace detection, for example when more than one namespace
+runs a Site Agent. It needs `kubectl`, `curl`, `openssl`, and `python3`.
 
 ## Teardown
 

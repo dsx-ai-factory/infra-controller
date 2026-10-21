@@ -26,7 +26,8 @@ use db::{self, explored_endpoints as db_explored_endpoints};
 use mac_address::MacAddress;
 use model::metadata::Metadata;
 use model::site_explorer::{
-    Chassis, ComputerSystem, EndpointExplorationReport, EndpointType, ExploredManagedSwitch,
+    Chassis, ComputerSystem, EndpointExplorationReport, EndpointType, EthernetInterface,
+    ExploredManagedSwitch,
 };
 use model::switch::SwitchSearchFilter;
 use rpc::forge::DhcpDiscovery;
@@ -41,7 +42,10 @@ fn expected_switch_fixture(
     model::expected_switch::ExpectedSwitch {
         expected_switch_id: None,
         bmc_mac_address: bmc_mac,
-        nvos_mac_addresses: vec![nvos_mac],
+        nvos_interfaces: vec![model::expected_switch::ExpectedNvosInterface {
+            mac_address: nvos_mac,
+            is_primary: true,
+        }],
         serial_number: serial.to_string(),
         bmc_username: "ADMIN".to_string(),
         bmc_password: "Pwd2023".to_string(),
@@ -74,11 +78,17 @@ fn explored_managed_switch_fixture(
     };
     ExploredManagedSwitch {
         bmc_ip,
-        nv_os_mac_addresses: vec![nvos_mac],
         report: EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,
             vendor: Some(bmc_vendor::BMCVendor::Nvidia),
             chassis: vec![chassis],
+            systems: vec![ComputerSystem {
+                ethernet_interfaces: vec![EthernetInterface {
+                    mac_address: Some(nvos_mac),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
             model: Some("Switch".to_string()),
             ..Default::default()
         },
@@ -118,7 +128,10 @@ async fn test_site_explorer_switch_discovery(
     let expected_switch = model::expected_switch::ExpectedSwitch {
         expected_switch_id: None,
         bmc_mac_address: bmc_mac,
-        nvos_mac_addresses: vec![bmc_mac],
+        nvos_interfaces: vec![model::expected_switch::ExpectedNvosInterface {
+            mac_address: bmc_mac,
+            is_primary: true,
+        }],
         serial_number: serial_number.clone(),
         bmc_username: bmc_username.clone(),
         bmc_password: bmc_password.clone(),
@@ -151,6 +164,9 @@ async fn test_site_explorer_switch_discovery(
     explorer.insert_endpoint_result(
         switch_ip.parse().unwrap(),
         Ok(EndpointExplorationReport {
+            component_integrities: None,
+            component_integrity_unavailable: false,
+            hardware_class: None,
             endpoint_type: EndpointType::Bmc,
             last_exploration_error: None,
             last_exploration_latency: None,
@@ -177,11 +193,8 @@ async fn test_site_explorer_switch_discovery(
             lockdown_status: None,
             power_shelf_id: None,
             switch_id: None,
-            compute_tray_index: None,
-            physical_slot_number: None,
-            revision_id: None,
-            topology_id: None,
             remediation_error: None,
+            ..Default::default()
         }),
     );
     let test_meter = &env.test_harness.test_meter;
@@ -225,6 +238,94 @@ async fn test_site_explorer_switch_discovery(
     txn.commit().await?;
     assert_eq!(switches.len(), 1, "Expected one switch to be created");
 
+    // Steady state: hardware inventory must not replace the operator-declared
+    // NVOS interfaces when an existing switch is explored again.
+    let nvos_mac: MacAddress = "B8:3F:D2:90:97:C1".parse().unwrap();
+    explorer.insert_endpoint_result(
+        switch_ip.parse().unwrap(),
+        Ok(EndpointExplorationReport {
+            endpoint_type: EndpointType::Bmc,
+            vendor: Some(bmc_vendor::BMCVendor::Nvidia),
+            systems: vec![ComputerSystem {
+                serial_number: Some(serial_number.clone()),
+                ethernet_interfaces: vec![EthernetInterface {
+                    id: Some("eth0".to_string()),
+                    mac_address: Some(nvos_mac),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            chassis: vec![Chassis {
+                id: "mgx_nvswitch_0".to_string(),
+                model: Some("Switch".to_string()),
+                manufacturer: Some("NVIDIA".to_string()),
+                serial_number: Some(serial_number.clone()),
+                part_number: Some(serial_number.clone()),
+                ..Default::default()
+            }],
+            model: Some("Switch".to_string()),
+            ..Default::default()
+        }),
+    );
+
+    explorer.run_single_iteration().await.unwrap();
+
+    let mut txn = env.pool.begin().await?;
+    let switches = db::switch::find_ids(txn.as_mut(), SwitchSearchFilter::default()).await?;
+    let expected_switches = db::expected_switch::find_all(&mut txn).await?;
+    txn.commit().await?;
+    assert_eq!(
+        switches.len(),
+        1,
+        "an existing switch must not be created again"
+    );
+    assert_eq!(expected_switches.len(), 1);
+    assert_eq!(
+        expected_switches[0].nvos_mac_addresses(),
+        vec![bmc_mac],
+        "exploration must preserve the expected-switch NVOS interfaces"
+    );
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn switch_creation_preserves_operator_declared_nvos_interfaces(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let bmc_mac: MacAddress = "B8:3F:D2:90:97:E0".parse()?;
+    let declared_nvos_mac: MacAddress = "B8:3F:D2:90:97:E1".parse()?;
+    let observed_nvos_mac: MacAddress = "B8:3F:D2:90:97:E2".parse()?;
+    let expected_switch = expected_switch_fixture(bmc_mac, declared_nvos_mac, "SW-AUTHORITATIVE");
+
+    let mut txn = env.pool.begin().await?;
+    db::expected_switch::create(&mut txn, expected_switch.clone()).await?;
+    txn.commit().await?;
+
+    let switch_creator =
+        SwitchCreator::new(env.pool.clone(), (&SiteExplorerConfig::default()).into());
+    assert!(
+        switch_creator
+            .create_managed_switch(
+                &explored_managed_switch_fixture(
+                    "10.0.0.3".parse()?,
+                    observed_nvos_mac,
+                    Some("SW-AUTHORITATIVE"),
+                ),
+                &expected_switch,
+                &env.pool,
+            )
+            .await?
+    );
+
+    let mut txn = env.pool.begin().await?;
+    let reloaded = db::expected_switch::find_by_bmc_mac_address(&mut txn, bmc_mac)
+        .await?
+        .expect("expected switch");
+    txn.commit().await?;
+    assert_eq!(reloaded.nvos_interfaces, expected_switch.nvos_interfaces);
+
     Ok(())
 }
 
@@ -243,7 +344,8 @@ async fn switch_skips_creation_when_bmc_mac_already_used(
     db::expected_switch::create(&mut txn, expected_switch.clone()).await?;
     txn.commit().await?;
 
-    let switch_creator = SwitchCreator::new(env.pool.clone(), SiteExplorerConfig::default());
+    let switch_creator =
+        SwitchCreator::new(env.pool.clone(), (&SiteExplorerConfig::default()).into());
 
     // First discovery, we get a real serial, which succeeds,
     // and inserts a switches row.
@@ -317,7 +419,8 @@ async fn switch_treats_na_chassis_serial_as_missing(
     db::expected_switch::create(&mut txn, expected_switch.clone()).await?;
     txn.commit().await?;
 
-    let switch_creator = SwitchCreator::new(env.pool.clone(), SiteExplorerConfig::default());
+    let switch_creator =
+        SwitchCreator::new(env.pool.clone(), (&SiteExplorerConfig::default()).into());
 
     let result = switch_creator
         .create_managed_switch(

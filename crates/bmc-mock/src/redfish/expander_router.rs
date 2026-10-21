@@ -297,23 +297,20 @@ mod tests {
         );
     }
 
-    use std::sync::Arc;
-
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Method, Request};
     use serde_json::Value;
     use tower::Service;
 
-    use crate::test_support::{TEST_MAC_POOL, TestCallbacks};
+    use crate::test_support::{TEST_MAC_POOL, TestBmcConfig};
     use crate::*;
 
     fn test_host_mock() -> Router {
-        let callbacks = Arc::new(TestCallbacks::default());
         let mut mac_pool = TEST_MAC_POOL.lock().unwrap();
         let hw_type = HardwareType::DellPowerEdgeR750;
         let ranges_config = mac_pool.allocate_range_config().unwrap();
-        crate::machine_router(
+        crate::test_support::create_test_bmc(
             &MachineInfo::Host(HostMachineInfo::new(
                 hw_type,
                 vec![DpuMachineInfo::new(
@@ -324,7 +321,7 @@ mod tests {
                 &mut mac_pool,
                 ranges_config,
             )),
-            callbacks,
+            TestBmcConfig::default(),
             String::default(),
             false,
             MachineRouterOptions::default(),

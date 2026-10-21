@@ -19,7 +19,6 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -32,7 +31,6 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
-	oteltrace "go.opentelemetry.io/otel/trace"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
 	"google.golang.org/protobuf/proto"
@@ -183,7 +181,6 @@ func TestGetRackHandler_Handle(t *testing.T) {
 		},
 	}
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -294,7 +291,6 @@ func TestGetRackHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg, tt.rackID)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -380,7 +376,6 @@ func TestGetAllRackHandler_Handle(t *testing.T) {
 		createMockRack("rack-5", "Rack-005", "Dell", "PowerEdge"),
 	}
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -584,7 +579,6 @@ func TestGetAllRackHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -659,7 +653,6 @@ func TestValidateRackHandler_Handle(t *testing.T) {
 
 	handler := NewValidateRackHandler(dbSession, nil, scp, cfg)
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	rackID := uuid.NewString()
@@ -815,7 +808,6 @@ func TestValidateRackHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg, tt.rackID)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -870,7 +862,6 @@ func TestValidateRacksHandler_Handle(t *testing.T) {
 
 	handler := NewValidateRacksHandler(dbSession, nil, scp, cfg)
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -1033,7 +1024,6 @@ func TestValidateRacksHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -1075,7 +1065,6 @@ func TestUpdateRackPowerStateHandler_Handle(t *testing.T) {
 
 	rackID := uuid.New().String()
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -1217,7 +1206,6 @@ func TestUpdateRackPowerStateHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg, tt.rackID)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -1261,7 +1249,6 @@ func TestBatchUpdateRackPowerStateHandler_Handle(t *testing.T) {
 
 	handler := NewBatchUpdateRackPowerStateHandler(dbSession, nil, scp, cfg)
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -1359,7 +1346,6 @@ func TestBatchUpdateRackPowerStateHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -1405,7 +1391,6 @@ func TestUpdateRackFirmwareHandler_Handle(t *testing.T) {
 
 	rackID := uuid.New().String()
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -1517,7 +1502,6 @@ func TestUpdateRackFirmwareHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg, tt.rackID)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -1565,7 +1549,6 @@ func TestBringUpRackHandler_Handle(t *testing.T) {
 
 	rackID := uuid.New().String()
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -1655,7 +1638,6 @@ func TestBringUpRackHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg, tt.rackID)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -1699,7 +1681,6 @@ func TestBatchBringUpRackHandler_Handle(t *testing.T) {
 
 	handler := NewBatchBringUpRackHandler(dbSession, nil, scp, cfg)
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -1790,7 +1771,6 @@ func TestBatchBringUpRackHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -1834,7 +1814,6 @@ func TestBatchUpdateRackFirmwareHandler_Handle(t *testing.T) {
 
 	handler := NewBatchUpdateRackFirmwareHandler(dbSession, nil, scp, cfg)
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	ctx := context.Background()
 
 	tests := []struct {
@@ -1930,7 +1909,6 @@ func TestBatchUpdateRackFirmwareHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.reqOrg)
 			ec.Set("user", tt.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := handler.Handle(ec)
@@ -1974,7 +1952,6 @@ func TestRackHandlers_RequestPassThrough(t *testing.T) {
 	_, site, _ := testRackSetupTestData(t, dbSession, org)
 	providerUser := testRackBuildUser(t, dbSession, "provider-user-rule-pass", org, []string{authz.ProviderAdminRole})
 
-	tracer := oteltrace.NewNoopTracerProvider().Tracer("test")
 	rackID := uuid.New().String()
 	ruleID := uuid.NewString()
 
@@ -2060,9 +2037,6 @@ func TestRackHandlers_RequestPassThrough(t *testing.T) {
 			ec.SetParamNames("orgName", "id")
 			ec.SetParamValues(org, rackID)
 			ec.Set("user", providerUser)
-
-			ctx := context.WithValue(context.Background(), otelecho.TracerKey, tracer)
-			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := tc.handler(ec)
 			require.NoError(t, err)

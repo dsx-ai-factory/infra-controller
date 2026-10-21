@@ -38,7 +38,7 @@ use nv_redfish::core::query::{ExpandQuery, FilterQuery};
 use nv_redfish::core::upload::{MultipartUpdateRequest, UploadReader};
 use nv_redfish::core::{
     Action, Bmc, BoxTryStream, EntityTypeRef, Expandable, ModificationResponse, ODataETag, ODataId,
-    SessionCreateResponse,
+    SessionCreateResponse, StreamEvent,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -492,8 +492,8 @@ impl BmcClient {
     /// the metric collectors means the series behind that resource vanish for the
     /// interval and reappear on the next one. See NVBug 6506008.
     ///
-    /// `op` is only ever re-run for reads (`get`/`expand`/`filter`/`stream`), so
-    /// replaying it is safe. The retry is deliberately single-shot: it runs with
+    /// `op` is only ever re-run for reads (`get`/`poll`/`expand`/`filter`/`stream`),
+    /// so replaying it is safe. The retry is deliberately single-shot: it runs with
     /// credentials newer than the ones that were rejected, so a second 401 means
     /// the credentials themselves are wrong, not stale, and retrying again would
     /// just multiply load against a BMC that is refusing us.
@@ -1028,6 +1028,41 @@ impl HttpClient for InstrumentedHttpClient {
         result
     }
 
+    async fn poll<T>(
+        &self,
+        url: Url,
+        credentials: &NvBmcCredentials,
+        custom_headers: &HeaderMap,
+    ) -> Result<ModificationResponse<T>, Self::Error>
+    where
+        T: DeserializeOwned + Send + Sync,
+    {
+        let request_url = url.clone();
+
+        // Exclude local redaction and metric recording from BMC latency.
+        let started = Instant::now();
+        let result = self.inner.poll(url, credentials, custom_headers).await;
+        let external_duration = started.elapsed();
+
+        let result = redact_request_credential(result, credentials);
+
+        // nv-redfish preserves 202 as a task but discards completed response statuses.
+        let status_code = match &result {
+            Ok(ModificationResponse::Task(_)) => http::StatusCode::ACCEPTED.as_u16().to_string(),
+            _ => result_status_code(&result, UNKNOWN_HTTP_STATUS_CODE),
+        };
+
+        self.observe(
+            "GET",
+            &request_url,
+            &status_code,
+            entity_type_name::<T>(),
+            external_duration,
+        );
+
+        result
+    }
+
     async fn post<B, T>(
         &self,
         url: Url,
@@ -1181,6 +1216,32 @@ impl HttpClient for InstrumentedHttpClient {
         self.observe_result("GET", &request_url, &result, "200", external_duration);
         result
     }
+
+    async fn sse_events<T: Sized + for<'de> Deserialize<'de> + Send + 'static>(
+        &self,
+        url: Url,
+        credentials: &NvBmcCredentials,
+        custom_headers: &HeaderMap,
+        last_event_id: Option<&str>,
+    ) -> Result<BoxTryStream<StreamEvent<T>, Self::Error>, Self::Error> {
+        let request_url = url.clone();
+
+        // Exclude local redaction and metric recording from BMC latency.
+        let started = Instant::now();
+
+        let result = self
+            .inner
+            .sse_events::<T>(url, credentials, custom_headers, last_event_id)
+            .await;
+
+        let external_duration = started.elapsed();
+
+        let result = redact_request_credential(result, credentials);
+
+        self.observe_result("GET", &request_url, &result, "200", external_duration);
+
+        result
+    }
 }
 
 fn bmc_server_address(addr: &BmcAddr) -> String {
@@ -1276,6 +1337,14 @@ fn entity_type_name<T>() -> &'static str {
         .unwrap_or(without_generics)
 }
 
+impl nv_redfish::core::BmcError for HealthError {
+    fn error_class(&self) -> nv_redfish::core::BmcErrorClass {
+        bmc_source_error(self).map_or(nv_redfish::core::BmcErrorClass::Other, |error| {
+            error.error_class()
+        })
+    }
+}
+
 impl Bmc for BmcClient {
     type Error = HealthError;
 
@@ -1309,6 +1378,17 @@ impl Bmc for BmcClient {
             })
             .await;
         self.finish("get", result)
+    }
+
+    async fn poll<R: Send + Sync + for<'de> Deserialize<'de>>(
+        &self,
+        id: &ODataId,
+    ) -> Result<ModificationResponse<R>, Self::Error> {
+        let result = self
+            .read_with_auth_retry(|| async { self.inner.poll(id).await.map_err(HealthError::from) })
+            .await;
+
+        self.finish("poll", result)
     }
 
     async fn filter<T: EntityTypeRef + for<'de> Deserialize<'de> + 'static>(
@@ -1436,6 +1516,27 @@ impl Bmc for BmcClient {
             })
             .await;
         let stream = self.finish("stream", result)?;
+        Ok(Box::pin(stream.map_err(HealthError::from)))
+    }
+
+    async fn stream_events<T: Sized + for<'de> Deserialize<'de> + Send + 'static>(
+        &self,
+        uri: &str,
+        last_event_id: Option<&str>,
+    ) -> Result<BoxTryStream<StreamEvent<T>, Self::Error>, Self::Error> {
+        // Preserve SSE IDs for vendor envelope repairs and resume cursors. Only
+        // establishment uses auth retry and the breaker; collectors own item failures.
+        let result = self
+            .read_with_auth_retry(|| async {
+                self.inner
+                    .stream_events(uri, last_event_id)
+                    .await
+                    .map_err(HealthError::from)
+            })
+            .await;
+
+        let stream = self.finish("stream", result)?;
+
         Ok(Box::pin(stream.map_err(HealthError::from)))
     }
 
@@ -3136,6 +3237,7 @@ mod tests {
 
                 let reason = match status {
                     200 => "OK",
+                    202 => "Accepted",
                     401 => "Unauthorized",
                     500 => "Internal Server Error",
                     503 => "Service Unavailable",
@@ -3223,6 +3325,148 @@ mod tests {
             "missing BMC latency series with labels {labels:?}; metrics:
 {metrics}",
         );
+    }
+
+    #[tokio::test]
+    async fn stream_events_preserves_ids_across_auth_retry_and_records_handshakes() {
+        use axum::Router;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::get;
+        use bmc_mock::test_support::serve_https;
+        use futures::StreamExt;
+        use serde_json::Value;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            struct RotatingProvider(AtomicUsize);
+
+            impl CredentialProvider for RotatingProvider {
+                fn fetch_credentials<'a>(
+                    &'a self,
+                    _endpoint: &'a BmcAddr,
+                ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>> {
+                    let token = if self.0.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                        "stale-token"
+                    } else {
+                        "fresh-token"
+                    };
+
+                    Box::pin(async move {
+                        Ok(BmcCredentials::SessionToken {
+                            token: token.into(),
+                        })
+                    })
+                }
+            }
+
+            let provider = Arc::new(RotatingProvider(AtomicUsize::new(0)));
+            let requests = Arc::new(StdMutex::new(Vec::new()));
+            let captured_requests = Arc::clone(&requests);
+            let (registry, metrics) = bmc_latency_metrics("test_health");
+
+            let app = Router::new().route(
+                "/events",
+                get(move |headers: HeaderMap| {
+                    let token = headers.get("x-auth-token").cloned();
+                    let cursor = headers.get("last-event-id").cloned();
+                    captured_requests
+                        .lock()
+                        .unwrap()
+                        .push((token.clone(), cursor));
+
+                    async move {
+                        if token.as_ref().and_then(|value| value.to_str().ok())
+                            != Some("fresh-token")
+                        {
+                            return (StatusCode::UNAUTHORIZED, "stale-token rejected")
+                                .into_response();
+                        }
+
+                        (
+                            [(header::CONTENT_TYPE, "text/event-stream")],
+                            "id: 42\ndata: {\"Message\":\"probe\"}\n\ndata: invalid-json\n\n",
+                        )
+                            .into_response()
+                    }
+                }),
+            );
+            let (mut server, base_url) = serve_https("health-sse-auth", app);
+
+            let client = test_bmc(
+                reqwest(),
+                test_addr(),
+                provider.clone(),
+                Some(base_url),
+                10,
+                Some(BmcLatencyInstrumentation::new(
+                    metrics,
+                    BmcLatencyEndpointLabels::new(None, None),
+                )),
+            )
+            .expect("client builds");
+
+            let mut stream = client
+                .stream_events::<Value>("/events", Some("41"))
+                .await
+                .expect("authentication retry opens stream");
+
+            let handshake_metrics = render_metrics(&registry);
+
+            let event = stream
+                .next()
+                .await
+                .expect("event exists")
+                .expect("event decodes");
+
+            let error = stream
+                .next()
+                .await
+                .expect("malformed frame exists")
+                .expect_err("malformed frame fails decoding");
+
+            assert_eq!(event.last_event_id.as_deref(), Some("42"));
+            assert_eq!(event.data["Message"], "probe");
+
+            assert!(matches!(
+                bmc_source_error(&error),
+                Some(BmcError::JsonError(_))
+            ));
+
+            assert_eq!(provider.0.load(AtomicOrdering::SeqCst), 2);
+
+            assert_eq!(
+                requests.lock().unwrap().as_slice(),
+                &[
+                    (
+                        Some("stale-token".parse().unwrap()),
+                        Some("41".parse().unwrap())
+                    ),
+                    (
+                        Some("fresh-token".parse().unwrap()),
+                        Some("41".parse().unwrap())
+                    ),
+                ]
+            );
+
+            assert_eq!(render_metrics(&registry), handshake_metrics);
+            assert!(!client.circuit_tripped.load(Ordering::Acquire));
+
+            for status in ["401", "200"] {
+                assert_bmc_latency_series(
+                    &handshake_metrics,
+                    &[
+                        &format!("http_response_status_code=\"{status}\""),
+                        "http_request_method=\"GET\"",
+                        "http_path=\"/events\"",
+                    ],
+                );
+            }
+
+            drop(stream);
+            server.stop().await.expect("server stops");
+        })
+        .await
+        .expect("SSE adapter test completes within its deadline");
     }
 
     #[tokio::test]
@@ -3336,6 +3580,166 @@ mod tests {
         assert!(!metrics.contains("machine_id="));
         assert!(!metrics.contains("rack_id="));
         server.join().expect("test server thread");
+    }
+
+    #[tokio::test]
+    async fn task_poll_refreshes_credentials_and_records_pending_and_completed_responses() {
+        let (registry, metrics) = bmc_latency_metrics("test_health");
+
+        let (base_url, requests, server) =
+            spawn_scripted_http_server(vec![(401, "{}"), (202, ""), (200, ENTITY_BODY)]);
+
+        let (client, provider_calls) = client_against_with_metrics(base_url, Some(metrics));
+        let id = ODataId::from("/redfish/v1/TaskService/TaskMonitors/1".to_string());
+
+        let pending = client.poll::<TestEntity>(&id).await.unwrap();
+
+        let ModificationResponse::Task(task) = pending else {
+            panic!("202 must preserve the pending task");
+        };
+
+        assert_eq!(task.location.0, id);
+        assert_eq!(requests.load(AtomicOrdering::SeqCst), 2);
+        assert_eq!(provider_calls.load(AtomicOrdering::SeqCst), 2);
+
+        let completed = client.poll::<TestEntity>(&id).await.unwrap();
+
+        let ModificationResponse::Entity(entity) = completed else {
+            panic!("200 must return the completed entity");
+        };
+
+        assert_eq!(entity.odata_id().to_string(), "/redfish/v1");
+        assert_eq!(requests.load(AtomicOrdering::SeqCst), 3);
+
+        let metrics = render_metrics(&registry);
+
+        for status in ["401", "202", "unknown"] {
+            assert_bmc_latency_series(
+                &metrics,
+                &[
+                    &format!("http_response_status_code=\"{status}\""),
+                    "http_request_method=\"GET\"",
+                    "http_path=\"/redfish/v1/TaskService/TaskMonitors/1\"",
+                ],
+            );
+        }
+
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn task_poll_does_not_infer_completion_status_from_response_shape() {
+        use axum::Router;
+        use axum::http::StatusCode;
+        use axum::routing::get;
+
+        let cases = [
+            (
+                "entity from location",
+                StatusCode::NO_CONTENT,
+                Some("/redfish/v1"),
+            ),
+            ("empty completion", StatusCode::OK, None),
+        ];
+
+        for (scenario, status, location) in cases {
+            let (registry, metrics) = bmc_latency_metrics("test_health");
+
+            let app = Router::new().route(
+                "/task",
+                get(move || async move {
+                    let mut headers = HeaderMap::new();
+
+                    if let Some(location) = location {
+                        headers.insert(header::LOCATION, location.parse().unwrap());
+                    }
+
+                    (status, headers, "")
+                }),
+            );
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+            let (client, _) = client_against_with_metrics(
+                Url::parse(&format!("http://{address}")).unwrap(),
+                Some(metrics),
+            );
+
+            let result = client
+                .poll::<TestEntity>(&ODataId::from("/task".to_string()))
+                .await
+                .unwrap();
+
+            match (result, location) {
+                (ModificationResponse::Entity(entity), Some(location)) => {
+                    assert_eq!(entity.odata_id().to_string(), location, "{scenario}");
+                }
+                (ModificationResponse::Empty, None) => {}
+                _ => panic!("{scenario}: unexpected polling response"),
+            }
+
+            let metrics = render_metrics(&registry);
+
+            assert_bmc_latency_series(
+                &metrics,
+                &[
+                    "http_response_status_code=\"unknown\"",
+                    "http_request_method=\"GET\"",
+                    "http_path=\"/task\"",
+                ],
+            );
+
+            assert!(
+                !metrics.contains("http_response_status_code=\"200\""),
+                "{scenario}"
+            );
+
+            assert!(
+                !metrics.contains("http_response_status_code=\"204\""),
+                "{scenario}"
+            );
+
+            server.abort();
+
+            assert!(server.await.unwrap_err().is_cancelled());
+        }
+    }
+
+    #[test]
+    fn bmc_error_classification_preserves_wrapped_bmc_errors() {
+        use carbide_test_support::{Check, check_values};
+        use nv_redfish::core::{BmcError as _, BmcErrorClass};
+
+        let cases = [
+            Check {
+                scenario: "server error",
+                input: HealthError::from(bmc_status_error(http::StatusCode::SERVICE_UNAVAILABLE)),
+                expect: BmcErrorClass::HttpResponse { status: 503 },
+            },
+            Check {
+                scenario: "nested authentication error",
+                input: HealthError::BmcError(Box::new(HealthError::from(bmc_status_error(
+                    http::StatusCode::UNAUTHORIZED,
+                )))),
+                expect: BmcErrorClass::HttpResponse { status: 401 },
+            },
+            Check {
+                scenario: "response parse error",
+                input: HealthError::from(BmcError::DecodeError(
+                    serde_json::from_str::<bool>("invalid").unwrap_err(),
+                )),
+                expect: BmcErrorClass::ResponseParse,
+            },
+            Check {
+                scenario: "unclassified error",
+                input: HealthError::GenericError("unclassified failure".to_string()),
+                expect: BmcErrorClass::Other,
+            },
+        ];
+
+        check_values(cases, |error| error.error_class());
     }
 
     #[tokio::test]

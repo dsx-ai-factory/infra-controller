@@ -9,10 +9,9 @@ nico-admin-cli-expected-rack-update - Update expected rack
 ## SYNOPSIS
 
 ```text
-nico-admin-cli expected-rack update [--rack-profile-id]
-[--meta-name] [--meta-description] [--label]
-[--extended] [--sort-by] [-h|--help]
-<RACK_ID>
+nico-admin-cli expected-rack update [--meta-name]
+[--meta-description] [--label] [--extended]
+[--sort-by] [-h|--help] <RACK_ID>
 ```
 
 ## DESCRIPTION
@@ -20,10 +19,6 @@ nico-admin-cli expected-rack update [--rack-profile-id]
 Update expected rack
 
 ## OPTIONS
-
-`--rack-profile-id <RACK_PROFILE_ID>`
-
-Rack profile ID of the expected rack
 
 `--meta-name <META_NAME>`
 
@@ -69,8 +64,7 @@ Rack ID of the expected rack
 ## Examples
 
 ```sh
-nico-admin-cli expected-rack update 12345678-1234-5678-90ab-cdef01234567 --rack-profile-id abcdef01-2345-6789-abcd-ef0123456789
-nico-admin-cli expected-rack update 12345678-1234-5678-90ab-cdef01234567 --rack-profile-id abcdef01-2345-6789-abcd-ef0123456789 --meta-name rack-01
+nico-admin-cli expected-rack update rack-01 --meta-name rack-01
 ```
 
 ---

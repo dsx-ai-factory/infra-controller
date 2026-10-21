@@ -1,10 +1,8 @@
 # Node-Auth: Self-Signed Bearer JWTs for Scout and DPU-Agent
 
-Design for [#355](https://github.com/dsx-ai-factory/infra-controller/issues/355)
-(sub-issue of the Vault-elimination epic
-[#195](https://github.com/dsx-ai-factory/infra-controller/issues/195)): Scout and the
-DPU-agent authenticate to the API with short-lived bearer JWTs alongside —
-and eventually instead of — mTLS client certificates.
+Design for [#355](https://github.com/dsx-ai-factory/infra-controller/issues/355):
+Scout and the DPU-agent authenticate to the API with short-lived bearer JWTs
+alongside mTLS client certificates.
 
 Nodes sign their own tokens with the private key of their **existing** mTLS
 client certificate. There is no new key material anywhere, no server-side
@@ -601,6 +599,20 @@ cost.
 The enable direction has the mirror window but fails safe on its own: the init
 container blocks waiting for the CA in `pub/` rather than starting into a
 broken state.
+
+**Certificate/key renewal is not crash-atomic.** `write_certs` writes
+`machine_cert.pem` before `machine_cert.key`. The minter's public-key comparison
+rejects a transient mismatch while both writes complete, but a crash or failed
+second write can leave a persistent mismatched pair that cannot authenticate a
+renewal retry. The [selectable cert-manager PKI work](https://github.com/dsx-ai-factory/infra-controller/issues/5956)
+must add validated, atomic credential-set promotion with rollback and make the
+JWT, gRPC TLS, optional DPU OTLP collector, and certificate-copy paths resolve
+and validate one immutable generation per load or copy. Non-Rust consumers must
+switch or reload only after a complete generation is promoted; they must not
+replace the certificate and key independently. This is required before the path
+is used for ordinary cert-manager renewal or planned node CA rollover. Until
+then, recovery from that failure requires re-enrollment or another out-of-band
+restoration of a matching pair.
 
 ## Designs not used
 

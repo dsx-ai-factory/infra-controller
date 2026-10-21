@@ -27,22 +27,33 @@ use crate::api::{Api, log_machine_id};
 
 const DEFAULT_BMC_HTTPS_PORT: u16 = 443;
 
-/// Resolves a BMC address, applying the default HTTPS port when one is absent.
+/// `resolve_bmc_address` selects the first address from [`resolve_bmc_addresses`].
+pub(super) async fn resolve_bmc_address(address: &str) -> Result<SocketAddr, tonic::Status> {
+    resolve_bmc_addresses(address)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| invalid_bmc_address(address, "name resolution returned no addresses").into())
+}
+
+/// `resolve_bmc_addresses` returns all BMC addresses, defaulting to HTTPS port 443.
+/// Successful resolution always returns at least one address.
 ///
 /// Bare IP literals are handled before hostname resolution so an IPv6 address's
 /// colons are never mistaken for a host/port separator. An explicit port on an
 /// IPv6 literal must use the standard `[address]:port` socket syntax.
-pub(super) async fn resolve_bmc_address(address: &str) -> Result<SocketAddr, tonic::Status> {
+pub(super) async fn resolve_bmc_addresses(address: &str) -> Result<Vec<SocketAddr>, tonic::Status> {
     if let Some(address) = parse_numeric_bmc_address(address) {
-        return Ok(address);
+        return Ok(vec![address]);
     }
 
     let lookup_target = bmc_lookup_target(address).map_err(tonic::Status::from)?;
-    let mut addresses = lookup_host(lookup_target.as_ref()).await?;
+    let addresses: Vec<_> = lookup_host(lookup_target.as_ref()).await?.collect();
+    if addresses.is_empty() {
+        return Err(invalid_bmc_address(address, "name resolution returned no addresses").into());
+    }
 
-    addresses
-        .next()
-        .ok_or_else(|| invalid_bmc_address(address, "name resolution returned no addresses").into())
+    Ok(addresses)
 }
 
 fn parse_numeric_bmc_address(address: &str) -> Option<SocketAddr> {
@@ -231,6 +242,13 @@ mod tests {
                 .expect("localhost should resolve");
             assert!(resolved.ip().is_loopback(), "{scenario}");
             assert_eq!(resolved.port(), expected_port, "{scenario}");
+            let all_resolved = resolve_bmc_addresses(address).await.unwrap();
+            let expected: Vec<_> = lookup_host(("localhost", expected_port))
+                .await
+                .unwrap()
+                .collect();
+            assert_eq!(all_resolved, expected, "{scenario}");
+            assert_eq!(all_resolved.first(), Some(&resolved), "{scenario}");
         }
     }
 

@@ -169,8 +169,14 @@ func syncMachines(
 		}
 	}
 
-	// Step 7: Direct-write derived ComponentOperationStatus (from pre-fetched detail.State).
+	// Step 7: Direct-write derived operation status and aggregate health from
+	// the pre-fetched machine detail snapshot.
 	syncMachineStatuses(ctx, pool, detailByID, componentsByExternalID)
+	machineHealth := make(map[string]*types.HealthReport, len(detailByID))
+	for id, detail := range detailByID {
+		machineHealth[id] = detail.Health
+	}
+	persistComponentHealthSnapshots(ctx, pool, machineHealth, componentsByExternalID)
 
 	// Step 8: Fetch positions and build drift records (requires separate NICo API)
 	machinePositions, err := nicoClient.GetMachinePositionInfo(ctx, machineIDs)

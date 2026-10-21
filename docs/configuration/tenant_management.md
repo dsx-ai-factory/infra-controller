@@ -182,23 +182,33 @@ Example tenant account detail (Ready, with active allocations):
 
 ### Accepting the Invitation (Tenant Side)
 
-The tenant admin must accept the invitation to transition the account to `Ready`. The non-interactive form sends an empty PATCH body -- note the flag-first ordering:
+The tenant admin accepts the invitation, which moves the account to `Ready`.
+
+Accepting is a tenant call, so `nicocli` has to act as the tenant. Two things decide who it acts as: the token it sends, and the org in the request path. Both have to name the tenant org.
+
+Give the tenant its own config file, and set `api.org` to the tenant org in it. Pass that file with `--config` to `nicocli login` and to every tenant command. The request then carries the tenant's token, which can act only in orgs it holds a role for. If it holds no role for the org in `api.org`, the request fails with `403 Requested organization not found in token claims`. If it holds roles in several orgs, `api.org` picks which one it acts as.
+
+Don't log in to the provider's config file. Login overwrites the provider's `auth.oidc` credentials there. A provider token in `auth.token` also outranks `auth.oidc.token`. In that case the tenant's login changes nothing that is sent.
+
+On Keycloak deployments, [Pointing `nicocli` at the Tenant Org](tenant-management-keycloak.md#pointing-nicocli-at-the-tenant-org) has the commands.
+
+To accept, send an empty PATCH body. Flags go before the account ID:
 
 ```bash
-nicocli tenant-account update --data '{}' <account-id>
+nicocli --config ~/.nico/<tenant-org>.yaml tenant-account update --data '{}' <account-id>
 ```
 
-TUI:
+Or use the TUI:
 
 ```bash
-nicocli tui
+nicocli --config ~/.nico/<tenant-org>.yaml tui
 > tenant-account update
 ```
 
-Only accounts in `Invited` status can be accepted. Attempting to update a `Ready` account returns the verified error:
+Only an account in `Invited` status can be accepted. An account that is already `Ready` returns this error:
 
 ```bash
-$ nicocli tenant-account update --data '{}' <account-id>
+$ nicocli --config ~/.nico/<tenant-org>.yaml tenant-account update --data '{}' <account-id>
 Error: API error 400: Tenant Account status is not Invited
 ```
 
@@ -705,17 +715,54 @@ The instance detail response is rich -- it includes `interfaces[]` with assigned
 
 **What it does.** When phone-home is enabled, NICo does not consider the instance fully provisioned until the booted OS contacts NICo's metadata service from inside the guest. The instance is held in a provisioning state -- the transition to `Ready` is gated -- until that callback arrives. When it is disabled, NICo reports the instance ready as soon as provisioning and config sync finish, without waiting for any signal from the OS.
 
-**What NICo injects.** When phone-home is enabled, NICo edits your `userData` for you -- you do *not* add the callback yourself. NICo parses your cloud-init YAML, strips any existing [`phone_home`](https://cloudinit.readthedocs.io/en/latest/reference/modules.html#phone-home) block, and inserts one that POSTs to the site's metadata endpoint:
+**What NICo injects.** When phone-home is enabled, NICo edits your `userData`. You do not add the callback yourself. NICo parses your cloud-init YAML, removes the existing [`phone_home`](https://cloudinit.readthedocs.io/en/latest/reference/modules.html#phone-home) blocks that it can edit, and inserts one that sends a POST request to the site's metadata endpoint:
 
 ```yaml
 #cloud-config
 # ... your first-boot setup (SSH keys, passwords, packages, ...) ...
 phone_home:
-  url: http://169.254.169.254/latest/meta-data/phone_home
   post: all
+  url: http://169.254.169.254/latest/meta-data/phone_home
 ```
 
-The injected `url` is the site-configured phone-home endpoint (`site.phoneHomeUrl`; default `http://169.254.169.254/latest/meta-data/phone_home`), which the platform operator can override per deployment. If you supply no `userData`, NICo generates a minimal `#cloud-config` containing only the block above. Disabling phone-home reverses this, and NICo removes the matching `phone_home` block it manages. Because NICo rewrites your user-data as YAML, **any `userData` you provide must be valid cloud-init YAML (a `#cloud-config` mapping) when phone-home is enabled**. The API rejects requests with invalid user-data. (Supplying no user-data is fine: NICo generates the minimal `#cloud-config` shown above.)
+The injected `url` is the site-configured phone-home endpoint in `site.phoneHomeUrl`. The default is `http://169.254.169.254/latest/meta-data/phone_home`. The platform operator can override this endpoint for each deployment. If you supply no `userData` when enabling phone-home, NICo generates a minimal `#cloud-config` that contains only the block above.
+
+When you disable phone-home, the removal behavior depends on whether the request supplies `userData`. If it does, NICo removes only a `phone_home` block that reports to the site endpoint and leaves blocks that report elsewhere unchanged. If the request omits `userData`, NICo edits the stored blob. If NICo stored that blob with phone-home enabled, it removes every `phone_home` block. A stored block can contain a URL from before a change to `site.phoneHomeUrl`.
+
+**Which user data NICo can edit.** When phone-home is enabled, the `userData` you provide must be one of these formats:
+
+- A `#cloud-config` mapping.
+- A `#cloud-config-archive` sequence.
+
+The API rejects these inputs:
+
+- A `#!` script.
+- A `## template: jinja` document, because NICo cannot render the template back to text.
+- Another cloud-init format, including `#cloud-boothook` or `#cloud-config-jsonp`.
+- More than one YAML document.
+- Text that is not YAML.
+
+NICo treats user data without a format marker as `#cloud-config`, including user data with only a comment above the keys. Enabling phone-home writes the marker at the top so that cloud-init reads the document. When you disable phone-home for user data that NICo cannot edit, NICo leaves the document unchanged instead of rejecting the request. Any `phone_home` block in that document remains.
+
+**Where the block lands.** In a `#cloud-config` document, NICo adds the block at the top level. If the document contains an `autoinstall` section, NICo adds the block under `autoinstall.user-data`. This placement makes the callback come from the installed system instead of the installer.
+
+In a `#cloud-config-archive`, NICo adds the block to the part that installs a target system, again under `autoinstall.user-data`. Cloud-init determines a part's format from its `type` without reading the content. If `type` is absent, cloud-init uses the content's first line. If neither value identifies a format, cloud-init treats the part as `cloud-config`. The first-line rule above therefore applies to the document you send, not to the parts inside it.
+
+NICo leaves a part whose content is a `## template: jinja` document unchanged because it cannot render the template back to text. If no part installs a target system, NICo appends a `#cloud-config` part that contains only the block. NICo does the same when the installation part is a template that it leaves unchanged. In both cases, NICo leaves your parts unchanged:
+
+```yaml
+#cloud-config-archive
+- type: text/x-shellscript
+  content: |
+    #!/bin/sh
+    # ... your part, untouched ...
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      post: all
+      url: http://169.254.169.254/latest/meta-data/phone_home
+```
 
 cloud-init runs the `phone_home` module in its final stage, after the rest of your configuration has been applied, so the callback fires only after your setup has completed. When NICo receives the POST, it records the contact and releases the readiness gate, allowing the instance to become `Ready`.
 
@@ -825,17 +872,15 @@ In TUI mode, `instance delete` prompts for confirmation before proceeding. Delet
 
 ### Machine-Level Emergency Operations (gRPC Only)
 
-For stuck or unresponsive machines that cannot be managed through the instance API, nico-admin-cli provides direct BMC operations:
+If a machine is stuck or unresponsive, operators can use `nico-admin-cli` for
+recovery. Choose the operation that matches the problem:
 
-```bash
-# Force-reboot via BMC
-nico-admin-cli -a <core-api-url> machine reboot --machine-id="<machine-id>"
-
-# Force-delete a stuck machine (destructive -- wipes machine state)
-nico-admin-cli -a <core-api-url> machine force-delete --machine="<machine-id>"
-```
-
-See the [Machine Reboot](../playbooks/machine_reboot.md) and [Force Delete](../playbooks/force_delete.md) playbooks in the core documentation for detailed procedures.
+- To restart the machine, refer to the
+  [`machine reboot` reference](../manuals/nico-admin-cli/commands/machine/machine-reboot.md).
+- To remove its NICo records and restart discovery, follow
+  [Force Deleting and Rebuilding NICo Hosts](../playbooks/force_delete.md).
+  Force deletion does not wipe the tenant operating system or its data. The
+  playbook explains deletion consent and the optional wait for DPU confirmation.
 
 ## Tenant Lifecycle Operations
 
@@ -881,15 +926,21 @@ NICo has no first-class "disable" operation. Options:
 
 ### Tenant Teardown Sequence
 
-There is no `DELETE /tenant` endpoint -- tenant records are permanent. To fully decommission:
+There is no `DELETE /tenant` endpoint -- tenant records are permanent. For peerings
+with another tenant, arrange deletion with the Site's Provider Admin.
+
+To fully decommission:
 
 1. **Terminate all instances** -- delete every instance; each must reach `Terminated` status.
 2. **Delete all tenant network resources** -- remove VPC Prefixes or Subnets
    from every VPC, according to its `networkVirtualizationType`.
-3. **Delete all VPCs** -- remove the tenant's VPCs.
-4. **Delete all allocations** -- provider admin removes compute and network allocations.
-5. **Delete the tenant account** -- provider admin severs the link.
-6. **Revoke identity provider access** -- remove roles and optionally org membership.
+3. **Delete all VPC peerings** -- follow the
+   [peering deletion guide](../manuals/vpc/vpc_peering_management.md#deleting-vpc-peering-connections)
+   and wait for each connection to disappear.
+4. **Delete all VPCs** -- remove the tenant's VPCs.
+5. **Delete all allocations** -- provider admin removes compute and network allocations.
+6. **Delete the tenant account** -- provider admin severs the link.
+7. **Revoke identity provider access** -- remove roles and optionally org membership.
 
 After this sequence, the tenant record still exists but is inert.
 
@@ -1080,7 +1131,7 @@ Flag-first ordering -- always put flags before positional args.
 - [Quick Start Guide](../getting-started/quick-start.md), NICo deployment and Day Zero walkthrough
 - [VPC Routing Profiles](../manuals/vpc/vpc_routing_profiles.md), profile configuration and behavior
 - [VPC Network Virtualization](../manuals/vpc/vpc_network_virtualization.md), full networking architecture
-- [VPC Peering](../manuals/vpc/vpc_peering_management.md), connecting VPCs (gRPC only)
+- [VPC Peering](../manuals/vpc/vpc_peering_management.md), connecting VPCs and waiting for peering deletion
 - [NVLink Partitioning](../manuals/nvlink_partitioning.md), NVLink logical partition management
 - [Machine Reboot Playbook](../playbooks/machine_reboot.md), emergency BMC reboot procedures
 - [Force Delete Playbook](../playbooks/force_delete.md), removing stuck machines

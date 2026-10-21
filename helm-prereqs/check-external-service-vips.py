@@ -62,6 +62,18 @@ def check_vips(stream, metallb_stream=None):
                 except ValueError as error:
                     pool_errors.append(f"MetalLB pool entry {block!r} is invalid: {error}")
 
+    # Chart defaults for externalTrafficPolicy and external ports. MetalLB only shares a VIP
+    # between Services with the same policy and distinct protocol/port pairs, and Local
+    # Services share only when they select the same pods.
+    sharing_defaults = {
+        "nico-api": ("Local", {"TCP/443"}),
+        "nico-pxe": ("Local", {"TCP/8080", "TCP/80"}),
+        "nico-ssh-console-rs": ("Cluster", {"TCP/22"}),
+        "nico-dhcp": ("Cluster", {"UDP/67"}),
+        "nico-dns": ("Cluster", {"UDP/53", "TCP/53"}),
+        "unbound": ("Cluster", {"UDP/53", "TCP/53"}),
+        "nico-ntp": ("Local", {"UDP/123"}),
+    }
     seen_vips = {}
     for component, config in values.items():
         # Only an explicit false disables the owning chart in the site values.
@@ -86,27 +98,45 @@ def check_vips(stream, metallb_stream=None):
                 if not dhcp.get("v6Enabled"):
                     continue
 
-            api_families = None
-            api_family_policy = None
-            if component == "nico-api" and name == "externalService":
-                api_families = service.get("ipFamilies")
-                api_family_policy = service.get("ipFamilyPolicy")
-                if api_family_policy is None or api_family_policy == "":
-                    api_family_policy = "SingleStack"
-                if api_families is not None and not isinstance(api_families, list):
+            families = None
+            family_policy = None
+            if component in ("nico-api", "nico-dns", "nico-pxe", "nico-ntp", "unbound", "nico-ssh-console-rs") and name == "externalService":
+                families = service.get("ipFamilies")
+                family_policy = service.get("ipFamilyPolicy")
+                if family_policy is None or family_policy == "":
+                    family_policy = "SingleStack"
+                if families is not None and not isinstance(families, list):
                     raise ValueError(f"{component}.{name}.ipFamilies must be a list")
-                if api_family_policy not in ("SingleStack", "PreferDualStack", "RequireDualStack"):
+                # Unbound renders an explicit IPv4 fallback rather than a cluster-selected family.
+                if component == "unbound" and not families:
+                    families = ["IPv4"]
+                if family_policy not in ("SingleStack", "PreferDualStack", "RequireDualStack"):
                     raise ValueError(f"{component}.{name}.ipFamilyPolicy must be SingleStack, PreferDualStack, or RequireDualStack")
-                if api_families:
-                    if (any(family not in ("IPv4", "IPv6") for family in api_families)
-                            or len(set(api_families)) != len(api_families)):
+                if families:
+                    if (any(family not in ("IPv4", "IPv6") for family in families)
+                            or len(set(families)) != len(families)):
                         raise ValueError(f"{component}.{name}.ipFamilies must contain unique IPv4 or IPv6 entries")
-                    if api_family_policy == "SingleStack" and len(api_families) != 1:
+                    if family_policy == "SingleStack" and len(families) != 1:
                         raise ValueError(f"{component}.{name}.ipFamilies must contain one family for SingleStack")
 
             # externalService honors type; the DHCPv6 template always renders LoadBalancer.
             if name == "externalService" and (service.get("type") or "LoadBalancer") != "LoadBalancer":
                 continue
+
+            policy, ports = sharing_defaults.get(component, ("Cluster", set()))
+            ports = set(ports)
+            if name == "externalService":
+                # A blank policy renders no externalTrafficPolicy, which Kubernetes treats as Cluster.
+                raw_policy = service.get("externalTrafficPolicy")
+                policy = policy if raw_policy is None else (str(raw_policy) or "Cluster")
+                if component in ("nico-api", "nico-ssh-console-rs", "nico-pxe") and service.get("port") not in (None, ""):
+                    ports = {f"TCP/{service['port']}"} | ({"TCP/80"} if component == "nico-pxe" else set())
+                if component == "nico-pxe" and "alternatePort" in service:
+                    ports.discard("TCP/80")
+                    if service["alternatePort"] not in (None, "", 0):
+                        ports.add(f"TCP/{service['alternatePort']}")
+            else:
+                policy, ports = "Local", {"UDP/547"}
 
             # Only DNS and NTP render per-pod annotations; other charts ignore that field.
             annotations = (service.get("perPodAnnotations")
@@ -127,6 +157,12 @@ def check_vips(stream, metallb_stream=None):
                     errors.append(f"{component}.{name} needs loadBalancerIPs from your MetalLB pool")
                     break
                 owner = f"{component}.{name}[{index}]"
+                # A shared VIP needs the same MetalLB sharing value on every Service that uses it;
+                # a blank or null value does not allow sharing.
+                groups = {str(value).strip() for key, value in (entry or {}).items()
+                          if key in ("metallb.universe.tf/allow-shared-ip", "metallb.io/allow-shared-ip")
+                          and value is not None and str(value).strip()}
+                group = groups.pop() if len(groups) == 1 else None
                 for value in vips:
                     for vip in str(value).split(","):
                         try:
@@ -138,22 +174,33 @@ def check_vips(stream, metallb_stream=None):
                         if name == "v6ExternalService" and address.version != 6:
                             errors.append(f"{component}.{name}: VIP {address} must be an IPv6 address")
                             continue
-                        # These external Services explicitly render SingleStack IPv4.
-                        if name == "externalService" and component in ("nico-dhcp", "unbound") and address.version != 4:
+                        # The DHCPv4 external Service explicitly renders SingleStack IPv4.
+                        if name == "externalService" and component == "nico-dhcp" and address.version != 4:
                             errors.append(f"{component}.{name}: VIP {address} must be an IPv4 address")
                             continue
-                        # The API chart can select a family explicitly. Dual-stack policies
+                        # These charts can select a family explicitly. Dual-stack policies
                         # may add the other family, and omitted families depend on the cluster.
-                        if (api_families and api_family_policy == "SingleStack"
-                                and f"IPv{address.version}" not in api_families):
-                            errors.append(f"{component}.{name}: VIP {address} does not match ipFamilies {api_families}")
+                        if (families and family_policy == "SingleStack"
+                                and f"IPv{address.version}" not in families):
+                            errors.append(f"{component}.{name}: VIP {address} does not match ipFamilies {families}")
                             continue
                         # Normalize addresses, but do not count annotation aliases as separate Services.
-                        if seen_vips.get(address) == owner:
+                        previous = seen_vips.get(address)
+                        if previous and previous[0] == owner:
                             continue
-                        if address in seen_vips:
-                            warnings.append(f"VIP {address} is assigned to more than one service (each service needs a unique IP)")
-                        seen_vips[address] = owner
+                        if previous and (group is None or previous[1] != group):
+                            warnings.append(f"VIP {address} is shared by more than one service; sharing requires "
+                                            "the same allow-shared-ip annotation value on every service that uses it")
+                        elif previous and previous[2] != policy:
+                            warnings.append(f"VIP {address}: {previous[0]} and {owner} share one allow-shared-ip value, but "
+                                            f"MetalLB cannot share them (externalTrafficPolicy {previous[2]} vs {policy})")
+                        elif previous and previous[3] & ports:
+                            warnings.append(f"VIP {address}: {previous[0]} and {owner} share one allow-shared-ip value, but "
+                                            f"MetalLB cannot share them (overlapping ports {sorted(previous[3] & ports)})")
+                        elif previous and policy == "Local" and previous[0].split(".")[0] != component:
+                            warnings.append(f"VIP {address}: {previous[0]} and {owner} share one allow-shared-ip value, but "
+                                            "MetalLB only shares Local Services that select the same pods")
+                        seen_vips[address] = (owner, group, policy, ports | (previous[3] if previous else set()))
                         # Missing rendered pools retain the existing format-only validation behavior.
                         if pools and not any(first.version == address.version and first <= address <= last
                                              for first, last in pools):

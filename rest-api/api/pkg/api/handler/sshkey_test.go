@@ -18,7 +18,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -149,7 +148,7 @@ func TestSSHKeyHandler_Create(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                      string
@@ -318,7 +317,6 @@ func TestSSHKeyHandler_Create(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			csgh := CreateSSHKeyHandler{
@@ -392,7 +390,7 @@ func TestSSHKeyHandler_GetByID(t *testing.T) {
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                   string
@@ -503,7 +501,6 @@ func TestSSHKeyHandler_GetByID(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			dsgh := GetSSHKeyHandler{
@@ -567,11 +564,9 @@ func TestSSHKeyHandler_GetAll(t *testing.T) {
 
 	tn1 := testInstanceBuildTenant(t, dbSession, "test-tenant", tnOrg, tnu1)
 
-	sks := []*cdbm.SSHKey{}
 	skg1 := testBuildSSHKeyGroup(t, dbSession, "test", tnOrg, nil, tn1.ID, nil, cdbm.SSHKeyGroupStatusSyncing, tnu1.ID)
 	skg2 := testBuildSSHKeyGroup(t, dbSession, "test2", tnOrg, nil, tn1.ID, nil, cdbm.SSHKeyGroupStatusSyncing, tnu1.ID)
 
-	sshKeySkg1 := []*cdbm.SSHKey{}
 	sshKeySkg2 := []*cdbm.SSHKey{}
 
 	totalKeys := 25
@@ -581,19 +576,17 @@ func TestSSHKeyHandler_GetAll(t *testing.T) {
 		if i <= 10 {
 			ska1 := testBuildSSHKeyAssociation(t, dbSession, sk1.ID, skg1.ID, tnu1.ID)
 			assert.NotNil(t, ska1)
-			sshKeySkg1 = append(sshKeySkg1, sk1)
 		} else {
 			ska2 := testBuildSSHKeyAssociation(t, dbSession, sk1.ID, skg2.ID, tnu1.ID)
 			assert.NotNil(t, ska2)
 			sshKeySkg2 = append(sshKeySkg2, sk1)
 		}
-		sks = append(sks, sk1)
 	}
 
 	cfg := common.GetTestConfig()
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                   string
@@ -765,7 +758,6 @@ func TestSSHKeyHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gsgh := GetAllSSHKeyHandler{
@@ -865,7 +857,7 @@ func TestSSHKeyHandler_Update(t *testing.T) {
 
 	cfg := common.GetTestConfig()
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -996,7 +988,6 @@ func TestSSHKeyHandler_Update(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			usgh := UpdateSSHKeyHandler{
@@ -1082,7 +1073,7 @@ func TestSSHKeyHandler_Delete(t *testing.T) {
 		mock.AnythingOfType("uuid.UUID"), mock.AnythingOfType("string")).Return(wrun, nil)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                      string
@@ -1169,7 +1160,6 @@ func TestSSHKeyHandler_Delete(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			dsgh := DeleteSSHKeyHandler{

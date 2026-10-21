@@ -53,6 +53,9 @@ spec:
             - name: ssh
               containerPort: 22
               protocol: TCP
+            - name: grpc
+              containerPort: 1079
+              protocol: TCP
           readinessProbe:
             failureThreshold: 3
             tcpSocket:

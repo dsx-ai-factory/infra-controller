@@ -207,6 +207,12 @@ func buildGeneratedBodyFormProperties(
 	body := make(map[string]interface{})
 	for _, field := range orderedGeneratedBodyFormFields(fields) {
 		if scoped, ok := generatedBodyScopeValue(s, field.JSONName); ok {
+			if field.JSONName == "siteId" && generatedCommandRequiresRegisteredSite(info) {
+				err := validateRegisteredSiteIDs(s, context.Background(), []string{scoped})
+				if err != nil {
+					return nil, err
+				}
+			}
 			body[field.JSONName] = scoped
 			resolvedValues[field.JSONName] = scoped
 			continue
@@ -453,6 +459,7 @@ func generatedBodyFieldResourceDescriptor(
 		return GeneratedResourceDescriptor{}, false
 	}
 	descriptor := GeneratedPathResourceDescriptor(info.Name, jsonName)
+	descriptor.RegisteredSiteOnly = descriptor.ResourceType == "site" && generatedCommandRequiresRegisteredSite(info)
 	switch lower {
 	case "ipv4blockid", "ipv6blockid":
 		descriptor.ResourceType = "ip-block"
@@ -673,6 +680,9 @@ func generatedBodyResourceItems(
 ) ([]NamedItem, bool, error) {
 	if s == nil || s.Resolver == nil {
 		return nil, false, nil
+	}
+	if descriptor.RegisteredSiteOnly {
+		return s.GeneratedResourceItems(ctx, descriptor, resolvedValues)
 	}
 	if _, ok := generatedBodySessionResourceTypes[descriptor.ResourceType]; ok {
 		return s.GeneratedResourceItems(ctx, descriptor, resolvedValues)

@@ -1,4 +1,4 @@
-# Flow Implementation
+# Flow Implementation <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 For service responsibilities and dependencies, see [NICo Flow](../../architecture/flow.md). Operator contracts live in [Flow Operations](../../operations/flow/overview.md).
 
@@ -26,6 +26,10 @@ The operation-run manager owns manual lifecycle changes. The dispatcher owns rec
 Task schedules use a separate dispatcher. The internal job scheduler is a third mechanism; its overlap policies and lifecycle do not define the user-facing schedule API.
 
 Database definitions are in [migrations](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/flow/internal/db/migrations) and [models](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/flow/internal/db/model). See [rule versioning](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/flow/docs/operation-rules-versioning.md) for rule-format development notes and [rule execution](operation-rule-execution.md) for activity and workflow boundaries.
+
+## Health synchronization
+
+Health synchronization preserves the last snapshot after a failed refresh or an omitted object; an explicitly empty report clears it. Observed NVLink topology is synchronized after switch inventory.
 
 ## Interfaces and configuration
 

@@ -12,11 +12,12 @@ use tonic::transport::Channel;
 use trace_propagation::TraceInjectService;
 use tracing::instrument;
 
+use crate::component_common::ComponentPowerStateResult;
 use crate::config::BackendTlsConfig;
 use crate::error::ComponentManagerError;
 use crate::nv_switch_manager::{
     ConfigureSwitchCertificateJobStatus, NvSwitchManager, SwitchComponentResult, SwitchEndpoint,
-    SwitchFirmwareUpdateStatus, SwitchPowerStateResult, SwitchSlotAndTrayResult,
+    SwitchFirmwareUpdateStatus, SwitchSlotAndTrayResult,
 };
 use crate::proto::nsm;
 use crate::types::parse_mac;
@@ -373,14 +374,13 @@ impl NvSwitchManager for NsmSwitchBackend {
     async fn get_power_state(
         &self,
         endpoints: &[SwitchEndpoint],
-    ) -> Result<Vec<SwitchPowerStateResult>, ComponentManagerError> {
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError> {
         tracing::warn!("get power state is not supported by NSM backend, passthrough");
         Ok(endpoints
             .iter()
-            .map(|ep| SwitchPowerStateResult {
-                bmc_mac: ep.bmc_mac,
-                power_state: None,
-                error: None,
+            .map(|ep| ComponentPowerStateResult {
+                mac_address: ep.bmc_mac,
+                power_state: Ok(None),
             })
             .collect())
     }
@@ -421,6 +421,18 @@ mod tests {
     use carbide_test_support::value_scenarios;
 
     use super::*;
+
+    /// NSM's no-observation stub must not advertise fresh hardware evidence.
+    #[tokio::test]
+    async fn power_getter_stub_is_not_a_passive_capability() {
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let backend = NsmSwitchBackend {
+            client: nsm::nv_switch_manager_client::NvSwitchManagerClient::new(
+                TraceInjectService::new(channel),
+            ),
+        };
+        assert_eq!(backend.power_state_source(), None);
+    }
 
     #[test]
     fn nsm_update_state_maps_each_variant() {

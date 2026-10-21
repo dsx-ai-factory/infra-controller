@@ -28,16 +28,18 @@ Rack IDs to target
 
 `--target-version <TARGET_VERSION>`
 
-Firmware target version for legacy direct-update paths
+Firmware target version for legacy direct-update paths; exactly one of
+--target-version and --sot-json-file is required
 
 `--sot-json-file <PATH>`
 
-SOT JSON file for RMS ApplyFirmwareObject
+SOT JSON file for RMS ApplyFirmwareObject; exactly one of
+--target-version and --sot-json-file is required
 
 `--access-token <ACCESS_TOKEN>`
 
 Artifact access token for RMS SOT JSON downloads; omit or pass empty for
-NOAUTH
+NOAUTH; only valid with --sot-json-file
 
 `--force-update`
 

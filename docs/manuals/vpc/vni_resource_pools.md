@@ -177,9 +177,8 @@ The practical consequence is that pools can only grow, never shrink, through con
 alone. To reduce a pool, a manual database operation would be required. This is intentional: it
 prevents accidental deallocation of VNIs that may be in active use.
 
-When `listen_only = true` is set in the configuration, the API server does not register pool definitions at startup. It reads pool state from the
-database only, on the assumption that
-another instance has already populated the pools. Pool changes in this mode must be applied using
+When `listen_only = true` is set in the configuration, the API server skips registration of the configured pool inventory at startup.
+It uses existing pools in the database, assuming another instance has already populated them. Pool changes in this mode must be applied using
 the `nico-admin-cli resource-pool grow` command described below.
 
 ---

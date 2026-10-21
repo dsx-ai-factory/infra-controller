@@ -38,6 +38,7 @@ carbide-secrets = { path = "../secrets" }
 carbide-uuid = { path = "../uuid" }
 trace-propagation = { path = "../trace-propagation" }
 chrono = { workspace = true }
+futures-util = { workspace = true }
 libredfish = { workspace = true }
 librms = { workspace = true }
 mac_address = { workspace = true }
@@ -56,6 +57,7 @@ tracing = { workspace = true }
 carbide-api-test-helper = { path = "../api-test-helper" }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-macros = { path = "../macros" }
+carbide-redfish = { path = "../redfish", features = ["test-support"] }
 carbide-secrets = { path = "../secrets", features = ["test-support"] }
 carbide-sqlx-testing = { path = "../sqlx-testing" }
 carbide-test-support = { path = "../test-support" }

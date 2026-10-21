@@ -27,6 +27,10 @@
 //!   per-group TOML overrides; `LifecycleTimings::with_overrides` and `LifecycleTimings::scale`
 //!   for the three-layer resolution chain (platform defaults → group overrides →
 //!   `acceleration_factor`).
+//! - **#4494:** `firmware_upgrade`, how long a simulated firmware task stays
+//!   `Running`; resolved like every other field and handed to bmc-mock's update
+//!   service, so `timing_overrides` and `acceleration_factor` reach the upgrade
+//!   chain too.
 
 use std::time::Duration;
 
@@ -60,7 +64,18 @@ pub struct LifecycleTimings {
     /// Duration the BMC is unreachable after `Manager.Reset` / `ipmitool bmc reset cold`.
     /// Phase 4 will use this to drive the `BmcAvailability::Resetting` window in bmc-mock.
     pub bmc_reset: Duration,
+    /// How long a firmware upload's Redfish task (`SimpleUpdate`, multipart or
+    /// `HttpPushUri`) stays `Running` before it reports `Completed` and the new
+    /// version is staged for the next power-on. NICo polls the task for this long.
+    /// Drives bmc-mock's `UpdateServiceConfig::task_completion_delay` (#4494).
+    pub firmware_upgrade: Duration,
 }
+
+/// Default `firmware_upgrade` in every platform profile. Equal to bmc-mock's
+/// `DEFAULT_TASK_COMPLETION_DELAY`, so a configuration without the key behaves
+/// exactly as before the key existed; realistic per-platform values are a
+/// profile change, not a code change.
+pub const FIRMWARE_UPGRADE_DEFAULT: Duration = Duration::from_secs(2);
 
 impl LifecycleTimings {
     /// Return a new `LifecycleTimings` with every `Some` field in `overrides` replacing
@@ -79,6 +94,7 @@ impl LifecycleTimings {
                 .bmc_ssh_ready_offset
                 .unwrap_or(self.bmc_ssh_ready_offset),
             bmc_reset: overrides.bmc_reset.unwrap_or(self.bmc_reset),
+            firmware_upgrade: overrides.firmware_upgrade.unwrap_or(self.firmware_upgrade),
         }
     }
 
@@ -96,6 +112,7 @@ impl LifecycleTimings {
             reboot: self.reboot.mul_f64(f),
             bmc_ssh_ready_offset: self.bmc_ssh_ready_offset.mul_f64(f),
             bmc_reset: self.bmc_reset.mul_f64(f),
+            firmware_upgrade: self.firmware_upgrade.mul_f64(f),
         }
     }
 }
@@ -149,6 +166,7 @@ mod opt_duration_str {
 /// [machines.my-group.timing_overrides]
 /// host.reboot = "300s"
 /// host.power_on_os_ready = "420s"
+/// host.firmware_upgrade = "600s"   # a BMC/UEFI update task stays Running this long
 /// ```
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -189,6 +207,12 @@ pub struct PartialLifecycleTimings {
         skip_serializing_if = "Option::is_none"
     )]
     pub bmc_reset: Option<Duration>,
+    #[serde(
+        with = "opt_duration_str",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub firmware_upgrade: Option<Duration>,
 }
 
 /// Per-group TOML timing overrides — one [`PartialLifecycleTimings`] for the host
@@ -237,6 +261,7 @@ impl PlatformTimingProfile {
             reboot: Duration::from_secs(180),
             bmc_ssh_ready_offset: Duration::from_secs(20),
             bmc_reset: Duration::from_secs(90),
+            firmware_upgrade: FIRMWARE_UPGRADE_DEFAULT,
         };
 
         let host = match hw {
@@ -248,6 +273,7 @@ impl PlatformTimingProfile {
                 reboot: Duration::from_secs(600),
                 bmc_ssh_ready_offset: Duration::from_secs(30),
                 bmc_reset: Duration::from_secs(120),
+                firmware_upgrade: FIRMWARE_UPGRADE_DEFAULT,
             },
 
             // Dell iDRAC9 servers (R750 = BF3, R760 = BF4): standard boot cadence.
@@ -259,6 +285,7 @@ impl PlatformTimingProfile {
                     reboot: Duration::from_secs(390),
                     bmc_ssh_ready_offset: Duration::from_secs(30),
                     bmc_reset: Duration::from_secs(90),
+                    firmware_upgrade: FIRMWARE_UPGRADE_DEFAULT,
                 }
             }
 
@@ -270,6 +297,7 @@ impl PlatformTimingProfile {
                 reboot: Duration::from_secs(510),
                 bmc_ssh_ready_offset: Duration::from_secs(30),
                 bmc_reset: Duration::from_secs(120),
+                firmware_upgrade: FIRMWARE_UPGRADE_DEFAULT,
             },
 
             // DGX GB300 / DGX VR: large NVIDIA GPU system, extended POST.
@@ -280,6 +308,7 @@ impl PlatformTimingProfile {
                 reboot: Duration::from_secs(630),
                 bmc_ssh_ready_offset: Duration::from_secs(30),
                 bmc_reset: Duration::from_secs(120),
+                firmware_upgrade: FIRMWARE_UPGRADE_DEFAULT,
             },
 
             // DGX H100: NVIDIA GPU server, moderately long POST.
@@ -290,6 +319,7 @@ impl PlatformTimingProfile {
                 reboot: Duration::from_secs(540),
                 bmc_ssh_ready_offset: Duration::from_secs(30),
                 bmc_reset: Duration::from_secs(120),
+                firmware_upgrade: FIRMWARE_UPGRADE_DEFAULT,
             },
 
             // Supermicro GB300 NVL and generic Supermicro.
@@ -301,6 +331,7 @@ impl PlatformTimingProfile {
                     reboot: Duration::from_secs(480),
                     bmc_ssh_ready_offset: Duration::from_secs(30),
                     bmc_reset: Duration::from_secs(90),
+                    firmware_upgrade: FIRMWARE_UPGRADE_DEFAULT,
                 }
             }
 
@@ -312,6 +343,7 @@ impl PlatformTimingProfile {
                 reboot: Duration::from_secs(390),
                 bmc_ssh_ready_offset: Duration::from_secs(30),
                 bmc_reset: Duration::from_secs(60),
+                firmware_upgrade: FIRMWARE_UPGRADE_DEFAULT,
             },
 
             // Generic AMI: moderate defaults for unknown AMI-BMC servers.
@@ -322,6 +354,7 @@ impl PlatformTimingProfile {
                 reboot: Duration::from_secs(420),
                 bmc_ssh_ready_offset: Duration::from_secs(30),
                 bmc_reset: Duration::from_secs(90),
+                firmware_upgrade: FIRMWARE_UPGRADE_DEFAULT,
             },
 
             // Non-compute hardware: switches and power shelves do not go through the
@@ -337,6 +370,7 @@ impl PlatformTimingProfile {
                 reboot: Duration::ZERO,
                 bmc_ssh_ready_offset: Duration::ZERO,
                 bmc_reset: Duration::ZERO,
+                firmware_upgrade: FIRMWARE_UPGRADE_DEFAULT,
             },
         };
 
@@ -542,6 +576,7 @@ mod tests {
             reboot: Some(Duration::from_secs(5)),
             bmc_ssh_ready_offset: Some(Duration::from_secs(7)),
             bmc_reset: Some(Duration::from_secs(8)),
+            firmware_upgrade: Some(Duration::from_secs(9)),
         };
         let result = base.with_overrides(&overrides);
         assert_eq!(result.power_on_os_ready, Duration::from_secs(2));
@@ -550,6 +585,43 @@ mod tests {
         assert_eq!(result.reboot, Duration::from_secs(5));
         assert_eq!(result.bmc_ssh_ready_offset, Duration::from_secs(7));
         assert_eq!(result.bmc_reset, Duration::from_secs(8));
+        assert_eq!(result.firmware_upgrade, Duration::from_secs(9));
+    }
+
+    // ── firmware_upgrade (#4494) ──────────────────────────────────────────────
+
+    #[test]
+    fn firmware_upgrade_default_is_the_mock_constant_in_every_profile() {
+        // Without the key, a firmware task completes after the same 2 s the
+        // mock used before the key existed — hosts and DPUs, compute or not.
+        for hw in &[
+            HardwareType::WiwynnGB200Nvl,
+            HardwareType::DellPowerEdgeR750,
+            HardwareType::GenericAmi,
+            HardwareType::NvidiaSwitchNd5200Ld,
+        ] {
+            let p = PlatformTimingProfile::for_hardware_type(hw);
+            assert_eq!(
+                p.host.firmware_upgrade, FIRMWARE_UPGRADE_DEFAULT,
+                "{hw:?} host"
+            );
+            assert_eq!(
+                p.dpu.firmware_upgrade, FIRMWARE_UPGRADE_DEFAULT,
+                "{hw:?} dpu"
+            );
+        }
+        assert_eq!(FIRMWARE_UPGRADE_DEFAULT, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn firmware_upgrade_follows_overrides_and_acceleration() {
+        let toml_str = "[host]\nfirmware_upgrade = \"600s\"\n";
+        let overrides: LifecycleTimingOverrides = toml::from_str(toml_str).expect("parses");
+        let host = PlatformTimingProfile::for_hardware_type(&HardwareType::WiwynnGB200Nvl)
+            .host
+            .with_overrides(&overrides.host)
+            .scale(0.05);
+        assert_eq!(host.firmware_upgrade, Duration::from_secs(30));
     }
 
     // ── Phase 3: scale ────────────────────────────────────────────────────────
@@ -567,6 +639,7 @@ mod tests {
         let scaled = base.scale(0.0);
         assert_eq!(scaled.reboot, Duration::ZERO);
         assert_eq!(scaled.bmc_reset, Duration::ZERO);
+        assert_eq!(scaled.firmware_upgrade, Duration::ZERO);
     }
 
     #[test]
