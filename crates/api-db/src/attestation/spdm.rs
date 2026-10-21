@@ -414,13 +414,16 @@ pub async fn list_all_attestation_statuses(
 
 /// Aggregates the latest attestation for each device on a machine.
 /// Unfinished devices take precedence, followed by failure, cancellation, and all-passed.
-/// `device_ids` limits the aggregate to the selected devices; `None` includes all devices.
-/// Returns not found when no attestation matches the machine and device selection.
+/// `device_ids` limits the aggregate to the selected devices; `None` includes all stored devices.
+/// Any selected device without a stored result makes the status `InProgress`.
+/// Repeated device IDs are treated as one selection. Returns not found for an empty
+/// selection, or when `device_ids` is `None` and the machine has no stored attestations.
 pub async fn list_single_machine_attestation_status(
     txn: &mut PgConnection,
     machine_id: &MachineId,
     device_ids: Option<&[String]>,
 ) -> Result<SpdmAttestationStatus, DatabaseError> {
+    // Check missing requested devices before terminal outcomes, just like unfinished work.
     let query = r#"
         WITH latest_device_attestations AS (
             SELECT DISTINCT ON (machine_id, device_id)
@@ -434,6 +437,13 @@ pub async fn list_single_machine_attestation_status(
         )
         SELECT
             CASE
+                WHEN EXISTS (
+                    SELECT 1 FROM unnest($2::text[]) AS selected(device_id)
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM latest_device_attestations AS latest
+                        WHERE latest.device_id = selected.device_id
+                    )
+                ) THEN 'in_progress'
                 WHEN bool_or(state NOT IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb) AND NOT (state ? 'Failed'))
                     THEN 'in_progress'
                 WHEN bool_or(state ? 'Failed')
@@ -444,7 +454,7 @@ pub async fn list_single_machine_attestation_status(
                     THEN 'passed'
             END AS attestation_status
         FROM latest_device_attestations
-        HAVING count(*) > 0
+        HAVING count(*) > 0 OR cardinality($2::text[]) > 0
     "#;
 
     let status = sqlx::query_scalar::<_, String>(query)
@@ -534,6 +544,32 @@ pub async fn get_attestations_for_machine_id(
         .map_err(|e| DatabaseError::query(query, e))?;
 
     Ok(attestation_details)
+}
+
+/// Returns the latest attestation details for each selected device on a machine.
+///
+/// Uses the same revision ordering as [`list_single_machine_attestation_status`].
+/// Devices without records are omitted; an empty selection returns no details.
+pub async fn get_latest_attestations_for_machine_id(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+    device_ids: &[String],
+) -> Result<Vec<SpdmDeviceAttestationDetails>, DatabaseError> {
+    // Match the status aggregate so historical failures cannot appear as current failures.
+    let query = r#"
+        SELECT DISTINCT ON (machine_id, device_id)
+            machine_id, device_id, ca_certificate, state, metadata, evidence, started_at, cancelled_at, completed_at
+        FROM spdm_machine_devices_attestation
+        WHERE machine_id = $1 AND device_id = ANY($2)
+        ORDER BY machine_id, device_id, started_at DESC, job_id DESC
+    "#;
+
+    sqlx::query_as(query)
+        .bind(machine_id)
+        .bind(device_ids)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
 }
 
 /// Returns all device attestations for a job, or `NotFoundError` if it has no devices.
@@ -734,11 +770,107 @@ pub async fn update_history(
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::Outcome::{FailsWith, Yields};
     use carbide_test_support::{Case, check_cases_async};
     use carbide_uuid::machine::{MachineIdSource, MachineType};
 
     use super::*;
+
+    /// A requested device without evidence must not disappear from the machine's status.
+    #[crate::sqlx_test]
+    async fn selected_devices_without_results_are_in_progress(
+        pool: sqlx::PgPool,
+    ) -> eyre::Result<()> {
+        #[derive(Debug, PartialEq)]
+        enum StatusError {
+            NotFound,
+            Unexpected(String),
+        }
+        let populated_machine = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [0x71; 32],
+            MachineType::Host,
+        );
+        let empty_machine = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [0x72; 32],
+            MachineType::Host,
+        );
+        let mut txn = pool.begin().await?;
+        for machine_id in [populated_machine, empty_machine] {
+            sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+                .bind(machine_id)
+                .execute(&mut *txn)
+                .await?;
+        }
+        // Include an excluded failure so a complete selection proves the device filter still applies.
+        let job_id = uuid::Uuid::new_v4();
+        for (device_id, state) in [
+            ("GPU_0", SpdmAttestationState::Passed),
+            (
+                "GPU_1",
+                SpdmAttestationState::Failed("verification failed".to_string()),
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO spdm_machine_devices_attestation
+                 (machine_id, device_id, nonce, state, job_id, started_at)
+                 VALUES ($1, $2, gen_random_uuid(), $3, $4, now())",
+            )
+            .bind(populated_machine)
+            .bind(device_id)
+            .bind(sqlx::types::Json(state))
+            .bind(job_id)
+            .execute(&mut *txn)
+            .await?;
+        }
+        txn.commit().await?;
+
+        check_cases_async([
+            Case {
+                scenario: "a missing selected device prevents existing passes from reporting passed",
+                input: (populated_machine, Some(vec!["GPU_0".to_string(), "new-device".to_string()])),
+                expect: Yields(SpdmAttestationStatus::InProgress),
+            },
+            Case {
+                scenario: "missing selected work takes precedence over a stored failure",
+                input: (populated_machine, Some(vec!["GPU_1".to_string(), "new-device".to_string()])),
+                expect: Yields(SpdmAttestationStatus::InProgress),
+            },
+            Case {
+                scenario: "a nonempty selection with no stored rows is in progress",
+                input: (empty_machine, Some(vec!["new-device".to_string()])),
+                expect: Yields(SpdmAttestationStatus::InProgress),
+            },
+            Case {
+                scenario: "repeated IDs do not invent a missing device or include excluded failures",
+                input: (populated_machine, Some(vec!["GPU_0".to_string(), "GPU_0".to_string()])),
+                expect: Yields(SpdmAttestationStatus::Passed),
+            },
+            Case {
+                scenario: "no explicit selection and no stored rows remains not found",
+                input: (empty_machine, None),
+                expect: FailsWith(StatusError::NotFound),
+            },
+            Case {
+                scenario: "an empty explicit selection remains not found",
+                input: (populated_machine, Some(Vec::new())),
+                expect: FailsWith(StatusError::NotFound),
+            },
+        ], |(machine_id, device_ids)| {
+            let pool = &pool;
+            async move {
+                let mut txn = pool.begin().await.expect("status transaction should start");
+                list_single_machine_attestation_status(&mut txn, &machine_id, device_ids.as_deref())
+                    .await
+                    .map_err(|error| match error {
+                        DatabaseError::NotFoundError { .. } => StatusError::NotFound,
+                        other => StatusError::Unexpected(other.to_string()),
+                    })
+            }
+        }).await;
+        Ok(())
+    }
 
     #[crate::sqlx_test]
     async fn mixed_cancelled_attestation_statuses(pool: sqlx::PgPool) {

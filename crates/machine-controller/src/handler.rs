@@ -2068,7 +2068,7 @@ impl MachineStateHandler {
                         handle_spdm_attestation_failed_recovery(
                             ctx,
                             host_machine_id,
-                            &mh_snapshot.host_snapshot.status.bmc_info,
+                            mh_snapshot,
                             details,
                         )
                         .await
@@ -2244,7 +2244,8 @@ impl MachineStateHandler {
                             }
                             SpdmMeasuringState::PollResult(job_id) => {
                                 handle_spdm_poll_state(
-                                    &ctx.services.db_pool,
+                                    ctx.services,
+                                    mh_snapshot,
                                     host_machine_id,
                                     job_id,
                                     FailureSource::StateMachineArea(
@@ -2286,7 +2287,8 @@ impl MachineStateHandler {
                     }
                     SpdmMeasuringState::PollResult(job_id) => {
                         handle_spdm_poll_state(
-                            &ctx.services.db_pool,
+                            ctx.services,
+                            mh_snapshot,
                             host_machine_id,
                             job_id,
                             FailureSource::StateMachineArea(StateMachineArea::MainFlow),
@@ -8281,7 +8283,8 @@ impl StateHandler for HostMachineStateHandler {
                         },
                         SpdmMeasuringState::PollResult(job_id) => {
                             handle_spdm_poll_state(
-                                &ctx.services.db_pool,
+                                ctx.services,
+                                mh_snapshot,
                                 host_machine_id,
                                 job_id,
                                 FailureSource::StateMachineArea(StateMachineArea::HostInit),
