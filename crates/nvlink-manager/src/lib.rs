@@ -1419,6 +1419,18 @@ impl NvlPartitionMonitor {
         }))
         .await;
 
+        // Cleanup runs once per iteration, after every group has committed its
+        // results, in its own transaction so a failure cannot affect group work.
+        if let Err(error) = self
+            .final_delete_marked_logical_partitions(&db_nvl_logical_partitions)
+            .await
+        {
+            tracing::error!(
+                %error,
+                "Failed to delete logical partitions marked as deleted; will retry next iteration"
+            );
+        }
+
         let mut total_completed_operations = 0;
         let mut pending_null_nvlink_observations = Vec::new();
         for result in all_group_results {
@@ -1980,13 +1992,48 @@ impl NvlPartitionMonitor {
         self.update_db_with_nmx_c_operations(
             &mut txn,
             completed_nmx_c_operations,
-            &db_nvl_logical_partitions,
             &nmx_c_partitions,
         )
         .await?;
         txn.commit().await?;
 
         Ok(num_completed_operations)
+    }
+
+    /// Permanently removes logical partitions that are marked as deleted and are
+    /// no longer referenced by any `nvlink_partitions` row.
+    /// A logical partition that still has physical rows is left
+    /// for a later iteration (or a manual intervention) rather than failing.
+    async fn final_delete_marked_logical_partitions(
+        &self,
+        db_nvl_logical_partitions: &[LogicalPartition],
+    ) -> NvLinkManagerResult<()> {
+        let mut txn = self.db_pool.txn_begin().await?;
+        let referenced_logical_partition_ids: HashSet<NvLinkLogicalPartitionId> =
+            db::nvl_partition::find_by(&mut txn, ObjectColumnFilter::<IdColumn>::All)
+                .await?
+                .into_iter()
+                .filter_map(|p| p.logical_partition_id)
+                .collect();
+        for lp in db_nvl_logical_partitions {
+            if !model::nvl_logical_partition::is_marked_as_deleted(lp) {
+                continue;
+            }
+            if referenced_logical_partition_ids.contains(&lp.id) {
+                tracing::warn!(
+                    nvlink_logical_partition_id = %lp.id,
+                    "Logical partition marked as deleted still has physical partition rows; skipping deletion"
+                );
+                continue;
+            }
+            tracing::info!(
+                nvlink_logical_partition_id = %lp.id,
+                "Deleting logical partition"
+            );
+            db::nvl_logical_partition::final_delete(lp.id, &mut txn).await?;
+        }
+        txn.commit().await?;
+        Ok(())
     }
 
     /// Correlates NMX-C per-GPU health for a domain with the locally known NVLink GPUs for
@@ -2926,7 +2973,6 @@ impl NvlPartitionMonitor {
         &self,
         txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         completed_nmx_c_operations: HashMap<NvLinkLogicalPartitionId, Vec<NmxcPartitionOperation>>,
-        db_nvl_logical_partitions: &[LogicalPartition],
         nmx_c_partitions: &HashMap<String, PartitionInfo>,
     ) -> NvLinkManagerResult<()> {
         for (logical_partition_id, operations) in completed_nmx_c_operations {
@@ -3003,18 +3049,6 @@ impl NvlPartitionMonitor {
                 }
             }
         }
-
-        // walk the logical partition list and check if any logical partitions need to be cleaned up
-        for lp in db_nvl_logical_partitions {
-            if model::nvl_logical_partition::is_marked_as_deleted(lp) {
-                tracing::info!(
-                    nvlink_logical_partition_id = %lp.id,
-                    "Deleting logical partition"
-                );
-                db::nvl_logical_partition::final_delete(lp.id, txn).await?;
-            }
-        }
-
         Ok(())
     }
 

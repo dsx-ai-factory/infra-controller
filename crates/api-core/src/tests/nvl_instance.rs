@@ -1302,14 +1302,14 @@ async fn nmxc_sim_partition_ids(env: &TestEnv) -> Vec<u32> {
 /// from 1. The monitor recreates the instance's partition and inserts a second
 /// `nvlink_partitions` row for it, but the row of the forgotten partition is
 /// never removed. Once the instance is released and the logical partition is
-/// deleted, purging the logical partition violates
-/// `nvlink_partitions_logical_partition_id_fkey` on every iteration, the
-/// group's work is abandoned, and its hosts get null NVLink observations.
+/// deleted, the orphan still references it, so the monitor must skip the purge
+/// instead of failing `nvlink_partitions_logical_partition_id_fkey` and
+/// abandoning the group's work.
 ///
-/// This pins the current behaviour; a fix should flip the orphan and stall
-/// assertions.
+/// The orphan assertions pin a known gap; a fix that removes forgotten
+/// partition rows should flip them.
 #[crate::sqlx_test]
-async fn test_nmx_c_state_loss_orphans_partition_row_and_stalls_monitor(pool: sqlx::PgPool) {
+async fn test_nmx_c_state_loss_orphans_partition_row_without_stalling_monitor(pool: sqlx::PgPool) {
     let mut config = common::api_fixtures::get_config();
     if let Some(nvlink_config) = config.nvlink_config.as_mut() {
         nvlink_config.enabled = true;
@@ -1429,26 +1429,23 @@ async fn test_nmx_c_state_loss_orphans_partition_row_and_stalls_monitor(pool: sq
         &logical_partitions[0]
     ));
 
-    // Every later pass fails the same way: the orphan still references the
-    // logical partition, so the purge hits the foreign key, the group's work
-    // is abandoned, and its hosts get null observations.
+    // Every later pass skips the purge because the orphan still references the
+    // logical partition, but the group's work completes and its hosts keep
+    // their NVLink observations.
     for pass in 1..=2 {
         env.run_nvl_partition_monitor_iteration().await;
 
         let unreachable = env
             .test_meter
             .formatted_metrics("carbide_nvlink_partition_monitor_nmx_c_unreachable_chassis_count");
-        assert_eq!(
-            unreachable,
-            vec![r#"{reason="partition_monitor_work_failed"} 1"#],
-            "pass {pass}"
-        );
+        assert!(unreachable.is_empty(), "pass {pass}: {unreachable:?}");
+        assert_machine_nvlink_observation_present(&mh, gpus.len()).await;
 
         let logical_partitions = nvl_logical_partition_rows(&pool).await;
         assert_eq!(
             logical_partitions.len(),
             1,
-            "pass {pass}: purge keeps failing"
+            "pass {pass}: purge is skipped while the orphan remains"
         );
         assert!(model::nvl_logical_partition::is_marked_as_deleted(
             &logical_partitions[0]
