@@ -1373,7 +1373,9 @@ pub async fn update_nvlink_status_observation(
 
 /// Clears `machines.nvlink_status_observation` for the given machine IDs.
 ///
-/// Used when NMX-C is unreachable so instance state does not retain stale partition observations.
+/// Used when NMX-C is unreachable so instance state does not retain stale
+/// partition observations. Rows already holding NULL are not written, so the
+/// `updated` trigger does not fire for them.
 pub async fn clear_nvlink_status_observations(
     txn: &mut PgConnection,
     machine_ids: &[HostMachineId],
@@ -1382,7 +1384,8 @@ pub async fn clear_nvlink_status_observations(
         return Ok(());
     }
 
-    let query = "UPDATE machines SET nvlink_status_observation = NULL WHERE id = ANY($1)";
+    let query = "UPDATE machines SET nvlink_status_observation = NULL
+                 WHERE id = ANY($1) AND nvlink_status_observation IS NOT NULL";
     let machine_id_strings: Vec<String> = machine_ids.iter().map(|id| id.to_string()).collect();
     sqlx::query(query)
         .bind(machine_id_strings)
@@ -4725,6 +4728,80 @@ mod test {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn clearing_nvlink_observations_writes_only_rows_holding_one(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use chrono::{DateTime, Utc};
+
+        use super::clear_nvlink_status_observations;
+
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let mut txn = pool.begin().await?;
+        super::create(
+            &mut txn,
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        txn.commit().await?;
+
+        // The `updated` trigger stamps NOW(), which is constant inside one
+        // transaction, so every step commits before the row is read back.
+        async fn clear_in_own_transaction(
+            pool: &sqlx::PgPool,
+            machine_id: HostMachineId,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            let mut txn = pool.begin().await?;
+            clear_nvlink_status_observations(txn.as_mut(), &[machine_id]).await?;
+            txn.commit().await?;
+            Ok(())
+        }
+        async fn row(
+            pool: &sqlx::PgPool,
+            machine_id: &HostMachineId,
+        ) -> Result<(Option<serde_json::Value>, DateTime<Utc>), Box<dyn std::error::Error>>
+        {
+            Ok(sqlx::query_as(
+                "SELECT nvlink_status_observation, updated FROM machines WHERE id = $1",
+            )
+            .bind(machine_id)
+            .fetch_one(pool)
+            .await?)
+        }
+
+        let (_, updated_before) = row(&pool, &machine_id).await?;
+        clear_in_own_transaction(&pool, machine_id).await?;
+        let (observation, updated_after) = row(&pool, &machine_id).await?;
+        assert_eq!(observation, None);
+        assert_eq!(
+            updated_after, updated_before,
+            "a row already holding NULL must not be rewritten"
+        );
+
+        sqlx::query("UPDATE machines SET nvlink_status_observation = $1 WHERE id = $2")
+            .bind(sqlx::types::Json(
+                serde_json::json!({"observed_at": "2026-09-16T16:00:00Z", "nvlink_gpus": []}),
+            ))
+            .bind(machine_id)
+            .execute(&pool)
+            .await?;
+        let (observation, updated_before) = row(&pool, &machine_id).await?;
+        assert!(observation.is_some());
+        clear_in_own_transaction(&pool, machine_id).await?;
+        let (observation, updated_after) = row(&pool, &machine_id).await?;
+        assert_eq!(observation, None);
+        assert!(
+            updated_after > updated_before,
+            "a cleared row is a new row version"
+        );
         Ok(())
     }
 

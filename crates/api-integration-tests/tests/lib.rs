@@ -477,6 +477,7 @@ async fn run_integration() -> eyre::Result<()> {
     .await?;
 
     exercise_admin_address_reconcile_failures(&test_env).await?;
+    exercise_nvlink_partition_monitor(&test_env, server_handle_2.ready.meter.clone()).await?;
 
     let metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
     assert!(
@@ -499,6 +500,24 @@ async fn run_integration() -> eyre::Result<()> {
             metric_infos
                 .iter()
                 .any(|metric| metric.name == name && metric.ty == "counter"),
+            "{name} must come from the fresh scrape, not from the checked-in catalogue",
+        );
+    }
+    for (name, metric_type) in [
+        ("carbide_nvlink_partition_monitor_groups_total", "counter"),
+        (
+            "carbide_nvlink_partition_monitor_iteration_overruns_total",
+            "counter",
+        ),
+        (
+            "carbide_nvlink_partition_monitor_stage_latency_milliseconds",
+            "histogram",
+        ),
+    ] {
+        assert!(
+            metric_infos
+                .iter()
+                .any(|metric| metric.name == name && metric.ty == metric_type),
             "{name} must come from the fresh scrape, not from the checked-in catalogue",
         );
     }
@@ -944,6 +963,50 @@ async fn exercise_admin_address_reconcile_failures(
     let mut txn = test_env.db_pool.begin().await?;
     db::machine_interface::set_primary_interface(&primary_id, true, &mut txn).await?;
     txn.commit().await?;
+    Ok(())
+}
+
+/// Runs one partition monitor pass on the shared database so its Events reach
+/// the catalogue scrape. A zero interval makes the pass an overrun.
+async fn exercise_nvlink_partition_monitor(
+    test_env: &IntegrationTestEnvironment,
+    meter: opentelemetry::metrics::Meter,
+) -> eyre::Result<()> {
+    use carbide_nvlink_manager::NvlPartitionMonitor;
+    use carbide_nvlink_manager::config::NvLinkConfig;
+    use model::machine::HostHealthConfig;
+
+    let mut work_lock_tasks = tokio::task::JoinSet::new();
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut work_lock_tasks,
+        test_env.db_pool.clone(),
+        db::work_lock_manager::KeepaliveConfig::default(),
+    )
+    .await?;
+    let nmxc_client_pool = libnmxc::NmxcClientPool::builder()
+        .build()
+        .map_err(|error| eyre::eyre!("NMX-C client pool: {error}"))?;
+    let monitor = NvlPartitionMonitor::new(
+        test_env.db_pool.clone(),
+        Arc::new(nmxc_client_pool),
+        meter,
+        NvLinkConfig {
+            monitor_run_interval: Duration::ZERO,
+            ..Default::default()
+        },
+        HostHealthConfig::default(),
+        work_lock_manager_handle,
+    );
+    monitor.run_single_iteration().await?;
+    for line in [
+        "# TYPE carbide_nvlink_partition_monitor_groups_total counter\n",
+        r#"carbide_nvlink_partition_monitor_groups_total{outcome="unreachable"}"#,
+        "# TYPE carbide_nvlink_partition_monitor_iteration_overruns_total counter\n",
+        "# TYPE carbide_nvlink_partition_monitor_stage_latency_milliseconds histogram\n",
+    ] {
+        metrics::wait_for_metric_line(&test_env.carbide_metrics_addrs, line).await?;
+    }
+    work_lock_tasks.shutdown().await;
     Ok(())
 }
 

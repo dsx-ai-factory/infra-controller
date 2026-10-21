@@ -44,6 +44,10 @@ pub(super) struct NvlPartitionMonitorMetrics {
     pub(super) num_physical_partitions: usize,
     /// Number of completed operations in this run
     pub(super) num_completed_operations: usize,
+    /// Number of machine groups (chassis or rack) in this run
+    pub(super) num_groups: usize,
+    /// Number of those groups skipped by change detection
+    pub(super) num_groups_skipped: usize,
     /// Number of NVLink GPU partition ID mismatches between DB and NMX-C
     pub(super) num_nvlink_info_mismatches: usize,
     /// Number of stale partitions deleted from DB (not found in NMX-C)
@@ -228,6 +232,8 @@ impl NvlPartitionMonitorMetrics {
             num_physical_partitions: 0,
             num_gpus_scanned: 0,
             num_completed_operations: 0,
+            num_groups: 0,
+            num_groups_skipped: 0,
             num_nvlink_info_mismatches: 0,
             num_stale_partitions_deleted: 0,
             applied_changes: HashMap::new(),
@@ -253,8 +259,8 @@ impl NvlPartitionMonitorMetrics {
     /// and can be merged with `extend`.
     ///
     /// Fields managed by the caller (`recording_started_at`, `num_logical_partitions`,
-    /// `num_physical_partitions`, `num_completed_operations`, `num_nmx_c_unreachable_chassis`)
-    /// are not touched here.
+    /// `num_physical_partitions`, `num_completed_operations`, `num_groups`,
+    /// `num_groups_skipped`, `num_nmx_c_unreachable_chassis`) are not touched here.
     ///
     /// Exhaustive destructuring is intentional: adding a field to
     /// [`NvlPartitionMonitorMetrics`] or [`NmxcMetrics`] must force a merge decision here.
@@ -282,6 +288,8 @@ impl NvlPartitionMonitorMetrics {
             num_logical_partitions: _,
             num_physical_partitions: _,
             num_completed_operations: _,
+            num_groups: _,
+            num_groups_skipped: _,
             num_nmx_c_unreachable_chassis: _,
         } = other;
 
@@ -315,7 +323,9 @@ impl Display for NvlPartitionMonitorMetrics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{{ machines_scanned: {}, instances_scanned: {}, nvl_status_updates: {}, num_logical_partitions: {}, num_physical_partitions:{}, num_gpus_scanned: {}, nvlink_info_mismatches: {}, stale_partitions_deleted: {}, nmx_c_unreachable_chassis: {:?}, applied_changes: {}, nmxc_connect_err: {}, nmxc_num_partitions: {}, nmxc_num_gpus: {}, completed_operations: {}, duration: {} }}",
+            "{{ groups: {}, groups_skipped: {}, machines_scanned: {}, instances_scanned: {}, nvl_status_updates: {}, num_logical_partitions: {}, num_physical_partitions:{}, num_gpus_scanned: {}, nvlink_info_mismatches: {}, stale_partitions_deleted: {}, nmx_c_unreachable_chassis: {:?}, applied_changes: {}, nmxc_connect_err: {}, nmxc_num_partitions: {}, nmxc_num_gpus: {}, completed_operations: {}, duration: {} }}",
+            self.num_groups,
+            self.num_groups_skipped,
             self.num_machines_scanned,
             self.num_instances_scanned,
             self.num_machine_nvl_status_updates,
@@ -392,6 +402,97 @@ pub(super) struct NvlinkUnhealthyAlertWriteFailed {
     pub(super) domain_uuid: String,
     #[context]
     pub(super) error: String,
+}
+
+/// One timed stage of a partition monitor iteration. Fleet stages are sampled
+/// once per iteration, group stages once per machine group that ran them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
+pub(super) enum MonitorStage {
+    /// Managed-host snapshots, nvlink info, partitions and endpoints loaded from the database.
+    FleetLoad,
+    /// NMX-C client creation and `hello` for one group.
+    GroupHello,
+    /// NVLink domain publication on a rack group's switches and power shelves.
+    GroupDomainPublish,
+    /// The partition, GPU and compute node list RPCs for one group.
+    GroupInventory,
+    /// The `nvlink_status_observation` writes for one group.
+    GroupStatusWrite,
+    /// NMX-C operations and the database updates that record them, for one
+    /// group that issued operations or wrote `nvlink_info`.
+    GroupApply,
+    /// The null observation writes for the groups NMX-C could not serve.
+    NullObservations,
+}
+
+/// One stage of a partition monitor iteration finished. Sampled only; the
+/// iteration Event owns the log line.
+#[derive(Event)]
+#[event(
+    event_name = "nvlink_partition_monitor_stage_finished",
+    metric_name = "carbide_nvlink_partition_monitor_stage_latency_milliseconds",
+    component = "nvlink-manager",
+    log = off,
+    metric = histogram,
+    describe = "Time consumed by one stage of a partition monitor iteration, by stage"
+)]
+pub(super) struct NvlPartitionMonitorStageFinished {
+    #[label]
+    pub(super) stage: MonitorStage,
+    #[observation]
+    pub(super) latency: Duration,
+}
+
+/// How the partition monitor finished one machine group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
+pub(super) enum GroupOutcome {
+    /// NMX-C was contacted and every operation the group needed completed.
+    Reconciled,
+    /// NMX-C was contacted but an operation failed or timed out, so the
+    /// group is checked again next iteration.
+    OperationsFailed,
+    /// The group's inputs were unchanged since its last good check and its
+    /// full check was not due, so NMX-C was not contacted.
+    SkippedUnchanged,
+    /// NMX-C could not be used for the group and its observations were cleared.
+    Unreachable,
+}
+
+/// One machine group finished. Counted only; the group's own `warn!` lines
+/// carry the diagnostics.
+#[derive(Event)]
+#[event(
+    event_name = "nvlink_partition_monitor_group_finished",
+    metric_name = "carbide_nvlink_partition_monitor_groups_total",
+    component = "nvlink-manager",
+    log = off,
+    metric = counter,
+    describe = "Number of machine groups (chassis or rack) the partition monitor finished, by outcome"
+)]
+pub(super) struct NvlPartitionMonitorGroupFinished {
+    #[label]
+    pub(super) outcome: GroupOutcome,
+}
+
+/// One iteration ran longer than `monitor_run_interval`, so the loop could
+/// not keep its cadence and idled only the pacing floor.
+#[derive(Event)]
+#[event(
+    event_name = "nvlink_partition_monitor_iteration_overran",
+    metric_name = "carbide_nvlink_partition_monitor_iteration_overruns_total",
+    component = "nvlink-manager",
+    log = warn,
+    metric = counter,
+    message = "NVLink partition monitor iteration exceeded its run interval",
+    describe = "Number of partition monitor iterations that ran longer than monitor_run_interval"
+)]
+pub(super) struct NvlPartitionMonitorIterationOverran {
+    #[context]
+    pub(super) latency_ms: u128,
+    #[context]
+    pub(super) interval_ms: u128,
+    #[context]
+    pub(super) groups: usize,
 }
 
 /// Instruments that are used by pub struct NvlPartitionMonitor
@@ -980,6 +1081,161 @@ mod tests {
                 }
             },
         );
+    }
+
+    /// The stage and outcome labels are what the operator documentation and
+    /// dashboards grep for, so they are pinned here.
+    #[test]
+    fn partition_monitor_stage_and_group_labels_are_stable() {
+        check_values(
+            [
+                Check {
+                    scenario: "fleet load",
+                    input: MonitorStage::FleetLoad,
+                    expect: "fleet_load".to_string(),
+                },
+                Check {
+                    scenario: "group hello",
+                    input: MonitorStage::GroupHello,
+                    expect: "group_hello".to_string(),
+                },
+                Check {
+                    scenario: "group domain publish",
+                    input: MonitorStage::GroupDomainPublish,
+                    expect: "group_domain_publish".to_string(),
+                },
+                Check {
+                    scenario: "group inventory",
+                    input: MonitorStage::GroupInventory,
+                    expect: "group_inventory".to_string(),
+                },
+                Check {
+                    scenario: "group status write",
+                    input: MonitorStage::GroupStatusWrite,
+                    expect: "group_status_write".to_string(),
+                },
+                Check {
+                    scenario: "group apply",
+                    input: MonitorStage::GroupApply,
+                    expect: "group_apply".to_string(),
+                },
+                Check {
+                    scenario: "null observations",
+                    input: MonitorStage::NullObservations,
+                    expect: "null_observations".to_string(),
+                },
+            ],
+            |stage| stage.label_value().to_string(),
+        );
+        check_values(
+            [
+                Check {
+                    scenario: "reconciled",
+                    input: GroupOutcome::Reconciled,
+                    expect: "reconciled".to_string(),
+                },
+                Check {
+                    scenario: "operations failed",
+                    input: GroupOutcome::OperationsFailed,
+                    expect: "operations_failed".to_string(),
+                },
+                Check {
+                    scenario: "skipped unchanged",
+                    input: GroupOutcome::SkippedUnchanged,
+                    expect: "skipped_unchanged".to_string(),
+                },
+                Check {
+                    scenario: "unreachable",
+                    input: GroupOutcome::Unreachable,
+                    expect: "unreachable".to_string(),
+                },
+            ],
+            |outcome| outcome.label_value().to_string(),
+        );
+    }
+
+    #[test]
+    fn partition_monitor_stage_and_group_events_are_metric_only() {
+        const STAGE_METRIC: &str = "carbide_nvlink_partition_monitor_stage_latency_milliseconds";
+        const GROUP_METRIC: &str = "carbide_nvlink_partition_monitor_groups_total";
+
+        let metrics = MetricsCapture::start();
+        let logs = capture_logs(|| {
+            emit(NvlPartitionMonitorStageFinished {
+                stage: MonitorStage::FleetLoad,
+                latency: Duration::from_millis(250),
+            });
+            emit(NvlPartitionMonitorStageFinished {
+                stage: MonitorStage::GroupInventory,
+                latency: Duration::from_millis(40),
+            });
+            emit(NvlPartitionMonitorGroupFinished {
+                outcome: GroupOutcome::Reconciled,
+            });
+            emit(NvlPartitionMonitorGroupFinished {
+                outcome: GroupOutcome::Reconciled,
+            });
+            emit(NvlPartitionMonitorGroupFinished {
+                outcome: GroupOutcome::Unreachable,
+            });
+        });
+
+        assert!(logs.is_empty(), "stage and group events must not log");
+        assert_eq!(
+            metrics.histogram_count_delta(STAGE_METRIC, &[("stage", "fleet_load")]),
+            1
+        );
+        assert_eq!(
+            metrics.histogram_sum_delta(STAGE_METRIC, &[("stage", "fleet_load")]),
+            ApproxHistogramSum(250.0)
+        );
+        assert_eq!(
+            metrics.histogram_count_delta(STAGE_METRIC, &[("stage", "group_inventory")]),
+            1
+        );
+        assert_eq!(
+            metrics.counter_delta(GROUP_METRIC, &[("outcome", "reconciled")]),
+            2.0
+        );
+        assert_eq!(
+            metrics.counter_delta(GROUP_METRIC, &[("outcome", "unreachable")]),
+            1.0
+        );
+        let encoded = metrics.render();
+        assert!(
+            encoded.contains(&format!("# TYPE {STAGE_METRIC} histogram\n")),
+            "stage latency must be exposed as a millisecond histogram:\n{encoded}"
+        );
+        assert!(
+            encoded.contains(&format!("# TYPE {GROUP_METRIC} counter\n")),
+            "group outcomes must be exposed as a counter:\n{encoded}"
+        );
+    }
+
+    #[test]
+    fn partition_monitor_overrun_counts_and_warns_with_its_context() {
+        const METRIC_NAME: &str = "carbide_nvlink_partition_monitor_iteration_overruns_total";
+
+        let metrics = MetricsCapture::start();
+        let logs = capture_logs(|| {
+            emit(NvlPartitionMonitorIterationOverran {
+                latency_ms: 65_000,
+                interval_ms: 60_000,
+                groups: 400,
+            });
+        });
+
+        assert_eq!(metrics.counter_delta(METRIC_NAME, &[]), 1.0);
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].level, tracing::Level::WARN);
+        assert_eq!(
+            logs[0].message,
+            "NVLink partition monitor iteration exceeded its run interval"
+        );
+        assert_eq!(logs[0].field("metric_name"), Some(METRIC_NAME));
+        assert_eq!(logs[0].field("latency_ms"), Some("65000"));
+        assert_eq!(logs[0].field("interval_ms"), Some("60000"));
+        assert_eq!(logs[0].field("groups"), Some("400"));
     }
 
     #[test]
