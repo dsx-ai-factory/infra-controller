@@ -463,10 +463,10 @@ impl Kea6 {
         let response = serde_json::Deserializer::from_reader(stream)
             .into_iter::<serde_json::Value>()
             .next()
-            .ok_or_else(|| eyre::eyre!("empty Kea control response"))??;
+            .ok_or_else(|| eyre::eyre!("empty kea control response"))??;
         eyre::ensure!(
             response["result"] == 0,
-            "Kea statistics command failed: {response}"
+            "kea statistics command failed: {response}"
         );
         Ok(response["arguments"].clone())
     }
