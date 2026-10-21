@@ -46,7 +46,7 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 	logger.Info().Msg("starting activity")
 
 	if inventory == nil {
-		return invalid("UpdateSitePrefixesInDB called with nil inventory")
+		return invalidSitePrefixTemporalApplicationError("UpdateSitePrefixesInDB called with nil inventory")
 	}
 	if inventory.InventoryStatus == corev1.InventoryStatus_INVENTORY_STATUS_FAILED {
 		logger.Warn().Str("Status Message", inventory.StatusMsg).
@@ -54,7 +54,7 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 		return nil
 	}
 	if inventory.InventoryStatus != corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS {
-		return invalid("unsupported SitePrefix inventory status")
+		return invalidSitePrefixTemporalApplicationError("unsupported SitePrefix inventory status")
 	}
 	siteDAO := cdbm.NewSiteDAO(manager.dbSession)
 	site, err := siteDAO.GetByID(ctx, nil, siteID, nil, false, false)
@@ -125,7 +125,7 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 				return err
 			}
 			if lockedSite.InfrastructureProviderID != site.InfrastructureProviderID {
-				return invalid("Site provider changed while acquiring inventory lock")
+				return invalidSitePrefixTemporalApplicationError("Site provider changed while acquiring inventory lock")
 			}
 			block := existingBlockMap[id]
 			if block != nil {
@@ -147,7 +147,7 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 					return err
 				}
 				if len(tenants) != 1 {
-					return invalid("tenant organization for SitePrefix %s is unknown or ambiguous", id)
+					return invalidSitePrefixTemporalApplicationError("tenant organization for SitePrefix %s is unknown or ambiguous", id)
 				}
 				tenantID = &tenants[0].ID
 			}
@@ -209,9 +209,10 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 // and active Site row locks and keeps this helper and subsequent updates in one tx.
 // Adoption preserves the REST ID, IPAM tree, and allocations. Only newly created
 // blocks receive an initial status detail here; ordinary updates belong to the caller.
-// Retired operator roots are skipped for Deleting reports and restored with their
-// IPAM entry for Ready reports. Tenant identities are never restored.
-// A nil block without an error skips a retired root.
+// Retired blocks still reported as Deleting are skipped. Other reports restore
+// the same identity, with IPAM only for operator roots. Tenant recovery waits out
+// the Site's stale-inventory window to avoid undoing a newer deletion.
+// A nil block without an error skips a retired block.
 // This helper never removes roots or infers absence.
 func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Context, tx *cdb.Tx, site *cdbm.Site, prefix *corev1.SitePrefix, tenantID *uuid.UUID) (*cdbm.IPBlock, error) {
 	id := uuid.MustParse(prefix.GetId().GetValue()) // validated before the transaction
@@ -244,11 +245,15 @@ func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Con
 		if existingBlock.Deleted == nil {
 			return dao.GetByIDForUpdate(ctx, tx, existingBlock.ID)
 		}
-		if tenantID != nil {
-			return nil, invalid("Core SitePrefix %s conflicts with its immutable REST identity", id)
-		}
+		// REST soft-deleted this block while Core still reports the same identity.
 		if prefix.Status.LifecycleState == corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING {
-			logger.Info().Msg("Skipping retired operator SitePrefix still reported as Deleting")
+			logger.Info().Msg("Skipping retired SitePrefix still reported as Deleting")
+			return nil, nil
+		}
+		// As with SpectrumX inventory, a recent tenant deletion may postdate
+		// the snapshot. A later inventory can recover it if Core still reports it.
+		if tenantID != nil && site.IsTimeWithinStaleInventoryThreshold(*existingBlock.Deleted) {
+			logger.Info().Msg("Not restoring tenant SitePrefix deleted more recently than the inventory interval")
 			return nil, nil
 		}
 	}
@@ -264,29 +269,32 @@ func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Con
 		for _, root := range roots {
 			other, err := netip.ParsePrefix(fmt.Sprintf("%s/%d", root.Prefix, root.PrefixLength))
 			if err != nil {
-				return nil, invalid("existing operator IP Block %s has an invalid prefix", root.ID)
+				return nil, invalidSitePrefixTemporalApplicationError("existing operator IP Block %s has an invalid prefix", root.ID)
 			}
 			if other.Masked() == cidr {
 				exact = append(exact, root)
 			} else if other.Overlaps(cidr) {
-				return nil, invalid("operator SitePrefix %s overlaps an existing root", id)
+				return nil, invalidSitePrefixTemporalApplicationError("operator SitePrefix %s overlaps an existing root", id)
 			}
 		}
 		if len(exact) > 1 {
-			return nil, invalid("operator SitePrefix %s has ambiguous adoption candidates", id)
+			return nil, invalidSitePrefixTemporalApplicationError("operator SitePrefix %s has ambiguous adoption candidates", id)
 		}
 		if len(exact) == 1 {
 			candidate, err := dao.GetByIDForUpdate(ctx, tx, exact[0].ID)
 			if err != nil {
 				return nil, err
 			}
-			if candidate.InfrastructureProviderID != site.InfrastructureProviderID || candidate.ProtocolVersion != family ||
-				candidate.RoutingType != routingType || candidate.SiteID != site.ID || !candidate.Managed ||
-				candidate.TenantID != nil || candidate.Prefix != cidr.Addr().String() || candidate.PrefixLength != cidr.Bits() {
-				return nil, invalid("operator SitePrefix %s has an incompatible adoption candidate", id)
+			expected := cdbm.IPBlock{
+				SiteID: site.ID, InfrastructureProviderID: site.InfrastructureProviderID, Managed: true,
+				Prefix: cidr.Addr().String(), PrefixLength: cidr.Bits(),
+				ProtocolVersion: family, RoutingType: routingType,
+			}
+			if candidate.Key() != expected.Key() {
+				return nil, invalidSitePrefixTemporalApplicationError("operator SitePrefix %s has an incompatible adoption candidate", id)
 			}
 			if candidate.SitePrefixID != nil || existingBlock != nil {
-				return nil, invalid("operator SitePrefix %s conflicts with an existing root identity", id)
+				return nil, invalidSitePrefixTemporalApplicationError("operator SitePrefix %s conflicts with an existing root identity", id)
 			}
 			return dao.LinkSitePrefix(ctx, tx, candidate.ID, id)
 		}
@@ -306,8 +314,8 @@ func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Con
 		}
 	}
 	if existingBlock != nil {
-		// Restore the same REST identity only after successfully recreating its
-		// IPAM root. The caller applies lifecycle in this transaction.
+		// Restore the same REST identity after recreating IPAM for an operator
+		// root, or without IPAM for a tenant block. The caller applies lifecycle.
 		return dao.Clear(ctx, tx, cdbm.IPBlockClearInput{IPBlockID: existingBlock.ID, Deleted: true})
 	}
 	name := prefix.Metadata.Name
@@ -341,12 +349,14 @@ func validateSitePrefixIdentity(block *cdbm.IPBlock, site *cdbm.Site, prefix *co
 	if cidr.Addr().Is4() {
 		family = cdbm.IPBlockProtocolVersionV4
 	}
-	if block.SiteID != site.ID || block.InfrastructureProviderID != site.InfrastructureProviderID ||
-		(block.TenantID == nil) != (tenantID == nil) || (tenantID != nil && *block.TenantID != *tenantID) ||
-		block.Prefix != cidr.Addr().String() || block.PrefixLength != cidr.Bits() ||
-		block.ProtocolVersion != family || block.RoutingType != cdbm.GetSiteFabricIPBlockRoutingType(cidr) ||
-		block.Managed != (tenantID == nil) {
-		return invalid("Core SitePrefix %s conflicts with its immutable REST identity", prefix.GetId().GetValue())
+	expected := cdbm.IPBlock{
+		SiteID: site.ID, InfrastructureProviderID: site.InfrastructureProviderID,
+		TenantID: tenantID, Managed: tenantID == nil,
+		Prefix: cidr.Addr().String(), PrefixLength: cidr.Bits(),
+		ProtocolVersion: family, RoutingType: cdbm.GetSiteFabricIPBlockRoutingType(cidr),
+	}
+	if block.Key() != expected.Key() {
+		return invalidSitePrefixTemporalApplicationError("Core SitePrefix %s conflicts with its immutable REST identity", prefix.GetId().GetValue())
 	}
 	return nil
 }
@@ -360,67 +370,60 @@ func getSitePrefixStatus(state corev1.SitePrefixLifecycleState) string {
 	}[state]
 }
 
-func invalid(format string, args ...any) error {
+func invalidSitePrefixTemporalApplicationError(format string, args ...any) error {
 	return temporal.NewNonRetryableApplicationError(fmt.Sprintf(format, args...), "InvalidSitePrefixInventory", nil)
 }
 
 func validatePrefix(prefix *corev1.SitePrefix) error {
 	if prefix == nil || prefix.Config == nil || prefix.Status == nil || prefix.Metadata == nil {
-		return invalid("SitePrefix requires config, status, and metadata")
+		return invalidSitePrefixTemporalApplicationError("SitePrefix requires config, status, and metadata")
 	}
 	id, err := uuid.Parse(prefix.GetId().GetValue())
 	if err != nil || id == uuid.Nil || id.String() != prefix.GetId().GetValue() {
-		return invalid("SitePrefix requires a canonical, nonzero UUID")
+		return invalidSitePrefixTemporalApplicationError("SitePrefix requires a canonical, nonzero UUID")
 	}
 	config, status, metadata := prefix.Config, prefix.Status, prefix.Metadata
 	cidr, err := netip.ParsePrefix(config.Prefix)
 	if err != nil || cidr != cidr.Masked() || cidr.Addr().Is4In6() {
-		return invalid("SitePrefix %s requires a network-aligned CIDR", prefix.GetId().GetValue())
+		return invalidSitePrefixTemporalApplicationError("SitePrefix %s requires a network-aligned CIDR", prefix.GetId().GetValue())
 	}
 	if config.RoutingScope != corev1.SitePrefixRoutingScope_SITE_PREFIX_ROUTING_SCOPE_DATACENTER_ONLY {
-		return invalid("unsupported SitePrefix routing scope")
+		return invalidSitePrefixTemporalApplicationError("unsupported SitePrefix routing scope")
 	}
 	minName := 0
 	switch status.Authority {
 	case corev1.SitePrefixAuthority_SITE_PREFIX_AUTHORITY_OPERATOR_MANAGED:
 		if config.TenantOrganizationId != nil || (status.LifecycleState != corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_READY &&
 			status.LifecycleState != corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING) {
-			return invalid("operator SitePrefix has an owner or unsupported lifecycle")
+			return invalidSitePrefixTemporalApplicationError("operator SitePrefix has an owner or unsupported lifecycle")
 		}
 	case corev1.SitePrefixAuthority_SITE_PREFIX_AUTHORITY_TENANT_MANAGED:
 		minName = 2
 		if config.GetTenantOrganizationId() == "" || !cidr.Addr().Is4() || cidr.Bits() < 8 || cidr.Bits() > 31 {
-			return invalid("tenant SitePrefix requires an owner and RFC1918 IPv4 /8 through /31")
+			return invalidSitePrefixTemporalApplicationError("tenant SitePrefix requires an owner and RFC1918 IPv4 /8 through /31")
 		}
 		if cdbm.GetSiteFabricIPBlockRoutingType(cidr) != cdbm.IPBlockRoutingTypeDatacenterOnly ||
 			status.LifecycleState < corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_PROVISIONING ||
 			status.LifecycleState > corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_ERROR {
-			return invalid("unsupported tenant SitePrefix range or lifecycle")
+			return invalidSitePrefixTemporalApplicationError("unsupported tenant SitePrefix range or lifecycle")
 		}
 	default:
-		return invalid("unsupported SitePrefix authority")
+		return invalidSitePrefixTemporalApplicationError("unsupported SitePrefix authority")
 	}
-	if len(metadata.Name) < minName || len(metadata.Name) > 256 || !ascii(metadata.Name) ||
+	if len(metadata.Name) < minName || len(metadata.Name) > 256 ||
+		strings.ContainsFunc(metadata.Name, func(r rune) bool { return r > unicode.MaxASCII }) ||
 		strings.ContainsFunc(metadata.Name, unicode.IsControl) || len(metadata.Description) > 1024 ||
 		!utf8.ValidString(metadata.Description) || strings.ContainsRune(metadata.Description, '\x00') || len(metadata.Labels) > 16 {
-		return invalid("invalid SitePrefix metadata")
+		return invalidSitePrefixTemporalApplicationError("invalid SitePrefix metadata")
 	}
 	keys := make(map[string]bool)
 	for _, label := range metadata.Labels {
 		key := label.GetKey()
-		if key == "" || len(key) > 255 || !ascii(key) || len(label.GetValue()) > 255 || keys[key] {
-			return invalid("invalid SitePrefix metadata label")
+		if key == "" || len(key) > 255 || strings.ContainsFunc(key, func(r rune) bool { return r > unicode.MaxASCII }) ||
+			len(label.GetValue()) > 255 || keys[key] {
+			return invalidSitePrefixTemporalApplicationError("invalid SitePrefix metadata label")
 		}
 		keys[key] = true
 	}
 	return nil
-}
-
-func ascii(value string) bool {
-	for _, char := range value {
-		if char > 127 {
-			return false
-		}
-	}
-	return true
 }
