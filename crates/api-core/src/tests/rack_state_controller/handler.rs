@@ -4395,6 +4395,7 @@ async fn queue_configure_nmx_cluster_v2_success(
     env.rms_sim
         .queue_configure_scale_up_fabric_manager_v2_response(Ok(
             rms_v2::ConfigureScaleUpFabricManagerResponse {
+                selected_fabrics: Vec::new(),
                 job_id: "configure-scale-up-fabric-job".to_string(),
             },
         ))
@@ -4735,6 +4736,7 @@ async fn assert_configure_nmx_cluster_v2_results(
     assert!(desired.extra_static_configs.is_empty());
     assert_eq!(configure_request.primary_switch_node_id, None);
     assert_eq!(configure_request.domain, None);
+    assert!(configure_request.layout.is_none());
 
     assert_node_set_contains_switches(configure_request.nodes.as_ref(), switch_ids);
 
@@ -5050,6 +5052,7 @@ async fn test_configure_nmx_cluster_failed_v2_job_requires_new_maintenance_reque
     env.rms_sim
         .queue_configure_scale_up_fabric_manager_v2_response(Ok(
             rms_v2::ConfigureScaleUpFabricManagerResponse {
+                selected_fabrics: Vec::new(),
                 job_id: "failed-fabric-job".to_string(),
             },
         ))

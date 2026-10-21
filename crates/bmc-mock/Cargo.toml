@@ -26,7 +26,6 @@ repository.workspace = true
 # bmc-mock should be usable independently of NICo.
 # Do not add new carbide-* dependencies, including dev-dependencies.
 [dependencies]
-bmc-vendor = { path = "../bmc-vendor" }
 axum = { workspace = true }
 axum-extra = { features = ["typed-header"], workspace = true }
 axum-server = { features = ["tls-rustls"], workspace = true }
@@ -44,12 +43,12 @@ indexmap = { workspace = true }
 itertools = { workspace = true }
 lazy_static = { workspace = true }
 mac_address = { features = ["serde"], workspace = true }
-metrics-endpoint = { path = "../metrics-endpoint" }
 nv-redfish = { workspace = true, features = [
   "bmc-http",
   "computer-systems",
   "event-service",
 ] }
+nv-redfish-server-core = { workspace = true }
 nix = { features = ["fs"], workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
@@ -58,6 +57,7 @@ rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
+socket2 = { workspace = true }
 tar = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
@@ -69,10 +69,12 @@ tracing = { workspace = true }
 tracing-subscriber = { features = ["env-filter"], workspace = true }
 url = { workspace = true }
 
+[build-dependencies]
+nv-redfish-csdl-compiler = { workspace = true }
+nv-redfish-schema = { workspace = true }
+
 [dev-dependencies]
-libredfish = { workspace = true }
-carbide-test-support = { path = "../test-support" }
-carbide-tls = { path = "../tls" }
+rcgen = { workspace = true }
 hyper = { workspace = true, features = ["client", "http2"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 reqwest = { workspace = true, default-features = false, features = ["rustls"] }

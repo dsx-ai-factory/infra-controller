@@ -571,7 +571,8 @@ pub struct MachineATronConfig {
     )]
     pub api_refresh_interval: Duration,
 
-    /// Delay before a simulated Scout reconnects after its stream closes or fails.
+    /// Delay before a simulated Scout reopens its stream after it closes or fails. A denied
+    /// stream is not reopened.
     #[serde(
         default = "default_scout_stream_reconnect_interval",
         deserialize_with = "deserialize_duration",

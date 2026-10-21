@@ -511,6 +511,7 @@ impl ApiClient {
                 dpu_mode: dpu_policy.map(|policy| rpc::forge::DpuMode::from(policy) as i32),
                 bmc_ip_allocation: None,
                 host_lifecycle_profile: None,
+                server_name: None,
             })
             .await
             .map_err(ClientApiError::InvocationError)

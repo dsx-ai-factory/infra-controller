@@ -38,6 +38,7 @@ fn processor(pool: sqlx::PgPool) -> StateProcessor<TestStateControllerIO> {
         metric_holder: Arc::new(MetricHolder::new(None, "test", Duration::from_secs(300))),
         per_object_state: None,
         object_metrics: HashMap::new(),
+        object_ids_from_database: None,
         cancel_token: CancellationToken::new(),
         iteration_config: IterationConfig::default(),
         object_tasks: JoinSet::new(),
@@ -247,6 +248,480 @@ async fn delayed_claim_commit_is_not_dispatched_and_recovers_after_expiry(
         result.0,
         PersistentStateHandlerOutcome::DoNothing { .. }
     ));
+    Ok(())
+}
+
+/// Proves that renaming one persisted object must not make its old and new IDs
+/// count as two objects in the retained aggregate metrics.
+#[carbide_macros::sqlx_test]
+async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre::Result<()> {
+    const ORIGINAL_ID: &str = "predicted-host";
+    const RENAMED_ID: &str = "stable-host";
+
+    // Setup: create one object and a controller whose aggregate metrics are
+    // filtered by the replica-local database object-ID list.
+    create_test_state_controller_tables(&pool).await;
+    let mut join_set = JoinSet::new();
+    let work_lock_manager_handle =
+        ::db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let mut txn = pool.begin().await?;
+    create_test_object(ORIGINAL_ID.to_string(), &mut txn).await;
+    txn.commit().await?;
+
+    let meter = TestMeter::default();
+    let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
+        .database(pool.clone(), work_lock_manager_handle)
+        .meter("test_objects", meter.meter())
+        .filter_metrics_by_existing_object_ids()
+        .processor_id("identity-change-test".to_string())
+        .services(Arc::new(()))
+        .build_for_manual_iterations(CancellationToken::new())?;
+
+    // Action: publish the original database ID list, queue A, and process it
+    // through the production task-result path.
+    let enqueuer_result = controller.enqueuer.run_single_iteration().await;
+    assert!(!enqueuer_result.skipped_iteration);
+    assert_eq!(
+        controller
+            .processor
+            .dequeue_and_dispatch_object_handling_tasks()
+            .await?,
+        1
+    );
+    let result = controller
+        .processor
+        .object_tasks
+        .join_next()
+        .await
+        .unwrap()?;
+    controller
+        .processor
+        .process_object_handling_task_result(result, false, Instant::now());
+    controller.processor.finalize_completed_objects().await?;
+    controller.processor.emit_metrics();
+
+    // Assertion: the first completed identity establishes one aggregate object.
+    assert_eq!(
+        meter.formatted_metric("test_objects_total{fresh=\"true\"}"),
+        Some("1".to_string())
+    );
+
+    // Action: rename the same persisted object and give B a distinguishable
+    // state before processing it under the still-current database list containing A.
+    let mut txn = pool.begin().await?;
+    sqlx::query("UPDATE test_objects SET id=$1, controller_state=$2::json WHERE id=$3")
+        .bind(RENAMED_ID)
+        .bind(sqlx::types::Json(TestObjectControllerState::B))
+        .bind(ORIGINAL_ID)
+        .execute(&mut *txn)
+        .await?;
+    db::queue_objects(
+        &mut txn,
+        TestStateControllerIO::DB_QUEUED_OBJECTS_TABLE_NAME,
+        &[RENAMED_ID.to_string()],
+    )
+    .await?;
+    txn.commit().await?;
+    assert_eq!(
+        controller
+            .processor
+            .dequeue_and_dispatch_object_handling_tasks()
+            .await?,
+        1
+    );
+    let result = controller
+        .processor
+        .object_tasks
+        .join_next()
+        .await
+        .unwrap()?;
+    controller
+        .processor
+        .process_object_handling_task_result(result, false, Instant::now());
+    controller.processor.finalize_completed_objects().await?;
+    controller.processor.emit_metrics();
+
+    // Assertion: pending B is retained, but only A's state contributes while
+    // the latest database object-ID list still contains A.
+    assert_eq!(
+        meter.formatted_metric("test_objects_total{fresh=\"true\"}"),
+        Some("1".to_string())
+    );
+    assert_eq!(
+        meter.formatted_metric("test_objects_per_state{fresh=\"true\",state=\"a\",substate=\"\"}"),
+        Some("1".to_string())
+    );
+    assert_eq!(
+        meter.formatted_metric("test_objects_per_state{fresh=\"true\",state=\"b\",substate=\"\"}"),
+        None
+    );
+
+    // Action: read and publish the database list containing B, but deliberately
+    // do not process the B task that this sweep queues.
+    let enqueuer_result = controller.enqueuer.run_single_iteration().await;
+    assert!(!enqueuer_result.skipped_iteration);
+    controller.processor.emit_metrics();
+
+    // Assertion: the published database ID list contains B and excludes A.
+    let object_ids_from_database = controller
+        .processor
+        .object_ids_from_database
+        .as_ref()
+        .expect("database object-ID receiver should be configured")
+        .borrow()
+        .clone()
+        .expect("successful read should publish database object IDs");
+    assert!(object_ids_from_database.contains(RENAMED_ID));
+    assert!(!object_ids_from_database.contains(ORIGINAL_ID));
+
+    // Assertion: the previously retained B state contributes without another
+    // B completion, while retained A no longer contributes.
+    assert_eq!(
+        meter.formatted_metric("test_objects_total{fresh=\"true\"}"),
+        Some("1".to_string())
+    );
+    assert_eq!(
+        meter.formatted_metric("test_objects_per_state{fresh=\"true\",state=\"a\",substate=\"\"}"),
+        None
+    );
+    assert_eq!(
+        meter.formatted_metric("test_objects_per_state{fresh=\"true\",state=\"b\",substate=\"\"}"),
+        Some("1".to_string())
+    );
+
+    // Action: remove the deliberately unprocessed B queue row, then process a
+    // stale queued A after the database ID list contains B.
+    let mut txn = pool.begin().await?;
+    sqlx::query("DELETE FROM test_state_controller_queued_objects WHERE object_id=$1")
+        .bind(RENAMED_ID)
+        .execute(&mut *txn)
+        .await?;
+    db::queue_objects(
+        &mut txn,
+        TestStateControllerIO::DB_QUEUED_OBJECTS_TABLE_NAME,
+        &[ORIGINAL_ID.to_string()],
+    )
+    .await?;
+    txn.commit().await?;
+    assert_eq!(
+        controller
+            .processor
+            .dequeue_and_dispatch_object_handling_tasks()
+            .await?,
+        1
+    );
+    let result = controller
+        .processor
+        .object_tasks
+        .join_next()
+        .await
+        .unwrap()?;
+    assert!(matches!(
+        &result.metrics.common.error,
+        Some(StateHandlerError::MissingData { .. })
+    ));
+    controller
+        .processor
+        .process_object_handling_task_result(result, false, Instant::now());
+    controller.processor.finalize_completed_objects().await?;
+    controller.processor.emit_metrics();
+
+    // Assertion: a stale missing-object result cannot restore A to the total.
+    assert_eq!(
+        meter.formatted_metric("test_objects_total{fresh=\"true\"}"),
+        Some("1".to_string())
+    );
+
+    Ok(())
+}
+
+/// Verifies that a valid A task completing after the database ID list changes
+/// to B cannot restore A to the aggregate, while A's measurement remains cached.
+#[carbide_macros::sqlx_test]
+async fn late_result_for_id_absent_from_database_does_not_contribute(
+    pool: sqlx::PgPool,
+) -> eyre::Result<()> {
+    const ORIGINAL_ID: &str = "predicted-host";
+    const RENAMED_ID: &str = "stable-host";
+
+    // Setup: publish a database ID list containing A and dispatch its task
+    // without inserting the completed result into the processor cache yet.
+    create_test_state_controller_tables(&pool).await;
+    let mut join_set = JoinSet::new();
+    let work_lock_manager_handle =
+        ::db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let mut txn = pool.begin().await?;
+    create_test_object(ORIGINAL_ID.to_string(), &mut txn).await;
+    txn.commit().await?;
+    let meter = TestMeter::default();
+    let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
+        .database(pool.clone(), work_lock_manager_handle)
+        .meter("test_objects", meter.meter())
+        .filter_metrics_by_existing_object_ids()
+        .processor_id("late-result-test".to_string())
+        .services(Arc::new(()))
+        .build_for_manual_iterations(CancellationToken::new())?;
+    assert!(
+        controller
+            .enqueuer
+            .run_single_iteration()
+            .await
+            .iteration
+            .is_some()
+    );
+    assert_eq!(
+        controller
+            .processor
+            .dequeue_and_dispatch_object_handling_tasks()
+            .await?,
+        1
+    );
+    let late_result = controller
+        .processor
+        .object_tasks
+        .join_next()
+        .await
+        .unwrap()?;
+    assert_eq!(late_result.object_id, ORIGINAL_ID);
+    assert!(late_result.metrics.common.error.is_none());
+
+    // Action: rename the persisted object and publish B before accepting the
+    // already completed A result.
+    let mut txn = pool.begin().await?;
+    sqlx::query("UPDATE test_objects SET id=$1 WHERE id=$2")
+        .bind(RENAMED_ID)
+        .bind(ORIGINAL_ID)
+        .execute(&mut *txn)
+        .await?;
+    txn.commit().await?;
+    assert!(
+        controller
+            .enqueuer
+            .run_single_iteration()
+            .await
+            .iteration
+            .is_some()
+    );
+
+    // Action: process B first, then deliver the already completed A result.
+    assert_eq!(
+        controller
+            .processor
+            .dequeue_and_dispatch_object_handling_tasks()
+            .await?,
+        1
+    );
+    let current_result = controller
+        .processor
+        .object_tasks
+        .join_next()
+        .await
+        .unwrap()?;
+    assert_eq!(current_result.object_id, RENAMED_ID);
+    controller
+        .processor
+        .process_object_handling_task_result(current_result, false, Instant::now());
+    controller.processor.finalize_completed_objects().await?;
+    controller
+        .processor
+        .process_object_handling_task_result(late_result, false, Instant::now());
+    controller.processor.finalize_completed_objects().await?;
+    controller.processor.emit_metrics();
+
+    // Assertion: A remains cached for timing safety but only B contributes
+    // once the complete database ID list contains B instead.
+    assert!(
+        controller
+            .processor
+            .object_metrics
+            .contains_key(ORIGINAL_ID)
+    );
+    assert!(controller.processor.object_metrics.contains_key(RENAMED_ID));
+    assert_eq!(
+        meter.formatted_metric("test_objects_total{fresh=\"true\"}"),
+        Some("1".to_string())
+    );
+
+    Ok(())
+}
+
+/// A test handler that reports an ordinary processing error for an object whose
+/// ID remains in the database, distinguishing handler failure from ID removal.
+#[derive(Debug)]
+struct AlwaysErrorHandler;
+
+#[async_trait::async_trait]
+impl StateHandler for AlwaysErrorHandler {
+    type ObjectId = String;
+    type State = TestObject;
+    type ControllerState = TestObjectControllerState;
+    type ContextObjects = TestStateControllerContextObjects;
+
+    /// Returns a normal handler error so the test can prove that failures for
+    /// IDs still in the database remain eligible for aggregate counting.
+    async fn handle_object_state(
+        &self,
+        _object_id: &String,
+        _state: &mut TestObject,
+        _controller_state: &TestObjectControllerState,
+        _ctx: &mut StateHandlerContext<Self::ContextObjects>,
+    ) -> Result<StateHandlerOutcome<TestObjectControllerState>, StateHandlerError> {
+        Err(StateHandlerError::GenericError(eyre::eyre!(
+            "injected ordinary handler failure"
+        )))
+    }
+}
+
+/// Verifies that a failed database object-ID read preserves the last successful
+/// list and the useful error measurement for an object still in it.
+#[carbide_macros::sqlx_test]
+async fn failed_object_id_read_preserves_existing_object_error_metrics(
+    pool: sqlx::PgPool,
+) -> eyre::Result<()> {
+    const OBJECT_ID: &str = "live-host";
+
+    // Setup: publish one existing object ID and process an ordinary handler error.
+    create_test_state_controller_tables(&pool).await;
+    let mut join_set = JoinSet::new();
+    let work_lock_manager_handle =
+        ::db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let io = Arc::new(TestStateControllerIO::default());
+    let mut txn = pool.begin().await?;
+    create_test_object(OBJECT_ID.to_string(), &mut txn).await;
+    txn.commit().await?;
+    let meter = TestMeter::default();
+    let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
+        .database(pool, work_lock_manager_handle)
+        .meter("test_objects", meter.meter())
+        .filter_metrics_by_existing_object_ids()
+        .processor_id("failed-object-id-read-test".to_string())
+        .services(Arc::new(()))
+        .io(io.clone())
+        .state_handler(Arc::new(AlwaysErrorHandler))
+        .build_for_manual_iterations(CancellationToken::new())?;
+    assert!(
+        controller
+            .enqueuer
+            .run_single_iteration()
+            .await
+            .iteration
+            .is_some()
+    );
+    let successful_object_ids_from_database = controller
+        .processor
+        .object_ids_from_database
+        .as_ref()
+        .expect("database object-ID receiver should be configured")
+        .borrow()
+        .clone()
+        .expect("successful read should publish database object IDs");
+    assert_eq!(successful_object_ids_from_database.len(), 1);
+    assert!(successful_object_ids_from_database.contains(OBJECT_ID));
+    assert_eq!(
+        controller
+            .processor
+            .dequeue_and_dispatch_object_handling_tasks()
+            .await?,
+        1
+    );
+    let result = controller
+        .processor
+        .object_tasks
+        .join_next()
+        .await
+        .unwrap()?;
+    assert!(matches!(
+        &result.metrics.common.error,
+        Some(StateHandlerError::GenericError(_))
+    ));
+    controller
+        .processor
+        .process_object_handling_task_result(result, false, Instant::now());
+    controller.processor.finalize_completed_objects().await?;
+    controller.processor.emit_metrics();
+    assert_eq!(
+        meter.formatted_metric("test_objects_total{fresh=\"true\"}"),
+        Some("1".to_string())
+    );
+
+    // Action: inject a failed listing; it must not publish an empty replacement.
+    io.fail_next_list_objects();
+    let failed_iteration = controller.enqueuer.run_single_iteration().await;
+    assert!(failed_iteration.iteration.is_none());
+    assert!(!failed_iteration.skipped_iteration);
+    controller.processor.emit_metrics();
+
+    // Assertion: failure preserves the same nonempty list rather than
+    // reverting to the startup fallback or publishing an empty list.
+    let retained_object_ids_from_database = controller
+        .processor
+        .object_ids_from_database
+        .as_ref()
+        .expect("database object-ID receiver should be configured")
+        .borrow()
+        .clone()
+        .expect("failed read should preserve the prior database object IDs");
+    assert_eq!(
+        retained_object_ids_from_database,
+        successful_object_ids_from_database
+    );
+
+    // Assertion: the retained existing object's ordinary error metric survives.
+    assert_eq!(
+        meter.formatted_metric("test_objects_total{fresh=\"true\"}"),
+        Some("1".to_string())
+    );
+
+    Ok(())
+}
+
+/// Verifies that an enabled replica refreshes its database object-ID list even
+/// when another replica holds the global queue-enqueuing lock.
+#[carbide_macros::sqlx_test]
+async fn non_lock_winner_refreshes_object_ids_from_database(
+    pool: sqlx::PgPool,
+) -> eyre::Result<()> {
+    const OBJECT_ID: &str = "live-host";
+
+    // Setup: create a database object and hold the singleton iteration lock
+    // from outside the controller under test.
+    create_test_state_controller_tables(&pool).await;
+    let mut join_set = JoinSet::new();
+    let work_lock_manager_handle =
+        ::db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let mut txn = pool.begin().await?;
+    create_test_object(OBJECT_ID.to_string(), &mut txn).await;
+    txn.commit().await?;
+    let locked_iteration = db::lock_and_start_iteration(
+        &pool,
+        &work_lock_manager_handle,
+        TestStateControllerIO::DB_ITERATION_ID_TABLE_NAME,
+    )
+    .await?;
+    let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
+        .database(pool, work_lock_manager_handle)
+        .filter_metrics_by_existing_object_ids()
+        .processor_id("non-lock-winner-test".to_string())
+        .services(Arc::new(()))
+        .build_for_manual_iterations(CancellationToken::new())?;
+
+    // Action: run an iteration that cannot acquire the queue lock.
+    let iteration = controller.enqueuer.run_single_iteration().await;
+    assert!(iteration.skipped_iteration);
+
+    // Assertion: the pre-lock committed read was still published locally.
+    let object_ids_from_database = controller
+        .processor
+        .object_ids_from_database
+        .as_ref()
+        .expect("database object-ID receiver should be configured")
+        .borrow()
+        .clone()
+        .expect("successful read should publish database object IDs");
+    assert_eq!(object_ids_from_database.len(), 1);
+    assert!(object_ids_from_database.contains(OBJECT_ID));
+
+    std::mem::drop(locked_iteration);
     Ok(())
 }
 

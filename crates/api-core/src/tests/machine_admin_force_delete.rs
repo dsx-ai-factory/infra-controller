@@ -1154,7 +1154,8 @@ async fn dpf_force_delete_test_env(pool: sqlx::PgPool, mut mock: MockDpfOperatio
             url: "https://example.com/test-service".to_string(),
         }])
     });
-    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_device()
+        .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));
@@ -3024,6 +3025,10 @@ async fn test_admin_force_delete_with_instance_type(pool: sqlx::PgPool) {
 /// its offline DPU. Both calls use BMC MAC-derived CR names within the SDK limit.
 #[crate::sqlx_test]
 async fn test_admin_force_delete_with_dpf_retries_offline_admin_cleanup(pool: sqlx::PgPool) {
+    use model::bmc_suppression::{
+        BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression,
+    };
+
     type DpfCallLog = Vec<(String, Vec<String>)>;
     let captured_calls: Arc<std::sync::Mutex<DpfCallLog>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -3064,6 +3069,28 @@ async fn test_admin_force_delete_with_dpf_retries_offline_admin_cleanup(pool: sq
     assert!(snapshot.instance.is_none());
     assert!(snapshot.use_admin_network());
     assert!(!snapshot.managed_host_network_config_version_synced());
+    let bmc_macs = [
+        snapshot.host_snapshot.status.bmc_info.mac.unwrap(),
+        snapshot.dpu_snapshots[0].status.bmc_info.mac.unwrap(),
+    ];
+    for bmc_mac_address in bmc_macs {
+        for source in [
+            BmcSuppressionSource::DpfProvisioning,
+            BmcSuppressionSource::Decommissioning,
+        ] {
+            db::bmc_suppression::upsert(
+                txn.as_mut(),
+                &NewBmcSuppression {
+                    bmc_mac_address,
+                    subsystem: BmcSuppressionSubsystem::SiteExplorer,
+                    source,
+                    reason: "test".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+    }
     txn.commit().await.unwrap();
 
     // Trigger DPF cleanup after confirming Admin remains unsynchronized; the first failure must
@@ -3083,6 +3110,20 @@ async fn test_admin_force_delete_with_dpf_retries_offline_admin_cleanup(pool: sq
     assert_eq!(snapshot.managed_state, ManagedHostState::ForceDeletion);
     assert!(!snapshot.managed_host_network_config_version_synced());
     txn.commit().await.unwrap();
+
+    for mac in bmc_macs {
+        assert_eq!(
+            db::bmc_suppression::find_for_bmc(
+                &env.pool,
+                mac,
+                BmcSuppressionSubsystem::SiteExplorer
+            )
+            .await
+            .unwrap(),
+            vec![BmcSuppressionSource::Decommissioning],
+            "only the provisioning suppression must clear for {mac}, even when DPF cleanup fails",
+        );
+    }
 
     // Retry with the same missing observation that preceded the first call.
     let response = env

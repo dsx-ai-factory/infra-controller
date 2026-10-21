@@ -33,8 +33,7 @@ use crate::metrics::{
     SiteExplorerMachineSlotTrayResponseMissing, SiteExplorerMachineSlotTrayValueInvalid,
 };
 
-// Match RMS's 10-second I/O timeout with a total attempt deadline: HTTP/2
-// keepalives must not extend best-effort enrichment's hold on the iteration lock.
+// Keep RMS location lookups from holding the iteration lock indefinitely.
 const RMS_MACHINE_LOCATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Fills missing machine slot and tray data from RMS.

@@ -18,6 +18,7 @@
 //! Tests for batch instance allocation API
 
 use ::rpc::forge::forge_server::Forge;
+use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{MachineId, StableHostMachineId};
 use carbide_uuid::network::NetworkSegmentId;
 use common::api_fixtures::instance::{
@@ -27,6 +28,7 @@ use common::api_fixtures::{
     TestEnv, TestEnvOverrides, create_managed_host, create_test_env,
     create_test_env_with_overrides, get_instance_type_fixture_id, populate_network_security_groups,
 };
+use model::machine::machine_search_config::MachineSearchConfig;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 use crate::cfg::file::ComputeAllocationEnforcement;
@@ -36,6 +38,7 @@ use crate::test_support::network_segment::{
 use crate::tests::common;
 use crate::tests::common::api_fixtures::TestManagedHost;
 use crate::tests::common::api_fixtures::tenant::create_fixture_tenant;
+use crate::tests::common::postgres::wait_for_blocked_query;
 use crate::tests::common::rpc_builder::VpcCreationRequest;
 use crate::tests::instance_allocate::{
     TENANT_FIRMWARE_DPA_MAC, create_spx_allocation_request,
@@ -117,14 +120,20 @@ async fn tenant_nic_firmware_selection_allows_unrelated_spx_batch(pool: sqlx::Pg
         .expect("only the unselected tenant requests SPX attachments")
         .into_inner();
     assert_eq!(allocated.instances.len(), 2);
-    for (host, tenant_id, expected_macs) in [
+    for (host, tenant_id, expected_macs, profile_id) in [
         // Selection alone must not add an attachment requirement to this request.
-        (&ordinary_host, FIXTURE_TENANT_ORG_ID, vec![]),
+        (
+            &ordinary_host,
+            FIXTURE_TENANT_ORG_ID,
+            vec![],
+            Some("ordinary-batch-profile"),
+        ),
         // The unrelated tenant's requested attachment must still bind normally.
         (
             &spx_host,
             UNSELECTED_SPX_TENANT,
             vec![Some(UNSELECTED_SPX_MAC)],
+            None,
         ),
     ] {
         let instance_id = db::instance::find_id_by_machine_id(&env.pool, &host.host().id.into())
@@ -149,6 +158,40 @@ async fn tenant_nic_firmware_selection_allows_unrelated_spx_batch(pool: sqlx::Pg
                 .collect::<Vec<_>>(),
             expected_macs
         );
+        let frozen = persisted
+            .nic_firmware_snapshot
+            .expect("each batch instance must retain its allocation inputs");
+        assert_eq!(frozen.tenant_organization_id.as_str(), tenant_id);
+        let tenant = frozen.tenant.as_ref().expect("fixture tenant exists");
+        assert_eq!(tenant.organization_id.as_str(), tenant_id);
+        assert_eq!(
+            tenant
+                .profile_id
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref(),
+            profile_id
+        );
+        assert_eq!(
+            frozen
+                .profiles
+                .iter()
+                .map(|profile| profile.id.to_string())
+                .collect::<Vec<_>>(),
+            profile_id
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(frozen.targets.len(), expected_macs.len());
+        for (target, attachment) in frozen
+            .targets
+            .iter()
+            .zip(&persisted.config.spxconfig.spx_attachments)
+        {
+            assert_eq!(&target.attachment, attachment);
+            assert_eq!(target.machine_id, host.host().id.into());
+        }
     }
 }
 
@@ -224,6 +267,112 @@ async fn tenant_nic_firmware_selection_rejects_entire_spx_batch(pool: sqlx::PgPo
             Some(expected_mac)
         );
     }
+}
+
+/// A selection committed after the early guard must roll back instances,
+/// allocated addresses, and an earlier instance's firmware snapshot together.
+#[crate::sqlx_test]
+async fn late_tenant_nic_firmware_selection_rolls_back_spx_batch(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let selected_segment_id = env.create_vpc_and_tenant_segment().await;
+    let unselected_segment_id = create_unselected_spx_tenant_segment(&env).await;
+    let unselected_host = create_managed_host(&env).await;
+    let selected_host = create_managed_host(&env).await;
+    let mut unselected_request = create_spx_allocation_request_for_tenant(
+        &env,
+        &unselected_host,
+        unselected_segment_id,
+        UNSELECTED_SPX_TENANT,
+        UNSELECTED_SPX_MAC,
+    )
+    .await;
+    let mut selected_request =
+        create_spx_allocation_request(&env, &selected_host, selected_segment_id).await;
+
+    // Capture returns instances by ID: the unselected instance's snapshot is
+    // written before the selected instance reaches the late preparation guard.
+    let unselected_id: InstanceId = "00000000-0000-4000-8000-000000000001".parse().unwrap();
+    let selected_id: InstanceId = "00000000-0000-4000-8000-000000000002".parse().unwrap();
+    unselected_request.instance_id = Some(unselected_id);
+    selected_request.instance_id = Some(selected_id);
+    let batch = rpc::forge::BatchInstanceAllocationRequest {
+        instance_requests: vec![unselected_request, selected_request],
+    };
+
+    let mut blocker = env.db_txn().await;
+    db::machine::find_one(
+        blocker.as_mut(),
+        &selected_host.host().id,
+        MachineSearchConfig {
+            for_update: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(blocker.as_mut())
+        .await
+        .unwrap();
+    let profile_id = "late-spx-batch-profile";
+    let selection = async {
+        // Waiting on Machine proves both requests passed the early tenant check.
+        wait_for_blocked_query(&env.pool, blocker_pid, "SELECT row_to_json").await;
+        set_tenant_nic_firmware_profile(&env, Some(profile_id)).await;
+        blocker.commit().await.unwrap();
+    };
+    let (allocated, ()) = tokio::join!(
+        env.api
+            .allocate_instances(tonic::Request::new(batch.clone())),
+        selection
+    );
+    let error = allocated.expect_err("late tenant selection rejects the entire batch");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("NIC firmware preparation"));
+    assert!(!error.message().contains(profile_id));
+
+    let mut txn = env.db_txn().await;
+    for (instance_id, segment_id) in [
+        (unselected_id, unselected_segment_id),
+        (selected_id, selected_segment_id),
+    ] {
+        assert!(
+            db::instance::find_by_id(txn.as_mut(), instance_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "instance {instance_id} and its firmware snapshot must roll back"
+        );
+        assert_eq!(
+            db::instance_address::count_by_segment_id(txn.as_mut(), &segment_id)
+                .await
+                .unwrap(),
+            0,
+            "addresses allocated before the late guard must roll back"
+        );
+    }
+    txn.commit().await.unwrap();
+
+    set_tenant_nic_firmware_profile(&env, None).await;
+    let allocated = env
+        .api
+        .allocate_instances(tonic::Request::new(batch))
+        .await
+        .expect("the same instances and resources remain available after rollback")
+        .into_inner();
+    assert_eq!(allocated.instances.len(), 2);
+    let mut txn = env.db_txn().await;
+    for segment_id in [unselected_segment_id, selected_segment_id] {
+        assert!(
+            db::instance_address::count_by_segment_id(txn.as_mut(), &segment_id)
+                .await
+                .unwrap()
+                > 0,
+            "the successful retry must allocate addresses in {segment_id}"
+        );
+    }
+    txn.commit().await.unwrap();
 }
 
 /// Allocate 3 instances in a single batch request.

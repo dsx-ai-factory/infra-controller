@@ -30,6 +30,8 @@ use super::{ColumnInfo, FilterableQueryBuilder, ObjectColumnFilter};
 use crate::{DatabaseError, DatabaseResult};
 
 #[cfg(test)]
+mod test_decode;
+#[cfg(test)]
 mod test_explicit_columns;
 
 pub async fn persist_remediation(

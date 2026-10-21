@@ -18,8 +18,9 @@ use std::borrow::Cow;
 
 use serde_json::json;
 
-use crate::json::{JsonExt, JsonPatch};
+use crate::json::JsonExt;
 use crate::redfish;
+use crate::redfish::ModelExt;
 
 pub(crate) fn resource<'a>(system_id: &str) -> redfish::Resource<'a> {
     let odata_id = format!(
@@ -28,7 +29,7 @@ pub(crate) fn resource<'a>(system_id: &str) -> redfish::Resource<'a> {
     );
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
-        odata_type: Cow::Borrowed("#Bios.v1_2_0.Bios"),
+        odata_type: Cow::Borrowed(redfish::schema::bios::Bios::ODATA_TYPE),
         name: Cow::Borrowed("BIOS Configuration"),
         id: Cow::Borrowed("BIOS"),
     }
@@ -38,35 +39,18 @@ pub(super) fn change_password_target(resource: &redfish::Resource<'_>) -> String
     format!("{}/Actions/Bios.ChangePassword", resource.odata_id)
 }
 
-pub(crate) fn builder(resource: &redfish::Resource) -> BiosBuilder {
-    BiosBuilder {
-        value: resource.json_patch(),
-    }
+pub(crate) fn builder(resource: &redfish::Resource) -> super::schema::bios::Bios {
+    super::schema::bios::Bios::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        resource.name.as_ref(),
+    )
 }
 
-pub(crate) struct BiosBuilder {
-    value: serde_json::Value,
-}
-
-impl BiosBuilder {
-    pub(crate) fn attributes(self, value: serde_json::Value) -> Self {
-        self.apply_patch(json!({"Attributes": value}))
-    }
-
-    /// libredfish's HPE `Bios` model requires `@odata.context` (real iLOs
-    /// always send it); without it the machine controller's lockdown check
-    /// fails to deserialize the response.
-    pub(crate) fn odata_context(self, value: &str) -> Self {
-        self.apply_patch(json!({"@odata.context": value}))
-    }
-
-    pub(crate) fn build(self) -> serde_json::Value {
-        self.value
-    }
-
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-        }
+impl super::schema::bios::Bios {
+    /// BIOS attributes are registry-defined. The server generator currently emits
+    /// an opaque Attributes struct, so retain the configured attribute payload.
+    pub(crate) fn with_attributes(self, value: serde_json::Value) -> serde_json::Value {
+        self.into_json().patch(json!({"Attributes": value}))
     }
 }

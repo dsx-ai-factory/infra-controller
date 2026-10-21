@@ -18,6 +18,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
@@ -148,7 +149,8 @@ func TestHTTPServiceStart(t *testing.T) {
 		s := NewHTTPService("unix://" + socketPath)
 		s.AddHealthRoute(ctx)
 		s.Use(NewHTTPMiddleware(ctx)...)
-		s.Start(ctx)
+		_, err := s.Start(ctx)
+		require.NoError(t, err)
 
 		c := &http.Client{
 			Timeout: 10 * time.Second,

@@ -124,7 +124,8 @@ pub struct NmxcTlsConfig {
 
 impl NmxcTlsConfig {
     /// The configured TLS material files. A cached channel is rebuilt once any
-    /// of them is newer than it.
+    /// of them is newer than it, unless another is unreadable, such as one
+    /// missing mid-rotation.
     fn material_paths(&self) -> Vec<PathBuf> {
         [
             &self.ca_cert_path,
@@ -250,7 +251,8 @@ impl NmxcClientPool {
     /// calls and monitor ticks, self-healing dropped connections along the way.
     /// [`ClientCache::get_or_build`] rebuilds the channel once a configured
     /// TLS material file on disk is newer than it, so certificate rotations
-    /// are picked up without a restart.
+    /// are picked up without a restart. While another file is unreadable,
+    /// such as one missing mid-rotation, it keeps the cached channel instead.
     ///
     /// Concurrent misses for the same URI may each connect, last insert wins --
     /// a benign duplicate handshake. The steady-state caller is a serial

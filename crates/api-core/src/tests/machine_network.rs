@@ -611,7 +611,7 @@ async fn test_managed_host_network_config_supports_ipv6_only_admin(pool: sqlx::P
         .get_or_insert_with(Default::default)
         .interfaces
         .push(ExpectedInterface {
-            mac_address: dpu_oob_mac,
+            mac_address: Some(dpu_oob_mac),
             role: ExpectedInterfaceRole::DpuOs,
             ..Default::default()
         });
@@ -2325,6 +2325,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
             data: create_extension_service_data("test"),
             credential: None,
             observability: None,
+            deployment_type: 0,
         }))
         .await
         .unwrap()
@@ -2349,6 +2350,7 @@ async fn test_managed_host_network_config_with_extension_services(pool: sqlx::Pg
             data: create_extension_service_data("test2"),
             credential: None,
             observability: None,
+            deployment_type: 0,
         }))
         .await
         .unwrap()

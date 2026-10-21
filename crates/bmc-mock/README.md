@@ -4,6 +4,30 @@
 maps one `bmc-mock` process or container to one libvirt domain, matching the
 real-world relationship between a Redfish endpoint and its host.
 
+## Redfish response models
+
+`build.rs` uses `nv-redfish-csdl-compiler` and the CSDL files bundled in
+`nv-redfish-schema` to generate the response models selected in its root list.
+Cargo writes them to `OUT_DIR/redfish_server.rs`; `redfish::schema` includes them.
+The generated models use `nv-redfish-server-core` for references, finite numbers,
+UUIDs, and OEM extension maps. Schema files are packaged dependencies, so generation
+does not download schemas at build time.
+
+Resource modules construct these models directly. Their required properties and
+property types are checked by Rust, and entity `@odata.type` follows the resolved
+schema. The root list also selects NVIDIA, Delta, Dell, HPE, and Supermicro OEM
+models from the bundled vendor CSDL. OEM complex models use the `oem::object`
+helper for the firmware's type discriminator, which the server generator emits
+only for entities. Captured firmware spellings and older advertised type versions
+remain explicit compatibility details.
+
+Add new modeled resource types to the root list in `build.rs`, rather than writing
+JSON builders. Runtime state, routing, capabilities, and fault injection remain in
+`bmc-mock`. Explicit JSON is retained for OEM types absent from the bundled schemas
+(`DelliDRACCard`, `DellOemResources`, and `DellNIC`), firmware deviations,
+registry-defined BIOS/Dell attributes, bound actions, and expanded navigation
+payloads that the server generator does not yet model.
+
 ## Build the libvirt image
 
 Run from the infra-controller repository root:

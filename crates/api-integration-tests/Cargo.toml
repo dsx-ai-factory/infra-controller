@@ -33,6 +33,7 @@ carbide-utils = { path = "../utils", features = ["sqlx"] }
 carbide-api-test-helper = { path = "../api-test-helper" }
 carbide-kms-provider = { path = "../kms-provider" }
 carbide-secrets = { path = "../secrets" }
+carbide-tls = { path = "../tls" }
 carbide-api-core = { path = "../api-core", default-features = false }
 carbide-api-db = { path = "../api-db", default-features = false, features = [
   "test-support",

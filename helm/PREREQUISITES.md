@@ -62,6 +62,11 @@ namespace first and configure the sidecar to search it. See
 
 An SSL-enabled PostgreSQL instance is required by `nico-api` for persistent storage.
 
+If enabling the PostgreSQL slow-query exporter, configure
+`pg_stat_statements.track_utility = off` on the database server before scraping.
+See the [exporter database setup](charts/nico-postgres-exporter/README.md#database-collection-and-dashboard)
+for extension setup, permissions, and clearing previously collected statements.
+
 - **Recommended:** Use a PostgreSQL operator such as Crunchy PGO or Zalando Postgres Operator to manage the database lifecycle.
 - **Database name:** `nico` (configurable via values).
 - **Schema creation:** The migration job included in the `nico-api` subchart handles schema creation and migrations automatically. You do not need to run migrations manually.

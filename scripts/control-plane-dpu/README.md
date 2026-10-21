@@ -132,8 +132,10 @@ fnn:
   # level of the file it is rejected by the build ("Unsupported field in site
   # config (top level)") and would not be rendered.
   # A map, one `<asn>:<n>: {}` entry per target, not a list: the build rejects
-  # a list or a non-numeric key. Keys are full numeric targets; nothing is
-  # substituted.
+  # a list, a non-numeric key, and a key equal to one of the three imports it
+  # always renders from datacenterAsn and commonManagedNodeBmcRouteTarget,
+  # commonAdminNetworkTarget, commonSiteControllerRouteTarget. Keys are full
+  # numeric targets; nothing is substituted.
   # routeTargetsToImport:
   #   4266030000:101: {}   # Jumphosts
   #   4266030000:1002: {}  # UFM
@@ -190,7 +192,8 @@ What the build does with each value:
   hosts, rack devices, storage management and the tenant profiles' common tags. Never the site
   controllers' own out-of-band segment (`:901`) or a tenant's native target. It is a map keyed
   by the target (`<asn>:<n>: {}`); the build rejects a list or a key that is not numeric
-  `<asn>:<n>`, because the template renders the keys and a list would render as `0: {}`.
+  `<asn>:<n>` (no leading zeros), because the template renders the keys and a list would
+  render as `0: {}`.
 - `fnn.vpcVrfLoopbackPrefix` (optional) — a loopback inside the control-plane VRF for testing the
   overlay from the DPU; must not overlap the managed-host per-VPC loopback pool.
 

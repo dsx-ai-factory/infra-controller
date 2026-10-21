@@ -407,6 +407,105 @@ provide a reliable model allowlist. Use the
 [per-machine automatic-update policy](host-firmware.md#enable-or-disable-one-host)
 instead.
 
+### Firmware downloads
+
+These settings are planned for NICo v2.4. They require a Core build containing
+the [download-limit implementation](https://github.com/dsx-ai-factory/infra-controller/issues/7679),
+with this reference tracked in the
+[documentation companion](https://github.com/dsx-ai-factory/infra-controller/issues/7709).
+Earlier builds do not enforce these limits.
+
+The optional `[firmware_global.downloads]` section limits URL artifacts fetched
+by Core for managed-host Redfish upgrades and non-BFB pre-ingestion upgrades.
+Both paths share one worker pool per Core process. Scout, Core-local scripts,
+filename-only artifacts, and pre-ingestion BFB delivery bypass this downloader.
+
+Omit the section or individual fields to use their defaults. This also applies
+to existing configurations: with defaults, HTTP responses over 4 GiB fail, and
+HTTP requests have a 1,800-second total deadline. Core validates the settings at
+startup; changes require a Core restart.
+
+The following table lists the download settings and their inclusive ranges:
+
+| Setting | Default | Accepted range | Meaning |
+|---|---|---|---|
+| `max_concurrent_downloads` | `4` | `1` to `16` | Downloads and cache checks that can run concurrently in each Core process. |
+| `max_download_bytes` | `4294967296` (4 GiB) | `1` to `17179869184` (16 GiB) | Maximum bytes in one HTTP response body, counted while streaming regardless of `Content-Length`. |
+| `connect_timeout_seconds` | `30` | `1` to `300` | Seconds allowed to establish an HTTP connection. |
+| `read_timeout_seconds` | `60` | `1` to `600` | Seconds allowed to receive the final response headers, then the idle time allowed between body reads. |
+| `request_timeout_seconds` | `1800` | `1` to `7200` | Seconds from request start through response-body completion, even while reads make progress. |
+
+All values are positive integers; write timeouts as seconds, not duration
+strings such as `"30s"`. Both `connect_timeout_seconds` and
+`read_timeout_seconds` must be less than or equal to `request_timeout_seconds`.
+Core rejects invalid values at startup instead of disabling the limit.
+
+The read timer starts with the request and runs through receipt of final response
+headers, including connection establishment. It then resets after each body
+read makes progress. Whichever active timer expires first ends the HTTP attempt.
+Time spent writing received bytes counts toward the total request deadline, but
+the deadline cannot interrupt a filesystem operation. A blocked filesystem can
+keep the download in progress and retain its worker slot beyond that deadline.
+
+Unknown or misspelled keys produce a warning and are ignored; an omitted setting
+keeps its default. Set top-level `deny_unknown_fields = true` to reject unknown
+keys at startup. Refer to the
+[NICo API configuration reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md)
+for this shared loading policy.
+
+The following example explicitly sets all download defaults:
+
+```toml
+[firmware_global.downloads]
+max_concurrent_downloads = 4
+max_download_bytes = 4294967296
+connect_timeout_seconds = 30
+read_timeout_seconds = 60
+request_timeout_seconds = 1800
+```
+
+Use site TOML for these settings. Site configuration overrides base
+configuration; `CARBIDE_API_` environment configuration takes precedence over
+both. For Helm deployments, add the section to the existing
+`nico-api.siteConfig.nicoApiSiteConfig` TOML with `nico-api.siteConfig.enabled`
+enabled. Keep the rest of the TOML: replacing this Helm string replaces its
+entire contents. The chart does not set download limits, so Core's defaults
+apply when omitted. Changing this site configuration through Helm rolls the
+Core pods, applying the restart-required settings.
+
+Active HTTP downloads can hold up to 16 GiB of partial files per Core process at
+the defaults, or 256 GiB at the hard maxima. Retained cache and `file://` URL
+copies require additional storage. Choose limits for your artifact sizes,
+source performance, and available cache storage; these are not measured site
+capacity guarantees.
+
+When all workers are busy, Core defers the artifact check to the next poll. This
+applies even when the artifact is already cached or a recorded download failure
+is waiting to be reported. Core does not queue the check, and it does not count
+saturation as a firmware failure.
+The workflow remains waiting for artifact availability; the debug message
+"Firmware download workers are busy; deferring artifact check" identifies
+saturation. A slot remains occupied until verification and cleanup finish, even
+after the requesting controller iteration stops waiting. HTTP deadlines do not
+bound local copying, checksum verification, or cleanup.
+
+An HTTP timeout, size-limit violation, or transfer error prevents publication of
+the partial file. Managed-host Redfish upgrades enter `FailedFirmwareUpgrade`
+and follow the [firmware execution retry policy](host-firmware.md#firmware-execution-failures),
+including `firmware_global.host_firmware_upgrade_retry_interval` and the
+applicable retry budget. Pre-ingestion logs a warning and retries on
+[later passes](pre-ingestion.md#failures-and-retries). Retries download from the
+start rather than resume. The
+`carbide_firmware_download_duration_seconds_count` metric records finished
+attempts by `outcome`; HTTP deadlines appear as `fetch` or `transfer` failures.
+
+For these downloads, Core verifies a configured SHA-256 digest but does not
+require one. `file://` URL artifacts share worker capacity but do not use the
+HTTP size or timeout limits.
+
+Download limits are separate from firmware upload limits, BFB copy limits, and
+firmware execution concurrency. They do not limit retained cache storage.
+
 ## Roll out a new baseline
 
 Treat a baseline change as a site-wide rollout, even when the first update is a

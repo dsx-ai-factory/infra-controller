@@ -207,14 +207,25 @@ pub(super) async fn set_tenant_nic_firmware_profile(env: &TestEnv, profile_id: O
     txn.commit().await.unwrap();
 }
 
-/// A rejected allocation must disclose the preparation requirement, not the
-/// operator's profile ID, and the same request must bind after clearing it.
+/// Rejection hides the operator's profile ID; a retry captures machine profile
+/// content and only the selected DPA row from a larger inventory.
 #[crate::sqlx_test]
-async fn tenant_nic_firmware_selection_rejects_spx_allocation(pool: sqlx::PgPool) {
+async fn tenant_nic_firmware_guarded_retry_captures_selected_spx_target(pool: sqlx::PgPool) {
     let env = api_fixtures::create_test_env(pool).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let host = api_fixtures::create_managed_host(&env).await;
     let request = create_spx_allocation_request(&env, &host, segment_id).await;
+    env.api
+        .create_dpa_interface(tonic::Request::new(forge::DpaInterfaceCreationRequest {
+            mac_addr: "02:11:22:33:44:66".to_string(),
+            machine_id: Some(*host.host().id),
+            device_type: "ConnectX7".to_string(),
+            pci_name: "0000:dd:00.0".to_string(),
+            device_description: Some("NVIDIA ConnectX-7".to_string()),
+            interface_type: forge::DpaInterfaceType::Svpc.into(),
+        }))
+        .await
+        .unwrap();
     let profile_id = "spx-allocation-profile";
     set_tenant_nic_firmware_profile(&env, Some(profile_id)).await;
 
@@ -235,6 +246,26 @@ async fn tenant_nic_firmware_selection_rejects_spx_allocation(pool: sqlx::PgPool
 
     // Reusing the request proves the partition and DPA can actually be bound.
     set_tenant_nic_firmware_profile(&env, None).await;
+    let profile_id: NicFirmwareProfileId = profile_id.parse().unwrap();
+    let profiles = db::nic_firmware::find_by_ids(&env.pool, std::slice::from_ref(&profile_id))
+        .await
+        .unwrap();
+    let mut txn = env.db_txn().await;
+    let machine = host.host().db_machine(&mut txn).await;
+    db::nic_firmware::set_machine_config(
+        txn.as_mut(),
+        &machine.id,
+        Some(&profile_id),
+        None,
+        machine.version,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    // Capture the persisted token: incrementing again would assign a new time.
+    let mut txn = env.db_txn().await;
+    let selected_machine = host.host().db_machine(&mut txn).await;
+    txn.commit().await.unwrap();
     let allocated = env
         .api
         .allocate_instance(tonic::Request::new(request))
@@ -252,6 +283,33 @@ async fn tenant_nic_firmware_selection_rejects_spx_allocation(pool: sqlx::PgPool
             .as_deref(),
         Some(TENANT_FIRMWARE_DPA_MAC)
     );
+    let snapshot = persisted.nic_firmware_snapshot.unwrap();
+    assert_eq!(snapshot.machine_profile_id, Some(profile_id));
+    assert_eq!(snapshot.machine_config_version, selected_machine.version);
+    assert_eq!(snapshot.profiles, profiles);
+    assert_eq!(snapshot.tenant.unwrap().profile_id, None);
+    assert_eq!(snapshot.targets.len(), 1);
+    let target = &snapshot.targets[0];
+    assert_eq!(
+        target.attachment,
+        persisted.config.spxconfig.spx_attachments[0]
+    );
+    assert_eq!(target.machine_id, *host.host().id);
+    assert_eq!(target.mac_address.to_string(), TENANT_FIRMWARE_DPA_MAC);
+    assert_eq!(target.pci_name, "0000:cc:00.0");
+    assert!(target.observed_device.is_none());
+    assert!(target.observed_at.is_none());
+    assert!(!target.blocked_reason.is_empty());
+    let interfaces =
+        db::dpa_interface::find_by_machine_id(&env.pool, *host.host().id, Default::default())
+            .await
+            .unwrap();
+    assert_eq!(interfaces.len(), 2);
+    let selected = interfaces
+        .iter()
+        .find(|interface| interface.mac_address.to_string() == TENANT_FIRMWARE_DPA_MAC)
+        .unwrap();
+    assert_eq!(target.dpa_interface_id, selected.id);
 }
 
 /// Applicability follows requested attachments, not merely the tenant selection
@@ -261,6 +319,10 @@ async fn tenant_nic_firmware_selection_allows_allocations_without_spx(pool: sqlx
     let env = api_fixtures::create_test_env(pool).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
     set_tenant_nic_firmware_profile(&env, Some("unused-tenant-profile")).await;
+    let profile_id: NicFirmwareProfileId = "unused-tenant-profile".parse().unwrap();
+    let profiles = db::nic_firmware::find_by_ids(&env.pool, &[profile_id])
+        .await
+        .unwrap();
 
     for (scenario, has_dpa) in [
         // A selected tenant can still allocate ordinary hosts.
@@ -289,13 +351,23 @@ async fn tenant_nic_firmware_selection_allows_allocations_without_spx(pool: sqlx
             persisted.config.spxconfig.spx_attachments.is_empty(),
             "{scenario}"
         );
+        let snapshot = persisted.nic_firmware_snapshot.unwrap();
+        assert_eq!(snapshot.profiles, profiles, "{scenario}");
+        assert_eq!(
+            snapshot.tenant.as_ref().unwrap().profile_id,
+            Some(profiles[0].id.clone()),
+            "{scenario}"
+        );
+        assert!(snapshot.targets.is_empty(), "{scenario}");
     }
 }
 
-/// Creating and selecting a tenant after the guard's read must not retroactively
-/// reject that allocation, while the next request must see the selection.
+/// A selection committed while allocation waits for its Machine must be captured
+/// by the final guard and roll back the newly inserted instance and addresses.
 #[crate::sqlx_test]
-async fn tenant_nic_firmware_selection_is_read_before_machine_lock_wait(pool: sqlx::PgPool) {
+async fn tenant_nic_firmware_selection_during_machine_lock_wait_rejects_allocation(
+    pool: sqlx::PgPool,
+) {
     let env = api_fixtures::create_test_env(pool).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let host = api_fixtures::create_managed_host(&env).await;
@@ -326,28 +398,31 @@ async fn tenant_nic_firmware_selection_is_read_before_machine_lock_wait(pool: sq
         .unwrap();
 
     // Waiting on the Machine proves allocation has already read tenant intent.
-    // Creating the tenant and selecting a profile must not change that decision.
+    // The final capture must still observe the selection committed during this wait.
     let selection = async {
         wait_for_blocked_query(&env.pool, blocker_pid, "SELECT row_to_json").await;
         set_tenant_nic_firmware_profile(&env, Some("later-tenant-profile")).await;
         blocker.commit().await.unwrap();
     };
-    let (allocated, ()) = tokio::join!(
-        env.api
-            .allocate_instance(tonic::Request::new(request.clone())),
+    let (result, ()) = tokio::join!(
+        env.api.allocate_instance(tonic::Request::new(request)),
         selection
     );
-    let allocated = allocated.unwrap().into_inner();
-    let persisted = db::instance::find_by_id(&env.pool, allocated.id.unwrap())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        persisted.config.spxconfig.spx_attachments[0]
-            .mac_address
-            .as_deref(),
-        Some(TENANT_FIRMWARE_DPA_MAC)
+    let error = result.expect_err("captured tenant intent blocks SPX preparation");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("NIC firmware preparation"));
+    assert!(!error.message().contains("later-tenant-profile"));
+    assert!(
+        db::instance::find_id_by_machine_id(&env.pool, &host.host().id.into())
+            .await
+            .unwrap()
+            .is_none()
     );
+    let address_count: i64 = sqlx::query_scalar("SELECT count(*) FROM instance_addresses")
+        .fetch_one(&env.pool)
+        .await
+        .unwrap();
+    assert_eq!(address_count, 0);
     let selected = db::tenant::find_nic_firmware_config(&env.pool, &tenant_id)
         .await
         .unwrap()
@@ -356,14 +431,6 @@ async fn tenant_nic_firmware_selection_is_read_before_machine_lock_wait(pool: sq
         selected.profile_id.unwrap().to_string(),
         "later-tenant-profile"
     );
-
-    let error = env
-        .api
-        .allocate_instance(tonic::Request::new(request))
-        .await
-        .expect_err("later attempts see the committed tenant selection");
-    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-    assert!(error.message().contains("NIC firmware preparation"));
 }
 
 #[derive(Debug, Default)]

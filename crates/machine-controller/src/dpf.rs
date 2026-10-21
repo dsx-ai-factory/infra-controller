@@ -33,8 +33,8 @@ use carbide_dpf::{
     ResourceLabeler, node_id_from_dpu_node_cr_name,
 };
 use carbide_uuid::machine::{DpuMachineId, HostMachineId};
-use model::dpa_interface::DpaInterface;
 use model::dpu_machine_update::OutdatedDpfDpu;
+use model::expected_machine::ExpectedMachine;
 use model::machine::{DpuMachine, ManagedHostStateSnapshot};
 use model::machine_pending_action::{MachinePendingAction, MachinePendingActionKind};
 use sqlx::PgPool;
@@ -65,11 +65,13 @@ pub const HOST_BMC_IP_LABEL: &str = "carbide.nvidia.com/host-bmc-ip";
 #[cfg_attr(feature = "test-support", mockall::automock)]
 #[async_trait]
 pub trait DpfOperations: Send + Sync + std::fmt::Debug {
-    /// Register a DPU device.
-    async fn register_dpu_device<'a>(
+    /// Register a DPU device using the full expected-machine entry when available.
+    /// The expected-machine entry contains credentials and must not be logged.
+    async fn register_dpu_device(
         &self,
         info: DpuDeviceInfo,
-        astra_nics: Option<Vec<&'a DpaInterface>>,
+        expected_machine: Option<ExpectedMachine>,
+        deployment_type: DpuDeploymentType,
     ) -> Result<(), DpfError>;
 
     /// Register a DPU node.
@@ -795,16 +797,20 @@ impl std::fmt::Debug for DpfSdkOps {
 /// Delegates everything to the underlying DPF SDK.
 #[async_trait]
 impl DpfOperations for DpfSdkOps {
-    async fn register_dpu_device<'a>(
+    async fn register_dpu_device(
         &self,
         info: DpuDeviceInfo,
-        astra_nics: Option<Vec<&'a DpaInterface>>,
+        expected_machine: Option<ExpectedMachine>,
+        deployment_type: DpuDeploymentType,
     ) -> Result<(), DpfError> {
+        // For BF4 Astra, pair the expected-machine entry with site-configured route
+        // prefixes. The SDK uses this to build the values passed to the dpudevice.
+        let astra_provisioning_inputs = expected_machine
+            .as_ref()
+            .filter(|_| deployment_type == DpuDeploymentType::Bf4Astra)
+            .map(|machine| (machine, self.astra_route_prefixes));
         self.sdk
-            .register_dpu_device(
-                info,
-                astra_nics.map(|nics| (nics, self.astra_route_prefixes)),
-            )
+            .register_dpu_device(info, astra_provisioning_inputs)
             .await
     }
 

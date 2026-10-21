@@ -803,7 +803,7 @@ async fn test_exploration_refresh_adds_declared_adapter_port_to_predicted_host(
                 serial_number: mock_host.serial.clone(),
                 dpu_policy: HostDpuPolicy::Ignore,
                 interfaces: vec![ExpectedInterface {
-                    mac_address: declared_port_mac,
+                    mac_address: Some(declared_port_mac),
                     role: ExpectedInterfaceRole::Host,
                     primary: Some(true),
                     ..Default::default()

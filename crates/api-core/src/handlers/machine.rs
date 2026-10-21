@@ -31,7 +31,7 @@ use db::ConditionalWrite;
 use db::resource_pool::ResourcePoolAllocationNotOwned;
 use libredfish::SystemPowerControl;
 use model::bmc_info::BmcInfo;
-use model::bmc_suppression::BmcSuppressionSubsystem;
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem};
 use model::hardware_info::MachineNvLinkInfo;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
@@ -1046,6 +1046,25 @@ pub(crate) async fn admin_force_delete_machine(
             .await?;
         }
     }
+
+    // ForceDeletion bypasses the controller's provisioning-exit cleanup.
+    // Preserve independently requested suppressions unless their deletion is opted into.
+    let bmc_macs = host_machine
+        .iter()
+        .filter_map(|machine| machine.status.bmc_info.mac)
+        .chain(
+            dpu_machines
+                .iter()
+                .filter_map(|machine| machine.status.bmc_info.mac),
+        )
+        .collect::<Vec<_>>();
+    db::bmc_suppression::delete_many_for_source(
+        &mut txn,
+        &bmc_macs,
+        BmcSuppressionSubsystem::SiteExplorer,
+        BmcSuppressionSource::DpfProvisioning,
+    )
+    .await?;
 
     if let Some(instance_id) = instance_id {
         // Record the current IB memberships after acquiring the Machine lock,

@@ -109,13 +109,13 @@ func SetupTestCA(t *testing.T, caCertPath string) string {
 	caKeyFile, err := os.Create(caKeyPath)
 	assert.NoError(t, err)
 	defer caKeyFile.Close()
-	pem.Encode(caKeyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(caPrivateKey)})
+	require.NoError(t, pem.Encode(caKeyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(caPrivateKey)}))
 
 	// Write the CA certificate to file
 	caCertFile, err := os.Create(caCertPath)
 	assert.NoError(t, err)
 	defer caCertFile.Close()
-	pem.Encode(caCertFile, &pem.Block{Type: "CERTIFICATE", Bytes: caCertBytes})
+	require.NoError(t, pem.Encode(caCertFile, &pem.Block{Type: "CERTIFICATE", Bytes: caCertBytes}))
 
 	return caCertPath
 }
@@ -168,7 +168,7 @@ func SetupTestCerts(t *testing.T, clientCertPath string, clientKeyPath string, c
 	keyFile, err := os.Create(clientKeyPath)
 	assert.NoError(t, err)
 	defer keyFile.Close()
-	pem.Encode(keyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privatekey)})
+	require.NoError(t, pem.Encode(keyFile, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(privatekey)}))
 
 	// Encode and save the server/client certificate
 	err = os.MkdirAll(filepath.Dir(clientCertPath), 0755)
@@ -177,7 +177,7 @@ func SetupTestCerts(t *testing.T, clientCertPath string, clientKeyPath string, c
 	certFile, err := os.Create(clientCertPath)
 	assert.NoError(t, err)
 	defer certFile.Close()
-	pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: certBytes})
+	require.NoError(t, pem.Encode(certFile, &pem.Block{Type: "CERTIFICATE", Bytes: certBytes}))
 
 	return clientKeyPath, clientCertPath
 }

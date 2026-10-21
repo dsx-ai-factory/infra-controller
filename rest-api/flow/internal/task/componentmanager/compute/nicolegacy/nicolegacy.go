@@ -338,7 +338,7 @@ func nicoPowerStateToOperationsPowerStatus(state nicoapi.PowerState) operations.
 	switch state {
 	case nicoapi.PowerStateOn:
 		return operations.PowerStatusOn
-	case nicoapi.PowerStateOff, nicoapi.PowerStateDisabled:
+	case nicoapi.PowerStateOff:
 		return operations.PowerStatusOff
 	default:
 		return operations.PowerStatusUnknown

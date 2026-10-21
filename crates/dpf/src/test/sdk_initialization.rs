@@ -1422,14 +1422,11 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
         .map(|name| name.to_string())
         .collect::<BTreeSet<_>>();
     let mut astra_logical_names = astra_chainable_logical_names.clone();
-    let astra_xplane_group_ids = [
-        "r0swpln0", "r1swpln0", "r0swpln1", "r1swpln1", "r2swpln0", "r3swpln0", "r2swpln1",
-        "r3swpln1",
-    ];
+    let astra_xplane_group_ids = ["A56", "A53", "A43", "A46", "A6", "A3", "A13", "A16"];
     astra_logical_names.extend(astra_xplane_group_ids.into_iter().flat_map(|group_id| {
         [
-            format!("p-brcx-{group_id}-to-br-sfc"),
-            format!("p-br-xplane-{group_id}-to-br-sfc"),
+            format!("p-brcx-{}-to-br-sfc", group_id.to_ascii_lowercase()),
+            format!("p-br-xplane-{}-to-br-sfc", group_id.to_ascii_lowercase()),
         ]
     }));
     expected_interface_names.extend(
@@ -1519,7 +1516,7 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             .find(|interface| interface.metadata.name.as_deref() == Some(resource_name.as_str()))
             .unwrap_or_else(|| panic!("Astra scoped interface {resource_name} must exist"))
     };
-    let cx_patch = astra_interface("p-brcx-r0swpln0-to-br-sfc")
+    let cx_patch = astra_interface("p-brcx-a56-to-br-sfc")
         .spec
         .template
         .spec
@@ -1528,10 +1525,10 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
         .patch
         .as_ref()
         .expect("Astra CX bridge interface must be Patch-backed");
-    assert_eq!(cx_patch.peer_bridge, "brcx-r0swpln0");
+    assert_eq!(cx_patch.peer_bridge, "brcx-A56");
     assert!(cx_patch.peer_patch_name.is_none());
     assert!(cx_patch.peer_external_i_ds.is_none());
-    let xplane_patch = astra_interface("p-br-xplane-r3swpln1-to-br-sfc")
+    let xplane_patch = astra_interface("p-br-xplane-a16-to-br-sfc")
         .spec
         .template
         .spec
@@ -1546,7 +1543,7 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
         xplane_patch.peer_external_i_ds.as_ref(),
         Some(&BTreeMap::from([
             ("xplane".to_string(), "true".to_string()),
-            ("xplane-group-id".to_string(), "r3swpln1".to_string()),
+            ("xplane-group-id".to_string(), "A16".to_string()),
             ("xplane-downlink".to_string(), "patch".to_string()),
         ]))
     );
@@ -1736,8 +1733,8 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             .into_iter()
             .map(|group_id| {
                 (
-                    format!("p-brcx-{group_id}-to-br-sfc"),
-                    format!("p-br-xplane-{group_id}-to-br-sfc"),
+                    format!("p-brcx-{}-to-br-sfc", group_id.to_ascii_lowercase()),
+                    format!("p-br-xplane-{}-to-br-sfc", group_id.to_ascii_lowercase()),
                 )
             })
             .collect::<BTreeSet<_>>()
@@ -1798,7 +1795,9 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
     assert!(astra_ovs.contains("_ovs-vsctl --may-exist add-br 'br-vf4'"));
     let resolution = astra_ovs.find("resolve_dpf_pf 'c2pf3'").unwrap();
     let fixed_ovs_setup = astra_ovs.find("/etc/mellanox/ovs-script.sh").unwrap();
-    let fixed_xplane_setup = astra_ovs.find("/etc/mellanox/xplane-bridge.sh").unwrap();
+    let fixed_xplane_setup = astra_ovs
+        .find("/usr/local/sbin/configure-xplane-network.sh")
+        .unwrap();
     let intercept_bridge_setup = astra_ovs
         .find("_ovs-vsctl --may-exist add-br 'br-pf3'")
         .unwrap();
@@ -1921,8 +1920,8 @@ async fn topology_backed_astra_initialization_replaces_pre_topology_scoped_pf_vf
     for retained_name in [
         "p0-astra",
         "p1-astra",
-        "p-brcx-r0swpln0-to-br-sfc-astra",
-        "p-br-xplane-r0swpln0-to-br-sfc-astra",
+        "p-brcx-a56-to-br-sfc-astra",
+        "p-br-xplane-a56-to-br-sfc-astra",
         "pf0hpf-bf3",
         "pf0hpf-bf4",
     ] {
@@ -2027,8 +2026,8 @@ async fn topology_backed_astra_initialization_replaces_pre_topology_scoped_pf_vf
     for retained_name in [
         "p0-astra",
         "p1-astra",
-        "p-brcx-r0swpln0-to-br-sfc-astra",
-        "p-br-xplane-r0swpln0-to-br-sfc-astra",
+        "p-brcx-a56-to-br-sfc-astra",
+        "p-br-xplane-a56-to-br-sfc-astra",
         "pf0hpf-bf3",
         "pf0hpf-bf4",
     ] {

@@ -862,6 +862,7 @@ mod test {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use nv_redfish::bmc_http::{BmcCredentials, HttpClient};
+    use nv_redfish::core::NoRepair;
     use tower::ServiceExt;
     use url::Url;
 
@@ -1131,6 +1132,7 @@ mod test {
                 &BmcCredentials::new("root".to_string(), "password".to_string()),
                 None,
                 &axum::http::HeaderMap::new(),
+                &NoRepair,
             )
             .await
             .expect("expanded GET should succeed");
@@ -1156,6 +1158,7 @@ mod test {
                 &BmcCredentials::new("root".to_string(), "password".to_string()),
                 None,
                 &axum::http::HeaderMap::new(),
+                &NoRepair,
             )
             .await
             .expect_err("empty router should return transport error");

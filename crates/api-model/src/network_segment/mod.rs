@@ -36,6 +36,9 @@ use crate::state_history::StateHistoryRecord;
 
 mod slas;
 
+#[cfg(test)]
+mod test_decode;
+
 pub const MTU_MIN: i32 = 576;
 pub const MTU_MAX: i32 = 9000;
 
@@ -394,7 +397,7 @@ impl<'r> FromRow<'r, PgRow> for NetworkSegment {
                 subdomain_id: row.try_get("subdomain_id")?,
                 mtu: row.try_get("mtu")?,
                 segment_type: row.try_get("network_segment_type")?,
-                allocation_strategy: row.try_get("allocation_strategy").unwrap_or_default(),
+                allocation_strategy: row.try_get("allocation_strategy")?,
                 infer_slaac_eui64_addresses: row.try_get("infer_slaac_eui64_addresses")?,
                 vpc_id: row.try_get("vpc_id")?,
             },
@@ -405,8 +408,8 @@ impl<'r> FromRow<'r, PgRow> for NetworkSegment {
                 ),
                 controller_state_outcome: state_outcome.map(|x| x.0),
                 history,
-                vlan_id: row.try_get("vlan_id").unwrap_or_default(),
-                vni: row.try_get("vni_id").unwrap_or_default(),
+                vlan_id: row.try_get("vlan_id")?,
+                vni: row.try_get("vni_id")?,
                 can_stretch: row.try_get("can_stretch")?,
             },
             prefixes,

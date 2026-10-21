@@ -4,17 +4,21 @@
 package elektra
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/bootstrap"
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
+	bootstraptypes "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/bootstrap"
 	sitemgr "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/sitemgr"
 	log "github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Test_Bootstrap - test the bootstrap registeration
@@ -46,7 +50,7 @@ func Test_Bootstrap(t *testing.T) {
 			switch tc.descr {
 			case "read":
 				log.Info().Msg("Test Bootstrap read Start")
-				bCfg := bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap.Config
+				bCfg := bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap.GetConfig()
 				t.Log(bCfg.CACert)
 				t.Log(bCfg.CredsURL)
 				t.Log(bCfg.OTP)
@@ -58,29 +62,24 @@ func Test_Bootstrap(t *testing.T) {
 				log.Info().Msg("Test Bootstrap Read End")
 			case "touch":
 				log.Info().Msg("Test Bootstrap touch Start")
-				time.Sleep(10 * time.Millisecond)
+				// A new OTP in the bootstrap Secret reaches reloadBootstrapCredentials
+				// only through the watcher that Start runs. The download then fails
+				// against the test creds-url, but the attempt is counted first.
 				w := bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap.State
-				files := make([]string, len(bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap.Secretfiles))
-				i := 0
-				for k := range bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap.Secretfiles {
-					files[i] = k
-					i++
-				}
-				NumLoop := 1
-				for i := 0; i <= NumLoop; i++ {
-					// Update file
-					currentTime := time.Now().Local()
-					err := os.Chtimes(files[0],
-						currentTime, currentTime)
-					if err != nil {
-						t.Log(err)
-					}
-					time.Sleep(350 * time.Millisecond)
-					assert.GreaterOrEqual(t, int(w.DownloadAttempted.Load()), i+2)
-				}
-				assert.GreaterOrEqual(t, int(w.DownloadAttempted.Load()), NumLoop+1)
-				t.Log(w.DownloadAttempted.Load())
-				log.Info().Msg("Test Bootstrap touch Start")
+				otpPath := filepath.Join(bootstrap.ManagerAccess.Conf.EB.BootstrapSecret, bootstraptypes.TagOTP)
+				originalOTP, err := os.ReadFile(otpPath)
+				require.NoError(t, err)
+				attemptCount := w.DownloadAttempted.Load()
+
+				require.NoError(t, os.WriteFile(otpPath, []byte("touch-test-otp"), 0644))
+				assert.Eventually(t, func() bool {
+					return w.DownloadAttempted.Load() > attemptCount
+				}, 5*time.Second, 20*time.Millisecond, "watcher did not reload the bootstrap Secret")
+
+				// The original OTP matches the active configuration, so restoring it
+				// is skipped without another attempt.
+				require.NoError(t, os.WriteFile(otpPath, originalOTP, 0644))
+				log.Info().Msg("Test Bootstrap touch End")
 			case "noop":
 				log.Info().Msg("Test Bootstrap noop Start")
 				bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadAttempted.Store(0)
@@ -97,16 +96,18 @@ func Test_Bootstrap(t *testing.T) {
 				assert.NotNil(t, s)
 
 				// Save current values
-				bCfg := bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap.Config
+				bootstrapManager := bootstrap.ManagerAccess.Data.EB.Managers.Bootstrap
+				bCfg := bootstrapManager.GetConfig()
 				bCfg.OTP = s.UUID1OTP
 				bCfg.CredsURL = s.MgrURL + "/v1/sitecreds"
 				bCfg.UUID = sitemgr.Testuuid1
+				bootstrapManager.ReplaceConfig(bCfg)
 
 				t.Logf("CredsURL: %s", bCfg.CredsURL)
 
 				state := bootstrap.ManagerAccess.Data.EB.Managers.Workflow.State
 				state.ConnectionAttempted.Store(0)
-				err = bootstrap.ManagerAccess.API.Bootstrap.DownloadAndStoreCreds(nil)
+				err = bootstrap.ManagerAccess.API.Bootstrap.DownloadAndStoreCreds(context.Background(), nil)
 				if err != nil {
 					t.Error(err.Error())
 				}
@@ -137,7 +138,7 @@ func Test_Bootstrap(t *testing.T) {
 				assert.Equal(t, s.UUID1OTP, string(otpBytes))
 
 				// Try to download again, should be skipped since OTP is same
-				err = bootstrap.ManagerAccess.API.Bootstrap.DownloadAndStoreCreds(nil)
+				err = bootstrap.ManagerAccess.API.Bootstrap.DownloadAndStoreCreds(context.Background(), nil)
 				assert.NoError(t, err)
 
 				assert.Equal(t, attemptCount, state.ConnectionAttempted.Load())

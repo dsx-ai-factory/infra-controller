@@ -12,6 +12,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/location"
@@ -21,6 +22,24 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
+
+func TestComponentFrom_PowerState(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state nicoapi.PowerState
+		want  string
+	}{
+		{"stored disabled observation", nicoapi.PowerStateDisabled, "unknown"},
+		{"unknown observation", nicoapi.PowerStateUnknown, "unknown"},
+		{"observed on", nicoapi.PowerStateOn, "on"},
+		{"observed off", nicoapi.PowerStateOff, "off"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ComponentFrom(model.Component{PowerState: &tc.state})
+			assert.Equal(t, tc.want, got.PowerState)
+		})
+	}
+}
 
 func TestComponentFrom_LeakStatus(t *testing.T) {
 	daoComponent := model.Component{

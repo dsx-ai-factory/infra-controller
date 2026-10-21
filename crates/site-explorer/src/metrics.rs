@@ -1186,12 +1186,12 @@ impl SiteExplorerInstruments {
 
         if let Some(latency) = metrics.create_power_shelves_latency {
             self.site_explorer_create_power_shelves_latency
-                .record(1000.0 * latency.as_secs_f64(), &[]);
+                .record(latency.as_secs_f64(), &[]);
         }
 
         if let Some(latency) = metrics.create_switches_latency {
             self.site_explorer_create_switches_latency
-                .record(1000.0 * latency.as_secs_f64(), &[]);
+                .record(latency.as_secs_f64(), &[]);
         }
 
         for duration in metrics.endpoint_exploration_duration.iter() {
@@ -1828,6 +1828,59 @@ mod tests {
                 "iteration latency must remain label-free: {sample}"
             );
         }
+    }
+
+    #[test]
+    fn site_explorer_creation_latencies_use_declared_units() {
+        let test_meter = LatencyHistogramTestMeter::new("carbide_site_explorer_*_latency");
+        let metric_holder = MetricHolder::new(
+            test_meter.meter_provider.meter("site-explorer-test"),
+            Duration::MAX,
+            &SiteExplorerConfig::default(),
+        );
+
+        metric_holder.update_metrics(SiteExplorationMetrics {
+            create_machines_latency: Some(Duration::from_millis(375)),
+            create_power_shelves_latency: Some(Duration::from_millis(125)),
+            create_switches_latency: Some(Duration::from_millis(1250)),
+            ..Default::default()
+        });
+
+        let families = test_meter.registry.gather();
+        check_values(
+            [
+                Check {
+                    scenario: "machine creation",
+                    input: "carbide_site_explorer_create_machines_latency_milliseconds",
+                    expect: (prometheus::proto::MetricType::HISTOGRAM, 1, 375.0),
+                },
+                Check {
+                    scenario: "power-shelf creation",
+                    input: "site_explorer_create_power_shelves_latency_seconds",
+                    expect: (prometheus::proto::MetricType::HISTOGRAM, 1, 0.125),
+                },
+                Check {
+                    scenario: "switch creation",
+                    input: "site_explorer_create_switches_latency_seconds",
+                    expect: (prometheus::proto::MetricType::HISTOGRAM, 1, 1.25),
+                },
+            ],
+            |name| {
+                let family = families
+                    .iter()
+                    .find(|family| family.name() == name)
+                    .unwrap_or_else(|| panic!("missing {name} histogram"));
+                assert_eq!(family.get_metric().len(), 1, "{name}: series count");
+                let metric = &family.get_metric()[0];
+                assert!(metric.get_label().is_empty(), "{name}: unexpected labels");
+                let histogram = metric.get_histogram();
+                (
+                    family.get_field_type(),
+                    histogram.get_sample_count(),
+                    histogram.get_sample_sum(),
+                )
+            },
+        );
     }
 
     #[test]
