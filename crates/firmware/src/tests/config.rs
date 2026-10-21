@@ -187,7 +187,7 @@ fn merging_config() -> eyre::Result<()> {
 
     [[components.uefi.known_firmware]]
     version = "1.13.2"
-    url = "https://urm.nvidia.com/artifactory/sw-ngc-forge-cargo-local/misc/BIOS_T3H20_WN64_1.13.2.EXE"
+    url = "https://artifactory.nvidia.com/artifactory/sw-ngc-forge-cargo-local/misc/BIOS_T3H20_WN64_1.13.2.EXE"
     default = true
 "#;
     let cfg2 = r#"
@@ -200,7 +200,7 @@ preingest_upgrade_when_below = "1.13.3"
 
 [[components.uefi.known_firmware]]
 version = "1.13.3"
-url = "https://urm.nvidia.com/artifactory/sw-ngc-forge-cargo-local/misc/BIOS_T3H20_WN64_1.13.2.EXE"
+url = "https://artifactory.nvidia.com/artifactory/sw-ngc-forge-cargo-local/misc/BIOS_T3H20_WN64_1.13.2.EXE"
 default = true
 
 [components.bmc]
