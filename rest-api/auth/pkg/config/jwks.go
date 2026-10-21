@@ -330,7 +330,9 @@ func (jcfg *JwksConfig) ValidateToken(authHeader string, claims jwt.Claims) (*jw
 		"EdDSA", // Ed25519/Ed448
 	}
 
-	jwtParser := jwt.NewParser(jwt.WithValidMethods(allCommonAlgorithms))
+	// Require exp, which golang-jwt treats as optional by default. A signed
+	// token without it would stay valid until its signing key is rotated out.
+	jwtParser := jwt.NewParser(jwt.WithValidMethods(allCommonAlgorithms), jwt.WithExpirationRequired())
 
 	token, err := jwtParser.ParseWithClaims(authHeader, claims, jcfg.getPublicKey)
 	if err != nil {
