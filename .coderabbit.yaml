@@ -19,6 +19,25 @@ reviews:
   collapse_walkthrough: true
   slop_detection:
     enabled: true
+  finishing_touches:
+    autofix:
+      enabled: false
+  pre_merge_checks:
+    # Counts every touched function, not the public declarations STYLE_GUIDE.md
+    # requires, and pushes rustdoc onto Clap types where it changes help text.
+    docstrings:
+      mode: "off"
+    title:
+      requirements: >-
+        Use the conventional commit format `type(scope): Summary`, with an
+        optional scope and `!` before the colon for a breaking change. The title
+        becomes the squash commit subject.
+  tools:
+    # Its only finding here is CKV_OPENAPI_5 on spec.yaml, attached to unrelated comments.
+    checkov:
+      enabled: false
+    languagetool:
+      enabled: false
   path_filters:
     - "!target/**"
     - "!rest-api/**/*.pb.go"
@@ -96,8 +115,11 @@ reviews:
         the two-step removal rule for schema objects used by the outgoing
         binary. For index retention, identify an affected query or constraint;
         an expression difference alone does not prove a performance regression.
-        Data-semantic changes need predecessor-schema tests using the shipped
-        migration file.
+        A Squawk lock warning is a finding only when you can name the table and
+        the nico-api read or write the lock would block. Do not propose NOT VALID
+        with VALIDATE CONSTRAINT in the same file. A CONCURRENTLY statement needs
+        its own no-transaction migration. Data-semantic changes need
+        predecessor-schema tests using the shipped migration file.
     - path: "rest-api/**"
       instructions: >-
         Apply rest-api/AGENTS.md to changed behavior. Preserve tenant ownership
@@ -150,6 +172,9 @@ knowledge_base:
     filePatterns:
       - STYLE_GUIDE.md
       - CONTRIBUTING.md
+      # Auto-discovery only treats skills/ at the repository root as Agent Skills.
+      - files: "rest-api/skills/**/SKILL.md"
+        applyTo: "rest-api/**"
 issue_enrichment:
   planning:
     enabled: true
