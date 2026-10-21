@@ -356,6 +356,8 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_switches_time_in_state_seconds</td><td>histogram</td><td>The amount of time objects of type carbide_switches have spent in a certain state</td></tr>
 <tr><td>carbide_switches_total</td><td>gauge</td><td>Number of carbide_switches in the system</td></tr>
 <tr><td>carbide_switches_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of state-handling errors for carbide_switches in a given state</td></tr>
+<tr><td>carbide_tokio_runtime_workers</td><td>gauge</td><td>Number of worker threads in the Tokio runtime</td></tr>
+<tr><td>carbide_tokio_worker_busy_seconds_total</td><td>counter</td><td>Number of seconds each Tokio runtime worker thread has spent running tasks</td></tr>
 <tr><td>carbide_total_ips_count</td><td>gauge</td><td>Number of IPs per network segment</td></tr>
 <tr><td>carbide_unavailable_dpu_nic_firmware_update_count</td><td>gauge</td><td>Number of machines in the system that need a DPU/NIC firmware update but are unavailable for update</td></tr>
 <tr><td>carbide_vpc_prefixes_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_vpc_prefixes in the system</td></tr>
