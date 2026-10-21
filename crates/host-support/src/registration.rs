@@ -268,6 +268,12 @@ pub async fn register_machine(
     ))
 }
 
+/// Submits a quote and saves the credentials returned on acceptance.
+/// Returns `Ok(true)` only after saving them, or `Ok(false)` for a rejection
+/// without writing credentials. An accepted response with missing credentials
+/// or a failed write returns `RegistrationError::ClientCertificateError`.
+/// The files are written separately, so a failed write can leave one updated.
+/// Client configuration and RPC errors are propagated.
 pub async fn attest_quote(
     forge_api: &str,
     root_ca: String,
@@ -282,7 +288,18 @@ pub async fn attest_quote(
         .attest_quote(quote)
         .await?;
 
-    let _ = write_certs(response.machine_certificate, None).await;
+    finalize_attestation(response, None).await
+}
+
+async fn finalize_attestation(
+    response: rpc::AttestQuoteResponse,
+    override_client_cert: Option<&ClientCert>,
+) -> Result<bool, RegistrationError> {
+    if response.success {
+        write_certs(response.machine_certificate, override_client_cert)
+            .await
+            .map_err(RegistrationError::ClientCertificateError)?;
+    }
 
     tracing::info!(success = response.success, "Attestation result");
 
@@ -364,6 +381,9 @@ async fn write_private_key(path: &str, key: &[u8]) -> Result<(), std::io::Error>
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 
+    use carbide_test_support::Outcome::{Fails, Yields};
+    use carbide_test_support::{Case, check_cases_async};
+
     use super::*;
 
     /// `write_certs` concatenates and writes bytes without parsing them, so
@@ -387,22 +407,107 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn private_key_is_written_owner_only() {
+    async fn accepted_attestation_reports_private_key_write_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The certificate can be written, but the missing key directory makes
+        // the second write fail.
+        let paths = ClientCert {
+            cert_path: dir.path().join("cert.pem").to_string_lossy().into_owned(),
+            key_path: dir
+                .path()
+                .join("absent/cert.key")
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let response = rpc::AttestQuoteResponse {
+            success: true,
+            machine_certificate: Some(test_certificate()),
+        };
+
+        let error = finalize_attestation(response, Some(&paths))
+            .await
+            .expect_err("key write failure must fail attestation");
+        let RegistrationError::ClientCertificateError(error) = error else {
+            panic!("expected client certificate error, got {error:?}");
+        };
+
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "failed to write new machine certificate key to: {}",
+                paths.key_path
+            )
+        );
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .expect("filesystem error source is preserved")
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            std::fs::read_to_string(&paths.cert_path).expect("certificate write succeeded"),
+            "test-leaf-certificate-bytes\ntest-issuing-ca-bytes\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn attestation_without_credentials() {
+        check_cases_async(
+            [
+                Case {
+                    scenario: "rejection remains a rejection",
+                    input: false,
+                    expect: Yields(false),
+                },
+                Case {
+                    scenario: "acceptance requires credentials",
+                    input: true,
+                    expect: Fails,
+                },
+            ],
+            |success| async move {
+                let response = rpc::AttestQuoteResponse {
+                    success,
+                    machine_certificate: None,
+                };
+                finalize_attestation(response, None).await.map_err(|error| {
+                    assert!(
+                        matches!(error, RegistrationError::ClientCertificateError(_)),
+                        "expected client certificate error, got {error:?}"
+                    );
+                })
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn accepted_attestation_saves_credentials_with_owner_only_key() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = ClientCert {
             cert_path: dir.path().join("cert.pem").to_string_lossy().into_owned(),
             key_path: dir.path().join("cert.key").to_string_lossy().into_owned(),
         };
+        let response = rpc::AttestQuoteResponse {
+            success: true,
+            machine_certificate: Some(test_certificate()),
+        };
 
-        write_certs(Some(test_certificate()), Some(&paths))
-            .await
-            .expect("write_certs succeeds");
+        assert!(
+            finalize_attestation(response, Some(&paths))
+                .await
+                .expect("accepted attestation saves credentials")
+        );
 
         assert_eq!(key_mode(&paths.key_path), 0o600, "fresh key must be 0600");
-        let cert = std::fs::read_to_string(&paths.cert_path).expect("cert readable");
-        assert!(
-            cert.contains("leaf") && cert.contains("ca"),
-            "cert file carries leaf + chain"
+        assert_eq!(
+            std::fs::read_to_string(&paths.cert_path).expect("cert readable"),
+            "test-leaf-certificate-bytes\ntest-issuing-ca-bytes\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&paths.key_path).expect("key readable"),
+            "test-machine-private-key-bytes"
         );
     }
 
