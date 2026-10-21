@@ -104,11 +104,12 @@ than an alias, and include every nested `subcommand` segment.
 Build, render the affected command's long help to a file, and read its
 `EXAMPLES:` section. Write to a file rather than piping into `grep`. The agent
 sandbox can drop piped output, so a pipe can print nothing even when the block
-is present.
+is present. Replace `vpc show` with the affected command path.
 
 ```bash
+mkdir -p tmp
 cargo build -p nico-admin-cli
-cargo run -q -p nico-admin-cli -- <command path> --help > tmp/help.txt 2>&1
+cargo run -q -p nico-admin-cli -- vpc show --help > tmp/help.txt 2>&1
 sed -n '/EXAMPLES/,$p' tmp/help.txt
 ```
 
