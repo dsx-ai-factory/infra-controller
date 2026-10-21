@@ -125,26 +125,30 @@ pub struct PowerShelf {
     pub health_reports: HealthReportSources,
 }
 
+/// Decodes a `PowerShelf`, preserving supported absence in nullable JSON columns.
+/// Present values that cannot be decoded return `sqlx::Error` instead.
 impl<'r> FromRow<'r, PgRow> for PowerShelf {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         let controller_state: sqlx::types::Json<PowerShelfControllerState> =
             row.try_get("controller_state")?;
         let config: sqlx::types::Json<PowerShelfConfig> = row.try_get("config")?;
-        let status: Option<sqlx::types::Json<PowerShelfStatus>> = row.try_get("status").ok();
+        // `db::power_shelf::update` writes JSON null for an absent status;
+        // newly created shelves have SQL NULL instead. Accept both.
+        let status: Option<sqlx::types::Json<Option<PowerShelfStatus>>> = row.try_get("status")?;
         let controller_state_outcome: Option<sqlx::types::Json<PersistentStateHandlerOutcome>> =
-            row.try_get("controller_state_outcome").ok();
+            row.try_get("controller_state_outcome")?;
         let power_shelf_maintenance_requested: Option<
             sqlx::types::Json<PowerShelfMaintenanceRequest>,
-        > = row.try_get("power_shelf_maintenance_requested").ok();
+        > = row.try_get("power_shelf_maintenance_requested")?;
         let power_shelf_reprovisioning_requested: Option<
             sqlx::types::Json<PowerShelfReprovisionRequest>,
-        > = row.try_get("power_shelf_reprovisioning_requested").ok();
+        > = row.try_get("power_shelf_reprovisioning_requested")?;
         let firmware_upgrade_status: Option<
             sqlx::types::Json<crate::rack::RackFirmwareUpgradeStatus>,
-        > = row.try_get("firmware_upgrade_status").ok();
+        > = row.try_get("firmware_upgrade_status")?;
 
         let health_reports: HealthReportSources = row
-            .try_get::<sqlx::types::Json<HealthReportSources>, _>("health_reports")
+            .try_get::<Option<sqlx::types::Json<HealthReportSources>>, _>("health_reports")?
             .map(|j| j.0)
             .unwrap_or_default();
         let labels: sqlx::types::Json<HashMap<String, String>> = row.try_get("labels")?;
@@ -159,7 +163,7 @@ impl<'r> FromRow<'r, PgRow> for PowerShelf {
         Ok(PowerShelf {
             id: row.try_get("id")?,
             config: config.0,
-            status: status.map(|s| s.0),
+            status: status.and_then(|s| s.0),
             deleted: row.try_get("deleted")?,
             bmc_mac_address: row.try_get("bmc_mac_address")?,
             bmc_credential_rotation_requested: row.try_get("bmc_credential_rotation_requested")?,

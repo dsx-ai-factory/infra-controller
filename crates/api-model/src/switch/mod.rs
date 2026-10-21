@@ -222,27 +222,31 @@ pub struct Switch {
     pub health_reports: HealthReportSources,
 }
 
+/// Decodes a `Switch`, preserving supported absence in nullable JSON columns.
+/// Present values that cannot be decoded return `sqlx::Error` instead.
 impl<'r> FromRow<'r, PgRow> for Switch {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         let controller_state: sqlx::types::Json<SwitchControllerState> =
             row.try_get("controller_state")?;
         let config: sqlx::types::Json<SwitchConfig> = row.try_get("config")?;
-        let status: Option<sqlx::types::Json<SwitchStatus>> = row.try_get("status").ok();
+        // `db::switch::update` writes JSON null for an absent status;
+        // newly created switches have SQL NULL instead. Accept both.
+        let status: Option<sqlx::types::Json<Option<SwitchStatus>>> = row.try_get("status")?;
         let controller_state_outcome: Option<sqlx::types::Json<PersistentStateHandlerOutcome>> =
-            row.try_get("controller_state_outcome").ok();
+            row.try_get("controller_state_outcome")?;
         let switch_maintenance_requested: Option<sqlx::types::Json<SwitchMaintenanceRequest>> =
-            row.try_get("switch_maintenance_requested").ok();
+            row.try_get("switch_maintenance_requested")?;
         let switch_reprovisioning_requested: Option<sqlx::types::Json<SwitchReprovisionRequest>> =
-            row.try_get("switch_reprovisioning_requested").ok();
+            row.try_get("switch_reprovisioning_requested")?;
         let firmware_upgrade_status: Option<sqlx::types::Json<RackFirmwareUpgradeStatus>> =
-            row.try_get("firmware_upgrade_status").ok();
+            row.try_get("firmware_upgrade_status")?;
         let nvos_update_status: Option<sqlx::types::Json<SwitchNvosUpdateStatus>> =
-            row.try_get("nvos_update_status").ok();
+            row.try_get("nvos_update_status")?;
         let fabric_manager_status: Option<sqlx::types::Json<FabricManagerStatus>> =
-            row.try_get("fabric_manager_status").ok().flatten();
+            row.try_get("fabric_manager_status")?;
 
         let health_reports: HealthReportSources = row
-            .try_get::<sqlx::types::Json<HealthReportSources>, _>("health_reports")
+            .try_get::<Option<sqlx::types::Json<HealthReportSources>>, _>("health_reports")?
             .map(|j| j.0)
             .unwrap_or_default();
         let labels: sqlx::types::Json<HashMap<String, String>> = row.try_get("labels")?;
@@ -257,7 +261,7 @@ impl<'r> FromRow<'r, PgRow> for Switch {
         Ok(Switch {
             id: row.try_get("id")?,
             config: config.0,
-            status: status.map(|s| s.0),
+            status: status.and_then(|s| s.0),
             deleted: row.try_get("deleted")?,
             bmc_mac_address: row.try_get("bmc_mac_address")?,
             bmc_info,
