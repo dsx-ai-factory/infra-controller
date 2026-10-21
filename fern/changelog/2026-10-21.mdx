@@ -1,0 +1,15 @@
+---
+tags: ["unreleased", "rest-api"]
+---
+
+## Cross-Tenant VPC attachments - unreleased
+
+### REST API
+
+Instance create, batch create, and update can now attach non-primary Interfaces to a VPC or VPC Prefix owned by another Tenant at the same Site, by `vpcId` or `vpcPrefixId`. The primary physical Interface must still use the Instance's own VPC, and foreign Subnets are still rejected.
+
+VPC owners can list every attachment to their VPC, including ones from other Tenants, with `GET /v2/org/{org}/nico/vpc/{vpcId}/attachment`. Deleting a VPC now fails while any Instance, including another Tenant's, still references it.
+
+### Capability change for existing Tenants
+
+Cross-Tenant attachment is authorized by the existing `targetedInstanceCreation` Site capability, not a new one. Every Tenant that already has `targetedInstanceCreation` enabled at a Site can attach to other Tenants' VPCs at that Site after the upgrade, with no Provider action. Review the `siteCapabilities` grants on Tenant Accounts before upgrading, and disable the capability at Sites where that access isn't wanted.

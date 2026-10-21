@@ -974,10 +974,43 @@ func introducesForeignVpcAttachment(requested, existing []cdbm.Interface, tenant
 	return false, nil
 }
 
-// IntroducesForeignVpcAttachment reports whether Instance create
-// introduces a foreign VPC or VPC Prefix attachment.
-func (icr *APIInstanceCreateRequest) IntroducesForeignVpcAttachment(tenantID uuid.UUID, requested []cdbm.Interface) (bool, error) {
-	return introducesForeignVpcAttachment(requested, nil, tenantID)
+// selectsNewForeignVpc reports whether a loaded VPC or VPC Prefix selector
+// belongs to another Tenant and no persisted Interface that is not Deleting
+// already selects it. Selectors missing from the maps are left to the
+// not-found checks that follow.
+func selectsNewForeignVpc(tenantID uuid.UUID, vpcs map[uuid.UUID]*cdbm.Vpc, vpcPrefixes map[uuid.UUID]*cdbm.VpcPrefix, existing []cdbm.Interface) bool {
+	attachedVpcIDs := make(map[uuid.UUID]struct{}, len(existing))
+	attachedVpcPrefixIDs := make(map[uuid.UUID]struct{}, len(existing))
+	for _, ifc := range existing {
+		if ifc.Status == cdbm.InterfaceStatusDeleting {
+			continue
+		}
+		if ifc.VpcID != nil {
+			attachedVpcIDs[*ifc.VpcID] = struct{}{}
+		}
+		if ifc.VpcPrefixID != nil {
+			attachedVpcPrefixIDs[*ifc.VpcPrefixID] = struct{}{}
+		}
+	}
+
+	for vpcID, vpc := range vpcs {
+		if _, attached := attachedVpcIDs[vpcID]; vpc.TenantID != tenantID && !attached {
+			return true
+		}
+	}
+	for vpcPrefixID, vpcPrefix := range vpcPrefixes {
+		if _, attached := attachedVpcPrefixIDs[vpcPrefixID]; vpcPrefix.TenantID != tenantID && !attached {
+			return true
+		}
+	}
+	return false
+}
+
+// IntroducesForeignVpcAttachment reports whether Instance create selects a VPC
+// or VPC Prefix owned by another Tenant. It takes the loaded selectors so the
+// capability can be checked before they are validated.
+func (icr *APIInstanceCreateRequest) IntroducesForeignVpcAttachment(tenantID uuid.UUID, vpcs map[uuid.UUID]*cdbm.Vpc, vpcPrefixes map[uuid.UUID]*cdbm.VpcPrefix) bool {
+	return selectsNewForeignVpc(tenantID, vpcs, vpcPrefixes, nil)
 }
 
 // ValidateDpuExtensionServiceDeployments validates the DpuExtensionServiceDeployments for the Instance create request
@@ -985,10 +1018,11 @@ func (icr *APIInstanceCreateRequest) ValidateDpuExtensionServiceDeployments(desd
 	return ValidateDpuExtensionServiceDeployments(desdrs)
 }
 
-// IntroducesForeignVpcAttachment reports whether batch Instance
-// create introduces a foreign VPC or VPC Prefix attachment.
-func (bicr *APIBatchInstanceCreateRequest) IntroducesForeignVpcAttachment(tenantID uuid.UUID, requested []cdbm.Interface) (bool, error) {
-	return introducesForeignVpcAttachment(requested, nil, tenantID)
+// IntroducesForeignVpcAttachment reports whether batch Instance create selects
+// a VPC or VPC Prefix owned by another Tenant. It takes the loaded selectors so
+// the capability can be checked before they are validated.
+func (bicr *APIBatchInstanceCreateRequest) IntroducesForeignVpcAttachment(tenantID uuid.UUID, vpcs map[uuid.UUID]*cdbm.Vpc, vpcPrefixes map[uuid.UUID]*cdbm.VpcPrefix) bool {
+	return selectsNewForeignVpc(tenantID, vpcs, vpcPrefixes, nil)
 }
 
 // Validate ensure the values passed in batch instance create request are acceptable
@@ -1590,6 +1624,14 @@ func (iur *APIInstanceUpdateRequest) ValidateMultiEthernetDeviceInterfaces(itNet
 // ValidateInfiniBandInterfaces validates the InfiniBand Interfaces for the Instance
 func (iur *APIInstanceUpdateRequest) ValidateInfiniBandInterfaces(itIbCaps []cdbm.MachineCapability) error {
 	return ValidateInfiniBandInterfaces(itIbCaps, iur.InfiniBandInterfaces)
+}
+
+// SelectsNewForeignVpc reports whether Instance update selects a VPC or VPC
+// Prefix owned by another Tenant that no persisted Interface already selects.
+// It runs before the selectors are validated, and IntroducesForeignVpcAttachment
+// still compares full Interface identities afterward.
+func (iur *APIInstanceUpdateRequest) SelectsNewForeignVpc(tenantID uuid.UUID, vpcs map[uuid.UUID]*cdbm.Vpc, vpcPrefixes map[uuid.UUID]*cdbm.VpcPrefix, existing []cdbm.Interface) bool {
+	return selectsNewForeignVpc(tenantID, vpcs, vpcPrefixes, existing)
 }
 
 // IntroducesForeignVpcAttachment reports whether Instance update

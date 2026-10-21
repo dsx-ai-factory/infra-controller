@@ -863,12 +863,16 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 		assert.Equal(t, totalCount+1, total)
 		assert.Len(t, got, totalCount+1)
 		ids := make(map[uuid.UUID]struct{}, len(got))
+		includesSecondPrefix := false
 		for _, ifc := range got {
 			ids[ifc.ID] = struct{}{}
+			if ifc.VpcPrefixID != nil && *ifc.VpcPrefixID == vpcPrefix1.ID {
+				includesSecondPrefix = true
+			}
 		}
 		assert.Contains(t, ids, directInterface.ID)
 		assert.Contains(t, ids, instance1VpcPrefixes[0].ID)
-		assert.Contains(t, ids, instance2VpcPrefixes[0].ID)
+		assert.True(t, includesSecondPrefix)
 
 		require.NoError(t, ifcd.Delete(ctx, nil, directInterface.ID))
 	})
@@ -918,6 +922,63 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 
 		require.NoError(t, ifcd.Delete(ctx, nil, first.ID))
 		require.NoError(t, ifcd.Delete(ctx, nil, second.ID))
+	})
+
+	t.Run("VpcID filter excludes Interfaces of soft-deleted Instances", func(t *testing.T) {
+		attachmentVpc := testInstanceBuildVpc(t, dbSession, ip, site, tenant, "softDeletedInstanceVpc")
+		attachmentVpcPrefix, err := vpsd.Create(ctx, nil, VpcPrefixCreateInput{
+			Name:         "softDeletedInstanceVpcPrefix",
+			TenantOrg:    "test",
+			SiteID:       site.ID,
+			VpcID:        attachmentVpc.ID,
+			TenantID:     tenant.ID,
+			IpBlockID:    &ipv4Block.ID,
+			Prefix:       ipv4Prefix,
+			PrefixLength: 24,
+			Status:       VpcPrefixStatusReady,
+			CreatedBy:    user.ID,
+		})
+		require.NoError(t, err)
+
+		buildInstance := func(name string) *Instance {
+			instance, cerr := isd.Create(ctx, nil, InstanceCreateInput{
+				Name:                     name,
+				TenantID:                 tenant.ID,
+				InfrastructureProviderID: ip.ID,
+				SiteID:                   site.ID,
+				InstanceTypeID:           &instanceType.ID,
+				VpcID:                    vpc.ID,
+				MachineID:                &machine.ID,
+				OperatingSystemID:        cutil.GetPtr(operatingSystem.ID),
+				Status:                   InstanceStatusReady,
+				CreatedBy:                user.ID,
+			})
+			require.NoError(t, cerr)
+			return instance
+		}
+		activeInstance := buildInstance("activeAttachmentInstance")
+		deletedInstance := buildInstance("softDeletedAttachmentInstance")
+
+		activeInterface, err := ifcd.Create(ctx, nil, InterfaceCreateInput{InstanceID: activeInstance.ID, VpcID: &attachmentVpc.ID, Status: InterfaceStatusReady, CreatedBy: user.ID})
+		require.NoError(t, err)
+		deletedVpcInterface, err := ifcd.Create(ctx, nil, InterfaceCreateInput{InstanceID: deletedInstance.ID, VpcID: &attachmentVpc.ID, Status: InterfaceStatusReady, CreatedBy: user.ID})
+		require.NoError(t, err)
+		deletedPrefixInterface, err := ifcd.Create(ctx, nil, InterfaceCreateInput{InstanceID: deletedInstance.ID, VpcPrefixID: &attachmentVpcPrefix.ID, Status: InterfaceStatusReady, CreatedBy: user.ID})
+		require.NoError(t, err)
+		require.NoError(t, isd.Delete(ctx, nil, deletedInstance.ID))
+
+		got, total, err := ifcd.GetAll(ctx, nil, InterfaceFilterInput{VpcID: &attachmentVpc.ID}, paginator.PageInput{
+			Limit: cutil.GetPtr(paginator.TotalLimit),
+		}, []string{InstanceRelationName})
+		require.NoError(t, err)
+		assert.Equal(t, 1, total)
+		require.Len(t, got, 1)
+		assert.Equal(t, activeInterface.ID, got[0].ID)
+		assert.NotNil(t, got[0].Instance)
+
+		require.NoError(t, ifcd.Delete(ctx, nil, activeInterface.ID))
+		require.NoError(t, ifcd.Delete(ctx, nil, deletedVpcInterface.ID))
+		require.NoError(t, ifcd.Delete(ctx, nil, deletedPrefixInterface.ID))
 	})
 
 	// OTEL Spanner configuration

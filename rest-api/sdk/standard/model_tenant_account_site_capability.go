@@ -26,7 +26,7 @@ var _ MappedNullable = &TenantAccountSiteCapability{}
 type TenantAccountSiteCapability struct {
 	// Empty for the account-default entry; otherwise the sorted Sites whose effective TargetedInstanceCreation value matches this entry.
 	SiteIds []string `json:"siteIds"`
-	// Whether TargetedInstanceCreation is enabled for the Tenant Account default or listed Sites. When true, Tenant Admins with a Ready Tenant Account on the Site's Infrastructure Provider may create Instances by Machine ID and perform related privileged actions on that Site.
+	// Whether TargetedInstanceCreation is enabled for the Tenant Account default or listed Sites. When true, Tenant Admins with a Ready Tenant Account on the Site's Infrastructure Provider may create Instances by Machine ID, perform related privileged actions on that Site, and attach non-primary Instance Interfaces to another Tenant's VPC or VPC Prefix on that Site.
 	TargetedInstanceCreation bool `json:"targetedInstanceCreation"`
 }
 
