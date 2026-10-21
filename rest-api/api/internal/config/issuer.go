@@ -331,7 +331,8 @@ func RecordIssuerHistory(ctx context.Context, dbSession *cdb.Session, tx *cdb.Tx
 
 // SyncConfigMapIssuers reconciles the issuer table with the ConfigMap: it inserts
 // missing issuers, updates config rows, takes over api rows the ConfigMap now
-// defines, and soft-deletes config rows the ConfigMap no longer defines. It returns
+// defines, and soft-deletes config rows the ConfigMap no longer defines. It leaves
+// the table alone when a newer ConfigMap revision has synced, and returns
 // ErrIssuerIdentityConflict when the ConfigMap overlaps an api issuer.
 func (c *Config) SyncConfigMapIssuers(ctx context.Context, dbSession *cdb.Session) error {
 	if !c.DynamicIssuersEnabled() {
@@ -349,6 +350,20 @@ func (c *Config) SyncConfigMapIssuers(ctx context.Context, dbSession *cdb.Sessio
 			return fmt.Errorf("%w: %v", ErrIssuerStoreUnavailable, err)
 		}
 
+		revision := c.GetConfigRevision()
+		var configRevision *int
+		if revision > 0 {
+			configRevision = &revision
+			tableRevision, rerr := dao.MaxConfigRevision(ctx, tx)
+			if rerr != nil {
+				return fmt.Errorf("%w: %v", ErrIssuerStoreUnavailable, rerr)
+			}
+			if tableRevision > revision && !c.GetConfigRevisionReset() {
+				log.Warn().Int("revision", revision).Int("table_revision", tableRevision).
+					Msg("the issuer table reflects a newer ConfigMap revision than this replica runs; leaving it as it is")
+				return nil
+			}
+		}
 		byURL := make(map[string]cdbm.Issuer, len(rows))
 		for _, row := range rows {
 			byURL[row.IssuerURL] = row
@@ -386,6 +401,7 @@ func (c *Config) SyncConfigMapIssuers(ctx context.Context, dbSession *cdb.Sessio
 
 		for _, ic := range static {
 			in := IssuerInputFromConfig(ic)
+			in.ConfigRevision = configRevision
 			existing, ok := byURL[ic.Issuer]
 			if !ok {
 				created, cerr := dao.Create(ctx, tx, in)
@@ -446,6 +462,13 @@ func (c *Config) SyncConfigMapIssuers(ctx context.Context, dbSession *cdb.Sessio
 			}
 			if herr := RecordIssuerHistory(ctx, dbSession, tx, existing.ID, updated.Status, IssuerChangeSummary("ConfigMap sync", existing, candidate)); herr != nil {
 				return herr
+			}
+		}
+
+		// Stamped before the removals so a withdrawn row carries this revision too.
+		if revision > 0 {
+			if serr := dao.SetConfigRevision(ctx, tx, revision, c.GetConfigRevisionReset()); serr != nil {
+				return serr
 			}
 		}
 

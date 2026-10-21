@@ -1477,6 +1477,37 @@ func TestSyncConfigMapIssuers(t *testing.T) {
 		assert.Contains(t, statuses, cdbm.IssuerStatusSuperseded)
 	})
 
+	t.Run("a replica on an older ConfigMap revision leaves the table alone", func(t *testing.T) {
+		older, dbSession, dao := newIssuerTestEnvWithYAML(t, syncIssuerYAML+`
+  - issuer: https://idp-b.example.com
+    jwks: https://idp-b.example.com/jwks
+    origin: custom
+    claimMappings:
+      - orgName: org-b
+        roles: [TENANT_ADMIN]
+`)
+		older.v.Set(ConfigRevision, 1)
+		require.NoError(t, older.SyncConfigMapIssuers(ctx, dbSession))
+		// The newer ConfigMap only drops B; A is unchanged.
+		newer := mustConfigFromYAML(t, syncIssuerYAML)
+		newer.v.Set(ConfigRevision, 2)
+		require.NoError(t, newer.SyncConfigMapIssuers(ctx, dbSession))
+
+		require.NoError(t, older.SyncConfigMapIssuers(ctx, dbSession), "an old pod restarting mid-rollout")
+		_, err := dao.GetByIssuerURL(ctx, nil, "https://idp-b.example.com")
+		assert.ErrorIs(t, err, cdb.ErrDoesNotExist, "the issuer the newer ConfigMap withdrew stays withdrawn")
+
+		// A fresh install over an existing database starts the revision count over
+		// and must still apply its ConfigMap.
+		older.v.Set(ConfigRevisionReset, true)
+		require.NoError(t, older.SyncConfigMapIssuers(ctx, dbSession))
+		_, err = dao.GetByIssuerURL(ctx, nil, "https://idp-b.example.com")
+		assert.NoError(t, err)
+		tableRevision, err := dao.MaxConfigRevision(ctx, nil)
+		require.NoError(t, err)
+		assert.Equal(t, 1, tableRevision, "the reset restamps every row, deleted ones included, so later upgrades are ordered again")
+	})
+
 	t.Run("a stale replica withdraws a bootstrap issuer the table no longer holds", func(t *testing.T) {
 		idp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
@@ -1485,16 +1516,19 @@ func TestSyncConfigMapIssuers(t *testing.T) {
 		defer idp.Close()
 		current := fmt.Sprintf("env:\n  disconnected: true\nissuers:\n  - issuer: https://idp-a.example.com\n    jwks: %s/a\n    origin: custom\n    claimMappings:\n      - orgName: org-a\n        roles: [TENANT_ADMIN]\n", idp.URL)
 		older, dbSession, dao := newIssuerTestEnvWithYAML(t, current+fmt.Sprintf("  - issuer: https://removed.example.com\n    jwks: %s/b\n    origin: custom\n    claimMappings:\n      - orgName: removed-org\n        roles: [TENANT_ADMIN]\n", idp.URL))
+		older.v.Set(ConfigRevision, 2)
 		require.NoError(t, older.SyncConfigMapIssuers(ctx, dbSession))
 		newer := mustConfigFromYAML(t, current)
+		newer.v.Set(ConfigRevision, 3)
 		require.NoError(t, newer.SyncConfigMapIssuers(ctx, dbSession))
 		_, err := dao.GetByIssuerURL(ctx, nil, "https://removed.example.com")
 		require.ErrorIs(t, err, cdb.ErrDoesNotExist)
 
-		// The stale pod starts with its ConfigMap entries installed from memory, then
-		// runs its first reload.
+		// The stale pod starts as the server does: ConfigMap entries from memory,
+		// then a sync its revision guard skips, then the first reload.
 		older.TokenOriginConfig = nil
 		reg := older.GetOrInitTokenOriginConfig()
+		require.NoError(t, older.SyncConfigMapIssuers(ctx, dbSession))
 		require.NoError(t, older.ReloadDBIssuers(ctx, dbSession))
 
 		assert.Nil(t, reg.GetConfig("https://removed.example.com"), "the table, not the stale ConfigMap, decides what is trusted")

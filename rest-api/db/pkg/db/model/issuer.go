@@ -88,9 +88,11 @@ type IssuerCreateOrUpdateInput struct {
 	ClaimMappings  []ClaimMapping
 	// Source is IssuerSourceConfig for a row the ConfigMap sync owns, otherwise
 	// IssuerSourceAPI (the default).
-	Source    string
-	CreatedBy *uuid.UUID
-	UpdatedBy *uuid.UUID
+	Source string
+	// ConfigRevision is the ConfigMap revision a config row was synced from.
+	ConfigRevision *int
+	CreatedBy      *uuid.UUID
+	UpdatedBy      *uuid.UUID
 }
 
 // ToIssuer returns the Issuer the input would produce, with table defaults applied.
@@ -135,6 +137,7 @@ func (input IssuerCreateOrUpdateInput) ToIssuer() Issuer {
 		Scopes:         scopes,
 		ClaimMappings:  claimMappings,
 		Source:         source,
+		ConfigRevision: input.ConfigRevision,
 		Status:         IssuerStatusPending,
 		CreatedBy:      input.CreatedBy,
 		UpdatedBy:      updatedBy,
@@ -175,6 +178,9 @@ type Issuer struct {
 	// Status is IssuerStatusPending, Ready or Degraded; StatusMessage explains it.
 	Status        string  `bun:"status,notnull,default:'Pending'"`
 	StatusMessage *string `bun:"status_message"`
+	// ConfigRevision is the Helm release revision of the ConfigMap a config row was
+	// last synced from, nil for api rows or when the deployment sets none.
+	ConfigRevision *int `bun:"config_revision"`
 	// JWKSLastAttemptAt and JWKSLastError describe the most recent refresh attempt,
 	// successful or not. JWKSFetchedAt records the last success only.
 	JWKSLastAttemptAt *time.Time `bun:"jwks_last_attempt_at,nullzero"`
@@ -215,6 +221,8 @@ type IssuerDAO interface {
 	UpdateJWKSCache(ctx context.Context, tx *db.Tx, id uuid.UUID, jwksURL string, raw json.RawMessage, fetchedAt time.Time) error
 	RecordJWKSAttempt(ctx context.Context, tx *db.Tx, id uuid.UUID, jwksURL, replica string, at time.Time, fetchErr *string, staleBefore time.Time) (*Issuer, error)
 	UpdateStatus(ctx context.Context, tx *db.Tx, id uuid.UUID, status string, message *string) (bool, error)
+	MaxConfigRevision(ctx context.Context, tx *db.Tx) (int, error)
+	SetConfigRevision(ctx context.Context, tx *db.Tx, revision int, includeDeleted bool) error
 }
 
 // IssuerSQLDAO is the SQL implementation of the IssuerDAO interface.
@@ -271,6 +279,7 @@ func (isd IssuerSQLDAO) Update(
 		"scopes",
 		"claim_mappings",
 		"source",
+		"config_revision",
 		"updated_at",
 		"updated_by",
 	}
@@ -289,6 +298,27 @@ func (isd IssuerSQLDAO) Update(
 	}
 
 	return isd.GetByID(ctx, tx, id)
+}
+
+// MaxConfigRevision returns the highest ConfigMap revision any row, deleted rows
+// included, was synced from, zero when none records one.
+func (isd IssuerSQLDAO) MaxConfigRevision(ctx context.Context, tx *db.Tx) (int, error) {
+	var revision int
+	err := db.GetIDB(tx, isd.dbSession).NewRaw("SELECT COALESCE(MAX(config_revision), 0) FROM issuer").Scan(ctx, &revision)
+	return revision, err
+}
+
+// SetConfigRevision stamps revision on every live config row, and on deleted ones
+// when includeDeleted is set.
+func (isd IssuerSQLDAO) SetConfigRevision(ctx context.Context, tx *db.Tx, revision int, includeDeleted bool) error {
+	q := db.GetIDB(tx, isd.dbSession).NewUpdate().Model((*Issuer)(nil)).WhereAllWithDeleted().
+		Set("config_revision = ?", revision).
+		Where("source = ? AND config_revision IS DISTINCT FROM ?", IssuerSourceConfig, revision)
+	if !includeDeleted {
+		q = q.Where("deleted IS NULL")
+	}
+	_, err := q.Exec(ctx)
+	return err
 }
 
 // GetByID returns an Issuer by ID. Returns db.ErrDoesNotExist if not found.

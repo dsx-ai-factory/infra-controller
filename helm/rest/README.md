@@ -54,13 +54,26 @@ Where `my-auth-values.yaml` contains:
 nico-rest-api:
   config:
     issuers:
-      - name: my-idp
-        origin: custom
+      - origin: custom
         jwks: https://my-idp.example.com/.well-known/jwks.json
         issuer: "my-idp.example.com"
 ```
 
 See [auth documentation](../../rest-api/auth/README.md) for full issuer configuration options.
+
+An organization belongs to exactly one issuer from this release, and a
+violation stops the API at startup. Before upgrading, check whether any two
+issuers in `config.issuers` map the same `orgName` and remove the duplicate;
+the per-issuer `allowDuplicateStaticOrgNames` key of earlier releases is no
+longer read. Inside one issuer an `orgName` may repeat only when every repeat
+carries a non-empty `audiences` list disjoint from the others.
+
+The API reads `config.issuers` only at startup. The API pods carry a
+`checksum/config` annotation, so a `helm upgrade` that changes the ConfigMap
+restarts every replica. This keeps replicas from serving different issuer
+definitions, which also decides whether claim mappings added to a ConfigMap
+issuer through the Auth Issuer API still apply (see
+[Issuers Defined Here and Issuers Created Through the API](../../rest-api/openapi/auth.md#issuers-defined-here-and-issuers-created-through-the-api)).
 
 ### Option B: Keycloak
 
@@ -87,6 +100,7 @@ nico-rest-api:
 ```
 
 If `nico-rest-common.enabled=false`, you must pre-create the following resources in the target namespace before install:
+
 - Secrets: `db-creds`, `temporal-encryption-key`, `image-pull-secret`
 - `keycloak-client-secret` (when Keycloak authentication is enabled)
 - The `temporal-client-cloud-cert` Certificate (or its resulting TLS Secret) consumed by the workflow workers

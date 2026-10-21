@@ -188,6 +188,7 @@ func (cih CreateOrUpdateAuthIssuerHandler) Handle(c echo.Context) error {
 		if static {
 			// The row defines every field except the api claim mappings.
 			upsertInput.Source = cdbm.IssuerSourceConfig
+			upsertInput.ConfigRevision = existing.ConfigRevision
 			if apiRequest.JWKSUrl == "" {
 				upsertInput.JWKSUrl = existing.JWKSUrl
 			}
@@ -568,6 +569,7 @@ func (dih DeleteAuthIssuerHandler) Handle(c echo.Context) error {
 				Scopes:         existing.Scopes,
 				ClaimMappings:  kept,
 				Source:         cdbm.IssuerSourceConfig,
+				ConfigRevision: existing.ConfigRevision,
 				CreatedBy:      existing.CreatedBy,
 				UpdatedBy:      &dbUser.ID,
 			}

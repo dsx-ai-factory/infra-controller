@@ -35,6 +35,9 @@ func init() {
 				jwks_replica_failures JSONB      NOT NULL DEFAULT '{}',
 				status               TEXT        NOT NULL DEFAULT 'Pending',
 				status_message       TEXT,
+				-- Helm release revision of the ConfigMap a config row was last synced
+				-- from; a replica on an older revision does not sync over it.
+				config_revision      INTEGER,
 				created_at           TIMESTAMPTZ NOT NULL DEFAULT current_timestamp,
 				updated_at           TIMESTAMPTZ NOT NULL DEFAULT current_timestamp,
 				created_by           UUID,

@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: REST API rolls on config changes
+templates:
+  - deployment.yaml
+  - configmap.yaml
+set:
+  global.image.repository: example.test
+  global.image.tag: latest
+  config.keycloak.enabled: true
+tests:
+  - it: annotates the API pods with the config checksum next to pod annotations
+    template: deployment.yaml
+    set:
+      podAnnotations:
+        example.com/team: rest
+    asserts:
+      - matchRegex:
+          path: spec.template.metadata.annotations["checksum/config"]
+          pattern: ^[0-9a-f]{64}$
+      - equal:
+          path: spec.template.metadata.annotations["example.com/team"]
+          value: rest

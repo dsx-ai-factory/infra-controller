@@ -137,6 +137,10 @@ const (
 	// ConfigAuthResolveFlightTimeout is the ceiling for one on-demand issuer
 	// resolution. Go duration string, default 30s.
 	ConfigAuthResolveFlightTimeout = "auth.resolveFlightTimeout"
+	// ConfigRevision is the ConfigMap's release revision, from CONFIG_REVISION.
+	ConfigRevision = "configRevision"
+	// ConfigRevisionReset, from CONFIG_REVISION_RESET, is true on a fresh Helm install.
+	ConfigRevisionReset = "configRevisionReset"
 
 	// ConfigKeycloakEnabled is a feature flag for Keycloak authentication
 	ConfigKeycloakEnabled = "keycloak.enabled"
@@ -353,6 +357,8 @@ func NewConfig() *Config {
 	c.v.SetDefault(ConfigDPSRequestTimeout, 15*time.Second)
 
 	c.v.AutomaticEnv()
+	_ = c.v.BindEnv(ConfigRevision, "CONFIG_REVISION")
+	_ = c.v.BindEnv(ConfigRevisionReset, "CONFIG_REVISION_RESET")
 	c.v.SetConfigFile(c.GetPathToConfig())
 
 	log.Warn().Str("config.file", c.GetPathToConfig()).Msg("loading config")
@@ -1196,6 +1202,18 @@ func (c *Config) GetTracingServiceName() string {
 		return name
 	}
 	return DefaultTracingServiceName
+}
+
+// GetConfigRevision returns the release revision of this replica's ConfigMap, zero
+// when the deployment does not set one.
+func (c *Config) GetConfigRevision() int {
+	return c.v.GetInt(ConfigRevision)
+}
+
+// GetConfigRevisionReset reports whether this replica belongs to a fresh install,
+// whose ConfigMap is applied regardless of the revisions the table records.
+func (c *Config) GetConfigRevisionReset() bool {
+	return c.v.GetBool(ConfigRevisionReset)
 }
 
 func (c *Config) durationOrDefault(key string, fallback time.Duration) time.Duration {
