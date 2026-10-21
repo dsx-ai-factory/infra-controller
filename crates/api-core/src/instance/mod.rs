@@ -1965,6 +1965,9 @@ fn not_allocatable_error(
         NotAllocatableReason::PendingInstanceCreation => CarbideError::InvalidArgument(format!(
             "could not create instance on machine {machine_id}. machine is already used by another instance creation request",
         )),
+        NotAllocatableReason::PendingDecommission => CarbideError::FailedPrecondition(format!(
+            "machine {machine_id} has a pending decommission request"
+        )),
         NotAllocatableReason::PendingBootConfiguration => {
             CarbideError::FailedPrecondition(format!(
                 "machine {machine_id} has a pending boot configuration; retry after it has been applied"
@@ -2217,6 +2220,7 @@ pub(crate) async fn batch_allocate_instances(
                 &e,
                 NotAllocatableReason::PendingBootConfiguration
                     | NotAllocatableReason::DpuReprovisioningStarted
+                    | NotAllocatableReason::PendingDecommission
             ) {
                 tracing::info!(
                     %machine_id,

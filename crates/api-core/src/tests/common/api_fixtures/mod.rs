@@ -647,6 +647,16 @@ impl TestEnv {
             .object_ids_from_database_contains_for_test(machine_id)
     }
 
+    /// Processes each queued machine once, without requeueing state transitions.
+    pub(in crate::tests) async fn run_machine_state_controller_iteration_without_requeue(&self) {
+        self.machine_state_controller
+            .lock()
+            .await
+            .run_single_iteration_ext(false)
+            .boxed()
+            .await;
+    }
+
     /// Runs one iteration of the network state controller handler with the services
     /// in this test environment
     pub(in crate::tests) async fn run_network_segment_controller_iteration(&self) {

@@ -242,6 +242,8 @@ pub enum NotAllocatableReason {
         "the machine has a pending instance creation request, that has not yet been processed by the state handler"
     )]
     PendingInstanceCreation,
+    #[error("the machine has a pending decommission request")]
+    PendingDecommission,
     #[error("the machine has a pending boot configuration")]
     PendingBootConfiguration,
     /// A DPU reprovision request has started and must finish before allocation.
@@ -496,6 +498,7 @@ impl ManagedHostStateSnapshot {
     /// This requires
     /// - the Machine to be in `Ready` state
     /// - the Machine has not yet been target of an instance creation request
+    /// - no pending decommission, even when `allow_unhealthy` is true
     /// - no health alerts which classification `PreventAllocations` to be set
     /// - no pending or operator maintenance, even when `allow_unhealthy` is true
     /// - the desired boot-interface generation to have a matching observation
@@ -516,6 +519,9 @@ impl ManagedHostStateSnapshot {
         }
 
         let host = &self.host_snapshot;
+        if host.decommission_requested {
+            return Err(NotAllocatableReason::PendingDecommission);
+        }
         if host.machine_maintenance_requested.is_some()
             || host.health_reports.maintenance_override().is_some()
         {
@@ -4397,6 +4403,20 @@ mod tests {
                     }),
             }
         );
+    }
+
+    #[test]
+    fn pending_decommission_blocks_allocation_even_with_the_health_override() {
+        let mut snapshot = managed_host_state_snapshot();
+        snapshot.host_snapshot.decommission_requested = true;
+        for allow_unhealthy in [false, true] {
+            assert_eq!(
+                snapshot.is_usable_as_instance(allow_unhealthy),
+                Err(NotAllocatableReason::PendingDecommission),
+            );
+        }
+        snapshot.host_snapshot.decommission_requested = false;
+        assert_eq!(snapshot.is_usable_as_instance(false), Ok(()));
     }
 
     #[test]
