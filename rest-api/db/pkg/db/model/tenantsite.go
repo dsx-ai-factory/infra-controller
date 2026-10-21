@@ -20,10 +20,6 @@ import (
 const (
 	// TenantSiteOrderByDefault default field to be used for ordering when none specified
 	TenantSiteOrderByDefault = "created"
-	// TenantSiteConfigKeyTargetedInstanceCreation is the JSON key for the targeted Instance creation override.
-	TenantSiteConfigKeyTargetedInstanceCreation = "targetedInstanceCreation"
-	// TenantSiteConfigKeyCrossTenantVpcAttachment is the JSON key for the cross-Tenant VPC attachment override.
-	TenantSiteConfigKeyCrossTenantVpcAttachment = "crossTenantVpcAttachment"
 )
 
 var (
@@ -40,7 +36,6 @@ var (
 // jsonb partial merge works.
 type TenantSiteConfig struct {
 	TargetedInstanceCreation *bool `json:"targetedInstanceCreation,omitempty"`
-	CrossTenantVpcAttachment *bool `json:"crossTenantVpcAttachment,omitempty"`
 }
 
 // TenantSite captures the relationship between a Tenant and a Site
@@ -75,7 +70,6 @@ type TenantSiteUpdateInput struct {
 	TenantSiteID        uuid.UUID
 	EnableSerialConsole *bool
 	Config              *TenantSiteConfig
-	ClearConfigKeys     []string
 }
 
 type TenantSiteFilterInput struct {
@@ -296,24 +290,24 @@ func (tssd TenantSiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input Tenant
 	}
 
 	if input.Config != nil {
-		_, err := db.GetIDB(tx, tssd.dbSession).NewUpdate().
-			Model(ts).
-			Set("config = config || ?::jsonb, updated = current_timestamp", input.Config).
-			Where("id = ?", input.TenantSiteID).
-			Exec(ctx)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	for _, key := range input.ClearConfigKeys {
-		_, err := db.GetIDB(tx, tssd.dbSession).NewUpdate().
-			Model(ts).
-			Set("config = config - ?, updated = current_timestamp", key).
-			Where("id = ?", input.TenantSiteID).
-			Exec(ctx)
-		if err != nil {
-			return nil, err
+		if input.Config.TargetedInstanceCreation != nil {
+			_, err := db.GetIDB(tx, tssd.dbSession).NewUpdate().
+				Model(ts).
+				Set("config = config || ?::jsonb, updated = current_timestamp", input.Config).
+				Where("id = ?", input.TenantSiteID).
+				Exec(ctx)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			_, err := db.GetIDB(tx, tssd.dbSession).NewUpdate().
+				Model(ts).
+				Set("config = config - 'targetedInstanceCreation', updated = current_timestamp").
+				Where("id = ?", input.TenantSiteID).
+				Exec(ctx)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 

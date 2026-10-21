@@ -157,18 +157,6 @@ func TestAPITenantAccountUpdateRequest_SiteCapabilitiesPresence(t *testing.T) {
 	}
 }
 
-func TestTenantCapabilityConfig_BackwardCompatibleJSON(t *testing.T) {
-	var accountConfig cdbm.TenantAccountConfig
-	err := json.Unmarshal([]byte(`{}`), &accountConfig)
-	require.NoError(t, err)
-	assert.False(t, accountConfig.CrossTenantVpcAttachment)
-
-	var siteConfig cdbm.TenantSiteConfig
-	err = json.Unmarshal([]byte(`{}`), &siteConfig)
-	require.NoError(t, err)
-	assert.Nil(t, siteConfig.CrossTenantVpcAttachment)
-}
-
 func TestAPITenantAccountSiteCapabilitiesUpdateRequest_Validate(t *testing.T) {
 	siteID := uuid.New().String()
 	otherSiteID := uuid.New().String()
@@ -184,7 +172,7 @@ func TestAPITenantAccountSiteCapabilitiesUpdateRequest_Validate(t *testing.T) {
 			expectErr: true,
 		},
 		{
-			desc: "rejects entry with no capability",
+			desc: "rejects omitted targetedInstanceCreation",
 			caps: APITenantAccountSiteCapabilitiesUpdateRequest{
 				{},
 			},
@@ -195,44 +183,6 @@ func TestAPITenantAccountSiteCapabilitiesUpdateRequest_Validate(t *testing.T) {
 			caps: APITenantAccountSiteCapabilitiesUpdateRequest{
 				{TargetedInstanceCreation: cutil.GetPtr(true)},
 			},
-		},
-		{
-			desc: "accepts crossTenantVpcAttachment-only replacement",
-			caps: APITenantAccountSiteCapabilitiesUpdateRequest{
-				{CrossTenantVpcAttachment: cutil.GetPtr(true)},
-				{
-					SiteIDs:                  []string{siteID},
-					CrossTenantVpcAttachment: cutil.GetPtr(false),
-				},
-			},
-		},
-		{
-			desc: "accepts independent site values for both replaced capabilities",
-			caps: APITenantAccountSiteCapabilitiesUpdateRequest{
-				{
-					TargetedInstanceCreation: cutil.GetPtr(true),
-					CrossTenantVpcAttachment: cutil.GetPtr(false),
-				},
-				{
-					SiteIDs:                  []string{siteID},
-					TargetedInstanceCreation: cutil.GetPtr(false),
-				},
-				{
-					SiteIDs:                  []string{otherSiteID},
-					CrossTenantVpcAttachment: cutil.GetPtr(true),
-				},
-			},
-		},
-		{
-			desc: "rejects site capability omitted from account default",
-			caps: APITenantAccountSiteCapabilitiesUpdateRequest{
-				{TargetedInstanceCreation: cutil.GetPtr(true)},
-				{
-					SiteIDs:                  []string{siteID},
-					CrossTenantVpcAttachment: cutil.GetPtr(true),
-				},
-			},
-			expectErr: true,
 		},
 		{
 			desc: "accepts empty siteIds for account capability",
@@ -376,9 +326,6 @@ func TestAPITenantAccountNew(t *testing.T) {
 	siteOtherProvider := uuid.MustParse("d0000000-0000-4000-8000-000000000004")
 	siteDisabledA := uuid.MustParse("a0000000-0000-4000-8000-000000000010")
 	siteDisabledB := uuid.MustParse("b0000000-0000-4000-8000-000000000011")
-	siteCrossEnabled := uuid.MustParse("a0000000-0000-4000-8000-000000000020")
-	siteBothEnabledA := uuid.MustParse("a0000000-0000-4000-8000-000000000021")
-	siteBothEnabledB := uuid.MustParse("b0000000-0000-4000-8000-000000000022")
 
 	dbObjWithSiteCapabilities := &cdbm.TenantAccount{
 		ID:                        uuid.New(),
@@ -401,20 +348,6 @@ func TestAPITenantAccountNew(t *testing.T) {
 		Config:                    cdbm.TenantAccountConfig{TargetedInstanceCreation: true},
 		Created:                   cdb.GetCurTime(),
 		Updated:                   cdb.GetCurTime(),
-	}
-	dbObjWithCapabilityVectors := &cdbm.TenantAccount{
-		ID:                        uuid.New(),
-		TenantID:                  &tenantID,
-		TenantOrg:                 "testOrg",
-		InfrastructureProviderID:  providerID,
-		InfrastructureProviderOrg: "testIPOrg",
-		Status:                    cdbm.TenantAccountStatusReady,
-		Config: cdbm.TenantAccountConfig{
-			TargetedInstanceCreation: false,
-			CrossTenantVpcAttachment: false,
-		},
-		Created: cdb.GetCurTime(),
-		Updated: cdb.GetCurTime(),
 	}
 
 	accountDefaultFalseTenantSites := []cdbm.TenantSite{
@@ -459,29 +392,6 @@ func TestAPITenantAccountNew(t *testing.T) {
 			SiteID: siteOtherProvider,
 			Site:   &cdbm.Site{InfrastructureProviderID: otherProviderID},
 			Config: cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)},
-		},
-	}
-	capabilityVectorTenantSites := []cdbm.TenantSite{
-		{
-			SiteID: siteBothEnabledB,
-			Site:   &cdbm.Site{InfrastructureProviderID: providerID},
-			Config: cdbm.TenantSiteConfig{
-				TargetedInstanceCreation: cutil.GetPtr(true),
-				CrossTenantVpcAttachment: cutil.GetPtr(true),
-			},
-		},
-		{
-			SiteID: siteCrossEnabled,
-			Site:   &cdbm.Site{InfrastructureProviderID: providerID},
-			Config: cdbm.TenantSiteConfig{CrossTenantVpcAttachment: cutil.GetPtr(true)},
-		},
-		{
-			SiteID: siteBothEnabledA,
-			Site:   &cdbm.Site{InfrastructureProviderID: providerID},
-			Config: cdbm.TenantSiteConfig{
-				TargetedInstanceCreation: cutil.GetPtr(true),
-				CrossTenantVpcAttachment: cutil.GetPtr(true),
-			},
 		},
 	}
 
@@ -621,42 +531,6 @@ func TestAPITenantAccountNew(t *testing.T) {
 					{
 						SiteIDs:                  []string{siteDisabledA.String(), siteDisabledB.String()},
 						TargetedInstanceCreation: false,
-					},
-				},
-			},
-		},
-		{
-			desc:        "siteCapabilities group and sort distinct effective capability vectors",
-			dbObj:       dbObjWithCapabilityVectors,
-			sdObj:       dbsds,
-			tenantSites: capabilityVectorTenantSites,
-			apiObj: &APITenantAccount{
-				ID:                        dbObjWithCapabilityVectors.ID.String(),
-				InfrastructureProviderID:  providerID.String(),
-				InfrastructureProviderOrg: dbObjWithCapabilityVectors.InfrastructureProviderOrg,
-				TenantID:                  cutil.GetPtr(tenantID.String()),
-				TenantOrg:                 dbObjWithCapabilityVectors.TenantOrg,
-				TenantContact:             nil,
-				AllocationCount:           2,
-				Status:                    dbObjWithCapabilityVectors.Status,
-				StatusHistory:             msh,
-				Created:                   dbObjWithCapabilityVectors.Created,
-				Updated:                   dbObjWithCapabilityVectors.Updated,
-				SiteCapabilities: []APITenantAccountSiteCapability{
-					{
-						SiteIDs:                  []string{},
-						TargetedInstanceCreation: false,
-						CrossTenantVpcAttachment: false,
-					},
-					{
-						SiteIDs:                  []string{siteCrossEnabled.String()},
-						TargetedInstanceCreation: false,
-						CrossTenantVpcAttachment: true,
-					},
-					{
-						SiteIDs:                  []string{siteBothEnabledA.String(), siteBothEnabledB.String()},
-						TargetedInstanceCreation: true,
-						CrossTenantVpcAttachment: true,
 					},
 				},
 			},

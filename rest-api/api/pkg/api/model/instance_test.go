@@ -528,7 +528,7 @@ func TestAPIInstanceUpdateRequest_PowerProfileJSON(t *testing.T) {
 	}
 }
 
-func TestAPIInstanceCreateRequest_RequiresCrossTenantVpcAttachmentCapability(t *testing.T) {
+func TestAPIInstanceCreateRequest_IntroducesForeignVpcAttachment(t *testing.T) {
 	tenantID := uuid.New()
 	foreignTenantID := uuid.New()
 	localVpcID := uuid.New()
@@ -565,14 +565,14 @@ func TestAPIInstanceCreateRequest_RequiresCrossTenantVpcAttachmentCapability(t *
 	request := APIInstanceCreateRequest{}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := request.RequiresCrossTenantVpcAttachmentCapability(tenantID, tc.requested)
+			got, err := request.IntroducesForeignVpcAttachment(tenantID, tc.requested)
 			assert.Equal(t, tc.wantErr, err != nil)
 			assert.Equal(t, tc.want, got)
 		})
 	}
 }
 
-func TestAPIInstanceUpdateRequest_RequiresCrossTenantVpcAttachmentCapability(t *testing.T) {
+func TestAPIInstanceUpdateRequest_IntroducesForeignVpcAttachment(t *testing.T) {
 	tenantID := uuid.New()
 	foreignTenantID := uuid.New()
 	localVpcID := uuid.New()
@@ -619,7 +619,7 @@ func TestAPIInstanceUpdateRequest_RequiresCrossTenantVpcAttachmentCapability(t *
 	request := APIInstanceUpdateRequest{}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := request.RequiresCrossTenantVpcAttachmentCapability(tenantID, tc.requested, tc.existing)
+			got, err := request.IntroducesForeignVpcAttachment(tenantID, tc.requested, tc.existing)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
 		})

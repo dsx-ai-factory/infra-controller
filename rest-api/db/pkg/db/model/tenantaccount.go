@@ -114,14 +114,6 @@ var (
 // Fields must stay flat so jsonb partial merge works.
 type TenantAccountConfig struct {
 	TargetedInstanceCreation bool `json:"targetedInstanceCreation"`
-	CrossTenantVpcAttachment bool `json:"crossTenantVpcAttachment"`
-}
-
-// TenantAccountConfigUpdate is a partial update to provider-scoped TenantAccount
-// configuration. Nil fields preserve the corresponding persisted value.
-type TenantAccountConfigUpdate struct {
-	TargetedInstanceCreation *bool `json:"targetedInstanceCreation,omitempty"`
-	CrossTenantVpcAttachment *bool `json:"crossTenantVpcAttachment,omitempty"`
 }
 
 // TenantAccount represents a tenant account - the relationship between a Tenant and an Infrastructure Provider
@@ -170,7 +162,7 @@ type TenantAccountUpdateInput struct {
 	SubscriptionTier *string
 	TenantContactID  *uuid.UUID
 	Status           *string
-	Config           *TenantAccountConfigUpdate
+	Config           *TenantAccountConfig
 }
 
 // TenantAccountFilterInput filtering options for GetAll and GetCount method, including SearchQuery for filtering by account or tenant org

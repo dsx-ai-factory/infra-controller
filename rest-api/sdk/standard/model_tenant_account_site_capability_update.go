@@ -14,28 +14,31 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the TenantAccountSiteCapabilityUpdate type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &TenantAccountSiteCapabilityUpdate{}
 
-// TenantAccountSiteCapabilityUpdate Partial capability replacement entry. At least one recognized capability must be present.  An omitted or empty `siteIds` identifies the single required account-default entry. Site entries may specify only capabilities also present in that account-default entry. For each replaced capability, omission from a Site entry means that Site inherits the submitted account default.
+// TenantAccountSiteCapabilityUpdate TargetedInstanceCreation replacement entry.  An omitted or empty `siteIds` identifies the single required account-default entry. Every entry must provide `targetedInstanceCreation`.
 type TenantAccountSiteCapabilityUpdate struct {
 	// Sites to configure. An omitted or empty array identifies the account-default entry. Each UUID may appear only once in the request and must identify a Site owned by the Tenant Account's Infrastructure Provider.
-	SiteIds []string
+	SiteIds []string `json:"siteIds,omitempty"`
 	// Replacement value for TargetedInstanceCreation.
-	TargetedInstanceCreation *bool
-	// Replacement value for cross-Tenant VPC attachment. The account default is `false` when no value has ever been configured.
-	CrossTenantVpcAttachment *bool
+	TargetedInstanceCreation bool `json:"targetedInstanceCreation"`
 }
+
+type _TenantAccountSiteCapabilityUpdate TenantAccountSiteCapabilityUpdate
 
 // NewTenantAccountSiteCapabilityUpdate instantiates a new TenantAccountSiteCapabilityUpdate object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTenantAccountSiteCapabilityUpdate() *TenantAccountSiteCapabilityUpdate {
+func NewTenantAccountSiteCapabilityUpdate(targetedInstanceCreation bool) *TenantAccountSiteCapabilityUpdate {
 	this := TenantAccountSiteCapabilityUpdate{}
+	this.TargetedInstanceCreation = targetedInstanceCreation
 	return &this
 }
 
@@ -79,68 +82,28 @@ func (o *TenantAccountSiteCapabilityUpdate) SetSiteIds(v []string) {
 	o.SiteIds = v
 }
 
-// GetTargetedInstanceCreation returns the TargetedInstanceCreation field value if set, zero value otherwise.
+// GetTargetedInstanceCreation returns the TargetedInstanceCreation field value
 func (o *TenantAccountSiteCapabilityUpdate) GetTargetedInstanceCreation() bool {
-	if o == nil || IsNil(o.TargetedInstanceCreation) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.TargetedInstanceCreation
+
+	return o.TargetedInstanceCreation
 }
 
-// GetTargetedInstanceCreationOk returns a tuple with the TargetedInstanceCreation field value if set, nil otherwise
+// GetTargetedInstanceCreationOk returns a tuple with the TargetedInstanceCreation field value
 // and a boolean to check if the value has been set.
 func (o *TenantAccountSiteCapabilityUpdate) GetTargetedInstanceCreationOk() (*bool, bool) {
-	if o == nil || IsNil(o.TargetedInstanceCreation) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TargetedInstanceCreation, true
+	return &o.TargetedInstanceCreation, true
 }
 
-// HasTargetedInstanceCreation returns a boolean if a field has been set.
-func (o *TenantAccountSiteCapabilityUpdate) HasTargetedInstanceCreation() bool {
-	if o != nil && !IsNil(o.TargetedInstanceCreation) {
-		return true
-	}
-
-	return false
-}
-
-// SetTargetedInstanceCreation gets a reference to the given bool and assigns it to the TargetedInstanceCreation field.
+// SetTargetedInstanceCreation sets field value
 func (o *TenantAccountSiteCapabilityUpdate) SetTargetedInstanceCreation(v bool) {
-	o.TargetedInstanceCreation = &v
-}
-
-// GetCrossTenantVpcAttachment returns the CrossTenantVpcAttachment field value if set, zero value otherwise.
-func (o *TenantAccountSiteCapabilityUpdate) GetCrossTenantVpcAttachment() bool {
-	if o == nil || IsNil(o.CrossTenantVpcAttachment) {
-		var ret bool
-		return ret
-	}
-	return *o.CrossTenantVpcAttachment
-}
-
-// GetCrossTenantVpcAttachmentOk returns a tuple with the CrossTenantVpcAttachment field value if set, nil otherwise
-// and a boolean to check if the value has been set.
-func (o *TenantAccountSiteCapabilityUpdate) GetCrossTenantVpcAttachmentOk() (*bool, bool) {
-	if o == nil || IsNil(o.CrossTenantVpcAttachment) {
-		return nil, false
-	}
-	return o.CrossTenantVpcAttachment, true
-}
-
-// HasCrossTenantVpcAttachment returns a boolean if a field has been set.
-func (o *TenantAccountSiteCapabilityUpdate) HasCrossTenantVpcAttachment() bool {
-	if o != nil && !IsNil(o.CrossTenantVpcAttachment) {
-		return true
-	}
-
-	return false
-}
-
-// SetCrossTenantVpcAttachment gets a reference to the given bool and assigns it to the CrossTenantVpcAttachment field.
-func (o *TenantAccountSiteCapabilityUpdate) SetCrossTenantVpcAttachment(v bool) {
-	o.CrossTenantVpcAttachment = &v
+	o.TargetedInstanceCreation = v
 }
 
 func (o TenantAccountSiteCapabilityUpdate) MarshalJSON() ([]byte, error) {
@@ -156,13 +119,44 @@ func (o TenantAccountSiteCapabilityUpdate) ToMap() (map[string]interface{}, erro
 	if !IsNil(o.SiteIds) {
 		toSerialize["siteIds"] = o.SiteIds
 	}
-	if !IsNil(o.TargetedInstanceCreation) {
-		toSerialize["targetedInstanceCreation"] = o.TargetedInstanceCreation
-	}
-	if !IsNil(o.CrossTenantVpcAttachment) {
-		toSerialize["crossTenantVpcAttachment"] = o.CrossTenantVpcAttachment
-	}
+	toSerialize["targetedInstanceCreation"] = o.TargetedInstanceCreation
 	return toSerialize, nil
+}
+
+func (o *TenantAccountSiteCapabilityUpdate) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"targetedInstanceCreation",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varTenantAccountSiteCapabilityUpdate := _TenantAccountSiteCapabilityUpdate{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varTenantAccountSiteCapabilityUpdate)
+
+	if err != nil {
+		return err
+	}
+
+	*o = TenantAccountSiteCapabilityUpdate(varTenantAccountSiteCapabilityUpdate)
+
+	return err
 }
 
 type NullableTenantAccountSiteCapabilityUpdate struct {

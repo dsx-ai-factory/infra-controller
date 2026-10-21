@@ -2880,7 +2880,7 @@ func TestAllocationHandler_Delete(t *testing.T) {
 			allocation := common.TestBuildAllocation(t, dbSession, site, tenant, tc.name, tnu)
 			if tc.revokeGrant {
 				_, err := cdbm.NewTenantAccountDAO(dbSession).Update(ctx, nil, cdbm.TenantAccountUpdateInput{
-					TenantAccountID: account.ID, Config: &cdbm.TenantAccountConfigUpdate{TargetedInstanceCreation: cutil.GetPtr(false)},
+					TenantAccountID: account.ID, Config: &cdbm.TenantAccountConfig{TargetedInstanceCreation: false},
 				})
 				require.NoError(t, err)
 			}

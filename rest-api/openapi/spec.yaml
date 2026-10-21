@@ -114,7 +114,7 @@ tags:
     description: |-
       Tenant Account connects a Tenant with an Infrastructure Provider. It represents/contains any information pertaining to their relationship.
 
-      Provider Admins configure `targetedInstanceCreation` and `crossTenantVpcAttachment` for a Tenant using the `siteCapabilities` attribute. An entry with empty or omitted `siteIds` configures Tenant Account defaults; entries with `siteIds` configure Tenant Site overrides. Missing `crossTenantVpcAttachment` configuration defaults to `false`.
+      Provider Admins configure TargetedInstanceCreation for a Tenant using the `siteCapabilities` attribute. An entry with empty or omitted `siteIds` configures the Tenant Account default; entries with `siteIds` configure Tenant Site overrides.
 
       Deprecation history:
 
@@ -811,7 +811,6 @@ paths:
                     siteCapabilities:
                       - siteIds: []
                         targetedInstanceCreation: true
-                        crossTenantVpcAttachment: false
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
         '403':
@@ -883,7 +882,6 @@ paths:
                     siteCapabilities:
                       - siteIds: []
                         targetedInstanceCreation: true
-                        crossTenantVpcAttachment: false
                     created: '2019-08-24T14:15:22Z'
                     updated: '2019-08-24T14:15:22Z'
         '400':
@@ -897,7 +895,7 @@ paths:
 
         Tenant Admins may accept an invitation sent by an Infrastructure Provider by supplying `tenantContactId`.
 
-        Provider Admins may replace one or both capabilities in `siteCapabilities` to configure the Tenant Account default and overrides for specific Sites. When `siteCapabilities` is sent, it must be non-empty, include exactly one entry with empty or omitted `siteIds`, and must not repeat any `siteId` across entries. Each entry must include at least one capability, and a capability used by a Site entry must also appear in the account-default entry. Capabilities omitted from the account-default entry remain unchanged, including their Site overrides. Requests containing both `tenantContactId` and `siteCapabilities` are rejected with 400.
+        Provider Admins may replace `siteCapabilities` to configure the Tenant Account default and overrides for specific Sites. When `siteCapabilities` is sent, it must be non-empty, include exactly one entry with empty or omitted `siteIds`, and must not repeat any `siteId` across entries. Requests containing both `tenantContactId` and `siteCapabilities` are rejected with 400.
 
         Org must have a Tenant entity whose ID matches the `tenantId` of the Tenant Account object when accepting an invite. User must have authorization role with `TENANT_ADMIN` suffix to accept; `PROVIDER_ADMIN` suffix to update `siteCapabilities`. Tenant Admins can only update a Tenant Account that has `Invited` status.
       requestBody:
@@ -913,7 +911,6 @@ paths:
                   siteCapabilities:
                     - siteIds: []
                       targetedInstanceCreation: true
-                      crossTenantVpcAttachment: false
         description: Tenant invite acceptance or Provider Admin site capability update.
     delete:
       summary: Delete Tenant Account
@@ -3411,7 +3408,7 @@ paths:
       description: |-
         Retrieve the current, non-deleted REST Interface rows that explicitly select this VPC, either directly through `vpcId` or through a `vpcPrefixId` whose parent is this VPC. The response reflects REST's persisted desired/current Interface state and status; it is not a Core visibility query.
 
-        The caller's organization must own the requested VPC, and the user must have authorization role with `TENANT_ADMIN` suffix. The `crossTenantVpcAttachment` capability is not required. Results include attachments from Instances owned by other Tenants, but expose only opaque attachment, Instance, and consuming-Tenant identity plus device identity and Interface status. Visibility does not grant authority over a foreign Instance or its security policy.
+        The caller's organization must own the requested VPC, and the user must have authorization role with `TENANT_ADMIN` suffix. The `targetedInstanceCreation` capability is not required to list attachments. Results include attachments from Instances owned by other Tenants, but expose only opaque attachment, Instance, and consuming-Tenant identity plus device identity and Interface status. Visibility does not grant authority over a foreign Instance or its security policy.
 
         This endpoint does not expose Instance names, Machine or Controller IDs, operating systems, user data, metadata, labels, Network Security Group contents, IP addresses, MAC addresses, or requested IP addresses. Generic VPC and VPC Prefix list, get, and mutation endpoints remain scoped to resources owned by the caller's Tenant.
 
@@ -20882,7 +20879,6 @@ components:
           siteCapabilities:
             - siteIds: []
               targetedInstanceCreation: true
-              crossTenantVpcAttachment: false
           created: '2019-08-24T14:15:22Z'
           updated: '2019-08-24T14:15:22Z'
       properties:
@@ -20943,41 +20939,38 @@ components:
         siteCapabilities:
           type: array
           description: |-
-            Provider-scoped `targetedInstanceCreation` and `crossTenantVpcAttachment` settings for this Tenant Account. `targetedInstanceCreation` replaces the deprecated tenant-level capability. `crossTenantVpcAttachment` defaults to `false` when absent from persisted configuration.
+            Provider-scoped TargetedInstanceCreation settings for this Tenant Account. Replaces the deprecated tenant-level `capabilities.targetedInstanceCreation` attribute.
 
-            The response always begins with one account-default entry whose `siteIds` is empty. Each following entry groups, in deterministic order, the sorted Site IDs that share an effective capability vector different from the account default. A non-null Tenant Site override takes precedence over the corresponding account default; a missing override inherits that default.
+            The response always begins with one account-default entry whose `siteIds` is empty. Each following entry contains sorted Site IDs whose effective value differs from the account default. A non-null Tenant Site override takes precedence over the account default; a missing override inherits that default.
           minItems: 1
           items:
             $ref: '#/components/schemas/TenantAccountSiteCapability'
     TenantAccountSiteCapability:
       title: TenantAccountSiteCapability
       type: object
-      description: Effective Site-scoped capability vector returned for the Tenant Account default or a group of Sites.
+      description: Effective TargetedInstanceCreation capability returned for the Tenant Account default or a group of Sites.
       required:
         - siteIds
         - targetedInstanceCreation
-        - crossTenantVpcAttachment
       properties:
         siteIds:
           type: array
-          description: Empty for the account-default entry; otherwise the sorted Sites whose effective capability vector matches this entry.
+          description: Empty for the account-default entry; otherwise the sorted Sites whose effective TargetedInstanceCreation value matches this entry.
           items:
             type: string
             format: uuid
         targetedInstanceCreation:
           type: boolean
           description: Whether TargetedInstanceCreation is enabled for the Tenant Account default or listed Sites. When true, Tenant Admins with a Ready Tenant Account on the Site's Infrastructure Provider may create Instances by Machine ID and perform related privileged actions on that Site.
-        crossTenantVpcAttachment:
-          type: boolean
-          default: false
-          description: Whether Tenant Admins may introduce non-primary Interfaces that select same-Site Ready FNN VPCs or explicit VPC Prefixes owned by another Tenant. This does not grant foreign-resource discovery or CRUD access.
     TenantAccountSiteCapabilityUpdate:
       title: TenantAccountSiteCapabilityUpdate
       type: object
       description: |-
-        Partial capability replacement entry. At least one recognized capability must be present.
+        TargetedInstanceCreation replacement entry.
 
-        An omitted or empty `siteIds` identifies the single required account-default entry. Site entries may specify only capabilities also present in that account-default entry. For each replaced capability, omission from a Site entry means that Site inherits the submitted account default.
+        An omitted or empty `siteIds` identifies the single required account-default entry. Every entry must provide `targetedInstanceCreation`.
+      required:
+        - targetedInstanceCreation
       properties:
         siteIds:
           type: array
@@ -20988,14 +20981,6 @@ components:
         targetedInstanceCreation:
           type: boolean
           description: Replacement value for TargetedInstanceCreation.
-        crossTenantVpcAttachment:
-          type: boolean
-          description: Replacement value for cross-Tenant VPC attachment. The account default is `false` when no value has ever been configured.
-      anyOf:
-        - required:
-            - targetedInstanceCreation
-        - required:
-            - crossTenantVpcAttachment
     TenantAccountStatus:
       title: TenantAccountStatus
       type: string
@@ -21038,19 +21023,15 @@ components:
         Tenant Admins may accept an invite via `tenantContactId` only.
         Requests containing both fields are rejected with 400.
 
-        When `siteCapabilities` is included, the replace payload must contain at least one entry, include exactly one entry with empty or omitted `siteIds`, and must not repeat any `siteId` across entries. Every entry must specify at least one recognized capability. Every provided `siteId` must be a valid UUID for a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400.
-
-        Replacement is independent per capability. A capability in the account-default entry is replaced, and stale Site overrides for that capability are cleared. A capability omitted from the account-default entry, including all of its existing Site overrides, is preserved. A Site entry may specify only capabilities included in the account-default entry; omitting a replaced capability from a Site entry makes that Site inherit the submitted default. This keeps targeted-instance-only clients and cross-Tenant-VPC-only clients backward compatible.
+        When `siteCapabilities` is included, the replace payload must contain at least one entry, include exactly one entry with empty or omitted `siteIds`, provide `targetedInstanceCreation` in every entry, and must not repeat any `siteId` across entries. Every provided `siteId` must be a valid UUID for a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400. Previously configured per-site overrides whose `siteId` is omitted from the replacement payload are cleared.
       examples:
         - tenantContactId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
         - siteCapabilities:
             - siteIds: []
               targetedInstanceCreation: true
-              crossTenantVpcAttachment: false
             - siteIds:
                 - 3fa85f64-5717-4562-b3fc-2c963f66afa6
               targetedInstanceCreation: false
-              crossTenantVpcAttachment: true
       properties:
         tenantContactId:
           type: string
@@ -21060,16 +21041,15 @@ components:
           type: array
           minItems: 1
           description: |-
-            Provider Admin partial replacement payload for Site-scoped Tenant capabilities. Required to be non-empty when sent. Each capability is replaced independently according to the account-default entry.
+            Provider Admin replacement payload for TargetedInstanceCreation configuration. Required to be non-empty when sent.
 
             Server validation rules:
             - must contain at least one entry
             - must contain exactly one entry with omitted or empty siteIds
-            - every entry must specify at least one recognized capability
+            - every entry must specify targetedInstanceCreation
             - must not repeat any siteId across entries
             - every provided siteId must be a valid Site UUID
             - every provided siteId must identify a Site owned by the Tenant Account's Infrastructure Provider; otherwise the server rejects the request with 400
-            - a capability in a Site entry must also appear in the account-default entry
           items:
             $ref: '#/components/schemas/TenantAccountSiteCapabilityUpdate'
     Site:
@@ -25377,7 +25357,7 @@ components:
       description: |-
         Request data to create an Instance.
 
-        The primary `vpcId` must be owned by the Instance Tenant. Additional Interfaces may select same-Site Ready FNN VPCs or explicit VPC Prefixes owned by another Tenant only when the caller is a Tenant Admin and the Instance Tenant has effective `crossTenantVpcAttachment` capability at the Instance Site. The capability is default-disabled, does not authorize foreign Subnet selectors, and does not grant foreign VPC or VPC Prefix discovery or CRUD access.
+        The primary `vpcId` must be owned by the Instance Tenant. Additional Interfaces may select same-Site Ready FNN VPCs or explicit VPC Prefixes owned by another Tenant only when the caller is a Tenant Admin and the Instance Tenant has effective `targetedInstanceCreation` capability at the Instance Site. The capability does not authorize foreign Subnet selectors or grant foreign VPC or VPC Prefix discovery or CRUD access.
 
         The primary physical Interface must select the primary `vpcId`, directly or through one of its VPC Prefixes. When device metadata is present, the primary physical Interface is the PF with `deviceInstance: 0`; a VF with `deviceInstance: 0` is not primary. Legacy requests without device metadata use the first physical Interface. Instance-level Network Security Group policy takes precedence over VPC-level policy on every Interface, including foreign-VPC Interfaces.
       examples:
@@ -25552,7 +25532,7 @@ components:
         secondaryVpcIds:
           type: array
           uniqueItems: true
-          description: IDs of additional VPCs the Instance should attach to through non-primary Interfaces. With effective `crossTenantVpcAttachment`, these may include foreign same-Site FNN VPC IDs obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
+          description: IDs of additional VPCs the Instance should attach to through non-primary Interfaces. With effective `targetedInstanceCreation`, these may include foreign same-Site FNN VPC IDs obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
           items:
             type: string
             format: uuid
@@ -25594,7 +25574,7 @@ components:
           description: 'User-defined key-value labels'
         interfaces:
           type: array
-          description: 'At least one interface must be specified unless `autoNetwork` is true. Interfaces must all be Subnet-backed or all be VPC-backed; VPC-backed interfaces may use an explicit `vpcPrefixId` or ask the Controller to select a prefix using `vpcId` and `ipFamilies`. A non-primary VPC-backed Interface may select a foreign same-Site Ready FNN VPC or VPC Prefix only with effective `crossTenantVpcAttachment`; foreign Subnets are never supported. The primary physical Interface must select the Instance Tenant-owned primary VPC. Only one network can be attached over a physical interface. If only one Subnet is specified, it will be attached over a physical interface regardless of `isPhysical`. Mutually exclusive with `autoNetwork`: when `autoNetwork` is true this list MUST be empty.'
+          description: 'At least one interface must be specified unless `autoNetwork` is true. Interfaces must all be Subnet-backed or all be VPC-backed; VPC-backed interfaces may use an explicit `vpcPrefixId` or ask the Controller to select a prefix using `vpcId` and `ipFamilies`. A non-primary VPC-backed Interface may select a foreign same-Site Ready FNN VPC or VPC Prefix only with effective `targetedInstanceCreation`; foreign Subnets are never supported. The primary physical Interface must select the Instance Tenant-owned primary VPC. Only one network can be attached over a physical interface. If only one Subnet is specified, it will be attached over a physical interface regardless of `isPhysical`. Mutually exclusive with `autoNetwork`: when `autoNetwork` is true this list MUST be empty.'
           items:
             $ref: '#/components/schemas/InterfaceCreateRequest'
         autoNetwork:
@@ -25640,7 +25620,7 @@ components:
       description: |-
         Request data to batch create multiple Instances with topology-optimized machine allocation. Explicit interface `ipAddress` values are not supported in batch requests.
 
-        The primary `vpcId` must be owned by the Instance Tenant. Shared non-primary Interfaces may select same-Site Ready FNN VPCs or explicit VPC Prefixes owned by another Tenant only when the caller is a Tenant Admin and the Tenant has effective `crossTenantVpcAttachment` capability at the Site. Foreign Subnets remain unsupported, and the capability grants no foreign discovery or CRUD access. The primary physical Interface rules are the same as single Instance create. Instance-level Network Security Group policy takes precedence on all Interfaces, including foreign-VPC Interfaces.
+        The primary `vpcId` must be owned by the Instance Tenant. Shared non-primary Interfaces may select same-Site Ready FNN VPCs or explicit VPC Prefixes owned by another Tenant only when the caller is a Tenant Admin and the Tenant has effective `targetedInstanceCreation` capability at the Site. Foreign Subnets remain unsupported, and the capability grants no foreign discovery or CRUD access. The primary physical Interface rules are the same as single Instance create. Instance-level Network Security Group policy takes precedence on all Interfaces, including foreign-VPC Interfaces.
       examples:
         - namePrefix: gpu-worker
           count: 4
@@ -25730,7 +25710,7 @@ components:
         secondaryVpcIds:
           type: array
           uniqueItems: true
-          description: IDs of additional VPCs every Instance should attach to through non-primary Interfaces. With effective `crossTenantVpcAttachment`, these may include foreign same-Site FNN VPC IDs obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
+          description: IDs of additional VPCs every Instance should attach to through non-primary Interfaces. With effective `targetedInstanceCreation`, these may include foreign same-Site FNN VPC IDs obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
           items:
             type: string
             format: uuid
@@ -25773,7 +25753,7 @@ components:
           description: 'Key-value objects to be applied to all instances (shared across all instances)'
         interfaces:
           type: array
-          description: 'Interface configuration shared across all Instances. At least one interface must be specified unless `autoNetwork` is true. Interfaces must all be Subnet-backed or all be VPC-backed; VPC-backed interfaces may use an explicit `vpcPrefixId` or ask the Controller to select a prefix using `vpcId` and `ipFamilies`. A non-primary VPC-backed Interface may select a foreign same-Site Ready FNN VPC or VPC Prefix only with effective `crossTenantVpcAttachment`; foreign Subnets are never supported. Each batch member is resolved independently and may use a different prefix. The primary physical Interface must select the primary VPC. Only one network can be attached over a physical interface. Interface `ipAddress` is not supported for batch instance creation requests. Mutually exclusive with `autoNetwork`: when `autoNetwork` is true this list MUST be empty.'
+          description: 'Interface configuration shared across all Instances. At least one interface must be specified unless `autoNetwork` is true. Interfaces must all be Subnet-backed or all be VPC-backed; VPC-backed interfaces may use an explicit `vpcPrefixId` or ask the Controller to select a prefix using `vpcId` and `ipFamilies`. A non-primary VPC-backed Interface may select a foreign same-Site Ready FNN VPC or VPC Prefix only with effective `targetedInstanceCreation`; foreign Subnets are never supported. Each batch member is resolved independently and may use a different prefix. The primary physical Interface must select the primary VPC. Only one network can be attached over a physical interface. Interface `ipAddress` is not supported for batch instance creation requests. Mutually exclusive with `autoNetwork`: when `autoNetwork` is true this list MUST be empty.'
           items:
             $ref: '#/components/schemas/InterfaceCreateRequest'
         autoNetwork:
@@ -25822,7 +25802,7 @@ components:
       description: |-
         Request data to update an Instance.
 
-        A complete `interfaces` replacement may introduce or retarget a non-primary Interface to a foreign same-Site Ready FNN VPC or explicit VPC Prefix only while the Instance Tenant has effective `crossTenantVpcAttachment` capability at the Site. Revoking the capability does not detach existing Interfaces: an unrelated update, an unchanged foreign Interface identity, removal of a foreign Interface, and Instance deletion remain allowed. Adding a foreign Interface or changing any persisted Interface identity to use a foreign selector returns 403 after revocation.
+        A complete `interfaces` replacement may introduce or retarget a non-primary Interface to a foreign same-Site Ready FNN VPC or explicit VPC Prefix only while the Instance Tenant has effective `targetedInstanceCreation` capability at the Site. Revoking the capability does not detach existing Interfaces: an unrelated update, an unchanged foreign Interface identity, removal of a foreign Interface, and Instance deletion remain allowed. Adding a foreign Interface or changing any persisted Interface identity to use a foreign selector returns 403 after revocation.
 
         The Tenant-owned primary VPC and primary physical Interface rules remain enforced, and foreign Subnets remain unsupported. The capability does not grant foreign VPC or VPC Prefix discovery or CRUD access. Instance-level Network Security Group policy continues to take precedence over VPC-level policy on all Interfaces.
       examples:
@@ -25971,13 +25951,13 @@ components:
         secondaryVpcIds:
           type: array
           uniqueItems: true
-          description: Complete IDs of additional VPCs the Instance should attach to through non-primary Interfaces. With effective `crossTenantVpcAttachment`, these may include foreign same-Site FNN VPC IDs obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
+          description: Complete IDs of additional VPCs the Instance should attach to through non-primary Interfaces. With effective `targetedInstanceCreation`, these may include foreign same-Site FNN VPC IDs obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
           items:
             type: string
             format: uuid
         interfaces:
           type: array
-          description: 'Complete updated Interface configuration for the Instance. Interfaces must all be Subnet-backed or all be VPC-backed; VPC-backed interfaces may use an explicit `vpcPrefixId` or ask the Controller to select a prefix using `vpcId` and `ipFamilies`. Newly introduced or retargeted foreign selectors require effective `crossTenantVpcAttachment`; unchanged or removed foreign Interfaces do not. Foreign Subnets remain unsupported, and the primary physical Interface must still select the Instance Tenant-owned primary VPC. Mutually exclusive with `autoNetwork`: when `autoNetwork` is true this list MUST be empty.'
+          description: 'Complete updated Interface configuration for the Instance. Interfaces must all be Subnet-backed or all be VPC-backed; VPC-backed interfaces may use an explicit `vpcPrefixId` or ask the Controller to select a prefix using `vpcId` and `ipFamilies`. Newly introduced or retargeted foreign selectors require effective `targetedInstanceCreation`; unchanged or removed foreign Interfaces do not. Foreign Subnets remain unsupported, and the primary physical Interface must still select the Instance Tenant-owned primary VPC. Mutually exclusive with `autoNetwork`: when `autoNetwork` is true this list MUST be empty.'
           items:
             $ref: '#/components/schemas/InterfaceCreateRequest'
         autoNetwork:
@@ -26280,7 +26260,7 @@ components:
 
         If the VPC has Ethernet network virtualization type then all interfaces must specify Subnet.
 
-        On Instance create, update, and batch create, a non-primary Interface may select a same-Site Ready FNN VPC or explicit VPC Prefix owned by another Tenant only when the consuming Tenant has effective `crossTenantVpcAttachment`. Foreign Subnet selectors are unsupported. The primary physical Interface must select the consuming Tenant's primary VPC; with device metadata this is the PF whose `deviceInstance` is `0`, while legacy requests use the first PF.
+        On Instance create, update, and batch create, a non-primary Interface may select a same-Site Ready FNN VPC or explicit VPC Prefix owned by another Tenant only when the consuming Tenant has effective `targetedInstanceCreation`. Foreign Subnet selectors are unsupported. The primary physical Interface must select the consuming Tenant's primary VPC; with device metadata this is the PF whose `deviceInstance` is `0`, while legacy requests use the first PF.
       properties:
         subnetId:
           type: string
@@ -26288,11 +26268,11 @@ components:
           format: uuid
         vpcPrefixId:
           type: string
-          description: ID of the explicit VPC Prefix to attach to the Interface. A foreign prefix ID must be obtained out of band and requires effective `crossTenantVpcAttachment` when introducing or retargeting the Interface.
+          description: ID of the explicit VPC Prefix to attach to the Interface. A foreign prefix ID must be obtained out of band and requires effective `targetedInstanceCreation` when introducing or retargeting the Interface.
           format: uuid
         vpcId:
           type: string
-          description: ID of the VPC from which the Controller should select a prefix. `ipFamilies` must also be specified, and `ipAddress` cannot be specified. A foreign VPC ID must be obtained out of band and requires effective `crossTenantVpcAttachment` when introducing or retargeting the Interface.
+          description: ID of the VPC from which the Controller should select a prefix. `ipFamilies` must also be specified, and `ipAddress` cannot be specified. A foreign VPC ID must be obtained out of band and requires effective `targetedInstanceCreation` when introducing or retargeting the Interface.
           format: uuid
         ipFamilies:
           type: array
