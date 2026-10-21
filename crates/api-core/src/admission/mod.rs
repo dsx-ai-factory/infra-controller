@@ -22,6 +22,7 @@
 //! responses, metrics, and rate-limited diagnostics.
 
 mod engine;
+mod in_flight;
 mod limits;
 mod peak_ewma;
 mod retry;
@@ -31,11 +32,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
+use opentelemetry::KeyValue;
 use axum::extract::{OriginalUri, Request, State};
 use axum::http::{HeaderValue, Response, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::IntoResponse;
+use carbide_instrument::LabelValue;
 use engine::{AdmissionObserver, AdmissionRejection, ClientKeyRef, FairAdmission, RejectionReason};
+use in_flight::{
+    ClientKindLabel, ExecutionRegistry, client_identifier, parse_grpc_timeout,
+};
 pub(crate) use limits::{AdmissionLimits, ClientLimits};
 use opentelemetry::metrics::{Meter, ObservableGauge};
 use retry::{RejectionScope, RetryAdvice};
@@ -49,11 +55,13 @@ use crate::logging::log_limiter::LogLimiter;
 const EXCLUDED_ADMIN_PATHS: &[&str] = &["/admin/static", "/admin/auth-callback", "/admin/logs"];
 const GRPC_RETRY_PUSHBACK_HEADER: &str = "grpc-retry-pushback-ms";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, carbide_instrument::LabelValue)]
 enum RequestTransport {
     Grpc,
     Http,
 }
+
+const EXECUTION_WATCHDOG_INTERVAL: Duration = Duration::from_secs(30);
 
 impl RequestTransport {
     fn classify(path: &str) -> Option<Self> {
@@ -74,6 +82,20 @@ impl RequestTransport {
         }
 
         Some(Self::Http)
+    }
+
+    fn execution_timeout_response(self) -> Response<Body> {
+        match self {
+            Self::Grpc => tonic::Status::deadline_exceeded(
+                "API admission execution deadline exceeded",
+            )
+            .into_http::<Body>(),
+            Self::Http => (
+                StatusCode::GATEWAY_TIMEOUT,
+                "API admission execution deadline exceeded",
+            )
+                .into_response(),
+        }
     }
 
     fn overloaded_response(self, retry: RetryAdvice) -> Response<Body> {
@@ -206,6 +228,26 @@ struct HandlerExecutionFinished {
     duration: Duration,
 }
 
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "api_admission_execution_timed_out",
+    metric_name = "carbide_api_admission_execution_timeouts_total",
+    component = "nico-api",
+    log = warn,
+    metric = counter,
+    describe = "Number of admitted API requests whose handler exceeded the execution deadline"
+)]
+struct ExecutionTimedOut {
+    #[label]
+    transport: RequestTransport,
+    #[label]
+    client_kind: ClientKindLabel,
+    #[context]
+    route: String,
+    #[context]
+    client_identifier: String,
+}
+
 struct CarbideAdmissionObserver;
 
 impl AdmissionObserver for CarbideAdmissionObserver {
@@ -226,9 +268,13 @@ pub(crate) struct ApiAdmissionControl {
     engine: Arc<FairAdmission>,
     default_client_limits: ClientLimits,
     service_limits: HashMap<String, ClientLimits>,
+    in_flight: Arc<ExecutionRegistry>,
     rejection_log_limiter: LogLimiter<(RejectionReason, RequestTransport)>,
+    execution_watchdog_log_limiter: LogLimiter<(String, String)>,
     _work_in_flight_gauge: ObservableGauge<u64>,
     _pending_requests_gauge: ObservableGauge<u64>,
+    _oldest_execution_age_gauge: ObservableGauge<u64>,
+    _work_in_flight_by_client_kind_gauge: ObservableGauge<u64>,
 }
 
 /// Shared admission handle installed inside the authenticated admin router.
@@ -271,6 +317,7 @@ impl ApiAdmissionControl {
             return Ok(None);
         };
 
+        let global_max_execution = config.max_execution_time;
         let service_limits = config
             .service_limits
             .iter()
@@ -279,6 +326,9 @@ impl ApiAdmissionControl {
                     service_limits.max_work_in_flight,
                     service_limits.max_pending,
                     service_limits.pending_timeout,
+                    service_limits
+                        .max_execution_time
+                        .unwrap_or(global_max_execution),
                     limits.max_work_in_flight(),
                     limits.max_pending(),
                 )
@@ -290,7 +340,8 @@ impl ApiAdmissionControl {
             .collect::<eyre::Result<HashMap<_, _>>>()?;
 
         let observer: Arc<dyn AdmissionObserver> = Arc::new(CarbideAdmissionObserver);
-        let engine = FairAdmission::start(limits, shutdown, observer, join_set);
+        let in_flight = Arc::new(ExecutionRegistry::new());
+        let engine = FairAdmission::start(limits, shutdown.clone(), observer, join_set);
         let work_in_flight_gauge = register_occupancy_gauge(
             meter,
             "carbide_api_admission_work_in_flight",
@@ -301,18 +352,35 @@ impl ApiAdmissionControl {
         let pending_requests_gauge = register_occupancy_gauge(
             meter,
             "carbide_api_admission_pending_requests",
-            "Number of API requests currently waiting for an execution slot",
+            "Number of API requests waiting for an execution slot, including entries whose callers already timed out waiting for admission",
             Arc::clone(&engine),
             |snapshot| snapshot.pending,
         );
-        Ok(Some(Arc::new(Self {
+        let oldest_execution_age_gauge = register_oldest_execution_age_gauge(
+            meter,
+            Arc::clone(&in_flight),
+        );
+        let work_in_flight_by_client_kind_gauge =
+            register_work_in_flight_by_client_kind_gauge(meter, Arc::clone(&in_flight));
+        let control = Arc::new(Self {
             engine,
             default_client_limits: limits.default_client(),
             service_limits,
+            in_flight,
             rejection_log_limiter: LogLimiter::default(),
+            execution_watchdog_log_limiter: LogLimiter::default(),
             _work_in_flight_gauge: work_in_flight_gauge,
             _pending_requests_gauge: pending_requests_gauge,
-        })))
+            _oldest_execution_age_gauge: oldest_execution_age_gauge,
+            _work_in_flight_by_client_kind_gauge: work_in_flight_by_client_kind_gauge,
+        });
+        let watchdog_control = Arc::clone(&control);
+        join_set
+            .build_task()
+            .name("API admission execution watchdog")
+            .spawn(async move { run_execution_watchdog(watchdog_control, shutdown).await })
+            .expect("spawning API admission execution watchdog must succeed");
+        Ok(Some(control))
     }
 
     fn rejection_response(
@@ -370,6 +438,71 @@ impl ApiAdmissionControl {
     }
 }
 
+
+fn register_oldest_execution_age_gauge(
+    meter: &Meter,
+    in_flight: Arc<ExecutionRegistry>,
+) -> ObservableGauge<u64> {
+    meter
+        .u64_observable_gauge("carbide_api_admission_oldest_execution_age_seconds")
+        .with_description(
+            "Age in seconds of the oldest API request currently holding an execution slot",
+        )
+        .with_callback(move |observer| {
+            observer.observe(in_flight.oldest_execution_age().as_secs(), &[]);
+        })
+        .build()
+}
+
+fn register_work_in_flight_by_client_kind_gauge(
+    meter: &Meter,
+    in_flight: Arc<ExecutionRegistry>,
+) -> ObservableGauge<u64> {
+    meter
+        .u64_observable_gauge("carbide_api_admission_work_in_flight_by_client_kind")
+        .with_description(
+            "Number of API requests currently holding an execution slot, grouped by client kind",
+        )
+        .with_callback(move |observer| {
+            let counts = in_flight.work_in_flight_by_client_kind();
+            for kind in [
+                ClientKindLabel::ExternalUser,
+                ClientKindLabel::Service,
+                ClientKindLabel::Machine,
+                ClientKindLabel::Default,
+            ] {
+                let count = counts.get(&kind).copied().unwrap_or(0);
+                observer.observe(count, &[KeyValue::new("client_kind", kind.label_value())]);
+            }
+        })
+        .build()
+}
+
+async fn run_execution_watchdog(control: Arc<ApiAdmissionControl>, shutdown: CancellationToken) {
+    let mut interval = tokio::time::interval(EXECUTION_WATCHDOG_INTERVAL);
+    loop {
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => return,
+            _ = interval.tick() => {
+                for (route, client, elapsed) in control.in_flight.entries_older_than_half_deadline() {
+                    if control.execution_watchdog_log_limiter.should_log(
+                        &(route.clone(), client.clone()),
+                        "API request holding an admission execution slot longer than half its deadline",
+                    ) {
+                        tracing::warn!(
+                            route = %route,
+                            client = %client,
+                            elapsed_seconds = elapsed.as_secs_f64(),
+                            "API request holding an admission execution slot longer than half its deadline"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn register_occupancy_gauge(
     meter: &Meter,
     name: &'static str,
@@ -418,18 +551,67 @@ fn classify_request(request: &Request) -> Option<RequestTransport> {
     RequestTransport::classify(path)
 }
 
+fn request_route(request: &Request) -> String {
+    request
+        .extensions()
+        .get::<OriginalUri>()
+        .map(|uri| uri.path().to_owned())
+        .unwrap_or_else(|| request.uri().path().to_owned())
+}
+
+fn execution_deadline(
+    request: &Request,
+    transport: RequestTransport,
+    client_limits: ClientLimits,
+) -> Duration {
+    let mut deadline = client_limits.max_execution_time();
+    if transport == RequestTransport::Grpc {
+        if let Some(header) = request.headers().get("grpc-timeout") {
+            if let Ok(value) = header.to_str() {
+                if let Some(parsed) = parse_grpc_timeout(value) {
+                    deadline = deadline.min(parsed);
+                }
+            }
+        }
+    }
+    deadline
+}
+
 async fn enforce_transport(
     control: Arc<ApiAdmissionControl>,
     request: Request,
     next: Next,
     transport: RequestTransport,
 ) -> Response<Body> {
+    let route = request_route(&request);
     let (client_key, client_limits) = control.client(&request);
+    let client_kind = ClientKindLabel::from(client_key);
+    let client_id = client_identifier(client_key);
     let permit = match control.engine.acquire(client_key, client_limits).await {
         Ok(permit) => permit,
         Err(rejection) => return control.rejection_response(transport, rejection),
     };
-    let response = next.run(request).await;
+    let deadline = execution_deadline(&request, transport, client_limits);
+    let in_flight_id = control.in_flight.register(
+        route.clone(),
+        client_kind,
+        client_id.clone(),
+        deadline,
+    );
+    let handler = next.run(request);
+    let response = match tokio::time::timeout(deadline, handler).await {
+        Ok(response) => response,
+        Err(_) => {
+            carbide_instrument::emit(ExecutionTimedOut {
+                transport,
+                client_kind,
+                route,
+                client_identifier: client_id,
+            });
+            transport.execution_timeout_response()
+        }
+    };
+    control.in_flight.remove(in_flight_id);
     drop(permit);
     response
 }
@@ -441,6 +623,7 @@ mod tests {
     use axum::Router;
     use axum::http::Request;
     use axum::routing::get;
+    use carbide_instrument::LabelValue;
     use carbide_instrument::testing::MetricsCapture;
     use futures::poll;
     use prost::Message;
@@ -467,6 +650,7 @@ mod tests {
                 max_work_in_flight_per_client: max_work_in_flight,
                 max_pending_per_client: max_pending,
                 pending_timeout,
+                max_execution_time: Duration::from_secs(120),
                 client_idle_timeout: Duration::from_secs(60),
                 service_limits: Default::default(),
             },
@@ -860,4 +1044,128 @@ mod tests {
         // bodies remain alive and unconsumed.
         assert_eq!(controller.snapshot().work_in_flight, 0);
     }
+    fn controller_with_execution_time(
+        max_work_in_flight: usize,
+        max_pending: usize,
+        pending_timeout: Duration,
+        max_execution_time: Duration,
+        shutdown: CancellationToken,
+    ) -> (Arc<ApiAdmissionControl>, JoinSet<()>) {
+        let mut join_set = JoinSet::new();
+        let control = ApiAdmissionControl::from_config(
+            &ApiAdmissionControlConfig {
+                enabled: true,
+                max_work_in_flight,
+                max_pending,
+                max_work_in_flight_per_client: max_work_in_flight,
+                max_pending_per_client: max_pending,
+                pending_timeout,
+                max_execution_time,
+                client_idle_timeout: Duration::from_secs(60),
+                service_limits: Default::default(),
+            },
+            &opentelemetry::global::meter("api-admission-tests"),
+            shutdown,
+            &mut join_set,
+        )
+        .expect("test admission config is valid")
+        .expect("test admission is enabled");
+        (control, join_set)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn execution_deadline_releases_slot() {
+        let _serial = ADMISSION_TEST_SERIAL.lock().await;
+        let metrics = MetricsCapture::start();
+        let shutdown = CancellationToken::new();
+        let (controller, _join_set) = controller_with_execution_time(
+            1,
+            1,
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+            shutdown,
+        );
+        let never = Arc::new(Notify::new());
+        let blocking = {
+            let never = Arc::clone(&never);
+            move || {
+                let never = Arc::clone(&never);
+                async move {
+                    never.notified().await;
+                    "blocked"
+                }
+            }
+        };
+        let router = Router::new()
+            .route(::rpc::service_path!("Test"), get(blocking))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&controller),
+                enforce_grpc,
+            ));
+
+        let first = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(::rpc::service_path!("Test"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.headers().get("grpc-status").unwrap(), "4");
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_api_admission_execution_timeouts_total",
+                &[("transport", "grpc"), ("client_kind", "default")],
+            ),
+            1.0
+        );
+
+        let second = router
+            .oneshot(
+                Request::builder()
+                    .uri(::rpc::service_path!("Test"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn execution_deadline_honors_grpc_timeout_header() {
+        let cases = [
+            ("500m", Duration::from_millis(500)),
+            ("10S", Duration::from_secs(10)),
+            ("invalid", Duration::from_secs(120)),
+        ];
+        for (header, expected) in cases {
+            let request = Request::builder()
+                .uri(::rpc::service_path!("Test"))
+                .header("grpc-timeout", header)
+                .body(Body::empty())
+                .unwrap();
+            let limits = ClientLimits::new(1, 1, Duration::from_secs(5), Duration::from_secs(120), 1, 1)
+                .expect("limits");
+            assert_eq!(
+                execution_deadline(&request, RequestTransport::Grpc, limits),
+                expected,
+                "header {header}"
+            );
+        }
+        let shorter = Request::builder()
+            .uri(::rpc::service_path!("Test"))
+            .header("grpc-timeout", "1S")
+            .body(Body::empty())
+            .unwrap();
+        let limits = ClientLimits::new(1, 1, Duration::from_secs(5), Duration::from_secs(120), 1, 1)
+            .expect("limits");
+        assert_eq!(
+            execution_deadline(&shorter, RequestTransport::Grpc, limits),
+            Duration::from_secs(1)
+        );
+    }
+
 }
