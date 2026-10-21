@@ -483,15 +483,24 @@ class VM:
             raise ValueError("checkout lacks a version tag; fetch repository tags before syncing native tests")
         sha = host_git("rev-parse", "--short=8", "HEAD",
                        capture_output=True, text=True).stdout.strip()
+        rest_version = host_git("describe", "--tags", "--first-parent", "--match",
+                                "v[0-9]*.[0-9]*.[0-9]*", "--dirty",
+                                capture_output=True, text=True).stdout.strip()
+        # Explicit command-backed DevSpace variables ignore environment values.
+        # Use its supported flag override, preserving other user-supplied flags.
+        rest_flag = shlex.join(["--var=LOCAL_DEV_REST_VERSION=" + rest_version])
         environment = (f"export VERSION={shlex.quote(version)}\n"
-                       f"export CI_COMMIT_SHORT_SHA={shlex.quote(sha)}\n")
+                       f"export CI_COMMIT_SHORT_SHA={shlex.quote(sha)}\n"
+                       f'export DEVSPACE_FLAGS="${{DEVSPACE_FLAGS:+$DEVSPACE_FLAGS }}"{shlex.quote(rest_flag)}\n')
         self.ssh("bash", "-c", 'umask 077; mkdir -p "$HOME/.config/nico" && '
                  'cat > "$HOME/.config/nico/vfkit-source-version.sh.tmp" && '
                  'mv "$HOME/.config/nico/vfkit-source-version.sh.tmp" '
                  '"$HOME/.config/nico/vfkit-source-version.sh"', input=environment, text=True)
 
     def provision(self, deploy=False):
-        command = ["sudo", "bash", GUEST_REPO + "/dev/deployment/devspace/setup-devspace-on-host.sh",
+        command = ["bash", "-c", '. "$HOME/.config/nico/vfkit-source-version.sh" && '
+                   'exec sudo env "DEVSPACE_FLAGS=$DEVSPACE_FLAGS" bash "$@"', "_",
+                   GUEST_REPO + "/dev/deployment/devspace/setup-devspace-on-host.sh",
                    "--user", "nico", "--repo-dir", GUEST_REPO,
                    "--ip-family", "dual"]
         if not deploy:
