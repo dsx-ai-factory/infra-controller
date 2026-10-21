@@ -2494,11 +2494,15 @@ if [[ "${_flow_namespace_rendered}" != "namespace/${NICO_FLOW_NAMESPACE}" ]]; th
     echo "  Remove namespaceOverride from the --flow-values file." >&2
     exit 1
 fi
-mapfile -t _flow_certificates < <(printf '%s\n' "${_flow_certificates_yaml}" | kubectl apply --dry-run=client -f - -o name)
-if (( ${#_flow_certificates[@]} == 0 )); then
+if ! _flow_certificates_rendered="$(printf '%s\n' "${_flow_certificates_yaml}" | kubectl apply --dry-run=client -f - -o name)"; then
+    echo "ERROR: could not read the rendered Flow Certificate names." >&2
+    exit 1
+fi
+if [[ -z "${_flow_certificates_rendered}" ]]; then
     echo "ERROR: the Flow chart rendered no Certificate resources." >&2
     exit 1
 fi
+mapfile -t _flow_certificates <<< "${_flow_certificates_rendered}"
 echo "Pre-applying flow Namespace and Certificates (${_flow_certificates[*]#*/})..."
 printf '%s\n' "${_flow_namespace_yaml}" | kubectl apply -f -
 printf '%s\n' "${_flow_certificates_yaml}" | kubectl apply -f -
