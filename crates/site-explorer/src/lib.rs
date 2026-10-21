@@ -1469,6 +1469,7 @@ impl SiteExplorer {
             // happen between those steps.
             let mut dpu_exploration = DpuExplorationState::new();
             let mut seen_bluefield_serials = HashSet::new();
+            let mut pcie_matches = Vec::new();
             for system in ep.report.systems.iter() {
                 for pcie_device in system.pcie_devices.iter() {
                     if let Some(serial_number) = duplicate_bluefield_serial(
@@ -1490,26 +1491,29 @@ impl SiteExplorer {
                         &dpu_sn_to_endpoint,
                         DpuMatchSource::Pcie,
                     ) {
-                        // Resolve the DPU's mode against what the host declared. Report a change
-                        // only after `set_nic_mode` succeeds, so failures keep the existing skip path.
-                        let mode_check = Some(
-                            match host_dpu_policy.target_operating_mode(matched_dpu.part_number) {
-                                Some(target) => {
-                                    self.update_dpu_mode(&matched_dpu, target, metrics).await
-                                }
-                                None => Ok(true),
-                            },
-                        );
-
-                        dpu_exploration.record_matched_dpu(&matched_dpu, &ep, mode_check);
+                        pcie_matches.push(matched_dpu);
                     }
                 }
+            }
+
+            for matched_dpu in pcie_matches {
+                // Resolve the DPU's mode against what the host declared. Report a change
+                // only after `set_nic_mode` succeeds, so failures keep the existing skip path.
+                let mode_check = Some(
+                    match host_dpu_policy.target_operating_mode(matched_dpu.part_number) {
+                        Some(target) => self.update_dpu_mode(&matched_dpu, target, metrics).await,
+                        None => Ok(true),
+                    },
+                );
+
+                dpu_exploration.record_matched_dpu(&matched_dpu, &ep, mode_check);
             }
 
             // A DPU can show up as a chassis instead of a PCIe device on some
             // BMCs; fall back to the chassis inventory only if the PCIe scan
             // found none.
             if dpu_exploration.expected_managed_total() == 0 {
+                let mut chassis_matches = Vec::new();
                 for chassis in ep.report.chassis.iter() {
                     for record in host_dpu_inventory_records(chassis) {
                         if let Some(serial_number) = duplicate_bluefield_serial(
@@ -1531,21 +1535,24 @@ impl SiteExplorer {
                             &dpu_sn_to_endpoint,
                             DpuMatchSource::Chassis,
                         ) {
-                            // Resolve the DPU's mode against what the host declared. Report a change
-                            // only after `set_nic_mode` succeeds, so failures keep the existing skip path.
-                            let mode_check = Some(
-                                match host_dpu_policy.target_operating_mode(matched_dpu.part_number)
-                                {
-                                    Some(target) => {
-                                        self.update_dpu_mode(&matched_dpu, target, metrics).await
-                                    }
-                                    None => Ok(true),
-                                },
-                            );
-
-                            dpu_exploration.record_matched_dpu(&matched_dpu, &ep, mode_check);
+                            chassis_matches.push(matched_dpu);
                         }
                     }
+                }
+
+                for matched_dpu in chassis_matches {
+                    // Resolve the DPU's mode against what the host declared. Report a change
+                    // only after `set_nic_mode` succeeds, so failures keep the existing skip path.
+                    let mode_check = Some(
+                        match host_dpu_policy.target_operating_mode(matched_dpu.part_number) {
+                            Some(target) => {
+                                self.update_dpu_mode(&matched_dpu, target, metrics).await
+                            }
+                            None => Ok(true),
+                        },
+                    );
+
+                    dpu_exploration.record_matched_dpu(&matched_dpu, &ep, mode_check);
                 }
             }
 
@@ -1576,49 +1583,53 @@ impl SiteExplorer {
             // reported DPU is matched, mode changes and configuration errors
             // must wait for the next iteration.
             if needs_expected_serial_fallback && let Some(expected_machine) = expected_machine {
+                let mut fallback_matches = Vec::new();
                 for dpu_sn in &expected_machine.data.fallback_dpu_serial_numbers {
                     if let Some(dpu_ep) = dpu_sn_to_endpoint.get(dpu_sn.as_str()) {
                         // Fallback matching has only the expected serial and the
                         // discovered DPU BMC report; pass the DPU's own part number
                         // for the legacy BF3 heuristic.
-                        let matched_dpu = MatchedDpu {
+                        fallback_matches.push(MatchedDpu {
                             endpoint: dpu_ep,
                             part_number: dpu_ep.report.dpu_part_number(),
                             source: DpuMatchSource::ExpectedSerial(dpu_sn),
-                        };
-                        let mode_check = Some(
-                            match host_dpu_policy.target_operating_mode(matched_dpu.part_number) {
-                                Some(target) => {
-                                    self.update_dpu_mode(&matched_dpu, target, metrics).await
-                                }
-                                None => Ok(true),
-                            },
-                        );
+                        });
+                    }
+                }
 
-                        match classify_matched_dpu(&matched_dpu, &ep, mode_check) {
-                            DiscoveredDpu::RunningAsDpu(dpu) => {
-                                // The expected-machine fallback list is the source of
-                                // truth here, so discard whatever the PCIe scan found
-                                // on the first confirmed match.
-                                if !dpu_added {
-                                    dpus_explored_for_host.clear();
-                                }
-                                dpu_added = true;
-                                dpus_explored_for_host.push(dpu);
+                for matched_dpu in fallback_matches {
+                    let mode_check = Some(
+                        match host_dpu_policy.target_operating_mode(matched_dpu.part_number) {
+                            Some(target) => {
+                                self.update_dpu_mode(&matched_dpu, target, metrics).await
                             }
-                            DiscoveredDpu::RunningAsNic => {
-                                host_reported_dpus_nic_mode_total += 1;
+                            None => Ok(true),
+                        },
+                    );
+
+                    match classify_matched_dpu(&matched_dpu, &ep, mode_check) {
+                        DiscoveredDpu::RunningAsDpu(dpu) => {
+                            // The expected-machine fallback list is the source of
+                            // truth here, so discard whatever the PCIe scan found
+                            // on the first confirmed match.
+                            if !dpu_added {
+                                dpus_explored_for_host.clear();
                             }
-                            DiscoveredDpu::NeedsReconfig => {
-                                // `set_nic_mode` was just issued; the host needs a
-                                // reset before this DPU re-reports in the new mode, so
-                                // mark it not-yet-configured and let the reset path
-                                // below run.
-                                all_dpus_configured_properly_in_host = false;
-                            }
-                            DiscoveredDpu::ModeCheckFailed(err) => {
-                                matched_dpu.warn_mode_check_failed(&err);
-                            }
+                            dpu_added = true;
+                            dpus_explored_for_host.push(dpu);
+                        }
+                        DiscoveredDpu::RunningAsNic => {
+                            host_reported_dpus_nic_mode_total += 1;
+                        }
+                        DiscoveredDpu::NeedsReconfig => {
+                            // `set_nic_mode` was just issued; the host needs a
+                            // reset before this DPU re-reports in the new mode, so
+                            // mark it not-yet-configured and let the reset path
+                            // below run.
+                            all_dpus_configured_properly_in_host = false;
+                        }
+                        DiscoveredDpu::ModeCheckFailed(err) => {
+                            matched_dpu.warn_mode_check_failed(&err);
                         }
                     }
                 }
