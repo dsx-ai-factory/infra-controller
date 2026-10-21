@@ -1549,25 +1549,33 @@ impl SiteExplorer {
                 }
             }
 
+            let needs_expected_serial_fallback = dpu_exploration.needs_expected_serial_fallback();
+            let has_unready_matches = dpu_exploration.matched_total
+                > dpu_exploration.running_as_dpu.len() + dpu_exploration.running_as_nic_total;
+
             // Bring the accumulated counts into variables that the rest
             // of this function uses.
             let DpuExplorationState {
                 reported_total: host_reported_dpus_total,
+                matched_total: _,
+                has_unmatched_reported_dpu: _,
                 running_as_nic_total: mut host_reported_dpus_nic_mode_total,
                 all_configured: mut all_dpus_configured_properly_in_host,
                 running_as_dpu: mut dpus_explored_for_host,
             } = dpu_exploration;
 
             // Fallback changes the counts; preserve the initial decision for reset/wait.
-            let incomplete_dpu_exploration = dpus_explored_for_host.is_empty()
+            let incomplete_dpu_exploration = needs_expected_serial_fallback
+                || has_unready_matches
+                || dpus_explored_for_host.is_empty()
                 || dpus_explored_for_host.len()
                     != host_reported_dpus_total.saturating_sub(host_reported_dpus_nic_mode_total);
             let mut dpu_added = false;
 
-            // Check if there are dpu serial(s) specified in expected_machine table for this host
-            // Lets assume for now that if a DPU is specific in the expected machine table for the host
-            // it has been configured properly (DPU vs NIC mode).
-            if incomplete_dpu_exploration && let Some(expected_machine) = expected_machine {
+            // Expected serials resolve incomplete matching. Once every
+            // reported DPU is matched, mode changes and configuration errors
+            // must wait for the next iteration.
+            if needs_expected_serial_fallback && let Some(expected_machine) = expected_machine {
                 for dpu_sn in &expected_machine.data.fallback_dpu_serial_numbers {
                     if let Some(dpu_ep) = dpu_sn_to_endpoint.remove(dpu_sn.as_str()) {
                         // Fallback matching has only the expected serial and the
@@ -1630,7 +1638,10 @@ impl SiteExplorer {
                 // queue a flip even on a host whose BMC reports no DPU over PCIe
                 // (`expected_managed_dpus_total == 0`), which is the usual reason we are
                 // on the fallback path at all.
-                if expected_managed_dpus_total > 0 || !all_dpus_configured_properly_in_host {
+                if expected_managed_dpus_total > 0
+                    || has_unready_matches
+                    || !all_dpus_configured_properly_in_host
+                {
                     if expected_managed_dpus_total > 0 {
                         tracing::warn!(
                             bmc_ip_address = %ep.address,
@@ -4054,13 +4065,17 @@ fn chassis_id_sort_key(id: &str) -> ChassisIdSortKey {
 
 /// State from exploring a host's DPUs and pairing them with DPU BMCs.
 ///
-/// The two counts are only ever incremented (monotonic), so the
+/// The counts are only ever incremented (monotonic), so the
 /// bookkeeping can never underflow; DPUs we still expect to manage is
 /// the derived difference ([`DpuExplorationState::expected_managed_total`]).
 #[derive(Debug)]
 struct DpuExplorationState {
-    /// DPUs the host's BMC reports (matched on `part_number`).
+    /// Host inventory DPUs identified by part number or a discovered BMC serial.
     reported_total: usize,
+    /// Host inventory devices matched to discovered DPU BMCs before mode checks.
+    matched_total: usize,
+    /// At least one reported BlueField has no discovered DPU BMC match.
+    has_unmatched_reported_dpu: bool,
     /// Of those, the ones confirmed running as a plain NIC -- not managed DPUs.
     running_as_nic_total: usize,
     /// `false` once any discovered DPU's mode didn't match the target (a
@@ -4074,13 +4089,15 @@ impl DpuExplorationState {
     fn new() -> Self {
         Self {
             reported_total: 0,
+            matched_total: 0,
+            has_unmatched_reported_dpu: false,
             running_as_nic_total: 0,
             all_configured: true,
             running_as_dpu: Vec::new(),
         }
     }
 
-    /// Counts a host-reported DPU and looks up its discovered BMC by serial.
+    /// Counts reported DPUs and tracks BMC matches independently of mode checks.
     fn record_reported_device<'a>(
         &mut self,
         part_number: Option<&'a str>,
@@ -4090,19 +4107,28 @@ impl DpuExplorationState {
     ) -> Option<MatchedDpu<'a>> {
         // Count every DPU the host reports, independent of whether we've
         // discovered its BMC yet.
-        if part_number
+        let is_reported_dpu = part_number
             .map(str::trim)
-            .is_some_and(is_bluefield_part_number)
-        {
+            .is_some_and(is_bluefield_part_number);
+        if is_reported_dpu {
             self.reported_total += 1;
         }
 
         // Only a device whose serial matches a *discovered* DPU BMC is ours to
         // classify; anything else is some other device, or a DPU whose BMC
         // we haven't explored yet.
-        let endpoint = serial_number
+        let Some(endpoint) = serial_number
             .map(str::trim)
-            .and_then(|sn| dpu_sn_to_endpoint.get(sn))?;
+            .and_then(|sn| dpu_sn_to_endpoint.get(sn))
+        else {
+            self.has_unmatched_reported_dpu |= is_reported_dpu;
+            return None;
+        };
+        self.matched_total += 1;
+        // A discovered DPU serial also identifies hardware without a BlueField part number.
+        if !is_reported_dpu {
+            self.reported_total += 1;
+        }
         Some(MatchedDpu {
             endpoint,
             part_number,
@@ -4131,6 +4157,10 @@ impl DpuExplorationState {
     fn expected_managed_total(&self) -> usize {
         self.reported_total
             .saturating_sub(self.running_as_nic_total)
+    }
+
+    fn needs_expected_serial_fallback(&self) -> bool {
+        self.matched_total == 0 || self.has_unmatched_reported_dpu
     }
 }
 
@@ -5494,6 +5524,67 @@ mod tests {
             classify_matched_dpu(&matched_pcie_dpu(&dpu), &host, Some(Err(err))),
             DiscoveredDpu::ModeCheckFailed(_)
         ));
+    }
+
+    #[test]
+    fn expected_serial_fallback_depends_on_matching() {
+        let endpoints = HashMap::from([(
+            "known-dpu".to_string(),
+            bf2_dpu(Some(BlueFieldOperatingMode::Dpu)),
+        )]);
+        const BLUEFIELD: &str = "900-9D3B6-00SV-AA0";
+        check_values(
+            [
+                Check {
+                    scenario: "no DPU inventory",
+                    input: vec![],
+                    expect: (0, true),
+                },
+                Check {
+                    scenario: "reported BlueField matched by serial",
+                    input: vec![(Some(BLUEFIELD), Some("known-dpu"))],
+                    expect: (1, false),
+                },
+                Check {
+                    scenario: "serial match without a part number",
+                    input: vec![(None, Some(" known-dpu "))],
+                    expect: (1, false),
+                },
+                Check {
+                    scenario: "unmatched device without a BlueField part number",
+                    input: vec![(None, Some("other-device"))],
+                    expect: (0, true),
+                },
+                Check {
+                    scenario: "reported BlueField has no serial",
+                    input: vec![(Some(BLUEFIELD), None)],
+                    expect: (1, true),
+                },
+                Check {
+                    scenario: "another serial match cannot hide an undiscovered BlueField",
+                    input: vec![
+                        (None, Some("known-dpu")),
+                        (Some(BLUEFIELD), Some("unknown-dpu")),
+                    ],
+                    expect: (2, true),
+                },
+            ],
+            |devices| {
+                let mut exploration = DpuExplorationState::new();
+                for (part_number, serial_number) in devices {
+                    exploration.record_reported_device(
+                        part_number,
+                        serial_number,
+                        &endpoints,
+                        DpuMatchSource::Pcie,
+                    );
+                }
+                (
+                    exploration.reported_total,
+                    exploration.needs_expected_serial_fallback(),
+                )
+            },
+        );
     }
 
     #[test]

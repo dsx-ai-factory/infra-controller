@@ -3528,16 +3528,100 @@ async fn test_select_host_primary_interface(
     Ok(())
 }
 
-/// Integration regression guard for the auto-correct path: when an
-/// `ExpectedMachine` resolves to `HostDpuPolicy::Nic` but the discovered
-/// DPU hardware is reporting `BlueFieldOperatingMode::Dpu`, site-explorer should call
-/// `set_nic_mode(Nic)` on the DPU during its per-host matching loop.
-///
-/// This exercises the full wire (site-explorer iteration → per-host policy
-/// resolution → `update_dpu_mode` → mock Redfish
-/// `set_nic_mode`) that the unit tests only cover in pieces.
+/// A serial match identifies a ready DPU even without its host part number.
 #[sqlx_test]
-async fn test_site_explorer_auto_corrects_nic_mode_per_expected_machine(
+async fn test_site_explorer_ingests_serial_matched_dpu_without_part_number(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::expected_machine::HostDpuPolicy;
+
+    let env = Env::new(pool).await;
+    let dpu = DpuConfig {
+        nic_mode: Some(BlueFieldOperatingMode::Dpu),
+        ..DpuConfig::default()
+    };
+    let host = ManagedHostConfig::default().with_dpus(vec![dpu.clone()]);
+    let mut txn = env.pool.begin().await?;
+    db::expected_machine::create(
+        &mut txn,
+        ExpectedMachine {
+            id: None,
+            bmc_mac_address: host.bmc_mac_address,
+            data: ExpectedMachineData {
+                serial_number: host.serial.clone(),
+                dpu_policy: HostDpuPolicy::Manage,
+                fallback_dpu_serial_numbers: vec![dpu.serial.clone()],
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
+    let mut host_bmc = env.new_machine(&host.bmc_mac_address.to_string(), "SomeVendor");
+    let mut dpu_bmc = env.new_machine(&dpu.bmc_mac_address.to_string(), "NVIDIA/BF/BMC");
+    host_bmc.discover_dhcp(env.api()).await?;
+    dpu_bmc.discover_dhcp(env.api()).await?;
+    let host_ip: IpAddr = host_bmc.ip.parse()?;
+    let dpu_ip: IpAddr = dpu_bmc.ip.parse()?;
+
+    let mut host_report: EndpointExplorationReport = host.into();
+    for system in &mut host_report.systems {
+        for device in &mut system.pcie_devices {
+            device.part_number = None;
+        }
+    }
+    host_report.chassis.clear();
+    let explorer = env.test_site_explorer(SiteExplorerConfig {
+        enabled: Arc::new(true.into()),
+        retained_boot_interface_window: None,
+        explorations_per_run: 10,
+        concurrent_explorations: 1,
+        run_interval: Duration::from_secs(1),
+        create_machines: Arc::new(false.into()),
+        ..Default::default()
+    });
+    explorer.insert_endpoints(vec![(host_ip, host_report), (dpu_ip, dpu.into())]);
+    explorer.run_single_iteration().await?;
+
+    let mut txn = env.pool.begin().await?;
+    for ip in [host_ip, dpu_ip] {
+        db::explored_endpoints::set_preingestion_complete(ip, &mut txn).await?;
+    }
+    txn.commit().await?;
+    explorer.run_single_iteration().await?;
+
+    let managed_hosts = db::explored_managed_host::find_all(&env.pool).await?;
+    assert_eq!(managed_hosts.len(), 1);
+    assert_eq!(managed_hosts[0].host_bmc_ip, host_ip);
+    assert_eq!(managed_hosts[0].dpus.len(), 1);
+    assert_eq!(managed_hosts[0].dpus[0].bmc_ip, dpu_ip);
+    assert!(
+        explorer
+            .endpoint_explorer()
+            .set_nic_mode_calls
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        explorer
+            .endpoint_explorer()
+            .redfish_power_control_calls
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+
+    Ok(())
+}
+
+/// A PCIe-matched DPU also listed in expected serials gets one configuration
+/// attempt per iteration, even with an incomplete host inventory. A failed
+/// attempt is retried on the next iteration; only a successful request triggers
+/// the host reset, and ingestion waits.
+#[sqlx_test]
+async fn test_site_explorer_retries_matched_dpu_mode_on_next_iteration(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use model::expected_machine::{ExpectedMachine, ExpectedMachineData, HostDpuPolicy};
@@ -3572,6 +3656,7 @@ async fn test_site_explorer_auto_corrects_nic_mode_per_expected_machine(
                 serial_number: "EM-866-NIC-OVERRIDE".to_string(),
                 metadata: model::metadata::Metadata::new_with_default_name(),
                 dpu_policy: HostDpuPolicy::Nic,
+                fallback_dpu_serial_numbers: vec![dpu_config.serial.clone()],
                 ..Default::default()
             },
         },
@@ -3594,9 +3679,18 @@ async fn test_site_explorer_auto_corrects_nic_mode_per_expected_machine(
         ..Default::default()
     };
     let explorer = env.test_site_explorer(explorer_config);
+    let mut host_report: EndpointExplorationReport = mock_host.into();
+    // Serial alone still matches the DPU. A failed configuration must still
+    // block ingestion. This host supplies no chassis inventory as an alternative.
+    for system in &mut host_report.systems {
+        for device in &mut system.pcie_devices {
+            device.part_number = None;
+        }
+    }
+    host_report.chassis.clear();
     explorer.insert_endpoint_results(vec![
         (dpu_bmc.ip.parse().unwrap(), Ok(dpu_config.clone().into())),
-        (host_bmc.ip.parse().unwrap(), Ok(mock_host.into())),
+        (host_bmc.ip.parse().unwrap(), Ok(host_report)),
     ]);
 
     // First iteration: initial endpoint exploration.
@@ -3606,19 +3700,71 @@ async fn test_site_explorer_auto_corrects_nic_mode_per_expected_machine(
         db::explored_endpoints::set_preingestion_complete(ip, &mut txn).await?;
     }
     txn.commit().await?;
-    // Second iteration: per-host DPU matching and NIC-mode correction.
+    explorer.endpoint_explorer().fail_next_set_nic_mode(
+        EndpointExplorationError::ConnectionTimeout {
+            details: "injected transient mode-setting failure".to_string(),
+        },
+    );
+    // The expected-serial fallback must not retry the failed PCIe match.
     explorer.run_single_iteration().await.unwrap();
 
-    let calls = explorer
-        .endpoint_explorer()
-        .set_nic_mode_calls
-        .lock()
-        .unwrap();
+    let dpu_address = std::net::SocketAddr::new(dpu_bmc.ip.parse()?, 443);
+    assert_eq!(
+        *explorer
+            .endpoint_explorer()
+            .set_nic_mode_calls
+            .lock()
+            .unwrap(),
+        vec![(dpu_address, BlueFieldOperatingMode::Nic)],
+    );
     assert!(
-        calls
-            .iter()
-            .any(|(_, mode)| *mode == BlueFieldOperatingMode::Nic),
-        "expected at least one set_nic_mode(Nic) call triggered by the operator's Nic policy; calls so far: {calls:?}"
+        db::explored_managed_host::find_all(&env.pool)
+            .await?
+            .is_empty()
+    );
+    let host_endpoint = db::explored_endpoints::find_by_ips(&env.pool, vec![host_bmc.ip.parse()?])
+        .await?
+        .pop()
+        .unwrap();
+    assert!(host_endpoint.last_redfish_powercycle.is_none());
+    assert!(
+        explorer
+            .endpoint_explorer()
+            .redfish_power_control_calls
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+
+    // The transient error is gone. Queue the mode change once and reset the
+    // host, but keep waiting for a report that confirms the new mode.
+    explorer.run_single_iteration().await.unwrap();
+    assert_eq!(
+        *explorer
+            .endpoint_explorer()
+            .set_nic_mode_calls
+            .lock()
+            .unwrap(),
+        vec![(dpu_address, BlueFieldOperatingMode::Nic); 2],
+    );
+    assert!(
+        db::explored_managed_host::find_all(&env.pool)
+            .await?
+            .is_empty()
+    );
+    let host_endpoint = db::explored_endpoints::find_by_ips(&env.pool, vec![host_bmc.ip.parse()?])
+        .await?
+        .pop()
+        .unwrap();
+    assert!(host_endpoint.last_redfish_powercycle.is_some());
+    let host_address = std::net::SocketAddr::new(host_bmc.ip.parse()?, 443);
+    assert_eq!(
+        *explorer
+            .endpoint_explorer()
+            .redfish_power_control_calls
+            .lock()
+            .unwrap(),
+        vec![(host_address, libredfish::SystemPowerControl::PowerCycle)],
     );
 
     Ok(())
