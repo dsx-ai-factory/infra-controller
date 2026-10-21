@@ -152,13 +152,14 @@ settings that disable the source-location section and the `RUST_BACKTRACE`
 footer; do not re-enable them. An explicitly set `RUST_BACKTRACE=1` still captures
 a backtrace.
 
-For CLI error propagation, add `.context()` before every `?`. With source
+For operational CLI errors, add `.context()` before every `?`. With source
 locations hidden, this chain is the error message. Write each context to
 complete "while attempting to ..." so the error and its causes read coherently.
 
-Invalid invocations must produce Clap's `error:` prefix, usage, `--help` hint,
-and exit code `2`. Do not replace them with a generic `eyre!` that exits `1`
-without usage.
+Keep argument parsing and invocation validation on Clap's native parsing and
+exit paths. Invalid invocations must produce Clap's `error:` prefix, usage,
+`--help` hint, and exit code `2`. Do not replace them with a generic `eyre!`
+that exits `1` without usage.
 
 ### Required and global arguments
 

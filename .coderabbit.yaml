@@ -43,7 +43,11 @@ reviews:
         Report a defect introduced, made reachable, or materially worsened by
         this PR. Identify the reviewed revision, concrete trigger, and
         observable consequence. Compare with the base before flagging unchanged
-        behavior. Read the PR rationale, relevant construction paths, callers,
+        behavior. Exception for materially revised guidance: report conflicting
+        or ambiguous instructions that could cause concrete incorrect behavior,
+        even if inherited from the base. Cite the relevant wording, specific
+        misapplication, and observable consequence.
+        Read the PR rationale, relevant construction paths, callers,
         wrappers, and retained tests; check evidence that contradicts the claim.
         If proposing a remedy, verify that it fixes the stated problem under the
         actual framework and runner without violating another contract.
