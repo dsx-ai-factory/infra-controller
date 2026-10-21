@@ -65,6 +65,7 @@ struct State {
     include_ipv6_tenant: bool,
     quarantine_host: bool,
     post_config_wait_seen: bool,
+    astra_config: Option<rpc::forge::AstraConfig>,
 }
 
 const DHCP_GATE_CONFIG_VERSION: &str = "V1-T1748645613333257";
@@ -108,6 +109,210 @@ async fn dhcp_unavailability_retries_the_same_ipv6_network_configuration() -> ey
 async fn fmds_failure_applies_quarantine_and_retries_the_same_network_configuration()
 -> eyre::Result<()> {
     network_update_retries_the_same_configuration(true).await
+}
+
+/// An actual Weave failure must reach Core without withholding successful
+/// HBN/DHCP acknowledgements, and the same desired configuration must recover.
+#[tokio::test(flavor = "multi_thread")]
+async fn astra_failure_reports_without_blocking_network_configuration_and_recovers()
+-> eyre::Result<()> {
+    let repo_root = std::env::var("REPO_ROOT")
+        .or_else(|_| std::env::var("CONTAINER_REPO_ROOT"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    eyre::ensure!(
+        repo_root.join("dev/bin/ip").is_file(),
+        "astra recovery test requires repository fixtures; set REPO_ROOT to the checkout"
+    );
+    if std::env::var_os("ASTRA_RECOVERY_TEST_CHILD").is_none() {
+        // Keep fixture commands and environment overrides in a child process
+        // so those overrides cannot affect other tests in the parent process.
+        let inherited_path =
+            std::env::var_os("PATH").ok_or_else(|| eyre::eyre!("missing test PATH"))?;
+        let path = std::env::join_paths(
+            std::iter::once(repo_root.join("dev/bin"))
+                .chain(std::env::split_paths(&inherited_path)),
+        )?;
+        let mut command = tokio::process::Command::new(std::env::current_exe()?);
+        command
+            .args([
+                "--exact",
+                "tests::full::astra_failure_reports_without_blocking_network_configuration_and_recovers",
+                "--nocapture",
+            ])
+            .env("ASTRA_RECOVERY_TEST_CHILD", "true")
+            .env("DISABLE_TLS_ENFORCEMENT", "true")
+            .env("IGNORE_MGMT_VRF", "true")
+            .env("NO_DPU_CONTAINERS", "true")
+            .env("PATH", path)
+            .kill_on_drop(true);
+        // Both report phases allow 60 seconds, with time for startup and cleanup.
+        let output = tokio::time::timeout(Duration::from_secs(210), command.output()).await??;
+        eyre::ensure!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+            "astra recovery test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return Ok(());
+    }
+
+    // Keep the desired attachment and revision fixed through both phases.
+    // Recovery must come from retrying Weave, without a new configuration.
+    let expected_attachment = rpc::forge::AstraAttachment {
+        mac_address: "02:aa:bb:cc:dd:ee".to_string(),
+        vni: 100,
+        subnet_ipv4: "192.0.2.0".to_string(),
+        subnet_mask: 24,
+        attachment_type: Some(rpc::forge::SpxAttachmentType::Physical.into()),
+        revision: "test-revision".to_string(),
+        ..Default::default()
+    };
+    let state = Arc::new(Mutex::new(State {
+        virtualization_type: VpcVirtualizationType::EthernetVirtualizer,
+        loopback_ip_override: Some("2001:db8::1"),
+        astra_config: Some(rpc::forge::AstraConfig {
+            astra_attachments: vec![expected_attachment.clone()],
+        }),
+        ..Default::default()
+    }));
+    let (addr, server) = common::run_grpc_server(mock_core(state.clone())).await?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let dhcp_addr = listener.local_addr()?;
+    let dhcp_app = Router::new()
+        .route(
+            "/dhcp_server_control.DhcpServerControl/UpdateAndReloadConfig",
+            post(handle_dhcp_update),
+        )
+        .route(
+            "/dhcp_server_control.DhcpServerControl/GetDhcpTimestamps",
+            post(|| async { common::respond(()) }),
+        )
+        .with_state(state.clone());
+    let dhcp_server = tokio::spawn(async move { axum::serve(listener, dhcp_app).await });
+    let (socket, weave_state, weave_server) =
+        crate::astra_weave::tests::start_recording_weave_ew_vpc_mock_server_for_agent();
+    // Fail the Weave read while Core and DHCP remain available, isolating
+    // Astra failure from the other network configuration work.
+    weave_state.lock().await.reject_network_lists = true;
+
+    // The nested blocks save errors until their agent and server tasks have
+    // been stopped and joined; an early `?` must not skip fixture cleanup.
+    let result = async {
+        let directory = tempfile::tempdir()?;
+        let config_file = tempfile::NamedTempFile::new()?;
+        let mut options =
+            common::setup_agent_run_options(&addr, &directory, &config_file, false, &repo_root)?;
+        let Some(crate::AgentCommand::Run(run)) = options.cmd.as_mut() else {
+            eyre::bail!("test fixture did not configure an agent run");
+        };
+        run.dhcp_grpc_server = Some(format!("http://{dhcp_addr}"));
+        let config = fs::read_to_string(config_file.path())?
+            .replace("main-loop-idle-secs = 30", "main-loop-idle-secs = 1");
+        fs::write(config_file.path(), config)?;
+        fs::create_dir_all(directory.path().join("var/support/forge-dhcp/conf"))?;
+        let startup_path = directory.path().join(crate::nvue::PATH);
+        // A changed startup file proves HBN applied the configuration during
+        // the Weave failure; reported versions alone could miss a skipped write.
+        const PREVIOUS_NETWORK: &str = "previous network configuration\n";
+        fs::write(&startup_path, PREVIOUS_NETWORK)?;
+
+        let socket = socket
+            .to_str()
+            .ok_or_else(|| eyre::eyre!("test weave socket path is not UTF-8"))?
+            .to_string();
+        let agent = tokio::spawn(async move {
+            crate::astra_weave::TEST_WEAVE_EW_VPC_SOCKET_PATH
+                .scope(socket, crate::start(options))
+                .await
+        });
+        let result = async {
+            // First wait for the failed Astra attempt to reach the Core mock.
+            // Its report must still acknowledge the successful HBN/DHCP work.
+            let failed = wait_for_network_status(&state, |status| {
+                status.network_config_error.as_deref().is_some_and(|error| {
+                    error.contains("injected virtual network list failure")
+                })
+            })
+            .await?;
+            eyre::ensure!(
+                failed.astra_config_status == Some(rpc::forge::AstraConfigStatus::default()),
+                "failed astra attempt omitted its explicit unsuccessful report: {failed:?}"
+            );
+            eyre::ensure!(
+                failed.network_config_version.as_deref() == Some(DHCP_GATE_CONFIG_VERSION)
+                    && failed.instance_network_config_version.as_deref()
+                        == Some(DHCP_GATE_CONFIG_VERSION),
+                "astra failure withheld successful HBN/DHCP acknowledgements: {failed:?}"
+            );
+            eyre::ensure!(
+                state.lock().await.dhcp_updates.iter().any(|(rejected, _)| !rejected),
+                "DHCP did not accept the network configuration"
+            );
+            let startup = fs::read_to_string(&startup_path)?;
+            eyre::ensure!(startup != PREVIOUS_NETWORK, "HBN configuration was not applied");
+            serde_yaml::from_str::<Vec<serde_yaml::Value>>(&startup)?;
+
+            // Only the service failure changes. The next ordinary iteration
+            // must retry Astra while retaining the same network acknowledgements.
+            weave_state.lock().await.reject_network_lists = false;
+            let recovered = wait_for_network_status(&state, |status| {
+                status.astra_config_status.as_ref().is_some_and(|astra| {
+                    astra.astra_attachments_status.iter().any(|attachment| {
+                        attachment.status.as_ref().is_some_and(|status| {
+                            status.phase == rpc::forge::AstraPhase::PhaseReady as i32
+                        })
+                    })
+                })
+            })
+            .await?;
+            eyre::ensure!(
+                recovered.network_config_version == failed.network_config_version
+                    && recovered.instance_network_config_version
+                        == failed.instance_network_config_version
+                    && recovered.network_config_error.is_none(),
+                "astra recovery changed network acknowledgements or retained an error: {recovered:?}"
+            );
+            let astra = recovered.astra_config_status.as_ref().unwrap();
+            let [attachment] = astra.astra_attachments_status.as_slice() else {
+                eyre::bail!("unexpected recovered astra attachments: {astra:?}");
+            };
+            eyre::ensure!(
+                attachment.mac_address == expected_attachment.mac_address
+                    && attachment.vni == expected_attachment.vni as i32
+                    && attachment.revision == expected_attachment.revision,
+                "astra recovery did not acknowledge the unchanged attachment: {attachment:?}"
+            );
+            eyre::ensure!(!agent.is_finished(), "agent exited during astra recovery");
+            Ok::<_, eyre::Report>(())
+        }
+        .await;
+        agent.abort();
+        match agent.await {
+            Ok(Err(error)) => return Err(error).wrap_err("agent exited during astra recovery"),
+            Err(error) if !error.is_cancelled() => return Err(error).wrap_err("agent task failed"),
+            _ => {}
+        }
+        result
+    }
+    .await;
+    dhcp_server.abort();
+    server.abort();
+    let (dhcp_result, weave_result, core_result) =
+        tokio::join!(dhcp_server, weave_server.shutdown(), server);
+    match dhcp_result {
+        Ok(result) => result.wrap_err("mock DHCP control server exited")?,
+        Err(error) if !error.is_cancelled() => return Err(error).wrap_err("mock DHCP task failed"),
+        _ => {}
+    }
+    weave_result?;
+    if let Err(error) = core_result
+        && !error.is_cancelled()
+    {
+        return Err(error).wrap_err("mock core task failed");
+    }
+    result
 }
 
 /// Exercise both network failure boundaries through the real agent and Core
@@ -535,6 +740,8 @@ async fn handle_dhcp_update(
     common::respond(()).into_response()
 }
 
+/// Waits for a matching report accepted by the Core mock. A timeout includes
+/// the last report so a missing transition can be diagnosed from the failure.
 async fn wait_for_network_status(
     state: &Arc<Mutex<State>>,
     matches: impl Fn(&rpc::forge::DpuNetworkStatus) -> bool,
@@ -920,13 +1127,20 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
             .num_netconf_fetches
             .fetch_add(1, Ordering::SeqCst);
     }
-    let (virtualization_type, loopback_ip_override, include_ipv6_tenant, quarantine_host) = {
+    let (
+        virtualization_type,
+        loopback_ip_override,
+        include_ipv6_tenant,
+        quarantine_host,
+        astra_config,
+    ) = {
         let state = state.lock().await;
         (
             state.virtualization_type,
             state.loopback_ip_override,
             state.include_ipv6_tenant,
             state.quarantine_host,
+            state.astra_config.clone(),
         )
     };
     let config_version = if loopback_ip_override.is_some() {
@@ -1481,7 +1695,7 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         stateful_acls_enabled: true,
         instance: Some(instance),
         dpu_extension_services: vec![],
-        astra_config: None,
+        astra_config,
         // The FMDS scenario also exercises the required OVS side effect while
         // entering the quarantined tenant network; retries must not repeat it.
         use_admin_network_changed: quarantine_host.then_some(true),
