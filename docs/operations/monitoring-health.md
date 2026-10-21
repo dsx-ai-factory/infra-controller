@@ -130,7 +130,7 @@ labels = { site = "rno-dev7", cluster = "cluster-01", environment = "development
 
 Static endpoints reject inline `username` and `password` fields. Move those
 values into the shared file and select a profile, or supply a per-MAC override.
-See the [credentials schema and reload behavior](../../crates/health/README.md#static-endpoint-credentials).
+See the [credentials schema and reload behavior](https://github.com/dsx-ai-factory/infra-controller/blob/848c7e1433804b96d63dd4e3664b0e357ddbcca9/crates/health/README.md#static-endpoint-credentials).
 
 Configure direct switch host endpoints separately when desired:
 

@@ -299,7 +299,7 @@ Switch endpoints carry switch ID, serial number, rack ID, rack placement, and NV
 
 **For local and test deployments**, you can configure explicit machine, switch, or power-shelf identity with `[[endpoint_sources.static_bmc_endpoints]]`. Direct switch host endpoints can use `[[endpoint_sources.static_switch_host_endpoints]]` or `[[endpoint_sources.static_bmc_endpoints]]`. Note the following:
 
-- Static credentials come from the shared `endpoint_sources.static_credentials_file`; entries select a `credentials_profile` or use per-MAC overrides. Inline credentials are rejected. See the [credential file contract](../../crates/health/README.md#static-endpoint-credentials).
+- Static credentials come from the shared `endpoint_sources.static_credentials_file`; entries select a `credentials_profile` or use per-MAC overrides. Inline credentials are rejected. See the [credential file contract](https://github.com/dsx-ai-factory/infra-controller/blob/848c7e1433804b96d63dd4e3664b0e357ddbcca9/crates/health/README.md#static-endpoint-credentials).
 - Static machine endpoints can include the same serial number, rack placement, and NVLink domain UUID metadata
 - Static switch endpoints can include serial number, rack placement, and NVLink domain UUID metadata
 - Static power-shelf endpoints can include serial number and NVLink domain UUID metadata
