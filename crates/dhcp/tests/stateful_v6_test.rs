@@ -768,6 +768,189 @@ fn relay_identity_scopes_expiry_and_refreshes_the_cache() -> Result<(), eyre::Re
     Ok(())
 }
 
+// Firmware and the installed OS use different DUIDs on the same physical NIC.
+#[test]
+fn boot_stage_duid_change_reuses_the_mac_owned_address() -> Result<(), eyre::Report> {
+    let idx = 0x47;
+    let h = Harness::new();
+    let address = DHCPv6Factory::mock_addr(idx);
+    let firmware_duid = DHCPv6Factory::duid_uuid(idx);
+    let os_duid = DHCPv6Factory::duid_en(12);
+    for duid in [&firmware_duid, &os_duid] {
+        let advertise = send_and_recv_v6(
+            &h.socket,
+            DHCPv6Factory::solicit_with_duid(idx, duid.clone(), true),
+        )?
+        .expect("boot-stage SOLICIT should receive an ADVERTISE");
+        assert_eq!(DHCPv6Factory::ia_addr(&advertise), Some(address));
+        if duid == &os_duid {
+            assert!(
+                h.active_lease(address, &DHCPv6Factory::duid_hex(&firmware_duid))?
+                    .is_some(),
+                "SOLICIT must preserve the firmware lease until REQUEST"
+            );
+        }
+        let reply = send_and_recv_v6(
+            &h.socket,
+            DHCPv6Factory::request_with_duid(
+                idx,
+                DHCPv6Factory::server_id(&advertise),
+                address,
+                duid.clone(),
+                true,
+            ),
+        )?
+        .expect("boot-stage REQUEST must complete despite a previous DUID lease");
+        assert_eq!(DHCPv6Factory::ia_addr(&reply), Some(address));
+        h.wait_for_active_lease(address, &DHCPv6Factory::duid_hex(duid))?;
+    }
+    assert!(
+        h.active_lease(address, &DHCPv6Factory::duid_hex(&firmware_duid))?
+            .is_none()
+    );
+    assert!(
+        h.api_server.expired_leases().is_empty(),
+        "a boot-stage handoff must not expire the Core allocation"
+    );
+    let stats = h.kea.statistics()?;
+    assert_eq!(stats["subnet[1].assigned-nas"][0][0], 1);
+    if let Some(pool) = stats.get("subnet[1].pool[0].assigned-nas") {
+        assert_eq!(pool[0][0], 1);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn address_collision_does_not_replace_another_mac_lease() -> Result<(), eyre::Report> {
+    let h = Harness::new();
+    let owner = 0x48;
+    let other = 0x49;
+    let (_, address) = h.establish_lease(owner)?;
+    h.api_server
+        .set_address_override(&DHCPv6Factory::mac_string(other), &address.to_string());
+    let response = send_and_recv_v6(&h.socket, DHCPv6Factory::solicit(other))?;
+    assert!(response.as_ref().and_then(DHCPv6Factory::ia_addr).is_none());
+    assert!(
+        h.active_lease(address, &DHCPv6Factory::duid_ll_hex(owner))?
+            .is_some()
+    );
+    // A rejected collision must not strand Kea in pool-wide allocation retries.
+    h.establish_lease(0x50)?;
+    Ok(())
+}
+
+// A cached lease can be updated by an existing-DUID REQUEST without SELECT.
+// Hold that transaction at Core discovery and require the new boot stage to retry.
+#[test]
+fn handoff_waits_for_existing_duid_transaction() -> Result<(), eyre::Report> {
+    let idx = 0x51;
+    let mut h = Harness::new();
+    let (server_id, address) = h.establish_lease(idx)?;
+    h.kea.restart()?;
+    let (entered, resume) = h.api_server.pause_next_discovery();
+    h.socket
+        .send(&DHCPv6Factory::request(idx, server_id.clone(), address))?;
+    h._rt
+        .block_on(async { tokio::time::timeout(METRIC_TIMEOUT, entered).await })??;
+    let new_duid = DHCPv6Factory::duid_en(19);
+    let request =
+        DHCPv6Factory::request_with_duid(idx, server_id.clone(), address, new_duid.clone(), true);
+    h.socket.send(&request)?;
+    assert!(
+        wait_for_v6_drop_metric_at_least(
+            h.kea.metrics_endpoint(),
+            "lease_transaction_busy",
+            1.0,
+            METRIC_TIMEOUT
+        ),
+        "a competing boot-stage packet must retry before Kea reads or mutates leases"
+    );
+    assert!(
+        h.active_lease(address, &DHCPv6Factory::duid_ll_hex(idx))?
+            .is_some()
+    );
+    resume.send(()).unwrap();
+    let mut packet = [0u8; 1500];
+    h.socket.recv(&mut packet)?;
+    let response = send_and_recv_v6(&h.socket, request)?.expect("handoff retry should complete");
+    assert_eq!(DHCPv6Factory::ia_addr(&response), Some(address));
+    h.wait_for_active_lease(address, &DHCPv6Factory::duid_hex(&new_duid))?;
+    let old_renew = send_and_recv_v6(&h.socket, DHCPv6Factory::renew(idx, server_id, address))?;
+    assert!(
+        old_renew
+            .as_ref()
+            .and_then(DHCPv6Factory::ia_addr)
+            .is_none()
+    );
+    assert!(
+        h.active_lease(address, &DHCPv6Factory::duid_hex(&new_duid))?
+            .is_some()
+    );
+    assert!(h.api_server.expired_leases().is_empty());
+    Ok(())
+}
+
+#[test]
+fn native_packet_exception_releases_transaction_guard() -> Result<(), eyre::Report> {
+    let idx = 0x53;
+    let h = Harness::new();
+    assert!(send_and_recv_v6(&h.socket, DHCPv6Factory::request_without_server_id(idx))?.is_none());
+    let discovery = &h.api_server.discoveries()[0];
+    assert_eq!(discovery.mac_address, DHCPv6Factory::mac_string(idx));
+    assert_eq!(
+        discovery.message_kind,
+        Some(rpc::MessageKind::V6Request as i32)
+    );
+    assert!(
+        h.kea
+            .wait_for_log("DHCP6_REQUIRED_OPTIONS_CHECK_FAIL", MEMFILE_TIMEOUT)
+    );
+    assert!(h.read_leases()?.is_empty());
+    h.establish_lease(idx + 1)?;
+    Ok(())
+}
+
+#[test]
+fn busy_reclamation_preserves_lease_and_counters_until_retry() -> Result<(), eyre::Report> {
+    let idx = 0x52;
+    let h = Harness::new_with_config(short_expiry_config());
+    let (_, address) = h.establish_lease(idx)?;
+    let (entered, resume) = h.api_server.pause_next_discovery();
+    h.socket.send(&DHCPv6Factory::solicit(idx + 1))?;
+    h._rt
+        .block_on(async { tokio::time::timeout(METRIC_TIMEOUT, entered).await })??;
+    // The compensation sample proves reclamation actually ran while busy.
+    let deadline = Instant::now() + EXPIRY_TIMEOUT;
+    let stats = loop {
+        let stats = h.kea.statistics()?;
+        let assigned = stats["subnet[1].assigned-nas"].as_array().unwrap();
+        if assigned[0][0] == 1 && assigned.iter().any(|sample| sample[0] == 2) {
+            break stats;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Kea did not attempt busy reclamation"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(h.api_server.expired_leases().is_empty());
+    assert!(
+        h.active_lease(address, &DHCPv6Factory::duid_ll_hex(idx))?
+            .is_some()
+    );
+    assert_eq!(stats["subnet[1].assigned-nas"][0][0], 1);
+    assert_eq!(stats["reclaimed-leases"][0][0], 0);
+    if let Some(pool) = stats.get("subnet[1].pool[0].assigned-nas") {
+        assert_eq!(pool[0][0], 1);
+    }
+    resume.send(()).unwrap();
+    let mut packet = [0u8; 1500];
+    h.socket.recv(&mut packet)?;
+    h.wait_for_scoped_expiry(address, &DHCPv6Factory::mac_string(idx));
+    Ok(())
+}
+
 // Prove RENEW and REBIND independently refuse to migrate a persisted lease
 // when a cache miss returns a different API-owned address.
 #[test]
