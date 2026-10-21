@@ -59,18 +59,8 @@ fn main() {
         .file(format!("{kea_shim_root}/carbide_logger.cc"))
         .define("CARBIDE_KEA_HOOKS_VERSION", hooks_version_string.as_str())
         .include(&kea_include_path);
-    // Debian's Kea 2.2 development package omits this header, although its
-    // installed network.h includes it. Keep the exact upstream declaration.
-    if hooks_version == 20200
-        && !std::path::Path::new(&kea_include_path)
-            .join("dhcpsrv/cfg_globals.h")
-            .exists()
-    {
-        shim.include(format!("{kea_shim_root}/compat/kea-2.2"));
-    }
     shim.pic(true).compile("keashim");
     println!("cargo:rerun-if-changed={hooks_header}");
-    println!("cargo:rerun-if-changed=src/kea/compat/kea-2.2/dhcpsrv/cfg_globals.h");
     println!("cargo:rerun-if-env-changed=KEA_INCLUDE_PATH");
     println!("cargo:rerun-if-env-changed=KEA_LIB_PATH");
 
