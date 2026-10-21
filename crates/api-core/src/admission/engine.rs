@@ -888,7 +888,7 @@ mod tests {
             Duration::from_secs(120),
             Duration::from_secs(60),
         )
-            .expect("test admission limits are valid");
+        .expect("test admission limits are valid");
         let client_limits = limits.default_client();
         let unused_global_capacity =
             limits.max_work_in_flight() - client_limits.max_work_in_flight();
