@@ -21,8 +21,47 @@
 #include <dhcp/option6_iaaddr.h>
 #include <dhcp/option6_status_code.h>
 #include <vector>
+#include <dhcpsrv/lease_mgr_factory.h>
+#include <atomic>
+#if CARBIDE_KEA_HOOKS_VERSION >= 20400
+#include <dhcpsrv/cfgmgr.h>
+#endif
+#include <stats/stats_mgr.h>
 
 isc::log::Logger logger("carbide-callouts");
+
+namespace {
+// Kea's allocation locks do not cover existing-DUID REQUEST, renewal, or
+// release. Hold ownership from packet receive until all native persistence
+// has finished. Contending clients retry instead of blocking worker threads.
+std::atomic_flag lease6_busy = ATOMIC_FLAG_INIT;
+const std::string lease6_guard_context = "carbide_lease6_transaction";
+struct Lease6Transaction {
+  bool owned = false;
+  ~Lease6Transaction() { if (owned) lease6_busy.clear(std::memory_order_release); }
+};
+
+bool own_lease6_transaction(CalloutHandle &handle) {
+  boost::shared_ptr<Lease6Transaction> transaction;
+  try {
+    handle.getContext(lease6_guard_context, transaction);
+  } catch (const isc::hooks::NoSuchCalloutContext &) {
+  }
+  if (transaction) {
+    return true;
+  }
+  // Allocate before claiming ownership so allocation failure cannot strand it.
+  transaction.reset(new Lease6Transaction());
+  if (lease6_busy.test_and_set(std::memory_order_acquire)) {
+    // A failed claimant must not release another transaction's flag.
+    transaction.reset();
+    return false;
+  }
+  transaction->owned = true;
+  handle.setContext(lease6_guard_context, transaction);
+  return true;
+}
+}
 
 const int IPV4_ADDR_SIZEB = 4;
 const int IPV6_ADDR_SIZEB = 16;
@@ -735,9 +774,9 @@ int refuse_lease6_address_migration(CalloutHandle &handle, Lease6Ptr lease6,
     LOG_WARN(logger, "LOG_CARBIDE_LEASE6_OVERRIDE: %1")
         .arg(hook_name + ": refusing to migrate existing lease " +
              lease6->addr_.toText() + " -> " + carbide_addr.toText());
-    // Kea's public hook surface does not expose a safe lease re-key here.
-    // Drop instead of sending a successful renewal for the API-stale address.
-    handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
+    // RENEW/REBIND honor SKIP, not DROP, before their database update.
+    // The send-path address guard separately suppresses the stale response.
+    handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
     return 1;
   }
 
@@ -1232,6 +1271,13 @@ int pkt6_receive(CalloutHandle &handle) {
     return 1;
   }
 
+  handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
+  if (!own_lease6_transaction(handle)) {
+    record_dropped_v6_request("lease_transaction_busy");
+    return 0;
+  }
+  handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
+
   LOG_INFO(logger, "LOG_CARBIDE_PKT6_RECEIVE: %1")
       .arg(query6_ptr->toText());
 
@@ -1305,6 +1351,22 @@ int pkt6_receive(CalloutHandle &handle) {
       }
     }
     handle.setContext(REQUESTED_PREFIX_IAIDS, prefix_iaids);
+    if (query6_ptr->getType() == DHCPV6_RENEW || query6_ptr->getType() == DHCPV6_REBIND) {
+      // Kea may allocate on RENEW when the old DUID no longer owns a lease.
+      // A delayed renewal must not replace another boot stage's lease.
+      handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
+      isc::asiolink::IOAddress address("::");
+      if (machine_ipv6_address(machine, address)) {
+        const auto current = isc::dhcp::LeaseMgrFactory::instance().getLease6(Lease::TYPE_NA, address);
+        const auto client_id = query6_ptr->getOption(D6O_CLIENTID);
+        const auto ia = boost::dynamic_pointer_cast<Option6IA>(query6_ptr->getOption(D6O_IA_NA));
+        if (current && (!current->duid_ || !client_id || current->duid_->getDuid() != client_id->getData() || !ia || current->iaid_ != ia->getIAID())) {
+          record_dropped_v6_request("stale_lease_identity");
+          return 0;
+        }
+      }
+      handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
+    }
     // CONFIRM cache hits must be visible as top-level Success in pkt6_send.
     if (query6_ptr->getType() == DHCPV6_CONFIRM) {
       handle.setContext("confirm_on_link", true);
@@ -1349,9 +1411,95 @@ int lease6_select(CalloutHandle &handle) {
     // Some Kea versions may not always pass this, that's fine.
   }
 
-  return override_lease6_address(
-      handle, lease6, "lease6_select",
-      fake_allocation ? " (SOLICIT, not persisted)" : " (REQUEST, will persist)");
+  // Kea catches hook exceptions; reject allocation until all checks succeed.
+  handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
+  const auto proposed_address = lease6 ? lease6->addr_ : isc::asiolink::IOAddress("::");
+  if (override_lease6_address(
+          handle, lease6, "lease6_select",
+          fake_allocation ? " (SOLICIT, not persisted)" : " (REQUEST, will persist)") != 0) {
+    return 1;
+  }
+
+  // Firmware and the OS may use different DUIDs on the same NIC. Kea indexes
+  // leases by address and otherwise retries its entire pool when the hook
+  // redirects a new allocation onto that NIC's existing lease.
+  auto &leases = isc::dhcp::LeaseMgrFactory::instance();
+  // An unchanged address may be Kea's reuseExpiredLease path, which performs
+  // an update after this hook. Never delete or re-key that row.
+  if (proposed_address == lease6->addr_) {
+    handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
+    return 0;
+  }
+  if (leases.getLease6(lease6->type_, proposed_address)) {
+    handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
+    return 1;
+  }
+  Lease6Ptr previous = leases.getLease6(lease6->type_, lease6->addr_);
+  if (!previous) {
+    handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
+    return 0;
+  }
+  std::string previous_mac;
+  if (previous->hwaddr_ && !previous->hwaddr_->hwaddr_.empty()) {
+    previous_mac = previous->hwaddr_->toText(false);
+  } else if (previous->duid_) {
+    const auto &duid = previous->duid_->getDuid();
+    char *mac = carbide_mac_from_duid(nullable_data(duid), duid.size());
+    if (mac) {
+      previous_mac = mac;
+      carbide_free_mac_string(mac);
+    }
+  }
+  char *selected_mac = nullptr;
+  boost::shared_ptr<Machine> machine;
+  handle.getContext("machine", machine);
+  selected_mac = machine_get_discovery_mac(machine.get());
+  const bool same_owner = selected_mac && previous_mac == selected_mac &&
+                          previous->subnet_id_ == lease6->subnet_id_ &&
+                          previous->state_ == Lease::STATE_DEFAULT &&
+                          lease6->type_ == Lease::TYPE_NA;
+  if (selected_mac) {
+    machine_free_discovery_mac(selected_mac);
+  }
+  if (!same_owner) {
+    LOG_WARN(logger, "LOG_CARBIDE_LEASE6_OVERRIDE: %1")
+        .arg("lease6_select: refusing allocation over another or unknown MAC's lease");
+    handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
+    return 1;
+  }
+  // SOLICIT is only an offer: retain the previous lease until REQUEST commits
+  // the new boot-stage identity. Do not notify Core of expiry during a handoff.
+  if (!fake_allocation) {
+    if (!leases.deleteLease(previous)) {
+      handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
+      return 1;
+    }
+    Subnet6Ptr subnet;
+    handle.getArgument("subnet6", subnet);
+    // Balance createLease6's active-lease increments; cumulative allocations
+    // still count the new boot-stage lease.
+    if (subnet->inPool(Lease::TYPE_NA, previous->addr_)) {
+      using isc::stats::StatsMgr;
+      StatsMgr::instance().addValue(
+          StatsMgr::generateName("subnet", previous->subnet_id_, "assigned-nas"),
+          static_cast<int64_t>(-1));
+      // Per-pool gauges and Pool::getID were added in Kea 2.4.
+#if CARBIDE_KEA_HOOKS_VERSION >= 20400
+      auto pool = subnet->getPool(Lease::TYPE_NA, previous->addr_, false);
+      if (pool) {
+        const auto pool_stat = StatsMgr::generateName(
+            "subnet", previous->subnet_id_,
+            StatsMgr::generateName("pool", pool->getID(), "assigned-nas"));
+        // Kea 2.2 has no per-pool gauges; later versions initialize these.
+        if (StatsMgr::instance().getObservation(pool_stat)) {
+          StatsMgr::instance().addValue(pool_stat, static_cast<int64_t>(-1));
+        }
+      }
+#endif
+    }
+  }
+  handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
+  return 0;
 }
 
 int lease6_renew(CalloutHandle &handle) {
@@ -1498,6 +1646,48 @@ int pkt6_send(CalloutHandle &handle) {
 }
 
 int lease6_expire(CalloutHandle &handle) {
+  // Kea catches hook exceptions and otherwise continues reclamation. Establish
+  // the veto before any lookup, and leave its counter compensation in place
+  // unless the persisted lease has been successfully revalidated.
+  handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
+  Lease6Ptr lease;
+  handle.getArgument("lease6", lease);
+  if (!lease) {
+    return 0;
+  }
+  const auto compensate = [&](int direction) {
+    // Kea 2.2 and 2.4 count even a skipped reclamation. Neutralize those
+    // updates because neither the lease nor Core's allocation was reclaimed.
+    using isc::stats::StatsMgr;
+    auto &stats = StatsMgr::instance();
+    const char *assigned = lease->type_ == Lease::TYPE_NA ? "assigned-nas" : "assigned-pds";
+    if (lease->type_ == Lease::TYPE_NA || lease->type_ == Lease::TYPE_PD) {
+      stats.addValue(StatsMgr::generateName("subnet", lease->subnet_id_, assigned), int64_t(direction));
+#if CARBIDE_KEA_HOOKS_VERSION >= 20400
+      auto subnet = CfgMgr::instance().getCurrentCfg()->getCfgSubnets6()->getBySubnetId(lease->subnet_id_);
+      auto pool = subnet ? subnet->getPool(lease->type_, lease->addr_, false) : PoolPtr();
+      if (pool) {
+        const char *pool_type = lease->type_ == Lease::TYPE_NA ? "pool" : "pd-pool";
+        stats.addValue(StatsMgr::generateName("subnet", lease->subnet_id_,
+            StatsMgr::generateName(pool_type, pool->getID(), assigned)), int64_t(direction));
+        stats.addValue(StatsMgr::generateName("subnet", lease->subnet_id_,
+            StatsMgr::generateName(pool_type, pool->getID(), "reclaimed-leases")), int64_t(-direction));
+      }
+#endif
+    }
+    stats.addValue("reclaimed-leases", int64_t(-direction));
+    stats.addValue(StatsMgr::generateName("subnet", lease->subnet_id_, "reclaimed-leases"), int64_t(-direction));
+  };
+  compensate(1);
+  if (!own_lease6_transaction(handle)) {
+    return 0;
+  }
+  const auto current = isc::dhcp::LeaseMgrFactory::instance().getLease6(lease->type_, lease->addr_);
+  if (!current || *current != *lease) {
+    return 0;
+  }
+  compensate(-1);
+  handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
   return handle_carbide_lease6_end(handle, "lease6_expire");
 }
 }
