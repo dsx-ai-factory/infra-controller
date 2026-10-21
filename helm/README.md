@@ -139,6 +139,10 @@ The configured issuer and any cert-manager approver policy must allow both
 requested URI/DNS identities, durations, key profile, and usages. Creating the
 Kubernetes Secret does not install or bind the server identity on a switch.
 
+`nico-bmc-proxy.switchTls` issues the proxy its own client certificate the same
+way, for switches whose NVUE REST API requires one, and points the proxy at it.
+See the [nico-bmc-proxy chart README](charts/nico-bmc-proxy/README.md#switch-client-tls).
+
 ### Grafana Dashboards
 
 The chart packages six dashboards built from NICo's exported Prometheus

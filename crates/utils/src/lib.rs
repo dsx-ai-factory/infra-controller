@@ -30,6 +30,7 @@ pub mod metrics;
 pub mod none_if_empty;
 pub mod periodic_timer;
 pub mod redfish;
+pub mod reloading;
 #[cfg(feature = "shutdown-handler")]
 pub mod shutdown_handler;
 pub mod sku;
