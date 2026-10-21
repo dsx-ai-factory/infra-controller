@@ -4284,9 +4284,7 @@ impl Api {
             let machine = match db::machine::find_one(&mut txn, &machine_id, search_config).await {
                 Err(err) => {
                     tracing::warn!(%machine_id, error = %err, "failed loading machine");
-                    return Err(CarbideError::InvalidArgument(
-                        "err loading machine".to_string(),
-                    ));
+                    return Err(err.into());
                 }
                 Ok(None) => {
                     tracing::info!(%machine_id, "machine not found");
