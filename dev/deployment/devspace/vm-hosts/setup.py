@@ -90,6 +90,7 @@ def main():
         "nico-dns",
         "nico-ntp-client",
         "nico-dhcp",
+        "nico-dhcp6",
     ):
         services[name] = json.loads(kubectl("get", "service", name, "-o", "json"))[
             "spec"
@@ -227,6 +228,7 @@ def main():
         kubectl("patch", "configmap", "nico-dhcp-config", "--type=merge", "-p", patch)
         kubectl("rollout", "restart", "deployment/nico-dhcp")
     kubectl("rollout", "status", "deployment/nico-dhcp", "--timeout=300s")
+    kubectl("rollout", "status", "deployment/nico-dhcp6", "--timeout=300s")
 
     for suffix, args in (
         (
@@ -240,6 +242,24 @@ def main():
                 "-i",
                 bridge,
                 services["nico-dhcp"],
+            ],
+        ),
+        (
+            "dhcp6",
+            [
+                "python3",
+                "/usr/local/lib/nico-dhcp6-relay.py",
+                "--interface",
+                lab.BRIDGE,
+                "--link-address",
+                str(ipaddress.ip_network(lab.IPV6_SUBNET).network_address + 1),
+                "--server",
+                services["nico-dhcp6"],
+                *[
+                    arg
+                    for host in inventory["targets"]
+                    for arg in ("--mac", host["host_mac"])
+                ],
             ],
         ),
     ):
@@ -257,6 +277,28 @@ def main():
             ["--network", "host", "--cap-add", "NET_RAW", "--cap-add", "NET_ADMIN"],
             args,
         )
+    radvd = root / "radvd.conf"
+    radvd.write_text(
+        f"interface {lab.BRIDGE} {{ AdvSendAdvert on; AdvManagedFlag on; "
+        f"AdvOtherConfigFlag on; prefix {lab.IPV6_SUBNET} {{ AdvOnLink on; AdvAutonomous off; }}; }};\n"
+    )
+    lab.container(
+        root,
+        f"{lab.NAME}-ra",
+        lab.LIBVIRT_IMAGE,
+        [
+            "--network",
+            "host",
+            "--cap-add",
+            "NET_RAW",
+            "--cap-add",
+            "NET_ADMIN",
+            "-v",
+            f"{radvd}:/etc/radvd.conf:ro",
+        ],
+        ["radvd", "-n", "-m", "stderr"],
+    )
+
     lab.resume_paused(root)
     segments = json.loads(admin("-f", "json", "network-segment", "show"))[
         "network_segments"
@@ -279,6 +321,8 @@ def main():
             "host-inband",
             "--prefix",
             lab.IPV4_SUBNET,
+            "--prefix",
+            lab.IPV6_SUBNET,
             "--gateway",
             "10.84.30.1",
             "--reserve-first",

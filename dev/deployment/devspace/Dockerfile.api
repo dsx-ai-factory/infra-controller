@@ -29,6 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   iproute2 \
   iputils-ping \
   kea-dhcp4-server=${KEA_VERSION} \
+  kea-dhcp6-server=${KEA_VERSION} \
   libssh-4 \
   libudev1 \
   tpm2-tools \
