@@ -148,6 +148,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_hosts_unhealthy_by_probe_id_count</td><td>gauge</td><td>Number of objects which reported a certain Health Probe Alert</td></tr>
 <tr><td>carbide_hosts_usable_count</td><td>gauge</td><td>Number of remaining hosts in the NICo deployment available for immediate instance creation</td></tr>
 <tr><td>carbide_hosts_with_bios_password_set</td><td>gauge</td><td>Number of hosts in the system that have their BIOS password set.</td></tr>
+<tr><td>carbide_hosts_with_scout_heartbeat_timeout</td><td>gauge</td><td>Scout heartbeat timeout status for hosts</td></tr>
 <tr><td>carbide_ib_monitor_fabrics_count</td><td>gauge</td><td>Number of monitored InfiniBand fabrics</td></tr>
 <tr><td>carbide_ib_monitor_iteration_latency_milliseconds</td><td>histogram</td><td>The time it took to perform one IB fabric monitor iteration</td></tr>
 <tr><td>carbide_ib_monitor_machine_ib_status_updates_count</td><td>gauge</td><td>Number of Machines whose InfiniBand status observation was updated</td></tr>
