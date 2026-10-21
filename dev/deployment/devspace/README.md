@@ -379,11 +379,10 @@ The REST images are built from the existing `rest-api/docker/local` Dockerfiles 
 
 ## Running DevSpace on macOS with vfkit
 
-This integration requires the shared DevSpace changes in
-[PR #7078](https://github.com/dsx-ai-factory/infra-controller/pull/7078), which
-includes the PXE work from
+This integration uses the shared DevSpace changes merged into `main` in
+[PR #7078](https://github.com/dsx-ai-factory/infra-controller/pull/7078), including
+the PXE work from
 [PR #5584](https://github.com/dsx-ai-factory/infra-controller/pull/5584).
-Until that prerequisite merges, use a checkout combining it with this change.
 The launcher delegates host preparation, deployment, and readiness checks to
 those shared scripts; it does not supply a separate DevSpace implementation.
 
