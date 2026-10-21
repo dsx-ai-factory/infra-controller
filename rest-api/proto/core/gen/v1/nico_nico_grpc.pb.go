@@ -718,7 +718,7 @@ type ForgeClient interface {
 	FindInstanceByMachineID(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*InstanceList, error)
 	// nico-dpu-agent -> nico-core-api
 	GetManagedHostNetworkConfig(ctx context.Context, in *ManagedHostNetworkConfigRequest, opts ...grpc.CallOption) (*ManagedHostNetworkConfigResponse, error)
-	RecordDpuNetworkStatus(ctx context.Context, in *DpuNetworkStatus, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	RecordDpuNetworkStatus(ctx context.Context, in *DpuNetworkStatus, opts ...grpc.CallOption) (*DpuNetworkStatusResponse, error)
 	// Lists all health report sources for a Machine
 	ListMachineHealthReports(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*ListHealthReportResponse, error)
 	// Adds a health report source for a Machine
@@ -2383,9 +2383,9 @@ func (c *forgeClient) GetManagedHostNetworkConfig(ctx context.Context, in *Manag
 	return out, nil
 }
 
-func (c *forgeClient) RecordDpuNetworkStatus(ctx context.Context, in *DpuNetworkStatus, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (c *forgeClient) RecordDpuNetworkStatus(ctx context.Context, in *DpuNetworkStatus, opts ...grpc.CallOption) (*DpuNetworkStatusResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(emptypb.Empty)
+	out := new(DpuNetworkStatusResponse)
 	err := c.cc.Invoke(ctx, Forge_RecordDpuNetworkStatus_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
@@ -7220,7 +7220,7 @@ type ForgeServer interface {
 	FindInstanceByMachineID(context.Context, *MachineId) (*InstanceList, error)
 	// nico-dpu-agent -> nico-core-api
 	GetManagedHostNetworkConfig(context.Context, *ManagedHostNetworkConfigRequest) (*ManagedHostNetworkConfigResponse, error)
-	RecordDpuNetworkStatus(context.Context, *DpuNetworkStatus) (*emptypb.Empty, error)
+	RecordDpuNetworkStatus(context.Context, *DpuNetworkStatus) (*DpuNetworkStatusResponse, error)
 	// Lists all health report sources for a Machine
 	ListMachineHealthReports(context.Context, *MachineId) (*ListHealthReportResponse, error)
 	// Adds a health report source for a Machine
@@ -8353,7 +8353,7 @@ func (UnimplementedForgeServer) FindInstanceByMachineID(context.Context, *Machin
 func (UnimplementedForgeServer) GetManagedHostNetworkConfig(context.Context, *ManagedHostNetworkConfigRequest) (*ManagedHostNetworkConfigResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetManagedHostNetworkConfig not implemented")
 }
-func (UnimplementedForgeServer) RecordDpuNetworkStatus(context.Context, *DpuNetworkStatus) (*emptypb.Empty, error) {
+func (UnimplementedForgeServer) RecordDpuNetworkStatus(context.Context, *DpuNetworkStatus) (*DpuNetworkStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RecordDpuNetworkStatus not implemented")
 }
 func (UnimplementedForgeServer) ListMachineHealthReports(context.Context, *MachineId) (*ListHealthReportResponse, error) {

@@ -231,6 +231,7 @@ async fn record_dpu_network_status(api: &Api, dpu_machine_id: DpuMachineId) {
         dpu_extension_services,
         astra_config_status: None,
         lldp: None,
+        lldp_acknowledgment_supported: false,
     }))
     .await
     .expect("DPU network status should be recorded");

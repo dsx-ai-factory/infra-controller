@@ -276,8 +276,10 @@ impl ApiClient {
                 dpu_extension_services: vec![],
                 astra_config_status: None,
                 lldp: None,
+                lldp_acknowledgment_supported: false,
             })
             .await
+            .map(|_| ())
             .map_err(ClientApiError::InvocationError)
     }
 

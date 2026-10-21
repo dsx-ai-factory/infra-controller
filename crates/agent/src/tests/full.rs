@@ -259,6 +259,10 @@ async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) ->
                     && rejected.instance_network_config_version.is_none(),
                 "rejected configuration was acknowledged: {rejected:?}"
             );
+            eyre::ensure!(
+                rejected.lldp_acknowledgment_supported,
+                "agent did not advertise separate LLDP acknowledgment support"
+            );
             if fail_fmds_route {
                 let startup: Vec<serde_yaml::Value> =
                     serde_yaml::from_str(&fs::read_to_string(&startup_path)?)?;

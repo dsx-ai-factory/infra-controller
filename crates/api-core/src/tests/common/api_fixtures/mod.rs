@@ -2347,9 +2347,10 @@ pub(in crate::tests) async fn network_configured_with_health_and_ext_services(
         dpu_health,
         extension_services_state,
         None,
+        false,
     )
     .await
-    .unwrap()
+    .unwrap();
 }
 
 /// Fake an iteration of forge-dpu-agent that attaches `lldp` to its network status report.
@@ -2358,9 +2359,9 @@ pub(in crate::tests) async fn network_configured_with_lldp(
     dpu_machine_id: &DpuMachineId,
     lldp: rpc::forge::LldpReport,
 ) {
-    try_network_configured_with_lldp(env, dpu_machine_id, lldp)
+    try_network_configured_with_lldp(env, dpu_machine_id, lldp, true)
         .await
-        .unwrap()
+        .unwrap();
 }
 
 /// Like [`network_configured_with_lldp`], but returns the status report's result.
@@ -2368,8 +2369,17 @@ pub(in crate::tests) async fn try_network_configured_with_lldp(
     env: &TestEnv,
     dpu_machine_id: &DpuMachineId,
     lldp: rpc::forge::LldpReport,
-) -> Result<(), tonic::Status> {
-    report_network_status(env, dpu_machine_id, None, None, Some(lldp)).await
+    lldp_acknowledgment_supported: bool,
+) -> Result<rpc::forge::DpuNetworkStatusResponse, tonic::Status> {
+    report_network_status(
+        env,
+        dpu_machine_id,
+        None,
+        None,
+        Some(lldp),
+        lldp_acknowledgment_supported,
+    )
+    .await
 }
 
 // This fixture reports the compatibility fields populated for older agents.
@@ -2380,7 +2390,8 @@ async fn report_network_status(
     dpu_health: Option<rpc::health::HealthReport>,
     extension_services_state: Option<rpc::forge::DpuExtensionServiceDeploymentStatus>,
     lldp: Option<rpc::forge::LldpReport>,
-) -> Result<(), tonic::Status> {
+    lldp_acknowledgment_supported: bool,
+) -> Result<rpc::forge::DpuNetworkStatusResponse, tonic::Status> {
     let network_config = env
         .api
         .get_managed_host_network_config(Request::new(
@@ -2516,6 +2527,7 @@ async fn report_network_status(
         dpu_extension_services,
         astra_config_status: None,
         lldp,
+        lldp_acknowledgment_supported,
     };
     tracing::trace!(
         network_config_version = %status.network_config_version.as_ref().unwrap(),
@@ -2526,7 +2538,7 @@ async fn report_network_status(
     env.api
         .record_dpu_network_status(Request::new(status))
         .await
-        .map(|_| ())
+        .map(tonic::Response::into_inner)
 }
 
 /// Fake hardware health service reporting health

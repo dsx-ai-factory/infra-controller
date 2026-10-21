@@ -1097,6 +1097,7 @@ impl MainLoop {
             dpu_extension_services: vec![],
             astra_config_status: None,
             lldp: None,
+            lldp_acknowledgment_supported: true,
         };
 
         // `read` does not block
@@ -1522,17 +1523,14 @@ impl MainLoop {
                     .map(|collected| self.lldp_cache.classify(collected));
                 status_out.lldp = lldp.clone();
 
-                if record_network_status(
+                if let Ok(response) = record_network_status(
                     status_out,
                     &self.forge_api_server,
                     &self.forge_client_config,
                 )
                 .await
-                .is_ok()
-                    && let Some(lldp) = lldp
                 {
-                    // The cache advances only once nico-api has the report
-                    self.lldp_cache.confirm_reported(lldp);
+                    confirm_lldp_if_accepted(&mut self.lldp_cache, lldp, response);
                 }
                 self.seen_blank = false;
             }
@@ -1901,7 +1899,7 @@ async fn record_network_status(
     status: rpc::DpuNetworkStatus,
     forge_api: &str,
     forge_client_config: &forge_tls_client::ForgeClientConfig,
-) -> Result<(), eyre::Report> {
+) -> Result<rpc::DpuNetworkStatusResponse, eyre::Report> {
     let mut client = match forge_tls_client::ForgeTlsClient::new(forge_client_config)
         .build(forge_api)
         .await
@@ -1918,9 +1916,9 @@ async fn record_network_status(
     };
     let request = tonic::Request::new(status);
     match client.record_dpu_network_status(request).await {
-        Ok(_) => {
+        Ok(response) => {
             NetworkStatus::Succeeded.emit();
-            Ok(())
+            Ok(response.into_inner())
         }
         Err(err) => {
             NetworkStatus::RpcFailed {
@@ -1929,6 +1927,23 @@ async fn record_network_status(
             .emit();
             Err(err.into())
         }
+    }
+}
+
+/// Confirms a sent LLDP snapshot only when Core established its acceptance.
+///
+/// An absent acknowledgment is the supported legacy-server response: that
+/// server returned success only after processing an attached LLDP report.
+fn confirm_lldp_if_accepted(
+    lldp_cache: &mut LldpSnapshotCache,
+    lldp: Option<rpc::LldpReport>,
+    response: rpc::DpuNetworkStatusResponse,
+) {
+    let Some(lldp) = lldp else {
+        return;
+    };
+    if response.lldp_accepted.unwrap_or(true) {
+        lldp_cache.confirm_reported(lldp);
     }
 }
 

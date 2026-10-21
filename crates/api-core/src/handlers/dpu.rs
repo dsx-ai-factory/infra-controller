@@ -998,10 +998,10 @@ pub(crate) async fn update_agent_reported_inventory(
 pub(crate) async fn record_dpu_network_status(
     api: &Api,
     request: Request<rpc::DpuNetworkStatus>,
-) -> Result<Response<()>, tonic::Status> {
+) -> Result<Response<rpc::DpuNetworkStatusResponse>, tonic::Status> {
     log_request_data(&request);
 
-    let request = request.into_inner();
+    let mut request = request.into_inner();
     let dpu_machine_id: DpuMachineId = convert_and_log_machine_id(request.dpu_machine_id.as_ref())?;
 
     let mut txn = api.txn_begin().await?;
@@ -1153,9 +1153,32 @@ pub(crate) async fn record_dpu_network_status(
         .await?;
     }
 
-    if let Some(lldp) = request.lldp {
-        lldp::handle_lldp_report(&mut txn, &dpu_machine_id, lldp).await?;
-    }
+    // Keep the machine-row ordering owned by this transaction while allowing a
+    // rejected LLDP report to roll back without discarding operational status.
+    let mut lldp_error = None;
+    let lldp_accepted = if let Some(lldp) = request.lldp.take() {
+        let mut lldp_savepoint = db::Transaction::begin_inner(txn.as_pgconn()).await?;
+        match lldp::handle_lldp_report(lldp_savepoint.as_pgconn(), &dpu_machine_id, lldp).await {
+            Ok(()) => {
+                lldp_savepoint.commit().await?;
+                Some(true)
+            }
+            Err(error) => {
+                // An explicit rollback restores the outer transaction after SQL
+                // errors leave the savepoint in an aborted state.
+                lldp_savepoint.rollback().await?;
+                tracing::warn!(
+                    %dpu_machine_id,
+                    error = %error,
+                    "LLDP report rejected",
+                );
+                lldp_error = Some(error);
+                Some(false)
+            }
+        }
+    } else {
+        None
+    };
 
     txn.commit().await?;
 
@@ -1228,7 +1251,15 @@ pub(crate) async fn record_dpu_network_status(
         });
     }
 
-    Ok(Response::new(()))
+    if let Some(error) = lldp_error
+        && !request.lldp_acknowledgment_supported
+    {
+        return Err(error.into());
+    }
+
+    Ok(Response::new(rpc::DpuNetworkStatusResponse {
+        lldp_accepted,
+    }))
 }
 
 async fn wakeup_host_state_handler_by_dpu_id(

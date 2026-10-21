@@ -95,6 +95,7 @@ async fn update_network_status_observation(
             dpu_extension_services: vec![],
             astra_config_status: None,
             lldp: None,
+            lldp_acknowledgment_supported: false,
         }))
         .await
         .unwrap();

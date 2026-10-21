@@ -116,6 +116,121 @@ fn fmds_reply_routes_preserve_ipv4_and_use_the_ipv6_metadata_source() {
     );
 }
 
+/// Builds one deterministic collection so acknowledgment tests can observe
+/// whether the same snapshot is suppressed or retransmitted.
+fn one_lldp_neighbor() -> carbide_host_support::lldp_collector::LldpNeighbor {
+    carbide_host_support::lldp_collector::LldpNeighbor {
+        local_mac: "02:00:00:00:00:01".to_string(),
+        switch: ::rpc::machine_discovery::LldpSwitchData {
+            local_port: "fabric0".to_string(),
+            remote_port_type: "ifname".to_string(),
+            remote_port_value: "swp1".to_string(),
+            ..Default::default()
+        },
+    }
+}
+
+/// Proves explicit acceptance, rejection, and legacy-server success each
+/// produce the required cache confirmation and retransmission behavior.
+#[test]
+fn lldp_acknowledgment_controls_snapshot_confirmation() {
+    use ::rpc::forge::LldpReportResult;
+    use carbide_host_support::lldp_snapshot_cache::result_of;
+
+    let cases = [
+        // Explicit acceptance confirms the snapshot.
+        ("accepted", Some(true), LldpReportResult::Unchanged),
+        // Explicit rejection keeps the snapshot pending for retransmission.
+        ("rejected", Some(false), LldpReportResult::Updated),
+        // A successful legacy response has no field but implies acceptance.
+        ("legacy server", None, LldpReportResult::Unchanged),
+    ];
+
+    for (name, lldp_accepted, expected_next_result) in cases {
+        // Classify and apply the server acknowledgment exactly as the loop does.
+        let mut cache = LldpSnapshotCache::new();
+        let report = cache.classify(Ok(vec![one_lldp_neighbor()]));
+        confirm_lldp_if_accepted(
+            &mut cache,
+            Some(report),
+            rpc::DpuNetworkStatusResponse { lldp_accepted },
+        );
+
+        // Reclassification exposes whether the snapshot was retained for retry.
+        let next = cache.classify(Ok(vec![one_lldp_neighbor()]));
+        assert_eq!(result_of(&next), expected_next_result, "{name}");
+    }
+}
+
+/// Proves a new agent sends attached LLDP to a legacy server and treats that
+/// server's successful empty response as acceptance of the exact snapshot.
+#[tokio::test]
+async fn legacy_server_success_confirms_attached_lldp() -> eyre::Result<()> {
+    use std::sync::Arc;
+
+    use axum::Router;
+    use axum::body::Bytes;
+    use axum::extract::State;
+    use axum::routing::{get, post};
+    use carbide_host_support::lldp_snapshot_cache::result_of;
+    use tokio::sync::Mutex;
+
+    let received = Arc::new(Mutex::new(None));
+    let app =
+        Router::new()
+            .route("/up", get(|| async {}))
+            .route(
+                ::rpc::service_path!("RecordDpuNetworkStatus"),
+                post(
+                    |State(received): State<Arc<Mutex<Option<rpc::DpuNetworkStatus>>>>,
+                     body: Bytes| async move {
+                        let payload = body.get(5..).expect("gRPC request has a frame header");
+                        let status =
+                            <rpc::DpuNetworkStatus as prost::Message>::decode(payload).unwrap();
+                        *received.lock().await = Some(status);
+                        crate::tests::common::respond(())
+                    },
+                ),
+            )
+            .with_state(received.clone());
+    let (address, server) = crate::tests::common::run_grpc_server(app).await?;
+
+    let result = async {
+        // Attach a newly classified snapshot to the capable agent request.
+        let mut cache = LldpSnapshotCache::new();
+        let report = cache.classify(Ok(vec![one_lldp_neighbor()]));
+        let status = rpc::DpuNetworkStatus {
+            lldp: Some(report.clone()),
+            lldp_acknowledgment_supported: true,
+            ..Default::default()
+        };
+        let client_config = forge_tls_client::ForgeClientConfig {
+            root_ca_path: concat!(env!("CARGO_MANIFEST_DIR"), "/test-certs/tls.crt").into(),
+            ..Default::default()
+        };
+
+        // A legacy Empty response decodes as a response with no acknowledgment.
+        let response =
+            record_network_status(status, &format!("https://{address}"), &client_config).await?;
+        assert_eq!(response.lldp_accepted, None);
+        confirm_lldp_if_accepted(&mut cache, Some(report), response);
+
+        // Verify the report crossed the wire and legacy success confirmed it.
+        let received = received.lock().await;
+        let received = received.as_ref().expect("server received network status");
+        assert!(received.lldp.is_some());
+        assert!(received.lldp_acknowledgment_supported);
+        assert_eq!(
+            result_of(&cache.classify(Ok(vec![one_lldp_neighbor()]))),
+            rpc::LldpReportResult::Unchanged
+        );
+        Ok(())
+    }
+    .await;
+    server.abort();
+    result
+}
+
 #[test]
 fn ipv6_only_network_requires_dhcp_acceptance() {
     for (scenario, loopback, dhcp_changed, expected_error) in [

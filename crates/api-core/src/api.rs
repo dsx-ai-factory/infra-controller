@@ -696,7 +696,7 @@ impl Forge for Api {
     async fn record_dpu_network_status(
         &self,
         request: Request<rpc::DpuNetworkStatus>,
-    ) -> Result<Response<()>, Status> {
+    ) -> Result<Response<rpc::DpuNetworkStatusResponse>, Status> {
         crate::handlers::dpu::record_dpu_network_status(self, request).await
     }
 

@@ -162,6 +162,7 @@ impl From<MachineNetworkStatusObservation> for rpc::DpuNetworkStatus {
             dpu_extension_services: vec![],
             astra_config_status: None,
             lldp: None,
+            lldp_acknowledgment_supported: false,
         }
     }
 }
