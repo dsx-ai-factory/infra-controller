@@ -3665,12 +3665,14 @@ async fn reconcile_interface_segment_candidates(
         return Ok(());
     }
 
-    let static_segment_id = crate::network_segment::static_assignments(txn)
-        .await
-        .map(|s| s.id)
-        .unwrap_or_default();
+    let static_segment_id = match crate::network_segment::static_assignments(txn).await {
+        Ok(segment) => Some(segment.id),
+        Err(error) if error.is_not_found() => None,
+        Err(error) => return Err(error),
+    };
 
-    if existing_interface.segment_id == static_segment_id && existing_interface.addresses.is_empty()
+    if Some(existing_interface.segment_id) == static_segment_id
+        && existing_interface.addresses.is_empty()
     {
         // Static assignment locks the interface before inserting an address.
         // Wait for that writer, then refresh both the segment and addresses so
@@ -3681,7 +3683,7 @@ async fn reconcile_interface_segment_candidates(
             return Ok(());
         }
     }
-    let on_static_assignments = existing_interface.segment_id == static_segment_id;
+    let on_static_assignments = Some(existing_interface.segment_id) == static_segment_id;
 
     // If the interface is on static-assignments with no addresses (as in
     // the static address was removed), move it to the discovered segment

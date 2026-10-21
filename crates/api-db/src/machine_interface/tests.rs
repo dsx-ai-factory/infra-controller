@@ -605,6 +605,64 @@ async fn proactive_admin_discovery_rejects_unreserved_mac(
 }
 
 #[crate::sqlx_test]
+async fn reconcile_interface_segment_preserves_static_assignment_lookup_failure(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    create_static_assignments_segment(&pool).await?;
+    create_test_segment(&pool, "reconciliation-candidate").await?;
+    let mut setup = pool.begin().await?;
+    let static_segment = db::network_segment::static_assignments(&mut setup).await?;
+    let candidate =
+        db::network_segment::find_by_name(&mut setup, "reconciliation-candidate").await?;
+    let original = create_without_addresses(
+        &mut setup,
+        &static_segment,
+        &"02:00:00:00:79:68".parse()?,
+        true,
+        InterfaceType::Data,
+        None,
+    )
+    .await?;
+    setup.commit().await?;
+
+    sqlx::query("UPDATE network_segments SET allocation_strategy = 'unsupported' WHERE id = $1")
+        .bind(static_segment.id)
+        .execute(&pool)
+        .await?;
+
+    let mut txn = pool.begin().await?;
+    let mut existing_interface = original.clone();
+    let error =
+        reconcile_interface_segment_candidates(&mut txn, &mut existing_interface, &[candidate])
+            .await
+            .expect_err("a failed anchor lookup must stop segment reconciliation");
+    let DatabaseError::Sqlx(annotated) = &error else {
+        panic!("expected Sqlx, got {error:?}");
+    };
+    let sqlx::Error::ColumnDecode { index, source } = &annotated.source else {
+        panic!("expected ColumnDecode, got {error:?}");
+    };
+    assert_eq!(index, "\"allocation_strategy\"");
+    assert!(source.to_string().contains("unsupported"), "{source:?}");
+
+    // Read before committing to prove the decode failure did not abort the transaction.
+    let pending = find_one(&mut *txn, original.id).await?;
+    txn.commit().await?;
+    let persisted = find_one(&pool, original.id).await?;
+    for (source, interface) in [
+        ("in-memory", existing_interface),
+        ("pending", pending),
+        ("persisted", persisted),
+    ] {
+        assert_eq!(interface.segment_id, original.segment_id, "{source}");
+        assert_eq!(interface.domain_id, original.domain_id, "{source}");
+        assert_eq!(interface.hostname, original.hostname, "{source}");
+        assert_eq!(interface.addresses, original.addresses, "{source}");
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn observed_dhcp_rechecks_static_assignment_before_moving_segment(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {

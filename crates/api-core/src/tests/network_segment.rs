@@ -617,6 +617,50 @@ async fn test_initial_network_reverse_zones_follow_persisted_config_drift(
 }
 
 #[crate::sqlx_test]
+async fn test_static_assignment_initialization_preserves_lookup_failure(
+    db_pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(db_pool).await;
+    sqlx::query("UPDATE network_segments SET allocation_strategy = 'unsupported' WHERE name = $1")
+        .bind(db::network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME)
+        .execute(&env.pool)
+        .await?;
+
+    let snapshot_query = "SELECT jsonb_build_object(
+        'segments', (SELECT jsonb_agg(ns ORDER BY id) FROM network_segments ns),
+        'prefixes', (SELECT jsonb_agg(np ORDER BY id) FROM network_prefixes np))";
+    let original: serde_json::Value = sqlx::query_scalar(snapshot_query)
+        .fetch_one(&env.pool)
+        .await?;
+
+    let mut txn = db::Transaction::begin(&env.pool).await?;
+    let error = db_init::ensure_static_assignments_segment(&env.api, &mut txn, None)
+        .await
+        .expect_err("a failed anchor lookup must stop initialization");
+    let crate::CarbideError::DBError(annotated) = &error else {
+        panic!("expected DBError, got {error:?}");
+    };
+    let sqlx::Error::ColumnDecode { index, source } = &annotated.source else {
+        panic!("expected ColumnDecode, got {error:?}");
+    };
+    assert_eq!(index, "\"allocation_strategy\"");
+    assert!(source.to_string().contains("unsupported"), "{source:?}");
+
+    // The decode failure must leave this transaction usable and unchanged.
+    let pending: serde_json::Value = sqlx::query_scalar(snapshot_query)
+        .fetch_one(txn.as_pgconn())
+        .await?;
+    assert_eq!(pending, original);
+    txn.commit().await?;
+
+    let persisted: serde_json::Value = sqlx::query_scalar(snapshot_query)
+        .fetch_one(&env.pool)
+        .await?;
+    assert_eq!(persisted, original);
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn test_initial_network_restart_does_not_restore_deleted_static_assignment_zones(
     db_pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {

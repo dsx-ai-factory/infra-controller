@@ -356,11 +356,10 @@ pub(crate) async fn ensure_static_assignments_segment(
     subdomain_id: Option<carbide_uuid::domain::DomainId>,
 ) -> Result<(), CarbideError> {
     let segment_name = network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME;
-    if db::network_segment::find_by_name(txn, segment_name)
-        .await
-        .is_ok()
-    {
-        return Ok(());
+    match db::network_segment::find_by_name(txn, segment_name).await {
+        Ok(_) => return Ok(()),
+        Err(error) if error.is_not_found() => {}
+        Err(error) => return Err(error.into()),
     }
 
     let ns = NewNetworkSegment {
