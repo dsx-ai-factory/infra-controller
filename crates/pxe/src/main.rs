@@ -143,7 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(routes::metrics::get_router("/metrics"))
         .with_state(app_state); // The order of the calls here matters --> we only want to cache the files on disk, nothing else, and we don't want /metrics to be included in our metrics.
 
-    let request_normalizing_middleware = map_request(middleware::normalize_url);
+    let request_normalizing_middleware = map_request(middleware::normalize_request);
     let final_app = request_normalizing_middleware.layer(app); // this one has to wrap all the others for the map_request to be able to affect routing
 
     let listener = metrics_endpoint::bind_tcp_listener(socket_addr)
