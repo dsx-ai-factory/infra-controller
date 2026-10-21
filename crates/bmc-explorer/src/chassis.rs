@@ -32,7 +32,7 @@ use nv_redfish::pcie_device::PcieDevice;
 use nv_redfish::{Bmc, ServiceRoot};
 
 use crate::network_adapter::ExploredNetworkAdapterCollection;
-use crate::{Error, network_adapter};
+use crate::{Error, ErrorClass, ErrorClassifier, network_adapter};
 
 type AssemblyModelFilterFn = fn(Option<AssemblyModel<&str>>) -> bool;
 const BF4_NDF0_TO_BASE_MAC_OFFSET: u64 = 0x10;
@@ -40,6 +40,13 @@ pub(crate) struct Config {
     pub(crate) network_adapter: network_adapter::Config,
     pub(crate) need_assembly_sn: fn(&str) -> Option<AssemblyModelFilterFn>,
     pub(crate) lazy_fetch: Option<fn(&ODataId) -> bool>,
+    /// Skip a chassis that the collection lists but that answers 404 when
+    /// fetched, instead of failing the whole exploration. Supermicro lists
+    /// the RAID storage enclosure while the host is rebooting and the
+    /// controller is not up yet; fetching it then returns 404 for a while.
+    /// The eager fetch is still tried first; only when it fails with 404 are
+    /// the members fetched one by one so the missing one can be dropped.
+    pub(crate) skip_not_found_members: bool,
 }
 
 pub(crate) struct ExploredChassisCollection<B: Bmc> {
@@ -47,9 +54,13 @@ pub(crate) struct ExploredChassisCollection<B: Bmc> {
 }
 
 impl<B: Bmc> ExploredChassisCollection<B> {
-    pub(crate) async fn explore(root: &ServiceRoot<B>, config: &Config) -> Result<Self, Error<B>> {
+    pub(crate) async fn explore(
+        root: &ServiceRoot<B>,
+        config: &Config,
+        error_classifier: ErrorClassifier<'_, B>,
+    ) -> Result<Self, Error<B>> {
         let mut members = Vec::new();
-        for m in Self::fetch_members(root, config).await? {
+        for m in Self::fetch_members(root, config, error_classifier).await? {
             members.push(ExploredChassis::explore(m, config).await?);
         }
         Ok(Self { members })
@@ -58,33 +69,64 @@ impl<B: Bmc> ExploredChassisCollection<B> {
     async fn fetch_members(
         root: &ServiceRoot<B>,
         config: &Config,
+        error_classifier: ErrorClassifier<'_, B>,
     ) -> Result<Vec<NvChassis<B>>, Error<B>> {
-        if let Some(filter) = config.lazy_fetch {
-            let links = root
-                .chassis_links()
-                .await
-                .map_err(Error::nv_redfish("chassis collection"))?
-                .ok_or_else(Error::bmc_not_provided("chassis collection"))?;
-            let mut result = Vec::with_capacity(links.len());
-            for l in links {
-                if filter(l.odata_id()) {
-                    result.push(
-                        l.upgrade()
-                            .await
-                            .map_err(Error::nv_redfish("chassis collection member"))?,
-                    )
-                }
-            }
-            Ok(result)
-        } else {
-            root.chassis()
-                .await
-                .map_err(Error::nv_redfish("chassis collection"))?
-                .ok_or_else(Error::bmc_not_provided("chassis collection"))?
-                .members()
-                .await
-                .map_err(Error::nv_redfish("chassis collection members"))
+        if config.lazy_fetch.is_some() {
+            return Self::fetch_member_links(root, config, error_classifier).await;
         }
+        let members = root
+            .chassis()
+            .await
+            .map_err(Error::nv_redfish("chassis collection"))?
+            .ok_or_else(Error::bmc_not_provided("chassis collection"))?
+            .members()
+            .await;
+        match members {
+            Ok(members) => Ok(members),
+            // The eager fetch fails as a whole on the first member that answers
+            // 404. Fetch member by member so only that one is dropped.
+            Err(nv_redfish::Error::Bmc(bmc_error))
+                if config.skip_not_found_members
+                    && error_classifier(&bmc_error) == Some(ErrorClass::NotFound) =>
+            {
+                Self::fetch_member_links(root, config, error_classifier).await
+            }
+            Err(err) => Err(Error::nv_redfish("chassis collection members")(err)),
+        }
+    }
+
+    async fn fetch_member_links(
+        root: &ServiceRoot<B>,
+        config: &Config,
+        error_classifier: ErrorClassifier<'_, B>,
+    ) -> Result<Vec<NvChassis<B>>, Error<B>> {
+        let links = root
+            .chassis_links()
+            .await
+            .map_err(Error::nv_redfish("chassis collection"))?
+            .ok_or_else(Error::bmc_not_provided("chassis collection"))?;
+        let mut result = Vec::with_capacity(links.len());
+        for l in links {
+            if let Some(filter) = config.lazy_fetch
+                && !filter(l.odata_id())
+            {
+                continue;
+            }
+            match l.upgrade().await {
+                Ok(chassis) => result.push(chassis),
+                Err(nv_redfish::Error::Bmc(bmc_error))
+                    if config.skip_not_found_members
+                        && error_classifier(&bmc_error) == Some(ErrorClass::NotFound) =>
+                {
+                    tracing::warn!(
+                        chassis = ?l.odata_id(),
+                        "chassis listed in the collection returned 404; skipping it for this exploration"
+                    );
+                }
+                Err(err) => return Err(Error::nv_redfish("chassis collection member")(err)),
+            }
+        }
+        Ok(result)
     }
 
     pub(crate) fn to_model(&self) -> Vec<Chassis> {

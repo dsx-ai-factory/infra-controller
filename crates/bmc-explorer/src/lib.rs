@@ -166,6 +166,11 @@ fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Confi
                 && root.product() == Some(Product::new("BlueField-3 DPU")))
             .then_some(|odata_id| odata_id.last_segment() != Some("Bluefield_ERoT"))
         },
+        // Supermicro lists the RAID storage enclosure in the chassis collection
+        // while the host is rebooting, but fetching it returns 404 until the
+        // controller is up. Skip a listed chassis that answers 404 for the cycle
+        // rather than failing the whole exploration.
+        skip_not_found_members: root.vendor() == Some(Vendor::new("Supermicro")),
     }
 }
 
@@ -177,7 +182,8 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
 ) -> Result<EndpointExplorationReport, Error<B>> {
     let chassis_explore_config = build_chassis_explore_config(&root);
     let mut explored_chassis =
-        ExploredChassisCollection::explore(&root, &chassis_explore_config).await?;
+        ExploredChassisCollection::explore(&root, &chassis_explore_config, config.error_classifier)
+            .await?;
     let explored_inventories = ExploredInventories::explore(&root).await?;
     let explored_component_integrities = ExploredComponentIntegrity::explore(&root).await;
 
