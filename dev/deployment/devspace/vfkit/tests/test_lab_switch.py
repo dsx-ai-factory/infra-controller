@@ -11,7 +11,7 @@ import time
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent / "lab"
+ROOT = Path(__file__).resolve().parents[1] / "lab"
 
 
 class SwitchTests(unittest.TestCase):
