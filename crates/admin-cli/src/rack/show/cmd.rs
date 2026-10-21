@@ -34,6 +34,7 @@ struct RackOutput {
     id: String,
     name: String,
     state: String,
+    certificate_failure: Option<model::component_manager::SwitchCertificateFailure>,
     version: String,
     current_compute_trays: Vec<String>,
     current_power_shelves: Vec<String>,
@@ -50,6 +51,11 @@ impl From<&Rack> for RackOutput {
                 .map(|m| m.name.clone())
                 .unwrap_or_default(),
             state: r.rack_state.clone(),
+            certificate_failure: r
+                .status
+                .as_ref()
+                .and_then(|status| status.lifecycle.as_ref())
+                .and_then(|lifecycle| super::super::certificate_failure(&lifecycle.state)),
             version: r.version.clone(),
             current_compute_trays: vec![],
             current_power_shelves: vec![],
@@ -176,6 +182,14 @@ fn show_detail(output: &RackOutput, writer: &mut impl Write) -> Result<()> {
     table.add_row(row!["ID", output.id]);
     table.add_row(row!["Name", output.name]);
     table.add_row(row!["State", output.state]);
+    table.add_row(row![
+        "Certificate failure",
+        output
+            .certificate_failure
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default()
+    ]);
     table.add_row(row!["Version", output.version]);
     table.add_row(row![
         "Current Compute Trays",
@@ -308,6 +322,7 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             state: state.to_string(),
+            certificate_failure: None,
             version: version.to_string(),
             current_compute_trays: compute_trays.into_iter().map(str::to_string).collect(),
             current_power_shelves: power_shelves.into_iter().map(str::to_string).collect(),

@@ -145,6 +145,8 @@ pub struct SwitchSlotAndTrayResult {
 pub struct ConfigureSwitchCertificateJobStatus {
     pub state: ConfigureSwitchCertificateState,
     pub error: Option<String>,
+    /// Node failure details when RMS reports a failed job.
+    pub failure: Option<model::component_manager::SwitchCertificateFailure>,
 }
 
 /// Backend observation of a ScaleUp Fabric Manager configuration job.
