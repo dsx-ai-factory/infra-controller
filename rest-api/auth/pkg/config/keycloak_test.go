@@ -4,6 +4,7 @@
 package config
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"net/http"
@@ -206,7 +207,7 @@ func TestKeycloakConfig_GetJwksConfig(t *testing.T) {
 		jwksConfig.Lock()
 		jwksConfig.LastAttempted = time.Now()
 		jwksConfig.Unlock()
-		_, err = jwksConfig.ValidateToken(tokenString, jwt.MapClaims{})
+		_, err = jwksConfig.ValidateTokenContext(context.Background(), tokenString, jwt.MapClaims{})
 		require.Error(t, err)
 		assert.Equal(t, int32(1), requestCount.Load())
 
@@ -215,7 +216,7 @@ func TestKeycloakConfig_GetJwksConfig(t *testing.T) {
 		jwksConfig.LastAttempted = time.Now().Add(-minUpdateInterval)
 		jwksConfig.Unlock()
 
-		token, err := jwksConfig.ValidateToken(tokenString, jwt.MapClaims{})
+		token, err := jwksConfig.ValidateTokenContext(context.Background(), tokenString, jwt.MapClaims{})
 		require.NoError(t, err)
 		require.NotNil(t, token)
 		assert.True(t, token.Valid)
