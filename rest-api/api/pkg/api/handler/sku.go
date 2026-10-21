@@ -542,12 +542,13 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 	} else {
 		projected := &cdbm.SKU{}
 		projected.FromProto(coreSKU, savedSKU.SiteID)
+		// Component replacement uses metadata from `ReplaceSku`, preserving
+		// the saved device type when Core omits it.
 		description := &projected.Description
 		deviceType := projected.DeviceType
 		if apiReq.Components == nil {
 			// Another writer may have changed omitted metadata since the Core read.
 			// Save only supplied metadata; nonmetadata still refreshes from Core.
-			// Component replacement uses the metadata returned by ReplaceSku.
 			description = apiReq.Description
 			deviceType = apiReq.DeviceType
 		}
@@ -614,12 +615,13 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "SKU was updated in Core but failed to update REST DB", nil)
 	}
 
+	// Keep Core's Created nanoseconds and leave it unset when Core omits it.
+	// REST can retain a device type that Core omitted, so use the saved value.
 	apiResponse := model.NewAPISkuFromProto(coreSKU, siteID)
+	apiResponse.DeviceType = savedSKU.DeviceType
 	if apiReq.Components == nil {
-		// Keep Core's Created nanoseconds and leave it unset when Core omits it.
-		// The REST row supplies metadata, including on the no-op path.
+		// `UpdateSkuMetadata` returns no SKU, so use the description we saved.
 		apiResponse.Description = savedSKU.Description
-		apiResponse.DeviceType = savedSKU.DeviceType
 	}
 	return c.JSON(http.StatusOK, apiResponse)
 }

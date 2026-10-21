@@ -1199,11 +1199,11 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "replaces version five components",
+			name: "replaces version five components and clears device type",
 			run: func(t *testing.T) {
 				existing := existingSkuProto()
 				existing.SchemaVersion = model.CoreSkuSchemaVersion
-				deviceType := "cpu-server"
+				deviceType := ""
 				replacementResponse := existingSkuProto()
 				replacementResponse.SchemaVersion = model.CoreSkuSchemaVersion
 				replacementResponse.DeviceType = &deviceType
@@ -1212,6 +1212,12 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 					findResponse:    &corev1.SkuList{Skus: []*corev1.Sku{existing}},
 					replaceResponse: replacementResponse,
 				})
+				skuDAO := cdbm.NewSkuDAO(fixture.updateHandler.dbSession)
+				_, err := skuDAO.Update(context.Background(), nil, cdbm.SkuUpdateInput{
+					SkuID:      "sku-1",
+					DeviceType: existing.DeviceType,
+				})
+				require.NoError(t, err)
 				components := validSkuCreateRequest(fixture.siteID).Components
 
 				rec := fixture.request(t, http.MethodPatch, "sku-1", model.APISkuUpdateRequest{
@@ -1226,12 +1232,17 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 				var coreReq corev1.Sku
 				require.NoError(t, protojson.Unmarshal(fixture.requests[1].RequestJSON, &coreReq))
 				assert.Equal(t, "sku-1", coreReq.Id)
+				require.NotNil(t, coreReq.DeviceType)
 				assert.Equal(t, deviceType, coreReq.GetDeviceType())
 				assert.Equal(t, model.CoreSkuSchemaVersion, coreReq.SchemaVersion)
 				require.NotNil(t, coreReq.Components)
 				require.Len(t, coreReq.Components.Storage, 1)
 
-				saved, err := cdbm.NewSkuDAO(fixture.updateHandler.dbSession).Get(context.Background(), nil, "sku-1")
+				var response model.APISku
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, &deviceType, response.DeviceType)
+
+				saved, err := skuDAO.Get(context.Background(), nil, "sku-1")
 				require.NoError(t, err)
 				require.NotNil(t, saved.DeviceType)
 				assert.Equal(t, deviceType, *saved.DeviceType)
@@ -1239,6 +1250,64 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 				require.Len(t, saved.Components.Storage, 1)
 				assert.Equal(t, uint32(3_600_000), saved.Components.Storage[0].GetMinSizeMb())
 				assert.Equal(t, uint32(3_900_000), saved.Components.Storage[0].GetMaxSizeMb())
+			},
+		},
+		{
+			name: "returns stored device type when Core omits it during component replacement",
+			run: func(t *testing.T) {
+				existing := existingSkuProto()
+				existing.SchemaVersion = model.CoreSkuSchemaVersion
+				existing.DeviceType = nil
+				replacementResponse := proto.Clone(existing).(*corev1.Sku)
+				components := validSkuCreateRequest("").Components
+				replacementResponse.Components = components.ToProto()
+				fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
+					findResponse:    &corev1.SkuList{Skus: []*corev1.Sku{existing}},
+					replaceResponse: replacementResponse,
+				})
+				skuDAO := cdbm.NewSkuDAO(fixture.updateHandler.dbSession)
+				deviceType := "REST device type"
+				_, err := skuDAO.Update(context.Background(), nil, cdbm.SkuUpdateInput{
+					SkuID:      "sku-1",
+					DeviceType: &deviceType,
+				})
+				require.NoError(t, err)
+
+				rec := fixture.request(t, http.MethodPatch, "sku-1", model.APISkuUpdateRequest{
+					Components: components,
+				}, fixture.updateHandler.Handle)
+
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				require.Len(t, fixture.requests, 2)
+				assert.Equal(t, corev1.Forge_FindSkusByIds_FullMethodName, fixture.requests[0].FullMethod)
+				assert.Equal(t, corev1.Forge_ReplaceSku_FullMethodName, fixture.requests[1].FullMethod)
+				var coreReq corev1.Sku
+				require.NoError(t, protojson.Unmarshal(fixture.requests[1].RequestJSON, &coreReq))
+				assert.Nil(t, coreReq.DeviceType)
+				assert.True(t, proto.Equal(replacementResponse.Components, coreReq.Components))
+
+				var response model.APISku
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.Equal(t, &deviceType, response.DeviceType)
+				require.NotNil(t, response.Components)
+				assert.True(t, proto.Equal(replacementResponse.Components, response.Components.ToProto()))
+				require.NotNil(t, response.Created)
+				assert.True(t, existingSkuCreatedTime().Equal(*response.Created))
+
+				saved, err := skuDAO.Get(context.Background(), nil, "sku-1")
+				require.NoError(t, err)
+				assert.Equal(t, &deviceType, saved.DeviceType)
+				require.NotNil(t, saved.Components)
+				assert.True(t, proto.Equal(replacementResponse.Components, saved.Components.SkuComponents))
+				assert.True(t, existingSkuCreatedTime().Round(time.Microsecond).Equal(saved.Created))
+				assert.False(t, response.Created.Equal(saved.Created))
+
+				getHandler := NewGetSkuHandler(fixture.updateHandler.dbSession, nil, &config.Config{})
+				getRec := fixture.request(t, http.MethodGet, "sku-1", nil, getHandler.Handle)
+				require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+				var getResponse model.APISku
+				require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &getResponse))
+				assert.Equal(t, &deviceType, getResponse.DeviceType)
 			},
 		},
 		{
