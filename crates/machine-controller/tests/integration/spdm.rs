@@ -29,18 +29,18 @@ use model::attestation::profile::{
 use model::attestation::spdm::SpdmAttestationState;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{
-    FailureCause, FailureDetails, FailureSource, MachineState, ManagedHostState,
-    SpdmMeasuringState, StateMachineArea,
+    CleanupContext, CleanupState, FailureCause, FailureDetails, FailureSource, MachineState,
+    ManagedHostState, SpdmMeasuringState, StateMachineArea,
 };
 use model::test_support::ManagedHostConfig;
 use state_controller::state_handler::StateHandlerError;
 
 use crate::env::Env;
 
-// Both polling and recovery need a discovered host with SPDM enabled and a working BMC.
-async fn setup_spdm_host(pool: PgPool) -> (Env, TestManagedHost) {
+// Polling and recovery need a discovered host and a working BMC.
+async fn setup_spdm_host(pool: PgPool, spdm_enabled: bool) -> (Env, TestManagedHost) {
     let env = Env::builder(pool)
-        .configure_runtime(|config| config.spdm.enabled = true)
+        .configure_runtime(|config| config.spdm.enabled = spdm_enabled)
         .build()
         .await;
     let domain = env.test_harness.test_domain().await;
@@ -110,7 +110,7 @@ async fn matching_spdm_jobs_poll_latest_machine_results(pool: sqlx::PgPool) -> e
             expected: Expected::Wait,
         },
     ];
-    let (mut env, mh) = setup_spdm_host(pool).await;
+    let (mut env, mh) = setup_spdm_host(pool, true).await;
     let machine_id: MachineId = mh.host.id.into();
 
     for case in cases {
@@ -312,7 +312,7 @@ async fn changed_spdm_attesters_cancel_and_restart_jobs(pool: PgPool) -> eyre::R
             selected_devices: &[],
         },
     ];
-    let (mut env, mh) = setup_spdm_host(pool).await;
+    let (mut env, mh) = setup_spdm_host(pool, true).await;
     let machine_id: MachineId = mh.host.id.into();
     let trigger_state = ManagedHostState::HostInit {
         machine_state: MachineState::SpdmMeasuring {
@@ -477,51 +477,116 @@ async fn changed_spdm_attesters_cancel_and_restart_jobs(pool: PgPool) -> eyre::R
     Ok(())
 }
 
-/// Recovery follows current BMC inventory, and cancellation cannot stand in for a pass.
+/// Recovery uses current selection and advances without repeating completed or waived work.
 #[sqlx_test]
 async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Result<()> {
     struct Case {
         scenario: &'static str,
-        selected_state: SpdmAttestationState,
-        resume: bool,
+        states: [Option<SpdmAttestationState>; 3],
+        source: StateMachineArea,
+        expected: Option<ManagedHostState>,
+        selection_mode: AttesterSelectionMode,
     }
-    let (mut env, mh) = setup_spdm_host(pool).await;
-    let machine_id: MachineId = mh.host.id.into();
-    let failed_state = ManagedHostState::Failed {
-        details: FailureDetails {
-            cause: FailureCause::SpdmAttestationFailed {
-                err: "previous failure".to_string(),
-            },
-            failed_at: Utc::now(),
-            source: FailureSource::StateMachineArea(StateMachineArea::HostInit),
-        },
-        retry_count: 7,
-        machine_id,
+    let passed_case = || Case {
+        scenario: "a stale failed device absent from the BMC does not block selected passes",
+        states: std::array::from_fn(|_| Some(SpdmAttestationState::Passed)),
+        source: StateMachineArea::HostInit,
+        expected: Some(ManagedHostState::HostInit {
+            machine_state: MachineState::WaitingForDiscovery,
+        }),
+        selection_mode: AttesterSelectionMode::Allowlist,
     };
+    let (mut env, mh) = setup_spdm_host(pool, true).await;
+    let machine_id: MachineId = mh.host.id.into();
 
     for case in [
+        passed_case(),
         Case {
-            scenario: "a stale failed device absent from the BMC does not block selected passes",
-            selected_state: SpdmAttestationState::Passed,
-            resume: true,
+            scenario: "passed and cancelled devices resume assignment without another job",
+            states: [
+                Some(SpdmAttestationState::Passed),
+                Some(SpdmAttestationState::Cancelled),
+                Some(SpdmAttestationState::Passed),
+            ],
+            source: StateMachineArea::MainFlow,
+            expected: Some(ManagedHostState::StartAssignmentCycle),
+            ..passed_case()
         },
         Case {
-            scenario: "a selected cancellation keeps the machine failed",
-            selected_state: SpdmAttestationState::Cancelled,
-            resume: false,
+            scenario: "all cancelled devices resume deprovisioning without another job",
+            states: std::array::from_fn(|_| Some(SpdmAttestationState::Cancelled)),
+            source: StateMachineArea::AssignedInstance,
+            expected: Some(ManagedHostState::WaitingForCleanup {
+                cleanup_state: CleanupState::Init,
+                cleanup_context: CleanupContext::Deprovision,
+            }),
+            ..passed_case()
+        },
+        Case {
+            scenario: "cancellation does not override a selected failure",
+            states: [
+                Some(SpdmAttestationState::Cancelled),
+                Some(SpdmAttestationState::Failed("still failing".to_string())),
+                Some(SpdmAttestationState::Passed),
+            ],
+            expected: None,
+            ..passed_case()
+        },
+        Case {
+            scenario: "unfinished selected work keeps recovery waiting",
+            states: [
+                Some(SpdmAttestationState::Passed),
+                Some(SpdmAttestationState::FetchMetadata),
+                Some(SpdmAttestationState::Passed),
+            ],
+            expected: None,
+            ..passed_case()
+        },
+        Case {
+            scenario: "a selected device without results keeps recovery waiting",
+            states: [
+                Some(SpdmAttestationState::Passed),
+                None,
+                Some(SpdmAttestationState::Passed),
+            ],
+            expected: None,
+            ..passed_case()
+        },
+        Case {
+            scenario: "an empty selection advances without BMC access or results",
+            states: [None, None, None],
+            selection_mode: AttesterSelectionMode::None,
+            ..passed_case()
         },
     ] {
+        env.redfish_sim.clear_create_client_error();
+        let failed_state = ManagedHostState::Failed {
+            details: FailureDetails {
+                cause: FailureCause::SpdmAttestationFailed {
+                    err: "previous failure".to_string(),
+                },
+                failed_at: Utc::now(),
+                source: FailureSource::StateMachineArea(case.source),
+            },
+            retry_count: 7,
+            machine_id,
+        };
         let mut txn = env.test_harness.db_txn().await;
-        // The removed device still matches the profile, but is absent from the BMC's inventory.
+        // The removed device still matches the profile, but is absent from BMC inventory.
         sqlx::query("DELETE FROM attestation_profiles")
             .execute(&mut *txn)
             .await?;
+        let skip_bmc = case.selection_mode == AttesterSelectionMode::None;
         db::attestation_profile::create(
             &mut txn,
             MOCK_HOST_HARDWARE_CLASS,
             &AttestationPolicyDocument::new(AttesterSelection {
-                mode: AttesterSelectionMode::Allowlist,
-                component_ids: vec![ComponentIdMatch::Prefix("HGX_IRoT_GPU".to_string())],
+                mode: case.selection_mode,
+                component_ids: if skip_bmc {
+                    Vec::new()
+                } else {
+                    vec![ComponentIdMatch::Prefix("HGX_IRoT_GPU".to_string())]
+                },
             }),
             "test",
         )
@@ -532,14 +597,17 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
             .await?;
         let job_id = uuid::Uuid::new_v4();
         for (device_id, state) in [
-            ("HGX_IRoT_GPU_0", SpdmAttestationState::Passed),
-            ("HGX_IRoT_GPU_1", case.selected_state),
-            ("HGX_IRoT_GPU_2", SpdmAttestationState::Passed),
+            ("HGX_IRoT_GPU_0", case.states[0].clone()),
+            ("HGX_IRoT_GPU_1", case.states[1].clone()),
+            ("HGX_IRoT_GPU_2", case.states[2].clone()),
             (
                 "HGX_IRoT_GPU_removed",
-                SpdmAttestationState::Failed("stale device failure".to_string()),
+                Some(SpdmAttestationState::Failed(
+                    "stale device failure".to_string(),
+                )),
             ),
         ] {
+            let Some(state) = state else { continue };
             sqlx::query(
                 "INSERT INTO spdm_machine_devices_attestation
                  (machine_id, device_id, nonce, state, job_id, started_at)
@@ -554,25 +622,23 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
         }
         db::machine::update_state(&mut txn, &mh.host.id, &failed_state).await?;
         txn.commit().await?;
+        if skip_bmc {
+            env.redfish_sim
+                .set_create_client_error("the BMC cannot be reached");
+        }
 
         env.run_single_iteration().await;
-        // Reload both the state and outcome so an error cannot masquerade as blocked recovery.
+        // Reload state and outcome so an error cannot masquerade as blocked recovery.
         let mut txn = env.test_harness.db_txn().await;
         let machine = mh.host.db_machine(&mut txn).await;
-        if case.resume {
-            assert_eq!(
-                machine.current_state(),
-                &ManagedHostState::HostInit {
-                    machine_state: MachineState::SpdmMeasuring {
-                        spdm_measuring_state: SpdmMeasuringState::TriggerMeasurements,
-                    },
-                },
-                "{}",
-                case.scenario
-            );
-        } else {
-            assert_eq!(machine.current_state(), &failed_state, "{}", case.scenario);
-            // Failed states have a zero SLA, so the controller records this successful no-op as an SLA error.
+        assert_eq!(
+            machine.current_state(),
+            case.expected.as_ref().unwrap_or(&failed_state),
+            "{}",
+            case.scenario
+        );
+        if case.expected.is_none() {
+            // Failed states have a zero SLA, so a successful no-op records an SLA error.
             let expected_error = StateHandlerError::TimeInStateAboveSla {
                 handler_outcome: "DoNothing".to_string(),
             }
@@ -587,6 +653,72 @@ async fn failed_spdm_recovery_checks_current_attesters(pool: PgPool) -> eyre::Re
                 machine.controller_state_outcome
             );
         }
+        // Recovery consumes existing results without inserting rows into this or another job.
+        let (rows, jobs): (i64, i64) = sqlx::query_as(
+            "SELECT count(*), count(DISTINCT job_id)
+             FROM spdm_machine_devices_attestation WHERE machine_id = $1",
+        )
+        .bind(machine_id)
+        .fetch_one(&mut *txn)
+        .await?;
+        assert_eq!(
+            rows,
+            1 + case.states.iter().flatten().count() as i64,
+            "{}",
+            case.scenario
+        );
+        assert_eq!(jobs, 1, "{}", case.scenario);
     }
+    Ok(())
+}
+
+/// Disabling SPDM releases failed hosts even when evidence and the BMC are unavailable.
+#[sqlx_test]
+async fn disabled_spdm_recovery_skips_attestation(pool: PgPool) -> eyre::Result<()> {
+    let (mut env, mh) = setup_spdm_host(pool, false).await;
+    let machine_id: MachineId = mh.host.id.into();
+    let mut txn = env.test_harness.db_txn().await;
+    // No attestation evidence can satisfy recovery; only the site setting permits it.
+    sqlx::query("DELETE FROM spdm_machine_devices_attestation WHERE machine_id = $1")
+        .bind(machine_id)
+        .execute(&mut *txn)
+        .await?;
+    db::machine::update_state(
+        &mut txn,
+        &mh.host.id,
+        &ManagedHostState::Failed {
+            details: FailureDetails {
+                cause: FailureCause::SpdmAttestationFailed {
+                    err: "previous failure".to_string(),
+                },
+                failed_at: Utc::now(),
+                source: FailureSource::StateMachineArea(StateMachineArea::HostInit),
+            },
+            retry_count: 7,
+            machine_id,
+        },
+    )
+    .await?;
+    txn.commit().await?;
+    env.redfish_sim
+        .set_create_client_error("the BMC cannot be reached");
+
+    env.run_single_iteration().await;
+    // Reload the persisted destination to prove recovery skipped scheduling entirely.
+    let mut txn = env.test_harness.db_txn().await;
+    let machine = mh.host.db_machine(&mut txn).await;
+    assert_eq!(
+        machine.current_state(),
+        &ManagedHostState::HostInit {
+            machine_state: MachineState::WaitingForDiscovery,
+        }
+    );
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM spdm_machine_devices_attestation WHERE machine_id = $1",
+    )
+    .bind(machine_id)
+    .fetch_one(&mut *txn)
+    .await?;
+    assert_eq!(rows, 0);
     Ok(())
 }

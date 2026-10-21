@@ -126,6 +126,8 @@ pub(crate) async fn spdm_attestation_run_to_failed_then_to_success(
     )
     .expect("attestation job ID should be a UUID");
 
+    assert_ne!(operator_job_id, initial_job_id);
+
     // An unfinished operator job must not start managed-host recovery.
     env.run_machine_state_controller_iteration().await;
     assert_eq!(
@@ -150,44 +152,13 @@ pub(crate) async fn spdm_attestation_run_to_failed_then_to_success(
         SpdmAttestationStatus::Passed
     );
 
-    let recovery_poll_state = env
-        .run_machine_state_controller_iteration_until_state_condition(&mh.host().id, 5, |machine| {
-            let Some(job_id) = spdm_poll_result_job_id(machine.current_state()) else {
-                return false;
-            };
-            machine.current_state() == &poll_state(job_id)
-        })
-        .await;
-    let recovery_job_id = spdm_poll_result_job_id(&recovery_poll_state)
-        .expect("the recovery polling state should include a job ID");
-    assert_ne!(recovery_job_id, initial_job_id);
-    assert_ne!(recovery_job_id, operator_job_id);
-    let recovery_attestations =
-        db::attestation::spdm::get_attestations_for_job_id(txn, &recovery_job_id)
-            .await
-            .unwrap();
-    assert_eq!(3, recovery_attestations.len());
+    // The caller resumes the lifecycle using the operator job's completed results.
+    // No further SPDM controller iterations should be needed for recovery.
     assert!(
-        recovery_attestations
-            .iter()
-            .all(|attestation| attestation.machine_id == machine_id)
-    );
-    assert_eq!(
-        db::attestation::spdm::get_attestation_job_status(txn, &recovery_job_id)
+        list_machines_under_attestation(env)
             .await
-            .unwrap(),
-        SpdmAttestationStatus::InProgress
-    );
-
-    // Complete the new job owned by the managed-host state machine.
-    for _ in 0..10 {
-        env.run_spdm_controller_iteration_no_requeue().await;
-    }
-    assert_eq!(
-        db::attestation::spdm::get_attestation_job_status(txn, &recovery_job_id)
-            .await
-            .unwrap(),
-        SpdmAttestationStatus::Passed
+            .unwrap()
+            .is_empty()
     );
     let attestation_status = fetch_machine_attestation_status(env, machine_id)
         .await

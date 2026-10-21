@@ -30,8 +30,8 @@ use model::attestation::spdm::{
 };
 use model::bmc_info::BmcInfo;
 use model::machine::{
-    AttestationMode, FailureCause, FailureDetails, FailureSource, MachineState, ManagedHostState,
-    ManagedHostStateSnapshot, SpdmMeasuringState, StateMachineArea,
+    CleanupContext, CleanupState, FailureCause, FailureDetails, FailureSource, MachineState,
+    ManagedHostState, ManagedHostStateSnapshot, StateMachineArea,
 };
 use sqlx::PgPool;
 use state_controller::state_handler::{
@@ -39,7 +39,7 @@ use state_controller::state_handler::{
 };
 
 use crate::context::MachineStateHandlerContextObjects;
-use crate::handler::MachineStateHandlerServices;
+use crate::handler::{MachineStateHandlerServices, waiting_for_cleanup_state};
 
 /// What scheduling decided for one machine.
 ///
@@ -372,9 +372,9 @@ fn from_component_integrity(
     }
 }
 
-/// Restart SPDM attestation when the currently selected attesters have passed, or
-/// attestation is disabled or selects no work. Resume in the measuring state for
-/// [`FailureDetails::source`].
+/// Continue past SPDM when selected attesters have passed or been cancelled, or
+/// attestation is disabled or selects no work. The destination follows
+/// [`FailureDetails::source`] without scheduling another attestation.
 pub(crate) async fn handle_spdm_attestation_failed_recovery(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     host_machine_id: &MachineId,
@@ -405,45 +405,36 @@ pub(crate) async fn handle_spdm_attestation_failed_recovery(
     };
 
     let mut txn = ctx.services.db_pool.begin().await?;
+    // Cancellation waives attestation; a pass satisfies it. Neither needs a new job.
     // Disabled attestation and an empty selection follow scheduling's skip path.
-    // With selected devices, only a pass resumes recovery; cancellation keeps it failed.
-    let should_resume_attestation = selected_device_ids.is_empty()
-        || db::attestation::spdm::list_single_machine_attestation_status(
-            &mut txn,
-            host_machine_id,
-            Some(&selected_device_ids),
-        )
-        .await?
-            == SpdmAttestationStatus::Passed;
-    if should_resume_attestation {
-        match &details.source {
-            FailureSource::StateMachineArea(StateMachineArea::HostInit) => {
-                Ok(StateHandlerOutcome::transition(ManagedHostState::HostInit {
-                    machine_state: MachineState::SpdmMeasuring {
-                        spdm_measuring_state: SpdmMeasuringState::TriggerMeasurements,
-                    },
-                })
-                .with_txn(txn))
-            }
-            FailureSource::StateMachineArea(StateMachineArea::AssignedInstance) => Ok(
-                StateHandlerOutcome::transition(ManagedHostState::PostAssignedMeasuring {
-                    attestation_mode: AttestationMode::SpdmAttestation {
-                        spdm_measuring_state: SpdmMeasuringState::TriggerMeasurements,
-                    },
-                })
-                .with_txn(txn),
-            ),
-            FailureSource::StateMachineArea(StateMachineArea::MainFlow) => Ok(
-                StateHandlerOutcome::transition(ManagedHostState::PreAssignedMeasuring {
-                    spdm_measuring_state: SpdmMeasuringState::TriggerMeasurements,
-                })
-                .with_txn(txn),
-            ),
-            _ => Ok(StateHandlerOutcome::do_nothing()),
-        }
-    } else {
-        Ok(StateHandlerOutcome::do_nothing())
+    let should_advance = selected_device_ids.is_empty()
+        || matches!(
+            db::attestation::spdm::list_single_machine_attestation_status(
+                &mut txn,
+                host_machine_id,
+                Some(&selected_device_ids),
+            )
+            .await?,
+            SpdmAttestationStatus::Passed | SpdmAttestationStatus::Cancelled
+        );
+    if !should_advance {
+        return Ok(StateHandlerOutcome::do_nothing());
     }
+
+    // Use the same destinations as successful polling in the original lifecycle stage.
+    let next_state = match &details.source {
+        FailureSource::StateMachineArea(StateMachineArea::HostInit) => ManagedHostState::HostInit {
+            machine_state: MachineState::WaitingForDiscovery,
+        },
+        FailureSource::StateMachineArea(StateMachineArea::AssignedInstance) => {
+            waiting_for_cleanup_state(CleanupState::Init, CleanupContext::Deprovision)
+        }
+        FailureSource::StateMachineArea(StateMachineArea::MainFlow) => {
+            ManagedHostState::StartAssignmentCycle
+        }
+        _ => return Ok(StateHandlerOutcome::do_nothing()),
+    };
+    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
 }
 
 pub(crate) async fn handle_spdm_trigger_state(
