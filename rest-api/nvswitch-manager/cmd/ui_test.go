@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	pb "github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/internal/proto/v1"
+	nsmlog "github.com/NVIDIA/infra-controller/rest-api/nvswitch-manager/pkg/common/log"
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
@@ -113,6 +114,7 @@ func TestUIServerResponseWrites(t *testing.T) {
 		writeError error
 		wantBody   string
 		wantLog    string
+		wantError  string
 	}{
 		{
 			name:     "JSON response",
@@ -124,6 +126,7 @@ func TestUIServerResponseWrites(t *testing.T) {
 			json:       true,
 			writeError: writeError,
 			wantLog:    "Failed to write JSON response",
+			wantError:  writeError.Error(),
 		},
 		{
 			name:     "template response",
@@ -135,11 +138,13 @@ func TestUIServerResponseWrites(t *testing.T) {
 			template:   `{{define "layout.html"}}{{.ErrorTitle}}: {{.ErrorMessage}}{{end}}`,
 			writeError: writeError,
 			wantLog:    "Failed to render UI page",
+			wantError:  writeError.Error(),
 		},
 		{
-			name:     "template evaluation failure",
-			template: `{{define "layout.html"}}{{call .Missing}}{{end}}`,
-			wantLog:  "Failed to render UI page",
+			name:      "template evaluation failure",
+			template:  `{{define "layout.html"}}{{call .Missing}}{{end}}`,
+			wantLog:   "Failed to render UI page",
+			wantError: "call of nil",
 		},
 	}
 	for _, tt := range tests {
@@ -147,8 +152,13 @@ func TestUIServerResponseWrites(t *testing.T) {
 			var logs bytes.Buffer
 			logger := log.StandardLogger()
 			originalOutput := logger.Out
+			originalFormatter := logger.Formatter
 			logger.SetOutput(&logs)
-			t.Cleanup(func() { logger.SetOutput(originalOutput) })
+			logger.SetFormatter(&nsmlog.JSONFormatter{})
+			t.Cleanup(func() {
+				logger.SetOutput(originalOutput)
+				logger.SetFormatter(originalFormatter)
+			})
 
 			recorder := httptest.NewRecorder()
 			writer := &uiResponseWriter{ResponseWriter: recorder, writeError: tt.writeError}
@@ -173,8 +183,8 @@ func TestUIServerResponseWrites(t *testing.T) {
 				assert.Empty(t, logs.String())
 			} else {
 				assert.Contains(t, logs.String(), tt.wantLog)
+				assert.Contains(t, logs.String(), tt.wantError)
 				if tt.writeError != nil {
-					assert.Contains(t, logs.String(), writeError.Error())
 					assert.Equal(t, 1, writer.writes)
 				}
 			}

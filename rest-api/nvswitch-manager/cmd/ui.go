@@ -1022,13 +1022,13 @@ func (s *UIServer) renderError(w http.ResponseWriter, title, message string) {
 func writeJSONResponse(w http.ResponseWriter, value interface{}) {
 	err := json.NewEncoder(w).Encode(value)
 	if err != nil {
-		log.WithError(err).Error("Failed to write JSON response")
+		log.WithField(log.ErrorKey, err.Error()).Error("Failed to write JSON response")
 	}
 }
 
 func (s *UIServer) renderPage(w http.ResponseWriter, data interface{}) {
 	err := s.templates.ExecuteTemplate(w, "layout.html", data)
 	if err != nil {
-		log.WithError(err).Error("Failed to render UI page")
+		log.WithField(log.ErrorKey, err.Error()).Error("Failed to render UI page")
 	}
 }
