@@ -19,10 +19,10 @@ use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use carbide_instrument::testing::MetricsCapture;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_site_explorer::MachineCreator;
 use carbide_site_explorer::config::SiteExplorerConfig;
-use carbide_site_explorer::errors::SiteExplorerError;
 use common::api_fixtures::TestEnv;
 use db::{self};
 use ipnetwork::IpNetwork;
@@ -109,8 +109,14 @@ async fn test_disable_machine_creation_outside_site_explorer(
     Ok(())
 }
 
+/// The admin address reconcile runs in its own transaction after the
+/// managed-host commit. When its network config bump loses to a concurrent
+/// writer, it re-reads the winning config and swaps again: the row repairs
+/// commit, the winning config is republished under the next version, the
+/// creation call still succeeds, no failure is counted, and the host BMC is
+/// not flagged for exploration.
 #[sqlx_test]
-async fn rejected_admin_address_reconciliation_rolls_back(
+async fn admin_address_reconciliation_republishes_a_config_changed_under_it(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = api_fixtures::create_test_env(pool).await;
@@ -178,6 +184,7 @@ async fn rejected_admin_address_reconciliation_rolls_back(
     let mut winning_config = network_config.value.clone();
     winning_config.use_admin_network = Some(!winning_config.use_admin_network.unwrap_or(true));
 
+    let metrics = MetricsCapture::start();
     let reconcile = creator.create_managed_host(
         &explored_host,
         &mut host_report,
@@ -217,19 +224,39 @@ async fn rejected_admin_address_reconciliation_rolls_back(
         })
         .await
         .expect("admin address reconciliation should finish after the competing writer commits");
-    assert!(matches!(
-        result.expect_err("rejected network config must fail admin address reconciliation"),
-        SiteExplorerError::DatabaseError(db::DatabaseError::FailedPrecondition(_))
-    ));
+    let created =
+        result.expect("the managed-host transaction commits before the admin address reconcile");
+    assert!(!created, "an existing host is not created again");
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_site_explorer_host_admin_address_reconcile_failures_total",
+            &[]
+        ),
+        0.0,
+        "a lost swap is retried, not counted as a failure"
+    );
+    assert!(
+        !explored_endpoint(&env, host_bmc_ip)
+            .await?
+            .exploration_requested,
+        "a retried network config swap must not flag the host BMC for exploration"
+    );
 
     let mut txn = env.pool.begin().await?;
     let after = db::machine_interface::find_one(&mut *txn, primary.id).await?;
-    assert_eq!(after.addresses, before.addresses);
-    assert_eq!(after.hostname, before.hostname);
-    assert_eq!(after.domain_id, before.domain_id);
+    assert!(!after.addresses.is_empty(), "the address repair commits");
+    assert_ne!(
+        after.hostname, before.hostname,
+        "the hostname repair commits"
+    );
+    assert!(after.domain_id.is_some(), "the domain repair commits");
     let after_config = db::machine::get_network_config(&mut *txn, &host_id).await?;
     assert_eq!(after_config.value, winning_config);
-    assert_eq!(after_config.version, winning_version);
+    assert_eq!(
+        after_config.version.version_nr(),
+        winning_version.version_nr() + 1,
+        "the winning config is republished under the next version"
+    );
     txn.commit().await?;
     Ok(())
 }

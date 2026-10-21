@@ -16,6 +16,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_api_db_queries_total</td><td>counter</td><td>Number of database queries that occurred inside a span</td></tr>
 <tr><td>carbide_api_db_span_query_time_milliseconds</td><td>histogram</td><td>Total time the request spent inside a span on database transactions</td></tr>
 <tr><td>carbide_api_grpc_server_duration_milliseconds</td><td>histogram</td><td>Processing time for a request on the carbide API server</td></tr>
+<tr><td>carbide_api_host_admin_address_reconcile_failures_total</td><td>counter</td><td>Number of host admin address reconciliations that failed after a discovery committed</td></tr>
 <tr><td>carbide_api_ready</td><td>gauge</td><td>Whether the NICo API is running</td></tr>
 <tr><td>carbide_api_secrets_request_duration_milliseconds</td><td>histogram</td><td>Duration of Postgres secrets operations, in milliseconds.</td></tr>
 <tr><td>carbide_api_secrets_requests_failed_total</td><td>counter</td><td>Number of failed Postgres secrets operations.</td></tr>
@@ -334,6 +335,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_site_explorer_dpf_explorations_deferred_total</td><td>counter</td><td>Number of periodic endpoint candidates skipped, re-exploration requests rejected, or refresh requests deferred during DPF provisioning, by request type.</td></tr>
 <tr><td>carbide_site_explorer_dpu_migration_signals_count</td><td>gauge</td><td>Number of DPU NIC-mode migration signals by signal type -- mode-mismatch found, set_nic_mode issued, reset requested, and zero-DPU registered for a host whose DPU policy is nic.</td></tr>
 <tr><td>carbide_site_explorer_enabled</td><td>gauge</td><td>Whether site-explorer is enabled (1) or paused (0)</td></tr>
+<tr><td>carbide_site_explorer_host_admin_address_reconcile_failures_total</td><td>counter</td><td>Number of host admin address reconciliations that failed after Site Explorer committed or revisited a managed host</td></tr>
 <tr><td>carbide_site_explorer_iteration_latency_milliseconds</td><td>histogram</td><td>The time it took to perform one site explorer iteration</td></tr>
 <tr><td>carbide_site_explorer_last_run_status</td><td>gauge</td><td>The status of the latest Site Explorer run</td></tr>
 <tr><td>carbide_site_explorer_machine_slot_tray_enrichment_failures_total</td><td>counter</td><td>Number of Site Explorer machine slot and tray enrichment failures, by failure stage.</td></tr>

@@ -139,8 +139,9 @@ pub(super) async fn update_primary_interface(
     let _admin_admission = db::machine_interface::admin_lock_admission().await;
     let mut txn = api.txn_begin().await?;
 
-    // Site Explorer takes these locks before it changes interface ownership.
-    // Matching that order keeps an operator or scout write from deadlocking discovery.
+    // This transaction locks interface rows, moves the primary flag, and
+    // reconciles admin addresses in one unit, so it takes the segment locks
+    // the reconcile needs before any row lock (the order the allocator uses).
     db::machine_interface::lock_all_admin_segments(&mut txn).await?;
     let interface_snapshots =
         db::machine_interface::find_by_machine_id_for_update(&mut txn, &host_machine_id).await?;
@@ -402,8 +403,9 @@ async fn select_primary_interface_from_scout<'a>(
                 "scout selected interface {interface_id} on host {host_machine_id}, but the locked interface does not exist"
             ),
         })?;
-    // Finally, do not compete with a primary interface that Site Explorer has already planned. Its
-    // writers take the same global Admin locks as this caller.
+    // Finally, do not compete with a primary interface that Site Explorer has already planned.
+    // Site Explorer plans it while holding the admin segments, and this transaction holds them
+    // exclusively, so the read below is stable.
     let has_primary_prediction =
         db::predicted_machine_interface::find_by_machine_id(txn, &host_machine_id)
             .await?

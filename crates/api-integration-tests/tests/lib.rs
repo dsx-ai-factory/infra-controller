@@ -473,6 +473,8 @@ async fn run_integration() -> eyre::Result<()> {
     )
     .await?;
 
+    exercise_admin_address_reconcile_failures(&test_env).await?;
+
     let metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
     assert!(
         metric_infos.iter().any(|metric| {
@@ -486,6 +488,17 @@ async fn run_integration() -> eyre::Result<()> {
             .any(|metric| metric.name == "carbide_scout_pci_evaluations_total"),
         "the MaT scout path must exercise PCI comparison observability",
     );
+    for name in [
+        "carbide_api_host_admin_address_reconcile_failures_total",
+        "carbide_site_explorer_host_admin_address_reconcile_failures_total",
+    ] {
+        assert!(
+            metric_infos
+                .iter()
+                .any(|metric| metric.name == name && metric.ty == "counter"),
+            "{name} must come from the fresh scrape, not from the checked-in catalogue",
+        );
+    }
     for object_type in ["switches", "racks", "power_shelves"] {
         for (family, metric_type) in [
             ("object_tasks_completed_total", "counter"),
@@ -655,6 +668,115 @@ async fn exercise_dpf_exploration_suppression(
         queued.exploration_requested,
         "provisioning must queue refresh"
     );
+    Ok(())
+}
+
+/// Leaves a host whose primary admin interface is DPU-backed without any
+/// primary, then drives the two paths whose post-commit admin address
+/// reconcile fails on that: a rediscovery of its DPU, and the explorer's
+/// steady-state repair of the host once its BMC endpoint is flagged for
+/// exploration. Each counts a failure. The primary flag is restored after.
+async fn exercise_admin_address_reconcile_failures(
+    test_env: &IntegrationTestEnvironment,
+) -> eyre::Result<()> {
+    use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+    use model::machine::machine_search_config::MachineSearchConfig;
+    use rpc::forge_api_client::ForgeApiClient;
+    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use rpc::{DiscoveryData, DiscoveryInfo, MachineDiscoveryInfo};
+
+    // A DPU's own OOB interface is primary and attached to itself; a host's
+    // link is attached to a different machine.
+    let (primary_id, host_id, dpu_id): (MachineInterfaceId, MachineId, MachineId) = sqlx::query_as(
+        "SELECT id, machine_id, attached_dpu_machine_id FROM machine_interfaces
+         WHERE primary_interface AND machine_id IS NOT NULL
+           AND attached_dpu_machine_id IS NOT NULL
+           AND attached_dpu_machine_id <> machine_id
+         ORDER BY machine_id, id LIMIT 1",
+    )
+    .fetch_one(&test_env.db_pool)
+    .await?;
+    eyre::ensure!(
+        !host_id.machine_type().is_dpu(),
+        "the selected primary admin interface must belong to a host, got {host_id}"
+    );
+    let host_bmc_ip: std::net::IpAddr = sqlx::query_scalar(
+        "SELECT e.address FROM explored_endpoints e
+         JOIN machine_interface_addresses mia ON mia.address = e.address
+         JOIN machine_interfaces bmc ON bmc.id = mia.interface_id
+         WHERE bmc.machine_id = $1 AND bmc.interface_type = 'Bmc'
+         ORDER BY e.address LIMIT 1",
+    )
+    .bind(host_id)
+    .fetch_one(&test_env.db_pool)
+    .await?;
+    // The DPU OS interface is the DPU's primary; its BMC row is not.
+    let dpu_interface_id: MachineInterfaceId = sqlx::query_scalar(
+        "SELECT id FROM machine_interfaces WHERE machine_id = $1 AND primary_interface
+         ORDER BY id LIMIT 1",
+    )
+    .bind(dpu_id)
+    .fetch_one(&test_env.db_pool)
+    .await?;
+    let hardware_info = db::machine::find_one(
+        &test_env.db_pool,
+        &dpu_id,
+        MachineSearchConfig {
+            include_dpus: true,
+            ..Default::default()
+        },
+    )
+    .await?
+    .context("the chosen host's DPU exists")?
+    .status
+    .hardware_info
+    .context("the chosen host's DPU recorded hardware info")?;
+
+    let mut txn = test_env.db_pool.begin().await?;
+    db::machine_interface::set_primary_interface(&primary_id, false, &mut txn).await?;
+    // The next explorer run revisits the host and its steady-state repair
+    // fails the same way.
+    db::explored_endpoints::request_exploration_for_addresses(&[host_bmc_ip], &mut txn).await?;
+    txn.commit().await?;
+
+    let certs = &api_test_helper::utils::LOCALHOST_CERTS;
+    let config = ForgeClientConfig::new(
+        certs.ca_cert.to_string_lossy().into_owned(),
+        Some(forge_tls::client_config::ClientCert {
+            cert_path: certs.client_cert.to_string_lossy().into_owned(),
+            key_path: certs.client_key.to_string_lossy().into_owned(),
+        }),
+    );
+    let client = ForgeApiClient::new(&ApiConfig::new(
+        &format!("https://{}", test_env.carbide_api_addrs[0]),
+        &config,
+    ));
+    // The discovery commits and its own reconcile finds no primary to repair.
+    client
+        .discover_machine(MachineDiscoveryInfo {
+            machine_interface_id: Some(dpu_interface_id),
+            discovery_data: Some(DiscoveryData::Info(
+                DiscoveryInfo::try_from(hardware_info)
+                    .map_err(|error| eyre::eyre!("hardware info conversion: {error:?}"))?,
+            )),
+            create_machine: true,
+            ..Default::default()
+        })
+        .await?;
+    for metric in [
+        "carbide_api_host_admin_address_reconcile_failures_total",
+        "carbide_site_explorer_host_admin_address_reconcile_failures_total",
+    ] {
+        metrics::wait_for_metric_line(
+            &test_env.carbide_metrics_addrs,
+            &format!("# TYPE {metric} counter\n"),
+        )
+        .await?;
+    }
+
+    let mut txn = test_env.db_pool.begin().await?;
+    db::machine_interface::set_primary_interface(&primary_id, true, &mut txn).await?;
+    txn.commit().await?;
     Ok(())
 }
 

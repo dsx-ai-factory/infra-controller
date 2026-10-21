@@ -415,6 +415,9 @@ impl From<DatabaseError> for CarbideError {
             DatabaseError::TryAgain => Internal {
                 message: DatabaseError::TryAgain.to_string(),
             },
+            error @ DatabaseError::NetworkConfigVersionChanged { .. } => Internal {
+                message: error.to_string(),
+            },
         }
     }
 }
@@ -479,16 +482,10 @@ impl CarbideError {
         }
     }
 
-    /// Returns true if this error is a Postgres deadlock (`40P01`) or
-    /// serialization failure (`40001`), both of which are safe to retry.
+    /// Whether the wrapped query error is a Postgres deadlock or serialization
+    /// failure (`db::AnnotatedSqlxError::is_retryable_transaction_error`).
     pub(crate) fn is_retryable_transaction_error(&self) -> bool {
-        matches!(
-            self,
-            CarbideError::DBError(db::AnnotatedSqlxError {
-                source: sqlx::Error::Database(db_err),
-                ..
-            }) if matches!(db_err.code().as_deref(), Some("40P01") | Some("40001"))
-        )
+        matches!(self, CarbideError::DBError(error) if error.is_retryable_transaction_error())
     }
 }
 

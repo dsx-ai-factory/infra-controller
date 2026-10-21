@@ -16,6 +16,7 @@
  */
 use std::net::IpAddr;
 
+use carbide_uuid::machine::MachineId;
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
 use const_format::concatcp;
@@ -685,6 +686,26 @@ pub async fn request_exploration_for_addresses(
         "UPDATE explored_endpoints SET exploration_requested = true WHERE address = ANY($1)";
     sqlx::query(query)
         .bind(addresses)
+        .execute(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(())
+}
+
+/// Sets `exploration_requested = true` on the BMC endpoints of `machine_id`
+/// so the site explorer revisits the machine on its next tick. A machine
+/// whose BMC interface has no address or no endpoint row is left alone.
+pub(crate) async fn request_exploration_for_machine(
+    machine_id: &MachineId,
+    txn: &mut PgConnection,
+) -> Result<(), DatabaseError> {
+    let query = "UPDATE explored_endpoints SET exploration_requested = true \
+                 WHERE address IN (\
+                     SELECT mia.address FROM machine_interfaces mi \
+                     JOIN machine_interface_addresses mia ON mia.interface_id = mi.id \
+                     WHERE mi.interface_type = 'Bmc' AND mi.machine_id = $1)";
+    sqlx::query(query)
+        .bind(machine_id)
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;

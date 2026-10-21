@@ -14,12 +14,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use carbide_instrument::emit;
 use carbide_utils::none_if_empty::NoneIfEmpty;
-use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSubtype, PredictedHostMachineId};
+use carbide_uuid::machine::{
+    DpuMachineId, HostMachineId, MachineId, MachineIdSubtype, PredictedHostMachineId,
+};
 use component_manager::MachineInfoProvider;
 use db::machine::MachineNetworkConfigNotCurrent;
 use db::{ConditionalWrite, Transaction};
@@ -207,6 +210,73 @@ impl MachineCreator {
         Ok(())
     }
 
+    /// Reconciles the admin addresses of the ingested hosts explored in this
+    /// run, for the mode in which `create_machines` is off and its
+    /// steady-state path does not revisit them.
+    ///
+    /// A host is revisited when its BMC and every DPU BMC belong to a machine
+    /// and one of them was explored in this run: the hosts `create_machines`
+    /// repairs when it is on. Each reconcile holds the admin-lock admission
+    /// permit, like `create_machines` does. A failed transient reconcile
+    /// flags the host's BMC endpoint for exploration, so the next run
+    /// revisits the host here.
+    pub(crate) async fn reconcile_explored_host_admin_addresses(
+        &self,
+        explored_managed_hosts: &[IdentifiedManagedHost],
+        ingested_bmc_ips: &HashSet<IpAddr>,
+        explored_this_run: &HashSet<IpAddr>,
+    ) {
+        for identified in explored_managed_hosts {
+            let host = &identified.explored_host;
+            if !ingested_host_explored_this_run(host, ingested_bmc_ips, explored_this_run) {
+                continue;
+            }
+            match self.existing_host_machine_id(host).await {
+                Ok(Some(host_machine_id)) => {
+                    // Admission permit BEFORE the reconcile transaction, which
+                    // may wait on the admin-segment advisory locks: excess
+                    // waiters queue in memory, not on open pool connections.
+                    let _admin_admission = db::machine_interface::admin_lock_admission().await;
+                    reconcile_host_admin_addresses_after_commit(
+                        &self.database_connection,
+                        &host_machine_id,
+                    )
+                    .await;
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    %error,
+                    host_bmc_ip_address = %host.host_bmc_ip,
+                    "Skipped the admin address reconcile of an explored host"
+                ),
+            }
+        }
+    }
+
+    /// The host machine the DPUs of `host` are attached to, or `None` while
+    /// they have no machines. A host without DPUs has no DPU-backed admin
+    /// link, so there is nothing to reconcile.
+    async fn existing_host_machine_id(
+        &self,
+        host: &ExploredManagedHost,
+    ) -> SiteExplorerResult<Option<HostMachineId>> {
+        let dpu_ids = host
+            .dpus
+            .iter()
+            .map(|dpu_report| dpu_report.machine_id_if_valid_report())
+            .collect::<Result<Vec<_>, _>>()?;
+        if dpu_ids.is_empty() {
+            return Ok(None);
+        }
+        let existing_hosts_by_dpu_id =
+            db::machine::lookup_host_machine_ids_by_dpu_ids(&self.database_connection, &dpu_ids)
+                .await?;
+        if existing_hosts_by_dpu_id.is_empty() {
+            return Ok(None);
+        }
+        attached_host_machine_id(&existing_hosts_by_dpu_id, &dpu_ids).map(Some)
+    }
+
     /// Creates a `Machine` objects for an identified `ManagedHost` with initial states
     ///
     /// Returns `true` if new `Machine` objects have been created or `false` otherwise.
@@ -249,16 +319,11 @@ impl MachineCreator {
         let mut managed_host = ManagedHost::init(explored_host);
 
         // Admission permit BEFORE the transaction: waiters on the admin-segment
-        // advisory lock must queue in memory, not on open pool connections.
+        // advisory locks (the allocation locks taken below for a new host, and
+        // the reconcile transaction that follows the commit) must queue in
+        // memory, not on open pool connections.
         let _admin_admission = db::machine_interface::admin_lock_admission().await;
         let mut txn = Transaction::begin(pool).await?;
-
-        // Advisory-lock the admin segments before any machine-interface row
-        // writes (`attach_dpu_to_host` / `configure_dpu_interface`), so this
-        // transaction holds locks in the allocator order (segment advisory
-        // lock first, then interface rows) all the way to the reconcile
-        // pass -- which re-acquires the same locks as a no-op.
-        db::machine_interface::lock_all_admin_segments(txn.as_pgconn()).await?;
 
         // Zero-dpu case: If the explored host had no DPUs, we can create the machine now
         if managed_host.explored_host.dpus.is_empty() {
@@ -299,58 +364,32 @@ impl MachineCreator {
             // Steady state case: DPU's already exist, so site explorer must have already created
             // this managed host (since only site explorer would have created them.) Ensure they're
             // associated with this machine, then return early. `create_machines` gates this
-            // path with `needs_managed_host_transaction`, because
-            // reconcile_host_admin_addresses locks all admin segments.
+            // path with `needs_managed_host_transaction` so an ingested fleet does not re-run
+            // it for every host on every iteration.
 
-            let existing_dpu_ids = existing_hosts_by_dpu_id
-                .keys()
-                .copied()
-                .sorted()
-                .dedup()
-                .collect::<Vec<_>>();
-            let existing_managed_host_ids = existing_hosts_by_dpu_id
-                .values()
-                .copied()
-                .sorted()
-                .dedup()
-                .collect::<Vec<_>>();
-
-            if existing_dpu_ids != dpu_ids.iter().copied().sorted().dedup().collect::<Vec<_>>() {
-                // This would only happen if somehow a host endpoint gains/loses a DPU from its endpoint report before we
-                // get a chance to create a managed host for it.
-                let msg = "explored endpoint has a partial number of DPU's already created";
-                tracing::error!(
-                    dpu_ids = dpu_ids.iter().join(", "),
-                    existing_dpu_ids = existing_dpu_ids.iter().join(", "),
-                    "{msg}",
-                );
-                return Err(SiteExplorerError::internal(msg.to_string()));
-            }
-
-            let host_machine_id = match existing_managed_host_ids.as_slice() {
-                [host_machine_id] => *host_machine_id,
-                host_machine_ids => {
-                    let existing_dpu_ids = existing_dpu_ids.iter().join(", ");
-                    let existing_host_ids = host_machine_ids.iter().join(", ");
-                    let msg = "DPU's from exploration report exist but are members of different managed hosts. exploration results are inconsistent";
-                    tracing::error!(%existing_dpu_ids, %existing_host_ids, "BUG: {msg}");
-                    return Err(SiteExplorerError::internal(msg.to_string()));
-                }
-            };
+            let host_machine_id = attached_host_machine_id(&existing_hosts_by_dpu_id, &dpu_ids)?;
 
             for dpu_report in managed_host.explored_host.dpus.iter() {
                 self.configure_dpu_interface(&mut txn, dpu_report).await?;
             }
 
-            self.reconcile_host_admin_addresses(&mut txn, &host_machine_id)
-                .await?;
             // The primary on an existing host may predate source
             // tracking. Do not infer its historical selector from today's
             // exploration or ExpectedMachine data.
             reconcile_desired_boot_interface(&mut txn, &host_machine_id, None, None).await?;
 
             txn.commit().await?;
+            reconcile_host_admin_addresses_after_commit(pool, &host_machine_id).await;
             return Ok(false);
+        }
+
+        // Advisory-lock the admin segments, in the allocators' mode, before the
+        // first machine-interface row write (`attach_dpu_to_host` allocates
+        // each DPU-backed host link), so the allocator's own segment locks
+        // re-acquire held keys and this transaction never requests a segment
+        // lock after a row lock.
+        if !managed_host.explored_host.dpus.is_empty() {
+            db::machine_interface::lock_all_admin_segments_for_allocation(txn.as_pgconn()).await?;
         }
 
         for (dpu_report, dpu_machine_id) in
@@ -427,11 +466,6 @@ impl MachineCreator {
                 .await?;
         }
 
-        // Normalize host admin address ownership after all DPU-backed host
-        // interfaces have been attached and primary flags are final.
-        self.reconcile_host_admin_addresses(&mut txn, &host_machine_id)
-            .await?;
-
         reconcile_desired_boot_interface(
             &mut txn,
             // TODO: ManagedHost will eventually have a HostMachineId as its machine_id and
@@ -463,6 +497,10 @@ impl MachineCreator {
         }
 
         txn.commit().await?;
+
+        // Normalize host admin address ownership now that every DPU-backed
+        // host interface is attached and the primary flags are committed.
+        reconcile_host_admin_addresses_after_commit(pool, &host_machine_id).await;
 
         tracing::info!(
             host_bmc_ip_address = %explored_host.host_bmc_ip,
@@ -635,6 +673,11 @@ impl MachineCreator {
         };
 
         if let Some(machine_id) = existing_predicted_host_machine_id {
+            // The refresh writes this host's NIC rows and locks its machine
+            // row; the exclusive segment locks keep it ordered against the
+            // DHCP and admin repair flows that lock those rows under the
+            // segment locks.
+            db::machine_interface::lock_all_admin_segments(&mut *txn).await?;
             Self::reconcile_zero_dpu_host_interfaces(
                 txn,
                 &machine_id,
@@ -1297,39 +1340,6 @@ impl MachineCreator {
         Ok(())
     }
 
-    /// Reconciles host admin addresses and bumps visible host network config when needed.
-    ///
-    /// Returns whether the active admin config changed.
-    async fn reconcile_host_admin_addresses(
-        &self,
-        txn: &mut PgConnection,
-        host_machine_id: &HostMachineId,
-    ) -> SiteExplorerResult<bool> {
-        let active_config_changed =
-            db::machine_interface::reconcile_admin_addresses_for_host(txn, host_machine_id).await?;
-        if active_config_changed {
-            let (network_config, network_config_version) =
-                db::machine::get_network_config(&mut *txn, host_machine_id)
-                    .await?
-                    .take();
-            if let ConditionalWrite::NotApplied(MachineNetworkConfigNotCurrent) =
-                db::machine::try_update_network_config(
-                    txn,
-                    host_machine_id,
-                    network_config_version,
-                    &network_config,
-                )
-                .await?
-            {
-                return Err(db::DatabaseError::FailedPrecondition(format!(
-                    "network configuration for machine {host_machine_id} changed or is no longer available"
-                ))
-                .into());
-            }
-        }
-        Ok(active_config_changed)
-    }
-
     // configure_host_machine configures the host's machine with the specific interface. It returns the host's machine ID.
     //
     // Normally, a host will have a single machine interface because the majority of hosts (for now) have a single DPU.
@@ -1427,6 +1437,51 @@ impl MachineCreator {
 
         Ok(PredictedHostMachineId::try_from(predicted_machine_id)?)
     }
+}
+
+/// Reconciles host admin addresses in a transaction of its own, after the
+/// managed-host transaction has committed or when an exploration revisits an
+/// ingested host.
+///
+/// `reconcile_admin_addresses_for_host` takes the admin segment advisory
+/// locks before any row lock when it has a repair to make, so it cannot run
+/// inside the managed-host transaction, which locks interface and machine
+/// rows first.
+async fn reconcile_host_admin_addresses_after_commit(
+    pool: &PgPool,
+    host_machine_id: &HostMachineId,
+) {
+    if let Err(error) =
+        db::machine_interface::reconcile_admin_addresses_after_commit(pool, host_machine_id).await
+    {
+        emit(SiteExplorerHostAdminAddressReconcileFailed {
+            host_machine_id: *host_machine_id,
+            error: error.to_string(),
+        });
+    }
+}
+
+/// A managed host committed, or an exploration revisited it, but its admin
+/// addresses could not be reconciled. After a transient failure the host's
+/// BMC endpoint is flagged for exploration, so the next Site Explorer
+/// iteration revisits the host and retries the repair. Until then a dormant
+/// link may keep a DHCP address and the host's network config version is
+/// not bumped.
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "site_explorer_host_admin_address_reconcile_failed",
+    metric_name = "carbide_site_explorer_host_admin_address_reconcile_failures_total",
+    component = "site-explorer",
+    log = warn,
+    metric = counter,
+    message = "Host admin address reconciliation failed for a managed host",
+    describe = "Number of host admin address reconciliations that failed after Site Explorer committed or revisited a managed host"
+)]
+struct SiteExplorerHostAdminAddressReconcileFailed {
+    #[context]
+    host_machine_id: HostMachineId,
+    #[context]
+    error: String,
 }
 
 /// Initializes the durable desired boot interface from Site Explorer's settled
@@ -1700,6 +1755,54 @@ fn host_mac_addresses_for_predicted_machine(
         .unwrap_or_default()
 }
 
+/// The host the DPUs of an exploration report are attached to: every DPU of
+/// the report has to be attached, and all of them to the same host.
+fn attached_host_machine_id(
+    existing_hosts_by_dpu_id: &HashMap<DpuMachineId, HostMachineId>,
+    dpu_ids: &[DpuMachineId],
+) -> SiteExplorerResult<HostMachineId> {
+    let existing_dpu_ids = existing_hosts_by_dpu_id
+        .keys()
+        .copied()
+        .sorted()
+        .dedup()
+        .collect::<Vec<_>>();
+    let existing_managed_host_ids = existing_hosts_by_dpu_id
+        .values()
+        .copied()
+        .sorted()
+        .dedup()
+        .collect::<Vec<_>>();
+
+    if existing_dpu_ids != dpu_ids.iter().copied().sorted().dedup().collect::<Vec<_>>() {
+        // This would only happen if somehow a host endpoint gains/loses a DPU from its endpoint report before we
+        // get a chance to create a managed host for it.
+        let msg = "explored endpoint has a partial number of DPU's already created";
+        tracing::error!(
+            dpu_ids = dpu_ids.iter().join(", "),
+            existing_dpu_ids = existing_dpu_ids.iter().join(", "),
+            "{msg}",
+        );
+        return Err(SiteExplorerError::internal(msg.to_string()));
+    }
+
+    match existing_managed_host_ids.as_slice() {
+        [host_machine_id] => Ok(*host_machine_id),
+        host_machine_ids => {
+            let existing_dpu_ids = existing_dpu_ids.iter().join(", ");
+            let existing_host_ids = host_machine_ids.iter().join(", ");
+            let msg = "DPU's from exploration report exist but are members of different managed hosts. exploration results are inconsistent";
+            tracing::error!(%existing_dpu_ids, %existing_host_ids, "BUG: {msg}");
+            Err(SiteExplorerError::internal(msg.to_string()))
+        }
+    }
+}
+
+/// The BMC IPs of `host`: its own BMC, then each DPU BMC.
+fn host_bmc_ips(host: &ExploredManagedHost) -> impl Iterator<Item = &IpAddr> {
+    std::iter::once(&host.host_bmc_ip).chain(host.dpus.iter().map(|dpu| &dpu.bmc_ip))
+}
+
 /// Whether `create_machines` must open the per-host transaction: always while
 /// the host BMC or any of its DPU BMCs has no machine yet, otherwise only when
 /// the host or one of its DPUs was explored in this run.
@@ -1708,9 +1811,20 @@ fn needs_managed_host_transaction(
     ingested_bmc_ips: &HashSet<IpAddr>,
     explored_this_run: &HashSet<IpAddr>,
 ) -> bool {
-    std::iter::once(&host.host_bmc_ip)
-        .chain(host.dpus.iter().map(|dpu| &dpu.bmc_ip))
+    host_bmc_ips(host)
         .any(|bmc_ip| !ingested_bmc_ips.contains(bmc_ip) || explored_this_run.contains(bmc_ip))
+}
+
+/// Whether the admin address pass revisits `host` while `create_machines` is
+/// off: the host BMC and every DPU BMC have a machine, and the host or one of
+/// its DPUs was explored in this run.
+fn ingested_host_explored_this_run(
+    host: &ExploredManagedHost,
+    ingested_bmc_ips: &HashSet<IpAddr>,
+    explored_this_run: &HashSet<IpAddr>,
+) -> bool {
+    host_bmc_ips(host).all(|bmc_ip| ingested_bmc_ips.contains(bmc_ip))
+        && host_bmc_ips(host).any(|bmc_ip| explored_this_run.contains(bmc_ip))
 }
 
 #[cfg(test)]
@@ -1723,12 +1837,9 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn needs_managed_host_transaction_cases() {
-        let host_bmc_ip: IpAddr = "10.0.0.1".parse().unwrap();
-        let dpu_bmc_ip: IpAddr = "10.0.0.2".parse().unwrap();
-        let other_ip: IpAddr = "10.0.0.3".parse().unwrap();
-        let host = ExploredManagedHost {
+    /// A host with one DPU, keyed on BMC IPs only.
+    fn one_dpu_host(host_bmc_ip: IpAddr, dpu_bmc_ip: IpAddr) -> ExploredManagedHost {
+        ExploredManagedHost {
             host_bmc_ip,
             dpus: vec![ExploredDpu {
                 bmc_ip: dpu_bmc_ip,
@@ -1736,7 +1847,15 @@ mod tests {
                 host_chassis_id: None,
                 report: Arc::new(EndpointExplorationReport::default()),
             }],
-        };
+        }
+    }
+
+    #[test]
+    fn needs_managed_host_transaction_cases() {
+        let host_bmc_ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let dpu_bmc_ip: IpAddr = "10.0.0.2".parse().unwrap();
+        let other_ip: IpAddr = "10.0.0.3".parse().unwrap();
+        let host = one_dpu_host(host_bmc_ip, dpu_bmc_ip);
 
         check_values(
             [
@@ -1778,6 +1897,44 @@ mod tests {
             ],
             |(ingested_bmc_ips, explored_this_run): (Vec<IpAddr>, Vec<IpAddr>)| {
                 needs_managed_host_transaction(
+                    &host,
+                    &ingested_bmc_ips.into_iter().collect(),
+                    &explored_this_run.into_iter().collect(),
+                )
+            },
+        );
+    }
+
+    /// Unlike `needs_managed_host_transaction`, a host with a BMC that has no
+    /// machine yet is left to creation, and a DPU BMC exploration admits the
+    /// host like its own.
+    #[test]
+    fn ingested_host_explored_this_run_cases() {
+        let host_bmc_ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let dpu_bmc_ip: IpAddr = "10.0.0.2".parse().unwrap();
+        let other_ip: IpAddr = "10.0.0.3".parse().unwrap();
+        let host = one_dpu_host(host_bmc_ip, dpu_bmc_ip);
+
+        check_values(
+            [
+                Check {
+                    scenario: "DPU has no machine yet, host BMC explored: skipped",
+                    input: (vec![host_bmc_ip], vec![host_bmc_ip]),
+                    expect: false,
+                },
+                Check {
+                    scenario: "host and DPU machines exist, unrelated endpoint explored: skipped",
+                    input: (vec![host_bmc_ip, dpu_bmc_ip], vec![other_ip]),
+                    expect: false,
+                },
+                Check {
+                    scenario: "host and DPU machines exist, DPU BMC explored: revisited",
+                    input: (vec![host_bmc_ip, dpu_bmc_ip], vec![dpu_bmc_ip]),
+                    expect: true,
+                },
+            ],
+            |(ingested_bmc_ips, explored_this_run): (Vec<IpAddr>, Vec<IpAddr>)| {
+                ingested_host_explored_this_run(
                     &host,
                     &ingested_bmc_ips.into_iter().collect(),
                     &explored_this_run.into_iter().collect(),

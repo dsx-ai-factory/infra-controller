@@ -26,7 +26,8 @@ use std::str::FromStr;
 use carbide_uuid::dpa_interface::DpaInterfaceId;
 use carbide_uuid::instance_type::InstanceTypeId;
 use carbide_uuid::machine::{
-    DpuMachineId, HostMachineId, MachineId, MachineIdSubtypeTrait, MachineType, StableHostMachineId,
+    DpuMachineId, HostMachineId, MachineId, MachineIdSubtypeTrait, MachineType,
+    PredictedHostMachineId, StableHostMachineId,
 };
 use carbide_uuid::machine_validation::MachineValidationId;
 use carbide_uuid::rack::{RackId, RackProfileId};
@@ -1869,11 +1870,41 @@ pub async fn clear_use_admin_network_changed_if_version_matches(
     })
 }
 
+/// Locks the interface rows of `predicted_host_id`, ascending by id and BMC
+/// rows included, then its machines row: the order the host's other writers
+/// use. Call it before any other row lock in the transaction, so the FK
+/// cascade of [`try_sync_stable_id_with_current_machine_id_for_host`] finds
+/// the interface rows already held; the rows it cascades into through the
+/// other tables that reference `machines(id)` are ones other flows write only
+/// after locking the machines row. Locks nothing when the host was renamed or
+/// deleted since the caller read its id.
+pub async fn lock_rows_for_stable_id_sync(
+    txn: &mut PgConnection,
+    predicted_host_id: &PredictedHostMachineId,
+) -> DatabaseResult<()> {
+    let query = "SELECT id FROM machine_interfaces WHERE machine_id = $1 ORDER BY id FOR UPDATE";
+    sqlx::query(query)
+        .bind(predicted_host_id)
+        .execute(&mut *txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    let query = "SELECT id FROM machines WHERE id = $1 FOR UPDATE";
+    sqlx::query(query)
+        .bind(predicted_host_id)
+        .execute(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(())
+}
+
 /// Replaces predicted host id with stable host id.
 /// Once forge receives DiscoveryData from Host, forge can create StableMachineId.
 /// This StableMachineId must replace existing PredictedHostId in db.
 /// State machine does not act on receiving discoverydata, but discoverycompleted message,
 /// so updating host id must not interfere state machine handling.
+/// Callers hold the locks from [`lock_rows_for_stable_id_sync`], so the FK
+/// cascade of the rename below finds the host's interface rows already held
+/// and reaches the other referencing tables only after the machines row.
 pub async fn try_sync_stable_id_with_current_machine_id_for_host(
     txn: &mut PgConnection,
     current_machine_id: Option<HostMachineId>,
@@ -4997,6 +5028,132 @@ mod test {
             2,
             "both dpa_interfaces rows should cascade to the stable id",
         );
+
+        Ok(())
+    }
+
+    /// The pre-lock holds every interface row of the host, BMC row included,
+    /// and its machines row, and no other machine's rows, before the rename
+    /// rewrites them.
+    #[crate::sqlx_test]
+    async fn lock_rows_for_stable_id_sync_holds_the_host_interface_and_machines_rows(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use carbide_uuid::machine::{MachineIdSource, MachineType, PredictedHostMachineId};
+
+        fn machine_id(marker: u8, machine_type: MachineType) -> MachineId {
+            let mut hardware_id = [0u8; 32];
+            hardware_id[0] = marker;
+            MachineId::new(
+                MachineIdSource::ProductBoardChassisSerial,
+                hardware_id,
+                machine_type,
+            )
+        }
+
+        /// Whether `query`, a `FOR UPDATE NOWAIT` of the row with the text
+        /// id `id`, fails because another transaction holds the row.
+        async fn row_is_held(pool: &sqlx::PgPool, query: &'static str, id: &str) -> bool {
+            let mut probe = pool.begin().await.unwrap();
+            let result = sqlx::query(query).bind(id).fetch_one(probe.as_mut()).await;
+            probe.rollback().await.unwrap();
+            match result {
+                Ok(_) => false,
+                Err(error) => {
+                    assert_eq!(
+                        error
+                            .as_database_error()
+                            .and_then(sqlx::error::DatabaseError::code)
+                            .as_deref(),
+                        Some("55P03"),
+                        "{error}"
+                    );
+                    true
+                }
+            }
+        }
+        const INTERFACE_HELD: &str =
+            "SELECT id FROM machine_interfaces WHERE id = $1::uuid FOR UPDATE NOWAIT";
+        const MACHINE_HELD: &str = "SELECT id FROM machines WHERE id = $1 FOR UPDATE NOWAIT";
+
+        let predicted_id =
+            PredictedHostMachineId::try_from(machine_id(1, MachineType::PredictedHost))?;
+        let stable_id = StableHostMachineId::try_from(machine_id(1, MachineType::Host))?;
+        let other_machine_id = machine_id(2, MachineType::Host);
+
+        let mut setup = pool.begin().await?;
+        for id in [MachineId::from(predicted_id), other_machine_id] {
+            super::create(setup.as_mut(), None, &id, ManagedHostState::Ready, None, 2).await?;
+        }
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version) VALUES ('stable-id-sync', 'V1-T0')
+             RETURNING id",
+        )
+        .fetch_one(setup.as_mut())
+        .await?;
+        let mut interface_ids = Vec::new();
+        for (index, (owner, interface_type)) in [
+            (MachineId::from(predicted_id), "Data"),
+            (MachineId::from(predicted_id), "Bmc"),
+            (MachineId::from(predicted_id), "Data"),
+            (other_machine_id, "Data"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let interface_id: MachineInterfaceId = sqlx::query_scalar(
+                "INSERT INTO machine_interfaces
+                     (machine_id, association_type, segment_id, mac_address,
+                      primary_interface, hostname, interface_type)
+                 VALUES ($1, 'Machine', $2, $3::macaddr, false, $4, $5::interface_type)
+                 RETURNING id",
+            )
+            .bind(owner)
+            .bind(segment_id)
+            .bind(format!("02:00:00:00:00:0{index}"))
+            .bind(format!("stable-id-sync-{index}"))
+            .bind(interface_type)
+            .fetch_one(setup.as_mut())
+            .await?;
+            interface_ids.push(interface_id);
+        }
+        let other_interface_id = interface_ids.pop().expect("four rows were inserted");
+        setup.commit().await?;
+
+        let mut txn = pool.begin().await?;
+        super::lock_rows_for_stable_id_sync(&mut txn, &predicted_id).await?;
+
+        for interface_id in &interface_ids {
+            assert!(
+                row_is_held(&pool, INTERFACE_HELD, &interface_id.to_string()).await,
+                "interface row {interface_id} of the predicted host should be held"
+            );
+        }
+        assert!(
+            row_is_held(&pool, MACHINE_HELD, &predicted_id.to_string()).await,
+            "the machines row of the predicted host should be held"
+        );
+        assert!(
+            !row_is_held(&pool, INTERFACE_HELD, &other_interface_id.to_string()).await,
+            "another machine's interface row should be free"
+        );
+
+        let renamed = super::try_sync_stable_id_with_current_machine_id_for_host(
+            &mut txn,
+            Some(HostMachineId::from(predicted_id)),
+            &stable_id,
+        )
+        .await?;
+        assert_eq!(renamed, stable_id);
+        let mut renamed_rows: Vec<MachineInterfaceId> =
+            sqlx::query_scalar("SELECT id FROM machine_interfaces WHERE machine_id = $1")
+                .bind(stable_id)
+                .fetch_all(txn.as_mut())
+                .await?;
+        renamed_rows.sort();
+        interface_ids.sort();
+        assert_eq!(renamed_rows, interface_ids);
+        txn.rollback().await?;
 
         Ok(())
     }
