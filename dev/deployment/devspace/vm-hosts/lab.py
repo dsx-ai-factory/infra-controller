@@ -21,6 +21,7 @@ NAME = "nico-vm-hosts"
 BRIDGE = "br-nico-vm"
 LABEL = "com.nvidia.devspace.vm-hosts"
 IPV4_SUBNET = "10.84.30.0/24"
+IPV6_SUBNET = "fd42:84:30::/64"
 LIBVIRT_IMAGE = "nico-devspace-libvirt:latest"
 BMC_IMAGE = "nico-devspace-bmc-mock:latest"
 
@@ -283,7 +284,7 @@ def up(root, config):
     if network:
         owned(network, root, network=True)
     else:
-        for version, cidr in ((4, IPV4_SUBNET),):
+        for version, cidr in ((4, IPV4_SUBNET), (6, IPV6_SUBNET)):
             existing_routes = json.loads(
                 run("ip", f"-{version}", "-json", "route", "show")
             )
@@ -294,8 +295,11 @@ def up(root, config):
             "create",
             "--driver",
             "bridge",
+            "--ipv6",
             "--subnet",
             IPV4_SUBNET,
+            "--subnet",
+            IPV6_SUBNET,
             "--opt",
             f"com.docker.network.bridge.name={BRIDGE}",
             "--opt",
@@ -417,7 +421,7 @@ def resume_paused(root):
 
 
 def network_rules(bridge, uplink):
-    for family, subnet in (("iptables", IPV4_SUBNET),):
+    for family, subnet in (("iptables", IPV4_SUBNET), ("ip6tables", IPV6_SUBNET)):
         # Docker drops direct traffic to unpublished container addresses before
         # FORWARD. Allow only the local kind bridge to reach the lab BMCs.
         yield (
@@ -602,12 +606,13 @@ def stop(root):
                 if host["name"] in active:
                     virsh("managedsave", host["name"])
     cleanup_network(root)
-    relay = f"{NAME}-dhcp4"
-    resource = inspect("container", relay)
-    if resource:
-        owned(resource, root)
-        run("docker", "stop", relay)
-        run("docker", "rm", relay)
+    for suffix in ("dhcp4", "dhcp6", "ra"):
+        relay = f"{NAME}-{suffix}"
+        resource = inspect("container", relay)
+        if resource:
+            owned(resource, root)
+            run("docker", "stop", relay)
+            run("docker", "rm", relay)
     if hypervisor:
         run("docker", "stop", NAME)
         run("docker", "rm", NAME)
@@ -617,7 +622,7 @@ def destroy(root):
     # Validate ownership of every container before stopping anything.
     config = read_inventory(root)
     names = [NAME] + [f"{host['name']}-bmc" for host in config["targets"]]
-    names.append(f"{NAME}-dhcp4")
+    names.extend(f"{NAME}-{suffix}" for suffix in ("dhcp4", "dhcp6", "ra"))
     for name in names:
         resource = inspect("container", name)
         if resource:
@@ -650,7 +655,7 @@ def destroy(root):
     )
     for path in root.iterdir():
         if (
-            path.name in ("inventory.json", "cluster-uid", "routes.json")
+            path.name in ("inventory.json", "cluster-uid", "radvd.conf", "routes.json")
             or path.name.startswith(NAME + "-")
             and path.suffix == ".xml"
         ):

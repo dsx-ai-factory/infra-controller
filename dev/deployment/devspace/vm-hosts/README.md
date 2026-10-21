@@ -5,8 +5,18 @@ native KVM guests. A standalone `bmc-mock` controls each guest through libvirt.
 The default `full` profile continues to use machine-a-tron.
 
 This profile exercises discovery and OS provisioning on real guest operating
-systems, with IPv4 networking. IPv6 experiments remain separate under
+systems. This extension layers dual-stack networking on
+[PR 7564](https://github.com/dsx-ai-factory/infra-controller/pull/7564) for
 [issue 84](https://github.com/dsx-ai-factory/infra-controller/issues/84).
+DHCPv6 lease handoff fixes belong to
+[PR 7934](https://github.com/dsx-ai-factory/infra-controller/pull/7934); include
+that fix when validating changes in client identity between firmware and Linux.
+The generic BMC behavior belongs to
+[PR 7948](https://github.com/dsx-ai-factory/infra-controller/pull/7948).
+The vfkit environment and MAT tests
+remain in [PR 6606](https://github.com/dsx-ai-factory/infra-controller/pull/6606),
+[PR 7430](https://github.com/dsx-ai-factory/infra-controller/pull/7430), and
+[PR 7436](https://github.com/dsx-ai-factory/infra-controller/pull/7436).
 It does not emulate BlueField forwarding, DPU agents, GPU devices, or hardware
 isolation.
 
@@ -14,7 +24,8 @@ isolation.
 
 Use an x86_64 or ARM64 Linux Docker host with `/dev/kvm`, Python 3.11 or later,
 PyYAML, the normal DevSpace prerequisites, and a single-node kind cluster whose
-provisioning services use IPv4. A physical host needs hardware virtualization;
+provisioning services have matching node address families, including an IPv6
+`nico-dhcp6` service and IPv6 kind node address. A physical host needs hardware virtualization;
 a VM host additionally needs nested virtualization. The guest architecture is
 always native: x86_64 uses Q35/OVMF and ARM64 uses virt/AAVMF.
 
@@ -94,22 +105,37 @@ virtual targets; Scout identity checks and BMC lockdown remain enabled.
 
 The profile waits for Core Ready, a responding Scout, and REST inventory for
 all targets. These checks do not establish successful tenant OS installation.
-See [validation evidence](VALIDATION.md) for the exercised scope.
+See [backend validation evidence](VALIDATION.md) and the
+[IPv6 validation record](IPV6-VALIDATION.md) for the exercised revisions and scope.
+The historical IPv6 runs predate this rebase; they do not establish live
+validation of the combined tree.
 
 ### Networking
 
-The private bridge `br-nico-vm` uses `10.84.30.0/24`, with the host at
-`10.84.30.1`. BMC endpoints use `.101` and `.102`; NICo reserves these fixed
-addresses. The helper rejects overlapping IPv4 routes before creating the
-network. The private inventory records matching MAC addresses, serials and
-UUIDs for BMC and libvirt.
+The private bridge `br-nico-vm` uses `10.84.30.0/24` and
+`fd42:84:30::/64`, with the host at `.1` and `::1`. BMC endpoints use
+`10.84.30.101` and `10.84.30.102`; NICo reserves these fixed addresses.
+The helper rejects overlapping IPv4 or IPv6 routes before creating the network.
+The private inventory records matching MAC addresses, serials and UUIDs for
+BMC and libvirt.
 
-NICo DHCPv4 owns guest address allocation. A relay forwards DHCP to the cluster;
-Kubernetes DNS resolves provisioning names. Service routes and narrow forwarding
-rules preserve guest source addresses for Scout identity checks. An IPv4
-masquerade rule on the host's default uplink provides Internet egress. No
-upstream gateway change, DHCPv6 server, or IPv6 route is required. The profile
-does not provide tenant network isolation.
+NICo DHCP owns guest address allocation. The DHCPv6 relay adds RFC 6939 client
+link-layer metadata from the actual Ethernet frame, including when UEFI uses a
+UUID-based DUID. It accepts only configured target MACs on the flat, untagged
+link; VLANs, IPv6 extension headers/fragments, and nested relays are unsupported.
+Router advertisements supply the on-link prefix and default route, with
+stateful DHCPv6 addressing rather than SLAAC.
+
+Kubernetes DNS resolves provisioning names. Service routes and forwarding rules
+preserve guest source addresses for Scout identity checks. The base profile's
+IPv4 masquerade rule provides IPv4 Internet egress. IPv6 egress requires the
+upstream lab gateway to route `fd42:84:30::/64` back through the host and permit
+it in its egress/NAT rules. The helper does not modify that gateway or install
+NAT66 on the host. Successful DHCP or peer traffic alone does not establish
+Internet IPv6 reachability. The profile does not provide tenant network isolation.
+
+Use a fresh lab network and site for this dual-stack extension: it does not
+upgrade an existing IPv4-only Docker network or HostInband segment in place.
 
 ## Persistent state and cleanup
 
