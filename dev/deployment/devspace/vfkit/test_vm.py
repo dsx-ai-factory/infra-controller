@@ -264,23 +264,73 @@ class LifecycleTests(unittest.TestCase):
                     self.assertNotIn("mtu", network)
                     self.assertFalse(dropins)
 
-    def test_native_build_version_comes_from_host_not_synthetic_guest_head(self):
+    def test_build_versions_come_from_host_not_synthetic_guest_head(self):
         version = "v2.3.0-pr-146-g12345678"
+        rest_version = version + "-dirty"
         with patch.object(vm, "host_git", side_effect=[
                 subprocess.CompletedProcess([], 0, stdout=version + "\n"),
-                subprocess.CompletedProcess([], 0, stdout="12345678\n")]), \
+                subprocess.CompletedProcess([], 0, stdout="12345678\n"),
+                subprocess.CompletedProcess([], 0, stdout=rest_version + "\n")]) as git, \
                 patch.object(self.machine, "ssh") as ssh:
             self.machine.sync_build_version()
+        self.assertEqual(git.call_args.args, (
+            "describe", "--tags", "--first-parent", "--match", "v[0-9]*.[0-9]*.[0-9]*", "--dirty"))
         environment = ssh.call_args.kwargs["input"]
-        result = subprocess.run(["bash", "-c", environment +
-                                 'printf "%s %s" "$VERSION" "$CI_COMMIT_SHORT_SHA"'],
-                                capture_output=True, text=True, check=True)
-        self.assertEqual(result.stdout, version + " 12345678")
+        for existing in ("", "--no-colors"):
+            with self.subTest(existing=existing):
+                result = subprocess.run(["bash", "-c", environment +
+                                         'printf "%s\\n" "$VERSION" "$CI_COMMIT_SHORT_SHA" "$DEVSPACE_FLAGS"'],
+                                        env=dict(os.environ, DEVSPACE_FLAGS=existing),
+                                        capture_output=True, text=True, check=True)
+                native, sha, flags = result.stdout.splitlines()
+                self.assertEqual((native, sha), (version, "12345678"))
+                # DevSpace's flag parser does not ignore leading whitespace.
+                self.assertEqual(flags, (existing + " " if existing else "") +
+                                 "--var=LOCAL_DEV_REST_VERSION=" + rest_version)
+
+    def test_provision_passes_version_override_across_sudo(self):
+        config = self.root / ".config/nico"
+        config.mkdir(parents=True)
+        (config / "vfkit-source-version.sh").write_text(
+            'export DEVSPACE_FLAGS="--var=LOCAL_DEV_REST_VERSION=v2.4.0-pr-dirty"\n')
+        binary = self.root / "bin"
+        binary.mkdir()
+        # A minimal sudo boundary: clear the caller's environment, then run the
+        # explicitly supplied command. The setup stub models run_as_user's env.
+        for name, content in {
+            "sudo": '#!/bin/bash\nexec /usr/bin/env -i PATH="$PATH" "$@"\n',
+            "bash": '#!/bin/bash\n/usr/bin/env USER=nico /bin/bash -c '\
+                    "'printf \"%s\\n\" \"$DEVSPACE_FLAGS\"'\n",
+        }.items():
+            path = binary / name
+            path.write_text(content)
+            path.chmod(0o755)
+        for deploy in (False, True):
+            with self.subTest(deploy=deploy), patch.object(self.machine, "ssh") as ssh:
+                self.machine.provision(deploy=deploy)
+                command = ssh.call_args.args
+                self.assertEqual("--skip-deploy" in command, not deploy)
+                result = subprocess.run(["/bin/bash", *command[1:]],
+                                        env=dict(os.environ, HOME=str(self.root),
+                                                 PATH=str(binary) + ":/usr/bin:/bin"),
+                                        capture_output=True, text=True, check=True)
+                self.assertEqual(result.stdout.strip(),
+                                 "--var=LOCAL_DEV_REST_VERSION=v2.4.0-pr-dirty")
 
     def test_native_build_version_rejects_checkout_without_version_tag(self):
         with patch.object(vm, "host_git", return_value=subprocess.CompletedProcess(
                 [], 0, stdout="12345678\n")), patch.object(self.machine, "ssh") as ssh:
             with self.assertRaisesRegex(ValueError, "lacks a version tag"):
+                self.machine.sync_build_version()
+            ssh.assert_not_called()
+
+    def test_missing_rest_release_tag_does_not_publish_partial_versions(self):
+        with patch.object(vm, "host_git", side_effect=[
+                subprocess.CompletedProcess([], 0, stdout="v2-not-a-release\n"),
+                subprocess.CompletedProcess([], 0, stdout="12345678\n"),
+                subprocess.CalledProcessError(128, "git describe")]), \
+                patch.object(self.machine, "ssh") as ssh:
+            with self.assertRaises(subprocess.CalledProcessError):
                 self.machine.sync_build_version()
             ssh.assert_not_called()
 
