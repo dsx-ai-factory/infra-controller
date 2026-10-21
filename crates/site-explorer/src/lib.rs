@@ -1396,12 +1396,6 @@ impl SiteExplorer {
         //   2. Site-wide `SiteExplorerConfig.dpu_policy` setting.
         //   3. Otherwise: `HostDpuPolicy::Manage` (the absolute default).
         let site_dpu_policy = self.config.dpu_policy;
-        let effective_policy = |host_bmc_ip: &IpAddr| -> HostDpuPolicy {
-            let declared = expected_explored_endpoint_index
-                .matched_expected_machine(host_bmc_ip)
-                .map(|em| em.data.dpu_policy);
-            HostDpuPolicy::resolve(declared, site_dpu_policy)
-        };
         // Match HOST and DPU using the serial Redfish reports for the same
         // physical card. BF4 does not expose that serial on the DPU system
         // object, so this uses `EndpointExplorationReport::dpu_pairing_serial_number`
@@ -1416,19 +1410,24 @@ impl SiteExplorer {
         let mut managed_hosts = Vec::new();
         let mut boot_interfaces = HostBootInterfaces::new();
         for (_, ep) in explored_hosts {
+            let expected_machine =
+                expected_explored_endpoint_index.matched_expected_machine(&ep.address);
+
             // Resolve the operator-declared DPU policy for this host once;
             // it drives both auto-correction (`update_dpu_mode`
             // below -- operator override wins over BF3 part-number heuristics)
             // and the post-match attach decision (`Nic` / `Ignore` policies
             // emit a bare managed host regardless of what matched).
-            let host_dpu_policy = effective_policy(&ep.address);
+            let host_dpu_policy = HostDpuPolicy::resolve(
+                expected_machine.map(|expected| expected.data.dpu_policy),
+                site_dpu_policy,
+            );
 
             // A declared `ExpectedInterface.primary` (when the matched expected
             // machine sets one) wins over the automatic DPU-PF pick, so the
             // explored default names the same NIC the managed store will.
-            let declared_primary = expected_explored_endpoint_index
-                .matched_expected_machine(&ep.address)
-                .and_then(|expected| expected.data.declared_primary_mac());
+            let declared_primary =
+                expected_machine.and_then(|expected| expected.data.declared_primary_mac());
 
             // If the resolved policy says to ignore this host's DPUs, treat it
             // as zero-DPU, regardless of what BMC hardware
@@ -1565,57 +1564,52 @@ impl SiteExplorer {
                     != host_reported_dpus_total.saturating_sub(host_reported_dpus_nic_mode_total);
             let mut dpu_added = false;
 
-            if incomplete_dpu_exploration {
-                // Check if there are dpu serial(s) specified in expected_machine table for this host
-                // Lets assume for now that if a DPU is specific in the expected machine table for the host
-                // it has been configured properly (DPU vs NIC mode).
-                if let Some(expected_machine) =
-                    expected_explored_endpoint_index.matched_expected_machine(&ep.address)
-                {
-                    for dpu_sn in &expected_machine.data.fallback_dpu_serial_numbers {
-                        if let Some(dpu_ep) = dpu_sn_to_endpoint.remove(dpu_sn.as_str()) {
-                            // Fallback matching has only the expected serial and the
-                            // discovered DPU BMC report; pass the DPU's own part number
-                            // for the legacy BF3 heuristic.
-                            let matched_dpu = MatchedDpu {
-                                endpoint: &dpu_ep,
-                                part_number: dpu_ep.report.dpu_part_number(),
-                                source: DpuMatchSource::ExpectedSerial(dpu_sn),
-                            };
-                            let mode_check = Some(
-                                match host_dpu_policy.target_operating_mode(matched_dpu.part_number)
-                                {
-                                    Some(target) => {
-                                        self.update_dpu_mode(&matched_dpu, target, metrics).await
-                                    }
-                                    None => Ok(true),
-                                },
-                            );
+            // Check if there are dpu serial(s) specified in expected_machine table for this host
+            // Lets assume for now that if a DPU is specific in the expected machine table for the host
+            // it has been configured properly (DPU vs NIC mode).
+            if incomplete_dpu_exploration && let Some(expected_machine) = expected_machine {
+                for dpu_sn in &expected_machine.data.fallback_dpu_serial_numbers {
+                    if let Some(dpu_ep) = dpu_sn_to_endpoint.remove(dpu_sn.as_str()) {
+                        // Fallback matching has only the expected serial and the
+                        // discovered DPU BMC report; pass the DPU's own part number
+                        // for the legacy BF3 heuristic.
+                        let matched_dpu = MatchedDpu {
+                            endpoint: &dpu_ep,
+                            part_number: dpu_ep.report.dpu_part_number(),
+                            source: DpuMatchSource::ExpectedSerial(dpu_sn),
+                        };
+                        let mode_check = Some(
+                            match host_dpu_policy.target_operating_mode(matched_dpu.part_number) {
+                                Some(target) => {
+                                    self.update_dpu_mode(&matched_dpu, target, metrics).await
+                                }
+                                None => Ok(true),
+                            },
+                        );
 
-                            match classify_matched_dpu(&matched_dpu, &ep, mode_check) {
-                                DiscoveredDpu::RunningAsDpu(dpu) => {
-                                    // The expected-machine fallback list is the source of
-                                    // truth here, so discard whatever the PCIe scan found
-                                    // on the first confirmed match.
-                                    if !dpu_added {
-                                        dpus_explored_for_host.clear();
-                                    }
-                                    dpu_added = true;
-                                    dpus_explored_for_host.push(dpu);
+                        match classify_matched_dpu(&matched_dpu, &ep, mode_check) {
+                            DiscoveredDpu::RunningAsDpu(dpu) => {
+                                // The expected-machine fallback list is the source of
+                                // truth here, so discard whatever the PCIe scan found
+                                // on the first confirmed match.
+                                if !dpu_added {
+                                    dpus_explored_for_host.clear();
                                 }
-                                DiscoveredDpu::RunningAsNic => {
-                                    host_reported_dpus_nic_mode_total += 1;
-                                }
-                                DiscoveredDpu::NeedsReconfig => {
-                                    // `set_nic_mode` was just issued; the host needs a
-                                    // reset before this DPU re-reports in the new mode, so
-                                    // mark it not-yet-configured and let the reset path
-                                    // below run.
-                                    all_dpus_configured_properly_in_host = false;
-                                }
-                                DiscoveredDpu::ModeCheckFailed(err) => {
-                                    matched_dpu.warn_mode_check_failed(&err);
-                                }
+                                dpu_added = true;
+                                dpus_explored_for_host.push(dpu);
+                            }
+                            DiscoveredDpu::RunningAsNic => {
+                                host_reported_dpus_nic_mode_total += 1;
+                            }
+                            DiscoveredDpu::NeedsReconfig => {
+                                // `set_nic_mode` was just issued; the host needs a
+                                // reset before this DPU re-reports in the new mode, so
+                                // mark it not-yet-configured and let the reset path
+                                // below run.
+                                all_dpus_configured_properly_in_host = false;
+                            }
+                            DiscoveredDpu::ModeCheckFailed(err) => {
+                                matched_dpu.warn_mode_check_failed(&err);
                             }
                         }
                     }
