@@ -1559,14 +1559,16 @@ impl SiteExplorer {
                 running_as_dpu: mut dpus_explored_for_host,
             } = dpu_exploration;
 
-            if dpus_explored_for_host.is_empty()
+            // Fallback changes the counts; preserve the initial decision for reset/wait.
+            let incomplete_dpu_exploration = dpus_explored_for_host.is_empty()
                 || dpus_explored_for_host.len()
-                    != host_reported_dpus_total.saturating_sub(host_reported_dpus_nic_mode_total)
-            {
+                    != host_reported_dpus_total.saturating_sub(host_reported_dpus_nic_mode_total);
+            let mut dpu_added = false;
+
+            if incomplete_dpu_exploration {
                 // Check if there are dpu serial(s) specified in expected_machine table for this host
                 // Lets assume for now that if a DPU is specific in the expected machine table for the host
                 // it has been configured properly (DPU vs NIC mode).
-                let mut dpu_added = false;
                 if let Some(expected_machine) =
                     expected_explored_endpoint_index.matched_expected_machine(&ep.address)
                 {
@@ -1618,116 +1620,114 @@ impl SiteExplorer {
                         }
                     }
                 }
+            }
 
-                // The site explorer should only create a managed host after exploring all of the DPUs attached to the host.
-                // If a host reports that it has two DPUs, the site explorer must wait until **both** DPUs have made the DHCP request.
-                // If only one of the two DPUs have made the DHCP request, the site explorer must wait until it has explored the latter DPU's BMC
-                // (ensuring that the second DPU has also made the DHCP request).
-                if !dpu_added {
-                    // Net DPUs still expected to pair: reported DPU minus those
-                    // confirmed to be running as plain NICs.
-                    let expected_managed_dpus_total =
-                        host_reported_dpus_total.saturating_sub(host_reported_dpus_nic_mode_total);
-                    // Enter the reset/wait path when DPUs are still expected to pair, or
-                    // when a `set_nic_mode` was just issued -- a fallback-serial match can
-                    // queue a flip even on a host whose BMC reports no DPU over PCIe
-                    // (`expected_managed_dpus_total == 0`), which is the usual reason we are
-                    // on the fallback path at all.
-                    if expected_managed_dpus_total > 0 || !all_dpus_configured_properly_in_host {
-                        if expected_managed_dpus_total > 0 {
+            // The site explorer should only create a managed host after exploring all of the DPUs attached to the host.
+            // If a host reports that it has two DPUs, the site explorer must wait until **both** DPUs have made the DHCP request.
+            // If only one of the two DPUs have made the DHCP request, the site explorer must wait until it has explored the latter DPU's BMC
+            // (ensuring that the second DPU has also made the DHCP request).
+            if incomplete_dpu_exploration && !dpu_added {
+                // Net DPUs still expected to pair: reported DPU minus those
+                // confirmed to be running as plain NICs.
+                let expected_managed_dpus_total =
+                    host_reported_dpus_total.saturating_sub(host_reported_dpus_nic_mode_total);
+                // Enter the reset/wait path when DPUs are still expected to pair, or
+                // when a `set_nic_mode` was just issued -- a fallback-serial match can
+                // queue a flip even on a host whose BMC reports no DPU over PCIe
+                // (`expected_managed_dpus_total == 0`), which is the usual reason we are
+                // on the fallback path at all.
+                if expected_managed_dpus_total > 0 || !all_dpus_configured_properly_in_host {
+                    if expected_managed_dpus_total > 0 {
+                        tracing::warn!(
+                            bmc_ip_address = %ep.address,
+                            discovered_dpu_count = dpus_explored_for_host.len(),
+                            expected_managed_dpu_count = expected_managed_dpus_total,
+                            all_dpus_configured_properly_in_host,
+                            "cannot identify managed host because the site explorer has not discovered all attached DPUs"
+                        );
+                    }
+
+                    if !all_dpus_configured_properly_in_host {
+                        // A queued `set_nic_mode` only takes effect after a host
+                        // power cycle, so drive one for every vendor --
+                        // `redfish_powercycle` issues `PowerCycle` and falls back
+                        // to a cold `ACPowercycle` for vendors that refuse it --
+                        // throttled by `reset_rate_limit`. A BMC that refuses both
+                        // surfaces the host as needing a manual power cycle via
+                        // the pairing-blocker metric.
+                        let time_since_redfish_powercycle = Utc::now()
+                            .signed_duration_since(ep.last_redfish_powercycle.unwrap_or_default());
+                        if time_since_redfish_powercycle > self.config.reset_rate_limit {
                             tracing::warn!(
                                 bmc_ip_address = %ep.address,
-                                discovered_dpu_count = dpus_explored_for_host.len(),
-                                expected_managed_dpu_count = expected_managed_dpus_total,
-                                all_dpus_configured_properly_in_host,
-                                "cannot identify managed host because the site explorer has not discovered all attached DPUs"
+                                %time_since_redfish_powercycle,
+                                "power cycling host to apply nic mode change for its incorrectly configured DPUs"
                             );
-                        }
+                            metrics
+                                .increment_dpu_migration_signal(DpuMigrationSignal::ResetRequested);
 
-                        if !all_dpus_configured_properly_in_host {
-                            // A queued `set_nic_mode` only takes effect after a host
-                            // power cycle, so drive one for every vendor --
-                            // `redfish_powercycle` issues `PowerCycle` and falls back
-                            // to a cold `ACPowercycle` for vendors that refuse it --
-                            // throttled by `reset_rate_limit`. A BMC that refuses both
-                            // surfaces the host as needing a manual power cycle via
-                            // the pairing-blocker metric.
-                            let time_since_redfish_powercycle = Utc::now().signed_duration_since(
-                                ep.last_redfish_powercycle.unwrap_or_default(),
-                            );
-                            if time_since_redfish_powercycle > self.config.reset_rate_limit {
+                            if let Err(err) = self.redfish_powercycle(ep.address).await {
                                 tracing::warn!(
                                     bmc_ip_address = %ep.address,
-                                    %time_since_redfish_powercycle,
-                                    "power cycling host to apply nic mode change for its incorrectly configured DPUs"
+                                    error = %err,
+                                    "site explorer failed to power cycle host to apply DPU mode changes; a manual power cycle may be required"
                                 );
-                                metrics.increment_dpu_migration_signal(
-                                    DpuMigrationSignal::ResetRequested,
-                                );
-
-                                if let Err(err) = self.redfish_powercycle(ep.address).await {
-                                    tracing::warn!(
-                                        bmc_ip_address = %ep.address,
-                                        error = %err,
-                                        "site explorer failed to power cycle host to apply DPU mode changes; a manual power cycle may be required"
-                                    );
-                                    metrics.increment_host_dpu_pairing_blocker(
-                                        PairingBlockerReason::ManualPowerCycleRequired,
-                                    );
-                                }
-                            } else {
-                                // We power-cycled within the rate limit and the
-                                // DPUs still aren't in the target operating
-                                // mode -- either the change is mid-flight (the
-                                // host is booting, a pass or two of normal
-                                // convergence) or this
-                                // vendor's `PowerCycle` is a warm reset that never
-                                // actually drops power. Keep the pairing-blocker
-                                // signal standing so a host stuck in the warm-reset
-                                // loop stays visible to operators instead of
-                                // rebooting hourly in silence.
-                                //
-                                // The reset above already escalates a refused
-                                // `PowerCycle` to a cold `ACPowercycle`
-                                // (`redfish_powercycle`), so a host still unflipped
-                                // here is mid-flight or genuinely stuck -- either way
-                                // it stays visible via the metric.
                                 metrics.increment_host_dpu_pairing_blocker(
                                     PairingBlockerReason::ManualPowerCycleRequired,
                                 );
                             }
+                        } else {
+                            // We power-cycled within the rate limit and the
+                            // DPUs still aren't in the target operating
+                            // mode -- either the change is mid-flight (the
+                            // host is booting, a pass or two of normal
+                            // convergence) or this
+                            // vendor's `PowerCycle` is a warm reset that never
+                            // actually drops power. Keep the pairing-blocker
+                            // signal standing so a host stuck in the warm-reset
+                            // loop stays visible to operators instead of
+                            // rebooting hourly in silence.
+                            //
+                            // The reset above already escalates a refused
+                            // `PowerCycle` to a cold `ACPowercycle`
+                            // (`redfish_powercycle`), so a host still unflipped
+                            // here is mid-flight or genuinely stuck -- either way
+                            // it stays visible via the metric.
+                            metrics.increment_host_dpu_pairing_blocker(
+                                PairingBlockerReason::ManualPowerCycleRequired,
+                            );
                         }
-
-                        continue;
-                    } else if host_dpu_policy.expects_managed_dpus() {
-                        // No DPUs remain available for management, and the
-                        // effective policy is `Manage` --
-                        // i.e. neither per-host `ExpectedMachine.dpu_policy`
-                        // nor site-wide `[site_explorer] dpu_policy` declared
-                        // this host as zero-DPU. We expect DPUs but found none --
-                        // probably a misconfiguration or a DPU-discovery
-                        // bug. Skip ingestion this cycle; site-explorer
-                        // will retry on the next iteration, giving the
-                        // operator a chance to either fix the host, select
-                        // `HostDpuPolicy::Nic` for installed BlueFields
-                        // that should run as NICs, or select
-                        // `HostDpuPolicy::Ignore` for a host with no usable DPU
-                        // hardware.
-                        //
-                        // `Ignore` hosts are handled by the fast-path earlier in
-                        // the loop; `Nic` hosts fall through to the push
-                        // below with an empty `dpus` vector.
-                        tracing::warn!(
-                            bmc_ip_address = %ep.address,
-                            exploration_report = ?ep,
-                            ?host_dpu_policy,
-                            "cannot identify managed host: site explorer found no DPUs available for management while the effective DPU policy is `Manage`; use `dpu_policy = \"nic\"` for installed BlueFields that should run as NICs, or `dpu_policy = \"ignore\"` for a host with no usable DPU hardware",
-                        );
-                        metrics.increment_host_dpu_pairing_blocker(
-                            PairingBlockerReason::NoDpuReportedByHost,
-                        );
-                        continue;
                     }
+
+                    continue;
+                } else if host_dpu_policy.expects_managed_dpus() {
+                    // No DPUs remain available for management, and the
+                    // effective policy is `Manage` --
+                    // i.e. neither per-host `ExpectedMachine.dpu_policy`
+                    // nor site-wide `[site_explorer] dpu_policy` declared
+                    // this host as zero-DPU. We expect DPUs but found none --
+                    // probably a misconfiguration or a DPU-discovery
+                    // bug. Skip ingestion this cycle; site-explorer
+                    // will retry on the next iteration, giving the
+                    // operator a chance to either fix the host, select
+                    // `HostDpuPolicy::Nic` for installed BlueFields
+                    // that should run as NICs, or select
+                    // `HostDpuPolicy::Ignore` for a host with no usable DPU
+                    // hardware.
+                    //
+                    // `Ignore` hosts are handled by the fast-path earlier in
+                    // the loop; `Nic` hosts fall through to the push
+                    // below with an empty `dpus` vector.
+                    tracing::warn!(
+                        bmc_ip_address = %ep.address,
+                        exploration_report = ?ep,
+                        ?host_dpu_policy,
+                        "cannot identify managed host: site explorer found no DPUs available for management while the effective DPU policy is `Manage`; use `dpu_policy = \"nic\"` for installed BlueFields that should run as NICs, or `dpu_policy = \"ignore\"` for a host with no usable DPU hardware",
+                    );
+                    metrics.increment_host_dpu_pairing_blocker(
+                        PairingBlockerReason::NoDpuReportedByHost,
+                    );
+                    continue;
                 }
             }
 
