@@ -10,7 +10,7 @@ use sqlx::PgPool;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use super::{DATABASE_WAIT_TIMEOUT, database_transaction};
+use crate::transaction::{DATABASE_WAIT_TIMEOUT, database_transaction};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 const FRESH_PERIOD: Duration = Duration::from_secs(30);

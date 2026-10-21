@@ -25,6 +25,8 @@
 //! independently calls a provider using identities and inputs saved by its caller;
 //! remote selection remains separate from the Integrated backend enum.
 //! [`value`] converts Core definitions and typed values to and from provider messages.
+//! [`registration`] saves remote pool definitions and retries their registration
+//! when provider acceptance has not been recorded locally.
 //! [`remote::RemoteResourcePool`] saves remote requests, recovers lost replies,
 //! and finishes cancellation or release. Consumers attach assignments and request
 //! release in their own entity transactions.
@@ -40,8 +42,10 @@ mod registry_tests;
 mod tests;
 
 pub mod grpc;
+pub mod registration;
 mod registry;
 pub mod remote;
+mod transaction;
 pub mod value;
 
 use std::str::FromStr;

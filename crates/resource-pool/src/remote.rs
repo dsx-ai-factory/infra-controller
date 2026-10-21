@@ -45,6 +45,7 @@ use uuid::Uuid;
 use v1::operation_status::State;
 
 use crate::grpc::{GrpcResourcePoolBackend, GrpcResourcePoolError};
+use crate::transaction::{DATABASE_WAIT_TIMEOUT, database_transaction};
 use crate::value::{ResourcePoolEligibility, ValueConversionError};
 
 // Match the client's 32 admitted calls without adding a waiting queue. One
@@ -53,7 +54,6 @@ const MAX_OPERATIONS: usize = 32;
 const FOREGROUND_ROUNDS: usize = 3;
 const FOREGROUND_TIMEOUT: Duration = Duration::from_secs(30);
 const RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
-const DATABASE_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const CANCELLATION_TIMEOUT: Duration = Duration::from_secs(5);
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 const PAGE_SIZE: NonZeroU16 = NonZeroU16::new(16).unwrap();
@@ -1017,23 +1017,6 @@ fn remaining(deadline: Instant) -> Result<Duration, RemoteResourcePoolError> {
         .checked_duration_since(Instant::now())
         .filter(|duration| !duration.is_zero())
         .ok_or(RemoteResourcePoolError::Incomplete)
-}
-
-async fn database_transaction(pool: &PgPool) -> Result<Transaction<'_>, DatabaseError> {
-    let mut txn = Transaction::begin(pool).await?;
-    // A dropped SQLx query can retain its pooled connection and any work-lock
-    // fence until PostgreSQL finishes the statement and runs the queued rollback.
-    // Bound statements to five seconds, preserving any shorter operator limit.
-    sqlx::query(
-        "SELECT set_config('statement_timeout', \
-            LEAST(NULLIF(setting::bigint, 0), $1::text::bigint)::text, true) \
-         FROM pg_settings WHERE name = 'statement_timeout'",
-    )
-    .bind(DATABASE_WAIT_TIMEOUT.as_millis().to_string())
-    .execute(txn.as_pgconn())
-    .await
-    .map_err(|error| DatabaseError::query("set remote allocation statement timeout", error))?;
-    Ok(txn)
 }
 
 fn call<T>(

@@ -16,6 +16,7 @@
  */
 pub mod allocation;
 pub mod binding;
+pub mod registration;
 pub mod remote;
 
 use std::collections::{HashMap, HashSet};

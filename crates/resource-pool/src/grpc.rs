@@ -4,7 +4,8 @@
 //! Bounded calls to the resource pool provider API with validated responses.
 //!
 //! [`crate::remote::RemoteResourcePool`] uses this client for allocation and
-//! recovery. Production wiring follows in
+//! recovery; [`crate::registration`] uses it to register pool definitions.
+//! Production wiring follows in
 //! [P11](https://github.com/dsx-ai-factory/infra-controller/issues/7140).
 
 mod config;
@@ -21,6 +22,7 @@ pub use config::{GrpcResourcePoolConfigError, ResourcePoolTlsConfig, validate_en
 #[cfg(test)]
 pub(crate) use tests::server as test_server;
 use thiserror::Error;
+pub(crate) use transport::MAX_MESSAGE_BYTES;
 use transport::Transport;
 use url::Url;
 

@@ -181,6 +181,10 @@ impl Drop for NotifyOnDrop {
 #[derive(Clone)]
 pub(crate) enum Fault {
     None,
+    // On the first Define attempt, lose a successful reply after acceptance.
+    DefineReplyUnavailableOnce,
+    // Hold Define before provider work so tests can inspect Core's committed intent.
+    StallDefine(Arc<Gate>),
     // Wait after allocation commits, before delivering the reply.
     WithholdAllocation(Arc<Gate>),
     AllocationUnavailable,
@@ -239,6 +243,8 @@ pub(crate) enum MalformedResponse {
 pub(crate) struct FaultProvider {
     pub(crate) provider: LocalProvider,
     fault: Fault,
+    pub(crate) define_requests: Arc<Mutex<Vec<DefineRequest>>>,
+    pub(crate) describe_requests: Arc<Mutex<Vec<DescribeRequest>>>,
     /// Counts both `Allocate` and `AllocateExact` requests.
     pub(crate) allocation_calls: Arc<AtomicUsize>,
     pub(crate) recover_calls: Arc<AtomicUsize>,
@@ -248,7 +254,7 @@ pub(crate) struct FaultProvider {
     pub(super) stats_calls: Arc<AtomicUsize>,
     pub(super) traceparent: Arc<Mutex<Option<String>>>,
     pub(super) grpc_timeout: Arc<Mutex<Option<String>>>,
-    pub(super) describe_calls: Arc<AtomicUsize>,
+    pub(crate) describe_calls: Arc<AtomicUsize>,
 }
 
 impl FaultProvider {
@@ -256,6 +262,8 @@ impl FaultProvider {
         Self {
             provider,
             fault,
+            define_requests: Arc::default(),
+            describe_requests: Arc::default(),
             allocation_calls: Arc::default(),
             recover_calls: Arc::default(),
             cancel_calls: Arc::default(),
@@ -276,6 +284,10 @@ impl ResourcePool for FaultProvider {
         request: Request<DescribeRequest>,
     ) -> Result<Response<DescribeResponse>, Status> {
         self.describe_calls.fetch_add(1, Ordering::SeqCst);
+        self.describe_requests
+            .lock()
+            .expect("description requests lock")
+            .push(request.get_ref().clone());
         *self.grpc_timeout.lock().expect("timeout header lock") = request
             .metadata()
             .get("grpc-timeout")
@@ -302,7 +314,23 @@ impl ResourcePool for FaultProvider {
         &self,
         request: Request<DefineRequest>,
     ) -> Result<Response<DefineResponse>, Status> {
-        self.provider.define(request).await
+        let first_call = {
+            let mut requests = self
+                .define_requests
+                .lock()
+                .expect("definition requests lock");
+            let first_call = requests.is_empty();
+            requests.push(request.get_ref().clone());
+            first_call
+        };
+        if let Fault::StallDefine(gate) = &self.fault {
+            gate.wait().await;
+        }
+        let response = self.provider.define(request).await?;
+        if first_call && matches!(self.fault, Fault::DefineReplyUnavailableOnce) {
+            return Err(Status::unavailable("definition reply unavailable"));
+        }
+        Ok(response)
     }
 
     async fn allocate(
