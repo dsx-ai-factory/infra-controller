@@ -35,7 +35,7 @@ MKOSI_PACKAGE_CACHE_DIR = { value = "${REPO_ROOT}/pxe/.mkosi-package-cache", con
 ] } }
 
 # Generated inputs for each profile, layered over its tracked mkosi.extra/ with
-# --extra-tree so the build never writes into mkosi.profiles/.
+# --extra-tree.
 MKOSI_STAGE = { value = "${REPO_ROOT}/pxe/.mkosi-stage", condition = { env_not_set = [
   "MKOSI_STAGE",
 ] } }
@@ -114,6 +114,8 @@ dependencies = [
   "mkosi-remove-zypper-from-debian-tools",
   "mkdir-static",
   "mkosi-generate-build-tmpdir",
+  "mkosi-remove-legacy-inputs",
+  "mkosi-reset-stage",
   "stage-disk_imaging-script",
   "mkosi-build-qcow-imager",
   "mkosi-copy-qcow-imager-to-webroot-x86_64",
@@ -127,6 +129,8 @@ dependencies = [
   "mkosi-remove-zypper-from-debian-tools",
   "mkdir-static",
   "mkosi-generate-build-tmpdir",
+  "mkosi-remove-legacy-inputs",
+  "mkosi-reset-stage",
   "stage-disk_imaging-script",
   "mkosi-build-qcow-imager-aarch64",
   "mkosi-copy-qcow-imager-to-webroot-aarch64",
@@ -284,6 +288,8 @@ category = "Ephemeral Image"
 dependencies = [
   "mkosi-remove-zypper-from-debian-tools",
   "mkosi-generate-build-tmpdir",
+  "mkosi-remove-legacy-inputs",
+  "mkosi-reset-stage",
   "copy-forge-scout-x86_64",
   "copy-forge-prod-root-ca-x86_64",
   "stage-disk_imaging-script",
@@ -307,6 +313,8 @@ dependencies = [
   "mkosi-remove-zypper-from-debian-tools",
   "mkdir-static",
   "mkosi-generate-build-tmpdir",
+  "mkosi-remove-legacy-inputs",
+  "mkosi-reset-stage",
   "copy-forge-scout-x86_64",
   "copy-forge-dev-root-ca-x86_64",
   "stage-disk_imaging-script",
@@ -329,6 +337,8 @@ category = "Ephemeral Image"
 dependencies = [
   "mkosi-remove-zypper-from-debian-tools",
   "mkosi-generate-build-tmpdir",
+  "mkosi-remove-legacy-inputs",
+  "mkosi-reset-stage",
   "copy-forge-scout-aarch64",
   "copy-forge-prod-root-ca-aarch64",
   "stage-disk_imaging-script",
@@ -352,6 +362,8 @@ dependencies = [
   "mkosi-remove-zypper-from-debian-tools",
   "mkdir-static",
   "mkosi-generate-build-tmpdir",
+  "mkosi-remove-legacy-inputs",
+  "mkosi-reset-stage",
   "copy-forge-scout-aarch64",
   "copy-forge-dev-root-ca-aarch64",
   "stage-disk_imaging-script",
@@ -525,6 +537,26 @@ script = '''
 tmp_name = exec --fail-on-error mktemp -d -p /tmp mkosi.output-XXXXXX
 tmp_name = replace ${tmp_name.stdout} "\n" ""
 set_env MKOSI_BUILD_TMP ${tmp_name}
+'''
+
+[tasks.mkosi-remove-legacy-inputs]
+category = "Ephemeral Image"
+description = "Removes inputs that earlier builds generated inside mkosi.profiles/"
+script = '''
+  git -C "${REPO_ROOT}" clean -fdxq -- \
+    'pxe/mkosi.profiles/*/mkosi.extra/build-output/' \
+    'pxe/mkosi.profiles/qcow-imager*/mkosi.extra/opt/forge/disk_imaging.sh' \
+    'pxe/mkosi.profiles/scout-loader-*/mkosi.extra/etc/rc.local' \
+    'pxe/mkosi.profiles/scout-loader-*/mkosi.extra/opt/forge/' \
+    'pxe/mkosi.profiles/scout-oss-*/mkosi.extra/opt/forge/forge-scout' \
+    'pxe/mkosi.profiles/scout-oss-*/mkosi.extra/opt/forge/forge_root.pem'
+'''
+
+[tasks.mkosi-reset-stage]
+category = "Ephemeral Image"
+description = "Removes inputs staged by a previous build"
+script = '''
+  rm -rf "${MKOSI_STAGE:?}"
 '''
 
 # `depmod` on our runners is in `/sbin`, so add to PATH
