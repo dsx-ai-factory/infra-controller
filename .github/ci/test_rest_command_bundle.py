@@ -371,12 +371,12 @@ class BundleFormatTest(unittest.TestCase):
         )
         recorded = {
             "file_description": "ELF 64-bit, x86-64, statically linked",
-            "go_version": "go1.26.4",
+            "go_version": "go1.27.3",
             "vcs_modified": "unknown",
             "vcs_revision": "unavailable",
         }
         inspection = bundle.BinaryInspection(
-            go_version="go1.26.4",
+            go_version="go1.27.3",
             vcs_modified="unknown",
             vcs_revision="unavailable",
             file_description=(
@@ -607,7 +607,7 @@ class BundleFormatTest(unittest.TestCase):
                 {
                     "cgo_enabled": output.cgo_enabled,
                     "file_description": "test binary",
-                    "go_version": "go1.26.4",
+                    "go_version": "go1.27.3",
                     "import_path": bundle.expected_import_path(module, output.package),
                     "ldflags": list(bundle.resolve_ldflags(output, values)),
                     "name": output.name,

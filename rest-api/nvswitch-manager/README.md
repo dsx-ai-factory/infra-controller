@@ -48,7 +48,7 @@ This section provides a repeatable local development workflow using Docker Compo
 
 ### Prerequisites
 1. Docker and Docker Compose
-2. Go toolchain (1.26.4+)
+2. Go toolchain 1.27.3 from the repository's `mise.toml`
 3. grpcui (optional) to exercise the gRPC API
 4. psql client (optional) for DB inspection
 

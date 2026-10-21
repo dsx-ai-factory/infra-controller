@@ -447,7 +447,7 @@ Endpoint tests should follow the changed surface, not just compile it:
 
 ### Prefer range-based iteration over C-style `for` loops
 
-The module is on Go 1.26.4, so reach for range-based iteration before the
+The module is on Go 1.27.3, so reach for range-based iteration before the
 three-clause `for i := 0; i < n; i++` / `i--` form. Range-over-integer and
 range-over-function iterators (`slices.Backward`, `slices.All`,
 `slices.Values`, `maps.Keys`, `maps.Values`, …) drop the manual index

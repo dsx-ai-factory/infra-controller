@@ -34,7 +34,7 @@ If any of those are not true, the task is not complete.
    make --version
    ```
 
-   You need Go 1.26.4 or newer, plus working `git` and `make`. If any is missing or too old, stop and tell the user what to install. Do not attempt to install Go, git, or make yourself unless the user explicitly asks.
+   You need Go 1.27.3 from the repository's `mise.toml`, plus working `git` and `make`. If any is missing or too old, stop and tell the user what to install. Do not attempt to install Go, git, or make yourself unless the user explicitly asks.
 
 2. Pick a working directory the user owns. Default to `~/Developer/nicocli-install/`. Do not use `/tmp/` (some agent sandboxes block it, and some build systems treat it as ephemeral):
 
@@ -83,9 +83,9 @@ If any of those are not true, the task is not complete.
 
 ### Common failures
 
-- **`command not found: go`** — Go is not installed. Stop and tell the user to install Go 1.26.4 or newer from [https://go.dev/dl/](https://go.dev/dl/). Do not auto-install Go.
+- **`command not found: go`** — Go is not installed. Stop and tell the user to run `mise install` from `rest-api/`. Do not auto-install Go.
 
-- **`go: go.mod requires go >= 1.26.4`** — Installed Go is too old. Stop and ask the user to upgrade.
+- **`go: go.mod requires go >= 1.27.3`** — Installed Go is too old. Stop and ask the user to run `mise install`.
 
 - **`command not found: make`** — `make` is not installed. On macOS, suggest `xcode-select --install`. On Debian/Ubuntu, suggest `sudo apt install build-essential`. If the user cannot install `make`, fall back to a direct `go build`:
 

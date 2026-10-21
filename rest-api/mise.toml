@@ -1,0 +1,3 @@
+[tools]
+# Keep local development and the container/CI toolchain on the patched Go release.
+go = "1.27.3"
