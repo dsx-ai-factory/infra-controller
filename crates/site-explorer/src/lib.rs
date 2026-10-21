@@ -1681,144 +1681,163 @@ impl SiteExplorer {
                 }
             }
 
-            // The host report owns the physical chassis identity, while each
-            // `ExploredDpu` owns the DPU endpoint report. Join those views by
-            // the same serial number used for DPU pairing before we choose a
-            // fallback order.
-            Self::assign_host_chassis_ids(&ep.report, &mut dpus_explored_for_host);
-
-            // ExpectedMachine and complete UEFI PCI evidence resolve the order
-            // before either provisional Redfish fallback is considered.
-            let mut dpu_order_resolved = false;
-            let mut primary_interface_selection = ep
-                .report
-                .select_host_primary_interface(&dpus_explored_for_host, declared_primary);
-            if let Some(selection) = primary_interface_selection {
-                let mac_address = selection.mac_address;
-                boot_interfaces.add(&ep, mac_address);
-
-                match Self::apply_report_selection(
-                    &mut dpus_explored_for_host,
-                    selection.mac_address,
-                ) {
-                    ReportSelectionOrdering::Applied => dpu_order_resolved = true,
-                    ReportSelectionOrdering::NoDpus => {}
-                    ReportSelectionOrdering::Mismatch => {
-                        let all_mac = dpus_explored_for_host
-                            .iter()
-                            .map(|x| {
-                                x.host_pf_mac_address
-                                    .map(|x| x.to_string())
-                                    .unwrap_or_default()
-                            })
-                            .collect_vec()
-                            .join(",");
-
-                        tracing::error!(
-                            %mac_address,
-                            discovered_dpu_mac_addresses = %all_mac,
-                            host_bmc_ip_address = %ep.address,
-                            "MAC address not found in discovered DPU list"
-                        );
-                        metrics.increment_host_dpu_pairing_blocker(
-                            PairingBlockerReason::BootInterfaceMacMismatch,
-                        );
-                        continue;
-                    }
-                }
+            if let Some(managed_host) = Self::build_managed_host(
+                ep,
+                dpus_explored_for_host,
+                host_dpu_policy,
+                declared_primary,
+                &mut boot_interfaces,
+                metrics,
+            ) {
+                managed_hosts.push(managed_host);
+                metrics.exploration_identified_managed_hosts += 1;
             }
-
-            if !dpu_order_resolved && dpus_explored_for_host.len() > 1 {
-                match Self::sort_dpus_by_redfish_chassis_id(&mut dpus_explored_for_host) {
-                    Ok(selection) => {
-                        primary_interface_selection = Some(selection);
-                        dpu_order_resolved = true;
-                    }
-                    Err(error) => {
-                        tracing::debug!(
-                            host_bmc_ip_address = %ep.address,
-                            host_chassis_ids = ?dpus_explored_for_host
-                                .iter()
-                                .map(|dpu| dpu.host_chassis_id.as_deref())
-                                .collect_vec(),
-                            %error,
-                            "Cannot order DPUs using Redfish chassis IDs; falling back to Redfish serial numbers",
-                        );
-                    }
-                }
-            }
-
-            if !dpu_order_resolved {
-                // Serial ordering is the existing deterministic fallback. Keep
-                // its result beside the selected MAC so machine creation can
-                // persist the exact reason only when that same MAC becomes the
-                // durable desired target.
-                let serial_selection =
-                    Self::sort_dpus_by_redfish_serial(&mut dpus_explored_for_host);
-                if let Some(selection) = serial_selection {
-                    primary_interface_selection = Some(selection);
-                }
-            }
-
-            // Record one selection after report ordering, mismatch handling, or
-            // serial fallback has finished for a managed host with multiple
-            // DPUs. Sources produced by other components are outside this Site
-            // Explorer metric.
-            if dpus_explored_for_host.len() > 1
-                && matches!(host_dpu_policy, HostDpuPolicy::Manage)
-                && let Some(selection) = primary_interface_selection
-                && let Some(event) = BootInterfaceSelected::from_selection_source(
-                    selection.source,
-                    ep.address,
-                    dpus_explored_for_host.len(),
-                    selection.mac_address,
-                    dpus_explored_for_host
-                        .first()
-                        .and_then(|dpu| dpu.report.systems.first())
-                        .and_then(|system| system.serial_number.clone()),
-                )
-            {
-                carbide_instrument::emit(event);
-            }
-
-            // For `Nic` hosts, don't attach DPUs even if matching
-            // discovered some: the operator has declared "treat this host
-            // as zero-DPU". Any DPU hardware has already had `set_nic_mode`
-            // issued by the check-and-configure step above if it was in
-            // DPU mode; this cycle we just emit a bare host.
-            // For `Ignore` hosts, we should have already returned/continued
-            // earlier on after detecting the host policy as such, so
-            // this shouldn't fire.
-            let dpus = match host_dpu_policy {
-                HostDpuPolicy::Nic => {
-                    metrics.increment_dpu_migration_signal(
-                        DpuMigrationSignal::RegisteredZeroDpuForNic,
-                    );
-                    Vec::new()
-                }
-                HostDpuPolicy::Manage => dpus_explored_for_host,
-                // Now that we continue/return early for `Ignore` hosts,
-                // we shouldn't actually get here. Probably could be
-                // lazy and just leave it as Vec::new(), but I think
-                // this firing would also surface a bug, which we
-                // probably want.
-                HostDpuPolicy::Ignore => {
-                    unreachable!("ignored-DPU hosts should have already returned early")
-                }
-            };
-
-            managed_hosts.push(IdentifiedManagedHost {
-                explored_host: ExploredManagedHost {
-                    host_bmc_ip: ep.address,
-                    dpus,
-                },
-                report: ep.report,
-                primary_interface_selection,
-            });
-            metrics.exploration_identified_managed_hosts += 1;
         }
 
         Ok((managed_hosts, boot_interfaces))
+    }
+
+    /// Builds an identified managed host by ordering DPUs and selecting its primary interface.
+    ///
+    /// Returns `None` when the selected boot MAC does not match the discovered DPUs.
+    /// Report-selected boot interfaces are recorded even when that mismatch blocks
+    /// identification. The caller handles hosts with the `Ignore` policy separately.
+    fn build_managed_host(
+        ep: ExploredEndpoint,
+        mut dpus_explored_for_host: Vec<ExploredDpu>,
+        host_dpu_policy: HostDpuPolicy,
+        declared_primary: Option<MacAddress>,
+        boot_interfaces: &mut HostBootInterfaces,
+        metrics: &mut SiteExplorationMetrics,
+    ) -> Option<IdentifiedManagedHost> {
+        // The host report owns the physical chassis identity, while each
+        // `ExploredDpu` owns the DPU endpoint report. Join those views by
+        // the same serial number used for DPU pairing before we choose a
+        // fallback order.
+        Self::assign_host_chassis_ids(&ep.report, &mut dpus_explored_for_host);
+
+        // ExpectedMachine and complete UEFI PCI evidence resolve the order
+        // before either provisional Redfish fallback is considered.
+        let mut dpu_order_resolved = false;
+        let mut primary_interface_selection = ep
+            .report
+            .select_host_primary_interface(&dpus_explored_for_host, declared_primary);
+        if let Some(selection) = primary_interface_selection {
+            let mac_address = selection.mac_address;
+            boot_interfaces.add(&ep, mac_address);
+
+            match Self::apply_report_selection(&mut dpus_explored_for_host, selection.mac_address) {
+                ReportSelectionOrdering::Applied => dpu_order_resolved = true,
+                ReportSelectionOrdering::NoDpus => {}
+                ReportSelectionOrdering::Mismatch => {
+                    let all_mac = dpus_explored_for_host
+                        .iter()
+                        .map(|x| {
+                            x.host_pf_mac_address
+                                .map(|x| x.to_string())
+                                .unwrap_or_default()
+                        })
+                        .collect_vec()
+                        .join(",");
+
+                    tracing::error!(
+                        %mac_address,
+                        discovered_dpu_mac_addresses = %all_mac,
+                        host_bmc_ip_address = %ep.address,
+                        "MAC address not found in discovered DPU list"
+                    );
+                    metrics.increment_host_dpu_pairing_blocker(
+                        PairingBlockerReason::BootInterfaceMacMismatch,
+                    );
+                    return None;
+                }
+            }
+        }
+
+        if !dpu_order_resolved && dpus_explored_for_host.len() > 1 {
+            match Self::sort_dpus_by_redfish_chassis_id(&mut dpus_explored_for_host) {
+                Ok(selection) => {
+                    primary_interface_selection = Some(selection);
+                    dpu_order_resolved = true;
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        host_bmc_ip_address = %ep.address,
+                        host_chassis_ids = ?dpus_explored_for_host
+                            .iter()
+                            .map(|dpu| dpu.host_chassis_id.as_deref())
+                            .collect_vec(),
+                        %error,
+                        "Cannot order DPUs using Redfish chassis IDs; falling back to Redfish serial numbers",
+                    );
+                }
+            }
+        }
+
+        if !dpu_order_resolved {
+            // Serial ordering is the existing deterministic fallback. Keep
+            // its result beside the selected MAC so machine creation can
+            // persist the exact reason only when that same MAC becomes the
+            // durable desired target.
+            let serial_selection = Self::sort_dpus_by_redfish_serial(&mut dpus_explored_for_host);
+            if let Some(selection) = serial_selection {
+                primary_interface_selection = Some(selection);
+            }
+        }
+
+        // Record one selection after report ordering, mismatch handling, or
+        // serial fallback has finished for a managed host with multiple
+        // DPUs. Sources produced by other components are outside this Site
+        // Explorer metric.
+        if dpus_explored_for_host.len() > 1
+            && matches!(host_dpu_policy, HostDpuPolicy::Manage)
+            && let Some(selection) = primary_interface_selection
+            && let Some(event) = BootInterfaceSelected::from_selection_source(
+                selection.source,
+                ep.address,
+                dpus_explored_for_host.len(),
+                selection.mac_address,
+                dpus_explored_for_host
+                    .first()
+                    .and_then(|dpu| dpu.report.systems.first())
+                    .and_then(|system| system.serial_number.clone()),
+            )
+        {
+            carbide_instrument::emit(event);
+        }
+
+        // For `Nic` hosts, don't attach DPUs even if matching
+        // discovered some: the operator has declared "treat this host
+        // as zero-DPU". Any DPU hardware has already had `set_nic_mode`
+        // issued by the caller's check-and-configure step if it was in
+        // DPU mode; this cycle we just emit a bare host.
+        // For `Ignore` hosts, we should have already returned/continued
+        // earlier on after detecting the host policy as such, so
+        // this shouldn't fire.
+        let dpus = match host_dpu_policy {
+            HostDpuPolicy::Nic => {
+                metrics.increment_dpu_migration_signal(DpuMigrationSignal::RegisteredZeroDpuForNic);
+                Vec::new()
+            }
+            HostDpuPolicy::Manage => dpus_explored_for_host,
+            // Now that we continue/return early for `Ignore` hosts,
+            // we shouldn't actually get here. Probably could be
+            // lazy and just leave it as Vec::new(), but I think
+            // this firing would also surface a bug, which we
+            // probably want.
+            HostDpuPolicy::Ignore => {
+                unreachable!("ignored-DPU hosts should have already returned early")
+            }
+        };
+
+        Some(IdentifiedManagedHost {
+            explored_host: ExploredManagedHost {
+                host_bmc_ip: ep.address,
+                dpus,
+            },
+            report: ep.report,
+            primary_interface_selection,
+        })
     }
 
     async fn persist_identified_managed_hosts(
