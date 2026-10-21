@@ -1,3 +1,9 @@
+## Per-chart image override. When repository is set, takes precedence over global.image.
+image:
+  repository: ""
+  tag: ""
+  pullPolicy: ""
+
 ## nico-hardware-health — Collects and reports hardware health metrics
 ## Global settings (overridden by umbrella chart)
 global:

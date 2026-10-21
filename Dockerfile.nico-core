@@ -1,0 +1,342 @@
+# syntax=docker/dockerfile:1.7
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Multi-service Kind dev image build. A single builder stage cross-compiles
+# all NICo Rust services; separate runtime stages produce one image per service.
+#
+# Build targets (from repo root, set --target to pick one):
+#
+#   docker buildx build --platform linux/amd64 --target nico-rest-core  \
+#     -t localhost:5000/nico-rest-core:latest  -f Dockerfile.nico-core .
+#   docker buildx build --platform linux/amd64 --target nico-rest-dns   \
+#     -t localhost:5000/nico-rest-dns:latest   -f Dockerfile.nico-core .
+#   docker buildx build --platform linux/amd64 --target nico-rest-pxe   \
+#     -t localhost:5000/nico-rest-pxe:latest   -f Dockerfile.nico-core .
+#   docker buildx build --platform linux/amd64 --target nico-rest-dhcp  \
+#     -t localhost:5000/nico-rest-dhcp:latest  -f Dockerfile.nico-core .
+#
+# NOTE: Cross-compilation
+# The builder stage runs NATIVE on $BUILDPLATFORM and cross-compiles to
+# x86_64-unknown-linux-gnu, avoiding QEMU SEGFAULT on arm hosts when
+# aws-lc-sys assembles its hand-written x86-64 assembly.
+#
+# NOTE: pxe/ is required because carbide-ipxe-renderer embeds
+# pxe/ipxe/local/embed.ipxe and pxe/ipxe/local/branding.h at compile time.
+#
+ARG RUST_VERSION=1.97.1
+ARG KEA_VERSION=2.2.0-6
+
+# =============================================================================
+# Builder — all Rust services
+# =============================================================================
+FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-slim-bookworm AS builder
+
+ARG VERSION
+ARG CI_COMMIT_SHORT_SHA
+ENV VERSION=${VERSION}
+ENV CI_COMMIT_SHORT_SHA=${CI_COMMIT_SHORT_SHA}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    pkg-config \
+    cmake \
+    clang \
+    protobuf-compiler \
+    libprotobuf-dev \
+    libssl-dev \
+    libudev-dev \
+    libtss2-dev \
+    libssh-dev \
+    kea-dev \
+    libboost-dev \
+    && if [ "$(uname -m)" != "x86_64" ]; then \
+         apt-get install -y --no-install-recommends \
+           gcc-x86-64-linux-gnu libc6-dev-amd64-cross; \
+       else \
+         apt-get install -y --no-install-recommends gcc libc6-dev; \
+       fi \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup target add x86_64-unknown-linux-gnu
+
+ENV CARGO_HOME=/cargo-home
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+ENV CARGO_TARGET_DIR=/cargo-target
+ENV RUST_BACKTRACE=1
+
+WORKDIR /workspace
+COPY . .
+
+RUN --mount=type=cache,id=nico-core-cross-cargo-home,target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-core-cross-cargo-target,target=/cargo-target,sharing=locked \
+    if [ "$(uname -m)" != "x86_64" ]; then \
+      export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc \
+             CC_x86_64_unknown_linux_gnu=x86_64-linux-gnu-gcc; \
+    fi && \
+    cargo build \
+        -p carbide-api               --bin carbide-api \
+        -p nico-admin-cli            --bin nico-admin-cli \
+        -p carbide-dns               --bin carbide-dns \
+        -p carbide-pxe               --bin carbide \
+        -p carbide-dhcp-server       --bin forge-dhcp-server \
+        -p carbide-dhcp              --lib \
+        -p carbide-bmc-proxy         --bin carbide-bmc-proxy \
+        -p carbide-ssh-console       --bin ssh-console \
+        -p carbide-health            --bin forge-hw-health \
+        -p carbide-site-health-probe --bin site-health-probe \
+        --locked --release \
+        --target x86_64-unknown-linux-gnu && \
+    mkdir -p /artifacts && \
+    cp /cargo-target/x86_64-unknown-linux-gnu/release/carbide-api          /artifacts/ && \
+    cp /cargo-target/x86_64-unknown-linux-gnu/release/nico-admin-cli       /artifacts/ && \
+    cp /cargo-target/x86_64-unknown-linux-gnu/release/carbide-dns          /artifacts/ && \
+    cp /cargo-target/x86_64-unknown-linux-gnu/release/carbide               /artifacts/carbide && \
+    cp /cargo-target/x86_64-unknown-linux-gnu/release/forge-dhcp-server    /artifacts/ && \
+    cp /cargo-target/x86_64-unknown-linux-gnu/release/libdhcp.so           /artifacts/ && \
+    cp /cargo-target/x86_64-unknown-linux-gnu/release/carbide-bmc-proxy    /artifacts/ && \
+    cp /cargo-target/x86_64-unknown-linux-gnu/release/ssh-console          /artifacts/ && \
+    cp /cargo-target/x86_64-unknown-linux-gnu/release/forge-hw-health      /artifacts/ && \
+    cp /cargo-target/x86_64-unknown-linux-gnu/release/site-health-probe    /artifacts/
+
+# =============================================================================
+# nico-rest-core — carbide-api + nico-admin-cli
+# =============================================================================
+FROM --platform=linux/amd64 debian:bookworm-slim AS nico-rest-core
+
+ARG VERSION
+ARG CI_COMMIT_SHORT_SHA
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.revision="${CI_COMMIT_SHORT_SHA}"
+LABEL org.opencontainers.image.title="nico-api"
+LABEL org.opencontainers.image.description="NICo Core API Server"
+LABEL org.opencontainers.image.vendor="NVIDIA"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    ipmitool \
+    iproute2 \
+    iputils-ping \
+    libudev1 \
+    libtss2-mu0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/carbide /mnt/persistence /var/run/kea
+
+COPY --from=builder /artifacts/carbide-api    /opt/carbide/carbide-api
+COPY --from=builder /artifacts/nico-admin-cli /opt/carbide/nico-admin-cli
+COPY crates/api/casbin-policy.csv /opt/carbide/casbin-policy.csv
+
+ENV CASBIN_POLICY_FILE=/opt/carbide/casbin-policy.csv
+
+EXPOSE 1079 1080
+
+ENTRYPOINT ["/bin/sh", "-c"]
+CMD ["exec /opt/carbide/carbide-api run \
+  --config-path /etc/forge/carbide-api/carbide-api-config.toml \
+  --site-config-path /etc/forge/carbide-api/site/carbide-api-site-config.toml"]
+
+# =============================================================================
+# nico-rest-dns — carbide-dns
+# =============================================================================
+FROM --platform=linux/amd64 debian:bookworm-slim AS nico-rest-dns
+
+ARG VERSION
+ARG CI_COMMIT_SHORT_SHA
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.revision="${CI_COMMIT_SHORT_SHA}"
+LABEL org.opencontainers.image.title="nico-dns"
+LABEL org.opencontainers.image.description="NICo DNS Server"
+LABEL org.opencontainers.image.vendor="NVIDIA"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/carbide
+
+COPY --from=builder /artifacts/carbide-dns /opt/carbide/carbide-dns
+RUN ln -s /opt/carbide/carbide-dns /opt/nico/nico-dns 2>/dev/null || true
+
+EXPOSE 53/udp 53/tcp
+
+ENTRYPOINT ["/opt/carbide/carbide-dns"]
+CMD ["run"]
+
+# =============================================================================
+# nico-rest-pxe — carbide-pxe
+# =============================================================================
+FROM --platform=linux/amd64 debian:bookworm-slim AS nico-rest-pxe
+
+ARG VERSION
+ARG CI_COMMIT_SHORT_SHA
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.revision="${CI_COMMIT_SHORT_SHA}"
+LABEL org.opencontainers.image.title="nico-pxe"
+LABEL org.opencontainers.image.description="NICo PXE Server"
+LABEL org.opencontainers.image.vendor="NVIDIA"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/carbide /opt/carbide/pxe
+
+COPY --from=builder /artifacts/carbide /opt/carbide/carbide
+# PXE templates are embedded at compile time; no extra runtime files needed.
+# The chart runs /opt/carbide/carbide; also expose as carbide-pxe for clarity.
+RUN ln -s /opt/carbide/carbide /opt/carbide/carbide-pxe
+
+EXPOSE 69/udp 8080
+
+ENTRYPOINT ["/opt/carbide/carbide-pxe"]
+CMD ["run"]
+
+# =============================================================================
+# nico-rest-dhcp — kea-dhcp4 + libdhcp.so hook + forge-dhcp-server helper
+# =============================================================================
+FROM --platform=linux/amd64 debian:bookworm-slim AS nico-rest-dhcp
+
+ARG VERSION
+ARG CI_COMMIT_SHORT_SHA
+ARG KEA_VERSION=2.2.0-6
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.revision="${CI_COMMIT_SHORT_SHA}"
+LABEL org.opencontainers.image.title="nico-dhcp"
+LABEL org.opencontainers.image.description="NICo DHCP Server (Kea + carbide hook)"
+LABEL org.opencontainers.image.vendor="NVIDIA"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    kea-dhcp4-server \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/carbide /var/run/kea /var/lib/kea
+
+COPY --from=builder /artifacts/libdhcp.so \
+    /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so
+COPY --from=builder /artifacts/forge-dhcp-server \
+    /opt/carbide/forge-dhcp-server
+
+EXPOSE 67/udp 8080
+
+ENTRYPOINT ["/bin/sh", "-c"]
+CMD ["mkdir -p /var/run/kea /var/lib/kea && exec /sbin/kea-dhcp4 -c /tmp/kea_config.json"]
+
+# =============================================================================
+# nico-rest-bmc-proxy — carbide-bmc-proxy
+# =============================================================================
+FROM --platform=linux/amd64 debian:bookworm-slim AS nico-rest-bmc-proxy
+
+ARG VERSION
+ARG CI_COMMIT_SHORT_SHA
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.revision="${CI_COMMIT_SHORT_SHA}"
+LABEL org.opencontainers.image.title="nico-bmc-proxy"
+LABEL org.opencontainers.image.description="NICo BMC Proxy (Redfish/IPMI → machines)"
+LABEL org.opencontainers.image.vendor="NVIDIA"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/carbide
+
+COPY --from=builder /artifacts/carbide-bmc-proxy /opt/carbide/carbide-bmc-proxy
+
+EXPOSE 8080
+
+ENTRYPOINT ["/opt/carbide/carbide-bmc-proxy"]
+CMD ["run"]
+
+# =============================================================================
+# nico-rest-ssh-console — ssh-console
+# =============================================================================
+FROM --platform=linux/amd64 debian:bookworm-slim AS nico-rest-ssh-console
+
+ARG VERSION
+ARG CI_COMMIT_SHORT_SHA
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.revision="${CI_COMMIT_SHORT_SHA}"
+LABEL org.opencontainers.image.title="nico-ssh-console"
+LABEL org.opencontainers.image.description="NICo SSH Console Proxy"
+LABEL org.opencontainers.image.vendor="NVIDIA"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/carbide
+
+COPY --from=builder /artifacts/ssh-console /opt/carbide/ssh-console
+
+EXPOSE 8080
+
+ENTRYPOINT ["/opt/carbide/ssh-console"]
+CMD ["run"]
+
+# =============================================================================
+# nico-rest-hw-health — forge-hw-health
+# =============================================================================
+FROM --platform=linux/amd64 debian:bookworm-slim AS nico-rest-hw-health
+
+ARG VERSION
+ARG CI_COMMIT_SHORT_SHA
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.revision="${CI_COMMIT_SHORT_SHA}"
+LABEL org.opencontainers.image.title="nico-hardware-health"
+LABEL org.opencontainers.image.description="NICo Hardware Health Reporter"
+LABEL org.opencontainers.image.vendor="NVIDIA"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/carbide
+
+COPY --from=builder /artifacts/forge-hw-health /opt/carbide/forge-hw-health
+
+EXPOSE 8080
+
+ENTRYPOINT ["/opt/carbide/forge-hw-health"]
+CMD ["run"]
+
+# =============================================================================
+# nico-rest-site-health-probe — site-health-probe
+# =============================================================================
+FROM --platform=linux/amd64 debian:bookworm-slim AS nico-rest-site-health-probe
+
+ARG VERSION
+ARG CI_COMMIT_SHORT_SHA
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.revision="${CI_COMMIT_SHORT_SHA}"
+LABEL org.opencontainers.image.title="nico-site-health-probe"
+LABEL org.opencontainers.image.description="NICo Site Health Probe (synthetic monitoring)"
+LABEL org.opencontainers.image.vendor="NVIDIA"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/carbide
+
+COPY --from=builder /artifacts/site-health-probe /opt/carbide/site-health-probe
+
+EXPOSE 8080
+
+ENTRYPOINT ["/opt/carbide/site-health-probe"]
+CMD ["run"]

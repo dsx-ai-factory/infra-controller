@@ -25,7 +25,7 @@ spec:
       containers:
         - name: {{ include "nico-hardware-health.name" . }}
           image: "{{ include "nico-hardware-health.image" . }}"
-          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | default ((.Values.global.image).pullPolicy | default "IfNotPresent") }}
           securityContext:
             capabilities:
               add:

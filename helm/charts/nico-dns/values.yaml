@@ -41,6 +41,10 @@ service:
     - port: 53
       name: udp
       protocol: UDP
+  ## Optional list of external IPs the Service is reachable on.
+  ## In Kind, set to a reserved IP from the BMC network (reserve_first range)
+  ## so machines receiving DHCP leases can use this as their DNS resolver.
+  externalIPs: []
 
 apiServiceName: nico-api
 

@@ -9,6 +9,10 @@ spec:
   ipFamilyPolicy: PreferDualStack
   selector:
     {{- include "nico-dns.selectorLabels" . | nindent 4 }}
+  {{- with .Values.service.externalIPs }}
+  externalIPs:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   ports:
     {{- range .Values.service.ports }}
     - port: {{ .port }}

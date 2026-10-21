@@ -31,3 +31,12 @@ nodes:
         nodeRegistration:
           kubeletExtraArgs:
             node-labels: "ingress-ready=true"
+      # Explicit pod and service CIDRs so the machine-a-tron BMC subnet
+      # (192.168.102.0/24 inside the podman network 192.168.100.0/22) does
+      # not collide with cluster-internal ranges.  KIND_MAT=true creates that
+      # podman network before cluster creation.
+      - |
+        kind: ClusterConfiguration
+        networking:
+          podSubnet: "10.244.0.0/16"
+          serviceSubnet: "10.96.0.0/16"
