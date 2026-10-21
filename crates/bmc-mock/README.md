@@ -297,7 +297,8 @@ are ignored.
 ## Standalone state persistence
 
 Use `--state-file PATH` with the libvirt backend to preserve BMC
-accounts across restarts. Each BMC needs its own file and a single writer; the
+accounts, BIOS overrides, boot policy, and manager/host-interface overrides
+across restarts. Live power observations and sessions are not restored. Each BMC needs its own file and a single writer; the
 parent directory must exist. Snapshots contain plaintext credentials and are
 atomically replaced with owner-only permissions. Missing files are initialized
 from the profile; corrupt, unsupported, or unreadable state fails startup.
@@ -319,7 +320,8 @@ format. The library does not attach file storage or actors to resource state.
 
 Snapshot readers ignore unknown fields so additive changes within a format
 version do not prevent rollback. Missing required fields, invalid account
-identities, and unsupported versions remain errors. MAT snapshots use
+identities, mismatched system/manager identities, and unsupported versions remain
+errors. Older account-only snapshots retain profile defaults for resource settings. MAT snapshots use
 `bmc_state`; the old `bmc_accounts` format is not migrated.
 Start with fresh persisted state when upgrading from that format.
 

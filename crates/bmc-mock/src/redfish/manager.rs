@@ -160,11 +160,68 @@ pub(crate) struct SingleConfig {
     pub(crate) oem: Option<Oem>,
 }
 
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PersistedManagerState {
+    overrides: serde_json::Value,
+    host_interfaces: HashMap<String, serde_json::Value>,
+}
+
 pub struct ManagerState {
     managers: Vec<SingleManagerState>,
 }
 
 impl ManagerState {
+    pub(crate) fn persisted(&self) -> std::collections::BTreeMap<String, PersistedManagerState> {
+        self.managers
+            .iter()
+            .map(|manager| {
+                (
+                    manager.id.to_string(),
+                    PersistedManagerState {
+                        overrides: manager.overrides.lock().expect("mutex poisoned").clone(),
+                        host_interfaces: manager
+                            .host_interface_overrides
+                            .lock()
+                            .expect("mutex poisoned")
+                            .clone(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn validate_persisted(
+        &self,
+        saved: &std::collections::BTreeMap<String, PersistedManagerState>,
+    ) -> bool {
+        saved.len() == self.managers.len()
+            && saved.iter().all(|(id, state)| {
+                self.find(id).is_some_and(|manager| {
+                    state.overrides.is_object()
+                        && state.host_interfaces.iter().all(|(iface, value)| {
+                            value.is_object()
+                                && manager.config.host_interfaces.as_ref().is_some_and(
+                                    |interfaces| interfaces.iter().any(|i| i.id == iface.as_str()),
+                                )
+                        })
+                })
+            })
+    }
+
+    pub(crate) fn restore_persisted(
+        &self,
+        saved: &std::collections::BTreeMap<String, PersistedManagerState>,
+    ) {
+        for (id, state) in saved {
+            let manager = self.find(id).expect("validated manager identity");
+            *manager.overrides.lock().expect("mutex poisoned") = state.overrides.clone();
+            *manager
+                .host_interface_overrides
+                .lock()
+                .expect("mutex poisoned") = state.host_interfaces.clone();
+        }
+    }
+
     pub(crate) fn new(config: &Config) -> Self {
         Self {
             managers: config

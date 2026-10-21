@@ -236,7 +236,7 @@ pub struct SystemState<C: Callbacks> {
     systems: Vec<SingleSystemState<C>>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct BootSourceOverride {
     mode: Option<String>,
     enabled: Option<String>,
@@ -256,6 +256,16 @@ pub(crate) struct SingleSystemState<C: Callbacks> {
     boot_source_override: Mutex<BootSourceOverride>,
     secure_boot_enabled: Arc<AtomicBool>,
     bios_overrides: Arc<Mutex<serde_json::Value>>,
+}
+
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PersistedSystemState {
+    bios_overrides: serde_json::Value,
+    boot_order: Option<Vec<String>>,
+    hpe_boot_order: Option<Vec<String>>,
+    boot_options: HashMap<String, serde_json::Value>,
+    boot_source: BootSourceOverride,
+    secure_boot_enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -278,6 +288,84 @@ pub(crate) enum Oem {
 }
 
 impl<C: Callbacks> SystemState<C> {
+    pub(crate) fn persisted(&self) -> std::collections::BTreeMap<String, PersistedSystemState> {
+        self.systems
+            .iter()
+            .map(|system| {
+                // Boot resolution takes these locks in a different order. Release
+                // each guard before reading the next field.
+                let bios_overrides = system
+                    .bios_overrides
+                    .lock()
+                    .expect("mutex poisoned")
+                    .clone();
+                let boot_order = system
+                    .boot_order_override
+                    .lock()
+                    .expect("mutex poisoned")
+                    .clone();
+                let hpe_boot_order = system
+                    .hpe_boot_order_override
+                    .lock()
+                    .expect("mutex poisoned")
+                    .clone();
+                let boot_options = system
+                    .boot_option_overrides
+                    .lock()
+                    .expect("mutex poisoned")
+                    .clone();
+                let boot_source = system
+                    .boot_source_override
+                    .lock()
+                    .expect("mutex poisoned")
+                    .clone();
+                (
+                    system.config.id.to_string(),
+                    PersistedSystemState {
+                        bios_overrides,
+                        boot_order,
+                        hpe_boot_order,
+                        boot_options,
+                        boot_source,
+                        secure_boot_enabled: system.secure_boot_enabled.load(Ordering::SeqCst),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn validate_persisted(
+        &self,
+        saved: &std::collections::BTreeMap<String, PersistedSystemState>,
+    ) -> bool {
+        saved.len() == self.systems.len()
+            && saved
+                .iter()
+                .all(|(id, state)| self.find(id).is_some() && state.bios_overrides.is_object())
+    }
+
+    pub(crate) fn restore_persisted(
+        &self,
+        saved: &std::collections::BTreeMap<String, PersistedSystemState>,
+    ) {
+        for (id, state) in saved {
+            let system = self.find(id).expect("validated system identity");
+            *system.bios_overrides.lock().expect("mutex poisoned") = state.bios_overrides.clone();
+            *system.boot_order_override.lock().expect("mutex poisoned") = state.boot_order.clone();
+            *system
+                .hpe_boot_order_override
+                .lock()
+                .expect("mutex poisoned") = state.hpe_boot_order.clone();
+            *system.boot_option_overrides.lock().expect("mutex poisoned") =
+                state.boot_options.clone();
+            *system.boot_source_override.lock().expect("mutex poisoned") =
+                state.boot_source.clone();
+            system
+                .secure_boot_enabled
+                .store(state.secure_boot_enabled, Ordering::SeqCst);
+        }
+    }
+
     /// Updates the power observation exposed for the controlled system.
     /// `PowerState` is omitted from Redfish responses until an observation is published.
     /// Unrecognized observations (`UnsupportedValue`) are reported as JSON null.

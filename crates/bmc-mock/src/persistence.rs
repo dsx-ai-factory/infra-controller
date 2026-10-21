@@ -16,14 +16,17 @@
  */
 
 //! Portable BMC snapshots and atomic file replacement. The caller owns when and where to save.
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::redfish::account_service::{AccountServiceState, PersistedAccount};
+use crate::redfish::account_service::PersistedAccount;
+use crate::redfish::computer_system::PersistedSystemState;
+use crate::redfish::manager::PersistedManagerState;
 use crate::{BmcState, Callbacks};
 
 /// State shared by standalone BMCs and enclosing simulator snapshots.
@@ -31,6 +34,10 @@ use crate::{BmcState, Callbacks};
 pub struct PersistedBmcState {
     version: u32,
     accounts: Vec<PersistedAccount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    systems: Option<BTreeMap<String, PersistedSystemState>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    managers: Option<BTreeMap<String, PersistedManagerState>>,
 }
 
 impl std::fmt::Debug for PersistedBmcState {
@@ -53,18 +60,21 @@ impl PersistedBmcState {
 }
 
 /// Non-owning snapshot access independent of the BMC's backend callback type.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct BmcSnapshotSource {
-    accounts: Weak<AccountServiceState>,
+    snapshot: Arc<dyn Fn() -> Option<PersistedBmcState> + Send + Sync>,
+}
+
+impl std::fmt::Debug for BmcSnapshotSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BmcSnapshotSource").finish_non_exhaustive()
+    }
 }
 
 impl BmcSnapshotSource {
     /// Returns None when the BMC's resource state has been dropped.
     pub fn persisted(&self) -> Option<PersistedBmcState> {
-        self.accounts.upgrade().map(|a| PersistedBmcState {
-            version: 1,
-            accounts: a.persisted_accounts(),
-        })
+        (self.snapshot)()
     }
 }
 
@@ -74,18 +84,49 @@ impl<C: Callbacks> BmcState<C> {
         PersistedBmcState {
             version: 1,
             accounts: self.account_service_state.persisted_accounts(),
+            systems: Some(self.system_state.persisted()),
+            managers: Some(self.manager.persisted()),
         }
     }
     /// Returns a weak resource handle suitable for an enclosing simulator or persistence actor.
     pub fn snapshot_source(&self) -> BmcSnapshotSource {
+        let accounts = Arc::downgrade(&self.account_service_state);
+        let systems = Arc::downgrade(&self.system_state);
+        let managers = Arc::downgrade(&self.manager);
         BmcSnapshotSource {
-            accounts: Arc::downgrade(&self.account_service_state),
+            snapshot: Arc::new(move || {
+                Some(PersistedBmcState {
+                    version: 1,
+                    accounts: accounts.upgrade()?.persisted_accounts(),
+                    systems: Some(systems.upgrade()?.persisted()),
+                    managers: Some(managers.upgrade()?.persisted()),
+                })
+            }),
         }
     }
     /// Restores validated state before serving requests or attaching IPMI synchronization.
     /// A validation failure leaves all live accounts unchanged.
     pub fn restore_persisted(&self, snapshot: &PersistedBmcState) -> Result<(), PersistenceError> {
         snapshot.validate()?;
+        if snapshot
+            .systems
+            .as_ref()
+            .is_some_and(|saved| !self.system_state.validate_persisted(saved))
+            || snapshot
+                .managers
+                .as_ref()
+                .is_some_and(|saved| !self.manager.validate_persisted(saved))
+        {
+            return Err(PersistenceError::Invalid(
+                "snapshot resources do not match the BMC profile",
+            ));
+        }
+        if let Some(saved) = &snapshot.systems {
+            self.system_state.restore_persisted(saved);
+        }
+        if let Some(saved) = &snapshot.managers {
+            self.manager.restore_persisted(saved);
+        }
         self.account_service_state
             .restore_accounts(&snapshot.accounts);
         Ok(())

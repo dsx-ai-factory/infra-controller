@@ -1153,12 +1153,19 @@ impl HostMachineInfo {
     }
 
     fn generic_server(&self) -> hw::generic_ami::GenericAmi<'_> {
-        let nics = self
-            .dpus
-            .iter()
-            .enumerate()
-            .map(|(index, dpu)| (index + 1, dpu.bluefield3().host_nic()))
-            .collect();
+        let nics = if self.dpus.is_empty() {
+            self.non_dpu_mac_address
+                .iter()
+                .enumerate()
+                .map(|(index, mac_address)| (index + 1, hw::nic::Nic::rooftop(*mac_address)))
+                .collect()
+        } else {
+            self.dpus
+                .iter()
+                .enumerate()
+                .map(|(index, dpu)| (index + 1, dpu.bluefield3().host_nic()))
+                .collect()
+        };
 
         hw::generic_ami::GenericAmi {
             product_serial_number: Cow::Borrowed(&self.serial),
@@ -1451,6 +1458,50 @@ mod tests {
             supermicro.serial
         );
         assert_ne!(dgx.serial, supermicro.serial);
+    }
+
+    #[test]
+    fn generic_host_boot_inventory_includes_host_nics_without_dpus() {
+        for dpu_count in [0, 2] {
+            let pool_config =
+                PoolConfig::new(MacAddress::new([2, 0, 0, 0, 0, 0]), 16).expect("valid MAC pool");
+            let mut pool = MacAddressPool::new(Config {
+                ranges: None,
+                pool: Some(pool_config),
+            });
+            let hw_mac_addr_pool = PoolConfig::new(MacAddress::new([6, 0, 0, 0, 0, 0]), 16)
+                .expect("valid hardware MAC pool");
+            let hardware_type = HardwareType::GenericAmi;
+            let dpus = (0..dpu_count)
+                .map(|_| DpuMachineInfo::new(hardware_type, &mut pool, DpuSettings::default()))
+                .collect();
+            let host = HostMachineInfo::new(hardware_type, dpus, &mut pool, hw_mac_addr_pool);
+            let expected_macs = if dpu_count == 0 {
+                vec![host.non_dpu_mac_address.expect("zero-DPU host NIC")]
+            } else {
+                host.dpus.iter().map(|dpu| dpu.host_mac_address).collect()
+            };
+            let config =
+                host.system_config(Arc::new(crate::test_support::TestCallbacks::default()));
+            let options = config.systems[0]
+                .boot_options
+                .as_ref()
+                .expect("boot inventory");
+            assert_eq!(options.len(), expected_macs.len() + 1, "{dpu_count} DPUs");
+            for (option, mac) in options.iter().zip(expected_macs) {
+                assert_eq!(option.kind, crate::BootOptionKind::Network);
+                assert!(
+                    option.to_json()["DisplayName"]
+                        .as_str()
+                        .expect("boot label")
+                        .contains(&mac.to_string())
+                );
+            }
+            assert_eq!(
+                options.last().expect("disk boot").kind,
+                crate::BootOptionKind::Disk
+            );
+        }
     }
 
     #[test]

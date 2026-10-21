@@ -86,7 +86,10 @@ impl StateFile {
 mod tests {
     use std::sync::Arc;
 
+    use axum::body::Body;
+    use axum::http::Request;
     use tokio_util::sync::CancellationToken;
+    use tower::ServiceExt;
 
     use super::*;
     use crate::libvirt::{Config, LibvirtActor, LibvirtCallbacks};
@@ -162,5 +165,79 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
+    }
+    #[tokio::test]
+    async fn restart_retains_lockdown_and_boot_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let (router, state, _actor, _callbacks) = unstarted(path.clone());
+        let mut storage = StateFile::load(path.clone(), &state).unwrap();
+        let changes = [
+            (
+                "/redfish/v1/Systems/Self/Bios",
+                serde_json::json!({"Attributes": {"KCSACP": "Deny All", "USB000": "Disabled"}}),
+            ),
+            (
+                "/redfish/v1/Managers/Self/HostInterfaces/Self",
+                serde_json::json!({"InterfaceEnabled": false}),
+            ),
+            (
+                "/redfish/v1/Systems/Self",
+                serde_json::json!({"Boot": {
+                    "BootOrder": ["Boot0001", "Boot0000"],
+                    "BootSourceOverrideEnabled": "Once",
+                    "BootSourceOverrideTarget": "Pxe"
+                }}),
+            ),
+        ];
+        let mut expected = Vec::new();
+        for (uri, body) in changes {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                response.status().is_success(),
+                "{uri}: {}",
+                response.status()
+            );
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            expected.push((
+                uri,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            ));
+        }
+        storage.save().unwrap();
+        let (restored, restored_state, _second_actor, _second_callbacks) = unstarted(path.clone());
+        StateFile::load(path, &restored_state).unwrap();
+        for (uri, before) in expected {
+            let response = restored
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let after: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            for key in ["Attributes", "InterfaceEnabled", "Boot"] {
+                assert_eq!(after.get(key), before.get(key), "{uri}: {key}");
+            }
+        }
     }
 }
