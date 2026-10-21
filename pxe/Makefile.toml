@@ -450,7 +450,13 @@ dependencies = ["mkdir-static"]
 [tasks.mkosi-clean-qcow-imager]
 category = "Ephemeral Image"
 command = "${REPO_ROOT}/pxe/mkosi/bin/mkosi"
-args = ["--profile", "qcow-imager", "--output-dir=${MKOSI_BUILD_TMP}", "clean"]
+args = [
+  "--profile",
+  "qcow-imager",
+  "--output-dir=${MKOSI_BUILD_TMP}",
+  "--force",
+  "clean",
+]
 
 [tasks.mkosi-clean-qcow-imager-aarch64]
 category = "Ephemeral Image"
@@ -459,6 +465,7 @@ args = [
   "--profile",
   "qcow-imager-aarch64",
   "--output-dir=${MKOSI_BUILD_TMP}",
+  "--force",
   "clean",
 ]
 
@@ -469,6 +476,7 @@ args = [
   "--profile",
   "scout-oss-x86_64",
   "--output-dir=${MKOSI_BUILD_TMP}",
+  "--force",
   "clean",
 ]
 
@@ -479,6 +487,7 @@ args = [
   "--profile",
   "scout-loader-x86_64",
   "--output-dir=${MKOSI_BUILD_TMP}",
+  "--force",
   "clean",
 ]
 
@@ -489,6 +498,7 @@ args = [
   "--profile",
   "scout-oss-aarch64",
   "--output-dir=${MKOSI_BUILD_TMP}",
+  "--force",
   "clean",
 ]
 
@@ -499,6 +509,7 @@ args = [
   "--profile",
   "scout-loader-aarch64",
   "--output-dir=${MKOSI_BUILD_TMP}",
+  "--force",
   "clean",
 ]
 
@@ -520,7 +531,7 @@ script = '''
   PROFILE="scout-oss-x86_64"
   export PATH=${PATH}:/sbin
   mkdir -p "${MKOSI_PACKAGE_CACHE_DIR}"
-  ${REPO_ROOT}/pxe/mkosi/bin/mkosi -E PKG_VERSION="${PKG_VERSION}" --profile ${PROFILE} --output-dir=${MKOSI_BUILD_TMP} --package-cache-directory=${MKOSI_PACKAGE_CACHE_DIR} --with-network=yes build
+  ${REPO_ROOT}/pxe/mkosi/bin/mkosi -E PKG_VERSION="${PKG_VERSION}" --profile ${PROFILE} --output-dir=${MKOSI_BUILD_TMP} --package-cache-directory=${MKOSI_PACKAGE_CACHE_DIR} build
 '''
 
 [tasks.mkosi-build-scout-loader-x86_64]
