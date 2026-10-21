@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -50,7 +52,7 @@ type Instance struct {
 	// External power provisioning profile associated with the Instance.
 	PowerProfile NullableString `json:"powerProfile,omitempty"`
 	// Network Security Group propagation details. Null when no details are available, including when no Network Security Group is attached or inherited.
-	NetworkSecurityGroupPropagationDetails NullableNetworkSecurityGroupPropagationDetails `json:"networkSecurityGroupPropagationDetails,omitempty"`
+	NetworkSecurityGroupPropagationDetails NullableNetworkSecurityGroupPropagationDetails `json:"networkSecurityGroupPropagationDetails"`
 	// Indicates if the Network Security Group is inherited from VPC
 	NetworkSecurityGroupInherited *bool `json:"networkSecurityGroupInherited,omitempty"`
 	// ID of the Instance in Site Controller
@@ -99,12 +101,15 @@ type Instance struct {
 	Updated *time.Time `json:"updated,omitempty"`
 }
 
+type _Instance Instance
+
 // NewInstance instantiates a new Instance object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewInstance() *Instance {
+func NewInstance(networkSecurityGroupPropagationDetails NullableNetworkSecurityGroupPropagationDetails) *Instance {
 	this := Instance{}
+	this.NetworkSecurityGroupPropagationDetails = networkSecurityGroupPropagationDetails
 	return &this
 }
 
@@ -598,16 +603,18 @@ func (o *Instance) UnsetPowerProfile() {
 	o.PowerProfile.Unset()
 }
 
-// GetNetworkSecurityGroupPropagationDetails returns the NetworkSecurityGroupPropagationDetails field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetNetworkSecurityGroupPropagationDetails returns the NetworkSecurityGroupPropagationDetails field value
+// If the value is explicit nil, the zero value for NetworkSecurityGroupPropagationDetails will be returned
 func (o *Instance) GetNetworkSecurityGroupPropagationDetails() NetworkSecurityGroupPropagationDetails {
-	if o == nil || IsNil(o.NetworkSecurityGroupPropagationDetails.Get()) {
+	if o == nil || o.NetworkSecurityGroupPropagationDetails.Get() == nil {
 		var ret NetworkSecurityGroupPropagationDetails
 		return ret
 	}
+
 	return *o.NetworkSecurityGroupPropagationDetails.Get()
 }
 
-// GetNetworkSecurityGroupPropagationDetailsOk returns a tuple with the NetworkSecurityGroupPropagationDetails field value if set, nil otherwise
+// GetNetworkSecurityGroupPropagationDetailsOk returns a tuple with the NetworkSecurityGroupPropagationDetails field value
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Instance) GetNetworkSecurityGroupPropagationDetailsOk() (*NetworkSecurityGroupPropagationDetails, bool) {
@@ -617,28 +624,9 @@ func (o *Instance) GetNetworkSecurityGroupPropagationDetailsOk() (*NetworkSecuri
 	return o.NetworkSecurityGroupPropagationDetails.Get(), o.NetworkSecurityGroupPropagationDetails.IsSet()
 }
 
-// HasNetworkSecurityGroupPropagationDetails returns a boolean if a field has been set.
-func (o *Instance) HasNetworkSecurityGroupPropagationDetails() bool {
-	if o != nil && o.NetworkSecurityGroupPropagationDetails.IsSet() {
-		return true
-	}
-
-	return false
-}
-
-// SetNetworkSecurityGroupPropagationDetails gets a reference to the given NullableNetworkSecurityGroupPropagationDetails and assigns it to the NetworkSecurityGroupPropagationDetails field.
+// SetNetworkSecurityGroupPropagationDetails sets field value
 func (o *Instance) SetNetworkSecurityGroupPropagationDetails(v NetworkSecurityGroupPropagationDetails) {
 	o.NetworkSecurityGroupPropagationDetails.Set(&v)
-}
-
-// SetNetworkSecurityGroupPropagationDetailsNil sets the value for NetworkSecurityGroupPropagationDetails to be an explicit nil
-func (o *Instance) SetNetworkSecurityGroupPropagationDetailsNil() {
-	o.NetworkSecurityGroupPropagationDetails.Set(nil)
-}
-
-// UnsetNetworkSecurityGroupPropagationDetails ensures that no value is present for NetworkSecurityGroupPropagationDetails, not even an explicit nil
-func (o *Instance) UnsetNetworkSecurityGroupPropagationDetails() {
-	o.NetworkSecurityGroupPropagationDetails.Unset()
 }
 
 // GetNetworkSecurityGroupInherited returns the NetworkSecurityGroupInherited field value if set, zero value otherwise.
@@ -1481,9 +1469,7 @@ func (o Instance) ToMap() (map[string]interface{}, error) {
 	if o.PowerProfile.IsSet() {
 		toSerialize["powerProfile"] = o.PowerProfile.Get()
 	}
-	if o.NetworkSecurityGroupPropagationDetails.IsSet() {
-		toSerialize["networkSecurityGroupPropagationDetails"] = o.NetworkSecurityGroupPropagationDetails.Get()
-	}
+	toSerialize["networkSecurityGroupPropagationDetails"] = o.NetworkSecurityGroupPropagationDetails.Get()
 	if !IsNil(o.NetworkSecurityGroupInherited) {
 		toSerialize["networkSecurityGroupInherited"] = o.NetworkSecurityGroupInherited
 	}
@@ -1554,6 +1540,46 @@ func (o Instance) ToMap() (map[string]interface{}, error) {
 		toSerialize["updated"] = o.Updated
 	}
 	return toSerialize, nil
+}
+
+func (o *Instance) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"networkSecurityGroupPropagationDetails",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	nullableRequiredProperties := map[string]struct{}{
+		"networkSecurityGroupPropagationDetails": {},
+	}
+	for _, requiredProperty := range requiredProperties {
+		_, nullable := nullableRequiredProperties[requiredProperty]
+		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varInstance := _Instance{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varInstance)
+
+	if err != nil {
+		return err
+	}
+
+	*o = Instance(varInstance)
+
+	return err
 }
 
 type NullableInstance struct {
