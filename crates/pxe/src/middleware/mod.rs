@@ -24,7 +24,9 @@ pub(super) mod logging;
 pub(super) mod metrics;
 
 pub(super) async fn normalize_request<B>(mut request: Request<B>) -> Request<B> {
-    // RFC 9110 §14.2 requires ignoring Range for methods other than GET.
+    // tower-http's file services incorrectly apply Range to HEAD requests,
+    // producing partial metadata or 416 instead of ignoring it (RFC 9110 §14.2).
+    // Strip the header before routing to work around this dependency bug.
     if request.method() == Method::HEAD {
         request.headers_mut().remove(header::RANGE);
     }
