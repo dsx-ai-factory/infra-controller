@@ -471,8 +471,11 @@ restart the same way. Then delete the rack with
 
 The chart can shard the simulated fleet across several machine-a-tron pods.
 The `mat-k8s-controller` creates a Service for each BMC, publishing the BMC IP
-assigned by NICo DHCP as the Service's `externalIPs`. NICo dials each BMC IP
-directly, with no `bmc_proxy`. Validated profiles live in `helm-prereqs/values/`:
+assigned by NICo DHCP as the Service's `externalIPs`, or, with
+`mat-k8s-controller.config.serviceGranularity: pod`, two Services per pod that
+carry every BMC and every NVOS address of that pod (refer to the chart README
+section Per-pod Services). NICo dials each BMC IP directly, with no
+`bmc_proxy`. Validated profiles live in `helm-prereqs/values/`:
 
 | Values file | Fleet |
 |---|---|

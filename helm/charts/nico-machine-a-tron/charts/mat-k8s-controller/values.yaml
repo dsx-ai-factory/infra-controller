@@ -67,6 +67,12 @@ config:
   ## Disable (default) to reduce cluster load in large-scale deployments.
   enableStateAnnotations: false
 
+  ## "device" (default) publishes one Service per BMC and per switch NVOS
+  ## endpoint; "pod" publishes every BMC address of a pod in one Service and
+  ## every NVOS address in another, without the IPMI and SSH ports. Use "pod"
+  ## when the fleet's BMC count approaches the ServiceCIDR size.
+  serviceGranularity: device
+
 serviceAccount:
   create: true
   name: ""

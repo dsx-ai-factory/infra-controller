@@ -109,6 +109,11 @@ The `mat-k8s-controller` dynamically creates one Service per BMC:
 - Polls `/machines/status` from each pod
 - Creates Services with the BMC IP (assigned by NICo DHCP) as `externalIPs`
 - Services route to correct pod via `nvidia-infra-controller/pod-name` selector
+- With `mat-k8s-controller.config.serviceGranularity: pod` it creates two
+  Services per pod instead, one carrying every BMC address and one every
+  switch NVOS address, so a pod takes two clusterIPs rather than one per
+  device. Use it when the fleet's BMC count approaches the ServiceCIDR size.
+  Refer to the chart README section Per-pod Services.
 
 **Requirements:**
 
