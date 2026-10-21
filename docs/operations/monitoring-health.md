@@ -130,7 +130,15 @@ labels = { site = "rno-dev7", cluster = "cluster-01", environment = "development
 
 Static endpoints reject inline `username` and `password` fields. Move those
 values into the shared file and select a profile, or supply a per-MAC override.
-See the [credentials schema and reload behavior](https://github.com/dsx-ai-factory/infra-controller/blob/848c7e1433804b96d63dd4e3664b0e357ddbcca9/crates/health/README.md#static-endpoint-credentials).
+The JSON file contains optional `profiles` (named username/password sets) and
+`overrides` (partial credentials keyed by MAC, ignoring letter case). Each field
+uses the per-MAC override first, then the explicitly selected profile; there is
+no default profile. A username must resolve; passwords are optional.
+
+Replace the file atomically. File events and 60-second polling reload the cached
+credentials; failed reloads retain the last valid snapshot. Collectors refresh
+credentials after authentication fails. Target lists and profile selections in
+the main configuration still require a restart.
 
 Configure direct switch host endpoints separately when desired:
 
