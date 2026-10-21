@@ -298,6 +298,26 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 	ts2 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn1.ID, st2.ID, tnu1.ID)
 	assert.NotNil(t, ts2)
 
+	disableTargetedInstanceCreation := func(t *testing.T) {
+		accountDAO := cdbm.NewTenantAccountDAO(dbSession)
+		_, err := accountDAO.Update(ctx, nil, cdbm.TenantAccountUpdateInput{
+			TenantAccountID: tenantAccount.ID,
+			Config: &cdbm.TenantAccountConfig{
+				TargetedInstanceCreation: false,
+			},
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_, cleanupErr := accountDAO.Update(ctx, nil, cdbm.TenantAccountUpdateInput{
+				TenantAccountID: tenantAccount.ID,
+				Config: &cdbm.TenantAccountConfig{
+					TargetedInstanceCreation: true,
+				},
+			})
+			assert.NoError(t, cleanupErr)
+		})
+	}
+
 	// Allocation for tenant 1
 	al1 := testInstanceSiteBuildAllocation(t, dbSession, st1, tn1, "test-allocation-1", ipu)
 	assert.NotNil(t, al1)
@@ -567,7 +587,7 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "batch create rejects a foreign VPC attachment without the capability",
+			name: "batch create rejects a foreign VPC attachment without targetedInstanceCreation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -595,14 +615,17 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 						},
 					},
 				},
+				prepareReq: func(t *testing.T, _ *model.APIBatchInstanceCreateRequest) {
+					disableTargetedInstanceCreation(t)
+				},
 				reqOrg:   tnOrg,
 				reqUser:  tnu1,
 				respCode: http.StatusForbidden,
-				respMsg:  "Tenant does not have crossTenantVpcAttachment capability enabled",
+				respMsg:  "Tenant does not have targetedInstanceCreation capability enabled",
 			},
 		},
 		{
-			name: "batch create permits a foreign VPC attachment with the capability",
+			name: "batch create permits a foreign VPC attachment with targetedInstanceCreation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -629,15 +652,6 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
 						},
 					},
-				},
-				prepareReq: func(t *testing.T, _ *model.APIBatchInstanceCreateRequest) {
-					_, err := cdbm.NewTenantAccountDAO(dbSession).Update(ctx, nil, cdbm.TenantAccountUpdateInput{
-						TenantAccountID: tenantAccount.ID,
-						Config: &cdbm.TenantAccountConfigUpdate{
-							CrossTenantVpcAttachment: cutil.GetPtr(true),
-						},
-					})
-					require.NoError(t, err)
 				},
 				reqOrg:   tnOrg,
 				reqUser:  tnu1,

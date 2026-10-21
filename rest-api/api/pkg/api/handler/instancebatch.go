@@ -810,19 +810,19 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 		}
 	}
 
-	requiresCrossTenantCapability, attachmentErr := apiRequest.RequiresCrossTenantVpcAttachmentCapability(tenant.ID, dbInterfaces)
+	introducesForeignAttachment, attachmentErr := apiRequest.IntroducesForeignVpcAttachment(tenant.ID, dbInterfaces)
 	if attachmentErr != nil {
 		logger.Error().Err(attachmentErr).Msg("failed to compare requested and persisted Interface identities")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to authorize cross-Tenant VPC attachments", nil)
 	}
-	if requiresCrossTenantCapability {
-		enabled, capabilityErr := common.TenantHasCrossTenantVpcAttachment(ctx, nil, bcih.dbSession, tenant, site.ID)
+	if introducesForeignAttachment {
+		enabled, capabilityErr := common.TenantHasTargetedInstanceCreation(ctx, nil, bcih.dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &site.ID})
 		if capabilityErr != nil {
-			logger.Error().Err(capabilityErr).Msg("failed to resolve crossTenantVpcAttachment capability")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve crossTenantVpcAttachment capability, DB error", nil)
+			logger.Error().Err(capabilityErr).Msg("failed to resolve targetedInstanceCreation capability for cross-Tenant VPC attachment")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve targetedInstanceCreation capability, DB error", nil)
 		}
 		if !enabled {
-			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have crossTenantVpcAttachment capability enabled", nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have targetedInstanceCreation capability enabled", nil)
 		}
 	}
 

@@ -807,6 +807,44 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 	ts1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn1.ID, st1.ID, tnu1.ID)
 	assert.NotNil(t, ts1)
 
+	disableTargetedInstanceCreation := func(t *testing.T) {
+		accountDAO := cdbm.NewTenantAccountDAO(dbSession)
+		_, err := accountDAO.Update(ctx, nil, cdbm.TenantAccountUpdateInput{
+			TenantAccountID: tenantAccount.ID,
+			Config: &cdbm.TenantAccountConfig{
+				TargetedInstanceCreation: false,
+			},
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_, cleanupErr := accountDAO.Update(ctx, nil, cdbm.TenantAccountUpdateInput{
+				TenantAccountID: tenantAccount.ID,
+				Config: &cdbm.TenantAccountConfig{
+					TargetedInstanceCreation: true,
+				},
+			})
+			assert.NoError(t, cleanupErr)
+		})
+	}
+
+	disableTargetedInstanceCreationAtSite := func(t *testing.T) {
+		siteDAO := cdbm.NewTenantSiteDAO(dbSession)
+		_, err := siteDAO.Update(ctx, nil, cdbm.TenantSiteUpdateInput{
+			TenantSiteID: ts1.ID,
+			Config: &cdbm.TenantSiteConfig{
+				TargetedInstanceCreation: cutil.GetPtr(false),
+			},
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_, cleanupErr := siteDAO.Update(ctx, nil, cdbm.TenantSiteUpdateInput{
+				TenantSiteID: ts1.ID,
+				Config:       &cdbm.TenantSiteConfig{},
+			})
+			assert.NoError(t, cleanupErr)
+		})
+	}
+
 	al1 := testInstanceSiteBuildAllocation(t, dbSession, st1, tn1, "test-allocation-1", ipu)
 	assert.NotNil(t, al1)
 
@@ -1767,7 +1805,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			verifyChildSpanner: true,
 		},
 		{
-			name: "foreign direct VPC attachment is forbidden without the capability",
+			name: "foreign direct VPC attachment is forbidden without targetedInstanceCreation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -1793,14 +1831,15 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 						},
 					},
 				},
+				prepareReq:  func(t *testing.T, _ *model.APIInstanceCreateRequest) { disableTargetedInstanceCreation(t) },
 				reqOrg:      tnOrg,
 				reqUser:     tnu1,
 				respCode:    http.StatusForbidden,
-				respMessage: "Tenant does not have crossTenantVpcAttachment capability enabled",
+				respMessage: "Tenant does not have targetedInstanceCreation capability enabled",
 			},
 		},
 		{
-			name: "foreign VPC Prefix attachment is forbidden without the capability",
+			name: "foreign VPC Prefix attachment is forbidden without targetedInstanceCreation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -1825,10 +1864,11 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 						},
 					},
 				},
+				prepareReq:  func(t *testing.T, _ *model.APIInstanceCreateRequest) { disableTargetedInstanceCreation(t) },
 				reqOrg:      tnOrg,
 				reqUser:     tnu1,
 				respCode:    http.StatusForbidden,
-				respMessage: "Tenant does not have crossTenantVpcAttachment capability enabled",
+				respMessage: "Tenant does not have targetedInstanceCreation capability enabled",
 			},
 		},
 		{
@@ -1865,7 +1905,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "effective capability permits foreign direct VPC and VPC Prefix attachments",
+			name: "targetedInstanceCreation permits foreign direct VPC and VPC Prefix attachments",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -1873,7 +1913,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			},
 			args: args{
 				reqData: &model.APIInstanceCreateRequest{
-					Name:              "CrossTenantVpcAttachmentAllowed",
+					Name:              "ForeignVpcAttachmentAllowed",
 					TenantID:          tn1.ID.String(),
 					InstanceTypeID:    cutil.GetPtr(istCrossTenantVpc.ID.String()),
 					VpcID:             vpc9.ID.String(),
@@ -1894,15 +1934,6 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 						},
 					},
 				},
-				prepareReq: func(t *testing.T, _ *model.APIInstanceCreateRequest) {
-					_, err := cdbm.NewTenantAccountDAO(dbSession).Update(ctx, nil, cdbm.TenantAccountUpdateInput{
-						TenantAccountID: tenantAccount.ID,
-						Config: &cdbm.TenantAccountConfigUpdate{
-							CrossTenantVpcAttachment: cutil.GetPtr(true),
-						},
-					})
-					require.NoError(t, err)
-				},
 				reqOrg:   tnOrg,
 				reqUser:  tnu1,
 				respCode: http.StatusCreated,
@@ -1913,7 +1944,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			},
 			check: func(t *testing.T) {
 				instances, _, err := cdbm.NewInstanceDAO(dbSession).GetAll(ctx, nil, cdbm.InstanceFilterInput{
-					Names:     []string{"CrossTenantVpcAttachmentAllowed"},
+					Names:     []string{"ForeignVpcAttachmentAllowed"},
 					TenantIDs: []uuid.UUID{tn1.ID},
 				}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 				require.NoError(t, err)
@@ -1964,19 +1995,11 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 						},
 					},
 				},
-				prepareReq: func(t *testing.T, _ *model.APIInstanceCreateRequest) {
-					_, err := cdbm.NewTenantSiteDAO(dbSession).Update(ctx, nil, cdbm.TenantSiteUpdateInput{
-						TenantSiteID: ts1.ID,
-						Config: &cdbm.TenantSiteConfig{
-							CrossTenantVpcAttachment: cutil.GetPtr(false),
-						},
-					})
-					require.NoError(t, err)
-				},
+				prepareReq:  func(t *testing.T, _ *model.APIInstanceCreateRequest) { disableTargetedInstanceCreationAtSite(t) },
 				reqOrg:      tnOrg,
 				reqUser:     tnu1,
 				respCode:    http.StatusForbidden,
-				respMessage: "Tenant does not have crossTenantVpcAttachment capability enabled",
+				respMessage: "Tenant does not have targetedInstanceCreation capability enabled",
 			},
 		},
 		{
@@ -7386,7 +7409,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				reqOrg:      tnOrg1,
 				reqUser:     tnu1,
 				respCode:    http.StatusForbidden,
-				respMessage: cutil.GetPtr("Tenant does not have crossTenantVpcAttachment capability enabled"),
+				respMessage: cutil.GetPtr("Tenant does not have targetedInstanceCreation capability enabled"),
 			},
 		},
 		{
@@ -7416,7 +7439,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				reqOrg:      tnOrg1,
 				reqUser:     tnu1,
 				respCode:    http.StatusForbidden,
-				respMessage: cutil.GetPtr("Tenant does not have crossTenantVpcAttachment capability enabled"),
+				respMessage: cutil.GetPtr("Tenant does not have targetedInstanceCreation capability enabled"),
 			},
 		},
 		{

@@ -22,14 +22,12 @@ import (
 // checks if the TenantAccountSiteCapability type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &TenantAccountSiteCapability{}
 
-// TenantAccountSiteCapability Effective Site-scoped capability vector returned for the Tenant Account default or a group of Sites.
+// TenantAccountSiteCapability Effective TargetedInstanceCreation capability returned for the Tenant Account default or a group of Sites.
 type TenantAccountSiteCapability struct {
-	// Empty for the account-default entry; otherwise the sorted Sites whose effective capability vector matches this entry.
+	// Empty for the account-default entry; otherwise the sorted Sites whose effective TargetedInstanceCreation value matches this entry.
 	SiteIds []string `json:"siteIds"`
 	// Whether TargetedInstanceCreation is enabled for the Tenant Account default or listed Sites. When true, Tenant Admins with a Ready Tenant Account on the Site's Infrastructure Provider may create Instances by Machine ID and perform related privileged actions on that Site.
 	TargetedInstanceCreation bool `json:"targetedInstanceCreation"`
-	// Whether Tenant Admins may introduce non-primary Interfaces that select same-Site Ready FNN VPCs or explicit VPC Prefixes owned by another Tenant. This does not grant foreign-resource discovery or CRUD access.
-	CrossTenantVpcAttachment bool `json:"crossTenantVpcAttachment"`
 }
 
 type _TenantAccountSiteCapability TenantAccountSiteCapability
@@ -38,11 +36,10 @@ type _TenantAccountSiteCapability TenantAccountSiteCapability
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTenantAccountSiteCapability(siteIds []string, targetedInstanceCreation bool, crossTenantVpcAttachment bool) *TenantAccountSiteCapability {
+func NewTenantAccountSiteCapability(siteIds []string, targetedInstanceCreation bool) *TenantAccountSiteCapability {
 	this := TenantAccountSiteCapability{}
 	this.SiteIds = siteIds
 	this.TargetedInstanceCreation = targetedInstanceCreation
-	this.CrossTenantVpcAttachment = crossTenantVpcAttachment
 	return &this
 }
 
@@ -51,8 +48,6 @@ func NewTenantAccountSiteCapability(siteIds []string, targetedInstanceCreation b
 // but it doesn't guarantee that properties required by API are set
 func NewTenantAccountSiteCapabilityWithDefaults() *TenantAccountSiteCapability {
 	this := TenantAccountSiteCapability{}
-	var crossTenantVpcAttachment bool = false
-	this.CrossTenantVpcAttachment = crossTenantVpcAttachment
 	return &this
 }
 
@@ -104,30 +99,6 @@ func (o *TenantAccountSiteCapability) SetTargetedInstanceCreation(v bool) {
 	o.TargetedInstanceCreation = v
 }
 
-// GetCrossTenantVpcAttachment returns the CrossTenantVpcAttachment field value
-func (o *TenantAccountSiteCapability) GetCrossTenantVpcAttachment() bool {
-	if o == nil {
-		var ret bool
-		return ret
-	}
-
-	return o.CrossTenantVpcAttachment
-}
-
-// GetCrossTenantVpcAttachmentOk returns a tuple with the CrossTenantVpcAttachment field value
-// and a boolean to check if the value has been set.
-func (o *TenantAccountSiteCapability) GetCrossTenantVpcAttachmentOk() (*bool, bool) {
-	if o == nil {
-		return nil, false
-	}
-	return &o.CrossTenantVpcAttachment, true
-}
-
-// SetCrossTenantVpcAttachment sets field value
-func (o *TenantAccountSiteCapability) SetCrossTenantVpcAttachment(v bool) {
-	o.CrossTenantVpcAttachment = v
-}
-
 func (o TenantAccountSiteCapability) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -140,7 +111,6 @@ func (o TenantAccountSiteCapability) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["siteIds"] = o.SiteIds
 	toSerialize["targetedInstanceCreation"] = o.TargetedInstanceCreation
-	toSerialize["crossTenantVpcAttachment"] = o.CrossTenantVpcAttachment
 	return toSerialize, nil
 }
 
@@ -151,7 +121,6 @@ func (o *TenantAccountSiteCapability) UnmarshalJSON(data []byte) (err error) {
 	requiredProperties := []string{
 		"siteIds",
 		"targetedInstanceCreation",
-		"crossTenantVpcAttachment",
 	}
 
 	allProperties := make(map[string]interface{})

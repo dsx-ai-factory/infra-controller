@@ -936,7 +936,7 @@ func (icr *APIInstanceCreateRequest) ValidateInfiniBandInterfaces(itIbCaps []cdb
 	return ValidateInfiniBandInterfaces(itIbCaps, icr.InfiniBandInterfaces)
 }
 
-func requiresCrossTenantVpcAttachmentCapability(requested, existing []cdbm.Interface, tenantID uuid.UUID) (bool, error) {
+func introducesForeignVpcAttachment(requested, existing []cdbm.Interface, tenantID uuid.UUID) (bool, error) {
 	existingByKey := make(map[string]int, len(existing))
 	for _, ifc := range existing {
 		if ifc.Status == cdbm.InterfaceStatusDeleting {
@@ -974,10 +974,10 @@ func requiresCrossTenantVpcAttachmentCapability(requested, existing []cdbm.Inter
 	return false, nil
 }
 
-// RequiresCrossTenantVpcAttachmentCapability reports whether Instance create
+// IntroducesForeignVpcAttachment reports whether Instance create
 // introduces a foreign VPC or VPC Prefix attachment.
-func (icr *APIInstanceCreateRequest) RequiresCrossTenantVpcAttachmentCapability(tenantID uuid.UUID, requested []cdbm.Interface) (bool, error) {
-	return requiresCrossTenantVpcAttachmentCapability(requested, nil, tenantID)
+func (icr *APIInstanceCreateRequest) IntroducesForeignVpcAttachment(tenantID uuid.UUID, requested []cdbm.Interface) (bool, error) {
+	return introducesForeignVpcAttachment(requested, nil, tenantID)
 }
 
 // ValidateDpuExtensionServiceDeployments validates the DpuExtensionServiceDeployments for the Instance create request
@@ -985,10 +985,10 @@ func (icr *APIInstanceCreateRequest) ValidateDpuExtensionServiceDeployments(desd
 	return ValidateDpuExtensionServiceDeployments(desdrs)
 }
 
-// RequiresCrossTenantVpcAttachmentCapability reports whether batch Instance
+// IntroducesForeignVpcAttachment reports whether batch Instance
 // create introduces a foreign VPC or VPC Prefix attachment.
-func (bicr *APIBatchInstanceCreateRequest) RequiresCrossTenantVpcAttachmentCapability(tenantID uuid.UUID, requested []cdbm.Interface) (bool, error) {
-	return requiresCrossTenantVpcAttachmentCapability(requested, nil, tenantID)
+func (bicr *APIBatchInstanceCreateRequest) IntroducesForeignVpcAttachment(tenantID uuid.UUID, requested []cdbm.Interface) (bool, error) {
+	return introducesForeignVpcAttachment(requested, nil, tenantID)
 }
 
 // Validate ensure the values passed in batch instance create request are acceptable
@@ -1592,10 +1592,10 @@ func (iur *APIInstanceUpdateRequest) ValidateInfiniBandInterfaces(itIbCaps []cdb
 	return ValidateInfiniBandInterfaces(itIbCaps, iur.InfiniBandInterfaces)
 }
 
-// RequiresCrossTenantVpcAttachmentCapability reports whether Instance update
+// IntroducesForeignVpcAttachment reports whether Instance update
 // introduces a foreign Interface identity that cannot reuse a persisted row.
-func (iur *APIInstanceUpdateRequest) RequiresCrossTenantVpcAttachmentCapability(tenantID uuid.UUID, requested, existing []cdbm.Interface) (bool, error) {
-	return requiresCrossTenantVpcAttachmentCapability(requested, existing, tenantID)
+func (iur *APIInstanceUpdateRequest) IntroducesForeignVpcAttachment(tenantID uuid.UUID, requested, existing []cdbm.Interface) (bool, error) {
+	return introducesForeignVpcAttachment(requested, existing, tenantID)
 }
 
 // ValidateDpuExtensionServiceDeployments validates the DpuExtensionServiceDeployments for the Instance update request

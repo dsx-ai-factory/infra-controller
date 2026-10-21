@@ -49,65 +49,35 @@ func TenantHasTargetedInstanceCreation(ctx context.Context, tx *db.Tx, dbSession
 		return false, errors.New("site ID and infrastructure provider ID cannot be specified together when evaluating Tenant's targeted Instance creation capability")
 	}
 
-	ta, siteConfig, err := readyTenantAccountForScope(ctx, tx, dbSession, tenant.ID, scope)
-	if err != nil || ta == nil {
-		return false, err
-	}
-	if siteConfig != nil && siteConfig.TargetedInstanceCreation != nil {
-		return *siteConfig.TargetedInstanceCreation, nil
-	}
-
-	return ta.Config.TargetedInstanceCreation, nil
-}
-
-// TenantHasCrossTenantVpcAttachment reports whether the Tenant has the
-// cross-Tenant VPC attachment capability enabled at the specified Site. It
-// deliberately ignores the deprecated Tenant capability object.
-func TenantHasCrossTenantVpcAttachment(ctx context.Context, tx *db.Tx, dbSession *db.Session, tenant *Tenant, siteID uuid.UUID) (bool, error) {
-	if tenant == nil {
-		return false, nil
-	}
-
-	ta, siteConfig, err := readyTenantAccountForScope(ctx, tx, dbSession, tenant.ID, &TenantPrivilegeScope{SiteID: &siteID})
-	if err != nil || ta == nil {
-		return false, err
-	}
-	if siteConfig != nil && siteConfig.CrossTenantVpcAttachment != nil {
-		return *siteConfig.CrossTenantVpcAttachment, nil
-	}
-
-	return ta.Config.CrossTenantVpcAttachment, nil
-}
-
-// readyTenantAccountForScope resolves the Ready TenantAccount and optional
-// TenantSite configuration that own a provider- or Site-scoped capability.
-func readyTenantAccountForScope(ctx context.Context, tx *db.Tx, dbSession *db.Session, tenantID uuid.UUID, scope *TenantPrivilegeScope) (*TenantAccount, *TenantSiteConfig, error) {
 	siteID := scope.SiteID
 	providerID := scope.InfrastructureProviderID
-	var siteConfig *TenantSiteConfig
+	var siteOverride *bool
 
+	// Site-scoped: resolve the effective capability for the exact Site.
 	if siteID != nil {
 		tsDAO := NewTenantSiteDAO(dbSession)
-		ts, err := tsDAO.GetByTenantIDAndSiteID(ctx, tx, tenantID, *siteID, []string{SiteRelationName})
+		ts, err := tsDAO.GetByTenantIDAndSiteID(ctx, tx, tenant.ID, *siteID, []string{SiteRelationName})
 		if err != nil {
 			if errors.Is(err, db.ErrDoesNotExist) {
 				siteDAO := NewSiteDAO(dbSession)
 				site, err := siteDAO.GetByID(ctx, tx, *siteID, nil, false)
 				if err != nil {
-					return nil, nil, err
+					return false, err
 				}
 
+				// Site-scoped: resolve the effective capability for the exact Site.
 				providerID = &site.InfrastructureProviderID
 			} else {
-				return nil, nil, err
+				return false, err
 			}
 		} else {
 			if ts.Site != nil {
 				providerID = &ts.Site.InfrastructureProviderID
 			} else {
-				return nil, nil, errors.New("failed to retrieve related Site for Tenant/Site association, DB error")
+				return false, errors.New("failed to retrieve related Site for Tenant/Site association, DB error")
 			}
-			siteConfig = &ts.Config
+			// This will ensure TenantAccount is ready for the Site.
+			siteOverride = ts.Config.TargetedInstanceCreation
 		}
 	}
 
@@ -115,21 +85,26 @@ func readyTenantAccountForScope(ctx context.Context, tx *db.Tx, dbSession *db.Se
 		taDAO := NewTenantAccountDAO(dbSession)
 		tas, _, err := taDAO.GetAll(ctx, tx, TenantAccountFilterInput{
 			InfrastructureProviderID: providerID,
-			TenantIDs:                []uuid.UUID{tenantID},
+			TenantIDs:                []uuid.UUID{tenant.ID},
 			Statuses:                 []string{TenantAccountStatusReady},
 		}, paginator.PageInput{Limit: cutil.GetPtr(1)}, nil)
 		if err != nil {
-			return nil, nil, err
+			return false, err
 		}
 
 		if len(tas) == 0 {
-			return nil, siteConfig, nil
+			return false, nil
 		}
 
-		return &tas[0], siteConfig, nil
+		ta := tas[0]
+		if siteOverride != nil {
+			return *siteOverride, nil
+		}
+
+		return ta.Config.TargetedInstanceCreation, nil
 	}
 
-	return nil, siteConfig, nil
+	return false, nil
 }
 
 // TenantHasSiteAccess reports whether the Tenant has an Allocation or effective TargetedInstanceCreation on the Site.
