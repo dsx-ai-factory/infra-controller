@@ -474,11 +474,6 @@ async fn run_integration() -> eyre::Result<()> {
             .await?;
         }
     }
-    metrics::wait_for_metric_line(
-        &test_env.carbide_metrics_addrs,
-        "# TYPE carbide_hosts_with_scout_heartbeat_timeout gauge\n",
-    )
-    .await?;
     generate_core_metric_docs(&test_env.carbide_metrics_addrs);
     drop(mqtt_client);
 
@@ -1505,6 +1500,7 @@ async fn test_machine_a_tron_scout_stream(
         underlay_dhcp_relay_address,
         move |machine_handle| {
             let scout_stream_api_addrs = scout_stream_api_addrs.clone();
+            let carbide_metrics_addrs = test_env.carbide_metrics_addrs.clone();
             let db_pool = test_env.db_pool.clone();
             async move {
                 machine_handle
@@ -1546,6 +1542,10 @@ async fn test_machine_a_tron_scout_stream(
                 .bind(machine_id)
                 .execute(&db_pool)
                 .await?;
+                let expected_metric = format!(
+                    r#"carbide_hosts_with_scout_heartbeat_timeout{{fresh="true",host_machine_id="{machine_id}"}} 1"#
+                );
+                metrics::wait_for_metric_line(&carbide_metrics_addrs, &expected_metric).await?;
                 Ok(())
             }
         },
