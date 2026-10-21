@@ -32,17 +32,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
-use opentelemetry::KeyValue;
 use axum::extract::{OriginalUri, Request, State};
 use axum::http::{HeaderValue, Response, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use carbide_instrument::LabelValue;
 use engine::{AdmissionObserver, AdmissionRejection, ClientKeyRef, FairAdmission, RejectionReason};
-use in_flight::{
-    ClientKindLabel, ExecutionRegistry, client_identifier, parse_grpc_timeout,
-};
+use in_flight::{ClientKindLabel, ExecutionRegistry, client_identifier, parse_grpc_timeout};
 pub(crate) use limits::{AdmissionLimits, ClientLimits};
+use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Meter, ObservableGauge};
 use retry::{RejectionScope, RetryAdvice};
 use tokio::task::JoinSet;
@@ -86,10 +84,10 @@ impl RequestTransport {
 
     fn execution_timeout_response(self) -> Response<Body> {
         match self {
-            Self::Grpc => tonic::Status::deadline_exceeded(
-                "API admission execution deadline exceeded",
-            )
-            .into_http::<Body>(),
+            Self::Grpc => {
+                tonic::Status::deadline_exceeded("API admission execution deadline exceeded")
+                    .into_http::<Body>()
+            }
             Self::Http => (
                 StatusCode::GATEWAY_TIMEOUT,
                 "API admission execution deadline exceeded",
@@ -235,6 +233,7 @@ struct HandlerExecutionFinished {
     component = "nico-api",
     log = warn,
     metric = counter,
+    message = "API request exceeded its admission execution deadline",
     describe = "Number of admitted API requests whose handler exceeded the execution deadline"
 )]
 struct ExecutionTimedOut {
@@ -352,14 +351,12 @@ impl ApiAdmissionControl {
         let pending_requests_gauge = register_occupancy_gauge(
             meter,
             "carbide_api_admission_pending_requests",
-            "Number of API requests waiting for an execution slot, including entries whose callers already timed out waiting for admission",
+            "Number of API requests currently waiting for an execution slot",
             Arc::clone(&engine),
             |snapshot| snapshot.pending,
         );
-        let oldest_execution_age_gauge = register_oldest_execution_age_gauge(
-            meter,
-            Arc::clone(&in_flight),
-        );
+        let oldest_execution_age_gauge =
+            register_oldest_execution_age_gauge(meter, Arc::clone(&in_flight));
         let work_in_flight_by_client_kind_gauge =
             register_work_in_flight_by_client_kind_gauge(meter, Arc::clone(&in_flight));
         let control = Arc::new(Self {
@@ -437,7 +434,6 @@ impl ApiAdmissionControl {
         (ClientKeyRef::Default, self.default_client_limits)
     }
 }
-
 
 fn register_oldest_execution_age_gauge(
     meter: &Meter,
@@ -564,17 +560,18 @@ fn execution_deadline(
     transport: RequestTransport,
     client_limits: ClientLimits,
 ) -> Duration {
-    let mut deadline = client_limits.max_execution_time();
-    if transport == RequestTransport::Grpc {
-        if let Some(header) = request.headers().get("grpc-timeout") {
-            if let Ok(value) = header.to_str() {
-                if let Some(parsed) = parse_grpc_timeout(value) {
-                    deadline = deadline.min(parsed);
-                }
-            }
-        }
+    let max_execution_time = client_limits.max_execution_time();
+    if transport != RequestTransport::Grpc {
+        return max_execution_time;
     }
-    deadline
+    request
+        .headers()
+        .get("grpc-timeout")
+        .and_then(|header| header.to_str().ok())
+        .and_then(parse_grpc_timeout)
+        .map_or(max_execution_time, |requested| {
+            requested.min(max_execution_time)
+        })
 }
 
 async fn enforce_transport(
@@ -592,12 +589,10 @@ async fn enforce_transport(
         Err(rejection) => return control.rejection_response(transport, rejection),
     };
     let deadline = execution_deadline(&request, transport, client_limits);
-    let in_flight_id = control.in_flight.register(
-        route.clone(),
-        client_kind,
-        client_id.clone(),
-        deadline,
-    );
+    let in_flight =
+        control
+            .in_flight
+            .register(route.clone(), client_kind, client_id.clone(), deadline);
     let handler = next.run(request);
     let response = match tokio::time::timeout(deadline, handler).await {
         Ok(response) => response,
@@ -611,7 +606,7 @@ async fn enforce_transport(
             transport.execution_timeout_response()
         }
     };
-    control.in_flight.remove(in_flight_id);
+    drop(in_flight);
     drop(permit);
     response
 }
@@ -623,7 +618,7 @@ mod tests {
     use axum::Router;
     use axum::http::Request;
     use axum::routing::get;
-    use carbide_instrument::LabelValue;
+    use carbide_authn::middleware::Principal;
     use carbide_instrument::testing::MetricsCapture;
     use futures::poll;
     use prost::Message;
@@ -1073,47 +1068,105 @@ mod tests {
         (control, join_set)
     }
 
+    /// A gRPC router with a `Stuck` handler that never returns and a `Ready`
+    /// handler that returns at once, both behind admission. `stuck_started` is
+    /// notified when a `Stuck` handler begins executing.
+    fn stuck_and_ready_router(
+        control: &Arc<ApiAdmissionControl>,
+        stuck_started: Arc<Notify>,
+    ) -> Router {
+        Router::new()
+            .route(
+                ::rpc::service_path!("Stuck"),
+                get(move || {
+                    let stuck_started = Arc::clone(&stuck_started);
+                    async move {
+                        stuck_started.notify_one();
+                        std::future::pending::<&'static str>().await
+                    }
+                }),
+            )
+            .route(::rpc::service_path!("Ready"), get(|| async { "ready" }))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::clone(control),
+                enforce_grpc,
+            ))
+    }
+
+    /// Builds a gRPC request, authenticated as `service_id` when one is given.
+    fn grpc_request(path: &'static str, service_id: Option<&str>) -> Request<Body> {
+        let mut request = Request::builder().uri(path).body(Body::empty()).unwrap();
+        if let Some(service_id) = service_id {
+            request.extensions_mut().insert(AuthContext {
+                principals: vec![Principal::SpiffeServiceIdentifier(service_id.to_owned())],
+                authorization: None,
+            });
+        }
+        request
+    }
+
+    fn grpc_status(response: &Response<Body>) -> Option<&str> {
+        response
+            .headers()
+            .get("grpc-status")
+            .map(|status| status.to_str().expect("grpc-status is ASCII"))
+    }
+
+    fn in_flight_total(control: &ApiAdmissionControl) -> u64 {
+        control
+            .in_flight
+            .work_in_flight_by_client_kind()
+            .values()
+            .sum()
+    }
+
+    /// Awaits a request that only the execution deadline can end. Paused test
+    /// time jumps straight to this guard when nothing else is pending, so a
+    /// missing deadline fails here instead of hanging the test.
+    async fn deadline_bounded<F: std::future::Future>(request: F) -> F::Output {
+        tokio::time::timeout(Duration::from_secs(60 * 60), request)
+            .await
+            .expect("only the execution deadline can end this request")
+    }
+
+    /// Waits for the dispatcher to account for released permits and drained
+    /// queue entries, which it does asynchronously.
+    async fn wait_until_idle(control: &ApiAdmissionControl) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while control.snapshot()
+                != (engine::AdmissionSnapshot {
+                    work_in_flight: 0,
+                    pending: 0,
+                })
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("admission becomes idle");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn execution_deadline_releases_slot() {
         let _serial = ADMISSION_TEST_SERIAL.lock().await;
         let metrics = MetricsCapture::start();
-        let shutdown = CancellationToken::new();
         let (controller, _join_set) = controller_with_execution_time(
             1,
             1,
             Duration::from_secs(5),
             Duration::from_secs(1),
-            shutdown,
+            CancellationToken::new(),
         );
-        let never = Arc::new(Notify::new());
-        let blocking = {
-            let never = Arc::clone(&never);
-            move || {
-                let never = Arc::clone(&never);
-                async move {
-                    never.notified().await;
-                    "blocked"
-                }
-            }
-        };
-        let router = Router::new()
-            .route(::rpc::service_path!("Test"), get(blocking))
-            .layer(axum::middleware::from_fn_with_state(
-                Arc::clone(&controller),
-                enforce_grpc,
-            ));
+        let router = stuck_and_ready_router(&controller, Arc::new(Notify::new()));
 
-        let first = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri(::rpc::service_path!("Test"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(first.headers().get("grpc-status").unwrap(), "4");
+        let timed_out = deadline_bounded(
+            router
+                .clone()
+                .oneshot(grpc_request(::rpc::service_path!("Stuck"), None)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(grpc_status(&timed_out), Some("4"));
         assert_eq!(
             metrics.counter_delta(
                 "carbide_api_admission_execution_timeouts_total",
@@ -1121,51 +1174,185 @@ mod tests {
             ),
             1.0
         );
+        assert_eq!(in_flight_total(&controller), 0);
 
-        let second = router
-            .oneshot(
-                Request::builder()
-                    .uri(::rpc::service_path!("Test"))
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        let admitted = router
+            .oneshot(grpc_request(::rpc::service_path!("Ready"), None))
             .await
             .unwrap();
-        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(admitted.status(), StatusCode::OK);
+        assert_eq!(grpc_status(&admitted), None);
+    }
+
+    #[tokio::test]
+    async fn cancelled_request_releases_slot_and_in_flight_entry() {
+        let _serial = ADMISSION_TEST_SERIAL.lock().await;
+        let (controller, _join_set) = controller_with_execution_time(
+            1,
+            1,
+            Duration::from_secs(5),
+            Duration::from_secs(120),
+            CancellationToken::new(),
+        );
+        let stuck_started = Arc::new(Notify::new());
+        let router = stuck_and_ready_router(&controller, Arc::clone(&stuck_started));
+
+        let mut request =
+            Box::pin(router.oneshot(grpc_request(::rpc::service_path!("Stuck"), None)));
+        tokio::select! {
+            _ = &mut request => panic!("the stuck handler must not return"),
+            () = stuck_started.notified() => {}
+        }
+        assert_eq!(
+            controller
+                .in_flight
+                .work_in_flight_by_client_kind()
+                .get(&ClientKindLabel::Default),
+            Some(&1)
+        );
+
+        // Hyper drops the request future this way when the client resets the
+        // stream, so neither the permit nor the in-flight entry may outlive it.
+        drop(request);
+        assert_eq!(in_flight_total(&controller), 0);
+        assert_eq!(controller.in_flight.oldest_execution_age(), Duration::ZERO);
+        wait_until_idle(&controller).await;
+    }
+
+    /// The production failure: one client's execution slots held by handlers
+    /// that never return, and its queue full of entries whose callers already
+    /// timed out. Other clients keep working, and the stuck client recovers
+    /// once the execution deadline frees its slot.
+    #[tokio::test(start_paused = true)]
+    async fn stuck_client_lane_recovers_after_execution_deadline() {
+        let _serial = ADMISSION_TEST_SERIAL.lock().await;
+        let mut join_set = JoinSet::new();
+        let controller = ApiAdmissionControl::from_config(
+            &ApiAdmissionControlConfig {
+                enabled: true,
+                max_work_in_flight: 4,
+                max_pending: 16,
+                max_work_in_flight_per_client: 1,
+                max_pending_per_client: 2,
+                pending_timeout: Duration::from_secs(5),
+                max_execution_time: Duration::from_secs(60),
+                client_idle_timeout: Duration::from_secs(600),
+                service_limits: Default::default(),
+            },
+            &opentelemetry::global::meter("api-admission-tests"),
+            CancellationToken::new(),
+            &mut join_set,
+        )
+        .expect("test admission config is valid")
+        .expect("test admission is enabled");
+        let stuck_started = Arc::new(Notify::new());
+        let router = stuck_and_ready_router(&controller, Arc::clone(&stuck_started));
+
+        let stuck = tokio::spawn(router.clone().oneshot(grpc_request(
+            ::rpc::service_path!("Stuck"),
+            Some("service-a"),
+        )));
+        stuck_started.notified().await;
+
+        // These queue behind the stuck handler and time out waiting. Their
+        // entries stay queued until the dispatcher can dequeue them.
+        let queued: Vec<_> = (0..2)
+            .map(|_| {
+                tokio::spawn(router.clone().oneshot(grpc_request(
+                    ::rpc::service_path!("Ready"),
+                    Some("service-a"),
+                )))
+            })
+            .collect();
+        for waiter in queued {
+            let response = waiter.await.unwrap().unwrap();
+            assert_eq!(grpc_status(&response), Some("8"));
+        }
+        let rejected = router
+            .clone()
+            .oneshot(grpc_request(
+                ::rpc::service_path!("Ready"),
+                Some("service-a"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(grpc_status(&rejected), Some("8"));
+
+        let other_client = router
+            .clone()
+            .oneshot(grpc_request(
+                ::rpc::service_path!("Ready"),
+                Some("service-b"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(other_client.status(), StatusCode::OK);
+        assert_eq!(grpc_status(&other_client), None);
+
+        let timed_out = deadline_bounded(stuck).await.unwrap().unwrap();
+        assert_eq!(grpc_status(&timed_out), Some("4"));
+        wait_until_idle(&controller).await;
+
+        let recovered = router
+            .oneshot(grpc_request(
+                ::rpc::service_path!("Ready"),
+                Some("service-a"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(recovered.status(), StatusCode::OK);
+        assert_eq!(grpc_status(&recovered), None);
+        assert_eq!(in_flight_total(&controller), 0);
     }
 
     #[test]
-    fn execution_deadline_honors_grpc_timeout_header() {
+    fn execution_deadline_uses_a_shorter_grpc_timeout() {
+        let max_execution_time = Duration::from_secs(120);
+        let limits = ClientLimits::new(1, 1, Duration::from_secs(5), max_execution_time, 1, 1)
+            .expect("test limits are valid");
         let cases = [
-            ("500m", Duration::from_millis(500)),
-            ("10S", Duration::from_secs(10)),
-            ("invalid", Duration::from_secs(120)),
+            (
+                "shorter header wins",
+                RequestTransport::Grpc,
+                Some("1S"),
+                Duration::from_secs(1),
+            ),
+            (
+                "longer header does not",
+                RequestTransport::Grpc,
+                Some("10M"),
+                max_execution_time,
+            ),
+            (
+                "malformed header falls back",
+                RequestTransport::Grpc,
+                Some("soon"),
+                max_execution_time,
+            ),
+            (
+                "missing header falls back",
+                RequestTransport::Grpc,
+                None,
+                max_execution_time,
+            ),
+            (
+                "HTTP ignores the header",
+                RequestTransport::Http,
+                Some("1S"),
+                max_execution_time,
+            ),
         ];
-        for (header, expected) in cases {
-            let request = Request::builder()
-                .uri(::rpc::service_path!("Test"))
-                .header("grpc-timeout", header)
-                .body(Body::empty())
-                .unwrap();
-            let limits = ClientLimits::new(1, 1, Duration::from_secs(5), Duration::from_secs(120), 1, 1)
-                .expect("limits");
+        for (name, transport, header, expected) in cases {
+            let mut request = Request::builder().uri(::rpc::service_path!("Ready"));
+            if let Some(header) = header {
+                request = request.header("grpc-timeout", header);
+            }
+            let request = request.body(Body::empty()).unwrap();
             assert_eq!(
-                execution_deadline(&request, RequestTransport::Grpc, limits),
+                execution_deadline(&request, transport, limits),
                 expected,
-                "header {header}"
+                "{name}"
             );
         }
-        let shorter = Request::builder()
-            .uri(::rpc::service_path!("Test"))
-            .header("grpc-timeout", "1S")
-            .body(Body::empty())
-            .unwrap();
-        let limits = ClientLimits::new(1, 1, Duration::from_secs(5), Duration::from_secs(120), 1, 1)
-            .expect("limits");
-        assert_eq!(
-            execution_deadline(&shorter, RequestTransport::Grpc, limits),
-            Duration::from_secs(1)
-        );
     }
-
 }

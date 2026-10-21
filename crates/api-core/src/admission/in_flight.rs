@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use carbide_authn::middleware::ExternalUserInfo;
@@ -96,13 +96,17 @@ impl ExecutionRegistry {
         }
     }
 
+    /// Records an admitted request until the returned guard is dropped. The
+    /// guard, not the caller, removes the entry, so a request whose future is
+    /// dropped mid-handler (a client cancelling with `RST_STREAM`) is removed
+    /// too.
     pub(super) fn register(
-        &self,
+        self: &Arc<Self>,
         route: String,
         client_kind: ClientKindLabel,
         client_identifier: String,
         deadline: Duration,
-    ) -> u64 {
+    ) -> InFlightGuard {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.lock_entries().insert(
             id,
@@ -114,10 +118,13 @@ impl ExecutionRegistry {
                 deadline,
             },
         );
-        id
+        InFlightGuard {
+            registry: Arc::clone(self),
+            id,
+        }
     }
 
-    pub(super) fn remove(&self, id: u64) {
+    fn remove(&self, id: u64) {
         self.lock_entries().remove(&id);
     }
 
@@ -160,6 +167,18 @@ impl ExecutionRegistry {
         self.entries
             .lock()
             .expect("execution registry mutex must not be poisoned")
+    }
+}
+
+/// Removes its request from the [`ExecutionRegistry`] when dropped.
+pub(super) struct InFlightGuard {
+    registry: Arc<ExecutionRegistry>,
+    id: u64,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.registry.remove(self.id);
     }
 }
 

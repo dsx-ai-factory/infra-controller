@@ -1177,9 +1177,7 @@ impl ApiAdmissionControlConfig {
                 limits.max_work_in_flight,
                 limits.max_pending,
                 limits.pending_timeout,
-                limits
-                    .max_execution_time
-                    .unwrap_or(self.max_execution_time),
+                limits.max_execution_time.unwrap_or(self.max_execution_time),
                 self.max_work_in_flight,
                 self.max_pending,
             )
@@ -6613,6 +6611,42 @@ path = "credentials.yaml"
         assert_api_admission_semaphore_bound("max_work_in_flight", |config, value| {
             config.max_work_in_flight = value;
         });
+    }
+
+    #[test]
+    fn api_admission_control_parses_max_execution_time_overrides() {
+        let config = toml::from_str::<ApiAdmissionControlConfig>(
+            r#"
+            max_execution_time = "45s"
+
+            [service_limits.site-agent]
+            max_work_in_flight = 4
+            max_pending = 32
+            pending_timeout = "5s"
+            max_execution_time = "300s"
+
+            [service_limits.flow]
+            max_work_in_flight = 4
+            max_pending = 32
+            pending_timeout = "5s"
+            "#,
+        )
+        .expect("admission config parses");
+
+        assert_eq!(
+            config.max_execution_time,
+            std::time::Duration::from_secs(45)
+        );
+        assert_eq!(
+            config.service_limits["site-agent"].max_execution_time,
+            Some(std::time::Duration::from_secs(300))
+        );
+        // An omitted override inherits the global value when limits are built.
+        assert_eq!(config.service_limits["flow"].max_execution_time, None);
+        config
+            .admission_limits()
+            .expect("overrides are valid")
+            .expect("admission is enabled");
     }
 
     #[test]

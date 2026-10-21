@@ -194,17 +194,38 @@ mod tests {
     #[test]
     fn client_limits_reject_global_overrides() {
         assert!(matches!(
-            ClientLimits::new(65, 1, Duration::from_secs(1), Duration::from_secs(120), 64, 1024),
+            ClientLimits::new(
+                65,
+                1,
+                Duration::from_secs(1),
+                Duration::from_secs(120),
+                64,
+                1024
+            ),
             Err(AdmissionLimitsError::ClientWorkCapacityTooLarge)
         ));
         assert!(matches!(
-            ClientLimits::new(1, 1025, Duration::from_secs(1), Duration::from_secs(120), 64, 1024),
+            ClientLimits::new(
+                1,
+                1025,
+                Duration::from_secs(1),
+                Duration::from_secs(120),
+                64,
+                1024
+            ),
             Err(AdmissionLimitsError::ClientPendingCapacityTooLarge)
         ));
         assert_eq!(
-            ClientLimits::new(8, 64, Duration::from_secs(5), Duration::from_secs(120), 64, 1024)
-                .expect("test limits are valid")
-                .max_work_in_flight(),
+            ClientLimits::new(
+                8,
+                64,
+                Duration::from_secs(5),
+                Duration::from_secs(120),
+                64,
+                1024
+            )
+            .expect("test limits are valid")
+            .max_work_in_flight(),
             8
         );
     }
