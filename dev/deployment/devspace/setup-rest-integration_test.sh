@@ -222,3 +222,21 @@ bash "${TEST_DIR}/dev/deployment/devspace/setup-rest-integration.sh" \
 grep -q 'all 1 hosts ready in Core, usable in REST, and synced' "${DEVSPACE_TEST_CASE_DIR}/output"
 [[ ! -e "${DEVSPACE_TEST_CASE_DIR}/scout-pings" ]]
 printf 'Assigned/Ready hosts do not require Scout while running a tenant OS\n'
+
+# The real-host backend must use the saved target inventory without requesting
+# MAT's deployment, service, or control API, while retaining Scout readiness.
+unset DEVSPACE_TEST_ASSIGNED
+DEVSPACE_TEST_CASE_DIR="${TEST_DIR}/vm-hosts-readiness"
+LOCAL_DEV_REST_WORK_DIR="${DEVSPACE_TEST_CASE_DIR}/work"
+LOCAL_DEV_VM_HOSTS_DIR="${DEVSPACE_TEST_CASE_DIR}/lab"
+LOCAL_DEV_TARGET_BACKEND=vm-hosts
+export DEVSPACE_TEST_CASE_DIR LOCAL_DEV_REST_WORK_DIR LOCAL_DEV_VM_HOSTS_DIR LOCAL_DEV_TARGET_BACKEND
+mkdir -p "${LOCAL_DEV_VM_HOSTS_DIR}"
+printf '{"targets":[{"name":"host"}]}\n' > "${LOCAL_DEV_VM_HOSTS_DIR}/inventory.json"
+bash "${TEST_DIR}/dev/deployment/devspace/setup-rest-integration.sh" \
+  > "${DEVSPACE_TEST_CASE_DIR}/output" 2>&1
+grep -q 'all 1 hosts ready in Core, usable in REST, and synced' "${DEVSPACE_TEST_CASE_DIR}/output"
+[[ ! -e "${DEVSPACE_TEST_CASE_DIR}/status-urls" ]]
+[[ ! -e "${DEVSPACE_TEST_CASE_DIR}/patch.json" ]]
+[[ "$(wc -l < "${DEVSPACE_TEST_CASE_DIR}/scout-pings")" -eq 2 ]]
+printf 'VM hosts use declared inventory and real Scout readiness without MAT\n'
