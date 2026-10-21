@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+ARG RUNTIME_IMAGE=ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
+FROM ${RUNTIME_IMAGE}
+ENV DEBIAN_FRONTEND=noninteractive
+RUN case "$(dpkg --print-architecture)" in \
+      amd64) vm_packages="qemu-system-x86 ovmf ipxe-qemu" ;; \
+      arm64) vm_packages="qemu-system-arm qemu-efi-aarch64" ;; \
+      *) exit 1 ;; \
+    esac && apt-get update && apt-get install -y --no-install-recommends \
+    libvirt-daemon-system libvirt-clients qemu-utils ${vm_packages} \
+    python3 iproute2 iptables isc-dhcp-relay ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && printf '%s\n' 'user = "root"' 'group = "root"' 'security_driver = "none"' \
+       'cgroup_controllers = []' > /etc/libvirt/qemu.conf \
+    && printf '%s\n' 'unix_sock_group = "root"' 'unix_sock_rw_perms = "0770"' \
+       'auth_unix_rw = "none"' > /etc/libvirt/libvirtd.conf
+CMD ["sh", "-ec", "mkdir -p /run/libvirt; virtlogd -d; exec libvirtd"]

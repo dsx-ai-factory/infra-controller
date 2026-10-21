@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+ARG RUNTIME_IMAGE=ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
+FROM ${RUNTIME_IMAGE}
+ARG BOOT_ARCH=x86_64
+COPY ${BOOT_ARCH}/ /${BOOT_ARCH}/
+COPY build-info.json /build-info.json
