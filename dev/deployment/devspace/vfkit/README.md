@@ -268,11 +268,12 @@ bit-for-bit reproducible.
 | [`lab/image/extract-kernel.py`](lab/image/extract-kernel.py) | Extract a directly bootable kernel for vfkit. |
 | [`lab/guest/`](lab/guest/) | Diskless boot, package collection, DHCP/DNS/NAT and IPv6 route renewal. |
 | [`lab/lib/image_verification.py`](lab/lib/image_verification.py) | Signature verification with a selected bundled key. |
+| [`tests/`](tests/) | Host-only launcher, lab lifecycle, networking and image verification tests. |
 
 Run the host-only regression suite from this directory:
 
 ```bash
-python3 -B -m unittest discover -s . -p 'test_*.py'
+python3 -B -m unittest discover -s tests -t . -p 'test_*.py'
 ```
 
 It needs GnuPG and permission to create temporary Unix sockets. It does not boot
