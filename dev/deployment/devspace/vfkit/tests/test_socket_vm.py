@@ -13,7 +13,7 @@ import tempfile
 import time
 import unittest
 
-ROOT = Path(__file__).resolve().parent / "lab/lib"
+ROOT = Path(__file__).resolve().parents[1] / "lab/lib"
 GUEST = """
 import os,socket,sys
 fd=int(sys.argv[1].split('fd=',1)[1].split(',',1)[0])
