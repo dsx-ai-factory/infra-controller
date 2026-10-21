@@ -159,7 +159,8 @@
 #   - --core-values supplies site-specific NICo Core Helm values.
 #   - --flow-values supplies site-specific NICo Flow Helm values. Flow
 #     overrides made outside setup.sh are reset on every run unless they
-#     are in this file.
+#     are in this file. The file must not set namespaceOverride: setup.sh
+#     and the site-agent address Flow in the flow namespace.
 #   - --metallb-config supplies site-specific MetalLB resources.
 #   - --debug enables shell tracing and may print secrets; avoid it when
 #     REGISTRY_PULL_SECRET is set unless logs are protected.
@@ -2478,24 +2479,36 @@ if [[ -n "${REGISTRY_PULL_SECRET:-}" ]]; then
     )
 fi
 
-# Pre-apply Certificates so cert-manager can issue secrets before the pod schedules.
-echo "Pre-applying flow Certificates (SPIFFE + Temporal client)..."
-helm template flow "${NICO_FLOW_CHART}" \
-    "${NICO_FLOW_ARGS[@]}" \
-    --show-only templates/namespace.yaml | kubectl apply -f -
-helm template flow "${NICO_FLOW_CHART}" \
-    "${NICO_FLOW_ARGS[@]}" \
-    --show-only templates/certificate.yaml | kubectl apply -f -
-kubectl annotate certificate/flow-certificate -n "${NICO_FLOW_NAMESPACE}" \
-    "meta.helm.sh/release-name=flow" \
-    "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
-kubectl annotate certificate/temporal-client-certs -n "${NICO_FLOW_NAMESPACE}" \
-    "meta.helm.sh/release-name=flow" \
-    "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
-kubectl label certificate/flow-certificate -n "${NICO_FLOW_NAMESPACE}" \
-    "app.kubernetes.io/managed-by=Helm" --overwrite
-kubectl label certificate/temporal-client-certs -n "${NICO_FLOW_NAMESPACE}" \
-    "app.kubernetes.io/managed-by=Helm" --overwrite
+# Pre-apply the Namespace and Certificates so cert-manager can issue secrets
+# before the pod schedules. Certificate names come from the rendered chart so a
+# values file that renames them is followed. The namespace cannot move: setup.sh
+# and the NICo REST site-agent address flow.flow.svc.cluster.local directly.
+_flow_render() {
+    helm template flow "${NICO_FLOW_CHART}" "${NICO_FLOW_ARGS[@]}" --show-only "templates/$1"
+}
+_flow_namespace_yaml="$(_flow_render namespace.yaml)"
+_flow_certificates_yaml="$(_flow_render certificate.yaml)"
+_flow_namespace_rendered="$(printf '%s\n' "${_flow_namespace_yaml}" | kubectl apply --dry-run=client -f - -o name)"
+if [[ "${_flow_namespace_rendered}" != "namespace/${NICO_FLOW_NAMESPACE}" ]]; then
+    echo "ERROR: the Flow values render namespace '${_flow_namespace_rendered#namespace/}', but setup.sh and the NICo REST site-agent address Flow in namespace '${NICO_FLOW_NAMESPACE}'." >&2
+    echo "  Remove namespaceOverride from the --flow-values file." >&2
+    exit 1
+fi
+mapfile -t _flow_certificates < <(printf '%s\n' "${_flow_certificates_yaml}" | kubectl apply --dry-run=client -f - -o name)
+if (( ${#_flow_certificates[@]} == 0 )); then
+    echo "ERROR: the Flow chart rendered no Certificate resources." >&2
+    exit 1
+fi
+echo "Pre-applying flow Namespace and Certificates (${_flow_certificates[*]#*/})..."
+printf '%s\n' "${_flow_namespace_yaml}" | kubectl apply -f -
+printf '%s\n' "${_flow_certificates_yaml}" | kubectl apply -f -
+for _flow_cert in "${_flow_certificates[@]}"; do
+    kubectl annotate "${_flow_cert}" -n "${NICO_FLOW_NAMESPACE}" \
+        "meta.helm.sh/release-name=flow" \
+        "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
+    kubectl label "${_flow_cert}" -n "${NICO_FLOW_NAMESPACE}" \
+        "app.kubernetes.io/managed-by=Helm" --overwrite
+done
 
 # Annotate/label the namespace itself so the Flow release can adopt the
 # namespace created before the main helm install.
@@ -2505,12 +2518,11 @@ kubectl annotate namespace "${NICO_FLOW_NAMESPACE}" \
 kubectl label namespace "${NICO_FLOW_NAMESPACE}" \
     "app.kubernetes.io/managed-by=Helm" --overwrite
 
-echo "Waiting for cert-manager to issue flow-certificate..."
-kubectl wait --for=condition=Ready certificate/flow-certificate \
-    -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
-echo "Waiting for cert-manager to issue temporal-client-certs..."
-kubectl wait --for=condition=Ready certificate/temporal-client-certs \
-    -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
+for _flow_cert in "${_flow_certificates[@]}"; do
+    echo "Waiting for cert-manager to issue ${_flow_cert#*/}..."
+    kubectl wait --for=condition=Ready "${_flow_cert}" \
+        -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
+done
 
 # Wait for the Flow DB credential ESO sync to land. Fail fast if the Secret
 # never appears instead of allowing the helm install to enter an opaque
