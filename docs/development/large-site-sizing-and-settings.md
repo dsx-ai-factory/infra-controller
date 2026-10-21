@@ -125,6 +125,33 @@ base configuration.
 | `[api_admission_control]` `enabled` (chart value `apiAdmissionControl.enabled`) | `false` for the simulated fleet | `true`, with per-client limits of 8 requests in flight and 64 pending. All Machine-a-Tron agents share one client key and retry rejected calls at once, which rejected 819,130 calls in 11 minutes and restarted nico-api three times. Keep admission control on for real hardware |
 | Vault server probes (`helm-prereqs/operators/values/vault.yaml`) | `timeoutSeconds` 10, `failureThreshold` 5 | 3 seconds and 2 failures: the active node missed two probes under load, was killed, and came back sealed |
 
+Two settings bound how many managed hosts Site Explorer creates at once:
+`[site_explorer] machine_creation_concurrency` (default 4) is the number of
+hosts one explorer iteration creates at the same time, and each in-flight
+creation holds one permit of the top-level `admin_lock_admission_permits`
+(default 16), which DHCP discovery and machine discovery share. Raise the two
+together and keep the concurrency below the permit count. The
+[configuration reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md)
+has both contracts.
+
+Two further behaviors decide when racks complete rather than how fast hosts
+are created. Site Explorer creates the hosts of one run in rack order: the
+racks the run can complete first, then the racks with the fewest hosts
+missing, one rack at a time. A smaller `machines_created_per_run` therefore
+makes each run finish a few racks instead of spreading its budget over many,
+at the cost of more runs and their fixed per-run phases. Hosts that already
+have a machine and need only the steady-state repair come after every host
+that still needs one, so while `machines_created_per_run` binds, those repairs
+wait for a run with spare cap. The
+`carbide_site_explorer_rack_host_fill_count` gauge reports, by `kind`, the
+racks with expected hosts, the racks whose hosts all have a machine, and the
+racks the last run could complete. `[site_explorer]
+switch_and_power_shelf_pass_interval` (default `15m`) runs the switch and
+power shelf creation pass at that interval during the host creation phase as
+well as at the end of the run, so switches and shelves that complete
+preingestion while hosts are being created do not wait for the end of a long
+run.
+
 The TOML keys are nico-api configuration: the chart's base file merged with the
 site config overlay `siteConfig.nicoApiSiteConfig`. Set them in the overlay.
 The two settings that name a chart value can be set through the nico-api chart

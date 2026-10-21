@@ -95,6 +95,7 @@ use explored_endpoint_ext::ExploredEndpointExt;
 pub use explored_endpoint_ext::get_sys_image_version;
 pub mod explored_endpoint_index;
 mod managed_host;
+mod rack_order;
 use carbide_uuid::rack::RackId;
 use db::ObjectColumnFilter;
 use db::work_lock_manager::WorkLockManagerHandle;
@@ -439,6 +440,25 @@ struct EndpointExplorationTaskResult<'a> {
     result: Result<EndpointExplorationReport, EndpointExplorationError>,
     exploration_duration: Duration,
     steps: EndpointExplorationStepDurations,
+}
+
+/// The endpoints one `update_explored_endpoints` phase probed.
+struct ExploredThisRun {
+    /// Every probed endpoint, whether or not its probe produced a report.
+    endpoints: HashSet<IpAddr>,
+    /// The endpoints whose probe produced a report, so their stored report
+    /// is from this iteration.
+    refreshed: HashSet<IpAddr>,
+}
+
+/// What `can_ingest_host_endpoint` decided for one host endpoint.
+enum HostIngestDecision {
+    Ingest,
+    /// Not in this iteration; `blocker` is the pairing blocker to count, if
+    /// the reason is one.
+    Skip {
+        blocker: Option<PairingBlockerReason>,
+    },
 }
 
 impl Display for Endpoint<'_> {
@@ -1092,6 +1112,10 @@ impl SiteExplorer {
         let (expected_endpoint_index, explored_this_run) = self
             .update_explored_endpoints(metrics, &run_context)
             .await?;
+        let ExploredThisRun {
+            endpoints: explored_this_run,
+            refreshed: refreshed_this_run,
+        } = explored_this_run;
         metrics.record_phase_latency(
             "update_explored_endpoints",
             update_explored_endpoints_start.elapsed(),
@@ -1106,7 +1130,12 @@ impl SiteExplorer {
         // once we create a managed host and add it to the state machine.
         let identify_machines_to_ingest_start = Instant::now();
         let (explored_dpus, explored_hosts, already_ingested_bmc_ips) = self
-            .identify_machines_to_ingest(metrics, &expected_endpoint_index, &run_context)
+            .identify_machines_to_ingest(
+                metrics,
+                &expected_endpoint_index,
+                &run_context,
+                &refreshed_this_run,
+            )
             .await?;
         metrics.record_phase_latency(
             "identify_machines_to_ingest",
@@ -1299,6 +1328,7 @@ impl SiteExplorer {
         metrics: &mut SiteExplorationMetrics,
         expected_endpoint_index: &ExploredEndpointIndex,
         run_context: &SiteExplorerRunContext,
+        refreshed_this_run: &HashSet<IpAddr>,
     ) -> SiteExplorerResult<(
         HashMap<IpAddr, ExploredEndpoint>,
         HashMap<IpAddr, ExploredEndpoint>,
@@ -1323,6 +1353,7 @@ impl SiteExplorer {
 
         let mut explored_dpus = HashMap::new();
         let mut explored_hosts = HashMap::new();
+        let mut host_endpoints = Vec::new();
         for ep in explored_endpoints.into_iter() {
             if let Some(bmc_interface) = expected_endpoint_index.underlay_interface(&ep.address)
                 && run_context
@@ -1353,11 +1384,78 @@ impl SiteExplorer {
                 if self.can_ingest_dpu_endpoint(metrics, &ep, &already_ingested_bmc_ips)? {
                     explored_dpus.insert(ep.address, ep);
                 }
-            } else if self
-                .can_ingest_host_endpoint(metrics, &ep, &already_ingested_bmc_ips)
-                .await?
-            {
-                explored_hosts.insert(ep.address, ep);
+            } else {
+                host_endpoints.push(ep);
+            }
+        }
+
+        // One lookup serves every uningested host, and the live checks run
+        // `concurrent_explorations` wide, as the probes do. Each task owns its
+        // endpoint and returns a decision; the metrics are applied after the
+        // join, so nothing is shared across tasks.
+        let uningested_host_ips = host_endpoints
+            .iter()
+            .map(|ep| ep.address)
+            .filter(|address| !already_ingested_bmc_ips.contains(address))
+            .collect::<Vec<_>>();
+        // A failed lookup leaves every interface unknown: the checks below
+        // then skip the live reads.
+        let host_interfaces = match db::machine_interface::find_by_ips(
+            &self.database_connection,
+            &uningested_host_ips,
+        )
+        .await
+        {
+            Ok(host_interfaces) => host_interfaces,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    hosts = uningested_host_ips.len(),
+                    "Site Explorer could not look up the machine interfaces of the uningested hosts"
+                );
+                HashMap::new()
+            }
+        };
+        let host_interfaces = &host_interfaces;
+        let already_ingested = &already_ingested_bmc_ips;
+        let concurrency_limiter = Arc::new(tokio::sync::Semaphore::new(
+            self.config.concurrent_explorations as usize,
+        ));
+        let decisions = host_endpoints
+            .into_iter()
+            .map(|ep| {
+                let concurrency_limiter = concurrency_limiter.clone();
+                async move {
+                    let _permit = concurrency_limiter
+                        .acquire()
+                        .await
+                        .expect("Semaphore can't be closed");
+                    let decision = self
+                        .can_ingest_host_endpoint(
+                            &ep,
+                            already_ingested,
+                            host_interfaces.get(&ep.address),
+                            refreshed_this_run,
+                        )
+                        .await;
+                    (ep, decision)
+                }
+            })
+            .collect::<FuturesUnordered<_>>()
+            // Drain every task before reporting an error, so no check keeps
+            // running once the phase has returned.
+            .collect::<Vec<_>>()
+            .await;
+        for (ep, decision) in decisions {
+            match decision? {
+                HostIngestDecision::Ingest => {
+                    explored_hosts.insert(ep.address, ep);
+                }
+                HostIngestDecision::Skip { blocker } => {
+                    if let Some(blocker) = blocker {
+                        metrics.increment_host_dpu_pairing_blocker(blocker);
+                    }
+                }
             }
         }
 
@@ -1703,7 +1801,7 @@ impl SiteExplorer {
         &self,
         metrics: &mut SiteExplorationMetrics,
         run_context: &SiteExplorerRunContext,
-    ) -> SiteExplorerResult<(ExploredEndpointIndex, HashSet<IpAddr>)> {
+    ) -> SiteExplorerResult<(ExploredEndpointIndex, ExploredThisRun)> {
         let load_start = Instant::now();
         let mut txn = self.txn_begin().await?;
 
@@ -2235,10 +2333,17 @@ impl SiteExplorer {
         // Any transaction touching multiple explored_endpoints needs to sort them the same way to
         // avoid deadlocks: sort by IP.
         exploration_results.sort_by_key(|result| result.endpoint.address);
-        let explored_this_run: HashSet<IpAddr> = exploration_results
-            .iter()
-            .map(|result| result.endpoint.address)
-            .collect();
+        let explored_this_run = ExploredThisRun {
+            endpoints: exploration_results
+                .iter()
+                .map(|result| result.endpoint.address)
+                .collect(),
+            refreshed: exploration_results
+                .iter()
+                .filter(|result| result.result.is_ok())
+                .map(|result| result.endpoint.address)
+                .collect(),
+        };
         metrics.record_phase_latency("update_explored_endpoints_probe", probe_start.elapsed());
         for EndpointExplorationTaskResult { steps, .. } in &exploration_results {
             metrics
@@ -3049,25 +3154,28 @@ impl SiteExplorer {
         }
     }
 
-    //// can_ingest_host_endpoint will return true if the site explorer should proceed with ingesting a given host endpoint.
-    /// It will always return true for a host that has already been ingested.
+    /// Decides whether the site explorer should proceed with ingesting a given host endpoint.
+    /// It always decides `Ingest` for a host that has already been ingested.
     ///
-    /// If the host has not been ingested, and is not on, the function will try to turn the host on and return false.
-    /// If the host has not been ingested, is a Lenovo,  and infinite boot is disabled, the function will try to enable
-    /// infinite boot and return false.
-    /// Otherwise, the function will return true.
+    /// If the host has not been ingested, and is not on, the function will try to turn the host on and skip it.
+    /// If the host has not been ingested, is a Lenovo, and infinite boot is disabled, the function will try to enable
+    /// infinite boot and skip it.
+    /// Otherwise, the function decides `Ingest`.
     ///
-    /// `already_ingested_bmc_ips` is the caller's snapshot of ingested BMC IPs, so
-    /// this decision costs no database round trip per endpoint.
+    /// `already_ingested_bmc_ips` is the caller's snapshot of ingested BMC IPs and
+    /// `interface` the caller's lookup of the BMC's interface, so this decision
+    /// costs no database round trip per endpoint. `refreshed_this_run` holds the
+    /// endpoints whose stored report is from this iteration.
     async fn can_ingest_host_endpoint(
         &self,
-        metrics: &mut SiteExplorationMetrics,
         host_endpoint: &ExploredEndpoint,
         already_ingested_bmc_ips: &HashSet<IpAddr>,
-    ) -> SiteExplorerResult<bool> {
+        interface: Option<&MachineInterfaceSnapshot>,
+        refreshed_this_run: &HashSet<IpAddr>,
+    ) -> SiteExplorerResult<HostIngestDecision> {
         if already_ingested_bmc_ips.contains(&host_endpoint.address) {
             // this host has already been ingested
-            return Ok(true);
+            return Ok(HostIngestDecision::Ingest);
         }
 
         let bmc_target_port = self.config.override_target_port.unwrap_or(443);
@@ -3077,9 +3185,9 @@ impl SiteExplorer {
                 bmc_ip_address = %host_endpoint.address,
                 "Site Explorer could not find the system report for a host",
             );
-            metrics
-                .increment_host_dpu_pairing_blocker(PairingBlockerReason::HostSystemReportMissing);
-            return Ok(false);
+            return Ok(HostIngestDecision::Skip {
+                blocker: Some(PairingBlockerReason::HostSystemReportMissing),
+            });
         };
 
         // if we are explicitly forbidden from powering on in the expected_machines,
@@ -3089,44 +3197,40 @@ impl SiteExplorer {
                 bmc_ip_address = %host_endpoint.address,
                 "Host is configured to pause on ingestion"
             );
-            return Ok(false);
+            return Ok(HostIngestDecision::Skip { blocker: None });
         }
 
         let mut ingest_host = true;
-        let interface = match self
-            .find_machine_interface_for_ip(host_endpoint.address)
-            .await
-        {
-            Ok(interface) => Some(interface),
-            Err(e) => {
-                tracing::warn!(
-                    bmc_ip_address = %host_endpoint.address,
-                    error = %e,
-                    "Site Explorer could not find machine interface for host endpoint",
-                );
-                None
-            }
-        };
+        if interface.is_none() {
+            tracing::warn!(
+                bmc_ip_address = %host_endpoint.address,
+                "Site Explorer could not find machine interface for host endpoint",
+            );
+        }
 
-        // The cached `systems[].power_state` may be stale when this endpoint was
-        // not refreshed in the current iteration, so prefer a live Redfish power
-        // state check for uningested hosts. The exceptions are auth/lockout and
-        // unreachable failures, where another live read is either unsafe or very
-        // unlikely to help. `None` means we have no trustworthy reading; we fall
-        // back to the cached state for remediation decisions only and defer
-        // ingestion to a later run.
+        // The stored `systems[].power_state` is current when this endpoint's
+        // probe produced a report in this iteration. Otherwise it may be stale,
+        // so prefer a live Redfish power state check for uningested hosts. The
+        // exceptions are auth/lockout and unreachable failures, where another
+        // live read is either unsafe or very unlikely to help. `None` means we
+        // have no trustworthy reading; we fall back to the stored state for
+        // remediation decisions only and defer ingestion to a later run.
         let fresh_power_state: Option<PowerState> =
-            match host_endpoint.report.last_exploration_error.as_ref() {
-                Some(err) if err.is_unauthorized() || err.is_unreachable() => None,
-                _ => match interface.as_ref() {
-                    Some(interface) => self
-                        .bmc_client
-                        .redfish_get_power_state(bmc_target_addr, interface)
-                        .await
-                        .ok()
-                        .map(IntoModel::into_model),
-                    None => None,
-                },
+            if refreshed_this_run.contains(&host_endpoint.address) {
+                Some(system.power_state)
+            } else {
+                match host_endpoint.report.last_exploration_error.as_ref() {
+                    Some(err) if err.is_unauthorized() || err.is_unreachable() => None,
+                    _ => match interface {
+                        Some(interface) => self
+                            .bmc_client
+                            .redfish_get_power_state(bmc_target_addr, interface)
+                            .await
+                            .ok()
+                            .map(IntoModel::into_model),
+                        None => None,
+                    },
+                }
             };
 
         let effective_power_state = fresh_power_state.unwrap_or(system.power_state);
@@ -3150,7 +3254,7 @@ impl SiteExplorer {
                     "Site Explorer found an uningested host that isn't on"
                 );
 
-                if let Some(interface) = interface.as_ref() {
+                if let Some(interface) = interface {
                     self.bmc_client
                         .redfish_power_control(
                             bmc_target_addr,
@@ -3177,7 +3281,7 @@ impl SiteExplorer {
                     "Site Explorer could not find the manager report for an NVIDIA host",
                 );
 
-                return Ok(false);
+                return Ok(HostIngestDecision::Skip { blocker: None });
             };
 
             // Viking
@@ -3202,10 +3306,9 @@ impl SiteExplorer {
                                         %expected_cpldmb_0_version,
                                         "Site Explorer found a Viking whose CPLDMB_0 version does not match the expected version. A DC power cycle may be needed",
                                     );
-                                    metrics.increment_host_dpu_pairing_blocker(
-                                        PairingBlockerReason::VikingCpldVersionIssue,
-                                    );
-                                    return Ok(false);
+                                    return Ok(HostIngestDecision::Skip {
+                                        blocker: Some(PairingBlockerReason::VikingCpldVersionIssue),
+                                    });
                                 }
                             }
                             Err(e) => {
@@ -3216,10 +3319,9 @@ impl SiteExplorer {
                                     error = ?e,
                                     "Site Explorer found a Viking with a CPLDMB_0 version and could not compare it to the current CPLDMB_0 version",
                                 );
-                                metrics.increment_host_dpu_pairing_blocker(
-                                    PairingBlockerReason::VikingCpldVersionIssue,
-                                );
-                                return Ok(false);
+                                return Ok(HostIngestDecision::Skip {
+                                    blocker: Some(PairingBlockerReason::VikingCpldVersionIssue),
+                                });
                             }
                         }
                     } else {
@@ -3227,10 +3329,9 @@ impl SiteExplorer {
                             bmc_ip_address = %host_endpoint.address,
                             "Site Explorer could not find the CPLDMB_0 inventory for a Viking",
                         );
-                        metrics.increment_host_dpu_pairing_blocker(
-                            PairingBlockerReason::VikingCpldVersionIssue,
-                        );
-                        return Ok(false);
+                        return Ok(HostIngestDecision::Skip {
+                            blocker: Some(PairingBlockerReason::VikingCpldVersionIssue),
+                        });
                     };
                 }
             }
@@ -3248,12 +3349,15 @@ impl SiteExplorer {
                 "Site Explorer found an uningested Lenovo without infinite boot enabled"
             );
 
-            let interface = self
-                .find_machine_interface_for_ip(bmc_target_addr.ip())
-                .await?;
+            let Some(interface) = interface else {
+                return Err(SiteExplorerError::NotFoundError {
+                    kind: "machine_interface",
+                    id: format!("remote_ip={:?}", host_endpoint.address),
+                });
+            };
 
             self.bmc_client
-                .machine_setup(bmc_target_addr, &interface, None)
+                .machine_setup(bmc_target_addr, interface, None)
                 .await
                 .inspect_err(|err| {
                     tracing::error!(
@@ -3267,7 +3371,7 @@ impl SiteExplorer {
             self.bmc_client
                 .redfish_power_control(
                     bmc_target_addr,
-                    &interface,
+                    interface,
                     libredfish::SystemPowerControl::ForceRestart,
                 )
                 .await
@@ -3283,7 +3387,11 @@ impl SiteExplorer {
             ingest_host = false;
         }
 
-        Ok(ingest_host)
+        Ok(if ingest_host {
+            HostIngestDecision::Ingest
+        } else {
+            HostIngestDecision::Skip { blocker: None }
+        })
     }
 }
 

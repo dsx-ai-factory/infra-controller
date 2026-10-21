@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_test_support::{Check, check_values};
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use carbide_uuid::network::NetworkSegmentId;
 use model::allocation_type::AllocationType;
@@ -30,6 +31,45 @@ use model::network_segment::{
 use super::*;
 use crate as db;
 use crate::test_support::postgres::wait_for_blocked_query;
+
+#[test]
+fn admin_lock_admission_permit_count_prefers_the_configuration() {
+    check_values(
+        [
+            Check {
+                scenario: "the configured value wins over the environment",
+                input: (Some(32), Some("8")),
+                expect: 32,
+            },
+            Check {
+                scenario: "the environment applies when nothing is configured",
+                input: (None, Some("8")),
+                expect: 8,
+            },
+            Check {
+                scenario: "an unparsable environment value falls back to the default",
+                input: (None, Some("many")),
+                expect: 16,
+            },
+            Check {
+                scenario: "nothing set gives the default",
+                input: (None, None),
+                expect: 16,
+            },
+            Check {
+                scenario: "zero from the environment would deadlock every gated flow and becomes one",
+                input: (None, Some("0")),
+                expect: 1,
+            },
+            Check {
+                scenario: "a value above the ceiling from the environment is clamped",
+                input: (None, Some("1000")),
+                expect: 256,
+            },
+        ],
+        |(configured, environment)| admin_lock_admission_permit_count(configured, environment),
+    );
+}
 
 async fn create_static_assignments_segment(
     pool: &sqlx::PgPool,

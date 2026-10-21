@@ -2708,6 +2708,9 @@ async fn test_site_explorer_audit_exploration_results(
         run_interval: std::time::Duration::from_secs(1),
         create_machines: Arc::new(true.into()),
         machines_created_per_run: 1,
+        machine_creation_concurrency: SiteExplorerConfig::default_machine_creation_concurrency(),
+        switch_and_power_shelf_pass_interval:
+            SiteExplorerConfig::default_switch_and_power_shelf_pass_interval(),
         override_target_ip: None,
         override_target_port: None,
         allow_changing_bmc_proxy: None,

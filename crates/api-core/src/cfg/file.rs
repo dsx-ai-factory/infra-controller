@@ -204,6 +204,15 @@ pub struct CarbideConfig {
     )]
     pub database_startup_retry_timeout: std::time::Duration,
 
+    /// Permits of the admission gate in front of the admin-segment advisory
+    /// locks: how many flows (DHCP discovery, machine discovery, Site
+    /// Explorer machine creation) may hold an open transaction while waiting
+    /// on those locks. Must be 1 to 256; startup rejects other values. When
+    /// unset, the `ADMIN_LOCK_ADMISSION` environment variable applies, then
+    /// 16. Read at startup; a change needs a restart.
+    #[serde(default)]
+    pub admin_lock_admission_permits: Option<usize>,
+
     /// Bounds the number of API requests that may execute or wait for
     /// execution. The limits are shared by gRPC and admin HTTP traffic.
     #[serde(default)]
@@ -3610,6 +3619,20 @@ impl CarbideConfig {
         Ok(())
     }
 
+    /// Rejects an `admin_lock_admission_permits` value outside the gate's
+    /// accepted range before it becomes the active permit count.
+    pub(crate) fn validate_admin_lock_admission_permits(&self) -> eyre::Result<()> {
+        let range = db::machine_interface::ADMIN_LOCK_ADMISSION_PERMIT_RANGE;
+        match self.admin_lock_admission_permits {
+            Some(permits) if !range.contains(&permits) => Err(eyre::eyre!(
+                "admin_lock_admission_permits must be {} to {}, got {permits}",
+                range.start(),
+                range.end()
+            )),
+            _ => Ok(()),
+        }
+    }
+
     pub(crate) fn validate_service_vpc_slots(&self) -> eyre::Result<()> {
         // Reject unrealizable capacity before startup creates DPF resources or launches
         // controllers.
@@ -6346,6 +6369,32 @@ path = "credentials.yaml"
             url: BAD_URL.to_string(),
         }];
         assert!(config.validate_web_ui_sidebar_tools().is_err());
+    }
+
+    /// The admission permit count is bounded at startup: an out-of-range
+    /// value is rejected rather than clamped.
+    #[test]
+    fn admin_lock_admission_permits_are_bounded_at_startup() {
+        scenarios!(
+            run = |permits: Option<usize>| {
+                let mut config: CarbideConfig = Figment::new()
+                    .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+                    .extract()
+                    .unwrap();
+                config.admin_lock_admission_permits = permits;
+                config.validate_admin_lock_admission_permits().map_err(drop)
+            };
+            "accepted" {
+                None => Yields(()),
+                Some(1) => Yields(()),
+                Some(256) => Yields(()),
+            }
+
+            "rejected" {
+                Some(0) => Fails,
+                Some(257) => Fails,
+            }
+        );
     }
 
     /// Rejects unrealizable slot counts, endpoint reservations without a bridge, and static slots
