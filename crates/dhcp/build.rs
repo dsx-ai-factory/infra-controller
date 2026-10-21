@@ -40,15 +40,39 @@ fn main() {
         .expect("Unable to generate bindings")
         .write_to_file(format!("{kea_shim_root}/carbide_rust.h"));
 
-    cc::Build::new()
-        .cpp(true)
+    let hooks_header = format!("{kea_include_path}/hooks/hooks.h");
+    let hooks_source = std::fs::read_to_string(&hooks_header).expect("Kea hooks header missing");
+    let hooks_version = hooks_source
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            line.strip_prefix("const int KEA_HOOKS_VERSION = ")
+                .and_then(|value| value.trim_end_matches(';').parse::<u32>().ok())
+        })
+        .expect("Kea hooks header has no supported version declaration");
+    let hooks_version_string = hooks_version.to_string();
+    let mut shim = cc::Build::new();
+    shim.cpp(true)
         .file(format!("{kea_shim_root}/logger.cc"))
         .file(format!("{kea_shim_root}/loader.cc"))
         .file(format!("{kea_shim_root}/callouts.cc"))
         .file(format!("{kea_shim_root}/carbide_logger.cc"))
-        .include(kea_include_path)
-        .pic(true)
-        .compile("keashim");
+        .define("CARBIDE_KEA_HOOKS_VERSION", hooks_version_string.as_str())
+        .include(&kea_include_path);
+    // Debian's Kea 2.2 development package omits this header, although its
+    // installed network.h includes it. Keep the exact upstream declaration.
+    if hooks_version == 20200
+        && !std::path::Path::new(&kea_include_path)
+            .join("dhcpsrv/cfg_globals.h")
+            .exists()
+    {
+        shim.include(format!("{kea_shim_root}/compat/kea-2.2"));
+    }
+    shim.pic(true).compile("keashim");
+    println!("cargo:rerun-if-changed={hooks_header}");
+    println!("cargo:rerun-if-changed=src/kea/compat/kea-2.2/dhcpsrv/cfg_globals.h");
+    println!("cargo:rerun-if-env-changed=KEA_INCLUDE_PATH");
+    println!("cargo:rerun-if-env-changed=KEA_LIB_PATH");
 
     println!("cargo:rerun-if-changed=src/kea/callouts.cc");
     println!("cargo:rerun-if-changed=src/kea/callouts.h");
