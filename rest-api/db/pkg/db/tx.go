@@ -213,7 +213,7 @@ func (tx *Tx) acquireAdvisoryLock(ctx context.Context, lockID uint64, blocking b
 
 	if blocking {
 		query := fmt.Sprintf("SELECT pg_advisory_xact_lock%s(%d)", sharedSuffix, lockID)
-		_, err := tx.tx.Exec(query)
+		_, err := tx.tx.ExecContext(ctx, query)
 		return err
 	}
 
