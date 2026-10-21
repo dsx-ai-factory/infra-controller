@@ -343,6 +343,21 @@ impl DHCPv6Factory {
         )
     }
 
+    /// Build a REQUEST that passes discovery but fails Kea's mandatory Server-ID check.
+    pub(crate) fn request_without_server_id(idx: u8) -> Vec<u8> {
+        Self::relay_wrap(
+            Self::client_message(
+                idx,
+                MessageType::Request,
+                Self::duid_ll(idx),
+                None,
+                true,
+                false,
+            ),
+            true,
+        )
+    }
+
     /// Build a REQUEST without relay option 79.
     pub(crate) fn request_without_relay_option79(
         idx: u8,
