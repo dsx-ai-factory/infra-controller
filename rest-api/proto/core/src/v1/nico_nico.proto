@@ -2860,6 +2860,10 @@ message ExpectedPowerShelf {
   string bmc_username = 2;
   string bmc_password = 3;
   string shelf_serial_number = 4;
+  // BMC IPv4 or IPv6 address; malformed values fail INVALID_ARGUMENT when applied.
+  // Empty or omitted means no inventory address on add, full update, or
+  // replace-all. Masked updates apply this field only when selected.
+  // Clearing the inventory address does not remove existing interface addresses.
   string bmc_ip_address = 5;
   // Metadata that will automatically get associated with a newly created PowerShelf
   Metadata metadata = 6;
@@ -3117,6 +3121,10 @@ message ExpectedSwitch {
   // changed from string to message.
   reserved 10;
   reserved "nvos_mac_addresses";
+  // BMC IPv4 or IPv6 address; malformed values fail INVALID_ARGUMENT when applied.
+  // Empty or omitted means no inventory address on add, full update, or
+  // replace-all. Masked updates apply this field only when selected.
+  // Clearing the inventory address does not remove existing interface addresses.
   string bmc_ip_address = 11;
   // When true, site-explorer skips BMC password rotation and stores the
   // factory-default credentials in Vault as-is.

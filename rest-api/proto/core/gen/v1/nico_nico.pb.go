@@ -16135,7 +16135,11 @@ type ExpectedPowerShelf struct {
 	BmcUsername       string                 `protobuf:"bytes,2,opt,name=bmc_username,json=bmcUsername,proto3" json:"bmc_username,omitempty"`
 	BmcPassword       string                 `protobuf:"bytes,3,opt,name=bmc_password,json=bmcPassword,proto3" json:"bmc_password,omitempty"`
 	ShelfSerialNumber string                 `protobuf:"bytes,4,opt,name=shelf_serial_number,json=shelfSerialNumber,proto3" json:"shelf_serial_number,omitempty"`
-	BmcIpAddress      string                 `protobuf:"bytes,5,opt,name=bmc_ip_address,json=bmcIpAddress,proto3" json:"bmc_ip_address,omitempty"`
+	// BMC IPv4 or IPv6 address; malformed values fail INVALID_ARGUMENT when applied.
+	// Empty or omitted means no inventory address on add, full update, or
+	// replace-all. Masked updates apply this field only when selected.
+	// Clearing the inventory address does not remove existing interface addresses.
+	BmcIpAddress string `protobuf:"bytes,5,opt,name=bmc_ip_address,json=bmcIpAddress,proto3" json:"bmc_ip_address,omitempty"`
 	// Metadata that will automatically get associated with a newly created PowerShelf
 	Metadata *Metadata `protobuf:"bytes,6,opt,name=metadata,proto3" json:"metadata,omitempty"`
 	RackId   *RackId   `protobuf:"bytes,7,opt,name=rack_id,json=rackId,proto3,oneof" json:"rack_id,omitempty"`
@@ -17851,8 +17855,12 @@ type ExpectedSwitch struct {
 	NvosUsername *string   `protobuf:"bytes,7,opt,name=nvos_username,json=nvosUsername,proto3,oneof" json:"nvos_username,omitempty"`
 	NvosPassword *string   `protobuf:"bytes,8,opt,name=nvos_password,json=nvosPassword,proto3,oneof" json:"nvos_password,omitempty"`
 	// Unique identifier for the expected switch. When omitted, server generates one.
-	ExpectedSwitchId *UUID  `protobuf:"bytes,9,opt,name=expected_switch_id,json=expectedSwitchId,proto3,oneof" json:"expected_switch_id,omitempty"`
-	BmcIpAddress     string `protobuf:"bytes,11,opt,name=bmc_ip_address,json=bmcIpAddress,proto3" json:"bmc_ip_address,omitempty"`
+	ExpectedSwitchId *UUID `protobuf:"bytes,9,opt,name=expected_switch_id,json=expectedSwitchId,proto3,oneof" json:"expected_switch_id,omitempty"`
+	// BMC IPv4 or IPv6 address; malformed values fail INVALID_ARGUMENT when applied.
+	// Empty or omitted means no inventory address on add, full update, or
+	// replace-all. Masked updates apply this field only when selected.
+	// Clearing the inventory address does not remove existing interface addresses.
+	BmcIpAddress string `protobuf:"bytes,11,opt,name=bmc_ip_address,json=bmcIpAddress,proto3" json:"bmc_ip_address,omitempty"`
 	// When true, site-explorer skips BMC password rotation and stores the
 	// factory-default credentials in Vault as-is.
 	BmcRetainCredentials *bool `protobuf:"varint,12,opt,name=bmc_retain_credentials,json=bmcRetainCredentials,proto3,oneof" json:"bmc_retain_credentials,omitempty"`
