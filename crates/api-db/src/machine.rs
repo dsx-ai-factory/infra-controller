@@ -42,6 +42,7 @@ use health_report::{HealthReport, HealthReportApplyMode};
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use mac_address::MacAddress;
+use model::attestation_scheduling::AttestationScheduling;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::expected_machine::ExpectedMachineData;
 use model::extension_service::ExtensionServiceType;
@@ -2041,6 +2042,85 @@ pub async fn update_sku_validation_health_report(
         &health_report,
     )
     .await
+}
+
+/// Stores the complete `attestation` alert list, replacing whatever the source
+/// held before. A caller builds the whole list every time, so an empty one
+/// means the machine has nothing to report and the source is deleted.
+pub async fn update_attestation_health_report(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+    health_report: &HealthReport,
+) -> Result<(), DatabaseError> {
+    if health_report.alerts.is_empty() {
+        return crate::health_report::remove_health_report(
+            txn,
+            "machines",
+            machine_id,
+            HealthReportApplyMode::Merge,
+            HealthReport::ATTESTATION_SOURCE,
+        )
+        .await;
+    }
+
+    // The stored report is the only place an alert's original `in_alert_since`
+    // survives an overwrite. The four updates above leave this to their caller,
+    // which already has the machine loaded; attestation is updated from two
+    // controllers that do not, so it happens here to keep both identical.
+    let query = "SELECT health_reports->'merges'->'attestation' FROM machines WHERE id=$1";
+    let stored: Option<sqlx::types::Json<HealthReport>> = sqlx::query_scalar(query)
+        .bind(machine_id)
+        .fetch_one(&mut *txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    let mut health_report = health_report.clone();
+    health_report.source = HealthReport::ATTESTATION_SOURCE.to_string();
+    health_report.update_in_alert_since(stored.as_deref());
+    crate::health_report::insert_health_report(
+        txn,
+        "machines",
+        machine_id,
+        HealthReportApplyMode::Merge,
+        &health_report,
+    )
+    .await
+}
+
+/// Returns the latest attestation scheduling decision, or `None` when the
+/// machine has never been scheduled.
+pub async fn get_attestation_scheduling(
+    txn: impl DbReader<'_>,
+    machine_id: &MachineId,
+) -> Result<Option<AttestationScheduling>, DatabaseError> {
+    let query = "SELECT attestation_scheduling FROM machines WHERE id=$1";
+
+    let stored: Option<sqlx::types::Json<AttestationScheduling>> = sqlx::query_scalar(query)
+        .bind(machine_id)
+        .fetch_one(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(stored.map(|sqlx::types::Json(scheduling)| scheduling))
+}
+
+/// Records what scheduling decided, replacing any earlier decision. Only the
+/// latest is kept, so this holds no history.
+pub async fn set_attestation_scheduling(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+    scheduling: &AttestationScheduling,
+) -> Result<(), DatabaseError> {
+    let query = "UPDATE machines SET attestation_scheduling=$1 WHERE id=$2 RETURNING id";
+
+    sqlx::query_as::<_, ()>(query)
+        .bind(sqlx::types::Json(scheduling))
+        .bind(machine_id)
+        .fetch_one(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(())
 }
 
 pub async fn insert_health_report(
@@ -10390,6 +10470,185 @@ mod test {
             crate::resource_pool::stats(&pool, LOOPBACK_IP_V6).await?,
             stats_after_first_pass
         );
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn attestation_scheduling_is_absent_until_written_and_then_round_trips(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use model::attestation_scheduling::{AttestationScheduling, SchedulingOutcome};
+
+        let machine_id: MachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let mut txn = pool.begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+
+        assert!(
+            super::get_attestation_scheduling(txn.as_mut(), &machine_id)
+                .await?
+                .is_none(),
+            "a machine that has never been scheduled must read as absent"
+        );
+
+        let scheduling = AttestationScheduling {
+            outcome: SchedulingOutcome::NoProfile,
+            hardware_class: Some("nvidia_mgx-power-shelf".to_string()),
+            used_any_fallback: false,
+            profile_version: None,
+            unsatisfied: None,
+            job_id: None,
+        };
+        super::set_attestation_scheduling(txn.as_mut(), &machine_id, &scheduling).await?;
+        assert_eq!(
+            super::get_attestation_scheduling(txn.as_mut(), &machine_id).await?,
+            Some(scheduling)
+        );
+
+        txn.commit().await?;
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn attestation_health_report_is_stored_under_its_source_and_deleted_when_empty(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use health_report::{HealthProbeAlert, HealthReport};
+
+        let machine_id: MachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let mut txn = pool.begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+
+        let query = "SELECT health_reports->'merges'->'attestation' FROM machines WHERE id=$1";
+
+        // The source is left empty to prove the function stamps it, as the four
+        // health report updates beside it do.
+        let mut report = HealthReport::empty(String::new());
+        report.alerts = vec![HealthProbeAlert::spdm_attestation_failed(
+            "HGX_ERoT_GPU_3".to_string(),
+            "Failed NRAS".to_string(),
+        )];
+        super::update_attestation_health_report(txn.as_mut(), &machine_id, &report).await?;
+
+        let stored: Option<sqlx::types::Json<HealthReport>> = sqlx::query_scalar(query)
+            .bind(machine_id)
+            .fetch_one(txn.as_mut())
+            .await?;
+        let stored = stored
+            .expect("the report is stored under the attestation source")
+            .0;
+        assert_eq!(stored.source, HealthReport::ATTESTATION_SOURCE);
+        assert_eq!(stored.alerts.len(), 1);
+
+        super::update_attestation_health_report(
+            txn.as_mut(),
+            &machine_id,
+            &HealthReport::empty(String::new()),
+        )
+        .await?;
+        let stored: Option<sqlx::types::Json<HealthReport>> = sqlx::query_scalar(query)
+            .bind(machine_id)
+            .fetch_one(txn.as_mut())
+            .await?;
+        assert!(
+            stored.is_none(),
+            "an empty alert list must delete the source rather than store it empty"
+        );
+
+        txn.commit().await?;
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn attestation_health_report_keeps_the_original_in_alert_since_of_a_lasting_alert(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use health_report::{HealthProbeAlert, HealthReport};
+
+        fn report(attesters: &[&str]) -> HealthReport {
+            let mut report = HealthReport::empty(String::new());
+            report.alerts = attesters
+                .iter()
+                .map(|attester| {
+                    HealthProbeAlert::spdm_attestation_failed(
+                        (*attester).to_string(),
+                        "Failed NRAS".to_string(),
+                    )
+                })
+                .collect();
+            report
+        }
+
+        let machine_id: MachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let mut txn = pool.begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+
+        let query = "SELECT health_reports->'merges'->'attestation' FROM machines WHERE id=$1";
+
+        super::update_attestation_health_report(txn.as_mut(), &machine_id, &report(&["GPU_3"]))
+            .await?;
+        let first: sqlx::types::Json<HealthReport> = sqlx::query_scalar(query)
+            .bind(machine_id)
+            .fetch_one(txn.as_mut())
+            .await?;
+
+        // The second update rebuilds the alert for GPU_3 from scratch, as every
+        // update does, and adds one for an attester that has just failed.
+        super::update_attestation_health_report(
+            txn.as_mut(),
+            &machine_id,
+            &report(&["GPU_3", "GPU_4"]),
+        )
+        .await?;
+        let second: sqlx::types::Json<HealthReport> = sqlx::query_scalar(query)
+            .bind(machine_id)
+            .fetch_one(txn.as_mut())
+            .await?;
+
+        let since = |report: &HealthReport, attester: &str| {
+            report
+                .alerts
+                .iter()
+                .find(|alert| alert.target.as_deref() == Some(attester))
+                .and_then(|alert| alert.in_alert_since)
+        };
+        assert_eq!(
+            since(&second, "GPU_3"),
+            since(&first, "GPU_3"),
+            "an attester that was already failing must keep the time it started"
+        );
+        assert!(
+            since(&second, "GPU_4").is_some(),
+            "a newly failing attester must be timestamped"
+        );
+
+        txn.commit().await?;
         Ok(())
     }
 }

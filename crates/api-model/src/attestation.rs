@@ -484,7 +484,8 @@ pub mod profile {
     }
 
     /// Which requirement went unsatisfied, so a caller can say which.
-    #[derive(Clone, Debug, Eq, PartialEq)]
+    #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
     pub enum UnsatisfiedRequirement {
         /// These patterns matched no eligible attester. A caller holding the
         /// attesters that failed eligibility can name the ones a pattern

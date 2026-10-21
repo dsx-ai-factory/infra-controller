@@ -67,6 +67,7 @@ impl HealthReport {
     pub const RACK_FIRMWARE_SOURCE: &str = "rack-firmware";
     pub const SKU_VALIDATION_SOURCE: &str = "sku-validation";
     pub const QUARANTINE_SOURCE: &str = "quarantine";
+    pub const ATTESTATION_SOURCE: &str = "attestation";
 
     /// Returns a health report with no successes or errors reported
     pub fn empty(source: String) -> Self {
@@ -589,6 +590,51 @@ impl HealthProbeAlert {
         }
     }
 
+    /// Creates a SpdmAttestationFailed alert for one attester.
+    ///
+    /// The target is the SPDM device ID the machine's BMC reports, such as
+    /// `HGX_ERoT_GPU_3`, so a machine carries one of these per failed attester.
+    pub fn spdm_attestation_failed(attester_id: String, message: String) -> Self {
+        Self {
+            id: HealthProbeId::spdm_attestation_failed(),
+            target: Some(attester_id),
+            in_alert_since: Some(chrono::Utc::now()),
+            message,
+            tenant_message: None,
+            classifications: vec![HealthAlertClassification::prevent_allocations()],
+        }
+    }
+
+    /// Creates an AttestationNoAttesters alert.
+    ///
+    /// The target is the machine's hardware class, and is `None` when
+    /// exploration has recorded none.
+    pub fn attestation_no_attesters(hardware_class: Option<String>, message: String) -> Self {
+        Self {
+            id: HealthProbeId::attestation_no_attesters(),
+            target: hardware_class,
+            in_alert_since: Some(chrono::Utc::now()),
+            message,
+            tenant_message: None,
+            classifications: vec![],
+        }
+    }
+
+    /// Creates an AttestationPolicyUnsatisfied alert.
+    ///
+    /// Takes the same hardware class target as
+    /// [`Self::attestation_no_attesters`].
+    pub fn attestation_policy_unsatisfied(hardware_class: Option<String>, message: String) -> Self {
+        Self {
+            id: HealthProbeId::attestation_policy_unsatisfied(),
+            target: hardware_class,
+            in_alert_since: Some(chrono::Utc::now()),
+            message,
+            tenant_message: None,
+            classifications: vec![],
+        }
+    }
+
     /// Merge a HealthProbeAlert with the report from another probe of the same type
     ///
     /// The function does not check whether the Probe ID and target are equivalent.
@@ -763,6 +809,23 @@ impl HealthProbeId {
     /// marked host's GPUs in any NVLink partition.
     pub fn nvlink_isolated() -> Self {
         HealthProbeId("NvlinkIsolated".to_string())
+    }
+
+    /// The ID used when an attester failed SPDM attestation.
+    pub fn spdm_attestation_failed() -> Self {
+        HealthProbeId("SpdmAttestationFailed".to_string())
+    }
+
+    /// The ID used when an attestation profile applied but the BMC offered no
+    /// eligible attester.
+    pub fn attestation_no_attesters() -> Self {
+        HealthProbeId("AttestationNoAttesters".to_string())
+    }
+
+    /// The ID used when an attestation profile asked for attesters the BMC did
+    /// not offer.
+    pub fn attestation_policy_unsatisfied() -> Self {
+        HealthProbeId("AttestationPolicyUnsatisfied".to_string())
     }
 }
 
@@ -1647,6 +1710,51 @@ mod tests {
                 .classifications
                 .contains(&HealthAlertClassification::prevent_allocations())
         );
+    }
+
+    #[test]
+    fn test_attestation_alert_ids_targets_and_classifications() {
+        let cases = [
+            (
+                HealthProbeAlert::spdm_attestation_failed(
+                    "HGX_ERoT_GPU_3".to_string(),
+                    "Failed NRAS".to_string(),
+                ),
+                "SpdmAttestationFailed",
+                Some("HGX_ERoT_GPU_3"),
+                true,
+            ),
+            (
+                HealthProbeAlert::attestation_no_attesters(
+                    Some("nvidia_dgx-h100".to_string()),
+                    "the BMC offered no eligible attester".to_string(),
+                ),
+                "AttestationNoAttesters",
+                Some("nvidia_dgx-h100"),
+                false,
+            ),
+            (
+                HealthProbeAlert::attestation_policy_unsatisfied(
+                    None,
+                    "no hardware class recorded".to_string(),
+                ),
+                "AttestationPolicyUnsatisfied",
+                None,
+                false,
+            ),
+        ];
+
+        for (alert, expected_id, expected_target, prevents_allocations) in cases {
+            assert_eq!(alert.id.as_str(), expected_id);
+            assert_eq!(alert.target.as_deref(), expected_target);
+            assert_eq!(
+                alert
+                    .classifications
+                    .contains(&HealthAlertClassification::prevent_allocations()),
+                prevents_allocations,
+                "{expected_id} allocation classification"
+            );
+        }
     }
 
     #[test]
