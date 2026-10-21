@@ -290,6 +290,7 @@ If a phase fails, `setup.sh` prints `SETUP FAILED` and offers: `Run clean.sh to 
 | `--skip-rms` | Skip the Rack Management Service upgrade (Phase 5c). RMS installs **by default** (like DPF); `NICO_RMS_IMAGE_TAG` is required unless this flag is passed. Skipping leaves an existing RMS release untouched. |
 | `--skip-dpf` | Use **only** if DPF is not enabled at this site. This is not a pure skip: it clears `INSTALL_DPF`, which drops phase 5b and redeploys NICo Core with the `[dpf]` block disabled — on a DPF-enabled site that is a config change, not a skip. |
 | `--core-values <file>` | Use a per-site NICo Core values file (same as initial install). |
+| `--flow-values <file>` | Use a per-site NICo Flow values file (same as initial install). Flow overrides applied outside `setup.sh` are reset by the upgrade unless they are in this file. |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest or kustomize dir (same as initial install). |
 
 ### Estimated upgrade time
@@ -518,6 +519,19 @@ configuration. Before upgrading to 2.4, install with the Helm charts as
 described in the [quick start](../getting-started/quick-start.md) and retire the
 Kustomize overlays. The `rest-api/deploy/kustomize` bases that `setup.sh` uses
 for cert-manager, PostgreSQL, and Temporal are not affected.
+
+### 2.3 → 2.4: Kustomize deployment removed
+
+The Kustomize deployment under `deploy/` is removed in 2.4. Install and
+upgrade NICo Core with the Helm charts under `helm/`, either through
+`setup.sh` as described in the [quick start](../getting-started/quick-start.md)
+or directly as described in [`helm/README.md`](../../helm/README.md). Sites
+still running the Kustomize manifests must move to the Helm charts before
+upgrading to 2.4. The annotated site configuration example now lives at
+[`helm/examples/nico-api-site-config.toml`](../../helm/examples/nico-api-site-config.toml),
+and the `.nico` service endpoint reference moved to
+[DNS Service Endpoints](../configuration/dns-service-endpoints.md). The
+`rest-api/deploy/kustomize` bases that `setup.sh` uses are not affected.
 
 ## Rollback
 

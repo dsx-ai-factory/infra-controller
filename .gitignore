@@ -37,7 +37,6 @@ pxe/debs/*
 dev/shell/*
 **/*.xz
 
-pxe/mkosi.profiles/*/mkosi.extra/build-output
 ssh-console/legacy/ssh-console
 
 dev/mac-local-dev/carbide-api-config-*.toml

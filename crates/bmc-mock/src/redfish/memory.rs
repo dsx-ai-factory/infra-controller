@@ -23,11 +23,8 @@
 
 use std::borrow::Cow;
 
-use serde_json::json;
-
-use crate::json::{JsonExt, JsonPatch};
 use crate::redfish;
-use crate::redfish::Builder;
+use crate::redfish::ModelExt;
 
 pub(super) fn system_collection(system_id: &str) -> redfish::Collection<'static> {
     let odata_id = format!("/redfish/v1/Systems/{system_id}/Memory");
@@ -42,7 +39,7 @@ pub(super) fn system_resource<'a>(system_id: &str, memory_id: &'a str) -> redfis
     let odata_id = format!("/redfish/v1/Systems/{system_id}/Memory/{memory_id}");
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
-        odata_type: Cow::Borrowed("#Memory.v1_20_0.Memory"),
+        odata_type: Cow::Borrowed(redfish::schema::memory::Memory::ODATA_TYPE),
         id: Cow::Borrowed(memory_id),
         name: Cow::Borrowed("Memory"),
     }
@@ -52,7 +49,7 @@ pub(super) fn metrics_resource(system_id: &str, memory_id: &str) -> redfish::Res
     let odata_id = format!("/redfish/v1/Systems/{system_id}/Memory/{memory_id}/MemoryMetrics");
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
-        odata_type: Cow::Borrowed("#MemoryMetrics.v1_7_0.MemoryMetrics"),
+        odata_type: Cow::Borrowed(redfish::schema::memory_metrics::MemoryMetrics::ODATA_TYPE),
         id: Cow::Borrowed("MemoryMetrics"),
         name: Cow::Borrowed("Memory Metrics"),
     }
@@ -75,92 +72,76 @@ impl Memory {
     }
 }
 
-struct MemoryBuilder {
-    id: Cow<'static, str>,
-    value: serde_json::Value,
-}
-
-impl Builder for MemoryBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-            id: self.id,
-        }
-    }
-}
-
-impl MemoryBuilder {
-    fn metrics(self, metrics: &redfish::Resource<'_>) -> Self {
-        self.apply_patch(metrics.nav_property("Metrics"))
-    }
-
-    fn status(self, status: redfish::resource::Status) -> Self {
-        self.apply_patch(json!({ "Status": status.into_json() }))
-    }
-
-    fn build(self, metrics: serde_json::Value) -> Memory {
-        Memory {
-            id: self.id,
-            resource: self.value,
-            metrics,
-        }
-    }
-}
-
 /// An HBM stack as a GB-family tray reports it.
 pub(crate) fn hbm(system_id: &str, memory_id: &str, capacity_mib: u64) -> Memory {
+    use super::schema::memory::{Memory as MemoryModel, MemoryDeviceType, MemoryType};
     let metrics = metrics_resource(system_id, memory_id);
     let resource = system_resource(system_id, memory_id);
-    let metrics_json = nvidia_hbm_metrics(&metrics, memory_id);
-
-    MemoryBuilder {
-        id: Cow::Owned(memory_id.to_string()),
-        value: resource.json_patch(),
+    Memory {
+        id: memory_id.to_string().into(),
+        resource: MemoryModel::new(
+            resource.odata_id.as_ref(),
+            resource.id.as_ref(),
+            resource.name.as_ref(),
+        )
+        .memory_device_type(MemoryDeviceType::Hbm3)
+        .memory_type(MemoryType::Dram)
+        .manufacturer("NVIDIA")
+        .capacity_mi_b(
+            capacity_mib
+                .try_into()
+                .expect("fixture memory capacity fits i64"),
+        )
+        .operating_speed_mhz(2619)
+        .status(redfish::resource::Status::Ok.into())
+        .metrics(metrics.odata_id.as_ref())
+        .into_json(),
+        metrics: nvidia_hbm_metrics(&metrics, memory_id),
     }
-    .apply_patch(json!({
-        "MemoryDeviceType": "HBM3",
-        "MemoryType": "DRAM",
-        "Manufacturer": "NVIDIA",
-        "CapacityMiB": capacity_mib,
-        "OperatingSpeedMhz": 2619,
-    }))
-    .status(redfish::resource::Status::Ok)
-    .metrics(&metrics)
-    .build(metrics_json)
 }
 
 fn nvidia_hbm_metrics(resource: &redfish::Resource<'_>, memory_id: &str) -> serde_json::Value {
-    resource.json_patch().patch(json!({
-        "Name": format!("{memory_id} Memory Metrics"),
-        "BlockSizeBytes": 4096,
-        "BandwidthPercent": 12.5,
-        "OperatingSpeedMHz": 2619,
-        "CurrentPeriod": {
-            "CorrectableECCErrorCount": 0,
-            "UncorrectableECCErrorCount": 0
-        },
-        "LifeTime": {
-            "CorrectableECCErrorCount": 7,
-            "UncorrectableECCErrorCount": 0
-        },
-        "Oem": {
-            "Nvidia": {
-                "@odata.type": "#NvidiaMemoryMetrics.v1_2_0.NvidiaMemoryMetrics",
-                "RowRemapping": {
-                    "CorrectableRowRemappingCount": 3,
-                    "UncorrectableRowRemappingCount": 0,
-                    "MaxAvailabilityBankCount": 40,
-                    "HighAvailabilityBankCount": 2,
-                    "PartialAvailabilityBankCount": 0,
-                    "LowAvailabilityBankCount": 0,
-                    // Firmware built against the original schema spells
-                    // this one without the second `i`, and consumers are
-                    // expected to accept either.
-                    "NoAvailablityBankCount": 0
-                }
-            }
-        }
-    }))
+    use super::schema::memory_metrics::{CurrentPeriod, LifeTime, MemoryMetrics};
+    MemoryMetrics::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        format!("{memory_id} Memory Metrics"),
+    )
+    .block_size_bytes(4096)
+    .bandwidth_percent(nv_redfish_server_core::FiniteF64::try_from(12.5).expect("finite bandwidth"))
+    .operating_speed_mhz(2619)
+    .current_period(
+        CurrentPeriod::new()
+            .correctable_ecc_error_count(0)
+            .uncorrectable_ecc_error_count(0),
+    )
+    .life_time(
+        LifeTime::new()
+            .correctable_ecc_error_count(7)
+            .uncorrectable_ecc_error_count(0),
+    )
+    .oem(redfish::resource::oem(
+        [(
+            "Nvidia".to_string(),
+            redfish::oem::object(
+                // Retain the type spelling reported by the firmware capture.
+                "#NvidiaMemoryMetrics.v1_2_0.NvidiaMemoryMetrics",
+                super::schema::nvidia_memory_metrics::NvidiaMemoryMetrics::new().row_remapping(
+                    super::schema::nvidia_memory_metrics::RowRemapping::new()
+                        .correctable_row_remapping_count(3)
+                        .uncorrectable_row_remapping_count(0)
+                        .max_availability_bank_count(40)
+                        .high_availability_bank_count(2)
+                        .partial_availability_bank_count(0)
+                        .low_availability_bank_count(0)
+                        // Original firmware omits the second `i`; CSDL retains both spellings.
+                        .no_availablity_bank_count(0),
+                ),
+            ),
+        )]
+        .into(),
+    ))
+    .into_json()
 }
 
 #[cfg(test)]

@@ -90,22 +90,22 @@ impl WiwynnGB200Nvl<'_> {
     ) -> redfish::computer_system::Config<C> {
         let system_id = "System_0";
         let serial_number = Some(self.system_serial_number.to_string().into());
-        let boot_opt_builder = |id: &str, kind| {
-            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, id), kind)
+        let boot_opt_builder = |id: &str| {
+            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, id))
                 .boot_option_reference(id)
         };
         let boot_options = [
-            boot_opt_builder("Boot0020", BootOptionKind::Disk)
+            boot_opt_builder("Boot0020")
                 .display_name("Ubuntu")
                 .uefi_device_path("HD(1,GPT,C07AA982-7D30-4663-9538-776771BBED85,0x800,0x219800)/\\EFI\\ubuntu\\shimaa64.efi")
-                .build()
+                .build(BootOptionKind::Disk)
         ].into_iter().chain([&self.dpu1, &self.dpu2].into_iter().enumerate().map(|(index, dpu)| {
             let mac = dpu.host_mac_address.to_string().replace(":", "").to_uppercase();
             let display_name = format!("UEFI HTTPv4 (MAC:{mac})");
-            boot_opt_builder(&format!("Boot{index:04X}"), BootOptionKind::Network)
+            boot_opt_builder(&format!("Boot{index:04X}"))
                 .display_name(&display_name)
-                .uefi_device_path(&format!("MAC({mac},0x1)/IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()"))
-                .build()
+                .uefi_device_path(format!("MAC({mac},0x1)/IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()"))
+                .build(BootOptionKind::Network)
         })).collect::<Vec<_>>();
 
         let hgx_baseboard_id = "HGX_Baseboard_0";
@@ -127,10 +127,9 @@ impl WiwynnGB200Nvl<'_> {
                     oem: redfish::computer_system::Oem::Generic,
                     base_bios: Some(
                         redfish::bios::builder(&redfish::bios::resource(system_id))
-                            .attributes(json!({
+                            .with_attributes(json!({
                                 "EmbeddedUefiShell": "Enabled",
-                            }))
-                            .build(),
+                            })),
                     ),
                     log_services: None,
                     storage: None,
@@ -182,13 +181,13 @@ impl WiwynnGB200Nvl<'_> {
                     &redfish::network_adapter::chassis_resource(chassis_id, chassis_id),
                     &nic,
                 )
-                .status(redfish::resource::Status::Ok)
+                .status(redfish::resource::Status::Ok.into())
                 .build(),
             ]);
 
             redfish::chassis::SingleChassisConfig {
                 id: chassis_id.into(),
-                chassis_type: "Card".into(),
+                chassis_type: redfish::schema::chassis::ChassisType::Card,
                 manufacturer: nic.manufacturer,
                 part_number: nic.part_number,
                 model: Some("GB200 NVL".into()),
@@ -200,7 +199,7 @@ impl WiwynnGB200Nvl<'_> {
         redfish::chassis::ChassisConfig {
             chassis: std::iter::once(redfish::chassis::SingleChassisConfig {
                 id: "BMC_0".into(),
-                chassis_type: "Module".into(),
+                chassis_type: redfish::schema::chassis::ChassisType::Module,
                 manufacturer: Some("WIWYNN".into()),
                 part_number: Some("B81.11810.0005".into()),
                 model: Some("GB200 NVL".into()),
@@ -209,7 +208,7 @@ impl WiwynnGB200Nvl<'_> {
             })
             .chain(std::iter::once(redfish::chassis::SingleChassisConfig {
                 id: "Chassis_0".into(),
-                chassis_type: "RackMount".into(),
+                chassis_type: redfish::schema::chassis::ChassisType::RackMount,
                 manufacturer: Some("NVIDIA".into()),
                 part_number: Some("B81.11810.000D".into()),
                 model: Some("GB200 NVL".into()),
@@ -218,15 +217,11 @@ impl WiwynnGB200Nvl<'_> {
                     Self::sensor_layout(),
                 )),
                 leak_detectors: Some(redfish::leak_detector::generate_chassis_leak_detectors(4)),
-                assembly: Some(
-                    redfish::assembly::builder(&redfish::assembly::chassis_resource("Chassis_0"))
-                        .add_data(
-                            redfish::assembly::data_builder("0".into())
-                                .serial_number(&self.chassis_serial_number)
-                                .build(),
-                        )
-                        .build(),
-                ),
+                assembly: Some(redfish::assembly::response(
+                    "Chassis_0",
+                    "0",
+                    &self.chassis_serial_number,
+                )),
                 ..redfish::chassis::SingleChassisConfig::defaults()
             }))
             .chain((0..4).map(|index| {
@@ -281,7 +276,7 @@ impl WiwynnGB200Nvl<'_> {
                 ("HGX_FW_ERoT_BMC_0", "01.04.0031.0000_n04"),
             ]
             .iter()
-            .map(|(id, version)| fw_inv_builder(id).version(version).build())
+            .map(|(id, version)| fw_inv_builder(id).version(*version).build())
             .collect(),
             host_bmc_inventory_id: Some("FW_BMC_0".to_string()),
             host_uefi_inventory_id: Some("HGX_FW_CPU_0".to_string()),

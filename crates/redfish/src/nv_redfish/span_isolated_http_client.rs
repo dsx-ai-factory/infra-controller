@@ -19,7 +19,7 @@ use http::HeaderMap;
 use nv_redfish::bmc_http::reqwest::{BmcError, Client};
 use nv_redfish::bmc_http::{BmcCredentials, HttpClient, MultipartUpdateRequest};
 use nv_redfish::core::{
-    BoxTryStream, ModificationResponse, ODataETag, SessionCreateResponse, UploadReader,
+    BoxTryStream, ModificationResponse, ODataETag, Repair, SessionCreateResponse, UploadReader,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -58,12 +58,13 @@ impl HttpClient for SpanIsolatedHttpClient {
         credentials: &BmcCredentials,
         etag: Option<ODataETag>,
         custom_headers: &HeaderMap,
+        repair: &impl Repair,
     ) -> Result<T, Self::Error>
     where
         T: DeserializeOwned + Send + Sync,
     {
         self.inner
-            .get(url, credentials, etag, custom_headers)
+            .get(url, credentials, etag, custom_headers, repair)
             .instrument(Self::span())
             .await
     }

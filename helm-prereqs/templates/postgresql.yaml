@@ -97,6 +97,8 @@ spec:
   postgresql:
     version: "15"
     parameters:
+      # Keep utility-statement literals out of query statistics.
+      pg_stat_statements.track_utility: "off"
       max_connections: "1024"
       synchronous_commit: "remote_apply"
       lock_timeout: "2min"

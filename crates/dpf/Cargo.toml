@@ -22,6 +22,7 @@ driver = ["dep:clap", "dep:tracing-subscriber", "dep:libredfish"]
 
 [dependencies]
 hex = { workspace = true }
+indoc = { workspace = true }
 kube = { default-features = false, features = [
   "runtime",
   "derive",

@@ -2,8 +2,9 @@
   Token mode pins these paths to the dpu-agent's defaults.
 
   The agent publishes the trust anchor and serves its socket at paths taken
-  from its own [forge-system] config, and DPF deploys it with no config file
-  at all -- so it always uses /opt/forge. It has no CLI flag for either path.
+  from its own [forge-system] config. The agent chart's generated config does
+  not override these trust paths, so it uses /opt/forge. It has no CLI flag
+  for either path.
   Rendering fmds against a different certsDir/rootCaFile therefore points it
   at files the agent will never create: the init container waits forever for a
   CA that is not coming, or the token source connects to a socket that does
@@ -22,6 +23,11 @@
   {{- if ne $rootCa "forge_root.pem" }}
     {{- fail (printf "useNodeTokens requires the dpu-agent's default rootCaFile (forge_root.pem); got %q. The agent publishes under its own filename, so fmds would wait for a file that is never created." $rootCa) }}
   {{- end }}
+{{- end }}
+{{/* The IPv4 listener defaults cannot serve an explicitly enabled IPv6 endpoint.
+     Leave exact IPv6 address validation to FMDS so expanded spellings remain valid. */}}
+{{- if and .Values.interfaceCidrV6 (not (or (hasPrefix "[" (.Values.restAddress | default "")) (hasPrefix "[" (.Values.compatibilityRestAddress | default "")))) }}
+  {{- fail "interfaceCidrV6 requires an IPv6 restAddress or compatibilityRestAddress, for example restAddress=\"[::]:80\"" }}
 {{- end }}
 apiVersion: apps/v1
 kind: DaemonSet
@@ -132,6 +138,9 @@ spec:
             {{- end }}
             {{- with .Values.compatibilityRestAddress }}
             - "--compatibility-rest-address={{ . }}"
+            {{- end }}
+            {{- with .Values.interfaceCidrV6 }}
+            - "--interface-cidr-v6={{ . }}"
             {{- end }}
             {{- if .Values.useNodeTokens }}
             - "--root-ca={{ $dir }}/pub/{{ $rootCa }}"

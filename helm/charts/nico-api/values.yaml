@@ -544,7 +544,7 @@ configFiles:
 ## nicoApiSiteConfig is REQUIRED: nico-api exits at startup if the four
 ## resource pool definitions (lo-ip, vlan-id, vni, vpc-vni) are absent.
 ## See PREREQUISITES.md § "Site Configuration" and
-## deploy/files/nico-api/nico-api-site-config.toml for a full example.
+## helm/examples/nico-api-site-config.toml for a full example.
 siteConfig:
   enabled: true
   nicoApiSiteConfig: ""  # Must include [pools.lo-ip], [pools.vlan-id], [pools.vni], [pools.vpc-vni]

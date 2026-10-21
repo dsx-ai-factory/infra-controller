@@ -107,6 +107,20 @@ async fn replay_and_release(
     expected_policy: &Option<RouteTargetPolicy>,
     supports_stats: bool,
 ) {
+    let mut invalid_owner = operation(pool, "nul-owner");
+    invalid_owner.owner.as_mut().expect("owner").owner_id = "vpc\0id".into();
+    assert_eq!(
+        provider
+            .allocate(Request::new(AllocateRequest {
+                operation: Some(invalid_owner),
+                requested_value: None,
+            }))
+            .await
+            .expect_err("a fresh allocation rejects NUL in its owner")
+            .code(),
+        Code::InvalidArgument
+    );
+
     let wrong_partition_operation = operation(pool, "wrong-partition");
     let wrong_partition = provider
         .allocate(Request::new(AllocateRequest {
@@ -170,6 +184,8 @@ async fn replay_and_release(
     changed_owner.owner.as_mut().expect("owner").owner_id = "another-vpc".into();
     let mut changed_owner_type = original.clone();
     changed_owner_type.owner.as_mut().expect("owner").owner_type = "machine".into();
+    let mut invalid_owner_type = original.clone();
+    invalid_owner_type.owner.as_mut().expect("owner").owner_type = "machine\0type".into();
     let mut changed_slot = original.clone();
     changed_slot.owner.as_mut().expect("owner").slot = "another-slot".into();
     let mut changed_generation = original.clone();
@@ -185,6 +201,10 @@ async fn replay_and_release(
     for (scenario, changed) in [
         ("owner", changed_owner),
         ("owner type", changed_owner_type),
+        (
+            "invalid owner type still conflicts on replay",
+            invalid_owner_type,
+        ),
         ("slot", changed_slot),
         ("generation", changed_generation),
         ("binding", changed_binding),
@@ -778,9 +798,33 @@ async fn growth_preserves_prior_definitions(
         previous_revision: None,
         ..grown.clone()
     };
-    for (scenario, invalid) in [
-        ("growth removes an earlier declaration", nonadditive),
-        ("growth omits its predecessor", missing_predecessor),
+    for (scenario, invalid, code) in [
+        (
+            "growth removes an earlier declaration",
+            nonadditive,
+            Code::FailedPrecondition,
+        ),
+        (
+            "growth omits its predecessor",
+            missing_predecessor,
+            Code::FailedPrecondition,
+        ),
+        (
+            "growth rejects a NUL in the new revision",
+            DefineRequest {
+                eligibility_revision: "grown\0revision".into(),
+                ..grown.clone()
+            },
+            Code::InvalidArgument,
+        ),
+        (
+            "growth rejects a NUL in the predecessor revision",
+            DefineRequest {
+                previous_revision: Some("initial\0revision".into()),
+                ..grown.clone()
+            },
+            Code::InvalidArgument,
+        ),
     ] {
         assert_eq!(
             provider
@@ -788,7 +832,7 @@ async fn growth_preserves_prior_definitions(
                 .await
                 .expect_err(scenario)
                 .code(),
-            Code::FailedPrecondition,
+            code,
             "{scenario}"
         );
     }

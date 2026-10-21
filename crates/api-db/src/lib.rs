@@ -619,6 +619,9 @@ impl From<DatabaseError> for tonic::Status {
             error @ DatabaseError::FailedPrecondition(_) => {
                 Status::failed_precondition(error.to_string())
             }
+            DatabaseError::ResourcePoolError(
+                error @ model::resource_pool::ResourcePoolError::MissingAllocationRange { .. },
+            ) => Status::failed_precondition(error.to_string()),
             error @ DatabaseError::Internal { .. } => Status::internal(error.to_string()),
             DatabaseError::InvalidArgument(msg) => Status::invalid_argument(msg),
             DatabaseError::InvalidConfiguration(e) => Status::invalid_argument(e.to_string()),

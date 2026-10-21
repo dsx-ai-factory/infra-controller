@@ -151,6 +151,16 @@ impl ResourcePoolEligibility {
             .value
             .as_ref()
             .ok_or(ValueConversionError::Allocation("value is required"))?;
+        self.validate_value(value, allocation.assignment_mode)
+    }
+
+    /// `validate_value` checks the supplied value's domain, membership, and
+    /// assignment mode against the first matching eligibility declaration.
+    pub(crate) fn validate_value(
+        &self,
+        value: &v1::Value,
+        assignment_mode: i32,
+    ) -> Result<(), ValueConversionError> {
         let domain = wire_domain(self.domain);
         value.validate(domain).map_err(Box::new)?;
         for entry in &self.entries {
@@ -158,7 +168,7 @@ impl ResourcePoolEligibility {
         }
         for entry in &self.entries {
             if entry.contains(value).map_err(Box::new)? {
-                return if entry.assignment_mode == allocation.assignment_mode {
+                return if entry.assignment_mode == assignment_mode {
                     Ok(())
                 } else {
                     Err(ValueConversionError::Allocation(

@@ -11,6 +11,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type mockDaemon struct{}
@@ -65,14 +66,14 @@ func TestDaemon(t *testing.T) {
 	d.Start(ctx)
 
 	time.Sleep(2 * time.Second)
-	syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
+	require.NoError(t, syscall.Kill(syscall.Getpid(), syscall.SIGTERM))
 
 	<-ctx.Done()
 	SetDefaultLogLevel(logrus.InfoLevel)
 	//code coverage and setLevel  for empty string and check if its successful
 	assert.Error(t, SetLevel(GetLogger(ctx), ""), "SetLevel failed for empty string")
 
-	SetLevel(GetLogger(ctx), "info")
+	require.NoError(t, SetLevel(GetLogger(ctx), "info"))
 	GetLogger(ctx).Infof("ctx.Done(), shutting down")
 
 	// GetCurrentTime

@@ -368,7 +368,7 @@ Health information is stored as health report overrides on machine records. The 
 
 ### Core Deployment
 
-NICo Core commonly runs on a Kubernetes cluster, with three or five control plane nodes recommended. It runs as a set of microservices including API, DNS, DHCP, hardware monitoring, BMC console, and rack management services. Deployment is done through Kubernetes Kustomize manifests.
+NICo Core commonly runs on a Kubernetes cluster, with three or five control plane nodes recommended. It runs as a set of microservices including API, DNS, DHCP, hardware monitoring, BMC console, and rack management services. Deployment is done through Helm charts.
 
 ### REST Deployment
 

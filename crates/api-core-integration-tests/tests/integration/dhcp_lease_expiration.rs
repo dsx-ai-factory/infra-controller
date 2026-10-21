@@ -181,7 +181,7 @@ async fn test_discover_reallocates_after_expiration(
             bmc_mac_address: "aa:bb:cc:dd:ef:07".into(),
             chassis_serial_number: "EXPIRED-DHCP-STAYS-DYNAMIC".into(),
             host_nics: vec![rpc::forge::ExpectedInterface {
-                mac_address: mac_address.into(),
+                mac_address: Some(mac_address.into()),
                 ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Retained as i32),
                 ..Default::default()
             }],

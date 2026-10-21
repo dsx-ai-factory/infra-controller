@@ -242,6 +242,17 @@ pub struct ResourcePoolStats {
 pub enum ResourcePoolError {
     #[error("resource pool is empty, cannot allocate")]
     Empty,
+    /// The selected assignment mode has no configured values, free or allocated.
+    #[error(
+        "resource-pool `{pool_name}` has no {} allocation range",
+        if *.auto_assign { "automatic" } else { "explicit" }
+    )]
+    MissingAllocationRange {
+        /// The pool whose configuration does not support the request.
+        pool_name: String,
+        /// Whether the request needs an automatic range instead of an explicit range.
+        auto_assign: bool,
+    },
     #[error("cannot convert '{v}' to {pool_name}'s pool type for {owner_type} {owner_id}: {e}")]
     Parse {
         e: String,

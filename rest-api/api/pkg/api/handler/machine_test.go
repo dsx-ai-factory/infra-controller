@@ -339,7 +339,8 @@ func TestMachineHandler_Get(t *testing.T) {
 	mo3 := testMachineBuildMachine(t, dbSession, ip3.ID, siteo3.ID, nil, nil, true, false, cdbm.MachineStatusInitializing)
 
 	// Mangle the machine metadata to make sure we can still deal with it gracefully.
-	dbSession.DB.Exec(fmt.Sprintf(`update machine set metadata='{"random_junk": "is_it_cake?"}' where id='%s'`, m4.ID))
+	_, metadataErr := dbSession.DB.Exec(fmt.Sprintf(`update machine set metadata='{"random_junk": "is_it_cake?"}' where id='%s'`, m4.ID))
+	require.NoError(t, metadataErr)
 
 	mc11 := testMachineBuildMachineCapability(t, dbSession, &m.ID, cdbm.MachineCapabilityTypeCPU, "AMD Opteron Series x10", cutil.GetPtr("3.0GHz"), cutil.GetPtr(2))
 	assert.NotNil(t, mc11)

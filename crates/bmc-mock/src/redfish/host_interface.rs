@@ -17,11 +17,8 @@
 
 use std::borrow::Cow;
 
-use serde_json::json;
-
-use crate::json::{JsonExt, JsonPatch};
 use crate::redfish;
-use crate::redfish::Builder;
+use crate::redfish::schema::host_interface as schema;
 
 pub(super) fn manager_collection(manager_id: &str) -> redfish::Collection<'static> {
     let odata_id = format!("/redfish/v1/Managers/{manager_id}/HostInterfaces");
@@ -39,17 +36,18 @@ pub(crate) fn manager_resource<'a>(
     let odata_id = format!("/redfish/v1/Managers/{manager_id}/HostInterfaces/{iface_id}");
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
-        odata_type: Cow::Borrowed("#HostInterface.v1_3_3.HostInterface"),
+        odata_type: Cow::Borrowed(redfish::schema::host_interface::HostInterface::ODATA_TYPE),
         id: Cow::Borrowed(iface_id),
         name: Cow::Borrowed("Host Interface"),
     }
 }
 
-pub(crate) fn builder(resource: &redfish::Resource) -> HostInterfaceBuilder {
-    HostInterfaceBuilder {
-        id: Cow::Owned(resource.id.to_string()),
-        value: resource.json_patch(),
-    }
+pub(crate) fn builder(resource: &redfish::Resource) -> schema::HostInterface {
+    schema::HostInterface::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        resource.name.as_ref(),
+    )
 }
 
 #[derive(Clone)]
@@ -64,29 +62,11 @@ impl HostInterface {
     }
 }
 
-pub(crate) struct HostInterfaceBuilder {
-    id: Cow<'static, str>,
-    value: serde_json::Value,
-}
-
-impl Builder for HostInterfaceBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-            id: self.id,
-        }
-    }
-}
-
-impl HostInterfaceBuilder {
-    pub(crate) fn interface_enabled(self, v: bool) -> Self {
-        self.apply_patch(json!({ "InterfaceEnabled": v }))
-    }
-
+impl schema::HostInterface {
     pub(crate) fn build(self) -> HostInterface {
         HostInterface {
-            id: self.id,
-            value: self.value,
+            id: Cow::Owned(self.id.clone()),
+            value: serde_json::to_value(self).expect("generated Redfish model is serializable"),
         }
     }
 }

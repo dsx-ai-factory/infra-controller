@@ -31,7 +31,13 @@ import (
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 )
 
-func TestCreateTaskScheduleFirmwareAuthenticationData(t *testing.T) {
+func TestFlowServerImpl_CreateTaskSchedule(t *testing.T) {
+	t.Run("firmware authentication data", testCreateTaskScheduleFirmwareAuthenticationData)
+	t.Run("authentication data status codes", testCreateTaskScheduleAuthenticationDataStatusCodes)
+	t.Run("invalid schedule", testCreateTaskScheduleInvalidSchedule)
+}
+
+func testCreateTaskScheduleFirmwareAuthenticationData(t *testing.T) {
 	tests := []struct {
 		name               string
 		withCipher         bool
@@ -105,7 +111,7 @@ func TestCreateTaskScheduleFirmwareAuthenticationData(t *testing.T) {
 	}
 }
 
-func TestCreateTaskScheduleAuthenticationDataStatusCodes(t *testing.T) {
+func testCreateTaskScheduleAuthenticationDataStatusCodes(t *testing.T) {
 	componentID := uuid.New()
 	tests := []struct {
 		name               string
@@ -148,6 +154,62 @@ func TestCreateTaskScheduleAuthenticationDataStatusCodes(t *testing.T) {
 				req,
 			)
 			require.Equal(t, tt.wantCode, status.Code(err))
+			require.Nil(t, store.row)
+		})
+	}
+}
+
+func testCreateTaskScheduleInvalidSchedule(t *testing.T) {
+	tests := []struct {
+		name        string
+		schedule    *pb.ScheduleConfig
+		wantMessage string
+	}{
+		{
+			name:        "missing schedule",
+			wantMessage: "schedule config is required",
+		},
+		{
+			name:        "missing name",
+			schedule:    &pb.ScheduleConfig{},
+			wantMessage: "schedule.name is required",
+		},
+		{
+			name:        "missing spec type",
+			schedule:    &pb.ScheduleConfig{Name: "schedule", Spec: &pb.ScheduleSpec{}},
+			wantMessage: "schedule.spec.type is required",
+		},
+		{
+			name: "missing spec value",
+			schedule: &pb.ScheduleConfig{
+				Name: "schedule",
+				Spec: &pb.ScheduleSpec{Type: pb.ScheduleSpecType_SCHEDULE_SPEC_TYPE_CRON},
+			},
+			wantMessage: "schedule.spec.spec is required",
+		},
+		{
+			name: "impossible cron date",
+			schedule: &pb.ScheduleConfig{
+				Name: "schedule",
+				Spec: &pb.ScheduleSpec{
+					Type: pb.ScheduleSpecType_SCHEDULE_SPEC_TYPE_CRON,
+					Spec: "0 0 31 2 *",
+				},
+			},
+			wantMessage: "schedule.spec is invalid",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &capturingScheduleStore{id: uuid.New()}
+			server := &FlowServerImpl{taskScheduleStore: store}
+			req := &pb.CreateTaskScheduleRequest{Schedule: tt.schedule}
+
+			_, err := server.CreateTaskSchedule(context.Background(), req)
+
+			require.Equal(t, codes.InvalidArgument, status.Code(err))
+			require.ErrorContains(t, err, tt.wantMessage)
 			require.Nil(t, store.row)
 		})
 	}

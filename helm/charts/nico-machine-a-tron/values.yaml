@@ -214,6 +214,11 @@ machineATron:
     name: nico-site-credentials
     key: credentials.yaml
   apiRefreshInterval: "2s"
+  ## Delay before a simulated Scout reopens its ScoutStream after the stream
+  ## closes or fails. A stream nico-api denies is not reopened. A duration
+  ## string such as "30s" or "24h". Empty keeps the machine-a-tron default of
+  ## 10s.
+  scoutStreamReconnectInterval: ""
 
 ## =============================================================================
 ## Machine Defaults - Shared settings for all machine groups

@@ -13,6 +13,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
 )
 
@@ -193,6 +194,7 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_GetByID(t *testing.T) {
 			CreatedBy:                user.ID,
 		},
 	)
+	require.NoError(t, err)
 
 	skaisd := NewSSHKeyGroupInstanceAssociationDAO(dbSession)
 	skgis1, err := skaisd.Create(ctx, nil, SSHKeyGroupInstanceAssociationCreateInput{
@@ -522,6 +524,7 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_Update(t *testing.T) {
 			CreatedBy:                user.ID,
 		},
 	)
+	require.NoError(t, err)
 
 	i2, err := isd.Create(
 		ctx, nil,
@@ -544,6 +547,7 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_Update(t *testing.T) {
 			CreatedBy:                user.ID,
 		},
 	)
+	require.NoError(t, err)
 
 	skgisa1, err := skgiasd.Create(ctx, nil, SSHKeyGroupInstanceAssociationCreateInput{
 		SSHKeyGroupID: sshKeyGroup1.ID,
@@ -559,6 +563,7 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_Update(t *testing.T) {
 		InstanceID:    i2.ID,
 		CreatedBy:     user.ID,
 	})
+	require.NoError(t, err)
 	assert.NotNil(t, skgisa2)
 
 	// OTEL Spanner configuration
@@ -655,6 +660,7 @@ func TestSSHKeyGroupInstanceAssociationSQLDAO_Delete(t *testing.T) {
 			CreatedBy:                user.ID,
 		},
 	)
+	require.NoError(t, err)
 
 	skgias1, err := skgiasd.Create(ctx, nil, SSHKeyGroupInstanceAssociationCreateInput{
 		SSHKeyGroupID: sshKeyGroup1.ID,

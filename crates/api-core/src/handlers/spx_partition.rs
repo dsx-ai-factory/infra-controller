@@ -142,6 +142,16 @@ pub(crate) async fn delete(
     let vni_pool = api.common_pools.ethernet.pool_dpa_vni.clone();
     api.with_txn(|txn| {
         async move {
+            db::spx_partition::lock_for_delete(txn, id).await?;
+            // Admission may have committed while this transaction waited for
+            // the partition. Under READ COMMITTED, a separate statement takes
+            // a fresh snapshot that includes those references.
+            if db::spx_partition::has_instance_references(&mut **txn, id).await? {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "SPX partition {id} still has instance attachments"
+                )));
+            }
+
             let vni = match db::spx_partition::mark_as_deleted(id, txn).await? {
                 ConditionalWrite::Applied(partition) => partition.vni,
                 ConditionalWrite::NotApplied(SpxPartitionAlreadyDeleted { vni }) => vni,
@@ -252,6 +262,7 @@ mod tests {
     #[derive(Debug, Clone, Copy)]
     enum DpaVniFailureInput {
         Exhausted,
+        MissingRange,
         RequestedUnavailable,
         RequestedDatabase,
         Generic,
@@ -261,6 +272,11 @@ mod tests {
         fn error(self) -> ResourcePoolDatabaseError {
             match self {
                 Self::Exhausted => ResourcePoolError::Empty.into(),
+                Self::MissingRange => ResourcePoolError::MissingAllocationRange {
+                    pool_name: DPA_VNI.to_string(),
+                    auto_assign: false,
+                }
+                .into(),
                 Self::RequestedUnavailable => db::DatabaseError::FailedPrecondition(
                     "requested VNI is unavailable".to_string(),
                 )
@@ -283,6 +299,7 @@ mod tests {
         fn failure_label(self) -> &'static str {
             match self {
                 Self::Exhausted => "exhausted",
+                Self::MissingRange => "configuration",
                 Self::RequestedUnavailable => "requested_value_unavailable",
                 Self::RequestedDatabase => "database",
                 Self::Generic => "parse",
@@ -354,6 +371,35 @@ mod tests {
                         pool: Some(DPA_VNI.to_string()),
                         requested_vni: None,
                         error: None,
+                        counter_delta: 1.0,
+                    },
+                },
+                Check {
+                    scenario: "missing explicit range preserves configuration context",
+                    input: DpaVniFailureCase {
+                        failure: DpaVniFailureInput::MissingRange,
+                        requested_vni: Some(42),
+                    },
+                    expect: DpaVniFailureObservation {
+                        status_code: Code::FailedPrecondition,
+                        status_message: "resource-pool `dpa-vni` has no explicit allocation range"
+                            .to_string(),
+                        metadata_name: "resource_pool_allocation_failed".to_string(),
+                        level: tracing::Level::ERROR,
+                        message: "Error allocating from resource pool".to_string(),
+                        event_name: Some("resource_pool_allocation_failed".to_string()),
+                        metric_name: Some(RESOURCE_POOL_LIFECYCLE_FAILURES_METRIC.to_string()),
+                        operation: Some("allocate".to_string()),
+                        failure: Some("configuration".to_string()),
+                        failure_policy: Some("required".to_string()),
+                        allocation_mode: Some("requested".to_string()),
+                        value_type: Some("integer".to_string()),
+                        owner_id: Some(OWNER_ID.to_string()),
+                        pool: Some(DPA_VNI.to_string()),
+                        requested_vni: None,
+                        error: Some(
+                            "resource-pool `dpa-vni` has no explicit allocation range".to_string(),
+                        ),
                         counter_delta: 1.0,
                     },
                 },

@@ -55,6 +55,7 @@ carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
 nv-redfish = { workspace = true, features = ["chassis"] }
 rustls = { workspace = true }
+tower = { workspace = true, features = ["util"] }
 
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"

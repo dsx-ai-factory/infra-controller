@@ -2443,7 +2443,8 @@ async fn tracked_actions_are_independent_of_live_reads_and_reject_invalid_storag
             }),
             rpc::ComponentPowerErrorCode::Disabled,
         ),
-        // Switch needs a strict pending read despite its permissive shared decoder.
+        // `db::switch::find_by` rejects malformed maintenance JSON before
+        // `db::switch::find_maintenance_requests` runs.
         (
             "switch",
             "UPDATE switches SET controller_state = $1, switch_maintenance_requested = $2 WHERE id::text = $3",
@@ -2453,7 +2454,8 @@ async fn tracked_actions_are_independent_of_live_reads_and_reject_invalid_storag
             }),
             rpc::ComponentPowerErrorCode::EndpointUnavailable,
         ),
-        // Shelf has a separate SQL path with the same potential silent decode loss.
+        // `db::power_shelf::find_by` rejects malformed maintenance JSON before
+        // `db::power_shelf::find_maintenance_requests` runs.
         (
             "shelf",
             "UPDATE power_shelves SET controller_state = $1, power_shelf_maintenance_requested = $2 WHERE id::text = $3",

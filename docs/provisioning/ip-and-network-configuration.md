@@ -616,7 +616,7 @@ A fixed set of NICo service hostnames are resolved by DPU agents, host PXE loade
 Two TLD conventions exist:
 
 - **`.forge`** is the compiled default in `crates/agent/src/util.rs` and the host PXE loader scripts. The agent resolves `carbide-pxe.forge`, `carbide-ntp.forge`, etc. at startup. This is the TLD used by deployments built from the current binaries.
-- **`.nico`** is the rebranded TLD documented in [`deploy/DNS.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/deploy/DNS.md). Consumers with fixed compiled names need rebuilt images to use it. Scout can instead receive explicit boot URL overrides.
+- **`.nico`** is the rebranded TLD documented in [DNS Service Endpoints](../configuration/dns-service-endpoints.md). Consumers with fixed compiled names need rebuilt images to use it. Scout can instead receive explicit boot URL overrides.
 
 Choose the convention that matches your binaries. The stock names change both the first label and the TLD. For example, the NTP name is exactly `carbide-ntp.forge`, not `nico-ntp.forge`. Verify the name by checking what the agent actually resolves at startup with `kubectl exec -n nico-system <agent-pod> -- getent hosts carbide-ntp.forge`.
 
@@ -626,7 +626,7 @@ The required DNS records are shown with both NTP names where they differ:
 |---|---|---|---|---|
 | `nico-api.nico` | 443 | `nico-api` external LoadBalancer VIP | NICo gRPC API | Yes — `NICO_API_URL` env var on most clients |
 | `nico-pxe.nico` | 80 | `nico-pxe` LoadBalancer VIP | iPXE scripts, cloud-init, internal APT, and the legacy bootstrap-CA endpoint | The DNS record remains fixed for general consumers. DPF can separately configure bootstrap CA acquisition through a complete URL override or mounted Secret or ConfigMap. Non-DPF boot instructions include `pxe_uri`. Other consumers retain the compatibility hostname. |
-| `carbide-static-pxe.forge` (stock fallback) | 80 | Static PXE asset server VIP | Full Scout filesystem and update assets | **Yes, at boot.** Scout accepts `newrootfs=` for its full-image download and `pxe_uri=` for update checks. Embedded fallback URLs remain; see the [canonical endpoint reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/deploy/DNS.md#nico-static-pxenico--static-boot-asset-server). |
+| `carbide-static-pxe.forge` (stock fallback) | 80 | Static PXE asset server VIP | Full Scout filesystem and update assets | **Yes, at boot.** Scout accepts `newrootfs=` for its full-image download and `pxe_uri=` for update checks. Embedded fallback URLs remain; see the [canonical endpoint reference](../configuration/dns-service-endpoints.md#nico-static-pxenico---static-boot-asset-server). |
 | `carbide-ntp.forge` (stock) or `nico-ntp.nico` (rebranded image) | 123 | Operator-supplied NTP server IPs — A and AAAA records point at your existing NTP infrastructure, not a NICo-deployed service | Per-family NTP fallback for DPU-agent DHCP when that family has no valid site-configured address | **Fallback only.** Prefer `siteConfig.ntp_servers` for IPv4. Configure the exact hostname queried by the agent with at least one AAAA record for DHCPv6 option 56. |
 | `unbound.nico` | 53 | `unbound` LoadBalancer VIP | Recursive DNS resolver | Yes — the resolver address itself is distributed via DHCP option 6 |
 | `otel-receiver.nico` | 443 | OTel receiver VIP on the site controller | OTLP ingestion endpoint for DPU otel-collector sidecars | Yes — set in the otel-collector configuration YAML and re-deployed |
@@ -634,7 +634,7 @@ The required DNS records are shown with both NTP names where they differ:
 The static-asset row describes Scout's stock fallback. Boot URL overrides
 select their own host, scheme, port, and destination.
 
-One additional `.nico` hostname, `socks.nico`, is hardcoded into the DPU agent as the SOCKS5 outbound proxy for DPU extension-service pods. Add a corresponding A record only if your environment runs a SOCKS5 proxy for that purpose; it is not part of every NICo deployment. For per-endpoint detail (consumers, in-cluster addresses, hardcode locations, and the `unbound`-vs-other-resolver guidance), see [`deploy/DNS.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/deploy/DNS.md). That file is the canonical endpoint reference; the table above is the operator-facing summary.
+One additional `.nico` hostname, `socks.nico`, is hardcoded into the DPU agent as the SOCKS5 outbound proxy for DPU extension-service pods. Add a corresponding A record only if your environment runs a SOCKS5 proxy for that purpose; it is not part of every NICo deployment. For per-endpoint detail (consumers, in-cluster addresses, hardcode locations, and the `unbound`-vs-other-resolver guidance), see [DNS Service Endpoints](../configuration/dns-service-endpoints.md). That file is the canonical endpoint reference; the table above is the operator-facing summary.
 
 > **Note:** The `.nico` service zone is private and is not a publicly
 > registered TLD. It can be served on the conventional isolated OOB network or
@@ -729,7 +729,7 @@ update URL if different. The `newrootfs=` and `pxe_uri=` arguments select
 these URLs independently. Check `carbide-static-pxe.forge` for each stock
 fallback still in use. Omit the DNS check for any URL containing a literal IP
 address. An unused `nico-static-pxe.nico` alias does not need to resolve.
-Refer to the [Static Boot Asset Server reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/deploy/DNS.md#nico-static-pxenico--static-boot-asset-server)
+Refer to the [Static Boot Asset Server reference](../configuration/dns-service-endpoints.md#nico-static-pxenico---static-boot-asset-server)
 for URL selection.
 
 ```bash
@@ -824,4 +824,4 @@ When every item is checked, proceed to [Ingesting Hosts](ingesting-hosts.md).
 - [Quick Start Guide](../getting-started/quick-start.md) — the install flow that consumes the configuration described here.
 - [Reference Installation](../getting-started/installation-options/reference-install.md) — pointers to the manual, manifest-level install and troubleshooting references.
 - [Ingesting Hosts](ingesting-hosts.md) — `expected_machines.json` schema and upload commands.
-- [`deploy/DNS.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/deploy/DNS.md) — canonical reference for NICo service hostnames, ports, and hardcoded-vs-configurable status.
+- [DNS Service Endpoints](../configuration/dns-service-endpoints.md) - canonical reference for NICo service hostnames, ports, and hardcoded-vs-configurable status.

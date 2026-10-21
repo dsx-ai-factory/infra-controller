@@ -42,6 +42,7 @@ use rpc::forge::{
 
 use crate::handlers::machine_validation::apply_config_on_startup;
 use crate::tests::common;
+use crate::tests::common::postgres::wait_for_blocked_query;
 
 fn authenticated_machine_request<T>(
     message: T,
@@ -646,6 +647,24 @@ async fn test_machine_validation_test_on_demand_filter(
             .alerts
             .is_empty()
     );
+
+    // An interrupted previous on-demand run can remain unfinished. It must
+    // not be selected when the machine's current on-demand run is created.
+    let older_validation_id = MachineValidationId::new();
+    const INSERT_UNFINISHED_ON_DEMAND_RUN: &str = "
+        INSERT INTO machine_validation (
+            id, name, machine_id, filter, context, end_time, description, state
+        )
+        VALUES ($1, $2, $3, $4, 'OnDemand', NULL, $5, 'Started')";
+    sqlx::query(INSERT_UNFINISHED_ON_DEMAND_RUN)
+        .bind(older_validation_id)
+        .bind("interrupted-on-demand-run")
+        .bind(mh.host().id)
+        .bind(sqlx::types::Json(MachineValidationFilter::default()))
+        .bind("test fixture for a previous unfinished on-demand run")
+        .execute(&env.pool)
+        .await?;
+
     let allowed_tests = vec!["test1".to_string(), "test2".to_string()];
     let on_demand_response = on_demand_machine_validation(
         &env,
@@ -699,6 +718,7 @@ async fn test_machine_validation_test_on_demand_filter(
     else {
         panic!("expected typed machine validation action");
     };
+    assert_eq!(machine_validation.validation_id, Some(validation_id));
     let typed_filter = machine_validation
         .filter
         .as_ref()
@@ -733,6 +753,89 @@ async fn test_machine_validation_test_on_demand_filter(
         },
     )
     .await;
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn concurrent_on_demand_requests_create_only_one_run(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let mh = create_host_with_machine_validation(&env, None, None).await;
+    let machine_id = mh
+        .host()
+        .rpc_machine()
+        .await
+        .id
+        .expect("fixture host has an ID");
+
+    // Keep both requests behind this lock until they have begun their lookup.
+    // Without the handler's row lock, both requests can observe an unscheduled
+    // machine and each create a run before either updates the request flag.
+    let mut gate = env.pool.begin().await?;
+    sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
+        .bind(mh.host().id)
+        .execute(gate.as_mut())
+        .await?;
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(gate.as_mut())
+        .await?;
+
+    let request = || {
+        tonic::Request::new(rpc::forge::MachineValidationOnDemandRequest {
+            machine_id: Some(machine_id),
+            action: rpc::forge::machine_validation_on_demand_request::Action::Start.into(),
+            tags: Vec::new(),
+            allowed_tests: Vec::new(),
+            run_unverfied_tests: false,
+            contexts: Vec::new(),
+        })
+    };
+    let first_api = env.api.clone();
+    let second_api = env.api.clone();
+    let first_request = request();
+    let second_request = request();
+    let mut first =
+        tokio::spawn(async move { first_api.on_demand_machine_validation(first_request).await });
+    const LOCK_QUERY: &str = "SELECT id FROM machines WHERE id = $1 FOR UPDATE";
+    let first_pid = tokio::select! {
+        result = &mut first => panic!("first request passed the machine lock: {result:?}"),
+        pid = wait_for_blocked_query(&env.pool, gate_pid, LOCK_QUERY) => pid,
+    };
+    let mut second = tokio::spawn(async move {
+        second_api
+            .on_demand_machine_validation(second_request)
+            .await
+    });
+    // PostgreSQL queues the second row-lock request behind the first waiter.
+    tokio::select! {
+        result = &mut first => panic!("first request passed the machine lock: {result:?}"),
+        result = &mut second => panic!("second request passed the machine lock: {result:?}"),
+        _ = wait_for_blocked_query(&env.pool, first_pid, LOCK_QUERY) => {},
+    }
+    gate.commit().await?;
+
+    let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        tokio::join!(first, second)
+    })
+    .await
+    .expect("concurrent on-demand requests should finish");
+
+    let responses = [
+        first.expect("first request task should not panic"),
+        second.expect("second request task should not panic"),
+    ];
+    assert_eq!(
+        responses.iter().filter(|response| response.is_ok()).count(),
+        1,
+        "exactly one request should create an on-demand validation run"
+    );
+    let error = responses
+        .into_iter()
+        .find_map(Result::err)
+        .expect("the other request should be rejected as already scheduled");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+
     Ok(())
 }
 

@@ -30,7 +30,7 @@ use tokio::task::{JoinError, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::db;
+use super::{ObjectIdsFromDatabase, db};
 use crate::CheckApplied;
 use crate::config::IterationConfig;
 use crate::db_write_batch::DbWriteBatch;
@@ -74,6 +74,10 @@ pub(super) struct StateProcessor<IO: StateControllerIO> {
     pub(super) per_object_state: Option<PerObjectStateRecorder>,
 
     pub(super) object_metrics: HashMap<IO::ObjectId, CollectedMetrics<IO>>,
+    /// The latest complete database object-ID list used only to decide which
+    /// retained measurements contribute to aggregate metrics.
+    pub(super) object_ids_from_database:
+        Option<tokio::sync::watch::Receiver<Option<ObjectIdsFromDatabase<IO::ObjectId>>>>,
     pub(super) cancel_token: CancellationToken,
     pub(super) iteration_config: IterationConfig,
     /// Object handling tasks currently executing. Keeping them in a JoinSet ensures
@@ -277,9 +281,20 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
         let now = std::time::Instant::now();
         self.last_metric_emission_time = now;
 
+        // Filter totals using the latest ID list without removing cache entries.
+        // A newly processed ID may appear in the next database listing.
+        let object_ids_from_database = self
+            .object_ids_from_database
+            .as_ref()
+            .and_then(|receiver| receiver.borrow().clone());
         let mut aggregate = IterationMetrics::<IO>::default();
-        for object_metrics in self.object_metrics.values() {
-            aggregate.merge_object_handling_metrics(&object_metrics.metrics);
+        for (object_id, object_metrics) in &self.object_metrics {
+            if object_ids_from_database
+                .as_ref()
+                .is_none_or(|object_ids_from_database| object_ids_from_database.contains(object_id))
+            {
+                aggregate.merge_object_handling_metrics(&object_metrics.metrics);
+            }
         }
 
         // Remove metrics that have not been refreshed for the configured time

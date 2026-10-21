@@ -55,8 +55,8 @@ type ExpectedRack struct {
 	RackID        string    `bun:"rack_id,notnull"`
 	RackProfileID string    `bun:"rack_profile_id,notnull"`
 	RackGroupID   *string   `bun:"rack_group_id"`
-	Name          string    `bun:"name,nullzero,notnull,default:''"`
-	Description   string    `bun:"description,nullzero,notnull,default:''"`
+	Name          string    `bun:"name,notnull,default:''"`
+	Description   string    `bun:"description,notnull,default:''"`
 	Labels        Labels    `bun:"labels,type:jsonb,nullzero,notnull,default:'{}'"`
 	Created       time.Time `bun:"created,nullzero,notnull,default:current_timestamp"`
 	Updated       time.Time `bun:"updated,nullzero,notnull,default:current_timestamp"`
@@ -427,10 +427,12 @@ func (erd ExpectedRackSQLDAO) Update(ctx context.Context, tx *db.Tx, input Expec
 	return &results[0], nil
 }
 
-// UpdateMultiple updates multiple ExpectedRacks with the given parameters using a single bulk UPDATE query
-// All inputs should update the same set of fields for optimal performance.
-// Since there are 2 operations (UPDATE, SELECT), it is required that
-// this library call happens within a transaction
+// UpdateMultiple updates the supplied fields and returns rows in input order.
+// Name and Description must each be supplied for every input or omitted from
+// every input; mixed presence returns an error before any row is written.
+// Other fields must use the same set of supplied columns, except RackGroupID,
+// which is applied only to inputs that supply it. Call within a transaction so
+// the bulk updates and readback succeed or roll back together.
 func (erd ExpectedRackSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedRackUpdateInput) (_ []ExpectedRack, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, expectedRackDAOSpan := cotel.StartSpan(ctx, "ExpectedRackDAO.UpdateMultiple")
@@ -438,6 +440,14 @@ func (erd ExpectedRackSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inp
 
 	if len(inputs) == 0 {
 		return []ExpectedRack{}, nil
+	}
+	for _, input := range inputs[1:] {
+		if (input.Name == nil) != (inputs[0].Name == nil) {
+			return nil, fmt.Errorf("name must be supplied for every expected rack update or omitted from every update")
+		}
+		if (input.Description == nil) != (inputs[0].Description == nil) {
+			return nil, fmt.Errorf("description must be supplied for every expected rack update or omitted from every update")
+		}
 	}
 
 	expectedRacks := make([]*ExpectedRack, 0, len(inputs))

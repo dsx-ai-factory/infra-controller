@@ -12,12 +12,16 @@ package resource_pool.v1;
 // All providers support every value domain and selection mode. `Stats` is optional.
 //
 // Requests require every message field unless its comment says otherwise. Identity
-// strings are opaque and compared exactly, without normalization. Empty identities,
-// unset required oneofs, unknown enums, and malformed values return `InvalidArgument`
-// when validated. The replay rules below take precedence over revalidating
-// allocation inputs. Authentication and authorization failures return
-// `Unauthenticated` and `PermissionDenied`. A timeout or `Unavailable` leaves the
-// allocation result unknown: recover the same request rather than starting another.
+// strings are opaque UTF-8, compared exactly without normalization, and cannot
+// contain NUL (U+0000). This includes returned authority, pool, and allocation IDs,
+// as well as aliases, owner fields, and revision IDs.
+// There is no per-field length limit; transport message limits still apply.
+// Requests with empty identities, NUL characters, unset required oneofs, unknown
+// enums, or malformed values return `InvalidArgument` when validated. The replay
+// rules below take precedence over revalidating allocation inputs. Authentication
+// and authorization failures return `Unauthenticated` and `PermissionDenied`.
+// A timeout or `Unavailable` leaves the allocation result unknown: recover the same
+// request rather than starting another.
 //
 // Otherwise valid requests for an authority or pool this provider does not serve
 // return `NotFound`. Saved operation or eligibility revision conflicts are checked
@@ -401,7 +405,8 @@ message OperationStatus {
 message Failure {
   // Required semantic rejection; enum numbers match the corresponding gRPC codes.
   FailureCode code = 1;
-  // Required diagnostic without credentials or sensitive request payloads.
+  // Required nonempty diagnostic without NUL (U+0000), credentials, or sensitive
+  // request payloads. Other characters are preserved exactly.
   string message = 2;
 }
 

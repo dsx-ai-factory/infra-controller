@@ -59,7 +59,7 @@ func TestMigrations(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			migrator := migrate.NewMigrator(dbSession.DB, Migrations)
-			migrator.Init(tt.args.ctx)
+			require.NoError(t, migrator.Init(tt.args.ctx))
 			_, err := migrator.Migrate(tt.args.ctx)
 			assert.NoError(t, err)
 			assertExpectedMachineInterfacesColumn(t, dbSession.DB)

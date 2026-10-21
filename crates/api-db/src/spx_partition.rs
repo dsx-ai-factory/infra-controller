@@ -150,6 +150,74 @@ where
         .map_err(|e| DatabaseError::new(query.sql(), e))
 }
 
+/// `find_active_for_share` locks active partitions for attachment admission.
+/// Missing and deleted IDs are omitted; duplicate IDs are locked once. Locks
+/// are acquired in ID order for consistent ordering across callers. Keep the
+/// transaction open through the instance write so deletion cannot release a VNI
+/// between validation and persistence.
+pub async fn find_active_for_share(
+    txn: &mut PgConnection,
+    partition_ids: &[SpxPartitionId],
+) -> DatabaseResult<Vec<SpxPartition>> {
+    if partition_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let query = "SELECT row_to_json(p.*) FROM (
+        SELECT * FROM spx_partitions
+        WHERE id = ANY($1) AND deleted IS NULL
+        ORDER BY id FOR SHARE
+    ) p";
+    let partitions: Vec<SpxPartitionSnapshotPgJson> = sqlx::query_as(query)
+        .bind(partition_ids)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::new(query, e))?;
+
+    partitions
+        .into_iter()
+        .map(|partition| partition.try_into())
+        .collect::<Result<Vec<SpxPartition>, sqlx::Error>>()
+        .map_err(|e| DatabaseError::new(query, e))
+}
+
+/// `lock_for_delete` blocks admissions using `find_active_for_share` until the
+/// transaction ends.
+/// Tombstones are locked too because a retry may still release their VNI.
+/// A missing partition returns a wrapped `sqlx::Error::RowNotFound`.
+pub async fn lock_for_delete(
+    txn: &mut PgConnection,
+    partition_id: SpxPartitionId,
+) -> DatabaseResult<()> {
+    let query = "SELECT id FROM spx_partitions WHERE id = $1 FOR UPDATE";
+    sqlx::query_scalar::<_, SpxPartitionId>(query)
+        .bind(partition_id)
+        .fetch_one(txn)
+        .await
+        .map(|_| ())
+        .map_err(|e| DatabaseError::new(query, e))
+}
+
+/// `has_instance_references` includes terminating instances whose attachment
+/// configuration has not been removed. Deletion callers must hold the partition
+/// lock and run this query in a separate READ COMMITTED statement after acquiring
+/// it, so admissions committed during the lock wait are visible.
+pub async fn has_instance_references(
+    txn: impl DbReader<'_>,
+    partition_id: SpxPartitionId,
+) -> DatabaseResult<bool> {
+    let query = "SELECT EXISTS (
+        SELECT 1 FROM instances
+        WHERE (spx_config -> 'spx_attachments')
+            @> jsonb_build_array(jsonb_build_object('spx_partition_id', $1::text))
+    )";
+    sqlx::query_scalar(query)
+        .bind(partition_id.to_string())
+        .fetch_one(txn)
+        .await
+        .map_err(|e| DatabaseError::new(query, e))
+}
+
 /// `SpxPartitionAlreadyDeleted` means the partition already has a deletion timestamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpxPartitionAlreadyDeleted {
@@ -158,6 +226,8 @@ pub struct SpxPartitionAlreadyDeleted {
 }
 
 /// `mark_as_deleted` records the first deletion and returns the updated partition.
+/// Deletion callers must first use `lock_for_delete` and reject any instance
+/// references found by `has_instance_references` in the same transaction.
 /// An existing deleted partition returns `NotApplied` without changing its timestamps.
 /// If neither the update nor the tombstone lookup finds the partition, the error
 /// wraps `sqlx::Error::RowNotFound`. Callers must release any VNI returned by
@@ -264,6 +334,13 @@ mod tests {
     async fn missing_partition_delete_preserves_row_not_found(pool: sqlx::PgPool) {
         let mut txn = pool.begin().await.expect("begin deletion");
         let id = uuid::Uuid::new_v4().into();
+        let error = lock_for_delete(&mut txn, id)
+            .await
+            .expect_err("missing partition cannot be locked");
+        let DatabaseError::Sqlx(error) = error else {
+            panic!("expected wrapped SQLx error, got {error:?}");
+        };
+        assert!(matches!(error.source, sqlx::Error::RowNotFound));
         let error = mark_as_deleted(id, &mut txn)
             .await
             .expect_err("missing partition remains an error");

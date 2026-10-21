@@ -374,6 +374,7 @@ It supports these common deployment modes:
 | `--skip-rest` | Install prerequisites and Core, but skip all REST phases and REST repo checks. |
 | `--skip-core --skip-rest` | Infrastructure-only run; image tags, image registry, and REST repo are not required. |
 | `--core-values <file>` | Use site-specific Core values instead of `helm-prereqs/values/nico-core.yaml`. |
+| `--flow-values <file>` | Pass a site-specific NICo Flow values file to the `flow` Helm release. Every run resets the release to the chart defaults plus the image and pull-secret settings, so Flow overrides made with `helm upgrade` outside `setup.sh` are lost unless they are in this file. The file must not set `namespaceOverride`: `setup.sh` and the site-agent address Flow in the `flow` namespace. |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest file or kustomize directory. |
 | `--skip-dpf` | Skip the DPF (DOCA Platform Framework) DPU provisioning stack, which installs **by default**. Use for sites with no DPUs or that still use the deprecated iPXE DPU path. See [DPF](#dpf). |
 | `--install-contour` | Install the optional Contour/Envoy ingress controller. The Envoy Service is `LoadBalancer` and is pinned to the `vip-pool-external` MetalLB pool, so that pool must have addresses before the install. Setup aborts if `projectcontour` already runs a Contour that NICo does not manage, rather than upgrading it with these values. |

@@ -144,6 +144,7 @@
 #   ./setup.sh --skip-rms               # skip the Rack Manager Service (installed by default otherwise)
 #   ./setup.sh --skip-core --skip-rest  # fully non-interactive infra-only run
 #   ./setup.sh --core-values /path/to/values.yaml      # use site-specific values for Phase 6
+#   ./setup.sh --flow-values /path/to/flow.yaml        # use site-specific NICo Flow values for Phase 7h
 #   ./setup.sh --metallb-config /path/to/metallb.yaml  # use site-specific MetalLB config (file or kustomize dir)
 #   ./setup.sh --install-contour      # install optional Contour/Envoy Ingress controller
 #   ./setup.sh --site-overlay /path/to/kustomize-dir   # kubectl apply -k after Phase 6 (NTP services, etc.)
@@ -156,6 +157,10 @@
 #
 # Notes:
 #   - --core-values supplies site-specific NICo Core Helm values.
+#   - --flow-values supplies site-specific NICo Flow Helm values. Flow
+#     overrides made outside setup.sh are reset on every run unless they
+#     are in this file. The file must not set namespaceOverride: setup.sh
+#     and the site-agent address Flow in the flow namespace.
 #   - --metallb-config supplies site-specific MetalLB resources.
 #   - --debug enables shell tracing and may print secrets; avoid it when
 #     REGISTRY_PULL_SECRET is set unless logs are protected.
@@ -202,6 +207,7 @@ INSTALL_RMS="${NICO_INSTALL_RMS:-true}"
 WITH_OBSERVABILITY="${WITH_OBSERVABILITY:-false}"
 INSTALL_CONTOUR="${NICO_INSTALL_CONTOUR:-false}"
 CORE_VALUES=""
+FLOW_VALUES=""
 METALLB_CONFIG=""
 SITE_OVERLAY=""
 while [[ $# -gt 0 ]]; do
@@ -221,6 +227,11 @@ while [[ $# -gt 0 ]]; do
             CORE_VALUES="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
             [[ ! -f "${CORE_VALUES}" ]] && { echo "Error: --core-values file not found: $2"; exit 1; }
             shift ;;
+        --flow-values)
+            [[ -z "${2:-}" ]] && { echo "Error: --flow-values requires a file path"; exit 1; }
+            FLOW_VALUES="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
+            [[ ! -f "${FLOW_VALUES}" ]] && { echo "Error: --flow-values file not found: $2"; exit 1; }
+            shift ;;
         --metallb-config)
             [[ -z "${2:-}" ]] && { echo "Error: --metallb-config requires a file or directory path"; exit 1; }
             METALLB_CONFIG="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
@@ -231,7 +242,7 @@ while [[ $# -gt 0 ]]; do
             SITE_OVERLAY="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
             [[ ! -d "${SITE_OVERLAY}" ]] && { echo "Error: --site-overlay directory not found: $2"; exit 1; }
             shift ;;
-        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-dpf] [--skip-rms] [--with-observability] [--install-contour] [--core-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
+        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-dpf] [--skip-rms] [--with-observability] [--install-contour] [--core-values <file>] [--flow-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
     esac
     shift
 done
@@ -2446,6 +2457,12 @@ NICO_FLOW_ARGS=(
     --set "global.image.tag=${NICO_REST_IMAGE_TAG}"
 )
 
+# Site-specific Flow values. Every run resets the release to the chart
+# defaults plus the arguments above, so overrides must live in this file.
+if [[ -n "${FLOW_VALUES}" ]]; then
+    NICO_FLOW_ARGS+=(-f "${FLOW_VALUES}")
+fi
+
 # Render the dockerconfigjson for the chart-managed image-pull-secret. Same
 # pattern as the NICo REST common chart - keep the registry credential on
 # the helm command line so the chart template can install it as a
@@ -2462,24 +2479,40 @@ if [[ -n "${REGISTRY_PULL_SECRET:-}" ]]; then
     )
 fi
 
-# Pre-apply Certificates so cert-manager can issue secrets before the pod schedules.
-echo "Pre-applying flow Certificates (SPIFFE + Temporal client)..."
-helm template flow "${NICO_FLOW_CHART}" \
-    "${NICO_FLOW_ARGS[@]}" \
-    --show-only templates/namespace.yaml | kubectl apply -f -
-helm template flow "${NICO_FLOW_CHART}" \
-    "${NICO_FLOW_ARGS[@]}" \
-    --show-only templates/certificate.yaml | kubectl apply -f -
-kubectl annotate certificate/flow-certificate -n "${NICO_FLOW_NAMESPACE}" \
-    "meta.helm.sh/release-name=flow" \
-    "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
-kubectl annotate certificate/temporal-client-certs -n "${NICO_FLOW_NAMESPACE}" \
-    "meta.helm.sh/release-name=flow" \
-    "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
-kubectl label certificate/flow-certificate -n "${NICO_FLOW_NAMESPACE}" \
-    "app.kubernetes.io/managed-by=Helm" --overwrite
-kubectl label certificate/temporal-client-certs -n "${NICO_FLOW_NAMESPACE}" \
-    "app.kubernetes.io/managed-by=Helm" --overwrite
+# Pre-apply the Namespace and Certificates so cert-manager can issue secrets
+# before the pod schedules. Certificate names come from the rendered chart so a
+# values file that renames them is followed. The namespace cannot move: setup.sh
+# and the NICo REST site-agent address flow.flow.svc.cluster.local directly.
+_flow_render() {
+    helm template flow "${NICO_FLOW_CHART}" "${NICO_FLOW_ARGS[@]}" --show-only "templates/$1"
+}
+_flow_namespace_yaml="$(_flow_render namespace.yaml)"
+_flow_certificates_yaml="$(_flow_render certificate.yaml)"
+_flow_namespace_rendered="$(printf '%s\n' "${_flow_namespace_yaml}" | kubectl apply --dry-run=client -f - -o name)"
+if [[ "${_flow_namespace_rendered}" != "namespace/${NICO_FLOW_NAMESPACE}" ]]; then
+    echo "ERROR: the Flow values render namespace '${_flow_namespace_rendered#namespace/}', but setup.sh and the NICo REST site-agent address Flow in namespace '${NICO_FLOW_NAMESPACE}'." >&2
+    echo "  Remove namespaceOverride from the --flow-values file." >&2
+    exit 1
+fi
+if ! _flow_certificates_rendered="$(printf '%s\n' "${_flow_certificates_yaml}" | kubectl apply --dry-run=client -f - -o name)"; then
+    echo "ERROR: could not read the rendered Flow Certificate names." >&2
+    exit 1
+fi
+if [[ -z "${_flow_certificates_rendered}" ]]; then
+    echo "ERROR: the Flow chart rendered no Certificate resources." >&2
+    exit 1
+fi
+mapfile -t _flow_certificates <<< "${_flow_certificates_rendered}"
+echo "Pre-applying flow Namespace and Certificates (${_flow_certificates[*]#*/})..."
+printf '%s\n' "${_flow_namespace_yaml}" | kubectl apply -f -
+printf '%s\n' "${_flow_certificates_yaml}" | kubectl apply -f -
+for _flow_cert in "${_flow_certificates[@]}"; do
+    kubectl annotate "${_flow_cert}" -n "${NICO_FLOW_NAMESPACE}" \
+        "meta.helm.sh/release-name=flow" \
+        "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
+    kubectl label "${_flow_cert}" -n "${NICO_FLOW_NAMESPACE}" \
+        "app.kubernetes.io/managed-by=Helm" --overwrite
+done
 
 # Annotate/label the namespace itself so the Flow release can adopt the
 # namespace created before the main helm install.
@@ -2489,12 +2522,11 @@ kubectl annotate namespace "${NICO_FLOW_NAMESPACE}" \
 kubectl label namespace "${NICO_FLOW_NAMESPACE}" \
     "app.kubernetes.io/managed-by=Helm" --overwrite
 
-echo "Waiting for cert-manager to issue flow-certificate..."
-kubectl wait --for=condition=Ready certificate/flow-certificate \
-    -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
-echo "Waiting for cert-manager to issue temporal-client-certs..."
-kubectl wait --for=condition=Ready certificate/temporal-client-certs \
-    -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
+for _flow_cert in "${_flow_certificates[@]}"; do
+    echo "Waiting for cert-manager to issue ${_flow_cert#*/}..."
+    kubectl wait --for=condition=Ready "${_flow_cert}" \
+        -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
+done
 
 # Wait for the Flow DB credential ESO sync to land. Fail fast if the Secret
 # never appears instead of allowing the helm install to enter an opaque

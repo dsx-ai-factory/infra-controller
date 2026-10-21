@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -988,6 +989,7 @@ func TestUpdateExpectedRackHandler_Handle(t *testing.T) {
 		SiteID:         site.ID,
 		RackProfileID:  "profile-update-original-2",
 		CreatedBy:      dbUser.ID,
+		Labels:         map[string]string{"env": "stale"},
 	})
 	assert.Nil(t, err)
 	assert.NotNil(t, testER2)
@@ -1085,6 +1087,39 @@ func TestUpdateExpectedRackHandler_Handle(t *testing.T) {
 				c.SetParamValues(org, testER2.ID.String())
 			},
 			expectedStatus: http.StatusOK,
+			checkResponseContent: func(t *testing.T, body []byte) {
+				var response model.APIExpectedRack
+				require.NoError(t, json.Unmarshal(body, &response))
+				expectedLabels := map[string]string{
+					labels.RackLabelChassisManufacturer: "Acme-Updated",
+					labels.RackLabelLocationRegion:      "us-central",
+				}
+				assert.Equal(t, "Updated Rack", response.Name)
+				assert.Equal(t, "Updated description", response.Description)
+				assert.Equal(t, model.APILabels(expectedLabels), response.Labels)
+
+				stored, err := erDAO.Get(ctx, nil, testER2.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, "Updated Rack", stored.Name)
+				assert.Equal(t, "Updated description", stored.Description)
+				assert.Equal(t, cdbm.Labels(expectedLabels), stored.Labels)
+				mockTemporalClient.AssertCalled(t, "ExecuteWorkflow", mock.Anything,
+					mock.MatchedBy(func(options tclient.StartWorkflowOptions) bool {
+						return options.ID == "expected-rack-update-"+site.ID.String()+"-"+testER2.ID.String()
+					}),
+					"UpdateExpectedRack",
+					mock.MatchedBy(func(request *corev1.ExpectedRack) bool {
+						metadata := request.GetMetadata()
+						var actualLabels cdbm.Labels
+						actualLabels.FromProto(metadata.GetLabels())
+						return request.GetRackId().GetId() == testER2.RackID &&
+							metadata.GetName() == "Updated Rack" &&
+							metadata.GetDescription() == "Updated description" &&
+							len(metadata.GetLabels()) == len(expectedLabels) &&
+							maps.Equal(actualLabels, expectedLabels)
+					}),
+				)
+			},
 		},
 		{
 			name: "rack_id cannot be changed (immutable)",

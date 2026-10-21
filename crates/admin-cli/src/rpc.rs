@@ -122,18 +122,30 @@ fn replacement_has_effective_host_bmc(
                     == Some(rpc::ExpectedInterfaceRole::HostBmc);
             }
 
-            let Ok(mac_address) = replacement.mac_address.parse::<MacAddress>() else {
+            let Some(Ok(mac_address)) = replacement
+                .mac_address
+                .as_deref()
+                .map(|mac| mac.parse::<MacAddress>())
+            else {
                 return false;
             };
             let existing_interface = existing
                 .interfaces()
                 .get(index)
                 .filter(|candidate| {
-                    candidate.mac_address.parse::<MacAddress>().ok() == Some(mac_address)
+                    candidate
+                        .mac_address
+                        .as_deref()
+                        .and_then(|mac| mac.parse::<MacAddress>().ok())
+                        == Some(mac_address)
                 })
                 .or_else(|| {
                     existing.interfaces().iter().find(|candidate| {
-                        candidate.mac_address.parse::<MacAddress>().ok() == Some(mac_address)
+                        candidate
+                            .mac_address
+                            .as_deref()
+                            .and_then(|mac| mac.parse::<MacAddress>().ok())
+                            == Some(mac_address)
                     })
                 });
 
@@ -1391,6 +1403,7 @@ impl ApiClient {
             replace_host_nics: replace_interfaces,
             host_lifecycle_profile: host_lifecycle_profile
                 .or(expected_machine.host_lifecycle_profile),
+            server_name: expected_machine.server_name,
         };
 
         self.0
@@ -1440,6 +1453,7 @@ impl ApiClient {
                             disable_lockdown: hlp.disable_lockdown,
                         }
                     }),
+                    server_name: machine.server_name,
                 })
                 .collect(),
         };
@@ -3485,7 +3499,7 @@ mod tests {
     /// Builds the smallest protobuf interface needed by the patch-field table.
     fn expected_interface(role: rpc::ExpectedInterfaceRole) -> rpc::ExpectedInterface {
         rpc::ExpectedInterface {
-            mac_address: "00:11:22:33:44:55".to_string(),
+            mac_address: Some("00:11:22:33:44:55".to_string()),
             role: Some(role as i32),
             ip_allocation: Some(rpc::ExpectedInterfaceIpAllocation::Dynamic as i32),
             ..Default::default()

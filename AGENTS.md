@@ -42,7 +42,6 @@ infra-controller/
 │                        # to get the actual crate name before running
 │                        # `cargo test -p <name>` or similar.
 ├── book/                # mdBook documentation
-├── deploy/              # Kubernetes deployment configs and Kustomization overlays
 ├── dev/                 # Local dev tools (Dockerfiles, test configs, certs)
 ├── helm/                # Helm chart for Kubernetes deployment
 ├── bluefield/           # BlueField DPU-specific components
@@ -430,7 +429,7 @@ check before requesting review.
   - When a documentation objective names implementation or issue links, verify
     that the final document retains those links at the exact review head.
   - Search every changed literal or behavior with
-    `rg -n --fixed-strings '<literal>' README.md crates/ rest-api/ docs/ book/ helm/ helm-prereqs/ deploy/`;
+    `rg -n --fixed-strings '<literal>' README.md crates/ rest-api/ docs/ book/ helm/ helm-prereqs/`;
     reconcile every conflicting hit or establish one canonical explanation and
     link the others to it.
   - New or moved public pages must be present in `docs/index.yml`, and moved or

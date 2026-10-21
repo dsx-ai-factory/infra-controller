@@ -613,10 +613,10 @@ impl Collector for GaugeMetrics {
                 data.unit.clone(),
             );
 
-            let family = families.entry(family_key.clone()).or_insert_with(|| {
+            let family = families.entry(family_key).or_insert_with(|| {
                 let metric_name = format!(
                     "{}_{}_{}_{}",
-                    self.metric_name_prefix, family_key.0, family_key.1, family_key.2
+                    self.metric_name_prefix, data.name, data.metric_type, data.unit
                 );
                 let mut mf = proto::MetricFamily::default();
                 mf.set_name(metric_name);
@@ -625,7 +625,8 @@ impl Collector for GaugeMetrics {
                 mf
             });
 
-            let mut labels: Vec<proto::LabelPair> = self.static_labels.clone();
+            let mut labels = Vec::with_capacity(self.static_labels.len() + data.labels.len());
+            labels.extend_from_slice(&self.static_labels);
 
             for (name, value) in &data.labels {
                 let mut label = proto::LabelPair::new();

@@ -291,6 +291,62 @@ publishes an inventory snapshot; the metrics collector only reads that
 snapshot. Until the first discovery pass completes, the metrics collector
 emits nothing.
 
+### OTLP Ingress and Egress Rates
+
+The hardware health service exposes ingress and acknowledged egress counters on
+its `/metrics` endpoint. Each counter has a `target` label containing the
+configured OTLP endpoint and a `signal` label with the value `logs` or `metrics`.
+Each configured target exposes both counters for both signals, including when
+the target is idle. The counters are cumulative and reset to zero when the
+service restarts. Their names are fixed and do not use `metrics.prefix`.
+
+| Counter | Meaning |
+| --- | --- |
+| `carbide_health_otlp_ingress_records_total` | Log records or metric samples accepted into a target queue, including replacements and insertions that evict an older entry. |
+| `carbide_health_otlp_egress_records_total` | Log records or metric data points acknowledged by the receiver, excluding explicit partial-success rejections. |
+
+For `metrics`, each exported sample contributes one data point to the request.
+Filtered events and collection markers do not count as ingress. Sending the same
+record to multiple targets increments ingress once for each target. Failed
+attempts do not count as egress; successful retries and split requests count only
+their acknowledged records.
+
+Partial-success responses are not retried. If the receiver reports a negative
+rejection count or rejects more records or data points than the request contains,
+the service logs a warning and does not increment egress for that response.
+
+Calculate ingress in records per second:
+
+```promql
+sum by (target, signal) (
+  rate(carbide_health_otlp_ingress_records_total[5m])
+)
+```
+
+Calculate acknowledged egress in records per second:
+
+```promql
+sum by (target, signal) (
+  rate(carbide_health_otlp_egress_records_total[5m])
+)
+```
+
+Both queries sum rates across service instances with the same target and signal.
+The units are log records per second for `logs` and metric samples or data points
+per second for `metrics`. The `[5m]` range averages each rate over five minutes.
+Add scrape-label selectors to restrict either query to a specific instance.
+
+Ingress minus egress is not queue growth: queue replacements, capacity evictions,
+receiver rejections, export failures, and buffered or in-flight records affect
+the difference. Compare the rates with `carbide_health_otlp_queue_depth`,
+`carbide_health_otlp_queue_dropped_total`, and
+`carbide_health_otlp_export_failures_total`, plus the replacement counters
+`{prefix}_otlp_sink_replaced_total` and
+`{prefix}_otlp_sink_metrics_replaced_total`, where `{prefix}` is `metrics.prefix`.
+Queue depth excludes buffered and in-flight batches. Egress measures receiver
+acknowledgment, not unique delivery or downstream storage: a receiver can accept
+a request whose response is lost before a retry.
+
 ### Hardware Health Logs
 
 Use Loki or Grafana Explore to inspect hardware health logs for a host:

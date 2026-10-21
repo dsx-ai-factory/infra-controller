@@ -89,6 +89,11 @@ service Forge {
   rpc GetVpcRoutingState(VpcRoutingStateRequest) returns (VpcRoutingState);
 
   rpc CreateSpxPartition(SpxPartitionCreationRequest) returns (SpxPartition);
+  // Marks the partition deleted and releases its VNI if the partition still owns
+  // that reservation, committing both changes together. Repeating the request
+  // for a deleted, unreferenced partition succeeds. Returns FailedPrecondition
+  // while any instance, including a terminating one, still references it.
+  // An omitted id returns InvalidArgument; an unknown partition returns Internal.
   rpc DeleteSpxPartition(SpxPartitionDeletionRequest) returns (SpxPartitionDeletionResult);
   rpc FindSpxPartitionIds(SpxPartitionSearchFilter) returns (SpxPartitionIdList);
   rpc FindSpxPartitionsByIds(SpxPartitionsByIdsRequest) returns (SpxPartitionList);
@@ -359,6 +364,9 @@ service Forge {
   // picks up the freshly persisted report for downstream processing (pairing,
   // remediation, audit). Returns AlreadyExists
   // if a concurrent refresh or periodic probe is already in progress.
+  // During DPF provisioning, queues exploration and returns the cached report
+  // with exploration_requested=true. The queued refresh runs after all Site
+  // Explorer suppressions are cleared. Non-DPF suppressions alone return FailedPrecondition.
   rpc RefreshEndpointReport(RefreshEndpointReportRequest) returns (site_explorer.ExploredEndpoint);
   // Delete an explored endpoint from the database
   rpc DeleteExploredEndpoint(DeleteExploredEndpointRequest) returns (DeleteExploredEndpointResponse);
@@ -3974,6 +3982,9 @@ message InstanceConfigUpdateRequest {
   // documented on that field), the server does not merge omitted fields.
   // Read-modify-write clients must preserve fields and oneof variants they do
   // not intend to change.
+  // Allocation-time NIC firmware requirements are stored separately and are not
+  // replaced here. SPX edits must preserve captured target bindings; see
+  // SetTenantNicFirmwareConfigRequest for attachment restrictions.
   InstanceConfig config = 3;
   // New Metadata to be utilized by the instance
   Metadata metadata = 4;
@@ -7546,7 +7557,7 @@ message IpxeTemplateList {
 message ExpectedHostNic {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
-  string mac_address = 1;
+  optional string mac_address = 1;
   // Legacy free-form segment hint (bf3, onboard, oob, ...). Kept for backward
   // compatibility; declare `network_segment_type` instead, which wins.
   optional string nic_type = 2;
@@ -7587,6 +7598,12 @@ message ExpectedHostNic {
   // the legacy Host case leaves `network_segment_type` as a first-DHCP
   // selection hint.
   optional ExpectedInterfaceIpAllocation ip_allocation = 9;
+  // Physical interface identifier (for example C1-1-L1), as named in the
+  // Cerebro database.
+  // At least one of mac_address or physical_ifname must be supplied.
+  optional string physical_ifname = 10;
+  // Optional logical interface name; stored for inventory consumers.
+  optional string logical_ifname = 11;
 }
 
 // Forge RPC representation of the per-host policy for how NICo treats DPU
@@ -7699,6 +7716,10 @@ message ExpectedMachine {
   // host_nics, including `[]`; older clients leave it false so an unknown
   // nested HostBmc is not removed by a read-modify-write.
   bool replace_host_nics = 19;
+  // The server_name field is optional and is used to identify the machine. This
+  // name will be presented to the switches in LLDP responses and is potentially
+  // used for cable validation, etc.
+  optional string server_name = 20;
 }
 
 message ExpectedMachineRequest {
@@ -9155,7 +9176,10 @@ message PowerOptions {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   PowerState desired_state = 1;
   google.protobuf.Timestamp desired_state_updated_at = 2;
+  // PowerManagerDisabled when desired_state disables observation; otherwise the
+  // last fetched power state. Disabling does not overwrite the stored observation.
   PowerState actual_state = 3;
+  // Last power-state fetch time, retained while the power manager is disabled.
   google.protobuf.Timestamp actual_state_updated_at = 4;
   common.MachineId host_id = 5 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
   string desired_power_state_version = 6;
@@ -10063,6 +10087,16 @@ enum DpuExtensionServiceType {
   DPF_HELM_CHART = 1;
 }
 
+// Immutable policy controlling when and where an extension service is deployed.
+enum DpuExtensionServiceDeploymentType {
+  option (carbide.codegen.v1.enum_derive) = "serde::Serialize";
+  option (carbide.codegen.v1.enum_derive) = "serde::Deserialize";
+  // Default: deploy through instance attachment.
+  DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_DEMAND_DRIVEN = 0;
+  // DPF Helm charts only: creation requests deployment to all DPUs managed by DPF.
+  DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_BASELINE = 1;
+}
+
 // Enumerates the lifecycle states of an extension service registration.
 //
 // This is distinct from DpuExtensionServiceDeploymentStatus, which describes
@@ -10140,13 +10174,19 @@ message DpuExtensionService {
   // independent from deployment status on individual instances.
   LifecycleStatus lifecycle_status = 11;
 
-  // Required primary/all-active/all policy for Helm; absent for Kubernetes Pod services.
+  // Required primary/all-active/all policy for demand-driven Helm; absent for
+  // baseline Helm and Kubernetes Pod services.
   optional DpuExtensionServiceDpuTarget dpu_target = 12;
 
   // Service-facing interface requirements in ordinal order. Empty means the
   // service has no service network. The current API supports at most one
   // requirement.
   repeated ServiceVpcInterfaceRequirement service_vpc_interfaces = 13;
+
+  // Baseline Helm services deploy to all DPUs managed by DPF at creation time.
+  // Demand-driven services deploy through instance attachment. This choice
+  // cannot change after creation.
+  DpuExtensionServiceDeploymentType deployment_type = 14;
 }
 
 // Address family required by a service-facing interface.
@@ -10184,14 +10224,22 @@ message CreateDpuExtensionServiceRequest {
   // metrics collection service that runs on the DPU.
   optional DpuExtensionServiceObservability observability = 8;
 
-  // Required for Helm: PRIMARY, ALL_ACTIVE, or ALL. Immutable; forbidden for Kubernetes Pod.
+  // Required for demand-driven Helm: PRIMARY, ALL_ACTIVE, or ALL. Immutable;
+  // forbidden for baseline Helm and Kubernetes Pod services.
   optional DpuExtensionServiceDpuTarget dpu_target = 9;
 
   // Service-facing interface requirements. Omitted or empty means no
   // service network. The current API accepts at most one requirement and only
-  // for a DPF Helm chart service. A nonempty declaration is accepted but remains
+  // for a demand-driven DPF Helm chart service. A nonempty declaration remains
   // in retryable Creating state until service VPC reconciliation is available.
   repeated ServiceVpcInterfaceRequirement service_vpc_interfaces = 10;
+
+  // Choose deployment at creation to all DPUs managed by DPF (BASELINE), or
+  // deployment through instance attachment (DEMAND_DRIVEN, the default).
+  // BASELINE is valid only for DPF Helm charts with no dpu_target or service VPC
+  // requirements; baseline services cannot be attached to instances. Unknown
+  // enum values are rejected. This choice cannot change after creation.
+  DpuExtensionServiceDeploymentType deployment_type = 11;
 }
 
 // Complete service-facing interface requirements supplied during an update.
@@ -10230,7 +10278,8 @@ message UpdateDpuExtensionServiceRequest {
   // API rejects a change while any active or terminating instance attachment
   // references the service. Without attachments, a change is eligible under
   // the existing service-type and lifecycle update rules. The current API
-  // accepts at most one requirement and only for a DPF Helm chart service.
+  // accepts at most one requirement and only for a demand-driven DPF Helm
+  // chart service.
   optional ServiceVpcInterfaceRequirements service_vpc_interfaces = 8;
 }
 
@@ -12553,10 +12602,16 @@ message GetTenantNicFirmwareConfigResponse {
 // intent without updating hardware or changing existing allocations. Until NIC
 // firmware preparation is implemented (https://github.com/dsx-ai-factory/infra-controller/issues/6686),
 // Core rejects allocations with nonempty SPX attachments for a tenant with a
-// selected profile, and rejects attachment additions or changes that leave a
-// nonempty SPX list on its existing allocations. Unchanged or cleared attachments
-// remain allowed. Each attempt uses the selection visible to the guard's database
-// read; an attempt already past that read may finish after a selection is committed.
+// selected profile. Allocation captures the tenant selection, profile contents
+// and selected attachment bindings together before commit. Later selection or
+// profile edits affect future allocations, not those captured requirements.
+// An allocation that captured a profile cannot add attachments, even after the
+// live selection is cleared. Without a captured profile, additions retain their
+// existing firmware baseline. Edits must preserve allocation-time attachment
+// bindings; a changed DPA row, host, MAC or PCI address returns FAILED_PRECONDITION.
+// Removing attachments retains the captured bindings until release. Partition
+// edits are allowed when bindings still match. Instances without a captured
+// snapshot use the live selection check for changed, nonempty attachment lists.
 // Complete the Core upgrade before using tenant selections, and do not roll back
 // to allocators that ignore them. Ordinary tenant updates preserve the selection.
 message SetTenantNicFirmwareConfigRequest {

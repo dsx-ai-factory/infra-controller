@@ -40,6 +40,8 @@ accept it in their request's `operation_identity` field and return it alongside
 `operation_status`. The returned identity matches the request, including when
 `Recover` reports `unknown`.
 
+Identifiers, aliases, owner fields, revision IDs, and failure messages must be nonempty UTF-8 without NUL (`U+0000`). NICo preserves their case, whitespace, and other Unicode characters exactly. There is no per-field length limit; transport message limits still apply.
+
 `Allocate` preserves manual-partition exhaustion precedence: when no manual
 values are free, a requested allocation returns `ResourceExhausted`. Otherwise,
 an unavailable requested value returns `FailedPrecondition`. `AllocateExact`
@@ -91,13 +93,7 @@ the complete assignment. Replaying a request returns the same value, allocation
 ID, and optional route target policy. Different slots let one entity own several
 allocations without using its owner ID as a retry key.
 
-`Recover` returning `unknown` only means the provider has not observed the
-request. For example, an allocation request might still arrive after that
-lookup. `Cancel` records that the attempt cannot allocate, and acknowledges
-terminal cancellation only after any allocation and its owned provisioning
-have been removed. If cleanup returns `pending`, the provider continues it for
-the same request; NICo polls `Recover` until it sees `cancelled` or `released`.
-A delayed allocation request then observes the terminal state.
+`Recover` returning `unknown` only means the provider has not observed the request. For example, an allocation request might still arrive after that lookup. `Cancel` records that the attempt cannot allocate, and acknowledges terminal cancellation only after any allocation and its owned provisioning have been removed. If cleanup returns `pending`, the provider continues it for the same request. NICo repeats `Cancel` with the original identity and, when the reply is `pending`, checks `Recover` to see whether cleanup has finished. It stops only after observing `cancelled` or `released`. A delayed allocation request then observes the terminal state.
 
 `Release` also makes the original request terminal. Its allocation ID identifies
 one reservation, so retrying an old release cannot free a later assignment of
@@ -119,18 +115,9 @@ statistics return `Unavailable`, rather than a successful zero count.
 
 ## Conformance and implementation boundaries
 
-The `test-support` feature exposes an in-memory `LocalProvider` and reusable
-conformance scenarios against the generated service trait. The fixture uses a
-finite inventory and retains its request history only while it is alive. The
-suite uses it to check replay, conditional release, and both sequential arrival
-orders for allocation and cancellation. Cleanup completes immediately in this
-fixture. Running the suite requires a Tokio runtime with time enabled; testing
-a remote client requires an adapter to the generated service trait.
+The `test-support` feature exposes an in-memory `LocalProvider` and reusable conformance scenarios against the generated service trait. The fixture uses a finite inventory and retains its request history only while it is alive. The suite uses it to check replay, conditional release, and both sequential arrival orders for allocation and cancellation. Cleanup completes immediately by default. `LocalProvider::with_pending_cancellation` keeps the reservation and simulated provisioning until the test calls `complete_cleanup`. This lets recovery tests observe unfinished cleanup across coordinator restarts. Running the suite requires a Tokio runtime with time enabled; testing a remote client requires an adapter to the generated service trait.
 
-P05 and P07 must add tests for concurrent allocation and cancellation, actual
-provisioning, restart recovery, and cleanup that returns `pending` before remote
-activation. Providers whose RT policy can change must also prove that policy
-updates leave existing assignments intact.
+The [gRPC client tests](../resource-pool/src/grpc/tests.rs) exercise delayed allocation and lost replies over a local server. `terminal_cancel_prevents_an_allocation_already_in_flight` holds an allocation at the server while cancellation finishes, then verifies that the delayed allocation cannot reserve the value. The [coordinator tests](../resource-pool/src/remote/tests.rs) add PostgreSQL persistence, restart recovery, and cleanup that returns `pending`. These tests keep the local provider alive while reconstructing Core's coordinator; they do not prove that an external provider preserves reservations across its own restart or completes real network provisioning. The planned v2.5 P25 activation task owns that provider qualification and offline database restore testing. Providers whose RT policy can change must also prove that policy updates leave existing assignments intact.
 
 Run the package tests, including the generated client/server loopback test:
 
@@ -138,14 +125,4 @@ Run the package tests, including the generated client/server loopback test:
 cargo test -p carbide-resource-pool-api
 ```
 
-Core's [pool conversions](https://github.com/dsx-ai-factory/infra-controller/issues/7634)
-live in [`carbide_resource_pool::value`](../resource-pool/src/value.rs).
-Core's transport adapter belongs to
-[P05](https://github.com/dsx-ai-factory/infra-controller/issues/7134).
-Saved operations belong to
-[P06](https://github.com/dsx-ai-factory/infra-controller/issues/7135), and recovery
-polling belongs to
-[P07](https://github.com/dsx-ai-factory/infra-controller/issues/7136).
-Neither this crate nor these conversions activate a new backend. See the
-[execution and recovery design](../../designs/resource-pool/resource-pool-backend.md)
-for the complete lifecycle and release boundaries.
+Core's [pool conversions](https://github.com/dsx-ai-factory/infra-controller/issues/7634) live in [`carbide_resource_pool::value`](../resource-pool/src/value.rs). Core's transport adapter belongs to [P05](https://github.com/dsx-ai-factory/infra-controller/issues/7134). Saved operations belong to [P06](https://github.com/dsx-ai-factory/infra-controller/issues/7135), and recovery polling belongs to [P07](https://github.com/dsx-ai-factory/infra-controller/issues/7136). [P11](https://github.com/dsx-ai-factory/infra-controller/issues/7140) wires the library coordinator and cleanup sampler into API startup and shutdown. `carbide_resource_pool_cleanup_pending` counts saved cancellation and release requests awaiting confirmation; the integration test exercises it, but production registration also waits for P11. The sampler emits no value before its first successful query. It then retains the last count, with `fresh="true"` while that sample is less than 30 seconds old and `fresh="false"` afterward. Neither this crate nor these conversions activate a new backend. See the [execution and recovery design](../../designs/resource-pool/resource-pool-backend.md) for the complete lifecycle, release boundaries, and metric sampling contract.

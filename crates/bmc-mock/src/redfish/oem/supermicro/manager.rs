@@ -25,7 +25,10 @@ use axum::routing::get;
 use serde_json::json;
 
 use crate::bmc_state::BmcState;
-use crate::json::{JsonExt, JsonPatch};
+use crate::json::JsonExt;
+use crate::redfish::ModelExt;
+use crate::redfish::schema::kcs_interface::{KcsInterface, Privilege};
+use crate::redfish::schema::sys_lockdown::SysLockdown;
 use crate::{Callbacks, http, redfish};
 
 #[derive(Clone)]
@@ -37,12 +40,8 @@ pub(crate) struct SupermicroState {
 impl Default for SupermicroState {
     fn default() -> Self {
         Self {
-            kcs_interface: Arc::new(Mutex::new(json!({
-                "Privilege": "Administrator",
-            }))),
-            sys_lockdown: Arc::new(Mutex::new(json!({
-                "SysLockdownEnabled": false,
-            }))),
+            kcs_interface: Arc::new(Mutex::new(json!({}))),
+            sys_lockdown: Arc::new(Mutex::new(json!({}))),
         }
     }
 }
@@ -72,7 +71,7 @@ fn kcs_interface_resource(manager_id: &str) -> redfish::Resource<'static> {
         odata_id: Cow::Owned(format!(
             "/redfish/v1/Managers/{manager_id}/Oem/Supermicro/KCSInterface"
         )),
-        odata_type: Cow::Borrowed("#KCSInterface.v1_0_0.KCSInterface"),
+        odata_type: Cow::Borrowed(KcsInterface::ODATA_TYPE),
         id: Cow::Borrowed("KCSInterface"),
         name: Cow::Borrowed("KCS Interface"),
     }
@@ -83,21 +82,17 @@ fn sys_lockdown_resource(manager_id: &str) -> redfish::Resource<'static> {
         odata_id: Cow::Owned(format!(
             "/redfish/v1/Managers/{manager_id}/Oem/Supermicro/SysLockdown"
         )),
-        odata_type: Cow::Borrowed("#SysLockdown.v1_0_0.SysLockdown"),
+        odata_type: Cow::Borrowed(SysLockdown::ODATA_TYPE),
         id: Cow::Borrowed("SysLockdown"),
         name: Cow::Borrowed("System Lockdown"),
     }
 }
 
 pub(in crate::redfish) fn manager_oem_patch(manager_id: &str) -> serde_json::Value {
-    json!({
-        "Oem": {
-            "Supermicro": {
-                "KCSInterface": kcs_interface_resource(manager_id).entity_ref(),
-                "SysLockdown": sys_lockdown_resource(manager_id).entity_ref(),
-            }
-        }
-    })
+    let model = crate::redfish::schema::smc_manager_extensions::Manager::new()
+        .kcs_interface(kcs_interface_resource(manager_id).odata_id.as_ref())
+        .sys_lockdown(sys_lockdown_resource(manager_id).odata_id.as_ref());
+    json!({"Oem": {"Supermicro": model}})
 }
 
 pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
@@ -121,8 +116,15 @@ async fn get_kcs_interface<C: Callbacks>(
     if state.manager.find(&manager_id).is_none() {
         return http::not_found();
     }
+    let resource = kcs_interface_resource(&manager_id);
+    let model = KcsInterface::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        resource.name.as_ref(),
+    )
+    .privilege(Privilege::Administrator);
     supermicro
-        .kcs_interface(kcs_interface_resource(&manager_id).json_patch())
+        .kcs_interface(model.into_json())
         .into_ok_response()
 }
 
@@ -151,8 +153,15 @@ async fn get_sys_lockdown<C: Callbacks>(
     if state.manager.find(&manager_id).is_none() {
         return http::not_found();
     }
+    let resource = sys_lockdown_resource(&manager_id);
+    let model = SysLockdown::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        resource.name.as_ref(),
+    )
+    .sys_lockdown_enabled(false);
     supermicro
-        .sys_lockdown(sys_lockdown_resource(&manager_id).json_patch())
+        .sys_lockdown(model.into_json())
         .into_ok_response()
 }
 

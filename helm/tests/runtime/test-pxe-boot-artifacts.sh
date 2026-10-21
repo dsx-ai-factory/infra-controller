@@ -60,7 +60,7 @@ kubectl create secret generic nico-pxe-certificate -n pxe-test \
   --from-literal=ca.crt=runtime-test --from-literal=tls.crt=runtime-test \
   --from-literal=tls.key=runtime-test
 
-for scenario in copied-restrictive bundled kustomize; do
+for scenario in copied-restrictive bundled; do
   cat >"${test_dir}/values.yaml" <<VALUES
 image:
   repository: pxe-boot-artifacts-test
@@ -91,28 +91,13 @@ initContainers:
 VALUES
     artifact=restricted.bin
     expected="restricted artifact"
-  elif [[ "$scenario" == bundled ]]; then
+  else
     artifact=bundled.bin
     expected="bundled artifact"
-  else
-    artifact=restricted.bin
-    expected="restricted artifact"
   fi
-  if [[ "$scenario" == kustomize ]]; then
-    # Exercise the real optional ConfigMap and the component's four copy sidecars.
-    kubectl kustomize "${repo_root}/deploy/tests/pxe-with-boot-artifacts" \
-      | kubectl patch --local -f - --type=merge --patch '{}' -o json \
-      | jq --slurp --arg image "$fixture_image" '
-          map(select(.kind == "Deployment" and .metadata.name == "nico-pxe"))[0]
-          | .metadata.namespace = "pxe-test"
-          | .spec.template.spec.containers |= map(.image = $image | .imagePullPolicy = "Never")
-          | (.spec.template.spec.containers[] | select(.name == "nico-pxe")).env += [{name: "PXE_BIND_ADDRESS", value: "0.0.0.0"}]
-        ' | kubectl apply -f -
-  else
-    helm template pxe-test "$chart" -n pxe-test -f "${test_dir}/values.yaml" \
-      --show-only templates/deployment.yaml --show-only templates/rbac.yaml \
-      | kubectl apply -f -
-  fi
+  helm template pxe-test "$chart" -n pxe-test -f "${test_dir}/values.yaml" \
+    --show-only templates/deployment.yaml --show-only templates/rbac.yaml \
+    | kubectl apply -f -
   kubectl rollout status deployment/nico-pxe -n pxe-test --timeout=120s
   [[ "$(kubectl exec -n pxe-test deployment/nico-pxe -c nico-pxe -- id -u)" == 10001 ]]
   kubectl port-forward -n pxe-test deployment/nico-pxe :8080 >"${test_dir}/port-forward.log" 2>&1 &
@@ -130,23 +115,14 @@ VALUES
     --write-out '%{http_code}' "http://127.0.0.1:${port}/public/blobs/internal/x86_64/${artifact}")"
   printf '%s: HTTP %s\n' "$scenario" "$code"
   [[ "$code" == 200 && "$(cat "${test_dir}/body")" == "$expected" ]]
-  if [[ "$scenario" != bundled ]]; then
-    serve_path=/forge-boot-artifacts
-    [[ "$scenario" != copied-restrictive ]] || serve_path=/custom-boot-path
-    artifact_owner=0
-    [[ "$scenario" != copied-restrictive ]] || artifact_owner=20001
+  if [[ "$scenario" == copied-restrictive ]]; then
+    serve_path=/custom-boot-path
     [[ "$(kubectl exec -n pxe-test deployment/nico-pxe -c nico-pxe -- \
-      stat -c '%a %u %g' "${serve_path}/blobs/internal/x86_64/restricted.bin")" == "640 ${artifact_owner} 10001" ]]
+      stat -c '%a %u %g' "${serve_path}/blobs/internal/x86_64/restricted.bin")" == "640 20001 10001" ]]
     directory_stat="$(kubectl exec -n pxe-test deployment/nico-pxe -c nico-pxe -- \
       stat -c '%a %u %g' "${serve_path}/blobs/internal/x86_64")"
-    if [[ "$scenario" == copied-restrictive ]]; then
-      # fsGroup sets setgid on volume directories; copied directories can inherit it.
-      [[ "$directory_stat" == '750 20001 10001' || "$directory_stat" == '2750 20001 10001' ]]
-    else
-      # The legacy Kustomize copier can create the destination with mkdir's 0755
-      # before cp runs. It must still normalize the directory's group ownership.
-      [[ "${directory_stat#* }" == '0 10001' ]]
-    fi
+    # fsGroup sets setgid on volume directories; copied directories can inherit it.
+    [[ "$directory_stat" == '750 20001 10001' || "$directory_stat" == '2750 20001 10001' ]]
   fi
   printf 'PASS %s: HTTP %s, exact artifact content, serving UID 10001\n' "$scenario" "$code"
   kill "$port_forward_pid"

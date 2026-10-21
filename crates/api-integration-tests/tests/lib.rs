@@ -449,6 +449,13 @@ async fn run_integration() -> eyre::Result<()> {
     )
     .await?;
 
+    exercise_dpf_exploration_suppression(&test_env).await?;
+    metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        r#"carbide_site_explorer_dpf_explorations_deferred_total{request="refresh"}"#,
+    )
+    .await?;
+
     let metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
     assert!(
         metric_infos.iter().any(|metric| {
@@ -474,6 +481,27 @@ async fn run_integration() -> eyre::Result<()> {
             .await?;
         }
     }
+    // Exercise the library sampler on the server's meter without activating a
+    // remote backend. Stop its task before `generate_core_metric_docs`, whose
+    // metric fetch and file write can panic on I/O errors.
+    let mut cleanup_metric_tasks = tokio::task::JoinSet::new();
+    let cleanup_metric_cancel = cancel_token.child_token();
+    carbide_resource_pool::remote::start_cleanup_metrics(
+        test_env.db_pool.clone(),
+        server_handle_2.ready.meter.clone(),
+        &mut cleanup_metric_tasks,
+        cleanup_metric_cancel.clone(),
+    )?;
+    let cleanup_metric_result = metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        r#"carbide_resource_pool_cleanup_pending{fresh="true"} 0"#,
+    )
+    .await;
+    cleanup_metric_cancel.cancel();
+    while let Some(result) = cleanup_metric_tasks.join_next().await {
+        result?;
+    }
+    cleanup_metric_result?;
     generate_core_metric_docs(&test_env.carbide_metrics_addrs);
     drop(mqtt_client);
 
@@ -510,6 +538,69 @@ async fn run_integration() -> eyre::Result<()> {
     }
     test_env.db_pool.close().await;
     bmc_mock_handle.stop().await?;
+    Ok(())
+}
+
+async fn exercise_dpf_exploration_suppression(
+    test_env: &IntegrationTestEnvironment,
+) -> eyre::Result<()> {
+    use model::bmc_suppression::{
+        BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression,
+    };
+    use rpc::forge_api_client::ForgeApiClient;
+    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+
+    let (address, mac): (std::net::IpAddr, MacAddress) = sqlx::query_as(
+        "SELECT e.address, mi.mac_address FROM explored_endpoints e
+         JOIN machine_interface_addresses mia ON mia.address = e.address
+         JOIN machine_interfaces mi ON mi.id = mia.interface_id
+         ORDER BY e.address LIMIT 1",
+    )
+    .fetch_one(&test_env.db_pool)
+    .await?;
+    let mut txn = test_env.db_pool.begin().await?;
+    db::bmc_suppression::upsert(
+        &mut txn,
+        &NewBmcSuppression {
+            bmc_mac_address: mac,
+            subsystem: BmcSuppressionSubsystem::SiteExplorer,
+            source: BmcSuppressionSource::DpfProvisioning,
+            reason: "DPF provisioning".to_string(),
+        },
+    )
+    .await?;
+    txn.commit().await?;
+    let certs = &api_test_helper::utils::LOCALHOST_CERTS;
+    let config = ForgeClientConfig::new(
+        certs.ca_cert.to_string_lossy().into_owned(),
+        Some(forge_tls::client_config::ClientCert {
+            cert_path: certs.client_cert.to_string_lossy().into_owned(),
+            key_path: certs.client_key.to_string_lossy().into_owned(),
+        }),
+    );
+    let client = ForgeApiClient::new(&ApiConfig::new(
+        &format!("https://{}", test_env.carbide_api_addrs[0]),
+        &config,
+    ));
+    let result = client
+        .refresh_endpoint_report(rpc::forge::RefreshEndpointReportRequest {
+            ip_address: address.to_string(),
+        })
+        .await;
+    let mut txn = test_env.db_pool.begin().await?;
+    db::bmc_suppression::delete(
+        &mut txn,
+        mac,
+        BmcSuppressionSubsystem::SiteExplorer,
+        BmcSuppressionSource::DpfProvisioning,
+    )
+    .await?;
+    txn.commit().await?;
+    let queued = result?;
+    eyre::ensure!(
+        queued.exploration_requested,
+        "provisioning must queue refresh"
+    );
     Ok(())
 }
 

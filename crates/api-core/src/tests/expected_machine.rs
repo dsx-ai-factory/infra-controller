@@ -526,7 +526,7 @@ async fn test_replace_all_prevalidates_batch_before_clearing_existing_machines(
 
     let mut invalid_policy = replacement("6A:6B:6C:6D:6E:71", "SERIAL-FIXED");
     invalid_policy.host_nics = vec![rpc::forge::ExpectedInterface {
-        mac_address: "6A:6B:6C:6D:6E:72".into(),
+        mac_address: Some("6A:6B:6C:6D:6E:72".into()),
         ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Fixed as i32),
         ..Default::default()
     }];
@@ -736,6 +736,7 @@ async fn test_add_expected_machine_dpu_serials(pool: sqlx::PgPool) {
         bmc_ip_allocation: None,
         replace_host_nics: false,
         host_lifecycle_profile: None,
+        server_name: None,
         #[allow(deprecated)]
         dpf_enabled: true,
     };
@@ -1684,7 +1685,7 @@ async fn test_concurrent_older_client_update_preserves_interface_fields(
                 bmc_password: "PASS".into(),
                 chassis_serial_number: chassis_serial_number.clone(),
                 host_nics: vec![rpc::forge::ExpectedInterface {
-                    mac_address: interface_mac_address.clone(),
+                    mac_address: Some(interface_mac_address.clone()),
                     role: Some(rpc::forge::ExpectedInterfaceRole::DpuOs as i32),
                     ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Dynamic as i32),
                     ..Default::default()
@@ -1713,7 +1714,7 @@ async fn test_concurrent_older_client_update_preserves_interface_fields(
             bmc_password: "PASS".into(),
             chassis_serial_number,
             host_nics: vec![rpc::forge::ExpectedInterface {
-                mac_address: interface_mac_address,
+                mac_address: Some(interface_mac_address),
                 ..Default::default()
             }],
             ..Default::default()
@@ -1798,7 +1799,7 @@ async fn test_concurrent_replace_all_preserves_latest_interface_fields(
             bmc_password: "PASS".into(),
             chassis_serial_number: chassis_serial_number.clone(),
             host_nics: vec![rpc::forge::ExpectedInterface {
-                mac_address: interface_mac_address.clone(),
+                mac_address: Some(interface_mac_address.clone()),
                 role: Some(rpc::forge::ExpectedInterfaceRole::DpuOs as i32),
                 ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Dynamic as i32),
                 ..Default::default()
@@ -1832,7 +1833,7 @@ async fn test_concurrent_replace_all_preserves_latest_interface_fields(
         bmc_password: "PASS".into(),
         chassis_serial_number,
         host_nics: vec![rpc::forge::ExpectedInterface {
-            mac_address: interface_mac_address,
+            mac_address: Some(interface_mac_address),
             ..Default::default()
         }],
         ..Default::default()
@@ -1934,7 +1935,7 @@ async fn test_replace_all_preserves_interface_fields_omitted_by_older_client(
                 bmc_password: "PASS".into(),
                 chassis_serial_number: serial.clone(),
                 host_nics: vec![rpc::forge::ExpectedInterface {
-                    mac_address: interface_mac.clone(),
+                    mac_address: Some(interface_mac.clone()),
                     role: Some(rpc::forge::ExpectedInterfaceRole::DpuBmc as i32),
                     ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Retained as i32),
                     ..Default::default()
@@ -1954,7 +1955,7 @@ async fn test_replace_all_preserves_interface_fields_omitted_by_older_client(
                     bmc_password: "PASS".into(),
                     chassis_serial_number: serial,
                     host_nics: vec![rpc::forge::ExpectedInterface {
-                        mac_address: interface_mac,
+                        mac_address: Some(interface_mac),
                         role,
                         ip_allocation: allocation,
                         ..Default::default()
@@ -2055,7 +2056,7 @@ async fn test_authoritative_interface_replacement_removes_nested_host_bmc(
                 bmc_password: "PASS".into(),
                 chassis_serial_number: serial.clone(),
                 host_nics: vec![rpc::forge::ExpectedInterface {
-                    mac_address: bmc_mac.clone(),
+                    mac_address: Some(bmc_mac.clone()),
                     role: Some(rpc::forge::ExpectedInterfaceRole::HostBmc as i32),
                     ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Retained as i32),
                     network_segment_type: Some(rpc::forge::NetworkSegmentType::Underlay as i32),
@@ -2067,7 +2068,7 @@ async fn test_authoritative_interface_replacement_removes_nested_host_bmc(
 
         let interfaces = keep_host_interface
             .then(|| rpc::forge::ExpectedInterface {
-                mac_address: host_mac.clone(),
+                mac_address: Some(host_mac.clone()),
                 role: Some(rpc::forge::ExpectedInterfaceRole::Host as i32),
                 ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Dynamic as i32),
                 ..Default::default()
@@ -2403,7 +2404,7 @@ async fn test_expected_machine_update_fixed_interface_single_batch_parity(
             bmc_password: "PASS".into(),
             chassis_serial_number: serial,
             host_nics: vec![rpc::forge::ExpectedInterface {
-                mac_address: interface_mac.to_string(),
+                mac_address: Some(interface_mac.to_string()),
                 role: Some(rpc::forge::ExpectedInterfaceRole::DpuBmc as i32),
                 ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Fixed as i32),
                 fixed_ip: Some(fixed_ip.to_string()),
@@ -2534,7 +2535,7 @@ async fn test_expected_machine_update_fixed_interface_requires_managed_prefix(
             bmc_password: "PASS".into(),
             chassis_serial_number: serial,
             host_nics: vec![rpc::forge::ExpectedInterface {
-                mac_address: interface_mac.to_string(),
+                mac_address: Some(interface_mac.to_string()),
                 ip_allocation: case
                     .explicit_policy
                     .then_some(rpc::forge::ExpectedInterfaceIpAllocation::Fixed as i32),
@@ -2649,7 +2650,7 @@ async fn test_legacy_bmc_update_preserves_interface_behavior_and_restores_naming
         bmc_mac,
         &[common::api_fixtures::network_segment::FIXTURE_UNDERLAY_NETWORK_SEGMENT_GATEWAY.ip()],
         Some(model::expected_machine::ExpectedInterface {
-            mac_address: bmc_mac,
+            mac_address: Some(bmc_mac),
             role: ExpectedInterfaceRole::HostBmc,
             ..Default::default()
         }),
@@ -2850,7 +2851,7 @@ async fn test_add_with_host_nic_fixed_ip_creates_interface(
             host_nics: fixed_addresses
                 .iter()
                 .map(|address| rpc::forge::ExpectedInterface {
-                    mac_address: nic_mac.to_string(),
+                    mac_address: Some(nic_mac.to_string()),
                     nic_type: Some("onboard".into()),
                     fixed_ip: Some(address.to_string()),
                     ..Default::default()
@@ -2867,7 +2868,7 @@ async fn test_add_with_host_nic_fixed_ip_creates_interface(
         .await?
         .expect("expected machine should exist");
     for expected_interface in &expected_machine.data.interfaces {
-        if expected_interface.mac_address == nic_mac {
+        if expected_interface.mac_address == Some(nic_mac) {
             carbide_site_explorer::try_apply_expected_interface(
                 &env.pool,
                 &expected_machine,
@@ -2932,7 +2933,7 @@ async fn expected_machine_with_pending_fixed_interface(
             },
             bmc_ip_address: role.is_host_bmc().then_some(fixed_ip),
             interfaces: vec![model::expected_machine::ExpectedInterface {
-                mac_address,
+                mac_address: Some(mac_address),
                 role,
                 ip_allocation: Some(ExpectedInterfaceIpAllocation::Fixed),
                 fixed_ip: Some(fixed_ip),
@@ -3046,7 +3047,8 @@ async fn test_site_explorer_skips_superseded_expected_interface_allocations(
                         .host_nics
                         .iter_mut()
                         .find(|interface| {
-                            interface.mac_address == declaration.mac_address.to_string()
+                            interface.mac_address
+                                == Some(declaration.mac_address.unwrap().to_string())
                         })
                         .expect("the update should contain the expected interface");
                     interface.ip_allocation =
@@ -3054,7 +3056,7 @@ async fn test_site_explorer_skips_superseded_expected_interface_allocations(
                     interface.fixed_ip = None;
                 } else {
                     update.host_nics.retain(|interface| {
-                        interface.mac_address != declaration.mac_address.to_string()
+                        interface.mac_address != Some(declaration.mac_address.unwrap().to_string())
                     });
                     update.replace_host_nics = true;
                 }
@@ -3111,7 +3113,7 @@ async fn test_site_explorer_skips_superseded_expected_interface_allocations(
         .await;
 
         assert!(
-            db::machine_interface::find_by_mac_address(&env.pool, declaration.mac_address)
+            db::machine_interface::find_by_mac_address(&env.pool, declaration.mac_address.unwrap())
                 .await?
                 .is_empty(),
             "case: {case}",
@@ -3163,7 +3165,7 @@ async fn test_site_explorer_holds_expected_machine_lock_through_address_applicat
         let id = captured
             .id
             .expect("the stored expected machine should have an ID");
-        let mac_address = declaration.mac_address;
+        let mac_address = declaration.mac_address.unwrap();
         let fixed_ip = declaration
             .fixed_ip
             .expect("the declaration has a fixed IP");
@@ -3201,7 +3203,7 @@ async fn test_site_explorer_holds_expected_machine_lock_through_address_applicat
         let interface = update
             .host_nics
             .iter_mut()
-            .find(|interface| interface.mac_address == mac_address.to_string())
+            .find(|interface| interface.mac_address == Some(mac_address.to_string()))
             .expect("the update should contain the host interface");
         interface.ip_allocation = Some(rpc::forge::ExpectedInterfaceIpAllocation::Dynamic as i32);
         interface.fixed_ip = None;
@@ -3280,7 +3282,7 @@ async fn test_dhcp_discover_uses_fixed_ip_from_interfaces(
             chassis_serial_number: "EM-DHCP-001".into(),
             host_nics: vec![rpc::forge::ExpectedInterface {
                 network_segment_type: None,
-                mac_address: nic_mac.to_string(),
+                mac_address: Some(nic_mac.to_string()),
                 nic_type: Some("onboard".into()),
                 fixed_ip: Some(fixed_ip.into()),
                 fixed_mask: None,
@@ -3404,7 +3406,7 @@ async fn test_dhcp_discover_preallocates_host_nic_fixed_ip_for_unknown_mac(
             chassis_serial_number: "EM-RECOVERY-002".into(),
             host_nics: vec![rpc::forge::ExpectedInterface {
                 network_segment_type: None,
-                mac_address: nic_mac.to_string(),
+                mac_address: Some(nic_mac.to_string()),
                 nic_type: Some("onboard".into()),
                 fixed_ip: Some(fixed_ip.into()),
                 fixed_mask: None,
@@ -3594,7 +3596,7 @@ async fn test_dhcp_honors_primary_host_nic(
             chassis_serial_number: "EM-PRIMARY-001".into(),
             host_nics: vec![rpc::forge::ExpectedInterface {
                 network_segment_type: None,
-                mac_address: primary_mac.to_string(),
+                mac_address: Some(primary_mac.to_string()),
                 nic_type: Some("onboard".into()),
                 fixed_ip: None,
                 fixed_mask: None,
@@ -3655,7 +3657,7 @@ async fn test_dhcp_marks_non_primary_mac_as_non_primary(
             host_nics: vec![
                 rpc::forge::ExpectedInterface {
                     network_segment_type: None,
-                    mac_address: primary_mac.to_string(),
+                    mac_address: Some(primary_mac.to_string()),
                     nic_type: Some("onboard".into()),
                     fixed_ip: None,
                     fixed_mask: None,
@@ -3665,7 +3667,7 @@ async fn test_dhcp_marks_non_primary_mac_as_non_primary(
                 },
                 rpc::forge::ExpectedInterface {
                     network_segment_type: None,
-                    mac_address: other_mac.to_string(),
+                    mac_address: Some(other_mac.to_string()),
                     nic_type: Some("onboard".into()),
                     fixed_ip: None,
                     fixed_mask: None,
@@ -3725,7 +3727,7 @@ async fn test_add_rejects_multiple_primary_host_nics(
             host_nics: vec![
                 rpc::forge::ExpectedInterface {
                     network_segment_type: None,
-                    mac_address: mac_a.to_string(),
+                    mac_address: Some(mac_a.to_string()),
                     nic_type: Some("onboard".into()),
                     fixed_ip: None,
                     fixed_mask: None,
@@ -3735,7 +3737,7 @@ async fn test_add_rejects_multiple_primary_host_nics(
                 },
                 rpc::forge::ExpectedInterface {
                     network_segment_type: None,
-                    mac_address: mac_b.to_string(),
+                    mac_address: Some(mac_b.to_string()),
                     nic_type: Some("onboard".into()),
                     fixed_ip: None,
                     fixed_mask: None,
@@ -3787,7 +3789,7 @@ async fn test_batch_update_rejects_multiple_primary_host_nics(
         host_nics: ["9A:9B:9C:9D:9E:31", "9A:9B:9C:9D:9E:32"]
             .into_iter()
             .map(|mac_address| rpc::forge::ExpectedInterface {
-                mac_address: mac_address.into(),
+                mac_address: Some(mac_address.into()),
                 primary: Some(true),
                 ..Default::default()
             })
@@ -3834,7 +3836,7 @@ async fn test_declared_primary_survives_dhcp_arrival_order(
             host_nics: vec![
                 rpc::forge::ExpectedInterface {
                     network_segment_type: None,
-                    mac_address: primary_mac.to_string(),
+                    mac_address: Some(primary_mac.to_string()),
                     nic_type: Some("onboard".into()),
                     fixed_ip: None,
                     fixed_mask: None,
@@ -3844,7 +3846,7 @@ async fn test_declared_primary_survives_dhcp_arrival_order(
                 },
                 rpc::forge::ExpectedInterface {
                     network_segment_type: None,
-                    mac_address: other_mac.to_string(),
+                    mac_address: Some(other_mac.to_string()),
                     nic_type: Some("onboard".into()),
                     fixed_ip: None,
                     fixed_mask: None,
@@ -4385,7 +4387,7 @@ async fn test_host_bmc_declaration_validation(
             name: "one declaration with compatibility primary false",
             suffix: 0x20,
             interfaces: vec![rpc::forge::ExpectedInterface {
-                mac_address: "5A:5B:5C:5D:62:20".into(),
+                mac_address: Some("5A:5B:5C:5D:62:20".into()),
                 role: Some(rpc::forge::ExpectedInterfaceRole::HostBmc as i32),
                 ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Retained as i32),
                 primary: Some(false),
@@ -4398,13 +4400,13 @@ async fn test_host_bmc_declaration_validation(
             suffix: 0x21,
             interfaces: vec![
                 rpc::forge::ExpectedInterface {
-                    mac_address: "5A:5B:5C:5D:62:21".into(),
+                    mac_address: Some("5A:5B:5C:5D:62:21".into()),
                     role: Some(rpc::forge::ExpectedInterfaceRole::HostBmc as i32),
                     ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Retained as i32),
                     ..Default::default()
                 },
                 rpc::forge::ExpectedInterface {
-                    mac_address: "5A:5B:5C:5D:62:21".into(),
+                    mac_address: Some("5A:5B:5C:5D:62:21".into()),
                     role: Some(rpc::forge::ExpectedInterfaceRole::HostBmc as i32),
                     ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Dynamic as i32),
                     ..Default::default()
@@ -4416,7 +4418,7 @@ async fn test_host_bmc_declaration_validation(
             name: "Host BMC MAC differs from the machine key",
             suffix: 0x22,
             interfaces: vec![rpc::forge::ExpectedInterface {
-                mac_address: "5A:5B:5C:5D:62:FF".into(),
+                mac_address: Some("5A:5B:5C:5D:62:FF".into()),
                 role: Some(rpc::forge::ExpectedInterfaceRole::HostBmc as i32),
                 ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Retained as i32),
                 ..Default::default()
@@ -4427,7 +4429,7 @@ async fn test_host_bmc_declaration_validation(
             name: "Host BMC declares itself primary",
             suffix: 0x23,
             interfaces: vec![rpc::forge::ExpectedInterface {
-                mac_address: "5A:5B:5C:5D:62:23".into(),
+                mac_address: Some("5A:5B:5C:5D:62:23".into()),
                 role: Some(rpc::forge::ExpectedInterfaceRole::HostBmc as i32),
                 ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Retained as i32),
                 primary: Some(true),
@@ -4440,13 +4442,13 @@ async fn test_host_bmc_declaration_validation(
             suffix: 0x24,
             interfaces: vec![
                 rpc::forge::ExpectedInterface {
-                    mac_address: "5A:5B:5C:5D:62:A4".into(),
+                    mac_address: Some("5A:5B:5C:5D:62:A4".into()),
                     role: Some(rpc::forge::ExpectedInterfaceRole::DpuOs as i32),
                     ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Retained as i32),
                     ..Default::default()
                 },
                 rpc::forge::ExpectedInterface {
-                    mac_address: "5A:5B:5C:5D:62:A4".into(),
+                    mac_address: Some("5A:5B:5C:5D:62:A4".into()),
                     role: Some(rpc::forge::ExpectedInterfaceRole::DpuBmc as i32),
                     ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Retained as i32),
                     ..Default::default()
@@ -4458,7 +4460,7 @@ async fn test_host_bmc_declaration_validation(
             name: "machine BMC MAC uses a non-HostBmc role",
             suffix: 0x25,
             interfaces: vec![rpc::forge::ExpectedInterface {
-                mac_address: "5A:5B:5C:5D:62:25".into(),
+                mac_address: Some("5A:5B:5C:5D:62:25".into()),
                 role: Some(rpc::forge::ExpectedInterfaceRole::DpuBmc as i32),
                 ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Retained as i32),
                 ..Default::default()
@@ -4548,7 +4550,7 @@ async fn test_host_bmc_compatibility_drift_is_read_and_healed(
     env.api
         .add_expected_machine(tonic::Request::new(rpc::forge::ExpectedMachine {
             host_nics: vec![rpc::forge::ExpectedInterface {
-                mac_address: bmc_mac.to_string(),
+                mac_address: Some(bmc_mac.to_string()),
                 role: Some(rpc::forge::ExpectedInterfaceRole::HostBmc as i32),
                 ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Retained as i32),
                 network_segment_type: Some(rpc::forge::NetworkSegmentType::Admin as i32),
@@ -4668,7 +4670,7 @@ async fn test_host_bmc_updates_preserve_and_reset_compatibility_fixed(
                 bmc_ip_address: Some(address.clone()),
                 bmc_ip_allocation: Some(rpc::forge::BmcIpAllocationType::Fixed as i32),
                 host_nics: vec![rpc::forge::ExpectedInterface {
-                    mac_address: bmc_mac.clone(),
+                    mac_address: Some(bmc_mac.clone()),
                     role: Some(rpc::forge::ExpectedInterfaceRole::HostBmc as i32),
                     fixed_ip: Some(address.clone()),
                     ..Default::default()
@@ -4687,7 +4689,7 @@ async fn test_host_bmc_updates_preserve_and_reset_compatibility_fixed(
             chassis_serial_number: serial.clone(),
             bmc_ip_address: Some(address.clone()),
             host_nics: vec![rpc::forge::ExpectedInterface {
-                mac_address: bmc_mac.clone(),
+                mac_address: Some(bmc_mac.clone()),
                 // Omitted role and policy model clients that do not know the
                 // stored HostBmc details.
                 role: None,
@@ -4897,7 +4899,7 @@ async fn test_create_missing_from_preallocates_interfaces(
             bmc_ip_address: Some(bmc_ip),
             interfaces: vec![model::expected_machine::ExpectedInterface {
                 network_segment_type: None,
-                mac_address: nic_mac,
+                mac_address: Some(nic_mac),
                 nic_type: Some("onboard".into()),
                 fixed_ip: Some(host_ip),
                 fixed_mask: None,
@@ -4936,7 +4938,7 @@ async fn test_create_missing_from_preallocates_interfaces(
         .data
         .interfaces
         .iter()
-        .filter(|interface| interface.mac_address != stored.bmc_mac_address)
+        .filter(|interface| interface.mac_address != Some(stored.bmc_mac_address))
     {
         carbide_site_explorer::try_apply_expected_interface(&env.pool, &stored, interface, None)
             .await;

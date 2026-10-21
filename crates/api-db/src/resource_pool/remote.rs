@@ -3,9 +3,11 @@
 
 //! Remember remote allocation requests before contacting their provider.
 //!
-//! `begin` commits a shared allocation row independently of entity creation.
-//! Subsequent writes update that row through the caller's connection or
-//! transaction. Attachment and release belong in the entity's transaction.
+//! `begin` saves the shared allocation row in the caller's transaction. Its
+//! inner savepoint does not commit that transaction; the caller must commit
+//! before provider I/O, separately from entity attachment. Subsequent writes
+//! use the caller's connection or transaction. Attachment and release belong
+//! in the entity's transaction.
 //! Terminal rows retain the request and result; deleting an entity must not
 //! discard work still owed to a provider.
 
@@ -17,11 +19,11 @@ use model::resource_pool::remote::{
     RemoteAllocationParameters, RemoteAllocationRequest,
 };
 use sqlx::types::Json;
-use sqlx::{PgConnection, PgPool, PgTransaction};
+use sqlx::{PgConnection, PgTransaction};
 use uuid::Uuid;
 
 use crate::db_read::DbReader;
-use crate::{ConditionalWrite, DatabaseError, TransactionVending};
+use crate::{ConditionalWrite, DatabaseError, Transaction};
 
 /// `RemoteAllocationError` explains why an allocation request could not be saved.
 /// If a different request conflicts with both a saved generation and an unfinished
@@ -34,7 +36,7 @@ pub enum RemoteAllocationError {
     /// The same request ID was reused with different inputs or completion authority.
     #[error("remote allocation request {0} already has different inputs")]
     RequestConflict(Uuid),
-    /// The binding is absent or names a different logical pool or authority.
+    /// The binding is absent, is not gRPC, or names a different logical pool or authority.
     #[error("remote allocation request does not match pool binding {0}")]
     BindingMismatch(Uuid),
     /// Another request already used this owner, slot, and generation.
@@ -52,11 +54,12 @@ pub enum RemoteAllocationError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperationNotCurrent;
 
-/// `begin` saves a request and commits it before returning, ready for provider I/O.
+/// `begin` saves a request in the caller's transaction. Commit that transaction
+/// before provider I/O; no transaction may span the provider call.
 /// The shared allocation UUID is the request UUID, from `Pending` through cleanup.
 /// An identical retry returns the original record, even after cleanup. Changing
 /// any request input or completion authority fails without replacing that record.
-/// The transaction verifies that the stored row decodes and matches before commit.
+/// The stored row must decode and match before this helper returns.
 ///
 /// Each owner slot identifies one purpose across pools, e.g. `vni` for a VPC or
 /// `loopback:<vpc-id>` for a DPU. A new generation cannot bypass an older `Pending`
@@ -64,15 +67,16 @@ pub struct OperationNotCurrent;
 /// This also applies to a saved failure: the slot stays blocked until cancellation
 /// is confirmed. If both generation and slot constraints conflict, either
 /// `GenerationExists` or `SlotInUse` can be returned.
-/// Call this before opening the entity transaction; no transaction may span the
-/// subsequent provider call. Provider admission and eligibility checks belong to
-/// the caller, not this storage helper. That includes checking the backend kind,
-/// value domain, stable site identity, and resolved provider pool.
+/// Use a separate transaction from entity attachment. This helper checks the
+/// binding's backend kind, logical pool, and authority. Provider admission,
+/// eligibility, value domain, stable site identity, and resolved provider pool
+/// remain the caller's responsibility.
+/// String inputs must satisfy the text contract in [`model::resource_pool::remote`].
 ///
-/// This commit does not include an entity or controller desire write. Persist any
+/// This write does not include an entity or controller desire write. Persist any
 /// controller desire first; attachment must check that it is still current.
 pub async fn begin(
-    pool: &PgPool,
+    txn: &mut PgTransaction<'_>,
     request: &RemoteAllocationRequest,
     completion_authority: &CompletionAuthority,
 ) -> Result<ResourcePoolAllocation, RemoteAllocationError> {
@@ -86,12 +90,13 @@ pub async fn begin(
         selection: request.selection.clone(),
         completion_authority: completion_authority.clone(),
     };
-    let mut txn = pool.txn_begin().await?;
+    let mut inner_txn = Transaction::begin_inner(txn).await?;
     let query = "INSERT INTO resource_pool_allocations
         (allocation_id, binding_id, pool_name, owner_type, owner_id, remote_request, state)
         SELECT $1, binding_id, pool_name, $3, $4, $5, 'pending'
         FROM resource_pool_binding
         WHERE binding_id = $2 AND authority_id = $6 AND pool_name = $7
+          AND backend_kind = 'grpc'
         ON CONFLICT (allocation_id) DO NOTHING";
     let inserted = sqlx::query(query)
         .bind(request.request_id)
@@ -101,7 +106,7 @@ pub async fn begin(
         .bind(Json(&parameters))
         .bind(&request.pool.authority_id)
         .bind(&request.pool.logical_pool)
-        .execute(&mut **txn)
+        .execute(inner_txn.as_pgconn())
         .await;
 
     if let Err(error) = inserted {
@@ -115,10 +120,10 @@ pub async fn begin(
         };
 
         // Concurrent identical inserts can hit a secondary unique constraint
-        // before ON CONFLICT handles their request ID. The failed transaction
-        // cannot read, so roll it back before checking the winning request.
-        txn.rollback().await?;
-        let Some(stored) = load_allocation(pool, request.request_id).await? else {
+        // before ON CONFLICT handles their request ID. Roll back the savepoint
+        // before reading the winner, keeping the caller's fence and timeout.
+        inner_txn.rollback().await?;
+        let Some(stored) = load_allocation(&mut **txn, request.request_id).await? else {
             return Err(conflict);
         };
         return check_replay(stored, request, &parameters);
@@ -126,11 +131,11 @@ pub async fn begin(
 
     // A concurrent insert may have supplied the row. This separate statement
     // sees its committed inputs under READ COMMITTED before comparing them.
-    let stored = load_allocation(&mut **txn, request.request_id)
+    let stored = load_allocation(inner_txn.as_pgconn(), request.request_id)
         .await?
         .ok_or(RemoteAllocationError::BindingMismatch(request.binding_id))?;
     let stored = check_replay(stored, request, &parameters)?;
-    txn.commit().await?;
+    inner_txn.commit().await?;
     Ok(stored)
 }
 
@@ -185,14 +190,34 @@ async fn load_allocation(
         .map_err(|error| DatabaseError::query(query, error))
 }
 
+/// `last_request_id` finds the end of a recovery pass for one state.
+/// Keeping this ID across pages lets recovery finish a pass even while callers
+/// keep adding requests. `None` means there are no remote requests in this state.
+pub async fn last_request_id(
+    db: impl DbReader<'_>,
+    state: AllocationState,
+) -> Result<Option<Uuid>, DatabaseError> {
+    let query = "SELECT allocation_id FROM resource_pool_allocations
+        WHERE binding_id IS NOT NULL AND state = $1
+        ORDER BY allocation_id DESC LIMIT 1";
+    sqlx::query_scalar(query)
+        .bind(state)
+        .fetch_optional(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// `list` reads up to `limit` remote allocations in request-ID order for recovery.
-/// Pass the last returned ID as `after`; `None` starts a new scan. State can
-/// change between pages, so recovery starts another scan on its next iteration.
+/// Pass the last returned ID as `after`; `None` starts at the beginning. `through`
+/// includes requests up to that ID, or has no upper limit when omitted. Recovery
+/// uses `last_request_id` to keep new arrivals from extending a pass indefinitely.
+/// State can change between pages, so callers must repeat completed passes.
 /// An undecodable record fails the whole page; this helper never skips it.
 pub async fn list(
     db: impl DbReader<'_>,
     state: AllocationState,
     after: Option<Uuid>,
+    through: Option<Uuid>,
     limit: NonZeroU16,
 ) -> Result<Vec<ResourcePoolAllocation>, DatabaseError> {
     let mut query = sqlx::QueryBuilder::new(
@@ -208,6 +233,10 @@ pub async fn list(
         query.push(" AND allocation_id > ");
         query.push_bind(after);
     }
+    if let Some(through) = through {
+        query.push(" AND allocation_id <= ");
+        query.push_bind(through);
+    }
     query.push(" ORDER BY allocation_id LIMIT ");
     query.push_bind(i64::from(limit.get()));
     query
@@ -215,6 +244,19 @@ pub async fn list(
         .fetch_all(db)
         .await
         .map_err(|error| DatabaseError::query(query.sql(), error))
+}
+
+/// `cleanup_backlog` counts remote allocations awaiting confirmed cancellation
+/// or release across every provider authority. Terminal rows remain stored but
+/// no longer contribute to the count.
+pub async fn cleanup_backlog(db: impl DbReader<'_>) -> Result<i64, DatabaseError> {
+    let query = "SELECT count(*) FROM resource_pool_allocations
+        WHERE binding_id IS NOT NULL
+          AND state IN ('cancel_requested', 'release_requested')";
+    sqlx::query_scalar(query)
+        .fetch_one(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
 }
 
 /// `record_result` saves the first assignment or definite rejection while the
@@ -229,13 +271,18 @@ pub async fn list(
 /// Before saving, the caller must validate the response's echoed request, site,
 /// authority, and provider pool against the saved request. For an allocation,
 /// also check its owner and eligibility revision. `AllocationResult` does not
-/// contain those echoed fields. If a matching assignment cannot be used, request
-/// cancellation first, then save its provider handle for cleanup. Saving a result
-/// during cancellation never reopens attachment. Unknown, pending, and transport
-/// failures are not definite results.
+/// contain those echoed fields. Save only a validated assignment. If it cannot
+/// be attached, request cancellation first. An invalid response must not supply
+/// a saved handle: cancellation uses the original request identity without it.
+/// Saving a result during cancellation never reopens attachment. Unknown,
+/// pending, and transport failures are not definite results.
+/// Provider handles and failure messages must also satisfy the text contract in
+/// [`model::resource_pool::remote`].
 ///
 /// A reused provider handle fails with a database constraint error. If this write
 /// uses a transaction, roll it back before requesting cancellation in a new one.
+/// The bounded handle index also rejects a SHA-256 collision; the digest is never
+/// used to identify an assignment or accept a replay.
 pub async fn record_result(
     txn: &mut PgConnection,
     request_id: Uuid,
@@ -321,11 +368,43 @@ pub async fn request_cancel(
     Ok(applied(result.rows_affected() == 1))
 }
 
+/// `request_cancel_if_expired` cancels an abandoned foreground attempt using the
+/// database clock. An unexpired attempt, controller request, or non-pending row
+/// returns `NotApplied`. The caller keeps this write in its fenced transaction.
+pub async fn request_cancel_if_expired(
+    txn: &mut PgTransaction<'_>,
+    request_id: Uuid,
+) -> Result<ConditionalWrite<(), OperationNotCurrent>, DatabaseError> {
+    // As in `attach`, take the row lock before checking the deadline. A request
+    // that expires while we wait must be cancelled on this iteration.
+    let query = "SELECT allocation_id FROM resource_pool_allocations
+        WHERE allocation_id = $1 AND binding_id IS NOT NULL FOR UPDATE";
+    sqlx::query_scalar::<_, Uuid>(query)
+        .bind(request_id)
+        .fetch_optional(&mut **txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+
+    let query = "UPDATE resource_pool_allocations
+        SET state = 'cancel_requested', updated_at = clock_timestamp()
+        WHERE allocation_id = $1 AND binding_id IS NOT NULL AND state = 'pending'
+          AND remote_request #>> '{completion_authority,kind}' = 'foreground'
+          AND (remote_request #>> '{completion_authority,attach_before}')::timestamptz
+            <= clock_timestamp()";
+    let result = sqlx::query(query)
+        .bind(request_id)
+        .execute(&mut **txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(applied(result.rows_affected() == 1))
+}
+
 /// `request_release` saves cleanup of one attached allocation alongside the
 /// entity change that stops using it. The caller must first satisfy its drain
 /// or retention checks. The original request ID and `provider_allocation_id`
 /// select this exact assignment, even if a later generation has reused its owner
 /// slot or value. The provider handle is distinct from NICo's allocation UUID.
+/// Pass the original validated handle unchanged.
 /// Repeating release after the state changes returns `NotApplied`.
 pub async fn request_release(
     txn: &mut PgTransaction<'_>,
