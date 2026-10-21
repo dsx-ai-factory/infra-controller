@@ -1705,18 +1705,13 @@ impl MachineStateHandler {
                             mh_snapshot.host_snapshot.state.version,
                             mh_snapshot.host_snapshot.status.last_cleanup_time,
                         ) {
-                            let entered_state_at =
-                                mh_snapshot.host_snapshot.state.version.timestamp();
-                            let early_retry_attempted = mh_snapshot
-                                .host_snapshot
-                                .status
-                                .last_reboot_requested
-                                .as_ref()
-                                .is_some_and(|request| request.time >= entered_state_at);
+                            let early_retry_attempted = dell_scout_early_retry_attempted(
+                                &mh_snapshot.host_snapshot,
+                                false,
+                            );
                             let status = match trigger_dell_scout_early_retry_if_needed(
                                 mh_snapshot,
                                 early_retry_attempted,
-                                None,
                                 &self.reachability_params,
                                 ctx,
                             )
@@ -6088,14 +6083,44 @@ fn dell_scout_early_retry(
     })
 }
 
+fn dell_scout_early_retry_attempted(
+    host: &HostMachine,
+    normal_retry_attempted: bool,
+) -> bool {
+    // Writes from the iteration that enters a state are persisted before its
+    // version is advanced, so only a reboot at or after the version timestamp
+    // was requested from within the current state.
+    normal_retry_attempted
+        || host
+            .status
+            .last_reboot_requested
+            .as_ref()
+            .is_some_and(|request| request.time >= host.state.version.timestamp())
+}
+
 async fn trigger_dell_scout_early_retry_if_needed(
     state: &ManagedHostStateSnapshot,
     retry_attempted: bool,
-    retry_count: Option<i64>,
     reachability_params: &ReachabilityParams,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<Option<RebootStatus>, StateHandlerError> {
     let host = &state.host_snapshot;
+    let entered_state_at = host.state.version.timestamp();
+    let current_time = Utc::now();
+
+    // Preserve the normal recovery policy before the Dell-specific deadline.
+    // These cheap checks also avoid a Site Explorer lookup after Scout contacts
+    // NICo or after any retry has already been requested in this state.
+    if retry_attempted
+        || host
+            .status
+            .last_scout_contact_time
+            .is_some_and(|contact| contact >= entered_state_at)
+        || current_time < entered_state_at + DELL_SCOUT_EARLY_RETRY_DELAY
+    {
+        return Ok(None);
+    }
+
     // Proactive hosts have default hardware inventory until Scout first boots.
     // Use Site Explorer's BMC vendor while Scout's vendor is still unknown.
     let scout_vendor = host.bmc_vendor();
@@ -6112,31 +6137,21 @@ async fn trigger_dell_scout_early_retry_if_needed(
     };
     let Some(decision) = dell_scout_early_retry(
         is_dell,
-        host.state.version.timestamp(),
+        entered_state_at,
         host.status.last_scout_contact_time,
         retry_attempted,
-        Utc::now(),
+        current_time,
     ) else {
         return Ok(None);
     };
 
-    match decision {
-        DellScoutEarlyRetry::WaitUntil(retry_at) => {
-            return Ok(Some(RebootStatus {
-                increase_retry_count: false,
-                status: format!(
-                    "Waiting for Scout to contact NICo. Will attempt an early Dell host reboot at {retry_at}"
-                ),
-            }));
-        }
-        DellScoutEarlyRetry::RetryNow => {}
-    }
+    debug_assert_eq!(decision, DellScoutEarlyRetry::RetryNow);
 
     let early_retry_params = ReachabilityParams {
         failure_retry_time: DELL_SCOUT_EARLY_RETRY_DELAY,
         ..*reachability_params
     };
-    trigger_reboot_if_needed_without_power_cycle(host, state, retry_count, &early_retry_params, ctx)
+    trigger_reboot_if_needed_without_power_cycle(host, state, None, &early_retry_params, ctx)
         .await
         .map(Some)
 }
@@ -9635,28 +9650,32 @@ impl StateHandler for InstanceStateHandler {
                 InstanceState::BootingWithDiscoveryImage { retry } => {
                     if !rebooted(&mh_snapshot.host_snapshot) {
                         let retry_count = Some(retry.count as i64 + 1);
-                        let status = match trigger_dell_scout_early_retry_if_needed(
-                            mh_snapshot,
+                        let early_retry_attempted = dell_scout_early_retry_attempted(
+                            &mh_snapshot.host_snapshot,
                             retry.count > 0,
-                            retry_count,
+                        );
+                        if let Some(status) = trigger_dell_scout_early_retry_if_needed(
+                            mh_snapshot,
+                            early_retry_attempted,
                             &self.reachability_params,
                             ctx,
                         )
                         .await?
                         {
-                            Some(status) => status,
-                            None => {
-                                trigger_reboot_if_needed(
-                                    &mh_snapshot.host_snapshot,
-                                    mh_snapshot,
-                                    // can't send 0. 0 will force power-off as cycle calculator.
-                                    retry_count,
-                                    &self.reachability_params,
-                                    ctx,
-                                )
-                                .await?
-                            }
-                        };
+                            // The Dell-specific restart is an extra attempt. Keep the normal retry
+                            // count and its restart/power-cycle schedule unchanged.
+                            return Ok(StateHandlerOutcome::wait(status.status));
+                        }
+
+                        let status = trigger_reboot_if_needed(
+                            &mh_snapshot.host_snapshot,
+                            mh_snapshot,
+                            // can't send 0. 0 will force power-off as cycle calculator.
+                            retry_count,
+                            &self.reachability_params,
+                            ctx,
+                        )
+                        .await?;
 
                         let st = if status.increase_retry_count {
                             let next_state = ManagedHostState::Assigned {
