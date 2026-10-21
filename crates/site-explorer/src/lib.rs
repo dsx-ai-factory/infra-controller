@@ -1464,7 +1464,7 @@ impl SiteExplorer {
             // Record the host's DPU devices against the discovered DPU BMCs.
             // A DPU can appear as a PCIe device under a system or as a chassis
             // network adapter (vendor-dependent), so we scan the PCIe inventory first
-            // and fall back to chassis adapters if no managed DPUs remain expected.
+            // and fall back to chassis adapters if no DPU BMCs matched.
             // DpuExplorationState handles counting and classification; mode changes
             // happen between those steps.
             let mut dpu_exploration = DpuExplorationState::new();
@@ -1510,9 +1510,9 @@ impl SiteExplorer {
             }
 
             // A DPU can show up as a chassis instead of a PCIe device on some
-            // BMCs; fall back to the chassis inventory only if the PCIe scan
-            // found none.
-            if dpu_exploration.expected_managed_total() == 0 {
+            // BMCs; fall back only if PCIe matched no discovered DPU BMC,
+            // independently of the matched DPUs' modes or configuration results.
+            if dpu_exploration.matched_total == 0 {
                 let mut chassis_matches = Vec::new();
                 for chassis in ep.report.chassis.iter() {
                     for record in host_dpu_inventory_records(chassis) {
@@ -4076,9 +4076,8 @@ fn chassis_id_sort_key(id: &str) -> ChassisIdSortKey {
 
 /// State from exploring a host's DPUs and pairing them with DPU BMCs.
 ///
-/// The counts are only ever incremented (monotonic), so the
-/// bookkeeping can never underflow; DPUs we still expect to manage is
-/// the derived difference ([`DpuExplorationState::expected_managed_total`]).
+/// The counts are only ever incremented (monotonic). The number of DPUs still
+/// expected to be managed is derived by subtracting the NIC count with saturation.
 #[derive(Debug)]
 struct DpuExplorationState {
     /// Host inventory DPUs identified by part number or a discovered BMC serial.
@@ -4162,12 +4161,6 @@ impl DpuExplorationState {
                 matched_dpu.warn_mode_check_failed(&err);
             }
         }
-    }
-
-    /// DPUs we still expect to manage = reported DPUs minus those running as NICs.
-    fn expected_managed_total(&self) -> usize {
-        self.reported_total
-            .saturating_sub(self.running_as_nic_total)
     }
 
     fn needs_expected_serial_fallback(&self) -> bool {
@@ -5596,20 +5589,6 @@ mod tests {
                 )
             },
         );
-    }
-
-    #[test]
-    fn dpu_exploration_expected_managed_total_saturates() {
-        let mut exploration = DpuExplorationState::new();
-        // More NIC-mode than reported (the partial-data case that used to
-        // underflow `-= 1`): the derived total saturates to 0 instead of panicking.
-        exploration.reported_total = 1;
-        exploration.running_as_nic_total = 3;
-        assert_eq!(exploration.expected_managed_total(), 0);
-        // Normal case: reported DPUs minus those running as NICs.
-        exploration.reported_total = 5;
-        exploration.running_as_nic_total = 2;
-        assert_eq!(exploration.expected_managed_total(), 3);
     }
 
     #[test]

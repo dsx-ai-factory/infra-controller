@@ -4119,6 +4119,155 @@ async fn test_site_explorer_enforces_nic_mode_on_fallback_serial_match(
     Ok(())
 }
 
+/// Chassis fallback depends on PCIe serial matching, even when the PCIe DPU
+/// count and operating modes would suggest a different fallback decision.
+#[sqlx_test]
+async fn test_site_explorer_chassis_fallback_depends_on_pcie_matching(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::expected_machine::HostDpuPolicy;
+
+    struct Case {
+        name: &'static str,
+        pcie_serial_matches: bool,
+        configure_chassis_dpu: bool,
+    }
+
+    let env = Env::new(pool).await;
+    let explorer = env.test_site_explorer(SiteExplorerConfig {
+        enabled: Arc::new(true.into()),
+        retained_boot_interface_window: None,
+        explorations_per_run: 10,
+        concurrent_explorations: 1,
+        run_interval: Duration::from_secs(1),
+        create_machines: Arc::new(false.into()),
+        ..Default::default()
+    });
+    let mut hosts = Vec::new();
+    for case in [
+        Case {
+            name: "unmatched PCIe serial allows chassis fallback",
+            pcie_serial_matches: false,
+            configure_chassis_dpu: true,
+        },
+        Case {
+            name: "PCIe match in NIC mode suppresses chassis fallback",
+            pcie_serial_matches: true,
+            configure_chassis_dpu: false,
+        },
+    ] {
+        let pcie_dpu = DpuConfig {
+            nic_mode: Some(BlueFieldOperatingMode::Nic),
+            ..DpuConfig::default()
+        };
+        let chassis_dpu = DpuConfig::default();
+        let host = ManagedHostConfig::default().with_dpus(vec![pcie_dpu.clone()]);
+        let mut txn = env.pool.begin().await?;
+        db::expected_machine::create(
+            &mut txn,
+            ExpectedMachine {
+                id: None,
+                bmc_mac_address: host.bmc_mac_address,
+                data: ExpectedMachineData {
+                    bmc_username: "ADMIN".to_string(),
+                    bmc_password: "PASS".to_string(),
+                    serial_number: host.serial.clone(),
+                    metadata: Metadata::new_with_default_name(),
+                    dpu_policy: HostDpuPolicy::Nic,
+                    ..Default::default()
+                },
+            },
+        )
+        .await?;
+        txn.commit().await?;
+
+        let mut host_bmc = env.new_machine(&host.bmc_mac_address.to_string(), "SomeVendor");
+        let mut pcie_bmc = env.new_machine(&pcie_dpu.bmc_mac_address.to_string(), "NVIDIA/BF/BMC");
+        let mut chassis_bmc =
+            env.new_machine(&chassis_dpu.bmc_mac_address.to_string(), "NVIDIA/BF/BMC");
+        host_bmc.discover_dhcp(env.api()).await?;
+        pcie_bmc.discover_dhcp(env.api()).await?;
+        chassis_bmc.discover_dhcp(env.api()).await?;
+        let host_ip: IpAddr = host_bmc.ip.parse()?;
+        let pcie_ip: IpAddr = pcie_bmc.ip.parse()?;
+        let chassis_ip: IpAddr = chassis_bmc.ip.parse()?;
+
+        let mut host_report: EndpointExplorationReport = host.into();
+        if !case.pcie_serial_matches {
+            host_report.systems[0].pcie_devices[0].serial_number =
+                Some(format!("undiscovered-{}", pcie_dpu.serial));
+        }
+        // The chassis reports a different DPU, so PCIe deduplication cannot
+        // hide an incorrectly enabled chassis fallback.
+        host_report.chassis = vec![Chassis {
+            id: "1".to_string(),
+            network_adapters: vec![NetworkAdapter {
+                id: "BlueField".to_string(),
+                part_number: Some("900-9D3B6-00CV-A".to_string()),
+                serial_number: Some(chassis_dpu.serial.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        explorer.insert_endpoint_results(vec![
+            (host_ip, Ok(host_report)),
+            (pcie_ip, Ok(pcie_dpu.into())),
+            (chassis_ip, Ok(chassis_dpu.into())),
+        ]);
+        hosts.push((case, host_ip, chassis_ip));
+    }
+
+    // Manual ingestion completes preingestion during exploration, so the same
+    // iteration can pair endpoints and persist the managed-host decision.
+    explorer.run_single_iteration().await?;
+
+    let expected_mode_calls = hosts
+        .iter()
+        .filter(|(case, _, _)| case.configure_chassis_dpu)
+        .map(|(_, _, ip)| {
+            (
+                std::net::SocketAddr::new(*ip, 443),
+                BlueFieldOperatingMode::Nic,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        *explorer
+            .endpoint_explorer()
+            .set_nic_mode_calls
+            .lock()
+            .unwrap(),
+        expected_mode_calls,
+    );
+    let managed_hosts = db::explored_managed_host::find_all(&env.pool).await?;
+    for (case, host_ip, _) in hosts {
+        let host_endpoint = db::explored_endpoints::find_by_ips(&env.pool, vec![host_ip])
+            .await?
+            .pop()
+            .unwrap();
+        assert_eq!(
+            host_endpoint.last_redfish_powercycle.is_some(),
+            case.configure_chassis_dpu,
+            "{}: only a queued mode change should reset the host",
+            case.name,
+        );
+        let managed_host = managed_hosts
+            .iter()
+            .find(|host| host.host_bmc_ip == host_ip);
+        assert_eq!(
+            managed_host.is_some(),
+            !case.configure_chassis_dpu,
+            "{}: a queued mode change should keep the host waiting",
+            case.name,
+        );
+        if let Some(managed_host) = managed_host {
+            assert!(managed_host.dpus.is_empty(), "{}", case.name);
+        }
+    }
+
+    Ok(())
+}
+
 /// Some host BMCs (e.g. the AMI/Lenovo GB300 `HG635N_V2`) report the BlueField
 /// as the chassis object itself -- model, part_number and serial_number live on
 /// the chassis, while its nested network adapter carries an empty serial -- and
@@ -4147,9 +4296,7 @@ async fn test_site_explorer_pairs_dpu_from_chassis_serial(
         ..DpuConfig::default()
     };
     // A host with no DPU configs: its report carries no BlueField PCIe device or
-    // network adapter, so the only BlueField is the chassis we push below. (A
-    // configured DPU would inject a phantom BlueField into the host's PCIe scan,
-    // making `expected_managed_total() != 0` and skipping the chassis fallback.)
+    // network adapter, so the only BlueField is the chassis we push below.
     let mock_host = ManagedHostConfig::zero_dpu();
     let host_bmc_mac = mock_host.bmc_mac_address;
 
