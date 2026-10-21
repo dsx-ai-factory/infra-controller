@@ -113,20 +113,6 @@ func (cemh CreateExpectedMachineHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate Expected Machine creation data", verr)
 	}
 
-	// Validate that SKU exists if specified
-	if apiRequest.SkuID != nil {
-		skuDAO := cdbm.NewSkuDAO(cemh.dbSession)
-		_, err = skuDAO.Get(ctx, nil, *apiRequest.SkuID)
-		if err != nil {
-			if errors.Is(err, cdb.ErrDoesNotExist) {
-				logger.Warn().Msg("SKU ID specified in request does not exist")
-				return cutil.NewAPIErrorResponse(c, http.StatusUnprocessableEntity, "SKU ID specified in request does not exist", nil)
-			}
-			logger.Warn().Err(err).Msg("error validating SKU ID in request data")
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate SKU ID in request data due to DB error", nil)
-		}
-	}
-
 	// Retrieve the Site from the DB
 	site, err := common.GetSiteFromIDString(ctx, nil, apiRequest.SiteID, cemh.dbSession)
 	if err != nil {
@@ -154,6 +140,24 @@ func (cemh CreateExpectedMachineHandler) Handle(c echo.Context) error {
 
 	if !hasAccess {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have access to Site", nil)
+	}
+
+	// Keep SKU lookup after Site authorization so denied requests cannot
+	// reveal whether a SKU exists.
+	if apiRequest.SkuID != nil {
+		skuDAO := cdbm.NewSkuDAO(cemh.dbSession)
+		skus, _, err := skuDAO.GetAll(ctx, nil, cdbm.SkuFilterInput{
+			SiteIDs: []uuid.UUID{site.ID},
+			SkuIDs:  []string{*apiRequest.SkuID},
+		}, paginator.PageInput{Limit: cutil.GetPtr(1)})
+		if err != nil {
+			logger.Warn().Err(err).Msg("error validating SKU ID in request data")
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate SKU ID in request data due to DB error", nil)
+		}
+		if len(skus) == 0 {
+			logger.Warn().Msg("SKU ID specified in request does not exist")
+			return cutil.NewAPIErrorResponse(c, http.StatusUnprocessableEntity, "SKU ID specified in request does not exist", nil)
+		}
 	}
 
 	// Check if Site is in Registered state
@@ -640,20 +644,6 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "If provided, Expected Machine ID specified in request data must match URL request value", nil)
 	}
 
-	// Validate that SKU exists if specified
-	if apiRequest.SkuID != nil {
-		skuDAO := cdbm.NewSkuDAO(uemh.dbSession)
-		_, err = skuDAO.Get(ctx, nil, *apiRequest.SkuID)
-		if err != nil {
-			if errors.Is(err, cdb.ErrDoesNotExist) {
-				logger.Warn().Msg("SKU ID specified in request does not exist")
-				return cutil.NewAPIErrorResponse(c, http.StatusUnprocessableEntity, "SKU ID specified in request does not exist", nil)
-			}
-			logger.Warn().Err(err).Msg("error validating SKU ID in request data")
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate SKU ID in request data due to DB error", nil)
-		}
-	}
-
 	// Get ExpectedMachine from DB by ID
 	emDAO := cdbm.NewExpectedMachineDAO(uemh.dbSession)
 	expectedMachine, err := emDAO.Get(ctx, nil, expectedMachineID, []string{cdbm.SiteRelationName}, false)
@@ -686,6 +676,24 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 
 	if !hasAccess {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Current org is not associated with the Site of the Expected Machine", nil)
+	}
+
+	// Keep SKU lookup after Site authorization so denied requests cannot
+	// reveal whether a SKU exists.
+	if apiRequest.SkuID != nil {
+		skuDAO := cdbm.NewSkuDAO(uemh.dbSession)
+		skus, _, err := skuDAO.GetAll(ctx, nil, cdbm.SkuFilterInput{
+			SiteIDs: []uuid.UUID{site.ID},
+			SkuIDs:  []string{*apiRequest.SkuID},
+		}, paginator.PageInput{Limit: cutil.GetPtr(1)})
+		if err != nil {
+			logger.Warn().Err(err).Msg("error validating SKU ID in request data")
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate SKU ID in request data due to DB error", nil)
+		}
+		if len(skus) == 0 {
+			logger.Warn().Msg("SKU ID specified in request does not exist")
+			return cutil.NewAPIErrorResponse(c, http.StatusUnprocessableEntity, "SKU ID specified in request does not exist", nil)
+		}
 	}
 
 	if !bmcMacUnchanged(expectedMachine.BmcMacAddress, apiRequest.BmcMacAddress) {

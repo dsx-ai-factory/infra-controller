@@ -47,7 +47,10 @@ var (
 	}
 )
 
-// ExpectedMachine is a record for each bare-metal host expected to be processed by NICo
+// ExpectedMachine is a record for each bare-metal host expected to be processed by NICo.
+//
+// The SKU foreign key checks only the ID. The `Sku` relation also matches
+// `SiteID` so legacy associations cannot expose another Site's SKU.
 type ExpectedMachine struct {
 	bun.BaseModel `bun:"table:expected_machine,alias:em"`
 
@@ -57,7 +60,7 @@ type ExpectedMachine struct {
 	BmcMacAddress            string                     `bun:"bmc_mac_address,notnull"`
 	ChassisSerialNumber      string                     `bun:"chassis_serial_number,notnull"`
 	SkuID                    *string                    `bun:"sku_id"`
-	Sku                      *SKU                       `bun:"rel:belongs-to,join:sku_id=id"`
+	Sku                      *SKU                       `bun:"rel:belongs-to,join:sku_id=id,join:site_id=site_id"`
 	MachineID                *string                    `bun:"machine_id"`
 	Machine                  *Machine                   `bun:"rel:belongs-to,join:machine_id=id"`
 	FallbackDpuSerialNumbers []string                   `bun:"fallback_dpu_serial_numbers,array"`

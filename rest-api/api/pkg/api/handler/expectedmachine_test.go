@@ -170,6 +170,20 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 	_, err = dbSession.DB.NewInsert().Model(unmanagedSite).Exec(ctx)
 	assert.Nil(t, err)
 
+	otherSite := &cdbm.Site{
+		ID:                       uuid.New(),
+		Name:                     "other-managed-site",
+		Org:                      org,
+		InfrastructureProviderID: infraProv.ID,
+		Status:                   cdbm.SiteStatusRegistered,
+	}
+	_, err = dbSession.DB.NewInsert().Model(otherSite).Exec(ctx)
+	require.NoError(t, err)
+
+	foreignSKU := &cdbm.SKU{ID: "foreign-site-sku", SiteID: otherSite.ID}
+	_, err = dbSession.DB.NewInsert().Model(foreignSKU).Exec(ctx)
+	require.NoError(t, err)
+
 	// Create an existing Expected Machine with a specific MAC address
 	// This will be used to test duplicate MAC address scenario
 	emDAO := cdbm.NewExpectedMachineDAO(dbSession)
@@ -218,6 +232,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 		setupContext     func(c echo.Context)
 		expectedStatus   int
 		expectedErrorMsg *string
+		rejectsMutation  bool
 	}{
 		{
 			name: "successful creation",
@@ -256,7 +271,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				DefaultBmcPassword:       cutil.GetPtr("password"),
 				ChassisSerialNumber:      "CHASSIS124",
 				FallbackDPUSerialNumbers: []string{"DPU001", "DPU002"},
-				SkuID:                    cutil.GetPtr("test-sku-uuid-1"),
+				SkuID:                    cutil.GetPtr("test-sku-uuid-2"),
 				Labels:                   map[string]string{"env": "test"},
 			},
 			setupContext: func(c echo.Context) {
@@ -306,13 +321,16 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				DefaultBmcUsername:  cutil.GetPtr("admin"),
 				DefaultBmcPassword:  cutil.GetPtr("password"),
 				ChassisSerialNumber: "CHASSIS127",
+				SkuID:               cutil.GetPtr("missing-sku"),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
 				c.SetParamNames("orgName")
 				c.SetParamValues(org)
 			},
-			expectedStatus: http.StatusBadRequest,
+			expectedStatus:   http.StatusBadRequest,
+			expectedErrorMsg: cutil.GetPtr("Site specified in request data does not exist"),
+			rejectsMutation:  true,
 		},
 		{
 			name: "site ID is empty",
@@ -346,6 +364,57 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusForbidden,
 		},
 		{
+			name: "foreign Site SKU returns 422",
+			requestBody: model.APIExpectedMachineCreateRequest{
+				SiteID:              site.ID.String(),
+				BmcMacAddress:       "00:11:22:33:44:A1",
+				ChassisSerialNumber: "SKU-VALIDATION",
+				SkuID:               cutil.GetPtr(foreignSKU.ID),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus:   http.StatusUnprocessableEntity,
+			expectedErrorMsg: cutil.GetPtr("SKU ID specified in request does not exist"),
+			rejectsMutation:  true,
+		},
+		{
+			name: "Site access precedes missing SKU lookup",
+			requestBody: model.APIExpectedMachineCreateRequest{
+				SiteID:              unmanagedSite.ID.String(),
+				BmcMacAddress:       "00:11:22:33:44:A2",
+				ChassisSerialNumber: "SKU-VALIDATION",
+				SkuID:               cutil.GetPtr("missing-sku"),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus:   http.StatusForbidden,
+			expectedErrorMsg: cutil.GetPtr("User does not have access to Site"),
+			rejectsMutation:  true,
+		},
+		{
+			name: "Site access precedes existing SKU lookup",
+			requestBody: model.APIExpectedMachineCreateRequest{
+				SiteID:              unmanagedSite.ID.String(),
+				BmcMacAddress:       "00:11:22:33:44:A3",
+				ChassisSerialNumber: "SKU-VALIDATION",
+				SkuID:               cutil.GetPtr(foreignSKU.ID),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus:   http.StatusForbidden,
+			expectedErrorMsg: cutil.GetPtr("User does not have access to Site"),
+			rejectsMutation:  true,
+		},
+		{
 			name: "invalid SKU ID returns 422",
 			requestBody: model.APIExpectedMachineCreateRequest{
 				SiteID:              site.ID.String(),
@@ -361,7 +430,9 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				c.SetParamNames("orgName")
 				c.SetParamValues(org)
 			},
-			expectedStatus: http.StatusUnprocessableEntity,
+			expectedStatus:   http.StatusUnprocessableEntity,
+			expectedErrorMsg: cutil.GetPtr("SKU ID specified in request does not exist"),
+			rejectsMutation:  true,
 		},
 		{
 			name: "successful creation with rackId",
@@ -406,6 +477,13 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			workflowCallsBefore := len(mockTemporalClient.Calls)
+			var countBefore int
+			if tt.rejectsMutation {
+				countBefore, err = dbSession.DB.NewSelect().Model((*cdbm.ExpectedMachine)(nil)).Count(ctx)
+				require.NoError(t, err)
+			}
+
 			// Create request
 			reqBody, err := json.Marshal(tt.requestBody)
 			require.NoError(t, err)
@@ -432,6 +510,13 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				t.Errorf("Response: %v", rec.Body.String())
 			}
 
+			if tt.rejectsMutation {
+				assert.Len(t, mockTemporalClient.Calls, workflowCallsBefore)
+				countAfter, readErr := dbSession.DB.NewSelect().Model((*cdbm.ExpectedMachine)(nil)).Count(ctx)
+				require.NoError(t, readErr)
+				assert.Equal(t, countBefore, countAfter, "rejected SKU must not create an Expected Machine")
+			}
+
 			// For successful creations, verify labels and rackId are returned in response
 			if tt.expectedStatus == http.StatusCreated {
 				var response model.APIExpectedMachine
@@ -442,6 +527,11 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				assert.Equal(t, "true", string(fields["isDpfEnabled"]))
 				stored, err := emDAO.Get(ctx, nil, response.ID, nil, false)
 				require.NoError(t, err)
+				assert.Equal(t, tt.requestBody.SkuID, response.SkuID)
+				assert.Equal(t, tt.requestBody.SkuID, stored.SkuID)
+				require.Len(t, mockTemporalClient.Calls, workflowCallsBefore+1)
+				workflowRequest := mockTemporalClient.Calls[workflowCallsBefore].Arguments.Get(3).(*corev1.ExpectedMachine)
+				assert.Equal(t, tt.requestBody.SkuID, workflowRequest.SkuId)
 				assert.Nil(t, stored.IsDpfEnabled, "response default must not change the stored optional value")
 				if tt.requestBodyJSON != "" {
 					assert.JSONEq(t, `{}`, string(fields["labels"]))
@@ -500,6 +590,10 @@ func TestGetAllExpectedMachineHandler_Handle(t *testing.T) {
 	_, err = dbSession.DB.NewInsert().Model(unmanagedSite).Exec(ctx)
 	assert.Nil(t, err)
 
+	foreignSKU := &cdbm.SKU{ID: "foreign-site-sku", SiteID: unmanagedSite.ID, Description: "private foreign SKU details"}
+	_, err = dbSession.DB.NewInsert().Model(foreignSKU).Exec(ctx)
+	require.NoError(t, err)
+
 	// Create a Machine first
 	mDAO := cdbm.NewMachineDAO(dbSession)
 	machineID := uuid.NewString()
@@ -527,6 +621,7 @@ func TestGetAllExpectedMachineHandler_Handle(t *testing.T) {
 		SiteID:                   site.ID,
 		BmcMacAddress:            managedEMMAC,
 		ChassisSerialNumber:      "MANAGED-CHASSIS",
+		SkuID:                    &foreignSKU.ID,
 		FallbackDpuSerialNumbers: []string{"DPU001"},
 		MachineID:                &machineID,
 	})
@@ -538,6 +633,7 @@ func TestGetAllExpectedMachineHandler_Handle(t *testing.T) {
 		SiteID:                   unmanagedSite.ID,
 		BmcMacAddress:            "00:11:22:33:44:BB",
 		ChassisSerialNumber:      "UNMANAGED-CHASSIS",
+		SkuID:                    &foreignSKU.ID,
 		FallbackDpuSerialNumbers: []string{"DPU002"},
 	})
 	assert.Nil(t, err)
@@ -784,7 +880,7 @@ func TestGetAllExpectedMachineHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name:             "successful GetAll with includeRelation=Sku",
+			name:             "includeRelation=Sku omits foreign Site details from stored mismatch",
 			siteId:           "",
 			includeRelations: []string{"Sku"},
 			setupContext: func(c echo.Context) {
@@ -797,8 +893,14 @@ func TestGetAllExpectedMachineHandler_Handle(t *testing.T) {
 				var response []model.APIExpectedMachine
 				err := json.Unmarshal(body, &response)
 				assert.Nil(t, err)
-				// Verify we can include Sku relation without errors
-				assert.Greater(t, len(response), 0, "Should return at least one expected machine")
+				require.Len(t, response, 1)
+				assert.Equal(t, managedEM.ID, response[0].ID)
+				assert.Equal(t, &foreignSKU.ID, response[0].SkuID)
+				assert.Nil(t, response[0].Sku)
+				assert.NotContains(t, string(body), foreignSKU.Description)
+				stored, err := emDAO.Get(ctx, nil, managedEM.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, managedEM, stored, "relation expansion must not rewrite stored associations")
 			},
 		},
 		{
@@ -910,9 +1012,10 @@ func TestGetAllExpectedMachineHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name:    "dual-role org GetAll with siteId on external site (tenant perspective succeeds)",
-			orgName: dualRoleOrg,
-			siteId:  unmanagedSite.ID.String(),
+			name:             "dual-role org GetAll with siteId on external site (tenant perspective succeeds)",
+			orgName:          dualRoleOrg,
+			siteId:           unmanagedSite.ID.String(),
+			includeRelations: []string{"Sku"},
 			setupContext: func(c echo.Context) {
 				c.Set("user", dualRoleUser)
 				c.SetParamNames("orgName")
@@ -922,10 +1025,13 @@ func TestGetAllExpectedMachineHandler_Handle(t *testing.T) {
 			checkResponseContent: func(t *testing.T, body []byte) {
 				var response []model.APIExpectedMachine
 				err := json.Unmarshal(body, &response)
-				assert.Nil(t, err)
-				for _, em := range response {
-					assert.Equal(t, unmanagedSite.ID, em.SiteID, "All results should be from the external TenantSite-associated site")
-				}
+				require.NoError(t, err)
+				require.Len(t, response, 1)
+				assert.Equal(t, unmanagedEM.ID, response[0].ID)
+				assert.Equal(t, unmanagedSite.ID, response[0].SiteID)
+				require.NotNil(t, response[0].Sku)
+				assert.Equal(t, foreignSKU.ID, response[0].Sku.ID)
+				assert.Equal(t, unmanagedSite.ID.String(), response[0].Sku.SiteID)
 			},
 		},
 		{
@@ -1043,6 +1149,10 @@ func TestGetExpectedMachineHandler_Handle(t *testing.T) {
 	_, err = dbSession.DB.NewInsert().Model(unmanagedSite).Exec(ctx)
 	assert.Nil(t, err)
 
+	foreignSKU := &cdbm.SKU{ID: "foreign-site-sku", SiteID: unmanagedSite.ID, Description: "private foreign SKU details"}
+	_, err = dbSession.DB.NewInsert().Model(foreignSKU).Exec(ctx)
+	require.NoError(t, err)
+
 	// Create a Machine first
 	mDAO := cdbm.NewMachineDAO(dbSession)
 	testMachineID := uuid.NewString()
@@ -1069,6 +1179,7 @@ func TestGetExpectedMachineHandler_Handle(t *testing.T) {
 		SiteID:                   site.ID,
 		BmcMacAddress:            testEMMAC,
 		ChassisSerialNumber:      "TEST-CHASSIS-123",
+		SkuID:                    cutil.GetPtr("test-sku-uuid-1"),
 		FallbackDpuSerialNumbers: []string{"DPU001"},
 		Labels:                   map[string]string{"env": "test"},
 		MachineID:                &testMachineID,
@@ -1088,6 +1199,15 @@ func TestGetExpectedMachineHandler_Handle(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, unmanagedEM)
 
+	legacyEM, err := emDAO.Create(ctx, nil, cdbm.ExpectedMachineCreateInput{
+		ExpectedMachineID:   uuid.New(),
+		SiteID:              site.ID,
+		BmcMacAddress:       "00:11:22:33:44:AB",
+		ChassisSerialNumber: "LEGACY-SKU-MISMATCH",
+		SkuID:               &foreignSKU.ID,
+	})
+	require.NoError(t, err)
+
 	// Helper function to create mock user
 	createMockUser := func(org string) *cdbm.User {
 		return &cdbm.User{
@@ -1105,10 +1225,12 @@ func TestGetExpectedMachineHandler_Handle(t *testing.T) {
 	}
 
 	tests := []struct {
-		name           string
-		id             string
-		setupContext   func(c echo.Context)
-		expectedStatus int
+		name                 string
+		id                   string
+		setupContext         func(c echo.Context)
+		expectedStatus       int
+		includeRelation      string
+		checkResponseContent func(t *testing.T, body []byte)
 	}{
 		{
 			name: "invalid ID",
@@ -1129,6 +1251,46 @@ func TestGetExpectedMachineHandler_Handle(t *testing.T) {
 				c.SetParamValues(org, testEM.ID.String())
 			},
 			expectedStatus: http.StatusOK,
+		},
+		{
+			name:            "includeRelation=Sku expands same Site SKU",
+			id:              testEM.ID.String(),
+			includeRelation: "Sku",
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEM.ID.String())
+			},
+			expectedStatus: http.StatusOK,
+			checkResponseContent: func(t *testing.T, body []byte) {
+				var response model.APIExpectedMachine
+				require.NoError(t, json.Unmarshal(body, &response))
+				require.NotNil(t, response.Sku)
+				assert.Equal(t, *testEM.SkuID, response.Sku.ID)
+				assert.Equal(t, site.ID.String(), response.Sku.SiteID)
+			},
+		},
+		{
+			name:            "includeRelation=Sku omits foreign Site details from stored mismatch",
+			id:              legacyEM.ID.String(),
+			includeRelation: "Sku",
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, legacyEM.ID.String())
+			},
+			expectedStatus: http.StatusOK,
+			checkResponseContent: func(t *testing.T, body []byte) {
+				var response model.APIExpectedMachine
+				require.NoError(t, json.Unmarshal(body, &response))
+				assert.Equal(t, legacyEM.ID, response.ID)
+				assert.Equal(t, &foreignSKU.ID, response.SkuID)
+				assert.Nil(t, response.Sku)
+				assert.NotContains(t, string(body), foreignSKU.Description)
+				stored, err := emDAO.Get(ctx, nil, legacyEM.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, legacyEM, stored, "relation expansion must not rewrite stored associations")
+			},
 		},
 		{
 			name: "machine not found",
@@ -1157,6 +1319,9 @@ func TestGetExpectedMachineHandler_Handle(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			url := "/v2/org/" + org + "/nico/expected-machine/" + tt.id
+			if tt.includeRelation != "" {
+				url += "?includeRelation=" + tt.includeRelation
+			}
 			req := httptest.NewRequest(http.MethodGet, url, nil)
 			req = req.WithContext(context.Background())
 
@@ -1174,6 +1339,10 @@ func TestGetExpectedMachineHandler_Handle(t *testing.T) {
 			assert.Equal(t, tt.expectedStatus, rec.Code)
 			if tt.expectedStatus != rec.Code {
 				t.Errorf("Response: %v", rec.Body.String())
+			}
+
+			if tt.checkResponseContent != nil {
+				tt.checkResponseContent(t, rec.Body.Bytes())
 			}
 
 			// For successful retrieval, verify labels are returned in response
@@ -1323,6 +1492,20 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 	_, err = dbSession.DB.NewInsert().Model(unmanagedSite).Exec(ctx)
 	assert.Nil(t, err)
 
+	otherSite := &cdbm.Site{
+		ID:                       uuid.New(),
+		Name:                     "other-managed-site",
+		Org:                      org,
+		InfrastructureProviderID: infraProv.ID,
+		Status:                   cdbm.SiteStatusRegistered,
+	}
+	_, err = dbSession.DB.NewInsert().Model(otherSite).Exec(ctx)
+	require.NoError(t, err)
+
+	foreignSKU := &cdbm.SKU{ID: "foreign-site-sku", SiteID: otherSite.ID}
+	_, err = dbSession.DB.NewInsert().Model(foreignSKU).Exec(ctx)
+	require.NoError(t, err)
+
 	// Create a test ExpectedMachine on managed site
 	emDAO := cdbm.NewExpectedMachineDAO(dbSession)
 	testEM, err := emDAO.Create(ctx, nil, cdbm.ExpectedMachineCreateInput{
@@ -1330,6 +1513,7 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 		SiteID:                   site.ID,
 		BmcMacAddress:            "00:11:22:33:44:DD",
 		ChassisSerialNumber:      "UPDATE-CHASSIS-123",
+		SkuID:                    cutil.GetPtr("test-sku-uuid-1"),
 		FallbackDpuSerialNumbers: []string{"DPU001"},
 		Labels:                   map[string]string{"env": "test"},
 	})
@@ -1392,9 +1576,23 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 		expectedStatus       int
 		scheduleErr          error
 		expectedPaths        []string
-		rejectsCredentials   bool
+		rejectsMutation      bool
 		checkResponseContent func(t *testing.T, body []byte)
 	}{
+		{
+			name: "same Site SKU updates persisted and dispatched value",
+			id:   testEM.ID.String(),
+			requestBody: model.APIExpectedMachineUpdateRequest{
+				SkuID: cutil.GetPtr("test-sku-uuid-2"),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEM.ID.String())
+			},
+			expectedStatus: http.StatusOK,
+			expectedPaths:  []string{"sku_id"},
+		},
 		{
 			name: "metadata update excludes null BMC credentials",
 			id:   testEM.ID.String(),
@@ -1422,8 +1620,8 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 				c.SetParamNames("orgName", "id")
 				c.SetParamValues(org, testEM.ID.String())
 			},
-			expectedStatus:     http.StatusBadRequest,
-			rejectsCredentials: true,
+			expectedStatus:  http.StatusBadRequest,
+			rejectsMutation: true,
 			checkResponseContent: func(t *testing.T, body []byte) {
 				assert.Contains(t, string(body), "defaultBmcUsername")
 			},
@@ -1509,6 +1707,66 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 			},
 		},
 		{
+			name: "foreign Site SKU returns 422",
+			id:   testEM.ID.String(),
+			requestBody: model.APIExpectedMachineUpdateRequest{
+				SkuID:  cutil.GetPtr(foreignSKU.ID),
+				Labels: map[string]string{"env": "must-not-change"},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEM.ID.String())
+			},
+			expectedStatus:  http.StatusUnprocessableEntity,
+			rejectsMutation: true,
+			checkResponseContent: func(t *testing.T, body []byte) {
+				var response cutil.APIError
+				require.NoError(t, json.Unmarshal(body, &response))
+				assert.Equal(t, "SKU ID specified in request does not exist", response.Message)
+			},
+		},
+		{
+			name: "Site access precedes missing SKU lookup",
+			id:   unmanagedEM.ID.String(),
+			requestBody: model.APIExpectedMachineUpdateRequest{
+				SkuID:  cutil.GetPtr("missing-sku"),
+				Labels: map[string]string{"env": "must-not-change"},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, unmanagedEM.ID.String())
+			},
+			expectedStatus:  http.StatusForbidden,
+			rejectsMutation: true,
+			checkResponseContent: func(t *testing.T, body []byte) {
+				var response cutil.APIError
+				require.NoError(t, json.Unmarshal(body, &response))
+				assert.Equal(t, "Current org is not associated with the Site of the Expected Machine", response.Message)
+			},
+		},
+		{
+			name: "Site access precedes existing SKU lookup",
+			id:   unmanagedEM.ID.String(),
+			requestBody: model.APIExpectedMachineUpdateRequest{
+				SkuID:  cutil.GetPtr(foreignSKU.ID),
+				Labels: map[string]string{"env": "must-not-change"},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, unmanagedEM.ID.String())
+			},
+			expectedStatus:  http.StatusForbidden,
+			rejectsMutation: true,
+			checkResponseContent: func(t *testing.T, body []byte) {
+				var response cutil.APIError
+				require.NoError(t, json.Unmarshal(body, &response))
+				assert.Equal(t, "Current org is not associated with the Site of the Expected Machine", response.Message)
+			},
+		},
+		{
 			name: "invalid SKU ID returns 422",
 			id:   testEM.ID.String(),
 			requestBody: model.APIExpectedMachineUpdateRequest{
@@ -1519,7 +1777,13 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 				c.SetParamNames("orgName", "id")
 				c.SetParamValues(org, testEM.ID.String())
 			},
-			expectedStatus: http.StatusUnprocessableEntity,
+			expectedStatus:  http.StatusUnprocessableEntity,
+			rejectsMutation: true,
+			checkResponseContent: func(t *testing.T, body []byte) {
+				var response cutil.APIError
+				require.NoError(t, json.Unmarshal(body, &response))
+				assert.Equal(t, "SKU ID specified in request does not exist", response.Message)
+			},
 		},
 		{
 			name: "invalid BMC MAC address returns 400",
@@ -1543,17 +1807,12 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 			scheduleCall.Return(mockWorkflowRun, tt.scheduleErr)
 			workflowCallsBefore := len(mockTemporalClient.Calls)
 			var logs bytes.Buffer
-			var before *cdbm.ExpectedMachine
-			if tt.rejectsCredentials {
-				before, err = emDAO.Get(ctx, nil, testEM.ID, nil, false)
-				require.NoError(t, err)
-			}
+			before, err := emDAO.Get(ctx, nil, uuid.MustParse(tt.id), nil, false)
+			require.NoError(t, err)
 			if tt.scheduleErr != nil {
 				previousLogger := log.Logger
 				log.Logger = zerolog.New(zerolog.SyncWriter(&logs))
 				t.Cleanup(func() { log.Logger = previousLogger })
-				before, err = emDAO.Get(ctx, nil, testEM.ID, nil, false)
-				require.NoError(t, err)
 			}
 			reqBody, _ := json.Marshal(tt.requestBody)
 			url := "/v2/org/" + org + "/nico/expected-machine/" + tt.id
@@ -1568,7 +1827,7 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 			tt.setupContext(c)
 
 			// Execute
-			err := handler.Handle(c)
+			err = handler.Handle(c)
 
 			// Assert
 			assert.Nil(t, err)
@@ -1583,17 +1842,32 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 				require.NoError(t, readErr)
 				assert.Equal(t, before.Labels, after.Labels, "scheduling failure must roll back metadata")
 			}
-			if tt.rejectsCredentials {
+			if tt.rejectsMutation {
 				assert.Len(t, mockTemporalClient.Calls, workflowCallsBefore)
-				after, readErr := emDAO.Get(ctx, nil, testEM.ID, nil, false)
+				after, readErr := emDAO.Get(ctx, nil, before.ID, nil, false)
 				require.NoError(t, readErr)
-				assert.Equal(t, before, after, "invalid credentials must not mutate the cloud row")
+				assert.Equal(t, before, after, "rejected request must not mutate the REST row")
 			}
 			if tt.expectedPaths != nil {
 				require.Len(t, mockTemporalClient.Calls, workflowCallsBefore+1)
 				patch := &corev1.PatchExpectedMachineRequest{}
 				testDecodeExpectedComponentPatch(t, mockTemporalClient.Calls[workflowCallsBefore].Arguments.Get(3), site.ID.String(), patch)
 				assert.Equal(t, tt.expectedPaths, patch.UpdateMask.Paths)
+			}
+
+			if rec.Code == http.StatusOK {
+				wantSKU := before.SkuID
+				if tt.requestBody.SkuID != nil {
+					wantSKU = tt.requestBody.SkuID
+				}
+				var response model.APIExpectedMachine
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				after, readErr := emDAO.Get(ctx, nil, before.ID, nil, false)
+				require.NoError(t, readErr)
+				assert.Equal(t, wantSKU, response.SkuID)
+				assert.Equal(t, wantSKU, after.SkuID)
+				require.Len(t, mockTemporalClient.Calls, workflowCallsBefore+1)
+				assert.Equal(t, wantSKU, capturedRequest.SkuId)
 			}
 
 			// Check response content if provided
@@ -1603,7 +1877,7 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 		})
 	}
 
-	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 3)
+	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 4)
 	require.NotNil(t, capturedRequest)
 	assert.Equal(t, testEM.BmcMacAddress, capturedRequest.GetBmcMacAddress(),
 		"Core must receive the stored BMC MAC spelling")
