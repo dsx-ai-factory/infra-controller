@@ -641,7 +641,7 @@ pub(crate) async fn handle_machine_validation_requested(
                     machine_id = %mh_snapshot.host_snapshot.id,
                     validation_id = ?validation_id,
                     error = %e,
-                    "current on-demand machine validation is missing or inactive; retaining request for retry"
+                    "failed to retrieve current active on-demand machine validation; retaining request for retry"
                 );
                 db::machine::set_machine_validation_request(
                     txn.as_mut(),
