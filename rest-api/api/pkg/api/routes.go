@@ -195,6 +195,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodDelete,
 			Handler: apiHandler.NewDeleteTenantAccountHandler(dbSession, tc, cfg),
 		},
+		{
+			Path:    apiPathPrefix + "/tenant/account/:id/routing-profile",
+			Method:  http.MethodPatch,
+			Handler: apiHandler.NewUpdateTenantAccountRoutingProfileHandler(dbSession, scp),
+		},
 		// Site endpoints
 		{
 			Path:    apiPathPrefix + "/site",
