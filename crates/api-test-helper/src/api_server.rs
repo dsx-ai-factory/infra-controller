@@ -105,6 +105,9 @@ pub async fn start(
         enable_admin_ui = false
         panic_on_early_task_return = true
 
+        [observability]
+        per_object_metrics_for_classifications = ["Hardware"]
+
         [ib_config]
         max_partition_per_tenant = 31
         enabled = false
