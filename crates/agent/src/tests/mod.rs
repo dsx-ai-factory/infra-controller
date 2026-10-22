@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 mod bootstrap_ca;
-mod common;
+pub(crate) mod common;
 mod full;
 mod lldp_collector;
 mod metrics;

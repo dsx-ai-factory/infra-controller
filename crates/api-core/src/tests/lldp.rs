@@ -27,7 +27,8 @@ use rpc::forge::forge_server::Forge;
 use crate::tests::common;
 use crate::tests::common::api_fixtures::dpu::dpu_discover_machine;
 use crate::tests::common::api_fixtures::{
-    create_managed_host, network_configured_with_lldp, try_network_configured_with_lldp,
+    create_managed_host, network_configured_with_lldp, try_legacy_network_configured_with_lldp,
+    try_network_configured_with_lldp, try_network_configured_with_optional_lldp,
 };
 
 #[crate::sqlx_test]
@@ -466,42 +467,144 @@ async fn test_scout_lldp_report_reconciles_stored_neighbors(pool: sqlx::PgPool) 
     );
 }
 
+/// Proves capable agents receive a rejected LLDP acknowledgment while their
+/// newer operational status commits and the last accepted neighbors survive.
 #[crate::sqlx_test]
-async fn test_dpu_lldp_report_rejection_fails_network_status(pool: sqlx::PgPool) {
+async fn test_dpu_lldp_rejection_commits_status_and_preserves_neighbors(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let dpu_id = create_managed_host(&env).await.dpu().id;
-    network_configured_with_lldp(
+    let prior_neighbor = neighbor("B0:00:00:00:00:01", "bb:bb:bb:bb:bb:bb", "swp9");
+
+    // Seed an accepted LLDP snapshot.
+    let accepted = try_network_configured_with_lldp(
         &env,
         &dpu_id,
-        lldp_report(
-            Updated,
-            vec![neighbor("B0:00:00:00:00:01", "bb:bb:bb:bb:bb:bb", "swp9")],
-        ),
+        lldp_report(Updated, vec![prior_neighbor.clone()]),
     )
-    .await;
-    let stored_observation = || async {
-        sqlx::query_scalar::<_, serde_json::Value>(
-            "SELECT network_status_observation FROM machines WHERE id = $1",
+    .await
+    .unwrap();
+    assert_eq!(accepted.lldp_accepted, Some(true));
+    let links_before = stored_links(&env, &dpu_id).await;
+
+    let cases = [
+        // Invalid data fails before SQL and must not poison the outer transaction.
+        (
+            "validation rejection",
+            lldp_report(Updated, vec![neighbor("not-a-mac", "aa", "swp1")]),
+        ),
+        // A duplicate key fails after replacement starts and must restore deleted rows.
+        (
+            "SQL rejection after replacement starts",
+            lldp_report(
+                Updated,
+                vec![prior_neighbor.clone(), prior_neighbor.clone()],
+            ),
+        ),
+    ];
+    for (name, report) in cases {
+        // Make each attempted status update independently observable.
+        sqlx::query(
+            "UPDATE machines
+             SET network_status_observation =
+                 jsonb_set(
+                     network_status_observation,
+                     '{agent_version}',
+                     to_jsonb('older-test-agent'::text)
+                 )
+             WHERE id = $1",
+        )
+        .bind(dpu_id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+        // Send the acknowledgment-aware report and inspect its explicit LLDP outcome.
+        let response = try_network_configured_with_lldp(&env, &dpu_id, report)
+            .await
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(response.lldp_accepted, Some(false), "{name}");
+
+        // The outer status committed, while savepoint rollback preserved neighbors.
+        let agent_version: Option<String> = sqlx::query_scalar(
+            "SELECT network_status_observation->>'agent_version' FROM machines WHERE id = $1",
         )
         .bind(dpu_id)
         .fetch_one(&env.pool)
         .await
-        .unwrap()
-    };
-    let observation_before = stored_observation().await;
+        .unwrap();
+        assert_eq!(
+            agent_version.as_deref(),
+            Some(crate::tests::common::api_fixtures::dpu::TEST_DPU_AGENT_VERSION),
+            "{name}"
+        );
+        assert_eq!(stored_links(&env, &dpu_id).await, links_before, "{name}");
+    }
+}
+
+/// Proves the additive method omits LLDP acknowledgment only when the request
+/// carries no LLDP report, preserving meaningful optional-field presence.
+#[crate::sqlx_test]
+async fn test_dpu_status_without_lldp_omits_acknowledgment(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let dpu_id = create_managed_host(&env).await.dpu().id;
+
+    // Report ordinary operational status through the additive method.
+    let response = try_network_configured_with_optional_lldp(&env, &dpu_id, None)
+        .await
+        .unwrap();
+
+    // Absence is reserved for a request that had no LLDP outcome to report.
+    assert_eq!(response.lldp_accepted, None);
+}
+
+/// Proves a legacy agent still receives a non-OK result after operational
+/// status commits, preventing it from treating rejected LLDP as accepted.
+#[crate::sqlx_test]
+async fn test_legacy_dpu_lldp_rejection_returns_error_after_status_commit(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let dpu_id = create_managed_host(&env).await.dpu().id;
+    let prior_neighbor = neighbor("B0:00:00:00:00:01", "bb:bb:bb:bb:bb:bb", "swp9");
+
+    // Seed last-known-good neighbors and mark the stored status as older.
+    network_configured_with_lldp(&env, &dpu_id, lldp_report(Updated, vec![prior_neighbor])).await;
+    sqlx::query(
+        "UPDATE machines
+         SET network_status_observation =
+             jsonb_set(
+                 network_status_observation,
+                 '{agent_version}',
+                 to_jsonb('older-test-agent'::text)
+             )
+         WHERE id = $1",
+    )
+    .bind(dpu_id)
+    .execute(&env.pool)
+    .await
+    .unwrap();
     let links_before = stored_links(&env, &dpu_id).await;
 
-    let status = try_network_configured_with_lldp(
+    // Use the original RPC and reject malformed LLDP.
+    let status = try_legacy_network_configured_with_lldp(
         &env,
         &dpu_id,
         lldp_report(Updated, vec![neighbor("not-a-mac", "aa", "swp1")]),
     )
     .await
-    .expect_err("rejected LLDP report");
+    .expect_err("legacy client must receive LLDP rejection");
 
-    // The LLDP write shares the status transaction, so the network status rolls back with it.
+    // The legacy error preserves cache safety without rolling back status.
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
-    assert_eq!(stored_observation().await, observation_before);
+    let agent_version: Option<String> = sqlx::query_scalar(
+        "SELECT network_status_observation->>'agent_version' FROM machines WHERE id = $1",
+    )
+    .bind(dpu_id)
+    .fetch_one(&env.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        agent_version.as_deref(),
+        Some(crate::tests::common::api_fixtures::dpu::TEST_DPU_AGENT_VERSION)
+    );
     assert_eq!(stored_links(&env, &dpu_id).await, links_before);
 }
 
