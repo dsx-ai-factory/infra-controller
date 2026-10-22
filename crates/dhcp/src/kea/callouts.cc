@@ -1522,9 +1522,10 @@ int lease6_select(CalloutHandle &handle) {
   boost::shared_ptr<Machine> machine;
   handle.getContext("machine", machine);
   selected_mac = machine_get_discovery_mac(machine.get());
+  const bool previous_assigned = previous && previous->state_ == Lease::STATE_DEFAULT;
   const bool same_owner = !previous || (selected_mac && previous_mac == selected_mac &&
                           previous->subnet_id_ == lease6->subnet_id_ &&
-                          previous->state_ == Lease::STATE_DEFAULT &&
+                          (previous_assigned || previous->state_ == Lease::STATE_EXPIRED_RECLAIMED) &&
                           lease6->type_ == Lease::TYPE_NA);
   if (selected_mac) {
     machine_free_discovery_mac(selected_mac);
@@ -1559,15 +1560,16 @@ int lease6_select(CalloutHandle &handle) {
     using isc::stats::StatsMgr;
     auto &stats = StatsMgr::instance();
     // CREATE counts the original pool candidate; REUSE counts the final
-    // address. Both must leave one assignment after replacing an active row.
+    // address. Remove the previous assignment only if reclamation has not
+    // already removed it.
     const bool reuse_outside_pool = candidate &&
         !subnet->inPool(Lease::TYPE_NA, lease6->addr_);
-    const int64_t adjustment = int64_t(reuse_outside_pool) - int64_t(bool(previous));
+    const int64_t adjustment = int64_t(reuse_outside_pool) - int64_t(previous_assigned);
     if (adjustment) {
       stats.addValue(StatsMgr::generateName("subnet", lease6->subnet_id_, "assigned-nas"), int64_t(adjustment));
     }
 #if CARBIDE_KEA_HOOKS_VERSION >= 20400
-    if (previous) {
+    if (previous_assigned) {
       auto pool = subnet->getPool(Lease::TYPE_NA, previous->addr_, false);
       if (pool) {
         stats.addValue(StatsMgr::generateName("subnet", previous->subnet_id_,

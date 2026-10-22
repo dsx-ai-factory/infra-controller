@@ -44,6 +44,7 @@ const METRIC_TIMEOUT: Duration = Duration::from_secs(5);
 const KEA_LEASE_TYPE_NA: u32 = 0;
 const KEA_LEASE_STATE_DEFAULT: u32 = 0;
 const KEA_LEASE_STATE_DECLINED: u32 = 1;
+const KEA_LEASE_STATE_EXPIRED_RECLAIMED: u32 = 2;
 
 fn assert_assigned_leases(stats: &serde_json::Value, subnet_count: i64, pool_count: i64) {
     assert_eq!(stats["subnet[1].assigned-nas"][0][0], subnet_count);
@@ -847,6 +848,54 @@ fn boot_stage_duid_change_reuses_the_mac_owned_address() -> Result<(), eyre::Rep
     let stats = h.kea.statistics()?;
     assert_assigned_leases(&stats, 1, 1);
 
+    Ok(())
+}
+
+#[test]
+fn boot_stage_handoff_reuses_a_retained_reclaimed_lease() -> Result<(), eyre::Report> {
+    let idx = 0x66;
+    let mut config = short_expiry_config();
+    config
+        .expired_leases_processing
+        .as_mut()
+        .unwrap()
+        .hold_reclaimed_time = 3600;
+    let h = Harness::new_with_config(config);
+    let (server_id, address) = h.establish_lease(idx)?;
+    let old_duid = DHCPv6Factory::duid_ll_hex(idx);
+    h.wait_for_scoped_expiry(address, &DHCPv6Factory::mac_string(idx));
+    h.wait_for_no_active_lease(address, &old_duid)?;
+    let leases = h.read_leases()?;
+    assert_eq!(leases.len(), 1);
+    assert_eq!(leases[0].state, KEA_LEASE_STATE_EXPIRED_RECLAIMED);
+    assert_eq!(normalize_hex(&leases[0].duid), normalize_hex(&old_duid));
+    assert_assigned_leases(&h.kea.statistics()?, 0, 0);
+
+    let new_duid = DHCPv6Factory::duid_en(23);
+    let advertise = send_and_recv_v6(
+        &h.socket,
+        DHCPv6Factory::solicit_with_duid(idx, new_duid.clone(), true),
+    )?
+    .expect("boot-stage SOLICIT should receive an ADVERTISE after reclamation");
+    assert_eq!(DHCPv6Factory::ia_addr(&advertise), Some(address));
+    let leases = h.read_leases()?;
+    assert_eq!(leases.len(), 1);
+    assert_eq!(leases[0].state, KEA_LEASE_STATE_EXPIRED_RECLAIMED);
+    assert_eq!(normalize_hex(&leases[0].duid), normalize_hex(&old_duid));
+    assert_assigned_leases(&h.kea.statistics()?, 0, 0);
+
+    // Omit the hint so SELECT must redirect a fresh pool candidate onto the
+    // reclaimed row, exercising both replacement and assigned-lease counters.
+    let reply = send_and_recv_v6(
+        &h.socket,
+        DHCPv6Factory::request_without_address_hint(idx, server_id, new_duid.clone()),
+    )?
+    .expect("boot-stage REQUEST should replace the reclaimed lease");
+    assert_eq!(DHCPv6Factory::ia_addr(&reply), Some(address));
+    h.wait_for_active_lease(address, &DHCPv6Factory::duid_hex(&new_duid))?;
+    assert_eq!(h.read_leases()?.len(), 1);
+    assert_assigned_leases(&h.kea.statistics()?, 1, 1);
+    assert_eq!(h.api_server.expired_leases().len(), 1);
     Ok(())
 }
 
