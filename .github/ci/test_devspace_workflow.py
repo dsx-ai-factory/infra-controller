@@ -18,14 +18,34 @@ class DevSpaceWorkflowTests(unittest.TestCase):
         workflow = yaml.safe_load(WORKFLOW.read_text())
         # PyYAML's YAML 1.1 loader interprets the Actions key `on` as True.
         events = workflow[True]
-        self.assertEqual(set(events), {"pull_request", "push", "workflow_dispatch"})
+        self.assertEqual(set(events), {"pull_request_target", "push", "workflow_dispatch"})
         self.assertEqual(events["push"]["branches"], ["pull-request/[0-9]+"])
         self.assertNotIn("tags", events["push"])
-        self.assertEqual(events["pull_request"]["paths"], events["push"]["paths"])
+        self.assertEqual(events["pull_request_target"]["paths"], events["push"]["paths"])
         for path in ("devspace.yaml", "dev/deployment/devspace/**",
                      ".github/workflows/devspace-tests.yml", ".github/ci/test_devspace_workflow.py"):
-            self.assertIn(path, events["pull_request"]["paths"])
+            self.assertIn(path, events["pull_request_target"]["paths"])
         self.assertEqual(workflow["permissions"], {"contents": "read"})
+
+    def test_job_rejects_forks_before_checkout(self):
+        workflow = yaml.safe_load(WORKFLOW.read_text())
+        condition = workflow["jobs"]["devspace-tests"]["if"]
+        self.assertEqual(
+            " ".join(condition.split()),
+            "github.event_name == 'workflow_dispatch' "
+            "|| (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/pull-request/')) "
+            "|| (github.event_name == 'pull_request_target' "
+            "&& github.event.pull_request.head.repo.full_name == github.repository)")
+
+    def test_checkout_pins_event_commit(self):
+        workflow = yaml.safe_load(WORKFLOW.read_text())
+        checkout = workflow["jobs"]["devspace-tests"]["steps"][0]
+        self.assertTrue(checkout["uses"].startswith("actions/checkout@"))
+        self.assertEqual(
+            checkout["with"].get("ref"),
+            "${{ github.event_name == 'pull_request_target' "
+            "&& github.event.pull_request.head.sha || github.sha }}")
+        self.assertFalse(checkout["with"]["persist-credentials"])
 
     def test_test_failures_remain_visible_and_isolated(self):
         workflow = yaml.safe_load(WORKFLOW.read_text())

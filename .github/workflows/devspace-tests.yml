@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Advisory only: keep this check out of required checks and publishing workflows.
-# Fork PRs run on the copy-pr-bot branch after maintainer approval, matching
-# fern-docs-ci.yml. Never run an unapproved fork head on a self-hosted runner.
+# Load the PR job guard from the trusted base workflow. Fork PRs run on the
+# copy-pr-bot branch after maintainer approval, not through PR events.
 name: DevSpace regression tests (advisory)
 
 on:
-  pull_request:
+  pull_request_target:
     paths:
       - 'devspace.yaml'
       - 'dev/deployment/devspace/**'
@@ -38,13 +38,14 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch'
       || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/pull-request/'))
-      || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+      || (github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: linux-amd64-cpu4
     timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
 
       - name: Install regression test dependencies
