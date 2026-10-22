@@ -152,7 +152,7 @@ Compile-time generation of hardware configuration registries from YAML files. Du
 
 ### How It Works
 
-```
+```text
 YAML Files → build.rs → Generated registries.rs → REGISTRIES constant
 databases/     Validation    src/registry/          Static access
 ```
@@ -415,6 +415,12 @@ match profile.sync("01:00.0", None) {
 
 Firmware management for Mellanox NICs, including flash, verify, and reset operations. Supports sourcing firmware from local files, HTTPS URLs, and SSH/SCP, with optional authentication.
 
+For read-only inspection, [`firmware::preflight`](src/firmware/preflight.rs)
+accepts caller-owned, digest-checked local files and compares a selected PCI
+device with an exact firmware target. It does not download artifacts, interpret
+binary configuration, change the device, or certify that flashing is safe. The
+module documents input requirements, query limits, and comparison errors.
+
 ### Lifecycle
 
 1. **Flash** — burn new firmware onto the device via `flint`
@@ -593,7 +599,7 @@ mlxconfig-embedded registry check <name> \            # Check device compatibili
 
 Converts `mlxconfig show_confs` output into YAML registry format:
 
-```
+```text
 List of configurations:
 ADVANCED CONFIG:
     CPU_FREQUENCY=<NUM> CPU frequency setting in MHz
@@ -636,7 +642,7 @@ mlxconfig-embedded firmware flash-config 4b:00.0 /etc/nico/firmware.toml
 
 ## Architecture
 
-```
+```text
 ┌──────────────────────────────────────────────────────────┐
 │                        libmlx                            │
 │                                                          │
@@ -669,7 +675,7 @@ mlxconfig-embedded firmware flash-config 4b:00.0 /etc/nico/firmware.toml
 
 ### Data Flow
 
-```
+```text
 YAML Files → build.rs → Static Registries → Runner/Profile → mlxconfig CLI → Device
 databases/   Compile     registries.rs       Type-safe API    sudo commands    Hardware
 ```

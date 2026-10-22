@@ -626,6 +626,185 @@ async fn test_dpu_for_reprovisioning_fail_if_state_is_not_ready(pool: sqlx::PgPo
 }
 
 #[crate::sqlx_test]
+async fn test_dpu_agent_control_requires_requested_machine(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let dpu_id: DpuMachineId = "fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80"
+        .parse()
+        .unwrap();
+
+    let error = env
+        .api
+        .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
+            machine_id: Some(dpu_id.into()),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::NotFound);
+    assert_eq!(error.message(), format!("machine not found: {dpu_id}"));
+}
+
+#[crate::sqlx_test]
+async fn test_dpu_agent_control_preserves_database_error_details(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let dpu_id: DpuMachineId = "fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80"
+        .parse()
+        .unwrap();
+
+    // Fail transaction acquisition before the DPU lookup; retain operator metadata.
+    env.pool.close().await;
+    let error = env
+        .api
+        .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
+            machine_id: Some(dpu_id.into()),
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert_eq!(
+        error.metadata().get("nico-error-code").unwrap(),
+        "NICO-API-500"
+    );
+}
+
+#[crate::sqlx_test]
+async fn test_dpu_agent_control_uses_host_state_and_requires_attachment(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let mh = create_managed_host(&env).await;
+    let dpu_id = mh.dpu_ids[0];
+    let mut txn = env.pool.begin().await.unwrap();
+    let host = mh.host().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&mut txn).await;
+
+    db::machine::advance(
+        &host,
+        &mut txn,
+        &mh.new_dpu_reprovision_state(ReprovisionState::WaitingForNetworkInstall),
+        None,
+    )
+    .await
+    .unwrap();
+    db::machine::advance(&dpu, &mut txn, &ManagedHostState::Ready, None)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    // The DPU's own `Ready` state maps to `Noop`; its host's state maps to `Discovery`.
+    let response = env
+        .api
+        .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
+            machine_id: Some(dpu_id.into()),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(matches!(response.action, Some(Action::Discovery(_))));
+
+    let mut txn = env.pool.begin().await.unwrap();
+    sqlx::query("UPDATE machines SET controller_state = '{}'::jsonb WHERE id = $1")
+        .bind(dpu_id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+    db::machine::find_one(txn.as_mut(), &dpu_id, Default::default())
+        .await
+        .expect_err("a full DPU snapshot must reject malformed controller state");
+    txn.commit().await.unwrap();
+
+    // Agent control needs the host's state, even if the DPU's own state cannot decode.
+    let response = env
+        .api
+        .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
+            machine_id: Some(dpu_id.into()),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(matches!(response.action, Some(Action::Discovery(_))));
+
+    let mut txn = env.pool.begin().await.unwrap();
+    sqlx::query(
+        "UPDATE machine_interfaces SET attached_dpu_machine_id = NULL
+         WHERE attached_dpu_machine_id = $1 AND machine_id != $1",
+    )
+    .bind(dpu_id)
+    .execute(txn.as_mut())
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    let error = env
+        .api
+        .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
+            machine_id: Some(dpu_id.into()),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::NotFound);
+    assert_eq!(error.message(), format!("machine not found: {dpu_id}"));
+}
+
+#[crate::sqlx_test]
+async fn test_agent_control_updates_scout_contact_only_for_host_requests(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let mh = create_managed_host(&env).await;
+    let dpu_id = mh.dpu_ids[0];
+    let stale_contact_time = "2020-01-01T00:00:00Z"
+        .parse::<chrono::DateTime<Utc>>()
+        .unwrap();
+    let mut txn = env.pool.begin().await.unwrap();
+    db::machine::update_state(&mut txn, &mh.id.into(), &ManagedHostState::Ready)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    for (scenario, machine_id, host_contact_updates) in [
+        ("host request", MachineId::from(mh.id), true),
+        ("DPU request", MachineId::from(dpu_id), false),
+    ] {
+        sqlx::query("UPDATE machines SET last_scout_contact_time = $1 WHERE id IN ($2, $3)")
+            .bind(stale_contact_time)
+            .bind(mh.id)
+            .bind(dpu_id)
+            .execute(&env.pool)
+            .await
+            .unwrap();
+
+        env.api
+            .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
+                machine_id: Some(machine_id),
+            }))
+            .await
+            .unwrap();
+
+        let mut txn = env.pool.begin().await.unwrap();
+        let host_contact_time = mh
+            .host()
+            .db_machine(&mut txn)
+            .await
+            .status
+            .last_scout_contact_time;
+        let dpu_contact_time = mh
+            .dpu()
+            .db_machine(&mut txn)
+            .await
+            .status
+            .last_scout_contact_time;
+        txn.commit().await.unwrap();
+
+        if host_contact_updates {
+            assert!(
+                host_contact_time.expect("host request records scout contact") > stale_contact_time,
+                "{scenario}"
+            );
+        } else {
+            assert_eq!(host_contact_time, Some(stale_contact_time), "{scenario}");
+        }
+        assert_eq!(dpu_contact_time, Some(stale_contact_time), "{scenario}");
+    }
+}
+
+#[crate::sqlx_test]
 async fn test_dpu_for_reprovisioning_with_no_firmware_upgrade(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;

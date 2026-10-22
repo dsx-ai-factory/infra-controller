@@ -40,11 +40,12 @@ async fn exercise_expected_machine_queries(
     let mut txn = connection.begin().await?;
     let id = Uuid::new_v4();
     let rack_id = RackId::new("projection-rack");
-    let interface_mac = "02:00:00:00:01:02".parse()?;
+    let interface_mac: MacAddress = "02:00:00:00:01:02".parse()?;
     let expected = ExpectedMachine {
         id: Some(id),
         bmc_mac_address: "02:00:00:00:01:01".parse()?,
         data: ExpectedMachineData {
+            server_name: Some("projection-name".to_string()),
             bmc_username: "test-user".to_string(),
             bmc_password: "test-password".to_string(),
             serial_number: "projection-machine".to_string(),
@@ -55,15 +56,24 @@ async fn exercise_expected_machine_queries(
                 description: "populated projection fixture".to_string(),
                 labels: HashMap::from([("location".to_string(), "rack-1".to_string())]),
             },
-            interfaces: vec![ExpectedInterface {
-                mac_address: interface_mac,
-                ip_allocation: Some(ExpectedInterfaceIpAllocation::Fixed),
-                fixed_ip: Some("192.0.2.11".parse()?),
-                fixed_mask: Some("255.255.255.0".to_string()),
-                fixed_gateway: Some("192.0.2.1".parse()?),
-                primary: Some(true),
-                ..Default::default()
-            }],
+            interfaces: vec![
+                ExpectedInterface {
+                    mac_address: Some(interface_mac),
+                    physical_ifname: Some("C1-1-L1".to_string()),
+                    logical_ifname: Some("rail0".to_string()),
+                    ip_allocation: Some(ExpectedInterfaceIpAllocation::Fixed),
+                    fixed_ip: Some("192.0.2.11".parse()?),
+                    fixed_mask: Some("255.255.255.0".to_string()),
+                    fixed_gateway: Some("192.0.2.1".parse()?),
+                    primary: Some(true),
+                    ..Default::default()
+                },
+                ExpectedInterface {
+                    physical_ifname: Some("C1-1-L2".to_string()),
+                    logical_ifname: Some("rail1".to_string()),
+                    ..Default::default()
+                },
+            ],
             rack_id: Some(rack_id.clone()),
             default_pause_ingestion_and_poweron: Some(true),
             dpf_enabled: Some(false),

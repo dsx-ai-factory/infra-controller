@@ -761,16 +761,15 @@ pub(crate) fn doca_weave_dhcp_agent_service(cfg: &DpfServiceConfig) -> ServiceDe
     }
 }
 
-const WEAVE_DHCP_AGENT_NETWORKS: &[&str] = &[
-    "r0swpln0", "r1swpln0", "r0swpln1", "r1swpln1", "r2swpln0", "r3swpln0", "r2swpln1", "r3swpln1",
-];
+const WEAVE_DHCP_AGENT_NETWORKS: &[&str] = &["A56", "A53", "A6", "A3", "A43", "A46", "A13", "A16"];
 
 fn weave_dhcp_agent_networks() -> Vec<serde_json::Value> {
     WEAVE_DHCP_AGENT_NETWORKS
         .iter()
         .map(|port| {
             serde_json::json!({
-                "name": format!("dhcp-{port}"),
+                // Kubernetes NAD names must be lowercase.
+                "name": format!("dhcp-{}", port.to_ascii_lowercase()),
                 "bridge": format!("br-dhcp-{port}"),
                 "resourceName": "nvidia.com/bf_sf",
                 "interfaceName": port,
@@ -782,14 +781,14 @@ fn weave_dhcp_agent_networks() -> Vec<serde_json::Value> {
 /// PCI address of each BF4 Astra uplink paired with the switch port it carries.
 /// The underlay, overlay, and bridge names are all derived from the port name.
 const WEAVE_FLOW_CONTROLLER_UNDERLAY_PORTS: &[(&str, &str)] = &[
-    ("0005:06:00.0", "r0swpln0"),
-    ("0005:03:00.0", "r1swpln0"),
-    ("0000:06:00.0", "r2swpln0"),
-    ("0000:03:00.0", "r3swpln0"),
-    ("0004:03:00.0", "r0swpln1"),
-    ("0004:06:00.0", "r1swpln1"),
-    ("0001:03:00.0", "r2swpln1"),
-    ("0001:06:00.0", "r3swpln1"),
+    ("0005:06:00.0", "A56"),
+    ("0005:03:00.0", "A53"),
+    ("0000:06:00.0", "A6"),
+    ("0000:03:00.0", "A3"),
+    ("0004:03:00.0", "A43"),
+    ("0004:06:00.0", "A46"),
+    ("0001:03:00.0", "A13"),
+    ("0001:06:00.0", "A16"),
 ];
 
 fn weave_flow_controller_underlay_interfaces() -> Vec<serde_json::Value> {
@@ -1461,6 +1460,20 @@ mod tests {
         assert_eq!(
             values["weaveDHCPAgent"]["dhcpNetworks"]["networks"],
             serde_json::Value::Array(weave_dhcp_agent_networks())
+        );
+
+        let networks = values["weaveDHCPAgent"]["dhcpNetworks"]["networks"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            networks
+                .iter()
+                .map(|network| network["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "dhcp-a56", "dhcp-a53", "dhcp-a6", "dhcp-a3", "dhcp-a43", "dhcp-a46", "dhcp-a13",
+                "dhcp-a16"
+            ]
         );
 
         let resources = service_configuration

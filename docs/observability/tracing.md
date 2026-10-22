@@ -174,8 +174,10 @@ DPS stays one trace across the proxy hop (issue
 - **Resource / tracer:** `service.name = nico-bmc-proxy`, tracer name `nico-bmc-proxy`.
 - **Span fields:** HTTP method and request path, the status the proxy answered its caller with (not
   the BMC's — a request the proxy rejects never reaches one), BMC target IP (span attribute, not
-  a Prometheus label), and, once the request passes its ACL, its request class
-  (`bmc_proxy.class`). Only a 5xx sets the span status to error; a 4xx is the caller's error.
+  a Prometheus label), the request class (`bmc_proxy.class`) after the request passes its ACL,
+  and the target type (`bmc_proxy.target`: `bmc`, or `switch_nvos` for a switch's NVOS
+  management interface) after its credentials resolve. Only a 5xx sets the span status to
+  error; a 4xx is the caller's error.
   A `429` the proxy answers for want of a slot at the BMC leaves the span ok as well;
   `carbide_bmc_proxy_admission_refused_total` counts those.
 

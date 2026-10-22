@@ -79,7 +79,11 @@ infra-controller/
 ### REST API contract conventions
 
 - Do not use `omitempty` on REST API response fields. Clients must be able to
-  distinguish an empty value from a field unsupported by the API version.
+  distinguish an empty value from a field unsupported by the API version. Two
+  exceptions: a deprecated attribute behind a date gate uses `omitempty` so the
+  field disappears from responses once its removal date passes, and a related
+  entity expansion that clients opt into with `includeRelation` uses it so the
+  attribute appears only when that expansion was requested.
 - Paginated operations must implement deterministic ordering before pagination
   and document every supported `orderBy` value and its default in OpenAPI. Do
   not rely on an upstream API or database's implicit result order.

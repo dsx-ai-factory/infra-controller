@@ -22,5 +22,8 @@ WORKDIR /
 COPY crates/machine-validation/config /machine-validation/config
 RUN cd /machine-validation/config && tar -cvf /tmp/config.tar . && cp /tmp/config.tar /machine-validation/config/
 COPY crates/machine-validation/images /machine-validation/images
+# list.json advertises the runner; scout downloads it from here. Built and
+# staged by `make images-machine-validation` or CI.
+RUN test -s /machine-validation/images/machine-validation-runner.tar
 
 CMD exec /bin/sh -c "trap : TERM INT; sleep 9999999999d & wait"

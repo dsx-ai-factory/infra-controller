@@ -6,6 +6,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,6 +19,8 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	tmocks "go.temporal.io/sdk/mocks"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
@@ -30,6 +33,7 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
 
 type spectrumXPartitionFixture struct {
@@ -47,6 +51,9 @@ type spectrumXPartitionFixture struct {
 	proxiedReq  *grpcproxy.Request
 	coreVNI     *uint32
 	coreErr     error
+	coreStarted chan struct{}
+	coreRelease <-chan struct{}
+	coreClient  *tmocks.Client
 	scp         *sc.ClientPool
 }
 
@@ -111,6 +118,10 @@ func newSpectrumXPartitionFixture(t *testing.T) *spectrumXPartitionFixture {
 	// The Core response the proxy decodes into the caller's `resp` message is returned
 	// through the workflow result, so the mock fills it from the fixture's coreVNI.
 	wrun.On("Get", mock.Anything, mock.Anything).Return(func(_ context.Context, out interface{}) error {
+		if fx.coreStarted != nil {
+			fx.coreStarted <- struct{}{}
+			<-fx.coreRelease
+		}
 		if fx.coreErr != nil {
 			return fx.coreErr
 		}
@@ -138,6 +149,7 @@ func newSpectrumXPartitionFixture(t *testing.T) *spectrumXPartitionFixture {
 			return true
 		}),
 	).Return(wrun, nil)
+	fx.coreClient = tsc
 
 	fx.scp = sc.NewClientPool(nil)
 	fx.scp.IDClientMap[fx.site.ID.String()] = tsc
@@ -260,6 +272,79 @@ func TestCreateSpectrumXPartitionHandler_Handle(t *testing.T) {
 		request := model.APISpectrumXPartitionCreateRequest{Name: "east-west-net", SiteID: fx.site.ID.String()}
 		require.Equal(t, http.StatusCreated, fx.create(t, request, fx.user, fx.org).Code)
 		assert.Equal(t, http.StatusConflict, fx.create(t, request, fx.user, fx.org).Code)
+	})
+
+	t.Run("concurrent duplicate name returns one conflict without another Core create", func(t *testing.T) {
+		fx := newSpectrumXPartitionFixture(t)
+		fx.coreStarted = make(chan struct{}, 2)
+		coreRelease := make(chan struct{})
+		fx.coreRelease = coreRelease
+		released := false
+		t.Cleanup(func() {
+			if !released {
+				close(coreRelease)
+			}
+		})
+
+		request := model.APISpectrumXPartitionCreateRequest{Name: "east-west-net", SiteID: fx.site.ID.String()}
+		body, err := json.Marshal(request)
+		require.NoError(t, err)
+		handler := NewCreateSpectrumXPartitionHandler(fx.dbSession, fx.scp, common.GetTestConfig())
+		type result struct {
+			code int
+			err  error
+		}
+		create := func() <-chan result {
+			done := make(chan result, 1)
+			go func() {
+				ec, rec := fx.newContext(t, http.MethodPost, "/", string(body), fx.user, fx.org, "")
+				done <- result{code: rec.Code, err: handler.Handle(ec)}
+			}()
+			return done
+		}
+
+		first := create()
+		select {
+		case <-fx.coreStarted:
+		case <-time.After(5 * time.Second):
+			t.Fatal("first create did not reach Core")
+		}
+
+		second := create()
+		select {
+		case got := <-second:
+			require.NoError(t, got.err)
+			assert.Equal(t, http.StatusConflict, got.code)
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent create did not return a conflict while the first request held the lock")
+		}
+		assert.Empty(t, fx.coreStarted, "the conflicting request must not call Core")
+
+		close(coreRelease)
+		released = true
+		select {
+		case got := <-first:
+			require.NoError(t, got.err)
+			assert.Equal(t, http.StatusCreated, got.code)
+		case <-time.After(5 * time.Second):
+			t.Fatal("first create did not complete after Core was released")
+		}
+		fx.coreClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+
+		partitions, total, err := cdbm.NewSpectrumXPartitionDAO(fx.dbSession).GetAll(
+			context.Background(),
+			nil,
+			cdbm.SpectrumXPartitionFilterInput{
+				Names:     []string{request.Name},
+				SiteIDs:   []uuid.UUID{fx.site.ID},
+				TenantIDs: []uuid.UUID{fx.tenant.ID},
+			},
+			paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)},
+			nil,
+		)
+		require.NoError(t, err)
+		assert.Equal(t, 1, total)
+		assert.Len(t, partitions, 1)
 	})
 
 	// Two Tenants on one Site are independent namespaces, so the same name has to work.
@@ -450,75 +535,138 @@ func TestGetAllSpectrumXPartitionHandler_Handle(t *testing.T) {
 	})
 }
 
-// TestDeleteSpectrumXPartitionHandler_Handle covers the delete gates, the attachment
-// reference block, and the already-deleted-on-Site absorption.
+// TestDeleteSpectrumXPartitionHandler_Handle covers attachment checks and rollback
+// when Core refuses to delete a Partition.
 func TestDeleteSpectrumXPartitionHandler_Handle(t *testing.T) {
-	deleteRequest := func(t *testing.T, fx *spectrumXPartitionFixture, id string, user *cdbm.User, org string) *httptest.ResponseRecorder {
-		t.Helper()
-		ec, rec := fx.newContext(t, http.MethodDelete, "/", "", user, org, id)
-		require.NoError(t, NewDeleteSpectrumXPartitionHandler(fx.dbSession, fx.scp, common.GetTestConfig()).Handle(ec))
-		return rec
+	tests := []struct {
+		name        string
+		attached    bool
+		otherTenant bool
+		unknownID   bool
+		coreInUse   bool
+		wantCode    int
+		wantStatus  cdbm.SpectrumXPartitionStatus
+		wantProxied bool
+	}{
+		{
+			name:        "moves the Partition to Deleting and proxies DeleteSpxPartition",
+			wantCode:    http.StatusAccepted,
+			wantStatus:  cdbm.SpectrumXPartitionStatusDeleting,
+			wantProxied: true,
+		},
+		{
+			name:       "refuses to delete while an Instance is still attached",
+			attached:   true,
+			wantCode:   http.StatusBadRequest,
+			wantStatus: cdbm.SpectrumXPartitionStatusReady,
+		},
+		{
+			name:        "Core in-use rejection rolls back the deletion",
+			coreInUse:   true,
+			wantCode:    http.StatusPreconditionFailed,
+			wantStatus:  cdbm.SpectrumXPartitionStatusReady,
+			wantProxied: true,
+		},
+		{
+			name:        "rejects a Partition owned by another Tenant",
+			otherTenant: true,
+			wantCode:    http.StatusBadRequest,
+			wantStatus:  cdbm.SpectrumXPartitionStatusReady,
+		},
+		{
+			name:       "returns 404 for an unknown ID",
+			unknownID:  true,
+			wantCode:   http.StatusNotFound,
+			wantStatus: cdbm.SpectrumXPartitionStatusReady,
+		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			fx := newSpectrumXPartitionFixture(t)
+			sxp := testBuildSpectrumXPartition(t, fx.dbSession, "east-west-net", fx.org, fx.site, fx.tenant, nil, cdbm.SpectrumXPartitionStatusReady)
+			partitionDAO := cdbm.NewSpectrumXPartitionDAO(fx.dbSession)
+			before, err := partitionDAO.Get(ctx, nil, sxp.ID, nil)
+			require.NoError(t, err)
+			statusDetailDAO := cdbm.NewStatusDetailDAO(fx.dbSession)
+			inUseMessage := fmt.Sprintf("SPX partition %s still has instance attachments", sxp.ID)
+			coreCause := status.Error(codes.FailedPrecondition, inUseMessage)
+			if tt.coreInUse {
+				// Core can know about attachments missing from REST inventory.
+				// Its rejection must preserve existing status history.
+				fx.coreErr = swe.WrapErr(coreCause)
+				_, err := statusDetailDAO.Create(ctx, nil, cdbm.StatusDetailCreateInput{
+					EntityID: sxp.ID.String(),
+					Status:   string(cdbm.SpectrumXPartitionStatusReady),
+					Message:  cutil.GetPtr("Partition is ready for instance attachments"),
+				})
+				require.NoError(t, err)
+			}
+			beforeDetails, _, err := statusDetailDAO.GetAll(ctx, nil, cdbm.StatusDetailFilterInput{
+				EntityIDs: []string{sxp.ID.String()},
+			}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)})
+			require.NoError(t, err)
+			if tt.coreInUse {
+				require.Len(t, beforeDetails, 1)
+			}
+			if tt.attached {
+				instance := testBuildSpectrumXInstance(t, fx.dbSession, fx.ip, fx.site, fx.tenant, fx.user)
+				_, err := cdbm.NewSpectrumXAttachmentDAO(fx.dbSession).Create(ctx, nil, cdbm.SpectrumXAttachmentCreateInput{
+					InstanceID:           instance.ID,
+					SiteID:               fx.site.ID,
+					SpectrumXPartitionID: sxp.ID,
+					Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
+					DeviceInstance:       0,
+					AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
+					Status:               cdbm.SpectrumXAttachmentStatusReady,
+					CreatedBy:            fx.user.ID,
+				})
+				require.NoError(t, err)
+			}
 
-	t.Run("moves the Partition to Deleting and proxies DeleteSpxPartition", func(t *testing.T) {
-		fx := newSpectrumXPartitionFixture(t)
-		sxp := testBuildSpectrumXPartition(t, fx.dbSession, "east-west-net", fx.org, fx.site, fx.tenant, nil, cdbm.SpectrumXPartitionStatusReady)
+			id, user, org := sxp.ID.String(), fx.user, fx.org
+			if tt.unknownID {
+				id = uuid.NewString()
+			}
+			if tt.otherTenant {
+				user, org = fx.otherUser, fx.otherOrg
+			}
+			ec, rec := fx.newContext(t, http.MethodDelete, "/", "", user, org, id)
+			require.NoError(t, NewDeleteSpectrumXPartitionHandler(fx.dbSession, fx.scp, common.GetTestConfig()).Handle(ec))
+			require.Equal(t, tt.wantCode, rec.Code, rec.Body.String())
 
-		rec := deleteRequest(t, fx, sxp.ID.String(), fx.user, fx.org)
-		require.Equal(t, http.StatusAccepted, rec.Code)
+			if tt.wantProxied {
+				fx.coreClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 1)
+				assert.Equal(t, "/forge.Forge/DeleteSpxPartition", fx.proxiedReq.FullMethod)
+				var coreReq corev1.SpxPartitionDeletionRequest
+				require.NoError(t, protojson.Unmarshal(fx.proxiedReq.RequestJSON, &coreReq))
+				assert.Equal(t, sxp.ID.String(), coreReq.GetId().GetValue())
+			} else {
+				fx.coreClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 0)
+			}
 
-		assert.Equal(t, "/forge.Forge/DeleteSpxPartition", fx.proxiedReq.FullMethod)
-		var coreReq corev1.SpxPartitionDeletionRequest
-		require.NoError(t, protojson.Unmarshal(fx.proxiedReq.RequestJSON, &coreReq))
-		assert.Equal(t, sxp.ID.String(), coreReq.GetId().GetValue())
-
-		// The row survives in Deleting; inventory removes it once the Site stops
-		// reporting the Partition.
-		persisted, err := cdbm.NewSpectrumXPartitionDAO(fx.dbSession).Get(context.Background(), nil, sxp.ID, nil)
-		require.NoError(t, err)
-		assert.Equal(t, cdbm.SpectrumXPartitionStatusDeleting, persisted.Status)
-	})
-
-	// An Instance still attached would lose its network if the Partition went away, so
-	// the request is refused rather than cascading.
-	t.Run("refuses to delete while an Instance is still attached", func(t *testing.T) {
-		fx := newSpectrumXPartitionFixture(t)
-		sxp := testBuildSpectrumXPartition(t, fx.dbSession, "east-west-net", fx.org, fx.site, fx.tenant, nil, cdbm.SpectrumXPartitionStatusReady)
-		instance := testBuildSpectrumXInstance(t, fx.dbSession, fx.ip, fx.site, fx.tenant, fx.user)
-
-		_, err := cdbm.NewSpectrumXAttachmentDAO(fx.dbSession).Create(context.Background(), nil, cdbm.SpectrumXAttachmentCreateInput{
-			InstanceID:           instance.ID,
-			SiteID:               fx.site.ID,
-			SpectrumXPartitionID: sxp.ID,
-			Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
-			DeviceInstance:       0,
-			AttachmentType:       cdbm.SpectrumXAttachmentTypePhysical,
-			Status:               cdbm.SpectrumXAttachmentStatusReady,
-			CreatedBy:            fx.user.ID,
+			persisted, err := partitionDAO.Get(ctx, nil, sxp.ID, nil)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantStatus, persisted.Status)
+			if tt.coreInUse {
+				var apiErr cutil.APIError
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiErr))
+				assert.Equal(t, coreCause.Error(), apiErr.Message)
+			}
+			details, _, err := statusDetailDAO.GetAll(ctx, nil, cdbm.StatusDetailFilterInput{
+				EntityIDs: []string{sxp.ID.String()},
+			}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)})
+			require.NoError(t, err)
+			if tt.wantCode == http.StatusAccepted {
+				require.Len(t, details, 1)
+				assert.Equal(t, string(cdbm.SpectrumXPartitionStatusDeleting), details[0].Status)
+				assert.Equal(t, cutil.GetPtr("Received request for deletion, pending processing"), details[0].Message)
+			} else {
+				assert.Equal(t, before, persisted)
+				assert.Equal(t, beforeDetails, details)
+			}
 		})
-		require.NoError(t, err)
-
-		rec := deleteRequest(t, fx, sxp.ID.String(), fx.user, fx.org)
-		assert.Equal(t, http.StatusBadRequest, rec.Code)
-
-		persisted, err := cdbm.NewSpectrumXPartitionDAO(fx.dbSession).Get(context.Background(), nil, sxp.ID, nil)
-		require.NoError(t, err)
-		assert.Equal(t, cdbm.SpectrumXPartitionStatusReady, persisted.Status, "a refused delete must not change the status")
-	})
-
-	t.Run("rejects a Partition owned by another Tenant", func(t *testing.T) {
-		fx := newSpectrumXPartitionFixture(t)
-		sxp := testBuildSpectrumXPartition(t, fx.dbSession, "east-west-net", fx.org, fx.site, fx.tenant, nil, cdbm.SpectrumXPartitionStatusReady)
-
-		rec := deleteRequest(t, fx, sxp.ID.String(), fx.otherUser, fx.otherOrg)
-		assert.Equal(t, http.StatusBadRequest, rec.Code)
-	})
-
-	t.Run("returns 404 for an unknown ID", func(t *testing.T) {
-		fx := newSpectrumXPartitionFixture(t)
-		rec := deleteRequest(t, fx, uuid.NewString(), fx.user, fx.org)
-		assert.Equal(t, http.StatusNotFound, rec.Code)
-	})
+	}
 }
 
 // testBuildSpectrumXInstance builds the Instance an attachment row has to reference,

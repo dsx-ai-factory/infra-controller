@@ -48,6 +48,7 @@ import (
 // It acts as an adapter between gRPC protobuf messages and the internal managers,
 // handling protobuf conversion and delegating business logic to the InventoryManager.
 type FlowServerImpl struct {
+	powerReader                componentPowerReader        // Shared NICo client for passive power details
 	inventoryManager           inventorymanager.Manager    // Business logic manager for inventory operations
 	taskManager                taskmanager.Manager         // Task manager for orchestrating task lifecycle
 	taskStore                  taskstore.Store             // Task store for task queries
@@ -68,6 +69,7 @@ type FlowServerImpl struct {
 //   - taskManager: The Task manager for orchestrating task lifecycle
 //   - taskStore: The task store for task queries
 //   - operationRunManager: The operation-run manager for planning and persisting operation runs
+//   - powerReader: Shared passive Core reader, or nil when the NICo provider is absent
 //
 // Returns:
 //   - *FlowServerImpl: A new server implementation instance
@@ -81,6 +83,7 @@ func newServerImplementation(
 	operationRunManager operationrunmanager.Manager,
 	eventRuleManager eventRuleManager,
 	dataCipher *secret.Cipher,
+	powerReader componentPowerReader,
 ) (*FlowServerImpl, error) {
 	return &FlowServerImpl{
 		inventoryManager:       inventoryManager,
@@ -91,6 +94,7 @@ func newServerImplementation(
 		operationRunManager:    operationRunManager,
 		eventRuleManager:       eventRuleManager,
 		dataCipher:             dataCipher,
+		powerReader:            powerReader,
 		conflictResolver:       conflict.NewResolver(taskStore),
 	}, nil
 }

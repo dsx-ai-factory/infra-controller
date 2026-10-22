@@ -59,16 +59,18 @@ pub async fn create(
                 id,
                 name,
                 description,
+                labels,
                 tenant_organization_id,
                 vni,
                 config_version)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING row_to_json(spx_partitions.*)";
 
     let partition: SpxPartitionSnapshotPgJson = sqlx::query_as(query)
         .bind(value.id)
         .bind(&value.name)
         .bind(&value.description)
+        .bind(sqlx::types::Json(&value.labels))
         .bind(&value.tenant_organization_id)
         .bind(vni)
         .bind(config_version)
@@ -148,6 +150,74 @@ where
         .map_err(|e| DatabaseError::new(query.sql(), e))
 }
 
+/// `find_active_for_share` locks active partitions for attachment admission.
+/// Missing and deleted IDs are omitted; duplicate IDs are locked once. Locks
+/// are acquired in ID order for consistent ordering across callers. Keep the
+/// transaction open through the instance write so deletion cannot release a VNI
+/// between validation and persistence.
+pub async fn find_active_for_share(
+    txn: &mut PgConnection,
+    partition_ids: &[SpxPartitionId],
+) -> DatabaseResult<Vec<SpxPartition>> {
+    if partition_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let query = "SELECT row_to_json(p.*) FROM (
+        SELECT * FROM spx_partitions
+        WHERE id = ANY($1) AND deleted IS NULL
+        ORDER BY id FOR SHARE
+    ) p";
+    let partitions: Vec<SpxPartitionSnapshotPgJson> = sqlx::query_as(query)
+        .bind(partition_ids)
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::new(query, e))?;
+
+    partitions
+        .into_iter()
+        .map(|partition| partition.try_into())
+        .collect::<Result<Vec<SpxPartition>, sqlx::Error>>()
+        .map_err(|e| DatabaseError::new(query, e))
+}
+
+/// `lock_for_delete` blocks admissions using `find_active_for_share` until the
+/// transaction ends.
+/// Tombstones are locked too because a retry may still release their VNI.
+/// A missing partition returns a wrapped `sqlx::Error::RowNotFound`.
+pub async fn lock_for_delete(
+    txn: &mut PgConnection,
+    partition_id: SpxPartitionId,
+) -> DatabaseResult<()> {
+    let query = "SELECT id FROM spx_partitions WHERE id = $1 FOR UPDATE";
+    sqlx::query_scalar::<_, SpxPartitionId>(query)
+        .bind(partition_id)
+        .fetch_one(txn)
+        .await
+        .map(|_| ())
+        .map_err(|e| DatabaseError::new(query, e))
+}
+
+/// `has_instance_references` includes terminating instances whose attachment
+/// configuration has not been removed. Deletion callers must hold the partition
+/// lock and run this query in a separate READ COMMITTED statement after acquiring
+/// it, so admissions committed during the lock wait are visible.
+pub async fn has_instance_references(
+    txn: impl DbReader<'_>,
+    partition_id: SpxPartitionId,
+) -> DatabaseResult<bool> {
+    let query = "SELECT EXISTS (
+        SELECT 1 FROM instances
+        WHERE (spx_config -> 'spx_attachments')
+            @> jsonb_build_array(jsonb_build_object('spx_partition_id', $1::text))
+    )";
+    sqlx::query_scalar(query)
+        .bind(partition_id.to_string())
+        .fetch_one(txn)
+        .await
+        .map_err(|e| DatabaseError::new(query, e))
+}
+
 /// `SpxPartitionAlreadyDeleted` means the partition already has a deletion timestamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpxPartitionAlreadyDeleted {
@@ -156,6 +226,8 @@ pub struct SpxPartitionAlreadyDeleted {
 }
 
 /// `mark_as_deleted` records the first deletion and returns the updated partition.
+/// Deletion callers must first use `lock_for_delete` and reject any instance
+/// references found by `has_instance_references` in the same transaction.
 /// An existing deleted partition returns `NotApplied` without changing its timestamps.
 /// If neither the update nor the tombstone lookup finds the partition, the error
 /// wraps `sqlx::Error::RowNotFound`. Callers must release any VNI returned by
@@ -216,9 +288,59 @@ mod tests {
     use super::*;
 
     #[crate::sqlx_test]
+    async fn spx_labels_migration_preserves_existing_rows_and_old_writers(pool: sqlx::PgPool) {
+        // The harness applies all migrations first. Restore this table's predecessor schema.
+        sqlx::query("ALTER TABLE spx_partitions DROP COLUMN labels")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let old_insert = "INSERT INTO spx_partitions
+            (name, description, tenant_organization_id, vni, config_version)
+            VALUES ('partition', 'existing metadata', 'tenant-org-123', $1, 'V1-T0')
+            RETURNING row_to_json(spx_partitions.*)";
+        let before: serde_json::Value = sqlx::query_scalar(old_insert)
+            .bind(40001)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        sqlx::raw_sql(include_str!(
+            "../migrations/20261016170411_spx_partition_labels.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut after: serde_json::Value =
+            sqlx::query_scalar("SELECT row_to_json(p.*) FROM spx_partitions p")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(after["labels"], serde_json::json!({}));
+        after.as_object_mut().unwrap().remove("labels");
+        assert_eq!(after, before);
+
+        let old_writer_row: SpxPartitionSnapshotPgJson = sqlx::query_as(old_insert)
+            .bind(40002)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let partition = SpxPartition::try_from(old_writer_row).unwrap();
+        assert!(partition.labels.is_empty());
+        assert_eq!(partition.name, "partition");
+        assert_eq!(partition.description, "existing metadata");
+    }
+
+    #[crate::sqlx_test]
     async fn missing_partition_delete_preserves_row_not_found(pool: sqlx::PgPool) {
         let mut txn = pool.begin().await.expect("begin deletion");
         let id = uuid::Uuid::new_v4().into();
+        let error = lock_for_delete(&mut txn, id)
+            .await
+            .expect_err("missing partition cannot be locked");
+        let DatabaseError::Sqlx(error) = error else {
+            panic!("expected wrapped SQLx error, got {error:?}");
+        };
+        assert!(matches!(error.source, sqlx::Error::RowNotFound));
         let error = mark_as_deleted(id, &mut txn)
             .await
             .expect_err("missing partition remains an error");

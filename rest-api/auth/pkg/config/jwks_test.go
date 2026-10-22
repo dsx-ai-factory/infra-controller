@@ -186,7 +186,8 @@ func TestJwksConfig_UpdateJWKs(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
 				// Return a valid JWKS with at least one key
-				w.Write([]byte(`{"keys": [{"kty":"RSA","use":"sig","kid":"test-key-1","alg":"RS256","n":"test-n-value","e":"AQAB"}]}`))
+				// Mock response writes are best-effort if the client closes the connection.
+				_, _ = w.Write([]byte(`{"keys": [{"kty":"RSA","use":"sig","kid":"test-key-1","alg":"RS256","n":"test-n-value","e":"AQAB"}]}`))
 			},
 			expectError: false,
 		},
@@ -195,7 +196,7 @@ func TestJwksConfig_UpdateJWKs(t *testing.T) {
 			serverResponse: func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusOK)
-				w.Write([]byte(`{"keys": [invalid json`))
+				_, _ = w.Write([]byte(`{"keys": [invalid json`))
 			},
 			expectError:   true,
 			errorContains: "invalid",
@@ -385,7 +386,7 @@ func TestJwksConfig_Concurrency(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{
+		_, _ = w.Write([]byte(`{
 			"keys": [
 				{
 					"kty": "RSA",
@@ -509,7 +510,7 @@ func TestJwksConfig_LastUpdate(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		// Return a valid JWKS with at least one key
-		w.Write([]byte(`{"keys": [{"kty":"RSA","use":"sig","kid":"test-key-1","alg":"RS256","n":"test-n-value","e":"AQAB"}]}`))
+		_, _ = w.Write([]byte(`{"keys": [{"kty":"RSA","use":"sig","kid":"test-key-1","alg":"RS256","n":"test-n-value","e":"AQAB"}]}`))
 	}))
 	defer server.Close()
 
@@ -549,7 +550,7 @@ func TestJwksConfig_ThrottlingMechanism(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"keys": [{"kty":"RSA","use":"sig","kid":"test-key-1","alg":"RS256","n":"test-n-value","e":"AQAB"}]}`))
+		_, _ = w.Write([]byte(`{"keys": [{"kty":"RSA","use":"sig","kid":"test-key-1","alg":"RS256","n":"test-n-value","e":"AQAB"}]}`))
 	}))
 	defer server.Close()
 
@@ -795,7 +796,7 @@ func createMockJWKSServerWithKeys(t *testing.T, keys []testKeyInfo) *httptest.Se
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write(jsonData)
+		_, _ = w.Write(jsonData)
 	}))
 }
 

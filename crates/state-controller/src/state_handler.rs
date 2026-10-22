@@ -154,6 +154,8 @@ pub enum StateHandlerOutcome<S> {
     Wait {
         /// The reason we're waiting
         reason: String,
+        /// Schedules the committed Wait again without waiting for a periodic scan when true.
+        requeue_immediately: bool,
         source_ref: &'static Location<'static>,
         txn: Option<PgTransaction<'static>>,
     },
@@ -189,10 +191,12 @@ impl<S> StateHandlerOutcome<S> {
         match self {
             Self::Wait {
                 reason,
+                requeue_immediately,
                 source_ref,
                 txn: _,
             } => Self::Wait {
                 reason,
+                requeue_immediately,
                 source_ref,
                 txn: transaction,
             },
@@ -240,8 +244,44 @@ impl<S> StateHandlerOutcome<S> {
     pub fn wait(reason: String) -> Self {
         StateHandlerOutcome::Wait {
             reason,
+            requeue_immediately: false,
             source_ref: Location::caller(),
             txn: None,
+        }
+    }
+
+    /// Returns a Wait that schedules another iteration after its outcome transaction commits so
+    /// successful idempotent writes can continue before the periodic scan.
+    #[track_caller]
+    pub fn wait_and_requeue(reason: String) -> Self {
+        StateHandlerOutcome::Wait {
+            reason,
+            requeue_immediately: true,
+            source_ref: Location::caller(),
+            txn: None,
+        }
+    }
+
+    /// Marks a Wait for immediate scheduling when `condition` is true while leaving transitions and
+    /// failures unchanged so callers preserve their original classifications after a successful
+    /// idempotent write.
+    pub fn requeue_if_waiting(self, condition: bool) -> Self {
+        if !condition {
+            return self;
+        }
+        match self {
+            Self::Wait {
+                reason,
+                source_ref,
+                txn,
+                ..
+            } => Self::Wait {
+                reason,
+                requeue_immediately: true,
+                source_ref,
+                txn,
+            },
+            outcome => outcome,
         }
     }
 

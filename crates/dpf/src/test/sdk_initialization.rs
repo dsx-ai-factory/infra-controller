@@ -524,7 +524,11 @@ impl DpuServiceInterfaceRepository for InitializationMock {
         consume_service_interface_failure(&self.service_interface_get_failures, &key, "get")?;
         Ok(self.service_interfaces.get(&key).map(|r| r.clone()))
     }
-    async fn list(&self, ns: &str) -> Result<Vec<DPUServiceInterface>, DpfError> {
+    async fn list(
+        &self,
+        ns: &str,
+        _label_selector: Option<&str>,
+    ) -> Result<Vec<DPUServiceInterface>, DpfError> {
         let prefix = format!("{}/", ns);
         Ok(self
             .service_interfaces
@@ -547,6 +551,23 @@ impl DpuServiceInterfaceRepository for InitializationMock {
         Ok(iface.clone())
     }
 
+    async fn create(&self, iface: &DPUServiceInterface) -> Result<DPUServiceInterface, DpfError> {
+        self.service_interfaces
+            .insert(resource_key(iface), iface.clone());
+        Ok(iface.clone())
+    }
+
+    async fn patch(
+        &self,
+        _name: &str,
+        _namespace: &str,
+        _patch: serde_json::Value,
+    ) -> Result<DPUServiceInterface, DpfError> {
+        Err(DpfError::InvalidState(
+            "initialization must not patch retained dynamic service interfaces".to_string(),
+        ))
+    }
+
     async fn delete(&self, name: &str, ns: &str) -> Result<(), DpfError> {
         let key = ns_key(ns, name);
         self.service_interface_delete_requests
@@ -564,6 +585,15 @@ impl DpuServiceInterfaceRepository for InitializationMock {
         }
         self.service_interfaces.remove(&key);
         Ok(())
+    }
+
+    async fn delete_if_current(
+        &self,
+        name: &str,
+        ns: &str,
+        _preconditions: &DpfDeletePreconditions,
+    ) -> Result<(), DpfError> {
+        <Self as DpuServiceInterfaceRepository>::delete(self, name, ns).await
     }
 }
 
@@ -1373,7 +1403,7 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
     assert_eq!(mock.flavor_templates.len(), 1);
 
     // The effective inventories must produce exact, non-overlapping scoped resource names.
-    let interfaces = DpuServiceInterfaceRepository::list(&mock, TEST_NS)
+    let interfaces = DpuServiceInterfaceRepository::list(&mock, TEST_NS, None)
         .await
         .unwrap();
     let interface_names = interfaces
@@ -1392,14 +1422,11 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
         .map(|name| name.to_string())
         .collect::<BTreeSet<_>>();
     let mut astra_logical_names = astra_chainable_logical_names.clone();
-    let astra_xplane_group_ids = [
-        "r0swpln0", "r1swpln0", "r0swpln1", "r1swpln1", "r2swpln0", "r3swpln0", "r2swpln1",
-        "r3swpln1",
-    ];
+    let astra_xplane_group_ids = ["A56", "A53", "A43", "A46", "A6", "A3", "A13", "A16"];
     astra_logical_names.extend(astra_xplane_group_ids.into_iter().flat_map(|group_id| {
         [
-            format!("p-brcx-{group_id}-to-br-sfc"),
-            format!("p-br-xplane-{group_id}-to-br-sfc"),
+            format!("p-brcx-{}-to-br-sfc", group_id.to_ascii_lowercase()),
+            format!("p-br-xplane-{}-to-br-sfc", group_id.to_ascii_lowercase()),
         ]
     }));
     expected_interface_names.extend(
@@ -1489,7 +1516,7 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             .find(|interface| interface.metadata.name.as_deref() == Some(resource_name.as_str()))
             .unwrap_or_else(|| panic!("Astra scoped interface {resource_name} must exist"))
     };
-    let cx_patch = astra_interface("p-brcx-r0swpln0-to-br-sfc")
+    let cx_patch = astra_interface("p-brcx-a56-to-br-sfc")
         .spec
         .template
         .spec
@@ -1498,10 +1525,10 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
         .patch
         .as_ref()
         .expect("Astra CX bridge interface must be Patch-backed");
-    assert_eq!(cx_patch.peer_bridge, "brcx-r0swpln0");
+    assert_eq!(cx_patch.peer_bridge, "brcx-A56");
     assert!(cx_patch.peer_patch_name.is_none());
     assert!(cx_patch.peer_external_i_ds.is_none());
-    let xplane_patch = astra_interface("p-br-xplane-r3swpln1-to-br-sfc")
+    let xplane_patch = astra_interface("p-br-xplane-a16-to-br-sfc")
         .spec
         .template
         .spec
@@ -1516,7 +1543,7 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
         xplane_patch.peer_external_i_ds.as_ref(),
         Some(&BTreeMap::from([
             ("xplane".to_string(), "true".to_string()),
-            ("xplane-group-id".to_string(), "r3swpln1".to_string()),
+            ("xplane-group-id".to_string(), "A16".to_string()),
             ("xplane-downlink".to_string(), "patch".to_string()),
         ]))
     );
@@ -1706,8 +1733,8 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
             .into_iter()
             .map(|group_id| {
                 (
-                    format!("p-brcx-{group_id}-to-br-sfc"),
-                    format!("p-br-xplane-{group_id}-to-br-sfc"),
+                    format!("p-brcx-{}-to-br-sfc", group_id.to_ascii_lowercase()),
+                    format!("p-br-xplane-{}-to-br-sfc", group_id.to_ascii_lowercase()),
                 )
             })
             .collect::<BTreeSet<_>>()
@@ -1768,7 +1795,9 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
     assert!(astra_ovs.contains("_ovs-vsctl --may-exist add-br 'br-vf4'"));
     let resolution = astra_ovs.find("resolve_dpf_pf 'c2pf3'").unwrap();
     let fixed_ovs_setup = astra_ovs.find("/etc/mellanox/ovs-script.sh").unwrap();
-    let fixed_xplane_setup = astra_ovs.find("/etc/mellanox/xplane-bridge.sh").unwrap();
+    let fixed_xplane_setup = astra_ovs
+        .find("/usr/local/sbin/configure-xplane-network.sh")
+        .unwrap();
     let intercept_bridge_setup = astra_ovs
         .find("_ovs-vsctl --may-exist add-br 'br-pf3'")
         .unwrap();
@@ -1837,7 +1866,7 @@ async fn topology_backed_astra_initialization_replaces_pre_topology_scoped_pf_vf
         .map(str::to_string)
         .chain((0..=13).map(|vf_id| format!("pf0vf{vf_id}-astra")))
         .collect::<BTreeSet<_>>();
-    let initial_names = DpuServiceInterfaceRepository::list(&mock, TEST_NS)
+    let initial_names = DpuServiceInterfaceRepository::list(&mock, TEST_NS, None)
         .await
         .unwrap()
         .into_iter()
@@ -1891,8 +1920,8 @@ async fn topology_backed_astra_initialization_replaces_pre_topology_scoped_pf_vf
     for retained_name in [
         "p0-astra",
         "p1-astra",
-        "p-brcx-r0swpln0-to-br-sfc-astra",
-        "p-br-xplane-r0swpln0-to-br-sfc-astra",
+        "p-brcx-a56-to-br-sfc-astra",
+        "p-br-xplane-a56-to-br-sfc-astra",
         "pf0hpf-bf3",
         "pf0hpf-bf4",
     ] {
@@ -1985,7 +2014,7 @@ async fn topology_backed_astra_initialization_replaces_pre_topology_scoped_pf_vf
     retry.await.unwrap().unwrap();
 
     // The final state contains topology resources and none of the old scoped PF/VF resources.
-    let final_names = DpuServiceInterfaceRepository::list(&mock, TEST_NS)
+    let final_names = DpuServiceInterfaceRepository::list(&mock, TEST_NS, None)
         .await
         .unwrap()
         .into_iter()
@@ -1997,8 +2026,8 @@ async fn topology_backed_astra_initialization_replaces_pre_topology_scoped_pf_vf
     for retained_name in [
         "p0-astra",
         "p1-astra",
-        "p-brcx-r0swpln0-to-br-sfc-astra",
-        "p-br-xplane-r0swpln0-to-br-sfc-astra",
+        "p-brcx-a56-to-br-sfc-astra",
+        "p-br-xplane-a56-to-br-sfc-astra",
         "pf0hpf-bf3",
         "pf0hpf-bf4",
     ] {
@@ -2302,8 +2331,12 @@ async fn astra_migration_retries_repository_errors_after_partial_persistence() {
     }
 }
 
+/// Verifies scoped initialization prunes only legacy unscoped interfaces and preserves dynamic
+/// parents unchanged.
+/// Extension-service parents use nonempty selectors and must retain their exact specification
+/// across initialization.
 #[tokio::test]
-async fn scoped_initialization_prunes_unscoped_interfaces() {
+async fn scoped_initialization_prunes_unscoped_interfaces_and_preserves_dynamic_parents() {
     let definitions = crate::sdk::build_dpu_interfaces_vec();
 
     // Legacy-to-scoped: legacy interfaces are pruned, including stale interfaces from a
@@ -2333,13 +2366,47 @@ async fn scoped_initialization_prunes_unscoped_interfaces() {
         .insert(resource_key(&stale_c2pf3), stale_c2pf3);
     let sdk = crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
         .with_labeler(InitializationLabeler)
-        .initialize(&InitDpfResourcesConfig {
-            bfb_url: "http://example.com/test.bfb".to_string(),
-            deployment_scoped_service_interfaces: true,
-            ..Default::default()
-        })
+        .build_without_resources()
         .await
         .unwrap();
+
+    // A dynamic extension-service parent has a nonempty selector and is outside static migration
+    // ownership.
+    let dynamic_name = "extsvc-00000000-0000-0000-0000-000000000001-if0-svc";
+    let dynamic_before = sdk
+        .create_detached_dpu_service_interface(&DetachedDpuServiceInterfaceDefinition {
+            name: dynamic_name.to_string(),
+            namespace: TEST_NS.to_string(),
+            labels: BTreeMap::from([(
+                "nico/extension-service-id".to_string(),
+                "00000000-0000-0000-0000-000000000001".to_string(),
+            )]),
+            node_selector_labels: BTreeMap::from([(
+                "nico/extsvc-00000000-0000-0000-0000-000000000001".to_string(),
+                "true".to_string(),
+            )]),
+            template_labels: BTreeMap::new(),
+            interface: DetachedDpuServiceInterface::Service {
+                service_id: "extsvc-00000000-0000-0000-0000-000000000001".to_string(),
+                interface_name: "svc0".to_string(),
+                network: format!("{TEST_NS}/service-vpc-ipv4"),
+            },
+        })
+        .await
+        .expect("create dynamic extension-service interface");
+
+    // Run the public split initialization path so cleanup sees static and dynamic resources
+    // together.
+    sdk.create_initialization_objects(&InitDpfResourcesConfig {
+        bfb_url: "http://example.com/test.bfb".to_string(),
+        deployment_scoped_service_interfaces: true,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    // Legacy resources are replaced, while the selected dynamic parent is neither deleted nor
+    // overwritten.
     assert!(
         DpuServiceInterfaceRepository::get(&mock, "p1", TEST_NS)
             .await
@@ -2357,6 +2424,19 @@ async fn scoped_initialization_prunes_unscoped_interfaces() {
             .await
             .unwrap()
             .is_none()
+    );
+    let dynamic_after = DpuServiceInterfaceRepository::get(&mock, dynamic_name, TEST_NS)
+        .await
+        .unwrap()
+        .expect("dynamic interface survives initialization");
+    assert_eq!(
+        serde_json::to_value(dynamic_after.spec).expect("checked spec serializes"),
+        dynamic_before.spec
+    );
+    assert!(
+        !mock
+            .service_interface_delete_requests
+            .contains_key(&ns_key(TEST_NS, dynamic_name,))
     );
     drop(sdk);
 }

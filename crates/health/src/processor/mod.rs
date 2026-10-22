@@ -43,6 +43,7 @@ pub trait EventProcessor: Send + Sync {
 struct PendingEvent<'a> {
     event: Cow<'a, CollectorEvent>,
     blocked_processors: Vec<bool>,
+    is_event_record: bool,
 }
 
 pub struct EventProcessingPipeline {
@@ -98,6 +99,7 @@ impl EventProcessingPipeline {
                 queue.push_back(PendingEvent {
                     event: Cow::Owned(event),
                     blocked_processors: next_blocked_processors,
+                    is_event_record: false,
                 });
             }
         }
@@ -130,13 +132,28 @@ impl DataSink for EventProcessingPipeline {
         context: &EventContext,
         event: &CollectorEvent,
     ) -> Result<(), HealthError> {
+        self.try_handle_classified_event(context, event, false)
+    }
+
+    fn try_handle_classified_event(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+        is_event_record: bool,
+    ) -> Result<(), HealthError> {
         let mut queue = VecDeque::from(vec![PendingEvent {
             event: Cow::Borrowed(event),
             blocked_processors: vec![false; self.processors.len()],
+            is_event_record,
         }]);
 
         while let Some(current) = queue.pop_front() {
-            self.sink.try_handle_event(context, &current.event)?;
+            self.sink.try_handle_classified_event(
+                context,
+                &current.event,
+                current.is_event_record,
+            )?;
+
             self.next_events(
                 context,
                 &current.event,

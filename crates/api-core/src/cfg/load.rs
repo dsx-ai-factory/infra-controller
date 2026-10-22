@@ -399,6 +399,11 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
     // Reject endpoints with embedded secrets before tracing the configuration.
     config.validate_resource_pool_backends()?;
     config.api_admission_control.validate()?;
+    config
+        .firmware_global
+        .downloads
+        .validate()
+        .wrap_err("invalid firmware_global.downloads configuration")?;
 
     if let Some(config) = &config.dsx_exchange_event_bus {
         config.periodic_state_republish.validate()?;
@@ -484,12 +489,67 @@ pub fn log_vpc_peering_policy_deprecations(config: &CarbideConfig) {
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::Outcome::{Fails, Yields};
+    use carbide_test_support::Outcome::{Fails, FailsWith, Yields};
     use carbide_test_support::scenarios;
     use tracing_subscriber::prelude::*;
 
     use super::*;
     use crate::logging::stream::{LogStream, LogStreamLayer};
+
+    /// Loads downloader limits through the startup configuration path, including
+    /// omission defaults, and rejects invalid limits before activating Core.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn firmware_download_limits_are_loaded_and_validated() {
+        use carbide_firmware::downloader::FirmwareDownloadConfig;
+
+        figment::Jail::expect_with(|jail| {
+            scenarios!(
+                run = |settings| {
+                    // The minimal production configuration isolates this nested section.
+                    jail.create_file(
+                        "config.toml",
+                        &format!("{}\n{settings}\n", include_str!("test_data/min_config.toml")),
+                    ).unwrap();
+                    parse_carbide_config(Path::new("config.toml"), None)
+                        .map(|config| config.firmware_global.downloads.clone())
+                        .map_err(|error| format!("{error:#}"))
+                };
+                "firmware download startup configuration" {
+                    // Existing installations need no new section to receive bounded defaults.
+                    "" => Yields(FirmwareDownloadConfig::default()),
+                    // The loader warns and removes a misspelled nested key by default.
+                    "[firmware_global.downloads]\nmax_download_byte = 1"
+                        => Yields(FirmwareDownloadConfig::default()),
+                    // Strict configuration turns that same typo into a startup error.
+                    "deny_unknown_fields = true\n[firmware_global.downloads]\nmax_download_byte = 1"
+                        => FailsWith(
+                            "failed to load configuration files: unknown configuration fields: firmware_global.downloads.max_download_byte (config.toml)".to_string(),
+                        ),
+                    // Distinct values prove every operator setting reaches the canonical owner.
+                    r#"[firmware_global.downloads]
+max_concurrent_downloads = 2
+max_download_bytes = 1024
+connect_timeout_seconds = 3
+read_timeout_seconds = 4
+request_timeout_seconds = 5"#
+                        => Yields(FirmwareDownloadConfig {
+                            max_concurrent_downloads: 2,
+                            max_download_bytes: 1024,
+                            connect_timeout_seconds: 3,
+                            read_timeout_seconds: 4,
+                            request_timeout_seconds: 5,
+                        }),
+                    // Deserialization alone accepts zero; startup must run semantic validation.
+                    "[firmware_global.downloads]\nmax_concurrent_downloads = 0"
+                        => FailsWith(
+                            "invalid firmware_global.downloads configuration: max_concurrent_downloads must be between 1 and 16".to_string(),
+                        ),
+                }
+            );
+            Ok(())
+        })
+    }
 
     /// Preserves omission versus explicit emptiness through real TOML loading,
     /// so an operator can disable null routes without activating the fallback.

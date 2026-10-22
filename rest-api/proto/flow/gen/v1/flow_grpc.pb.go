@@ -99,6 +99,7 @@ const (
 	Flow_ResumeOperationRun_FullMethodName       = "/v1.Flow/ResumeOperationRun"
 	Flow_AdvanceOperationRunPhase_FullMethodName = "/v1.Flow/AdvanceOperationRunPhase"
 	Flow_CancelOperationRun_FullMethodName       = "/v1.Flow/CancelOperationRun"
+	Flow_GetTrayPowerDetails_FullMethodName      = "/v1.Flow/GetTrayPowerDetails"
 )
 
 // FlowClient is the client API for Flow service.
@@ -199,6 +200,10 @@ type FlowClient interface {
 	ResumeOperationRun(ctx context.Context, in *ResumeOperationRunRequest, opts ...grpc.CallOption) (*OperationRun, error)
 	AdvanceOperationRunPhase(ctx context.Context, in *AdvanceOperationRunPhaseRequest, opts ...grpc.CallOption) (*OperationRun, error)
 	CancelOperationRun(ctx context.Context, in *CancelOperationRunRequest, opts ...grpc.CallOption) (*OperationRun, error)
+	// Reads live Core power details and outstanding Flow power tasks independently.
+	// This is not an atomic snapshot and does not change power or task state.
+	// Caller cancellation fails the RPC; child read failures remain section errors.
+	GetTrayPowerDetails(ctx context.Context, in *GetTrayPowerDetailsRequest, opts ...grpc.CallOption) (*GetTrayPowerDetailsResponse, error)
 }
 
 type flowClient struct {
@@ -969,6 +974,16 @@ func (c *flowClient) CancelOperationRun(ctx context.Context, in *CancelOperation
 	return out, nil
 }
 
+func (c *flowClient) GetTrayPowerDetails(ctx context.Context, in *GetTrayPowerDetailsRequest, opts ...grpc.CallOption) (*GetTrayPowerDetailsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetTrayPowerDetailsResponse)
+	err := c.cc.Invoke(ctx, Flow_GetTrayPowerDetails_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // FlowServer is the server API for Flow service.
 // All implementations should embed UnimplementedFlowServer
 // for forward compatibility.
@@ -1067,6 +1082,10 @@ type FlowServer interface {
 	ResumeOperationRun(context.Context, *ResumeOperationRunRequest) (*OperationRun, error)
 	AdvanceOperationRunPhase(context.Context, *AdvanceOperationRunPhaseRequest) (*OperationRun, error)
 	CancelOperationRun(context.Context, *CancelOperationRunRequest) (*OperationRun, error)
+	// Reads live Core power details and outstanding Flow power tasks independently.
+	// This is not an atomic snapshot and does not change power or task state.
+	// Caller cancellation fails the RPC; child read failures remain section errors.
+	GetTrayPowerDetails(context.Context, *GetTrayPowerDetailsRequest) (*GetTrayPowerDetailsResponse, error)
 }
 
 // UnimplementedFlowServer should be embedded to have
@@ -1303,6 +1322,9 @@ func (UnimplementedFlowServer) AdvanceOperationRunPhase(context.Context, *Advanc
 }
 func (UnimplementedFlowServer) CancelOperationRun(context.Context, *CancelOperationRunRequest) (*OperationRun, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelOperationRun not implemented")
+}
+func (UnimplementedFlowServer) GetTrayPowerDetails(context.Context, *GetTrayPowerDetailsRequest) (*GetTrayPowerDetailsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetTrayPowerDetails not implemented")
 }
 func (UnimplementedFlowServer) testEmbeddedByValue() {}
 
@@ -2692,6 +2714,24 @@ func _Flow_CancelOperationRun_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Flow_GetTrayPowerDetails_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetTrayPowerDetailsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).GetTrayPowerDetails(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_GetTrayPowerDetails_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).GetTrayPowerDetails(ctx, req.(*GetTrayPowerDetailsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Flow_ServiceDesc is the grpc.ServiceDesc for Flow service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -3002,6 +3042,10 @@ var Flow_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CancelOperationRun",
 			Handler:    _Flow_CancelOperationRun_Handler,
+		},
+		{
+			MethodName: "GetTrayPowerDetails",
+			Handler:    _Flow_GetTrayPowerDetails_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

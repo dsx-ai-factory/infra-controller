@@ -156,6 +156,8 @@ behavior.
 | `scout_boot_interface_correction_enabled` | `bool` | `false` | `machines` | Controls whether NICo may reconcile a boot interface selection recorded as `RedfishChassisId` or `RedfishSerialNumber` after ordering DPU-attached Admin interfaces by the `domain:bus:device.function` PCI addresses in scout's `HardwareInfo`. The setting is read at startup. NICo records available comparisons in structured logs and `carbide_scout_pci_evaluations_total` regardless of this setting. When `false`, it does not change the selection. When `true`, reconciliation requires at least two eligible interfaces, a complete and unique candidate, `ManagedHostState::Ready` or `ManagedHostState::HostInit` with `MachineState::Discovered`, no `Instance` or primary interface prediction, and no conflicting or integrated-NIC primary. If the selected MAC is already desired and primary, NICo changes only the source to `ScoutReportPci`. Otherwise it updates the desired target and primary together and enqueues the state handler. A `Ready` host enters `BootConfiguring`; `HostInit` completes its reboot handshake first. |
 | `node_auth` | `NodeAuthConfig` | *(default)* | `security` | How Scout and the DPU-agent authenticate: bearer JWTs, machine mTLS client certificates, or both during a migration (see [NodeAuthConfig](#nodeauthconfig)). |
 | `ssh_console_url` | `Option<Url>` | — | `machines` | HTTPS URL to the ssh-console service. Used for live streaming of BMC logs via the `StreamConsoleLogs` gRPC, and the admin-ui's Console Logs page for each machine. |
+| `shutdown_timeout` | `Duration` | `60s` | `server` | How long to wait for the nico-api server to shut down gracefully before forcing background tasks to abort. |
+| `panic_on_early_task_return` | `bool` | `false` | `server` | Intended for integration testing: Whether to panic if a background task (for instance, state controllers, site-explorer) finishes early before we've shut down. Not recommended for production. |
 
 ---
 
@@ -805,13 +807,55 @@ TOML section: `[extension_service_state_controller]`.
 | `max_uploads` | `usize` | `4` | Max concurrent firmware uploads. |
 | `concurrency_limit` | `usize` | `16` | Max concurrent firmware flashing operations. |
 | `firmware_directory` | `PathBuf` | `/opt/nico/firmware` | Firmware binary storage directory. |
+| `firmware_download_cache_directory` | `PathBuf` | `/mnt/persistence/fw/download-cache` | Writable directory used to cache downloaded firmware artifacts. |
+| `downloads` | `FirmwareDownloadConfig` | *(see below)* | Shared downloader limits, applied at Core startup. |
 | `host_firmware_upgrade_retry_interval` | `Duration` | `60m` | Retry delay for failed host firmware upgrades. |
 | `instance_updates_manual_tagging` | `bool` | `true` | Require manual tagging before firmware updates. |
 | `no_reset_retries` | `bool` | `false` | Disable retry logic after BMC resets. |
 | `hgx_bmc_gpu_reboot_delay` | `Duration` | `30s` | Delay after GPU reboot before HGX BMC access. |
 | `requires_manual_upgrade` | `bool` | `false` | Force all firmware upgrades to require admin approval. |
-| `firmware_download_cache_directory` | `PathBuf` | `/mnt/persistence/fw/download-cache` | Writable directory used to cache downloaded firmware artifacts. |
 | `max_concurrent_bfb_copies` | `usize` | `10` | Maximum number of concurrent BFB copy operations. |
+
+### `FirmwareDownloadConfig`
+
+Optional TOML section: `[firmware_global.downloads]`. Omitted fields use the
+defaults below. Core rejects out-of-range values at startup; changes require a
+restart. Base configuration is overridden by site configuration, then
+`CARBIDE_API_` environment configuration.
+
+See the [firmware download operational guide](../../../../docs/operations/firmware-updates/configuration.md#firmware-downloads)
+for affected workflows, deployment guidance, and failure handling.
+
+| Field | Type | Default | Accepted range and behavior |
+| ------- | ------ | --------- | ------------- |
+| `max_concurrent_downloads` | `usize` | `4` | `1`–`16` cache-verification/download workers per Core process. A slot remains occupied through filesystem work and cleanup after cancellation. Saturation defers the next check, even for a cached artifact, without queuing work or consuming a recorded failure. |
+| `max_download_bytes` | `u64` | `4294967296` (4 GiB) | `1`–`17179869184` (16 GiB) bytes per HTTP response body, counted while streaming regardless of `Content-Length`. |
+| `connect_timeout_seconds` | `u64` | `30` | `1`–`300` seconds to connect. |
+| `read_timeout_seconds` | `u64` | `60` | `1`–`600` seconds from starting the request through receiving final response headers, including connection establishment; then an idle timer that resets after each body read. |
+| `request_timeout_seconds` | `u64` | `1800` | `1`–`7200` seconds for one HTTP request, from connecting through body completion. |
+
+Connection and read timeouts must not exceed the whole-request timeout. Before
+headers, the first expired timer wins, so a shorter read timeout also caps
+connection establishment. These are HTTP transport deadlines, not hard deadlines
+for local filesystem operations, cache verification, hashing, or cleanup. A
+blocked filesystem operation retains its worker slot; timeout detection can wait
+for that operation to finish. The whole-request clock continues while received
+bytes are written to disk, but cannot interrupt the physical write.
+
+The defaults are initial resource-policy guardrails, not measured site capacity:
+four workers allow concurrent host work while limiting parallel transfers, and
+4 GiB per response gives a nominal 16 GiB HTTP staging envelope. At both hard
+maxima the envelope is 256 GiB per Core process. Retained cache and local copies
+are outside this size envelope. Check artifact sizes, available storage, and
+source transfer rates before selecting larger values. The 30-second connection,
+60-second initial/read-idle, and 30-minute request defaults distinguish stalled
+sources from a progressing large transfer; they do not resume partial downloads.
+
+Local-file copies share worker capacity without HTTP size or timeout limits.
+Optional legacy checksums remain optional. A timed-out or oversized HTTP transfer
+fails without publishing its partial file; the polling retry contract still
+applies. BFB delivery, retained cache storage, and firmware upload/flash
+concurrency have separate owners and limits.
 
 ### `MachineUpdater`
 
@@ -1516,17 +1560,32 @@ events, so consumers handle them identically.
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
-| `bfb_url` | `Option<String>` | BF3 bf-bundle URL | BlueField firmware bundle used for BF3 provisioning. Mutually exclusive with `bluefield_software`; BF4 requires `bluefield_software` instead. |
+| `bfb_url` | `Option<String>` | BF3 bf-bundle URL when the complete deployment block is omitted | BlueField firmware bundle used for BF3 provisioning. A written BF3 deployment block must set a site-qualified value. Mutually exclusive with `bluefield_software`. BF4 requires `bluefield_software` instead. |
 | `bluefield_software` | `Option<BlueFieldSoftwareConfig>` | — | BF4 OS ISO and PSID-to-PLDM firmware source. BF4 requires this field with at least one `pldm_fw_bundle` entry. |
 | `flavor_name` | `String` | `carbide-dpu-flavor` | Base name for the generated BF3/generic-BF4 `DPUFlavor` or Astra `DPUFlavorTemplate`. |
 | `deployment_name` | `String` | `nico-deployment-v2` | Name of the generated `DPUDeployment`. |
 | `node_label_key` | `String` | `carbide.nvidia.com/controlled.node.v2` | Label key used to select DPU nodes for this deployment. |
 | `max_sf_per_pf` | `u32` | `126` | Operator-declared SF ceiling per parent PF for BF3 and generic BF4 when service slots are enabled. Must then be positive. Omission in a written deployment block also uses 126. Rejects a generated `PF_TOTAL_SF` above this ceiling before initialization writes. The platform's per-SF BAR size determines the corresponding allocation. Ignored with zero slots to preserve existing pool overrides. It bounds the pool rather than adding capacity or changing the flavor by itself. Operators must declare a ceiling qualified for the deployment's platform/firmware tuple. The default is not hardware qualification. BF3 GB200 uses its fixed 128-SF profile and ignores this generic ceiling. The fixed-xplane deployment derives its SF capacity from its effective interface inventory and ignores this generic ceiling. |
+| `service_vpc_enabled_address_families` | `ServiceVpcEnabledAddressFamilies` | `[]` | Declares that this deployment's service-VPC DHCP CNI runtime and family-specific raw NAD are installed and qualified. Accepted values are `ipv4` and `ipv6`. Order is irrelevant. Duplicates and unknown values fail startup configuration parsing. The BF3 declaration also applies to the derived BF3 GB200 deployment, while generic BF4 has an independent declaration. Enabling a family on any supported non-Astra concrete deployment enables creation of global dormant registration parents for that family. Omission and an empty list retain the configured deployment (and for BF3, its GB200 derivative) in the per-target capability map with no enabled families. A new registration is deferred when no supported deployment enables its family. Service-VPC registration currently projects only IPv4, so IPv6 registrations are also deferred even when IPv6 is listed. The setting does not create, inspect, or delete the shared NAD. Before enablement, operators must install the raw NAD with MTU 1500 at `dpf-operator-system/nico-service-vpc-ipv4` or `dpf-operator-system/nico-service-vpc-ipv6` and install the corresponding DHCP CNI runtime. Astra rejects a nonempty value. Reference-bearing registrations remain repairable after a family is disabled. Registrations whose DPUService remains observable also retain and repair their parent graphs without an instance reference. |
 | `services` | `Option<Box<DpfMandatoryServicesConfig>>` | inherit `[dpf.services]` | Optional complete per-deployment mandatory-service override. Omitted service entries use built-in defaults rather than top-level values. |
 | `extra_services` | `BTreeMap<DpfExtraService, DpfServiceConfigOverride>` | `{}` | Deployment-local overlays for supported extra services. |
 | `enable_delay_host_init` | `bool` | `false` | When enabled, delay host initialization until the DPU's `DPUServiceCriticalPodsReady` condition is true. |
 
 Every active DPF deployment must use distinct `deployment_name`, `flavor_name`, and `node_label_key` values. A deployment `node_label_key` must not be `feature.node.kubernetes.io/dpu-enabled`, which marks every DPF-managed node, or `carbide.nvidia.com/host-bmc-ip`, whose per-node contextual value is the host BMC address. These checks use the local configuration and do not query or modify cluster resources.
+
+The initial service-VPC rollout enables only IPv4 on qualified deployments. A written deployment block must include its required identity fields and provisioning source:
+
+```toml
+[dpf.deployments.bf3]
+flavor_name = "carbide-dpu-flavor"
+deployment_name = "nico-deployment-v2"
+node_label_key = "carbide.nvidia.com/controlled.node.v2"
+# Use the BF3 BFB qualified for this site's platform and firmware.
+bfb_url = "https://artifacts.example.com/bluefield/site-qualified-bf3.bfb"
+service_vpc_enabled_address_families = ["ipv4"]
+```
+
+At least one fixed service-VPC slot must be configured before a supported deployment enables a family. The configuration is read once at API startup, so all Core replicas must receive the same configuration. During a rollout that changes enabled families or slot inventory, quiesce extension-service registration creates and updates. Wait for in-flight updates and registrations for already-enabled families to settle, but do not wait for declarations held in `Creating` solely because their family is disabled. The enabling restart resumes them. Changes to `service_vpc_slot_count` are eventually consistent after every Core replica runs the new inventory. During a rolling restart, periodic `Ready` reconciliation continues, so replicas using old and new inventories can temporarily create and remove conflicting parent graphs. Prefer a non-overlapping restart to avoid this churn. If using a rolling restart, keep registration writes quiesced until every replica is running the same configuration and reconciliation has converged. Registration parents are common dormant DPF resources. Activation of networked extension services is not implemented. [Issue #6125](https://github.com/dsx-ai-factory/infra-controller/issues/6125) tracks activation based on durable machine and DPU deployment state, including rejection of unknown or disabled target deployments without a synchronous Kubernetes query.
 
 Each entry under `[dpf.services]` accepts a chart-native `extra_helm_values` table. NICo deep-merges it over generated `DPUServiceTemplate` values. Nested scalars and arrays replace generated values. DPF applies NICo's deployment-specific `DPUServiceConfiguration` values after the template values. Top-level and per-deployment service fields both overlay the service's built-in defaults.
 

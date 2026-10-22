@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bmc_explorer::ProcessorExt;
-use carbide_network::deserialize_input_mac_to_address;
+use carbide_network::{deserialize_input_mac_to_address, is_locally_administered_mac};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::conv::{IntoModel, bmc_vendor};
 use carbide_redfish::libredfish::dpu_bios::is_dpu_bios_attributes_not_ready;
@@ -48,6 +48,8 @@ use model::site_explorer::{
     UefiDevicePath, derive_hardware_class,
 };
 use regex::Regex;
+
+use crate::explored_endpoint_ext::{mac_to_u64, u64_to_mac};
 
 const NOT_FOUND: u16 = 404;
 const BF4_NDF0_TO_BASE_MAC_OFFSET: u64 = 0x10;
@@ -926,7 +928,7 @@ async fn fetch_manager(client: &dyn Redfish) -> Result<Manager, RedfishError> {
         e.id.as_deref()
             .is_some_and(|id| id.eq_ignore_ascii_case("eth0"))
     }) && let Some(mac) = eth0.mac_address
-        && crate::is_locally_administered_mac(mac)
+        && is_locally_administered_mac(mac)
     {
         tracing::warn!(
             manager_id = %manager.id,
@@ -1639,8 +1641,8 @@ async fn get_base_mac_from_bf4_ndf0(client: &dyn Redfish) -> Option<MacAddress> 
             .and_then(serde_json::Value::as_str)
             && let Ok(parsed) = deserialize_input_mac_to_address(mac)
         {
-            let derived = crate::mac_to_u64(parsed).checked_sub(BF4_NDF0_TO_BASE_MAC_OFFSET)?;
-            return Some(crate::u64_to_mac(derived));
+            let derived = mac_to_u64(parsed).checked_sub(BF4_NDF0_TO_BASE_MAC_OFFSET)?;
+            return Some(u64_to_mac(derived));
         }
     }
     None
@@ -2554,7 +2556,6 @@ mod tests {
         assert_eq!(adapter.port_mac_addresses, vec![mac_address]);
         assert_eq!(report.all_mac_addresses(), vec![mac_address]);
         assert_eq!(report.find_interface_id_for_mac(mac_address), None);
-        assert_eq!(report.complete_boot_interfaces().count(), 0);
     }
 
     #[tokio::test]

@@ -1154,13 +1154,13 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 		site := cwu.TestBuildSite(t, dbSession, ip, "test-site-interfaces", cdbm.SiteStatusRegistered, nil, ipu)
 		emID := uuid.New()
 		initial := []cdbm.ExpectedMachineInterface{{
-			MacAddress: "02:00:00:00:00:09", NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.9"),
+			MacAddress: cutil.GetPtr("02:00:00:00:00:09"), NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.9"),
 			FixedMask: cutil.GetPtr("255.255.255.0"), FixedGateway: cutil.GetPtr("192.0.2.1"), Primary: cutil.GetPtr(true),
 			NetworkSegmentType: cutil.GetPtr(cdbm.ExpectedInterfaceNetworkSegmentTypeHostInband),
 			Role:               cutil.GetPtr(cdbm.ExpectedInterfaceRoleHost), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed),
 		}}
 		changed := []cdbm.ExpectedMachineInterface{{
-			MacAddress: "02:00:00:00:00:09", NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.10"),
+			MacAddress: cutil.GetPtr("02:00:00:00:00:09"), NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.10"),
 		}}
 		steps := []struct {
 			name     string

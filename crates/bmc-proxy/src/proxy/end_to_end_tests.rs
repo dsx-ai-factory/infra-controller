@@ -48,7 +48,7 @@ use tokio_rustls::rustls;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tracing_subscriber::layer::SubscriberExt;
 
-use crate::proxy::credentials::BmcCredentials;
+use crate::proxy::credentials::{BmcCredentials, TargetCredentials, TargetKind};
 use crate::proxy::test_support::*;
 use crate::proxy::upstream::MAX_BUFFERED_BODY_SIZE;
 use crate::proxy::{BmcProxyState, proxy_request};
@@ -59,8 +59,14 @@ const FAKE_BMC_IP: &str = "127.0.0.1";
 const BMC_PASSWORD: &str = "bmc-secret";
 /// What nico-api hands out once the BMC rejects the cached credential.
 const FRESH_PASSWORD: &str = "bmc-rotated";
+/// The NVOS admin password nico-api holds for the switch it knows.
+const NVOS_PASSWORD: &str = "nvos-secret";
 const SYSTEM_PATH: &str = "/redfish/v1/Systems/System_0";
 const SYSTEM_BODY: &str = r#"{"PowerState":"On"}"#;
+/// NVUE's system resource, as the fake BMC serves it standing in for a
+/// switch's NVOS interface.
+const NVUE_SYSTEM_PATH: &str = "/nvue_v1/system";
+const NVUE_SYSTEM_BODY: &str = r#"{"hostname":"switch-1"}"#;
 /// Redirects to [`SYSTEM_PATH`].
 const MOVED_PATH: &str = "/redfish/v1/Moved";
 /// Answers a 500 whose body echoes the BMC password.
@@ -150,6 +156,11 @@ async fn fake_bmc_handler(
             SYSTEM_BODY,
         )
             .into_response(),
+        (Method::GET, NVUE_SYSTEM_PATH) => (
+            [(header::CONTENT_TYPE, "application/json")],
+            NVUE_SYSTEM_BODY,
+        )
+            .into_response(),
         (Method::GET, MOVED_PATH) => (
             StatusCode::TEMPORARY_REDIRECT,
             [(header::LOCATION, SYSTEM_PATH)],
@@ -214,6 +225,37 @@ async fn fake_bmc_handler(
 }
 
 fn spawn_fake_bmc() -> (SocketAddr, FakeBmc) {
+    let bmc = FakeBmc::default();
+    let app = axum::Router::new()
+        .route("/{*path}", axum::routing::any(fake_bmc_handler))
+        .with_state(bmc.clone());
+    (spawn_tls(app), bmc)
+}
+
+/// bmc-mock's NVOS of an NVLink switch tray, served over TLS at
+/// [`FAKE_BMC_IP`] as a switch serves NVUE at its NVOS address: where it
+/// listens, and the state behind it.
+fn spawn_mock_switch() -> (SocketAddr, Arc<bmc_mock::NvueState>) {
+    use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig};
+    let pool_config =
+        PoolConfig::new(MacAddress::new([0x02, 0, 0, 0, 0x10, 0]), 24).expect("pool config");
+    let mut pool = MacAddressPool::new_pool(pool_config);
+    let switch = bmc_mock::HostMachineInfo::new(
+        bmc_mock::HardwareType::NvidiaSwitchN5700Ld,
+        Vec::new(),
+        &mut pool,
+        pool_config,
+    );
+    let (app, nvos) = bmc_mock::nvue_router(
+        &switch,
+        Arc::new(bmc_mock::injection::InjectionStore::new()),
+    )
+    .expect("a switch tray serves NVUE");
+    (spawn_tls(app), nvos)
+}
+
+/// Serves `app` over TLS at [`FAKE_BMC_IP`] on a free port.
+fn spawn_tls(app: axum::Router) -> SocketAddr {
     let params = rcgen::CertificateParams::new(vec![FAKE_BMC_IP.to_string()]).expect("cert params");
     let key = rcgen::KeyPair::generate().expect("server key");
     let cert = params.self_signed(&key).expect("self-signed server cert");
@@ -232,10 +274,6 @@ fn spawn_fake_bmc() -> (SocketAddr, FakeBmc) {
     .with_single_cert(vec![server_cert], server_key)
     .expect("server TLS config");
 
-    let bmc = FakeBmc::default();
-    let app = axum::Router::new()
-        .route("/{*path}", axum::routing::any(fake_bmc_handler))
-        .with_state(bmc.clone());
     let listener = std::net::TcpListener::bind((FAKE_BMC_IP, 0)).expect("bind fake BMC");
     listener
         .set_nonblocking(true)
@@ -251,7 +289,7 @@ fn spawn_fake_bmc() -> (SocketAddr, FakeBmc) {
         .await
         .expect("fake BMC serves");
     });
-    (addr, bmc)
+    addr
 }
 
 /// A port on the BMC's IP that refuses connections. The socket stays bound,
@@ -268,11 +306,73 @@ fn refusing_port() -> (tokio::net::TcpSocket, u16) {
 
 /// nico-api as the proxy uses it to replace a credential: naming the BMC at
 /// an IP, and handing out that BMC's credential, [`FRESH_PASSWORD`], each
-/// after `lookup_delay`. It also answers `Version`, which the client calls to
-/// check its connection, at once.
+/// after `lookup_delay`. Its `inventory` decides how it answers the probe for
+/// a switch with that MAC on its NVOS interface, and `nvos` is what it
+/// stores for that switch's NVOS administrator. It also answers `Version`,
+/// which the client calls to check its connection, at once. The switch and
+/// credential lookups it receives are recorded in `lookups`, each as the
+/// method name with its argument.
 #[derive(Clone)]
 struct FakeNicoApi {
     lookup_delay: Duration,
+    inventory: FakeInventory,
+    nvos: StoredNvos,
+    lookups: Lookups,
+}
+
+/// The switch and credential lookups a fake nico-api received, in order.
+type Lookups = Arc<Mutex<Vec<String>>>;
+
+/// The NVOS username and password nico-api stores for the switch it knows,
+/// which a test changes as a rotation would.
+type StoredNvos = Arc<Mutex<(String, String)>>;
+
+/// What nico-api stores for the switch unless a test says otherwise.
+fn stored_nvos() -> StoredNvos {
+    Arc::new(Mutex::new((
+        "nvos-admin".to_string(),
+        NVOS_PASSWORD.to_string(),
+    )))
+}
+
+/// The probe for the switch whose NVOS interface has the fake BMC's MAC, as
+/// the fake nico-api records it.
+fn probe_lookup() -> String {
+    format!("FindSwitchIds({})", fake_bmc_mac())
+}
+
+/// The BMC credential lookup for the fake BMC's MAC, as recorded.
+fn bmc_lookup() -> String {
+    format!("GetBmcCredentials({})", fake_bmc_mac())
+}
+
+/// The NVOS credential lookup for the switch the fake nico-api knows, as
+/// recorded.
+fn nvos_lookup() -> String {
+    format!("GetSwitchNvosCredentials({})", fake_switch_id(1))
+}
+
+/// What the fake nico-api knows of the switch whose NVOS interface has the
+/// MAC it resolves every address to.
+#[derive(Clone, Copy, Debug)]
+enum FakeInventory {
+    /// No switch has it: every address is a BMC's.
+    NoSwitch,
+    /// One switch has it, with [`NVOS_PASSWORD`] as its NVOS admin password.
+    Switch,
+    /// One switch has it, but holds no NVOS credentials.
+    SwitchWithoutCredentials,
+    /// Two switches claim it.
+    TwoSwitches,
+    /// The probe is denied, as a nico-api that predates it answers.
+    ProbeDenied,
+}
+
+/// The switch the fake nico-api knows, and a second one claiming the same
+/// NVOS MAC, numbered from `n`.
+fn fake_switch_id(n: u8) -> carbide_uuid::switch::SwitchId {
+    use carbide_uuid::switch::{SwitchIdSource, SwitchType};
+    carbide_uuid::switch::SwitchId::new(SwitchIdSource::Tpm, [n; 32], SwitchType::NvLink)
 }
 
 impl tonic::server::NamedService for FakeNicoApi {
@@ -290,6 +390,10 @@ impl tower::Service<http::Request<tonic::body::Body>> for FakeNicoApi {
 
     fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
         let lookup_delay = self.lookup_delay;
+        let inventory = self.inventory;
+        let nvos = self.nvos.clone();
+        let lookups = self.lookups.clone();
+        let record = move |lookup: String| lookups.lock().unwrap().push(lookup);
         Box::pin(async move {
             if request.uri().path() != "/forge.Forge/Version" {
                 tokio::time::sleep(lookup_delay).await;
@@ -298,7 +402,7 @@ impl tower::Service<http::Request<tonic::body::Body>> for FakeNicoApi {
                 "/forge.Forge/Version" => {
                     tonic::server::Grpc::new(tonic_prost::ProstCodec::default())
                         .unary(
-                            Unary(|_: forge::VersionRequest| forge::BuildInfo::default()),
+                            Unary(|_: forge::VersionRequest| Ok(forge::BuildInfo::default())),
                             request,
                         )
                         .await
@@ -306,9 +410,62 @@ impl tower::Service<http::Request<tonic::body::Body>> for FakeNicoApi {
                 "/forge.Forge/FindMacAddressByBmcIp" => {
                     tonic::server::Grpc::new(tonic_prost::ProstCodec::default())
                         .unary(
-                            Unary(|ip: forge::BmcIp| forge::MacAddressBmcIp {
-                                bmc_ip: ip.bmc_ip,
-                                mac_address: fake_bmc_mac().to_string(),
+                            Unary(|ip: forge::BmcIp| {
+                                Ok(forge::MacAddressBmcIp {
+                                    bmc_ip: ip.bmc_ip,
+                                    mac_address: fake_bmc_mac().to_string(),
+                                })
+                            }),
+                            request,
+                        )
+                        .await
+                }
+                "/forge.Forge/FindSwitchIds" => {
+                    tonic::server::Grpc::new(tonic_prost::ProstCodec::default())
+                        .unary(
+                            Unary(move |filter: forge::SwitchSearchFilter| {
+                                record(format!(
+                                    "FindSwitchIds({})",
+                                    filter.nvos_mac.unwrap_or_default()
+                                ));
+                                let ids = match inventory {
+                                    FakeInventory::NoSwitch => vec![],
+                                    FakeInventory::Switch
+                                    | FakeInventory::SwitchWithoutCredentials => {
+                                        vec![fake_switch_id(1)]
+                                    }
+                                    FakeInventory::TwoSwitches => {
+                                        vec![fake_switch_id(1), fake_switch_id(2)]
+                                    }
+                                    FakeInventory::ProbeDenied => {
+                                        return Err(tonic::Status::permission_denied(
+                                            "not allowed",
+                                        ));
+                                    }
+                                };
+                                Ok(forge::SwitchIdList { ids })
+                            }),
+                            request,
+                        )
+                        .await
+                }
+                "/forge.Forge/GetSwitchNvosCredentials" => {
+                    tonic::server::Grpc::new(tonic_prost::ProstCodec::default())
+                        .unary(
+                            Unary(move |switch: forge::GetSwitchNvosCredentialsRequest| {
+                                record(format!(
+                                    "GetSwitchNvosCredentials({})",
+                                    switch
+                                        .switch_id
+                                        .map_or_else(|| "none".to_string(), |id| id.to_string())
+                                ));
+                                if matches!(inventory, FakeInventory::SwitchWithoutCredentials) {
+                                    return Err(tonic::Status::not_found(
+                                        "switch_nvos_credentials",
+                                    ));
+                                }
+                                let (username, password) = nvos.lock().unwrap().clone();
+                                Ok(username_password(&username, &password))
                             }),
                             request,
                         )
@@ -317,19 +474,9 @@ impl tower::Service<http::Request<tonic::body::Body>> for FakeNicoApi {
                 "/forge.Forge/GetBmcCredentials" => {
                     tonic::server::Grpc::new(tonic_prost::ProstCodec::default())
                         .unary(
-                            Unary(|_: forge::GetBmcCredentialsRequest| {
-                                forge::GetBmcCredentialsResponse {
-                                    credentials: Some(forge::BmcCredentials {
-                                        r#type: Some(
-                                            forge::bmc_credentials::Type::UsernamePassword(
-                                                forge::UsernamePassword {
-                                                    username: "root".to_string(),
-                                                    password: FRESH_PASSWORD.to_string(),
-                                                },
-                                            ),
-                                        ),
-                                    }),
-                                }
+                            Unary(move |bmc: forge::GetBmcCredentialsRequest| {
+                                record(format!("GetBmcCredentials({})", bmc.mac_addr));
+                                Ok(username_password("root", FRESH_PASSWORD))
                             }),
                             request,
                         )
@@ -341,13 +488,27 @@ impl tower::Service<http::Request<tonic::body::Body>> for FakeNicoApi {
     }
 }
 
+/// nico-api's answer handing out `username` and `password`.
+fn username_password(username: &str, password: &str) -> forge::GetBmcCredentialsResponse {
+    forge::GetBmcCredentialsResponse {
+        credentials: Some(forge::BmcCredentials {
+            r#type: Some(forge::bmc_credentials::Type::UsernamePassword(
+                forge::UsernamePassword {
+                    username: username.to_string(),
+                    password: password.to_string(),
+                },
+            )),
+        }),
+    }
+}
+
 /// A unary gRPC method answered by `F`.
 #[derive(Clone)]
 struct Unary<F>(F);
 
 impl<Req, Resp, F> tonic::server::UnaryService<Req> for Unary<F>
 where
-    F: Fn(Req) -> Resp,
+    F: Fn(Req) -> Result<Resp, tonic::Status>,
     Req: Send + 'static,
     Resp: Send + 'static,
 {
@@ -355,32 +516,61 @@ where
     type Future = std::future::Ready<Result<tonic::Response<Resp>, tonic::Status>>;
 
     fn call(&mut self, request: tonic::Request<Req>) -> Self::Future {
-        std::future::ready(Ok(tonic::Response::new((self.0)(request.into_inner()))))
+        std::future::ready((self.0)(request.into_inner()).map(tonic::Response::new))
     }
 }
 
-/// A client for a fake nico-api listening on a fresh local port.
+/// A client for a fake nico-api listening on a fresh local port, knowing no
+/// switch.
 async fn fake_nico_api() -> ForgeApiClient {
     fake_nico_api_answering_after(Duration::ZERO).await
 }
 
 /// [`fake_nico_api`], answering lookups after `lookup_delay`.
 async fn fake_nico_api_answering_after(lookup_delay: Duration) -> ForgeApiClient {
+    fake_nico_api_with(lookup_delay, FakeInventory::NoSwitch)
+        .await
+        .0
+}
+
+/// A client for a fake nico-api knowing `inventory`, answering lookups
+/// after `lookup_delay`, and the lookups it receives.
+async fn fake_nico_api_with(
+    lookup_delay: Duration,
+    inventory: FakeInventory,
+) -> (ForgeApiClient, Lookups) {
+    fake_nico_api_storing(lookup_delay, inventory, stored_nvos()).await
+}
+
+/// [`fake_nico_api_with`], storing `nvos` for the switch it knows.
+async fn fake_nico_api_storing(
+    lookup_delay: Duration,
+    inventory: FakeInventory,
+    nvos: StoredNvos,
+) -> (ForgeApiClient, Lookups) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind fake nico-api");
     let addr = listener.local_addr().expect("fake nico-api address");
+    let lookups = Lookups::default();
+    let api = FakeNicoApi {
+        lookup_delay,
+        inventory,
+        nvos,
+        lookups: lookups.clone(),
+    };
     tokio::spawn(async move {
         tonic::transport::Server::builder()
-            .add_service(FakeNicoApi { lookup_delay })
+            .add_service(api)
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
             .await
             .expect("fake nico-api serves");
     });
-    ForgeApiClient::new(&ApiConfig::new(
+    let client = ForgeApiClient::new(&ApiConfig::new(
         &format!("http://{addr}"),
         &ForgeClientConfig::default(),
-    ))
+    ));
+    (client, lookups)
 }
 
 fn root_password() -> BmcCredentials {
@@ -428,7 +618,7 @@ async fn proxy_configured(
     ));
     state
         .credential_cache
-        .insert(FAKE_BMC_IP.parse().unwrap(), credentials)
+        .insert(FAKE_BMC_IP.parse().unwrap(), for_bmc(credentials))
         .await;
     state
 }
@@ -511,16 +701,18 @@ fn values(headers: &HeaderMap, name: &str) -> Vec<String> {
 /// but without the caller's `Forwarded`, which named the BMC to the proxy;
 /// the BMC's answer comes back with its headers and body.
 #[tokio::test]
-async fn a_request_reaches_the_bmc_with_its_query_and_headers() {
+async fn a_request_reaches_the_bmc_with_its_encoded_query_and_headers() {
     let metrics = MetricsCapture::start();
     let (addr, bmc) = spawn_fake_bmc();
     let state = proxy_reaching(addr, root_password()).await;
+    let path_and_query =
+        format!("{SYSTEM_PATH}?%24filter=EventFormatType%20eq%20%27MetricReport%27");
     let answer = exchange(
         &metrics,
         &state,
         proxied(
             Method::GET,
-            &format!("{SYSTEM_PATH}?$select=PowerState"),
+            &path_and_query,
             to_the_bmc(),
             &[(HeaderName::from_static("x-caller-custom"), "passed")],
             Body::empty(),
@@ -538,12 +730,68 @@ async fn a_request_reaches_the_bmc_with_its_query_and_headers() {
 
     let [received] = <[Received; 1]>::try_from(bmc.received()).expect("one request");
     assert_eq!(received.method, Method::GET);
-    assert_eq!(
-        received.path_and_query,
-        format!("{SYSTEM_PATH}?$select=PowerState")
-    );
+    assert_eq!(received.path_and_query, path_and_query);
     assert_eq!(values(&received.headers, "x-caller-custom"), ["passed"]);
     assert!(values(&received.headers, "forwarded").is_empty());
+}
+
+/// Escape hex case is normalized for authorization while the BMC receives
+/// the caller's original path and query spelling.
+#[tokio::test]
+async fn escape_case_matching_preserves_the_upstream_request_target() {
+    let metrics = MetricsCapture::start();
+    let (addr, bmc) = spawn_fake_bmc();
+    let state = proxy_to(
+        &addr.to_string(),
+        r#"["GET /redfish/v1/Registries/%4aResource%3AName"]"#,
+        root_password(),
+    )
+    .await;
+    let path_and_query = "/redfish/v1/Registries/%4AResource%3aName?name=%2f";
+    let answer = exchange(&metrics, &state, get(path_and_query)).await;
+
+    assert_eq!(answer.status, 404, "the fake BMC has no registry handler");
+    let [received] = <[Received; 1]>::try_from(bmc.received()).expect("one authorized request");
+    assert_eq!(received.path_and_query, path_and_query);
+}
+
+/// Escape opt-in preserves the request target and cannot bypass the path guard.
+#[tokio::test]
+async fn escape_policies_preserve_nvue_ids_without_bypassing_the_path_guard() {
+    let metrics = MetricsCapture::start();
+    let metrics_window = &metrics;
+    let path = "/nvue_v1/revision/changeset%2fadmin%2F2026-10-14%2Fextra?rev=changeset%2Fadmin";
+    check_cases_async(
+        [
+            Case {
+                scenario: "a broad allow cannot consume the encoded ID separators",
+                input: (r#"["GET /nvue_v1/**"]"#, path),
+                expect: Yields((403, Vec::<String>::new())),
+            },
+            Case {
+                scenario: "opt-in allows additional encoded slashes and forwards the original target",
+                input: (r#"[{ pattern = "GET /nvue_v1/revision/*", allow_escapes = ["%2F"] }]"#, path),
+                expect: Yields((404, vec![path.to_string()])),
+            },
+            Case {
+                scenario: "even unrestricted escape matching cannot authorize nested encoding",
+                input: (r#"[{ pattern = "/**", allow_escapes = ["*"] }]"#, "/nvue_v1/revision/name%252Fextra"),
+                expect: Yields((400, Vec::<String>::new())),
+            },
+        ],
+        |(acl, request_path)| async move {
+            let (addr, bmc) = spawn_fake_bmc();
+            let state = proxy_to(&addr.to_string(), acl, root_password()).await;
+            let response = exchange(metrics_window, &state, get(request_path)).await;
+            let paths = bmc
+                .received()
+                .into_iter()
+                .map(|request| request.path_and_query)
+                .collect();
+            Ok::<_, Infallible>((response.status, paths))
+        },
+    )
+    .await;
 }
 
 /// With `bmc_proxy` overriding the host, the proxy names the BMC to that
@@ -737,8 +985,14 @@ async fn after_rejection(
         .get(&FAKE_BMC_IP.parse::<IpAddr>().unwrap())
         .await
     {
-        Some(BmcCredentials::UsernamePassword { password, .. }) => Some(password),
-        Some(BmcCredentials::SessionToken { token }) => Some(token),
+        Some(TargetCredentials {
+            credentials: BmcCredentials::UsernamePassword { password, .. },
+            ..
+        }) => Some(password),
+        Some(TargetCredentials {
+            credentials: BmcCredentials::SessionToken { token },
+            ..
+        }) => Some(token),
         None => None,
     };
     let body = String::from_utf8_lossy(&answer.body);
@@ -871,6 +1125,172 @@ async fn a_bmc_named_by_mac_is_reached_at_its_ip() {
     assert_eq!(bmc.received().len(), 1);
 }
 
+/// A proxy reaching a fresh fake BMC, with no credentials cached for it, whose
+/// nico-api knows `inventory`: the proxy, the fake BMC, and the lookups the
+/// fake nico-api receives.
+async fn proxy_resolving_through(inventory: FakeInventory) -> (BmcProxyState, FakeBmc, Lookups) {
+    let (addr, bmc) = spawn_fake_bmc();
+    let mut state = proxy_reaching(addr, root_password()).await;
+    state
+        .credential_cache
+        .remove(&FAKE_BMC_IP.parse::<IpAddr>().unwrap())
+        .await;
+    let (api_client, lookups) = fake_nico_api_with(Duration::ZERO, inventory).await;
+    state.api_client = api_client;
+    (state, bmc, lookups)
+}
+
+/// What a `GET` of `path` at an address the proxy has no credentials for
+/// leads to, when nico-api knows `inventory` of the switch with the MAC at
+/// the address: (status the caller got, the `Authorization` values the
+/// upstream saw, the target cached for the address, the target the request
+/// span names, the lookups nico-api received).
+async fn resolved_through(
+    metrics: &MetricsCapture,
+    (inventory, path): (FakeInventory, &'static str),
+) -> (u16, Vec<String>, Option<&'static str>, String, Vec<String>) {
+    keep_callsites_enabled();
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let _traced = tracing::subscriber::set_default(
+        tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test"))),
+    );
+    let (state, bmc, lookups) = proxy_resolving_through(inventory).await;
+
+    let answer = exchange(metrics, &state, get(path)).await;
+
+    let sent = bmc
+        .received()
+        .iter()
+        .flat_map(|received| values(&received.headers, "authorization"))
+        .collect();
+    let cached = state
+        .credential_cache
+        .get(&FAKE_BMC_IP.parse::<IpAddr>().unwrap())
+        .await
+        .map(|resolved| resolved.target.as_str());
+    let on_span = exporter
+        .get_finished_spans()
+        .expect("finished spans")
+        .into_iter()
+        .find(|span| span.name == "bmc_proxy_request")
+        .expect("the request span is exported")
+        .attributes
+        .into_iter()
+        .find(|attribute| attribute.key.as_str() == "bmc_proxy.target")
+        .map_or_else(
+            || "(none)".to_string(),
+            |attribute| attribute.value.to_string(),
+        );
+    let lookups = lookups.lock().unwrap().clone();
+    (answer.status, sent, cached, on_span, lookups)
+}
+
+/// An address is served with the credentials for what it is: a switch's
+/// NVOS management interface gets the switch's NVOS admin credentials, and
+/// any other address its BMC's. A nico-api that denies the switch probe can
+/// serve only BMCs, so the address is taken for a BMC's. An address nico-api
+/// cannot resolve to one switch's credentials is not served.
+#[tokio::test]
+async fn an_address_is_served_with_the_credentials_for_what_it_is() {
+    let metrics = MetricsCapture::start();
+    let metrics_window = &metrics;
+    let nvos_basic = redfish_basic_authorization_context("nvos-admin", Some(NVOS_PASSWORD)).0;
+    check_cases_async(
+        [
+            Case {
+                scenario: "a BMC's address",
+                input: (FakeInventory::NoSwitch, SYSTEM_PATH),
+                expect: Yields((
+                    200,
+                    vec![basic(FRESH_PASSWORD)],
+                    Some("bmc"),
+                    "bmc".to_string(),
+                    vec![probe_lookup(), bmc_lookup()],
+                )),
+            },
+            Case {
+                scenario: "a switch's NVOS address",
+                input: (FakeInventory::Switch, NVUE_SYSTEM_PATH),
+                expect: Yields((
+                    200,
+                    vec![nvos_basic.clone()],
+                    Some("switch_nvos"),
+                    "switch_nvos".to_string(),
+                    vec![probe_lookup(), nvos_lookup()],
+                )),
+            },
+            Case {
+                scenario: "a nico-api that denies the probe",
+                input: (FakeInventory::ProbeDenied, SYSTEM_PATH),
+                expect: Yields((
+                    200,
+                    vec![basic(FRESH_PASSWORD)],
+                    Some("bmc"),
+                    "bmc".to_string(),
+                    vec![probe_lookup(), bmc_lookup()],
+                )),
+            },
+            Case {
+                scenario: "two switches claim the address's MAC",
+                input: (FakeInventory::TwoSwitches, NVUE_SYSTEM_PATH),
+                expect: Yields((
+                    502,
+                    vec![],
+                    None,
+                    "(none)".to_string(),
+                    vec![probe_lookup()],
+                )),
+            },
+            Case {
+                scenario: "a switch without NVOS credentials",
+                input: (FakeInventory::SwitchWithoutCredentials, NVUE_SYSTEM_PATH),
+                expect: Yields((
+                    502,
+                    vec![],
+                    None,
+                    "(none)".to_string(),
+                    vec![probe_lookup(), nvos_lookup()],
+                )),
+            },
+        ],
+        |input| async move { Ok::<_, Infallible>(resolved_through(metrics_window, input).await) },
+    )
+    .await;
+}
+
+/// Once nico-api denies the switch probe, the proxy counts the denial once
+/// and takes the next address it resolves for a BMC's without probing
+/// again.
+#[tokio::test]
+async fn a_denied_probe_is_not_repeated_within_its_retry_time() {
+    let metrics = MetricsCapture::start();
+    let (state, _bmc, lookups) = proxy_resolving_through(FakeInventory::ProbeDenied).await;
+    let ip: IpAddr = FAKE_BMC_IP.parse().unwrap();
+
+    assert_eq!(
+        exchange(&metrics, &state, get(SYSTEM_PATH)).await.status,
+        200
+    );
+    state.credential_cache.remove(&ip).await;
+    assert_eq!(
+        exchange(&metrics, &state, get(SYSTEM_PATH)).await.status,
+        200
+    );
+
+    assert_eq!(
+        *lookups.lock().unwrap(),
+        [probe_lookup(), bmc_lookup(), bmc_lookup()]
+    );
+    assert_eq!(
+        metrics.counter_delta("carbide_bmc_proxy_switch_probe_denied_total", &[]),
+        1.0
+    );
+}
+
 struct Refused {
     /// The anonymous caller's ACL entries, as a TOML array.
     acl: &'static str,
@@ -911,6 +1331,15 @@ async fn requests_the_proxy_does_not_deliver() {
                     bmc_listening: true,
                 },
                 expect: Yields((403, false)),
+            },
+            Case {
+                scenario: "an ambiguous path is rejected before the ACL",
+                input: Refused {
+                    acl: r#"["GET /redfish/v1/Chassis/**"]"#,
+                    request: || get("/redfish/v1/Systems/../Managers/BMC"),
+                    bmc_listening: true,
+                },
+                expect: Yields((400, false)),
             },
             Case {
                 scenario: "no Forwarded header names a BMC",
@@ -1596,6 +2025,124 @@ async fn latency_counts_until_the_bmc_answers() {
             },
         ],
         |path| async move { Ok::<_, Infallible>(slo_misses_after(path).await) },
+    )
+    .await;
+}
+
+/// A switch's NVUE API is served with the NVOS credentials nico-api holds,
+/// and stays served across a password rotation: the switch rejects the
+/// cached password once, and the proxy replays the request with the
+/// password nico-api now stores, resolved through the switch lookup again.
+/// The switch is bmc-mock's NVOS, which checks the credentials it is sent.
+#[tokio::test]
+async fn a_switch_is_served_through_its_rotated_nvos_password() {
+    let metrics = MetricsCapture::start();
+    let (addr, nvos) = spawn_mock_switch();
+    let stored: StoredNvos = Arc::new(Mutex::new(nvos.admin_credentials()));
+    let mut state = proxy_reaching(addr, root_password()).await;
+    state
+        .credential_cache
+        .remove(&FAKE_BMC_IP.parse::<IpAddr>().unwrap())
+        .await;
+    let (api_client, lookups) =
+        fake_nico_api_storing(Duration::ZERO, FakeInventory::Switch, stored.clone()).await;
+    state.api_client = api_client;
+    let json = |answer: &Answer| -> serde_json::Value {
+        serde_json::from_slice(&answer.body).expect("a JSON body")
+    };
+
+    let answer = exchange(&metrics, &state, get("/nvue_v1/system?rev=operational")).await;
+    assert_eq!(answer.status, 200, "{:?}", answer.body);
+    assert_eq!(json(&answer)["product-name"], "nvos");
+    assert_eq!(*lookups.lock().unwrap(), [probe_lookup(), nvos_lookup()]);
+
+    // The cached credentials serve the next request without a lookup.
+    let answer = exchange(&metrics, &state, get("/nvue_v1/platform/environment/fan")).await;
+    assert_eq!(answer.status, 200, "{:?}", answer.body);
+    assert_eq!(
+        json(&answer).pointer("/FAN1~11/current-speed"),
+        Some(&serde_json::json!("10096"))
+    );
+    assert_eq!(lookups.lock().unwrap().len(), 2);
+
+    // The password rotates on the switch, and nico-api stores the new one.
+    nvos.set_password(bmc_mock::DUMMY_NVOS_USERNAME, "rotated")
+        .expect("the NVOS admin exists");
+    *stored.lock().unwrap() = (
+        bmc_mock::DUMMY_NVOS_USERNAME.to_string(),
+        "rotated".to_string(),
+    );
+
+    let answer = exchange(&metrics, &state, get("/nvue_v1/system")).await;
+    assert_eq!(answer.status, 200, "{:?}", answer.body);
+    assert_eq!(
+        *lookups.lock().unwrap(),
+        [probe_lookup(), nvos_lookup(), probe_lookup(), nvos_lookup()]
+    );
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_bmc_proxy_upstream_auth_retries_total",
+            &[("method", "get")]
+        ),
+        1.0
+    );
+}
+
+/// The ACL entry the README gives for reading a switch's environment,
+/// `GET /nvue_v1/platform/environment/**`, grants the tree's root and its
+/// leaves with their query, and nothing beside or into the tree.
+#[tokio::test]
+async fn the_nvue_environment_acl_example_covers_its_tree() {
+    let metrics = MetricsCapture::start();
+    let (addr, nvos) = spawn_mock_switch();
+    let state = proxy_to(
+        &format!(":{}", addr.port()),
+        r#"["GET /nvue_v1/platform/environment/**"]"#,
+        root_password(),
+    )
+    .await;
+    let (username, password) = nvos.admin_credentials();
+    state
+        .credential_cache
+        .insert(
+            FAKE_BMC_IP.parse().unwrap(),
+            TargetCredentials {
+                target: TargetKind::SwitchNvos,
+                credentials: BmcCredentials::UsernamePassword { username, password },
+            },
+        )
+        .await;
+    let (metrics_window, state) = (&metrics, &state);
+    check_cases_async(
+        [
+            Case {
+                scenario: "the tree's root, with nothing after the double wildcard",
+                input: (Method::GET, "/nvue_v1/platform/environment"),
+                expect: Yields(200),
+            },
+            Case {
+                scenario: "a leaf with the revision query",
+                input: (
+                    Method::GET,
+                    "/nvue_v1/platform/environment/fan?rev=operational",
+                ),
+                expect: Yields(200),
+            },
+            Case {
+                scenario: "a tree beside it",
+                input: (Method::GET, "/nvue_v1/system"),
+                expect: Yields(403),
+            },
+            Case {
+                scenario: "a write into it",
+                input: (Method::PATCH, "/nvue_v1/platform/environment/fan"),
+                expect: Yields(403),
+            },
+        ],
+        |(method, path): (Method, &str)| async move {
+            let request = proxied(method, path, to_the_bmc(), &[], Body::empty());
+            Ok::<_, Infallible>(exchange(metrics_window, state, request).await.status)
+        },
     )
     .await;
 }

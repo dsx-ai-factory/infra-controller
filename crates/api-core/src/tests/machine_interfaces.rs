@@ -20,6 +20,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use std::str::FromStr;
 
+use carbide_network::ip::IpAddressFamily;
 use carbide_uuid::machine::{MachineId, MachineInterfaceId};
 use common::api_fixtures::network_segment::{
     FIXTURE_HOST_INBAND_NETWORK_SEGMENT_GATEWAY, create_host_inband_network_segment,
@@ -211,11 +212,19 @@ async fn reconcile_admin_addresses_moves_dhcp_to_new_primary_and_is_idempotent(
         .cloned()
         .unwrap();
     let active_address = primary.addresses[0];
+    // Change policy after allocation so reconciliation must reuse the donor,
+    // not satisfy the new primary by allocating another DHCP address.
+    let reserved =
+        sqlx::query("UPDATE network_segments SET allocation_strategy = 'reserved' WHERE id = $1")
+            .bind(primary.segment_id)
+            .execute(&mut *txn)
+            .await?;
+    assert_eq!(reserved.rows_affected(), 1);
     db::machine_interface::set_primary_interface(&primary.id, false, &mut txn).await?;
     db::machine_interface::set_primary_interface(&secondary.id, true, &mut txn).await?;
 
-    // Reconcile should move the existing DHCP address to the new primary
-    // rather than allocate a replacement from the same admin segment.
+    // Reserved policy forbids fresh DHCP allocation, but moving an existing
+    // address to the new primary must still preserve the host's admin IP.
     let active_config_changed =
         db::machine_interface::reconcile_admin_addresses_for_host(&mut txn, &mh.id)
             .await
@@ -255,6 +264,99 @@ async fn reconcile_admin_addresses_moves_dhcp_to_new_primary_and_is_idempotent(
             .unwrap();
     assert!(!active_config_changed);
 
+    txn.commit().await?;
+
+    let mut txn = env.pool.begin().await?;
+    let new_primary = db::machine_interface::find_one(&mut *txn, secondary.id).await?;
+    let old_primary = db::machine_interface::find_one(&mut *txn, primary.id).await?;
+    assert_eq!(new_primary.addresses, vec![active_address]);
+    assert!(old_primary.addresses.is_empty());
+    txn.commit().await?;
+
+    Ok(())
+}
+
+/// An addressless primary cannot allocate from a Reserved segment. Once an
+/// operator restores a static address, reconciliation must leave it untouched.
+#[crate::sqlx_test]
+async fn reconcile_admin_addresses_requires_an_existing_address_on_reserved_segment(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let mh = create_managed_host_multi_dpu(&env, 1).await;
+    let mut txn = env.pool.begin().await?;
+    let mut interface_map = db::machine_interface::find_by_machine_ids(&mut txn, &[mh.id]).await?;
+    let interfaces = interface_map.remove(&mh.id).unwrap();
+    let admin_interfaces: Vec<_> = interfaces
+        .iter()
+        .filter(|interface| interface.network_segment_type == Some(NetworkSegmentType::Admin))
+        .collect();
+    let [primary] = admin_interfaces.as_slice() else {
+        panic!("single-DPU host must have exactly one admin interface")
+    };
+    assert!(primary.primary_interface);
+    assert_eq!(primary.attached_dpu_machine_id, Some(mh.dpu().id));
+    let [active_address] = primary.addresses.as_slice() else {
+        panic!("primary admin interface must have exactly one IPv4 address")
+    };
+    assert!(active_address.is_ipv4());
+
+    // Remove the only DHCP address after reserving the segment: no donor can
+    // satisfy repair, so this reaches the fresh-allocation rejection.
+    let reserved =
+        sqlx::query("UPDATE network_segments SET allocation_strategy = 'reserved' WHERE id = $1")
+            .bind(primary.segment_id)
+            .execute(&mut *txn)
+            .await?;
+    assert_eq!(reserved.rows_affected(), 1);
+    assert!(
+        db::machine_interface_address::delete_by_interface_family(
+            &mut txn,
+            primary.id,
+            IpAddressFamily::Ipv4,
+            AllocationType::Dhcp,
+        )
+        .await?
+    );
+    txn.commit().await?;
+
+    let mut txn = env.pool.begin().await?;
+    let error = db::machine_interface::reconcile_admin_addresses_for_host(&mut txn, &mh.id)
+        .await
+        .expect_err("Reserved segment must reject a fresh DHCP allocation");
+    assert!(matches!(
+        error,
+        DatabaseError::Internal { message } if message.contains("static DHCP leases only")
+    ));
+    txn.rollback().await?;
+
+    let mut txn = env.pool.begin().await?;
+    let persisted = db::machine_interface::find_one(&mut *txn, primary.id).await?;
+    assert!(persisted.addresses.is_empty());
+    assert!(
+        db::machine_interface_address::find_for_interface(&mut txn, primary.id)
+            .await?
+            .is_empty()
+    );
+
+    // An operator-provided Static address restores service without reopening
+    // dynamic allocation; the next reconciliation must preserve its type.
+    db::machine_interface_address::assign_static(&mut txn, primary.id, *active_address).await?;
+    txn.commit().await?;
+
+    let mut txn = env.pool.begin().await?;
+    assert!(!db::machine_interface::reconcile_admin_addresses_for_host(&mut txn, &mh.id).await?);
+    txn.commit().await?;
+
+    let mut txn = env.pool.begin().await?;
+    let persisted = db::machine_interface::find_one(&mut *txn, primary.id).await?;
+    assert_eq!(persisted.addresses, vec![*active_address]);
+    let addresses = db::machine_interface_address::find_for_interface(&mut txn, primary.id).await?;
+    let [address] = addresses.as_slice() else {
+        panic!("reconciliation must preserve exactly one static address")
+    };
+    assert_eq!(address.address, *active_address);
+    assert_eq!(address.allocation_type, AllocationType::Static);
     txn.commit().await?;
 
     Ok(())

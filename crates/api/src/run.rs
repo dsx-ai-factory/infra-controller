@@ -27,6 +27,7 @@ use opentelemetry::metrics::Meter;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot::Sender;
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::subscriber::NoSubscriber;
 
@@ -165,6 +166,9 @@ pub async fn run(
     )
     .await?;
 
+    let shutdown_timeout = carbide_config.shutdown_timeout;
+    let panic_on_early_task_return = carbide_config.panic_on_early_task_return;
+
     let database_readiness_probe = crate::readiness::DatabaseReadinessProbe::new(&db_pool);
     let listen_address = await_api_runtime_and_database_before_marking_ready(
         &health_controller,
@@ -188,7 +192,7 @@ pub async fn run(
     .await?;
 
     // The fresh check established initial readiness; the same pool now monitors it periodically.
-    database_readiness_probe.spawn(&mut join_set, health_controller, cancel_token)?;
+    database_readiness_probe.spawn(&mut join_set, health_controller, cancel_token.clone())?;
 
     if ready_channel
         .send(ApiServerReady {
@@ -205,10 +209,65 @@ pub async fn run(
         );
     }
 
-    // Block forever until all spawned tasks complete. Any panics in spawned tasks will be
-    // propagated here.
-    join_set.join_all().await;
-    Ok(())
+    let task_count = join_set.len();
+
+    // Block forever until we get a cancel signal or if the tasks finish early
+    while let Some(Some(result)) = cancel_token
+        .run_until_cancelled(join_set.join_next_with_id())
+        .await
+    {
+        // A result has trickled in before we're cancelled. Propagate any panics.
+        let (task_id, ()) = result.expect("background task panicked");
+
+        if !cancel_token.is_cancelled() {
+            // Background tasks are supposed to run forever, log a warning if they don't. If we've
+            // made it to this line, the task didn't panic, but just returned early, gracefully,
+            // without a shutdown signal.
+            let msg = "background task finished but we're not shutting down";
+            tracing::error!(%task_id, "{msg}");
+            if panic_on_early_task_return {
+                panic!("{msg}");
+            }
+        }
+    }
+
+    // We must now be cancelled (or, extremely unlikely, all tasks finished early, gracefully), wait
+    // for all tasks to complete, with a timeout.
+    let shutdown_deadline = Instant::now() + shutdown_timeout;
+    let mut log_interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+
+    tracing::info!("shutdown signal received, waiting for tasks to complete gracefully");
+
+    loop {
+        tokio::select! {
+            // Report completed tasks as they finish
+            res = join_set.join_next_with_id() => match res {
+                Some(result) => {
+                    // Propagate any panics
+                    let (task_id, ()) = result.expect("background task panicked");
+                    tracing::info!(%task_id, "background task completed");
+                }
+                None => {
+                    // All tasks complete
+                    tracing::info!("server shutdown complete");
+                    break Ok(());
+                }
+            },
+            // Report how many tasks we're waiting on, once a second
+            _ = log_interval.tick() => tracing::info!(
+                "waiting {}s for {} of {} tasks to complete",
+                shutdown_deadline.duration_since(Instant::now()).as_secs(),
+                join_set.len(),
+                task_count,
+            ),
+            // Time out after the deadline
+            _ = tokio::time::sleep_until(shutdown_deadline) => {
+                let count = join_set.len();
+                join_set.shutdown().await; // forcefully aborts all tasks
+                return Err(eyre::eyre!("timed out waiting for {count} tasks to complete"));
+            }
+        }
+    }
 }
 
 /// Awaits API runtime startup and a fresh database check before exposing readiness.

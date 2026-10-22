@@ -511,6 +511,7 @@ impl ApiClient {
                 dpu_mode: dpu_policy.map(|policy| rpc::forge::DpuMode::from(policy) as i32),
                 bmc_ip_allocation: None,
                 host_lifecycle_profile: None,
+                server_name: None,
             })
             .await
             .map_err(ClientApiError::InvocationError)
@@ -547,11 +548,20 @@ impl ApiClient {
         nvos_mac_addresses: Vec<String>,
         rack_id: Option<RackId>,
     ) -> ClientApiResult<()> {
+        // The first MAC is the primary NVOS port; any remainder are non-primary.
+        let nvos_interfaces = nvos_mac_addresses
+            .into_iter()
+            .enumerate()
+            .map(|(index, mac_address)| rpc::forge::ExpectedNvosInterface {
+                mac_address,
+                is_primary: index == 0,
+            })
+            .collect();
         self.0
             .add_expected_switch(ExpectedSwitch {
                 expected_switch_id: None,
                 bmc_mac_address,
-                nvos_mac_addresses,
+                nvos_interfaces,
                 bmc_username: DUMMY_FACTORY_USERNAME.to_string(),
                 bmc_password: DUMMY_FACTORY_PASSWORD.to_string(),
                 switch_serial_number,

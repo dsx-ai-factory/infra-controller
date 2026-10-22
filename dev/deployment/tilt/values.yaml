@@ -182,7 +182,10 @@ nico-bmc-proxy:
       additional_issuer_cns = []
 
       [auth.acls]
-      "trusted-certificate" = ["/**"]
+      "trusted-certificate" = [
+        "GET /redfish/v1/Registries/%23*",
+        "/**",
+      ]
 
       [carbide_api]
       api_url = "https://nico-api.nico-system.svc.cluster.local:1079"
@@ -337,9 +340,12 @@ tilt:
     crds:
       create: true
     monitoring:
+      # Tilt enables monitoring and the dashboard with the observability profile.
       podMonitorEnabled: false
       grafanaDashboard:
         create: false
+        annotations:
+          grafana_folder: PostgreSQL
     resources:
       requests:
         cpu: 100m
@@ -437,6 +443,23 @@ tilt:
             vault kv put secrets/machines/all_hosts/site_default/uefi-metadata-items/auth - >/dev/null
 
   observability:
+    # Values passed directly to the nico-postgres-exporter Helm subchart.
+    postgresExporter:
+      database:
+        credentialsSecret: nico-pg-cluster-app
+        # Local development only; external PostgreSQL can require verified TLS.
+        sslMode: disable
+      serviceMonitor:
+        enabled: true
+      grafanaDashboards:
+        enabled: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
     prometheus:
       fullnameOverride: prometheus-stack
       crds:

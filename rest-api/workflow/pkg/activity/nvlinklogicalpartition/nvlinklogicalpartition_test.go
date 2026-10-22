@@ -68,6 +68,7 @@ func testNVLinkLogicalPartitionSetupSchema(t *testing.T, dbSession *cdb.Session)
 	assert.Nil(t, err)
 	// create Tenant table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.Tenant)(nil))
+	require.NoError(t, err)
 	// create TenantSite table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.TenantSite)(nil))
 	assert.Nil(t, err)

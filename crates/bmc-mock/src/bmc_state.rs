@@ -117,15 +117,16 @@ impl<C: Callbacks> BmcState<C> {
             return;
         };
         let sequence = self.event_sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        let payload = redfish::event::builder(&redfish::event::resource(sequence))
-            .record(&redfish::event::EventRecord {
+        let payload = redfish::event::response(
+            &redfish::event::resource(sequence),
+            &redfish::event::EventRecord {
                 message_id: draft.message_id,
                 message: &draft.message,
-                severity: draft.severity.as_str(),
+                severity: draft.severity.into(),
                 timestamp: &created,
                 origin: entry.as_deref().unwrap_or(&draft.origin),
-            })
-            .build();
+            },
+        );
         if let Err(error) = events.publish(payload) {
             tracing::warn!(error = %error, "lifecycle event not published");
         }

@@ -35,6 +35,15 @@ use crate::{BIND_LIMIT, ConditionalWrite, DatabaseError};
 #[cfg(test)]
 mod test_explicit_columns;
 
+// An in-flight exploration must retain requests queued while it was probing a
+// BMC that is now suppressed. Keep this check in the report write transaction.
+const KEEP_SUPPRESSED_EXPLORATION_REQUEST: &str = "exploration_requested AND EXISTS (
+    SELECT 1 FROM machine_interface_addresses mia
+    JOIN machine_interfaces mi ON mi.id = mia.interface_id
+    JOIN bmc_suppressions s ON s.bmc_mac_address = mi.mac_address
+    WHERE mia.address = explored_endpoints.address AND s.subsystem = 'site_explorer'
+)";
+
 #[derive(Debug)]
 struct DbExploredEndpoint {
     /// The IP address of the node we explored
@@ -48,7 +57,7 @@ struct DbExploredEndpoint {
     preingestion_state: PreingestionState,
     /// Indicates that preingestion is waiting for site explorer to refresh the state
     waiting_for_explorer_refresh: bool,
-    /// Whether the endpoint will be explored in the next site-explorer run
+    /// Whether exploration is queued. Pending requests remain queued while suppressed.
     exploration_requested: bool,
     /// The last time site explorer issued a redfish call to reset this BMC
     last_redfish_bmc_reset: Option<chrono::DateTime<chrono::Utc>>,
@@ -491,7 +500,8 @@ fn attester_digest(report: &EndpointExplorationReport) -> Option<String> {
 /// Replaces an endpoint's report if its version still matches.
 ///
 /// An applied write advances the report version, stores the supplied
-/// `waiting_for_explorer_refresh`, and clears `exploration_requested` in the
+/// `waiting_for_explorer_refresh`, and clears `exploration_requested` unless
+/// Site Explorer is suppressed for the endpoint. The write stays in the
 /// caller's transaction. A missing endpoint or changed report version returns
 /// `NotApplied(EndpointReportNotCurrent)`; database failures remain errors.
 pub async fn try_update(
@@ -503,10 +513,10 @@ pub async fn try_update(
 ) -> Result<ConditionalWrite<(), EndpointReportNotCurrent>, DatabaseError> {
     let new_version = old_version.increment();
     let attester_digest = attester_digest(exploration_report);
-    let query = "
-UPDATE explored_endpoints SET version=$1, exploration_report=$2, waiting_for_explorer_refresh=$3, exploration_requested = false, hardware_class=$4,
+    let query = concatcp!("
+UPDATE explored_endpoints SET version=$1, exploration_report=$2, waiting_for_explorer_refresh=$3, exploration_requested = ", KEEP_SUPPRESSED_EXPLORATION_REQUEST, ", hardware_class=$4,
     attester_digest = CASE WHEN $5 THEN attester_digest ELSE $6 END
-WHERE address=$7 AND version=$8";
+WHERE address=$7 AND version=$8");
     let query_result = sqlx::query(query)
         .bind(new_version)
         .bind(sqlx::types::Json(exploration_report))
@@ -537,7 +547,8 @@ pub struct EndpointReportNotCurrent;
 /// replacing the last successful exploration report.
 ///
 /// An applied write advances the report version, sets `waiting_for_explorer_refresh`,
-/// and clears `exploration_requested` in the caller's transaction. A missing
+/// and clears `exploration_requested` unless Site Explorer is suppressed for the
+/// endpoint, in the caller's transaction. A missing
 /// endpoint or changed report version returns `NotApplied(EndpointReportNotCurrent)`;
 /// database failures remain errors.
 pub async fn try_update_last_exploration_error(
@@ -548,15 +559,19 @@ pub async fn try_update_last_exploration_error(
     txn: &mut PgConnection,
 ) -> Result<ConditionalWrite<(), EndpointReportNotCurrent>, DatabaseError> {
     let new_version = old_version.increment();
-    let query = "UPDATE explored_endpoints
+    let query = concatcp!(
+        "UPDATE explored_endpoints
 SET version=$1,
     exploration_report=jsonb_set(
         jsonb_set(exploration_report, '{LastExplorationError}', $2::jsonb, true),
         '{LastExplorationLatency}', $3::jsonb, true
     ),
     waiting_for_explorer_refresh=true,
-    exploration_requested=false
-WHERE address=$4 AND version=$5";
+    exploration_requested=",
+        KEEP_SUPPRESSED_EXPLORATION_REQUEST,
+        "
+WHERE address=$4 AND version=$5"
+    );
     let query_result = sqlx::query(query)
         .bind(new_version)
         .bind(sqlx::types::Json(error))

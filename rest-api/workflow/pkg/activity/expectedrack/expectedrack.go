@@ -6,6 +6,7 @@ package expectedrack
 import (
 	"context"
 	"errors"
+	"maps"
 	"reflect"
 
 	"github.com/google/uuid"
@@ -150,7 +151,7 @@ func (mer ManageExpectedRack) UpdateExpectedRacksInDB(ctx context.Context, siteI
 			(reported.RackGroupID != nil && !reflect.DeepEqual(cur.RackGroupID, reported.RackGroupID)) ||
 			cur.Name != reported.Name ||
 			cur.Description != reported.Description ||
-			!reflect.DeepEqual(cur.Labels, reported.Labels) {
+			!maps.Equal(cur.Labels, reported.Labels) {
 			// nil labels in nico can mean we need to clear out existing labels in DB.
 			// A nil value will not trigger an update in the DAO layer, so use an empty map.
 			labels := reported.Labels

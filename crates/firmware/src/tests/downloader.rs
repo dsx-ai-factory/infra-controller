@@ -124,7 +124,8 @@ async fn repeated_available_calls_share_one_download() {
     source.assert_async().await;
 }
 
-/// Optional checksums remain compatible with local-file downloads and completion metrics.
+/// Local-file downloads retain optional checksums and are not subject to the
+/// HTTP byte limit, even when the source is larger than that configured limit.
 #[tokio::test]
 async fn test_download_without_checksum() -> Result<(), std::io::Error> {
     let temp_dir = tempfile::tempdir()?;
@@ -138,7 +139,11 @@ async fn test_download_without_checksum() -> Result<(), std::io::Error> {
     }
     srcfile.flush().await?;
 
-    let downloader = FirmwareDownloader::new();
+    let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
+        max_download_bytes: 1,
+        ..Default::default()
+    })
+    .unwrap();
     let metrics = MetricsCapture::start();
 
     let mut count = 0;
@@ -153,6 +158,8 @@ async fn test_download_without_checksum() -> Result<(), std::io::Error> {
             // >=1 rather than an exact delta: concurrent tests can add ok
             // samples, but if the ok emit vanished nothing could satisfy this.
             wait_for_downloads(&metrics, "ok", 1).await;
+            assert_eq!(std::fs::read(&filename)?, std::fs::read(&src_filename)?);
+            assert!(std::fs::metadata(&filename)?.len() > 1);
             return Ok(());
         }
     }
@@ -330,6 +337,8 @@ async fn status_after_download(
 /// that starts a new attempt, so a caller retries by asking again.
 #[tokio::test]
 async fn failed_download_is_reported_once_then_retried() {
+    // Fetch-failure assertions in other tests use this shared capture lock.
+    let _metrics = MetricsCapture::start();
     let temp_dir = tempfile::tempdir().unwrap();
     let filename = temp_dir.path().join("fw.bin");
     let src_filename = temp_dir.path().join("src.bin");
@@ -407,6 +416,406 @@ async fn truncated_http_body_is_removed_before_a_successful_retry() {
     );
     assert_eq!(std::fs::read(&filename).unwrap(), b"firmware");
     server.await.unwrap();
+}
+
+/// Consumes the request before a loopback server introduces its response failure.
+async fn accept_http_request(listener: &tokio::net::TcpListener) -> tokio::net::TcpStream {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (mut connection, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            request.push(connection.read_u8().await.unwrap());
+        }
+        assert!(request.starts_with(b"GET /fw.bin "));
+        connection
+    })
+    .await
+    .expect("the downloader should request the loopback firmware source")
+}
+
+/// Clones share admission: saturation neither queues a distinct destination nor
+/// consumes its recorded failure, and only a later explicit poll starts work.
+#[tokio::test]
+async fn saturated_public_downloads_require_an_explicit_retry() {
+    let metrics = MetricsCapture::start();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let first_filename = temp_dir.path().join("first.bin");
+    let deferred_filename = temp_dir.path().join("deferred.bin");
+    let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
+        max_concurrent_downloads: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let other_caller = downloader.clone();
+
+    // Leave a completed failure unconsumed. A saturated poll must not erase it
+    // while returning Downloading instead of that failure.
+    let missing_url = format!("file://{}", temp_dir.path().join("missing.bin").display());
+    assert_eq!(
+        other_caller
+            .available(&deferred_filename, &missing_url, "")
+            .await,
+        ArtifactStatus::Downloading,
+    );
+    wait_for_downloads(&metrics, "fetch", 1).await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/fw.bin", listener.local_addr().unwrap());
+    assert_eq!(
+        downloader.available(&first_filename, &url, "").await,
+        ArtifactStatus::Downloading,
+    );
+    let mut first_connection = accept_http_request(&listener).await;
+
+    // The accepted request holds the only slot until we supply its response.
+    let mut deferred_poll = Box::pin(other_caller.available(&deferred_filename, &url, ""));
+    assert_eq!(
+        futures_util::poll!(deferred_poll.as_mut()),
+        std::task::Poll::Ready(ArtifactStatus::Downloading),
+        "saturation must return without waiting for capacity",
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err(),
+        "a saturated caller must not start a second request",
+    );
+    assert!(!temp_dir.path().join("deferred.bin.download").exists());
+
+    first_connection
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nfirmware")
+        .await
+        .unwrap();
+    first_connection.shutdown().await.unwrap();
+    assert_eq!(
+        status_after_download(&downloader, &first_filename, &url, "").await,
+        ArtifactStatus::Available,
+    );
+    assert_eq!(std::fs::read(&first_filename).unwrap(), b"firmware");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err(),
+        "releasing capacity must not start deferred work automatically",
+    );
+
+    let ArtifactStatus::Failed { error } =
+        other_caller.available(&deferred_filename, &url, "").await
+    else {
+        panic!("the saturated poll must preserve the earlier source failure");
+    };
+    assert!(error.contains("could not open source"), "{error}");
+    assert_eq!(
+        metrics.histogram_count_delta(DOWNLOAD_DURATION_METRIC, &[("outcome", "fetch")]),
+        1,
+    );
+    assert_eq!(
+        other_caller.available(&deferred_filename, &url, "").await,
+        ArtifactStatus::Downloading,
+    );
+    let mut retry_connection = accept_http_request(&listener).await;
+    retry_connection
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nfirmware")
+        .await
+        .unwrap();
+    retry_connection.shutdown().await.unwrap();
+    assert_eq!(
+        status_after_download(&other_caller, &deferred_filename, &url, "").await,
+        ArtifactStatus::Available,
+    );
+    assert_eq!(std::fs::read(&deferred_filename).unwrap(), b"firmware");
+}
+
+/// HTTP deadlines release staging and the sole download slot, including when
+/// a server keeps supplying bytes often enough to avoid the read-idle timeout.
+#[tokio::test]
+async fn http_deadlines_remove_partial_files_and_allow_retry() {
+    #[derive(Clone, Copy, Debug)]
+    enum ResponsePhase {
+        TlsHandshake,
+        Headers,
+        IdleBody,
+        ProgressingBody,
+    }
+
+    struct Case {
+        phase: ResponsePhase,
+        read_timeout_seconds: u64,
+        request_timeout_seconds: u64,
+    }
+
+    for case in [
+        // TLS negotiation is part of connecting, before either longer timer.
+        Case {
+            phase: ResponsePhase::TlsHandshake,
+            read_timeout_seconds: 5,
+            request_timeout_seconds: 5,
+        },
+        // An accepted connection without response headers must still finish.
+        Case {
+            phase: ResponsePhase::Headers,
+            read_timeout_seconds: 1,
+            request_timeout_seconds: 5,
+        },
+        // Receiving headers and some bytes does not permit an idle body to hang.
+        Case {
+            phase: ResponsePhase::IdleBody,
+            read_timeout_seconds: 1,
+            request_timeout_seconds: 5,
+        },
+        // Progress resets the idle timer, but cannot extend the whole request.
+        Case {
+            phase: ResponsePhase::ProgressingBody,
+            read_timeout_seconds: 1,
+            request_timeout_seconds: 2,
+        },
+    ] {
+        // Fetch and transfer failures share the exact metric capture window.
+        let metrics = MetricsCapture::start();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let phase = case.phase;
+        let scheme = if matches!(phase, ResponsePhase::TlsHandshake) {
+            "https"
+        } else {
+            "http"
+        };
+        let url = format!("{scheme}://{}/fw.bin", listener.local_addr().unwrap());
+        let retry_url = format!("http://{}/fw.bin", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut connection = if matches!(phase, ResponsePhase::TlsHandshake) {
+                let (mut connection, _) = listener.accept().await.unwrap();
+                // Observe a TLS handshake record, but send no ServerHello or
+                // certificate. The TCP connection itself has already succeeded.
+                assert_eq!(connection.read_u8().await.unwrap(), 0x16);
+                connection
+            } else {
+                accept_http_request(&listener).await
+            };
+            let response_started = std::time::Instant::now();
+            if matches!(
+                phase,
+                ResponsePhase::IdleBody | ResponsePhase::ProgressingBody
+            ) {
+                connection
+                    .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1\r\nf\r\n")
+                    .await
+                    .unwrap();
+            }
+
+            let mut progress = tokio::time::interval(Duration::from_millis(100));
+            let mut chunk_count = 0;
+            let mut bytes = [0; 4096];
+            loop {
+                tokio::select! {
+                    received = connection.read(&mut bytes) => {
+                        match received {
+                            Ok(0) => break,
+                            // Drain the remaining ClientHello without making
+                            // progress on the stalled server handshake.
+                            Ok(_) if matches!(phase, ResponsePhase::TlsHandshake) => {},
+                            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+                            other => panic!("expected the timed-out client to close its connection, got {other:?}"),
+                        }
+                    }
+                    _ = progress.tick(), if matches!(phase, ResponsePhase::ProgressingBody) => {
+                        if let Err(error) = connection.write_all(b"1\r\nf\r\n").await {
+                            // The request deadline can close the socket while
+                            // this next chunk is being written.
+                            assert!(matches!(
+                                error.kind(),
+                                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset,
+                            ), "{error}");
+                            break;
+                        }
+                        chunk_count += 1;
+                    }
+                }
+            }
+            let response_elapsed = response_started.elapsed();
+            drop(connection);
+
+            // A repaired source must be fetched again, rather than accepting
+            // the partial staging file or leaving the only permit occupied.
+            let mut connection = accept_http_request(&listener).await;
+            connection
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nfirmware",
+                )
+                .await
+                .unwrap();
+            connection.shutdown().await.unwrap();
+            (chunk_count, response_elapsed)
+        });
+        let temp_dir = tempfile::tempdir().unwrap();
+        let filename = temp_dir.path().join("fw.bin");
+        let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
+            max_concurrent_downloads: 1,
+            connect_timeout_seconds: 1,
+            read_timeout_seconds: case.read_timeout_seconds,
+            request_timeout_seconds: case.request_timeout_seconds,
+            ..Default::default()
+        })
+        .unwrap();
+
+        // Connect and read-idle cases have a five-second request deadline.
+        // Failure before that deadline isolates their one-second phase timer.
+        let status = tokio::time::timeout(
+            Duration::from_secs(4),
+            status_after_download(&downloader, &filename, &url, ""),
+        )
+        .await
+        .expect("the configured HTTP phase should expire before the test deadline");
+        let ArtifactStatus::Failed { error } = status else {
+            panic!("{phase:?} must expire before the test's polling deadline");
+        };
+        assert!(error.contains("timed out"), "{phase:?}: {error}");
+        let expected_metric = match phase {
+            ResponsePhase::TlsHandshake | ResponsePhase::Headers => "fetch",
+            ResponsePhase::IdleBody | ResponsePhase::ProgressingBody => "transfer",
+        };
+        assert_eq!(
+            metrics
+                .histogram_count_delta(DOWNLOAD_DURATION_METRIC, &[("outcome", expected_metric)]),
+            1,
+            "{phase:?}",
+        );
+        assert!(!filename.exists(), "{phase:?}");
+        assert!(
+            !temp_dir.path().join("fw.bin.download").exists(),
+            "{phase:?}"
+        );
+        assert_eq!(
+            status_after_download(&downloader, &filename, &retry_url, "").await,
+            ArtifactStatus::Available,
+            "{phase:?}",
+        );
+        assert_eq!(std::fs::read(&filename).unwrap(), b"firmware", "{phase:?}");
+        let (chunk_count, response_elapsed) = server.await.unwrap();
+        if matches!(phase, ResponsePhase::ProgressingBody) {
+            assert!(
+                chunk_count >= 3,
+                "the source must progress before timing out"
+            );
+            assert!(
+                response_elapsed >= Duration::from_millis(1500),
+                "progress must keep the one-second read timer alive: {response_elapsed:?}",
+            );
+        }
+    }
+}
+
+/// The byte limit counts the complete body with or without Content-Length;
+/// overflow cannot publish partial bytes or prevent a repaired-source retry.
+#[tokio::test]
+async fn http_bodies_enforce_the_cumulative_byte_limit() {
+    struct Case {
+        scenario: &'static str,
+        response_start: &'static [u8],
+        response_end: &'static [u8],
+        wait_for_first_chunk: bool,
+        exceeds_limit: bool,
+    }
+
+    const CHUNKED_START: &[u8] =
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nfirm\r\n";
+    for case in [
+        // Equality is allowed, even when the body arrives in separate chunks.
+        Case {
+            scenario: "chunked exact limit",
+            response_start: CHUNKED_START,
+            response_end: b"4\r\nware\r\n0\r\n\r\n",
+            wait_for_first_chunk: true,
+            exceeds_limit: false,
+        },
+        // Each chunk fits independently; only the accumulated count exceeds eight.
+        Case {
+            scenario: "chunked over limit",
+            response_start: CHUNKED_START,
+            response_end: b"5\r\nwares\r\n0\r\n\r\n",
+            wait_for_first_chunk: true,
+            exceeds_limit: true,
+        },
+        // A declared body length does not exempt the transfer from the cap.
+        Case {
+            scenario: "Content-Length over limit",
+            response_start:
+                b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nfirm",
+            response_end: b"wares",
+            wait_for_first_chunk: false,
+            exceeds_limit: true,
+        },
+    ] {
+        let scenario = case.scenario;
+        let metrics = MetricsCapture::start();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let filename = temp_dir.path().join("fw.bin");
+        let staged_filename = temp_dir.path().join("fw.bin.download");
+        let server_staged_filename = staged_filename.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/fw.bin", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut connection = accept_http_request(&listener).await;
+            connection.write_all(case.response_start).await.unwrap();
+            // Wait for the first chunk to reach disk so socket coalescing cannot
+            // turn the chunked cases into a single oversized segment. A known
+            // Content-Length may also be rejected before writing any bytes.
+            if case.wait_for_first_chunk {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if std::fs::metadata(&server_staged_filename)
+                            .is_ok_and(|metadata| metadata.len() == 4)
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("the first chunk should be written before sending the next");
+            }
+            connection.write_all(case.response_end).await.unwrap();
+            connection.shutdown().await.unwrap();
+            if case.exceeds_limit {
+                let mut connection = accept_http_request(&listener).await;
+                connection
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nfirmware")
+                    .await
+                    .unwrap();
+                connection.shutdown().await.unwrap();
+            }
+        });
+        let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
+            max_concurrent_downloads: 1,
+            max_download_bytes: 8,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let status = status_after_download(&downloader, &filename, &url, "").await;
+        if case.exceeds_limit {
+            let ArtifactStatus::Failed { error } = status else {
+                panic!("{scenario} must reject the cumulative body length");
+            };
+            assert!(error.contains("exceeds max_download_bytes"), "{error}");
+            assert_eq!(
+                metrics.histogram_count_delta(DOWNLOAD_DURATION_METRIC, &[("outcome", "transfer")]),
+                1,
+                "{scenario}",
+            );
+            assert!(!filename.exists());
+            assert!(!staged_filename.exists());
+            assert_eq!(
+                status_after_download(&downloader, &filename, &url, "").await,
+                ArtifactStatus::Available,
+                "a rejected body must release the sole download slot",
+            );
+        } else {
+            assert_eq!(status, ArtifactStatus::Available, "{scenario}");
+        }
+        assert_eq!(std::fs::read(&filename).unwrap(), b"firmware", "{scenario}");
+        assert!(!staged_filename.exists(), "{scenario}");
+        server.await.unwrap();
+    }
 }
 
 /// Filesystem failures before fetch and after transfer both release staging and permit retry.
@@ -520,6 +929,8 @@ async fn filesystem_failures_release_the_destination_for_retry() {
 /// Public failures and completion events retain source context without URL credentials.
 #[tokio::test]
 async fn download_failure_and_completion_event_redact_source_credentials() {
+    // Fetch failures share the metric capture lock even when this test only logs.
+    let _metrics = MetricsCapture::start();
     let temp_dir = tempfile::tempdir().unwrap();
     let filename = temp_dir.path().join("fw.bin");
     // Nothing listens on port 1, so the connection is refused immediately.
@@ -656,7 +1067,13 @@ async fn unavailable_absent_artifact_without_url_counts_the_blocker() {
     })
     .await;
 
-    assert_eq!(logs.len(), 1);
+    // Tokio also traces semaphore permit release; this contract concerns the
+    // firmware error event, not runtime instrumentation.
+    let logs: Vec<_> = logs
+        .into_iter()
+        .filter(|log| log.target == "carbide_firmware::downloader")
+        .collect();
+    assert_eq!(logs.len(), 1, "{logs:#?}");
     assert_eq!(logs[0].metadata_name, "firmware_artifact_missing_url");
     assert_eq!(
         logs[0].message,

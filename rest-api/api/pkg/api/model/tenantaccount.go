@@ -4,6 +4,7 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -147,21 +148,21 @@ func (caps APITenantAccountSiteCapabilitiesUpdateRequest) Validate() error {
 			// values are already validated as UUIDs above, so parsing succeeds.
 			parsed, perr := uuid.Parse(siteID)
 			if perr != nil {
-				return validation.Errors{prefix: fmt.Errorf(validationErrorInvalidUUID)}
+				return validation.Errors{prefix: errors.New(validationErrorInvalidUUID)}
 			}
 			key := parsed.String()
 			if _, ok := seenSiteIDs[key]; ok {
-				return validation.Errors{"siteCapabilities": fmt.Errorf(validationErrorDuplicateSiteID)}
+				return validation.Errors{"siteCapabilities": errors.New(validationErrorDuplicateSiteID)}
 			}
 			seenSiteIDs[key] = struct{}{}
 		}
 	}
 
 	if accountCapabilityCount == 0 {
-		return validation.Errors{"siteCapabilities": fmt.Errorf(validationErrorMissingAccountCapability)}
+		return validation.Errors{"siteCapabilities": errors.New(validationErrorMissingAccountCapability)}
 	}
 	if accountCapabilityCount > 1 {
-		return validation.Errors{"siteCapabilities": fmt.Errorf(validationErrorDuplicateAccountCapability)}
+		return validation.Errors{"siteCapabilities": errors.New(validationErrorDuplicateAccountCapability)}
 	}
 
 	return nil

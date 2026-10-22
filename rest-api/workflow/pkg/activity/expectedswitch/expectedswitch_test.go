@@ -35,9 +35,22 @@ import (
 	cwu "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cwutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
+
+// protoNvosMacs extracts the ordered NVOS MAC list from a reported switch proto
+// so tests can compare it against the flat DB column the activity persists.
+func protoNvosMacs(es *corev1.ExpectedSwitch) []string {
+	interfaces := es.GetNvosInterfaces()
+	if len(interfaces) == 0 {
+		return nil
+	}
+	macs := make([]string, 0, len(interfaces))
+	for _, iface := range interfaces {
+		macs = append(macs, iface.GetMacAddress())
+	}
+	return macs
+}
 
 // testTemporalSiteClientPool Building site client pool
 func testTemporalSiteClientPool(t *testing.T) *sc.ClientPool {
@@ -185,8 +198,8 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 
 		// Update creation and update timestamp to be earlier than inventory processing interval
 		_, uerr := dbSession.DB.Exec("UPDATE expected_switch SET created = ?, updated = ? WHERE id = ?",
-			time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval*2)),
-			time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval*2)),
+			time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval*2)),
+			time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval*2)),
 			es.ID.String())
 		assert.NoError(t, uerr)
 
@@ -223,7 +236,8 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 		}
 
 		// Test label updates: add/modify labels for some switches
-		if i == 1 {
+		switch i {
+		case 1:
 			// Add labels to a switch that didn't have them before
 			ctrlExpectedSwitch.Metadata = &corev1.Metadata{
 				Labels: []*corev1.Label{
@@ -231,14 +245,17 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 				},
 			}
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
-		} else if i == 2 {
+		case 2:
 			// Report NVOS MAC addresses for a switch that didn't have them before
-			ctrlExpectedSwitch.NvosMacAddresses = []string{"aa:bb:cc:dd:ee:02", "aa:bb:cc:dd:ee:03"}
+			ctrlExpectedSwitch.NvosInterfaces = []*corev1.ExpectedNvosInterface{
+				{MacAddress: "aa:bb:cc:dd:ee:02", IsPrimary: true},
+				{MacAddress: "aa:bb:cc:dd:ee:03", IsPrimary: false},
+			}
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
-		} else if i == 4 {
+		case 4:
 			// NVOS MACs cleared on the Site: reported without any, DB has one
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
-		} else if i == 5 {
+		case 5:
 			// Modify existing labels
 			ctrlExpectedSwitch.Metadata = &corev1.Metadata{
 				Labels: []*corev1.Label{
@@ -248,13 +265,13 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 				},
 			}
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
-		} else if i == 10 {
+		case 10:
 			// Remove labels (set to empty labels array)
 			ctrlExpectedSwitch.Metadata = &corev1.Metadata{
 				Labels: []*corev1.Label{},
 			}
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
-		} else if i == 15 {
+		case 15:
 			// Remove labels (set metadata to nil)
 			ctrlExpectedSwitch.Metadata = nil
 			expectedSwitchesToUpdate = append(expectedSwitchesToUpdate, pagedExpectedSwitches[i])
@@ -488,7 +505,9 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 							ExpectedSwitchId:   &corev1.UUID{Value: uuid.New().String()},
 							BmcMacAddress:      "00:11:22:33:44:FF",
 							SwitchSerialNumber: "SW-SN-NEW-1",
-							NvosMacAddresses:   []string{"aa:bb:cc:dd:ee:f1"},
+							NvosInterfaces: []*corev1.ExpectedNvosInterface{
+								{MacAddress: "aa:bb:cc:dd:ee:f1", IsPrimary: true},
+							},
 							Metadata: &corev1.Metadata{
 								Labels: []*corev1.Label{
 									{Key: "environment", Value: cutil.GetPtr("test")},
@@ -586,8 +605,9 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 					assert.Equal(t, ctrlES.BmcMacAddress, updated.BmcMacAddress,
 						fmt.Sprintf("ExpectedSwitch %v should have been updated", es.ID))
 					// Both nil and empty lists should be treated as equivalent (no NVOS MACs)
-					if len(ctrlES.NvosMacAddresses) != 0 || len(updated.NvosMacAddresses) != 0 {
-						assert.Equal(t, ctrlES.NvosMacAddresses, updated.NvosMacAddresses,
+					ctrlMacs := protoNvosMacs(ctrlES)
+					if len(ctrlMacs) != 0 || len(updated.NvosMacAddresses) != 0 {
+						assert.Equal(t, ctrlMacs, updated.NvosMacAddresses,
 							fmt.Sprintf("ExpectedSwitch %v NVOS MAC addresses should match", es.ID))
 					}
 
@@ -617,8 +637,9 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 				created := switchesByID[esID]
 				if created != nil {
 					// Both nil and empty lists should be treated as equivalent (no NVOS MACs)
-					if len(ces.NvosMacAddresses) != 0 || len(created.NvosMacAddresses) != 0 {
-						assert.Equal(t, ces.NvosMacAddresses, created.NvosMacAddresses,
+					cesMacs := protoNvosMacs(ces)
+					if len(cesMacs) != 0 || len(created.NvosMacAddresses) != 0 {
+						assert.Equal(t, cesMacs, created.NvosMacAddresses,
 							fmt.Sprintf("ExpectedSwitch %v NVOS MAC addresses should match", esID))
 					}
 					var expectedLabels cdbm.Labels
@@ -942,15 +963,19 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 							{Key: "model", Value: cutil.GetPtr("initial-model")},
 						},
 					},
-					NvosMacAddresses: []string{"aa:bb:cc:dd:ee:01"},
+					NvosInterfaces: []*corev1.ExpectedNvosInterface{
+						{MacAddress: "aa:bb:cc:dd:ee:01", IsPrimary: true},
+						{MacAddress: "aa:bb:cc:dd:ee:02"},
+					},
 				},
 				want: cdbm.ExpectedSwitch{
-					BmcIpAddress:     cutil.GetPtr("192.0.2.10"),
-					RackID:           cutil.GetPtr("initial-rack"),
-					Name:             cutil.GetPtr("initial-name"),
-					Description:      cutil.GetPtr("initial-description"),
-					Labels:           cdbm.Labels{"model": "initial-model"},
-					NvosMacAddresses: []string{"aa:bb:cc:dd:ee:01"},
+					BmcIpAddress:          cutil.GetPtr("192.0.2.10"),
+					RackID:                cutil.GetPtr("initial-rack"),
+					Name:                  cutil.GetPtr("initial-name"),
+					Description:           cutil.GetPtr("initial-description"),
+					Labels:                cdbm.Labels{"model": "initial-model"},
+					NvosMacAddresses:      []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"},
+					NvosPrimaryMacAddress: cutil.GetPtr("aa:bb:cc:dd:ee:01"),
 				},
 			},
 		}
@@ -987,6 +1012,14 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 		bmcIPUpdate.want.BmcIpAddress = cutil.GetPtr("192.0.2.11")
 		cases = append(cases, bmcIPUpdate)
 
+		primaryUpdate := cases[len(cases)-1]
+		primaryUpdate.name = "replace only the NVOS primary"
+		primaryUpdate.reported = proto.Clone(primaryUpdate.reported).(*corev1.ExpectedSwitch)
+		primaryUpdate.reported.NvosInterfaces[0].IsPrimary = false
+		primaryUpdate.reported.NvosInterfaces[1].IsPrimary = true
+		primaryUpdate.want.NvosPrimaryMacAddress = cutil.GetPtr("aa:bb:cc:dd:ee:02")
+		cases = append(cases, primaryUpdate)
+
 		preserved := cases[len(cases)-1]
 		preserved.name = "preserve Cloud metadata when Core omits it"
 		preserved.reported = &corev1.ExpectedSwitch{Metadata: &corev1.Metadata{Labels: []*corev1.Label{
@@ -1002,6 +1035,11 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 		preserved.want.HostID = cutil.GetPtr(int32(5))
 		preserved.want.Labels = cdbm.Labels{"model": "updated-model-label"}
 		preserved.want.NvosMacAddresses = []string{}
+		// Core reporting no NVOS ports clears the primary selector too, rather
+		// than leaving it pointing at a MAC that is no longer present. The
+		// withoutLabels case below clones this want and inherits the cleared
+		// selector.
+		preserved.want.NvosPrimaryMacAddress = nil
 		preserved.prepare = func(t *testing.T) {
 			_, err := esDAO.Update(ctx, nil, cdbm.ExpectedSwitchUpdateInput{
 				ExpectedSwitchID: id,

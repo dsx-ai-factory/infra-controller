@@ -31,10 +31,11 @@ func TestNewTokenOriginConfig(t *testing.T) {
 	testServer := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
 		if strings.Contains(req.URL.Path, "/kas") {
 			res.WriteHeader(http.StatusOK)
-			res.Write([]byte(legacyKasJwks))
+			// Mock response writes are best-effort if the client closes the connection.
+			_, _ = res.Write([]byte(legacyKasJwks))
 		} else if strings.Contains(req.URL.Path, "/ssa") {
 			res.WriteHeader(http.StatusOK)
-			res.Write([]byte(ssaJwks))
+			_, _ = res.Write([]byte(ssaJwks))
 		} else {
 			res.WriteHeader(http.StatusNotFound)
 		}
@@ -423,7 +424,7 @@ func createMockJWKSServer(t *testing.T, publicKey *rsa.PublicKey, keyId string) 
 		jwks := createJWKSResponse(publicKey, keyId, "RS256", "sig")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(jwks))
+		_, _ = w.Write([]byte(jwks))
 	}))
 }
 
@@ -440,7 +441,7 @@ func createMockJWKSServerMultipleKeys(t *testing.T, publicKey1 *rsa.PublicKey, k
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(jwks))
+		_, _ = w.Write([]byte(jwks))
 	}))
 }
 
@@ -468,7 +469,7 @@ func createMockJWKSServerWithAlgorithms(t *testing.T, publicKey *rsa.PublicKey, 
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(jwks))
+		_, _ = w.Write([]byte(jwks))
 	}))
 }
 

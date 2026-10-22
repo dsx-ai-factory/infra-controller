@@ -1,0 +1,95 @@
+version: 2
+
+# Note that in each of these package ecosystems, we've declared a "-minor-patch"
+# group that instructs Dependabot to use a single weekly PR for all updates
+# of type "minor" or "patch", per declaration. Any update that doesn't match a
+# group will become its own separate PR.
+
+updates:
+
+# Rust ecosystem.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 3
+    labels: ["dependencies"]
+    groups:
+      cargo-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+
+# REST API Go ecosystem.
+  - package-ecosystem: "gomod"
+    directories:
+      - "/rest-api"
+      - "/rest-api/sdk/standard"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 3
+    labels: ["dependencies", "rest-api"]
+    groups:
+      gomod-rest-api-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+
+# Miscellaneous Go components.
+  - package-ecosystem: "gomod"
+    directories:
+      - "/bluefield/otel/fileresourceprocessor"
+      - "/bluefield/otel/puntstatsreceiver"
+      - "/bluefield/otel/telemetrystatsprocessor"
+      - "/dev/k8s/dpf-sim-controller"
+      - "/dev/k8s/machine-a-tron-controller"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 3
+    labels: ["dependencies"]
+    groups:
+      gomod-other-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+
+# GitHub Actions.
+  - package-ecosystem: "github-actions"
+    directories:
+      # Specifying the root directory makes Dependabot look at
+      # /.github/workflows and an action.yml file (if any).
+      - "/"
+      # Additionally, we need to tell it to look at all of these actions.
+      - "/.github/actions/*"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 3
+    labels: ["dependencies"]
+    groups:
+      github-actions-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+
+# Miscellaneous Python components.
+  - package-ecosystem: "uv"
+    directory: "/tests/machine-lifecycle"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 3
+    labels: ["dependencies"]
+    groups:
+      uv-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"

@@ -52,6 +52,8 @@ type ExpectedMachineCreateRequest struct {
 	Model NullableString `json:"model,omitempty"`
 	// Description of this component
 	Description NullableString `json:"description,omitempty"`
+	// Optional server name advertised to connected switches in LLDP responses and used for cable validation.
+	ServerName NullableString `json:"serverName,omitempty"`
 	// Slot ID within the rack
 	SlotId NullableInt32 `json:"slotId,omitempty"`
 	// Tray index within the rack
@@ -611,6 +613,49 @@ func (o *ExpectedMachineCreateRequest) UnsetDescription() {
 	o.Description.Unset()
 }
 
+// GetServerName returns the ServerName field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *ExpectedMachineCreateRequest) GetServerName() string {
+	if o == nil || IsNil(o.ServerName.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.ServerName.Get()
+}
+
+// GetServerNameOk returns a tuple with the ServerName field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *ExpectedMachineCreateRequest) GetServerNameOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.ServerName.Get(), o.ServerName.IsSet()
+}
+
+// HasServerName returns a boolean if a field has been set.
+func (o *ExpectedMachineCreateRequest) HasServerName() bool {
+	if o != nil && o.ServerName.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetServerName gets a reference to the given NullableString and assigns it to the ServerName field.
+func (o *ExpectedMachineCreateRequest) SetServerName(v string) {
+	o.ServerName.Set(&v)
+}
+
+// SetServerNameNil sets the value for ServerName to be an explicit nil
+func (o *ExpectedMachineCreateRequest) SetServerNameNil() {
+	o.ServerName.Set(nil)
+}
+
+// UnsetServerName ensures that no value is present for ServerName, not even an explicit nil
+func (o *ExpectedMachineCreateRequest) UnsetServerName() {
+	o.ServerName.Unset()
+}
+
 // GetSlotId returns the SlotId field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *ExpectedMachineCreateRequest) GetSlotId() int32 {
 	if o == nil || IsNil(o.SlotId.Get()) {
@@ -892,6 +937,9 @@ func (o ExpectedMachineCreateRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if o.Description.IsSet() {
 		toSerialize["description"] = o.Description.Get()
+	}
+	if o.ServerName.IsSet() {
+		toSerialize["serverName"] = o.ServerName.Get()
 	}
 	if o.SlotId.IsSet() {
 		toSerialize["slotId"] = o.SlotId.Get()

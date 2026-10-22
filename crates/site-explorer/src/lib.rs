@@ -26,20 +26,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use carbide_firmware::FirmwareConfigSnapshot;
-use carbide_network::{is_locally_administered_mac, sanitized_mac};
 use carbide_redfish::libredfish::conv::IntoModel;
 use carbide_secrets::credentials::CredentialManager;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::machine::MachineType;
-use carbide_uuid::power_shelf::{PowerShelfIdSource, PowerShelfType};
 use chrono::Utc;
 use component_manager::MachineInfoProvider;
 use config::SiteExplorerConfig;
 use db::explored_endpoints::EndpointReportNotCurrent;
-use db::{
-    self, ConditionalWrite, DatabaseError, Transaction, machine, power_shelf as db_power_shelf,
-};
+use db::{self, ConditionalWrite, DatabaseError, Transaction, machine};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{StreamExt, TryFutureExt};
 use itertools::Itertools;
@@ -47,20 +43,17 @@ use mac_address::MacAddress;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::errors::OperatorError;
 use model::expected_entity::ExpectedEntity;
-use model::expected_power_shelf::ExpectedPowerShelf;
 use model::machine::MachineInterfaceSnapshot;
 use model::machine::machine_search_config::MachineSearchConfig;
-use model::machine_boot_interface::{BootInterfaceSelectionSource, MachineBootInterface};
+use model::machine_boot_interface::BootInterfaceSelectionSource;
 use model::machine_interface::InterfaceType;
-use model::power_shelf::{NewPowerShelf, PowerShelfConfig};
 use model::rack_type::RackProfileConfig;
 use model::resource_pool::common::CommonPools;
 use model::site_explorer::{
     BlueFieldOperatingMode, Chassis, EndpointExplorationError, EndpointExplorationReport,
-    EndpointType, ExploredDpu, ExploredEndpoint, ExploredManagedHost, ExploredManagedSwitch,
-    HostPrimaryInterfaceSelection, MachineExpectation, PowerState, PreingestionState, Service,
-    SiteExplorerLastRun, is_bf3_dpu_part_number, is_bf3_supernic_part_number,
-    is_bluefield_part_number, is_bluefield_system,
+    EndpointType, ExploredDpu, ExploredEndpoint, ExploredManagedHost,
+    HostPrimaryInterfaceSelection, MachineExpectation, PowerState, PreingestionState,
+    SiteExplorerLastRun, is_bluefield_part_number,
 };
 use sqlx::PgPool;
 use tokio::task::JoinSet;
@@ -77,6 +70,7 @@ pub use endpoint_exploration_service::{
 mod credentials;
 mod endpoint_lock;
 mod metrics;
+pub mod suppression;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub use metrics::{SiteExplorationMetrics, site_explorer_latency_histogram_view};
@@ -84,26 +78,33 @@ mod bmc_endpoint_explorer;
 mod redfish;
 pub use bmc_endpoint_explorer::{AuthenticatedBmcClient, BmcEndpointExplorer};
 pub use redfish::{BmcAccess, EstablishedBmc, ProxiedPools};
+mod boot_interfaces;
+use boot_interfaces::{HostBootInterfaces, NicBootInterfaces};
 mod boot_order_tracker;
 use boot_order_tracker::BootOrderTracker;
-mod machine_creator;
-pub use machine_creator::MachineCreator;
+mod inventory_creator;
+use inventory_creator::InventoryCreator;
+pub use inventory_creator::{
+    Config as InventoryCreatorConfig, MachineCreator, PowerShelfCreator, SwitchCreator,
+};
+mod machine_location_reconciler;
+pub use machine_location_reconciler::MachineLocationReconciler;
+mod explored_endpoint_ext;
+use explored_endpoint_ext::ExploredEndpointExt;
+pub use explored_endpoint_ext::get_sys_image_version;
 pub mod explored_endpoint_index;
 mod managed_host;
+use carbide_uuid::rack::RackId;
 use db::ObjectColumnFilter;
 use db::work_lock_manager::WorkLockManagerHandle;
 pub use managed_host::is_endpoint_in_managed_host;
-use model::DpuModel;
 use model::expected_machine::{
     ExpectedInterface, ExpectedInterfaceIpAllocation, ExpectedMachine, ExpectedMachineRequest,
     HostDpuPolicy,
 };
 use model::firmware::FirmwareComponentType;
 use model::network_segment::NetworkSegmentType;
-mod switch_creator;
-use carbide_uuid::rack::RackId;
 use model::rack::Rack;
-pub use switch_creator::SwitchCreator;
 pub mod config;
 pub mod errors;
 use std::sync::atomic::AtomicBool;
@@ -592,8 +593,8 @@ pub struct SiteExplorer {
     bmc_client: Arc<dyn AuthenticatedBmc>,
     endpoint_exploration_service: Arc<EndpointExplorationService>,
     work_lock_manager_handle: WorkLockManagerHandle,
-    machine_creator: MachineCreator,
-    switch_creator: SwitchCreator,
+    inventory_creator: InventoryCreator,
+    machine_location_reconciler: MachineLocationReconciler,
     boot_order_tracker: BootOrderTracker,
     /// Backstops the persisted BMC-reset timestamps for the reset rate limit,
     /// so a reset whose timestamp write failed still throttles the next reset.
@@ -603,6 +604,7 @@ pub struct SiteExplorer {
 /// State captured once and applied throughout a Site Explorer iteration.
 struct SiteExplorerRunContext {
     suppressed_bmc_macs: HashSet<MacAddress>,
+    dpf_provisioning_bmc_macs: HashSet<MacAddress>,
 }
 
 impl SiteExplorer {
@@ -643,18 +645,19 @@ impl SiteExplorer {
         let endpoint_explorer = endpoint_exploration_service.endpoint_explorer();
 
         SiteExplorer {
-            machine_creator: MachineCreator::new(
+            machine_location_reconciler: MachineLocationReconciler::new(
                 database_connection.clone(),
-                explorer_config.clone(),
+                rack_profiles.clone(),
+                machine_info_provider.clone(),
+                credential_manager,
+            ),
+            inventory_creator: InventoryCreator::new(
+                database_connection.clone(),
+                (&explorer_config).into(),
                 common_pools,
                 rack_profiles,
                 machine_info_provider,
-                credential_manager,
                 dpf_enabled_at_site,
-            ),
-            switch_creator: SwitchCreator::new(
-                database_connection.clone(),
-                explorer_config.clone(),
             ),
             database_connection,
             config: explorer_config,
@@ -1128,10 +1131,7 @@ impl SiteExplorer {
         &self,
         metrics: &mut SiteExplorationMetrics,
     ) -> SiteExplorerResult<SiteIdentifiedHosts> {
-        let suppressed_bmc_macs = self.acknowledge_site_explorer_suppressions().await?;
-        let run_context = SiteExplorerRunContext {
-            suppressed_bmc_macs,
-        };
+        let run_context = self.acknowledge_site_explorer_suppressions().await?;
         self.check_preconditions(metrics).await?;
 
         let update_explored_endpoints_start = Instant::now();
@@ -1166,7 +1166,8 @@ impl SiteExplorer {
         // However since host information rarely changes (we never reassign MachineInterfaces),
         // this should be ok. The most noticeable effect is that ManagedHost population might be delayed a bit.
         let identify_managed_hosts_start = Instant::now();
-        let mut identified_hosts = self
+        let nic_boot_interfaces = NicBootInterfaces::new(&explored_hosts);
+        let (mut identified_hosts, boot_interfaces) = self
             .identify_managed_hosts(
                 metrics,
                 &expected_endpoint_index,
@@ -1174,99 +1175,28 @@ impl SiteExplorer {
                 explored_hosts,
             )
             .await?;
+
+        let mut txn = self.txn_begin().await?;
+        Self::persist_identified_managed_hosts(&mut txn, &identified_hosts).await?;
+        boot_interfaces.persist(&mut txn).await?;
+        nic_boot_interfaces.persist(&mut txn).await?;
+        txn.commit().await?;
+
         metrics.record_phase_latency(
             "identify_managed_hosts",
             identify_managed_hosts_start.elapsed(),
         );
 
-        if self.config.create_machines.load(Ordering::Relaxed) {
-            let start_create_machines = Instant::now();
-            let create_machines_res = self
-                .machine_creator
-                .create_machines(
-                    metrics,
-                    &mut identified_hosts,
-                    &expected_endpoint_index,
-                    &already_ingested_bmc_ips,
-                    &explored_this_run,
-                )
-                .await;
-            let create_machines_latency = start_create_machines.elapsed();
-            metrics.create_machines_latency = Some(create_machines_latency);
-            metrics.record_phase_latency("create_machines", create_machines_latency);
-            create_machines_res?;
-        }
-
-        let reconcile_desired_boot_interfaces_start = Instant::now();
-        let reconcile_desired_boot_interfaces_res = self
-            .machine_creator
-            .reconcile_desired_boot_interfaces()
-            .await;
-        metrics.record_phase_latency(
-            "reconcile_desired_boot_interfaces",
-            reconcile_desired_boot_interfaces_start.elapsed(),
-        );
-        if let Err(error) = reconcile_desired_boot_interfaces_res {
-            tracing::warn!(
-                %error,
-                "Desired boot-interface reconciliation pass failed; a later Site Explorer run will retry"
-            );
-        }
-
-        // Identify and create power shelves
-        let identify_power_shelves_to_ingest_start = Instant::now();
-        let explored_power_shelves = self
-            .identify_power_shelves_to_ingest(&expected_endpoint_index, &run_context)
+        self.inventory_creator
+            .create_inventory(
+                metrics,
+                &mut identified_hosts,
+                &expected_endpoint_index,
+                &already_ingested_bmc_ips,
+                &explored_this_run,
+                &run_context.suppressed_bmc_macs,
+            )
             .await?;
-        metrics.record_phase_latency(
-            "identify_power_shelves_to_ingest",
-            identify_power_shelves_to_ingest_start.elapsed(),
-        );
-
-        if self.config.create_power_shelves.load(Ordering::Relaxed) {
-            let start_create_power_shelves = Instant::now();
-            let create_power_shelves_res = self
-                .create_power_shelves(metrics, explored_power_shelves, &expected_endpoint_index)
-                .await;
-            let create_power_shelves_latency = start_create_power_shelves.elapsed();
-            metrics.create_power_shelves_latency = Some(create_power_shelves_latency);
-            metrics.record_phase_latency("create_power_shelves", create_power_shelves_latency);
-            create_power_shelves_res?;
-        } else if !explored_power_shelves.is_empty() {
-            tracing::info!(
-                power_shelf_count = explored_power_shelves.len(),
-                "Identified power shelves during exploration but create_power_shelves=false; skipping PowerShelf creation. \
-                 Set [site_explorer] create_power_shelves=true and declare matching expected_power_shelves records to ingest them."
-            );
-        }
-
-        // Identify and create switches
-        let identify_switches_to_ingest_start = Instant::now();
-        let explored_switches = self
-            .identify_switches_to_ingest(&expected_endpoint_index, &run_context)
-            .await?;
-        metrics.record_phase_latency(
-            "identify_switches_to_ingest",
-            identify_switches_to_ingest_start.elapsed(),
-        );
-
-        if self.config.create_switches.load(Ordering::Relaxed) {
-            let start_create_switches = Instant::now();
-            let create_switches_res = self
-                .switch_creator
-                .create_switches(metrics, &explored_switches, &expected_endpoint_index)
-                .await;
-            let create_switches_latency = start_create_switches.elapsed();
-            metrics.create_switches_latency = Some(create_switches_latency);
-            metrics.record_phase_latency("create_switches", create_switches_latency);
-            create_switches_res?;
-        } else if !explored_switches.is_empty() {
-            tracing::info!(
-                switch_count = explored_switches.len(),
-                "Identified switches during exploration but create_switches=false; skipping Switch creation. \
-                 Set [site_explorer] create_switches=true and declare matching expected_switches records to ingest them."
-            );
-        }
 
         // Audit after everything has been explored, identified, and created.
         let audit_exploration_results_start = Instant::now();
@@ -1309,7 +1239,7 @@ impl SiteExplorer {
             .map(|identified| identified.explored_host.host_bmc_ip)
             .collect::<Vec<_>>();
         if let Err(error) = self
-            .machine_creator
+            .machine_location_reconciler
             .reconcile_machine_locations(&host_bmc_ips)
             .await
         {
@@ -1327,235 +1257,6 @@ impl SiteExplorer {
             .into_iter()
             .map(|identified| (identified.explored_host, identified.report))
             .collect())
-    }
-
-    async fn create_power_shelves(
-        &self,
-        metrics: &mut SiteExplorationMetrics,
-        explored_power_shelves: Vec<(ExploredEndpoint, EndpointExplorationReport)>,
-        expected_endpoint_index: &ExploredEndpointIndex,
-    ) -> SiteExplorerResult<()> {
-        // One query replaces a per-shelf transaction for shelves that already
-        // exist; `create_power_shelf` keeps its own checks for the rest.
-        let mut existing_bmc_macs = HashSet::new();
-        let mut existing_names = HashSet::new();
-        for (bmc_mac_address, name) in
-            db_power_shelf::find_all_bmc_mac_addresses_and_names(&self.database_connection).await?
-        {
-            if let Some(bmc_mac_address) = bmc_mac_address {
-                existing_bmc_macs.insert(bmc_mac_address);
-            }
-            existing_names.insert(name);
-        }
-
-        let mut skipped_existing_power_shelves = 0usize;
-        for (endpoint, _report) in explored_power_shelves {
-            let address = endpoint.address;
-            let Some(expected_power_shelf) =
-                expected_endpoint_index.matched_expected_power_shelf(&endpoint.address)
-            else {
-                tracing::info!(
-                    bmc_ip_address = ?endpoint.address,
-                    "No expected power shelf found"
-                );
-                continue;
-            };
-
-            if power_shelf_already_exists(expected_power_shelf, &existing_bmc_macs, &existing_names)
-            {
-                skipped_existing_power_shelves += 1;
-                continue;
-            }
-
-            match self
-                .create_power_shelf(endpoint, expected_power_shelf, &self.database_connection)
-                .await
-            {
-                Ok(true) => {
-                    metrics.created_power_shelves_count += 1;
-                    if metrics.created_power_shelves_count as u64
-                        == self.config.power_shelves_created_per_run
-                    {
-                        break;
-                    }
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    tracing::error!(
-                        %error,
-                        bmc_ip_address = ?address,
-                        "Failed to create power shelf"
-                    )
-                }
-            }
-        }
-
-        if skipped_existing_power_shelves > 0 {
-            tracing::info!(
-                skipped_existing_power_shelves,
-                "Skipped power shelves that already exist"
-            );
-        }
-
-        Ok(())
-    }
-
-    pub async fn create_power_shelf(
-        &self,
-        explored_endpoint: ExploredEndpoint,
-        expected_shelf: &ExpectedPowerShelf,
-        pool: &PgPool,
-    ) -> SiteExplorerResult<bool> {
-        let mut txn = pool
-            .begin()
-            .await
-            .map_err(|e| DatabaseError::new("begin load create_power_shelf", e))?;
-
-        // Defense against the duplicate-power-shelves bug: if a power shelf
-        // already exists in the database for this BMC MAC, don't make another
-        // one. This mirrors the dedup check on the switch creation path and
-        // catches the case where the input we hash to mint the
-        // `PowerShelfId` drifts between exploration cycles.
-        if let Some(existing) =
-            db_power_shelf::find_by_bmc_mac_address(&mut txn, expected_shelf.bmc_mac_address)
-                .await?
-        {
-            tracing::warn!(
-                bmc_mac_address = %expected_shelf.bmc_mac_address,
-                existing_power_shelf_id = %existing.id,
-                bmc_ip_address = %explored_endpoint.address,
-                "Power shelf already exists; skipping discovery",
-            );
-            txn.rollback()
-                .await
-                .map_err(|e| DatabaseError::new("rollback create_power_shelf", e))?;
-            return Ok(false);
-        }
-
-        // Check if a power shelf with the same name already exists
-        if !expected_shelf.metadata.name.is_empty() {
-            let existing_power_shelves = db_power_shelf::find_by(
-                &mut txn,
-                ObjectColumnFilter::All::<db::power_shelf::NameColumn>,
-            )
-            .await?;
-
-            // Check if any existing power shelf has the same name
-            for existing_ps in &existing_power_shelves {
-                if existing_ps.config.name == expected_shelf.metadata.name {
-                    tracing::info!(
-                        power_shelf_name = %expected_shelf.metadata.name,
-                        bmc_ip_address = %explored_endpoint.address,
-                        "Power shelf already exists; skipping creation"
-                    );
-                    txn.rollback()
-                        .await
-                        .map_err(|e| DatabaseError::new("rollback create_power_shelf", e))?;
-                    return Ok(false);
-                }
-            }
-        }
-
-        tracing::info!(
-            bmc_ip_address = %explored_endpoint.address,
-            "Creating power shelf"
-        );
-
-        // Create a new power shelf
-        // Generate power_shelf_id similar to machine_id using deterministic hashing.
-        // Extract serial / vendor / model from the chassis reported by the
-        // explored endpoint. Prefer a chassis whose id identifies it as a
-        // power shelf, falling back to the first chassis if none match.
-        // Fall back to sensible defaults if the chassis is missing fields so
-        // that we can still mint a stable id during exploration.
-        let chassis_list = &explored_endpoint.report.chassis;
-        let power_shelf_chassis = chassis_list
-            .iter()
-            .find(|c| c.id.to_lowercase().contains("powershelf"))
-            .or_else(|| chassis_list.first());
-
-        if power_shelf_chassis.is_none() {
-            tracing::warn!(
-                bmc_ip_address = %explored_endpoint.address,
-                "No chassis reported for power shelf endpoint; falling back to defaults for id generation",
-            );
-        }
-
-        let power_shelf_serial = power_shelf_chassis
-            .and_then(|c| c.serial_number.as_deref())
-            .unwrap_or(expected_shelf.metadata.name.as_str());
-        let power_shelf_vendor = power_shelf_chassis
-            .and_then(|c| c.manufacturer.as_deref())
-            .unwrap_or("NVIDIA");
-        let power_shelf_model = power_shelf_chassis
-            .and_then(|c| c.model.as_deref())
-            .unwrap_or("PowerShelf");
-        let power_shelf_id = match model::power_shelf::power_shelf_id::from_hardware_info(
-            power_shelf_serial,
-            power_shelf_vendor,
-            power_shelf_model,
-            PowerShelfIdSource::ProductBoardChassisSerial,
-            PowerShelfType::Rack,
-        ) {
-            Ok(id) => id,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to create power shelf ID");
-                return Err(SiteExplorerError::InvalidArgument(format!(
-                    "Failed to create power shelf ID: {e}"
-                )));
-            }
-        };
-
-        let config = PowerShelfConfig {
-            name: expected_shelf.metadata.name.clone(),
-            capacity: Some(100),
-            voltage: Some(240),
-        };
-
-        let new_power_shelf = NewPowerShelf {
-            id: power_shelf_id,
-            config,
-            bmc_mac_address: Some(expected_shelf.bmc_mac_address),
-            metadata: Some(expected_shelf.metadata.clone()),
-            rack_id: expected_shelf.rack_id.clone(),
-        };
-
-        db_power_shelf::create(&mut txn, &new_power_shelf).await?;
-
-        let mi =
-            db::machine_interface::find_by_mac_address(&mut *txn, expected_shelf.bmc_mac_address)
-                .await?;
-        if let Some(interface) = mi.first() {
-            // A power shelf's BMC/PMC interface is its management endpoint, so
-            // associate it with the shelf and annotate it as `Bmc` (like
-            // host/switch BMC interfaces), demoting it from primary in one
-            // statement. This `Bmc` link is what lets the power-shelf load query
-            // resolve the shelf's MAC/IP into the `PowerShelf.bmc_info` field.
-            db::machine_interface::associate_bmc_interface(
-                &interface.id,
-                model::machine_interface_address::MachineInterfaceAssociation::PowerShelf(
-                    power_shelf_id,
-                ),
-                &mut txn,
-            )
-            .await?;
-        }
-
-        if let Some(ref rack_id) = expected_shelf.rack_id {
-            let _ = crate::ensure_rack_exists(txn.as_mut(), rack_id).await?;
-        }
-        // No need to update the power shelf name again; it was already set in config above.
-        txn.commit()
-            .await
-            .map_err(|e| DatabaseError::new("end create_power_shelf", e))?;
-
-        tracing::info!(
-            %power_shelf_id,
-            bmc_ip_address = %explored_endpoint.address,
-            "Created power shelf"
-        );
-
-        Ok(true)
     }
 
     /// identify_machines_to_ingest returns two maps and a set.
@@ -1640,7 +1341,7 @@ impl SiteExplorer {
         expected_explored_endpoint_index: &ExploredEndpointIndex,
         explored_dpus: HashMap<IpAddr, ExploredEndpoint>,
         explored_hosts: HashMap<IpAddr, ExploredEndpoint>,
-    ) -> SiteExplorerResult<Vec<IdentifiedManagedHost>> {
+    ) -> SiteExplorerResult<(Vec<IdentifiedManagedHost>, HostBootInterfaces)> {
         // Per-host DPU policy resolution. Precedence:
         //   1. Per-host `ExpectedMachine.dpu_policy` (`Nic` / `Ignore` wins).
         //   2. Site-wide `SiteExplorerConfig.dpu_policy` setting.
@@ -1664,47 +1365,10 @@ impl SiteExplorer {
         }
 
         let mut managed_hosts = Vec::new();
-        let mut boot_interfaces: Vec<(IpAddr, MachineBootInterface)> = Vec::new();
-        // Each host NIC's full boot interface (MAC + Redfish id), to record on
-        // its machine_interfaces row so the primary row holds the complete pair.
-        let mut nic_boot_interfaces: Vec<MachineBootInterface> = Vec::new();
-
+        let mut boot_interfaces = HostBootInterfaces::new();
         for (_, ep) in explored_hosts {
-            // Record every host NIC's boot interface (MAC + Redfish id) on its
-            // machine_interfaces row (matched by MAC), so the primary-flagged
-            // row holds the full pair -- whatever the NIC type (integrated NICs,
-            // SuperNICs, DPU host-PFs, DPUs in NIC mode). This sits before the
-            // `Ignore` and unmatched-host `continue`s below, so every
-            // explored host is covered -- including a zero-DPU host whose primary
-            // boots from a plain NIC. The UPDATE no-ops for MACs with no row
-            // (e.g. a never-cabled NIC). Last-known-good: only NICs that resolve
-            // a full pair in this report are recorded, so a wiped MAC keeps its
-            // prior id.
-            nic_boot_interfaces.extend(ep.report.complete_boot_interfaces());
-
-            // Surface partial records -- a host NIC reporting only one of (MAC,
-            // interface id). `complete_boot_interfaces` skips these, so log here
-            // to make it visible that we saw, and ignored, an incomplete NIC.
-            for iface in ep
-                .report
-                .systems
-                .iter()
-                .flat_map(|s| s.ethernet_interfaces.iter())
-            {
-                let has_mac = iface.mac_address.is_some();
-                let has_id = iface.id.as_deref().is_some_and(|s| !s.is_empty());
-                if has_mac != has_id {
-                    tracing::info!(
-                        bmc_ip_address = %ep.address,
-                        interface_mac_address = ?iface.mac_address,
-                        interface_id = ?iface.id,
-                        "site-explorer: host NIC reported with only one of (MAC, interface id) -- not recording its boot interface",
-                    );
-                }
-            }
-
             // Resolve the operator-declared DPU policy for this host once;
-            // it drives both auto-correction (`check_and_configure_dpu_mode`
+            // it drives both auto-correction (`update_dpu_mode`
             // below -- operator override wins over BF3 part-number heuristics)
             // and the post-match attach decision (`Nic` / `Ignore` policies
             // emit a bare managed host regardless of what matched).
@@ -1734,7 +1398,7 @@ impl SiteExplorer {
                     .report
                     .select_host_primary_interface(&[], declared_primary);
                 if let Some(selection) = primary_interface_selection {
-                    queue_host_boot_interface(&ep, selection.mac_address, &mut boot_interfaces);
+                    boot_interfaces.add(&ep, selection.mac_address);
                 }
 
                 managed_hosts.push(IdentifiedManagedHost {
@@ -1830,15 +1494,14 @@ impl SiteExplorer {
                             // Fallback matching has only the expected serial and the
                             // discovered DPU BMC report; pass the DPU's own part number
                             // for the legacy BF3 heuristic.
-                            let mode_check = Some(
-                                self.check_and_configure_dpu_mode(
-                                    &dpu_ep,
-                                    dpu_ep.report.dpu_part_number(),
-                                    host_dpu_policy,
-                                    metrics,
-                                )
-                                .await,
-                            );
+                            let part_number = dpu_ep.report.dpu_part_number();
+                            let mode_check =
+                                Some(match host_dpu_policy.target_operating_mode(part_number) {
+                                    Some(target) => {
+                                        self.update_dpu_mode(&dpu_ep, target, metrics).await
+                                    }
+                                    None => Ok(true),
+                                });
 
                             match classify_matched_dpu(&dpu_ep, &ep, mode_check) {
                                 DiscoveredDpu::RunningAsDpu(dpu) => {
@@ -2000,12 +1663,7 @@ impl SiteExplorer {
                 .select_host_primary_interface(&dpus_explored_for_host, declared_primary);
             if let Some(selection) = primary_interface_selection {
                 let mac_address = selection.mac_address;
-                // Capture the boot interface's [stable] Redfish interface id
-                // alongside its MAC. Only persist when both resolve from the
-                // current report: if the MAC has no matching interface id in
-                // this report, keep the last-known-good stored boot interface
-                // rather than clobbering it with a partial record.
-                queue_host_boot_interface(&ep, mac_address, &mut boot_interfaces);
+                boot_interfaces.add(&ep, mac_address);
 
                 match Self::apply_report_selection(
                     &mut dpus_explored_for_host,
@@ -2128,14 +1786,15 @@ impl SiteExplorer {
             metrics.exploration_identified_managed_hosts += 1;
         }
 
-        // Any transaction touching multiple explored_endpoints needs to sort them the same way to
-        // avoid deadlocks: sort by IP.
-        boot_interfaces.sort_by_key(|(address, _)| *address);
+        Ok((managed_hosts, boot_interfaces))
+    }
 
-        let mut txn = self.txn_begin().await?;
-
+    async fn persist_identified_managed_hosts(
+        txn: &mut Transaction<'_>,
+        managed_hosts: &[IdentifiedManagedHost],
+    ) -> SiteExplorerResult<()> {
         db::explored_managed_host::update(
-            &mut txn,
+            txn,
             managed_hosts
                 .iter()
                 .map(|identified| &identified.explored_host)
@@ -2144,34 +1803,7 @@ impl SiteExplorer {
         )
         .await?;
 
-        // Persist boot interface MACs for host endpoints
-        for (address, boot_interface) in &boot_interfaces {
-            db::explored_endpoints::set_boot_interface(*address, boot_interface, &mut txn).await?;
-        }
-
-        // Record each host NIC's Redfish id on its machine_interfaces row so the
-        // primary-flagged row is the host's complete boot interface (MAC + id).
-        // Pending predicted interfaces get the same refresh, so a prediction
-        // minted before the report resolved the id stays as current as the
-        // live report until DHCP promotes it.
-        for boot_interface in &nic_boot_interfaces {
-            db::machine_interface::set_boot_interface_id(
-                boot_interface.mac_address,
-                &boot_interface.interface_id,
-                &mut txn,
-            )
-            .await?;
-            db::predicted_machine_interface::set_boot_interface_id(
-                &mut txn,
-                boot_interface.mac_address,
-                &boot_interface.interface_id,
-            )
-            .await?;
-        }
-
-        txn.commit().await?;
-
-        Ok(managed_hosts)
+        Ok(())
     }
 
     /// `assign_host_chassis_ids` joins each explored DPU to one host BMC
@@ -2284,8 +1916,7 @@ impl SiteExplorer {
     /// Record a single host-reported device (a PCIe device or a chassis network
     /// adapter) into `exploration`, against the discovered DPU BMCs.
     ///
-    /// The one piece of IO -- `check_and_configure_dpu_mode`, which may issue a
-    /// `set_nic_mode` to auto-correct a mismatch -- happens here; the actual
+    /// Mode changes (`set_nic_mode`) are applied here; the actual
     /// classification of its result lives in [`classify_matched_dpu`], which is
     /// unit-tested directly. Both the PCIe loop and the chassis fallback call this.
     #[allow(clippy::too_many_arguments)]
@@ -2318,12 +1949,12 @@ impl SiteExplorer {
             return;
         };
 
-        // Resolve the DPU's mode against what the host declared. This is the only
-        // I/O, and may issue a `set_nic_mode` (in which case it returns `Ok(false)`).
-        let mode_check = Some(
-            self.check_and_configure_dpu_mode(dpu_ep, part_number, host_dpu_policy, metrics)
-                .await,
-        );
+        // Resolve the DPU's mode against what the host declared. Report a change
+        // only after `set_nic_mode` succeeds, so failures keep the existing skip path.
+        let mode_check = Some(match host_dpu_policy.target_operating_mode(part_number) {
+            Some(target) => self.update_dpu_mode(dpu_ep, target, metrics).await,
+            None => Ok(true),
+        });
 
         match classify_matched_dpu(dpu_ep, host_ep, mode_check) {
             DiscoveredDpu::RunningAsDpu(dpu) => exploration.running_as_dpu.push(dpu),
@@ -2339,95 +1970,49 @@ impl SiteExplorer {
         }
     }
 
-    async fn identify_power_shelves_to_ingest(
+    /// Sends a mode-setting request when the DPU reports a different current mode.
+    ///
+    /// Returns `false` after a successful request, `true` when no request is
+    /// sent (including an unknown current mode), or an error if the request fails.
+    async fn update_dpu_mode(
         &self,
-        expected_endpoint_index: &ExploredEndpointIndex,
-        run_context: &SiteExplorerRunContext,
-    ) -> SiteExplorerResult<Vec<(ExploredEndpoint, EndpointExplorationReport)>> {
-        let mut txn = self
-            .database_connection
-            .begin()
-            .await
-            .map_err(|e| DatabaseError::new("load find_all_preingestion_complete data", e))?;
-
-        let explored_endpoints =
-            db::explored_endpoints::find_all_preingestion_complete(&mut txn).await?;
-
-        txn.commit()
-            .await
-            .map_err(|e| DatabaseError::new("end find_all_preingestion_complete data", e))?;
-
-        let mut explored_power_shelves = Vec::new();
-        for ep in explored_endpoints.into_iter() {
-            if let Some(expected) =
-                expected_endpoint_index.matched_expected_power_shelf(&ep.address)
-                && run_context
-                    .suppressed_bmc_macs
-                    .contains(&expected.bmc_mac_address)
-            {
-                tracing::info!(
-                    bmc_ip_address = %ep.address,
-                    bmc_mac_address = %expected.bmc_mac_address,
-                    "Skipping ingestion of suppressed power shelf",
+        dpu_ep: &ExploredEndpoint,
+        target_operating_mode: BlueFieldOperatingMode,
+        metrics: &mut SiteExplorationMetrics,
+    ) -> SiteExplorerResult<bool> {
+        let observed_mode = dpu_ep.report.bluefield_operating_mode();
+        let Some(observed) = observed_mode.filter(|mode| *mode != target_operating_mode) else {
+            if observed_mode.is_none() {
+                tracing::warn!(
+                    bmc_ip_address = %dpu_ep.address,
+                    dpu_report = ?dpu_ep.report,
+                    "Site explorer cannot determine this DPU's mode"
                 );
-                continue;
             }
+            return Ok(true);
+        };
 
-            if ep.report.endpoint_type != EndpointType::Bmc {
-                continue;
-            }
-            if ep.report.is_power_shelf() {
-                explored_power_shelves.push((ep.clone(), ep.report.clone()));
-            }
-            //ignore other endpoints
-        }
+        tracing::warn!(
+            bmc_ip_address = %dpu_ep.address,
+            %observed,
+            ?target_operating_mode,
+            "site explorer found a DPU with a mode that does not match the target; will try to reconfigure"
+        );
+        metrics.increment_dpu_migration_signal(DpuMigrationSignal::ModeMismatchFound);
+        let bmc_target_port = self.config.override_target_port.unwrap_or(443);
+        let bmc_target_addr = SocketAddr::new(dpu_ep.address, bmc_target_port);
 
-        Ok(explored_power_shelves)
-    }
+        let interface = self.find_machine_interface_for_ip(dpu_ep.address).await?;
 
-    async fn identify_switches_to_ingest(
-        &self,
-        expected_endpoint_index: &ExploredEndpointIndex,
-        run_context: &SiteExplorerRunContext,
-    ) -> SiteExplorerResult<Vec<ExploredManagedSwitch>> {
-        let mut txn = self
-            .database_connection
-            .begin()
+        self.bmc_client
+            .set_nic_mode(bmc_target_addr, &interface, target_operating_mode)
             .await
-            .map_err(|e| DatabaseError::new("load find_all_preingestion_complete data", e))?;
-
-        let explored_endpoints =
-            db::explored_endpoints::find_all_preingestion_complete(&mut txn).await?;
-
-        txn.commit()
-            .await
-            .map_err(|e| DatabaseError::new("end find_all_preingestion_complete data", e))?;
-        let managed_switches = explored_endpoints
-            .iter()
-            .filter(|ep| {
-                if let Some(expected) = expected_endpoint_index.matched_expected_switch(&ep.address)
-                    && run_context
-                        .suppressed_bmc_macs
-                        .contains(&expected.bmc_mac_address)
-                {
-                    tracing::info!(
-                        bmc_ip_address = %ep.address,
-                        bmc_mac_address = %expected.bmc_mac_address,
-                        "Skipping ingestion of suppressed switch",
-                    );
-                    return false;
-                }
-                true
-            })
-            .filter(|ep| ep.report.endpoint_type == EndpointType::Bmc && ep.report.is_switch())
-            .map(|ep| ExploredManagedSwitch {
-                bmc_ip: ep.address,
-                nv_os_mac_addresses: ep.report.all_mac_addresses(),
-                report: ep.report.clone(),
-            })
-            .collect::<Vec<_>>();
-
-        Ok(managed_switches)
+            .map_err(|err| SiteExplorerError::EndpointExplorationError {
+                action: "set_nic_mode",
+                err,
+            })?;
+        metrics.increment_dpu_migration_signal(DpuMigrationSignal::SetNicModeIssued);
+        Ok(false)
     }
 
     /// Checks if all data that a site exploration run requires is actually configured
@@ -2447,10 +2032,12 @@ impl SiteExplorer {
             })
     }
 
-    /// Acknowledges pending Site Explorer suppressions and returns all site explorer suppressed BMC MAC addresses.
+    /// Loads the run's suppressed and DPF-provisioning BMC sets, acknowledging
+    /// pending suppressions that require endpoint guards. DPF provisioning does
+    /// not wait for acknowledgement.
     async fn acknowledge_site_explorer_suppressions(
         &self,
-    ) -> SiteExplorerResult<HashSet<MacAddress>> {
+    ) -> SiteExplorerResult<SiteExplorerRunContext> {
         let suppressions = db::bmc_suppression::find_all_by_subsystem(
             &self.database_connection,
             BmcSuppressionSubsystem::SiteExplorer,
@@ -2461,11 +2048,20 @@ impl SiteExplorer {
             .map(|suppression| suppression.bmc_mac_address)
             .collect();
 
+        let dpf_provisioning_bmc_macs = suppressions
+            .iter()
+            .filter(|s| s.source == model::bmc_suppression::BmcSuppressionSource::DpfProvisioning)
+            .map(|s| s.bmc_mac_address)
+            .collect();
         let mut guards = Vec::new();
         let mut acknowledgements = Vec::new();
         for suppression in suppressions
             .iter()
-            .filter(|suppression| suppression.acknowledged_at.is_none())
+            .filter(|suppression| {
+                suppression.acknowledged_at.is_none()
+                    && suppression.source
+                        != model::bmc_suppression::BmcSuppressionSource::DpfProvisioning
+            })
             .unique_by(|suppression| suppression.bmc_mac_address)
         {
             let bmc_ips = db::machine_interface::lookup_bmc_ip_by_mac_address(
@@ -2501,7 +2097,10 @@ impl SiteExplorer {
         }
         drop(guards);
 
-        Ok(suppressed_bmc_macs)
+        Ok(SiteExplorerRunContext {
+            suppressed_bmc_macs,
+            dpf_provisioning_bmc_macs,
+        })
     }
 
     /// Returns the endpoint index and the addresses explored in this run.
@@ -2597,11 +2196,10 @@ impl SiteExplorer {
                 self.config.retained_boot_interface_window,
             )
             .await;
-            for nic in expected_machine
-                .data
-                .interfaces
-                .iter()
-                .filter(|interface| interface.mac_address != expected_machine.bmc_mac_address)
+            for nic in
+                expected_machine.data.interfaces.iter().filter(|interface| {
+                    interface.mac_address != Some(expected_machine.bmc_mac_address)
+                })
             {
                 try_apply_expected_interface(
                     &self.database_connection,
@@ -2637,11 +2235,11 @@ impl SiteExplorer {
                 .await;
             }
             // NVOS static IP: handler-side validation pairs `nvos_ip_address` with
-            // exactly one `nvos_mac_addresses` entry (the single wired NVOS port).
-            // ...but re-check here just incase, with the failure case being a
+            // exactly one `nvos_interfaces` entry (the single wired NVOS port).
+            // Re-check here, with the failure case being a
             // log and skip for this pass.
             if let Some(nvos_ip) = expected_switch.nvos_ip_address {
-                match expected_switch.nvos_mac_addresses.as_slice() {
+                match expected_switch.nvos_mac_addresses().as_slice() {
                     [nvos_mac] => {
                         try_preallocate_one(
                             &self.database_connection,
@@ -2658,7 +2256,7 @@ impl SiteExplorer {
                             bmc_mac_address = %expected_switch.bmc_mac_address,
                             nvos_ip_address = %nvos_ip,
                             nvos_mac_address_count = macs.len(),
-                            "Skipping NVOS preallocation: nvos_ip_address requires exactly one nvos_mac_addresses entry"
+                            "Skipping NVOS preallocation: nvos_ip_address requires exactly one nvos_interfaces entry"
                         );
                     }
                 }
@@ -2722,12 +2320,11 @@ impl SiteExplorer {
                 // the separate DpuBmc interface.
                 interface.role == model::expected_machine::ExpectedInterfaceRole::DpuOs
             })
-            .map(|interface| interface.mac_address)
+            .filter_map(|interface| interface.mac_address)
             .chain(
                 expected_switches
                     .iter()
-                    .flat_map(|switch| &switch.nvos_mac_addresses)
-                    .copied(),
+                    .flat_map(|switch| switch.nvos_mac_addresses()),
             )
             // An explicit BMC identity wins if legacy data assigns the same
             // MAC address to both a BMC and an OS interface.
@@ -2799,6 +2396,15 @@ impl SiteExplorer {
             match index.underlay_interface(address) {
                 Some(iface) => {
                     if run_context.suppressed_bmc_macs.contains(&iface.mac_address) {
+                        if run_context
+                            .dpf_provisioning_bmc_macs
+                            .contains(&iface.mac_address)
+                        {
+                            suppression::record_deferred(
+                                *address,
+                                suppression::ExplorationRequest::Periodic,
+                            );
+                        }
                         tracing::info!(bmc_ip_address = %address, bmc_mac_address = %iface.mac_address, "Skipping exploration of suppressed BMC");
                         continue;
                     }
@@ -2841,6 +2447,9 @@ impl SiteExplorer {
                     .suppressed_bmc_macs
                     .contains(&iface.mac_address)
                 {
+                    if run_context.dpf_provisioning_bmc_macs.contains(&iface.mac_address) {
+                        suppression::record_deferred(*address, suppression::ExplorationRequest::Periodic);
+                    }
                     tracing::info!(bmc_ip_address = %address, bmc_mac_address = %iface.mac_address, "Skipping exploration of suppressed BMC");
                     return false;
                 }
@@ -3749,7 +3358,7 @@ impl SiteExplorer {
         // This is a BlueField that should be pairable as a managed DPU. BF4 may
         // not report mode, so host pairing and the PF MAC check decide whether
         // it can continue.
-        match find_host_pf_mac_address(dpu_endpoint) {
+        match dpu_endpoint.find_host_pf_mac_address() {
             Ok(_) => Ok(true),
             Err(error) => {
                 tracing::error!(
@@ -3761,27 +3370,6 @@ impl SiteExplorer {
                 Ok(false)
             }
         }
-    }
-
-    async fn set_nic_mode(
-        &self,
-        dpu_endpoint: &ExploredEndpoint,
-        mode: BlueFieldOperatingMode,
-    ) -> SiteExplorerResult<()> {
-        let bmc_target_port = self.config.override_target_port.unwrap_or(443);
-        let bmc_target_addr = SocketAddr::new(dpu_endpoint.address, bmc_target_port);
-
-        let interface = self
-            .find_machine_interface_for_ip(dpu_endpoint.address)
-            .await?;
-
-        self.bmc_client
-            .set_nic_mode(bmc_target_addr, &interface, mode)
-            .await
-            .map_err(|err| SiteExplorerError::EndpointExplorationError {
-                action: "set_nic_mode",
-                err,
-            })
     }
 
     async fn redfish_power_control(
@@ -4090,86 +3678,6 @@ impl SiteExplorer {
 
         Ok(ingest_host)
     }
-
-    /// Returns `true` when the DPU's hardware NIC mode already matches the
-    /// desired target; `false` when the function has issued a `set_nic_mode`
-    /// to fix a mismatch (in which case the caller should skip this host
-    /// for the current site-explorer cycle -- the next cycle will pick up
-    /// the corrected mode).
-    ///
-    /// The target is resolved in priority order:
-    /// 1. If the resolved host policy is [`HostDpuPolicy::Nic`], target
-    ///    NIC mode.
-    /// 2. If the resolved policy is [`HostDpuPolicy::Ignore`], bail out -- the
-    ///    `MachineValidation` state handler is where "hardware reports a
-    ///    DPU but operator said no DPU" gets surfaced as a health alert;
-    ///    we don't try to reconfigure in that case.
-    /// 3. Otherwise ([`HostDpuPolicy::Manage`]), fall back to
-    ///    the existing BF3 SuperNIC / BF3 DPU part-number heuristic for
-    ///    backward compat: BF3 SuperNIC → NIC mode, BF3 DPU → DPU mode,
-    ///    BF2 / unknown → no-op.
-    async fn check_and_configure_dpu_mode(
-        &self,
-        dpu_ep: &ExploredEndpoint,
-        dpu_part_number: Option<&str>,
-        host_dpu_policy: HostDpuPolicy,
-        metrics: &mut SiteExplorationMetrics,
-    ) -> SiteExplorerResult<bool> {
-        // Compute the target operating mode. `None` means "no opinion -- don't
-        // attempt to reconfigure" (e.g., BF2 where the heuristic doesn't
-        // apply, or `Ignore` where we defer to the health-check path).
-        let target_operating_mode: Option<BlueFieldOperatingMode> = match host_dpu_policy {
-            HostDpuPolicy::Nic => Some(BlueFieldOperatingMode::Nic),
-            HostDpuPolicy::Ignore => None,
-            HostDpuPolicy::Manage => {
-                // Preserve existing BF3 part-number heuristics when the operator
-                // hasn't explicitly chosen a mode. Missing part numbers only
-                // disable this heuristic fallback; explicit modes above do not
-                // require a part number. BF4 does not currently
-                // expose a reliable DPU/NIC mode signal over Redfish, so the
-                // default path does not infer or reconfigure BF4 mode,
-                dpu_part_number.and_then(|dpu_part_number| {
-                    if is_bf3_supernic_part_number(dpu_part_number) {
-                        Some(BlueFieldOperatingMode::Nic)
-                    } else if is_bf3_dpu_part_number(dpu_part_number) {
-                        Some(BlueFieldOperatingMode::Dpu)
-                    } else {
-                        None
-                    }
-                })
-            }
-        };
-
-        let Some(target_operating_mode) = target_operating_mode else {
-            return Ok(true);
-        };
-
-        match dpu_ep.report.bluefield_operating_mode() {
-            Some(observed) if observed == target_operating_mode => Ok(true),
-            Some(observed) => {
-                tracing::warn!(
-                    bmc_ip_address = %dpu_ep.address,
-                    part_number = ?dpu_part_number,
-                    %observed,
-                    ?target_operating_mode,
-                    ?host_dpu_policy,
-                    "site explorer found a DPU with a mode that does not match the target; will try to reconfigure"
-                );
-                metrics.increment_dpu_migration_signal(DpuMigrationSignal::ModeMismatchFound);
-                self.set_nic_mode(dpu_ep, target_operating_mode).await?;
-                metrics.increment_dpu_migration_signal(DpuMigrationSignal::SetNicModeIssued);
-                Ok(false)
-            }
-            None => {
-                tracing::warn!(
-                    bmc_ip_address = %dpu_ep.address,
-                    dpu_report = ?dpu_ep.report,
-                    "Site explorer cannot determine this DPU's mode"
-                );
-                Ok(true)
-            }
-        }
-    }
 }
 
 /// `try_preallocate_one` reconciles one generic fixed-address reservation in
@@ -4268,6 +3776,10 @@ pub async fn try_apply_expected_interface(
     expected_interface: &ExpectedInterface,
     retained_window: Option<chrono::Duration>,
 ) {
+    // Cerebro-only declarations are stored until name-to-MAC resolution is implemented.
+    let Some(mac_address) = expected_interface.mac_address else {
+        return;
+    };
     if expected_interface.resolved_ip_allocation() != ExpectedInterfaceIpAllocation::Fixed {
         return;
     }
@@ -4276,7 +3788,7 @@ pub async fn try_apply_expected_interface(
         Err(error) => {
             tracing::warn!(
                 %error,
-                mac_address = %expected_interface.mac_address,
+                mac_address = %mac_address,
                 "Site-explorer expected-interface allocation: txn_begin failed"
             );
             return;
@@ -4305,7 +3817,7 @@ pub async fn try_apply_expected_interface(
             tracing::warn!(
                 %error,
                 expected_machine_id = ?expected_machine.id,
-                mac_address = %expected_interface.mac_address,
+                mac_address = %mac_address,
                 "Site-explorer expected-interface allocation: configuration lookup failed"
             );
             txn.rollback_or_log("expected interface allocation lookup failed")
@@ -4314,7 +3826,7 @@ pub async fn try_apply_expected_interface(
         }
     };
 
-    let declaration_matches = if expected_interface.mac_address == current.bmc_mac_address {
+    let declaration_matches = if mac_address == current.bmc_mac_address {
         current.effective_host_bmc() == *expected_interface
     } else {
         current.data.interfaces.contains(expected_interface)
@@ -4324,7 +3836,7 @@ pub async fn try_apply_expected_interface(
     if current.bmc_mac_address != expected_machine.bmc_mac_address || !declaration_matches {
         tracing::debug!(
             expected_machine_id = ?expected_machine.id,
-            mac_address = %expected_interface.mac_address,
+            mac_address = %mac_address,
             "Site-explorer expected-interface allocation: owner or declaration changed, skipping"
         );
         txn.rollback_or_log("expected owner or interface declaration changed before allocation")
@@ -4344,7 +3856,7 @@ pub async fn try_apply_expected_interface(
             if let Err(error) = txn.commit().await {
                 tracing::warn!(
                     %error,
-                    mac_address = %expected_interface.mac_address,
+                    mac_address = %mac_address,
                     "Site-explorer expected-interface allocation: commit failed"
                 );
             }
@@ -4352,257 +3864,11 @@ pub async fn try_apply_expected_interface(
         Err(error) => {
             tracing::warn!(
                 %error,
-                mac_address = %expected_interface.mac_address,
+                mac_address = %mac_address,
                 "Site-explorer expected-interface allocation skipped"
             );
         }
     }
-}
-
-pub fn get_sys_image_version(services: &[Service]) -> Result<&String, String> {
-    let Some(service) = services.iter().find(|s| s.id == "FirmwareInventory") else {
-        return Err("Missing FirmwareInventory".to_string());
-    };
-
-    let Some(image) = service
-        .inventories
-        .iter()
-        .find(|inv| inv.id == "DPU_SYS_IMAGE")
-    else {
-        return Err("Missing DPU_SYS_IMAGE".to_string());
-    };
-
-    image
-        .version
-        .as_ref()
-        .ok_or("Missing DPU_SYS_IMAGE version".to_string())
-}
-
-/// get_base_mac_from_sys_image_version returns a base MAC address
-/// for a given sys image version/ See comments below about how the
-/// DPU derives a MAC from a DPU_SYS_IMAGE, but ultimately, a
-/// DPU_SYS_IMAGE of a088:c203:0046:0c68 means you just take out
-/// chars 6-10, and you get a MAC of a0:88:c2:46:0c:68.
-fn get_base_mac_from_sys_image_version(sys_image_version: &String) -> Result<String, String> {
-    // The DPU_SYS_IMAGE is always 19 characters long. Well, until
-    // it isn't, but for now, the DPU_SYS_IMAGE is 19 characters
-    // long.
-    if sys_image_version.len() != 19 {
-        return Err(format!(
-            "Invalid sys_image_version length: {} ({})",
-            sys_image_version.len(),
-            sys_image_version,
-        ));
-    }
-
-    // First, strip out the colons, and make sure we're
-    // left with 16 [what should be hex-friendly] characters.
-    let mut base_mac = sys_image_version.replace(':', "");
-    if base_mac.len() != 16 {
-        return Err(format!(
-            "Invalid base_mac length from sys_image_version after removing ':': {}",
-            base_mac.len()
-        ));
-    }
-
-    // And now drop range 6-10, leaving us with what
-    // should be the 12 characters for the MAC address.
-    base_mac.replace_range(6..10, "");
-
-    Ok(base_mac)
-}
-
-/// Identifies the MAC address that is used by the pf0 interface that
-/// the DPU exposes to the host.
-///
-/// According "MAC and GUID allocation and assignment" document
-///
-/// Ethernet only require allocation of MAC address. Similarly,
-/// IB only requires GUID allocation. Yet, since Mellanox devices support RoCE,
-/// NIC cards require allocation of GUID addresses. Similarly, since IB supports
-/// IP traffic HCA cards require allocation of MAC addresses.
-/// As both MAC addresses and GUID addresses are allocated together, there is a
-/// correlation between these 2 values. Unfortunately the translation from MAC
-/// address to GUID and vice-versa is inconsistent between different platforms and operating systems.
-/// To assure that this will not cause future issues, it is required that future
-/// devices will not rely on any conversion formulas between MAC and GUID values,
-/// and that these values will be explicitly stored in the device's nonvolatile memory.
-///
-/// Assumption:
-/// redfish/v1/UpdateService/FirmwareInventory/DPU_SYS_IMAGE(Version)
-/// is identical to
-/// flint -d /dev/mst/mt*_pciconf0 q full (BASE GUID)
-///
-/// Details:
-/// redfish/v1/UpdateService/FirmwareInventory/DPU_SYS_IMAGE
-/// is taken from /sys/class/infiniband/mlx*_<port>/sys_image_guid
-///
-/// Example:
-/// DPU_SYS_IMAGE: a088:c203:0046:0c68
-/// Base GUID: a088c20300460c68
-/// Base MAC:  a088c2    460c68
-/// Note: 0300 in the middle looks as a constant for dpu
-///
-/// redfish/v1/UpdateService/FirmwareInventory/DPU_SYS_IMAGE
-/// "Version": "a088:c203:0046:0c68"
-///
-/// ibdev2netdev -v
-/// 0000:31:00.0 mlx5_0 (MT41692 - 900-9D3B6-00CV-AA0) BlueField-3 P-Series DPU 200GbE/NDR200 dual-port QSFP112,
-/// PCIe Gen5.0 x16 FHHL, Crypto Enabled, 32GB DDR5, BMC, Tall Bracket  fw 32.37.1306 port 1 (DOWN  ) ==> ens3np0 (Down)
-///
-/// cat /sys/class/infiniband/mlx5_0/sys_image_guid
-/// a088:c203:0046:0c68
-///
-/// ip link show ens3np0
-/// 6: ens3np0: <BROADCAST,MULTICAST> mtu 1500 qdisc noop state DOWN mode DEFAULT group default qlen 1000
-/// link/ether a0:88:c2:46:0c:68 brd ff:ff:ff:ff:ff:ff
-///
-/// The method should be migrated to the DPU directly providing the
-/// MAC address: https://redmine.mellanox.com/issues/3749837
-fn find_host_pf_mac_address(dpu_ep: &ExploredEndpoint) -> Result<MacAddress, String> {
-    // Base-MAC derivation has three paths, tried in order of trust:
-    //   1. Primary  : any explored ComputerSystem base_mac (OEM Redfish BaseMAC).
-    //   2. Legacy   : derived from UpdateService/FirmwareInventory/DPU_SYS_IMAGE.Version.
-    //   3. BMC offset: derived from manager eth0 MAC minus per-platform offset.
-    //
-    // BF4 explicitly skips path 3. Its PF0 base MAC should be populated in
-    // `systems[].base_mac` at exploration time from the NDF0 Redfish path.
-    // BF3 keeps path 3 unchanged.
-
-    // Path 1: explored computer-system base_mac.
-    if let Some(system_mac) = dpu_ep.report.systems.first().and_then(|s| s.base_mac) {
-        return Ok(system_mac.to_mac());
-    }
-
-    // Path 2: legacy DPU_SYS_IMAGE derivation. Soft-fail so BF3 can still try
-    // path 3 (BMC offset). BF4 should never use path 3.
-    tracing::warn!("ComputerSystem doesn't have base_mac, trying DPU_SYS_IMAGE method");
-    let legacy_err = match get_sys_image_version(dpu_ep.report.service.as_ref())
-        .and_then(get_base_mac_from_sys_image_version)
-        .and_then(|legacy_mac| {
-            sanitized_mac(&legacy_mac).map_err(|e| {
-                format!("Failed to build sanitized MAC from legacy/service MAC: {e} (source_mac: {legacy_mac})")
-            })
-        }) {
-        Ok(mac) => return Ok(mac),
-        Err(e) => e,
-    };
-
-    // BF4 should not use eth0 offset fallback.
-    if is_bf4_dpu_report(&dpu_ep.report) {
-        tracing::warn!(
-            "DPU_SYS_IMAGE derivation failed for BF4; expected PF0 base MAC from NDF0-patched systems[].base_mac, skipping BMC eth0 offset fallback"
-        );
-        return Err(legacy_err);
-    }
-
-    // Path 3: BMC manager eth0 MAC minus a per-platform offset.
-    derive_base_mac_from_bmc_eth0(&dpu_ep.report).ok_or(legacy_err)
-}
-
-fn is_bf4_dpu_report(report: &EndpointExplorationReport) -> bool {
-    let has_bluefield_system = report.systems.first().is_some_and(is_bluefield_system);
-    if !has_bluefield_system {
-        return false;
-    }
-
-    // Use BF4-specific topology IDs instead of free-form model strings.
-    // This is intentionally strict to avoid matching BF2/BF3 reports that may
-    // also carry some *_0 naming in newer firmware.
-    let has_bf4_chassis_and_nic = report.chassis.iter().any(|chassis| {
-        chassis.id == "BlueField_0"
-            && chassis
-                .network_adapters
-                .iter()
-                .any(|adapter| adapter.id == "BlueField_NIC_0")
-    });
-    let has_bf4_bmc_manager_id = report
-        .managers
-        .iter()
-        .any(|manager| manager.id == "BlueField_BMC_0");
-
-    has_bf4_chassis_and_nic && has_bf4_bmc_manager_id
-}
-
-// The PF0 base MAC sits a fixed offset below the DPU BMC's eth0 MAC, within the
-// contiguous MAC block allocated to the card. Per the BlueField-3 DPU Controller
-// User Manual (§10.1, "DPU Controller Board Label"):
-//   * host high-speed ports are `base + port_index`
-//   * `DPU_BMC_MAC = OOB_MAC + 1`
-// so the offset decomposes as `(OOB - base) + 1`.
-//
-// Measured on a real BF3 DPU (offset = 0x25 = 37):
-//   DPU BMC eth0                              : 5c:25:73:9e:ac:eb
-//   base (DPU_SYS_IMAGE 5c25:7303:009e:acc6)  : 5c:25:73:9e:ac:c6
-// which implies OOB = bmc - 1 = ...ea and a host-reservation gap of
-// (OOB - base) = 0x24 = 36, consistent with the manual's `BMC = OOB + 1`.
-//
-// The host-reservation gap is not published and could differ on other SKUs
-// (e.g. 1- vs 2-port); revisit if a card of a different SKU mis-derives.
-const BF3_ETH0_TO_BASE_MAC_OFFSET: u64 = 0x25; // measured: BlueField-3, see above
-
-/// The per-platform offset to subtract from the BMC manager eth0 MAC to obtain
-/// the DPU PF0 base MAC, or `None` for platforms we can't classify (we never guess).
-fn bmc_eth0_to_base_mac_offset(report: &EndpointExplorationReport) -> Option<u64> {
-    match report.identify_dpu()? {
-        DpuModel::BlueField3 => Some(BF3_ETH0_TO_BASE_MAC_OFFSET),
-        // BlueField-2 is not supported by the BMC eth0 offset fallback.
-        DpuModel::BlueField2 | DpuModel::Unknown => None,
-    }
-}
-
-/// Fallback-only (item #2 of issue #1076): derive the DPU PF0 base MAC from the
-/// BMC manager eth0 MAC minus a platform-specific offset. Returns `None` if the
-/// eth0 interface MAC is missing, locally-administered (pre-sync), the platform
-/// is unknown, or the subtraction would underflow.
-fn derive_base_mac_from_bmc_eth0(report: &EndpointExplorationReport) -> Option<MacAddress> {
-    let offset = bmc_eth0_to_base_mac_offset(report)?;
-
-    // Pick the eth0 interface specifically -- the OOB interface also lives in
-    // the manager's ethernet_interfaces list.
-    let bmc_eth0 = report
-        .managers
-        .iter()
-        .flat_map(|m| m.ethernet_interfaces.iter())
-        .find(|e| {
-            e.id.as_deref()
-                .is_some_and(|id| id.eq_ignore_ascii_case("eth0"))
-        })
-        .and_then(|e| e.mac_address)?;
-
-    // A real NVIDIA BMC MAC is globally unique. A locally-administered MAC means
-    // the BMC hasn't synced its burned-in address yet (transient post-boot
-    // state) -- refuse to derive a base MAC from it rather than hand back a
-    // plausible-but-wrong value.
-    if is_locally_administered_mac(bmc_eth0) {
-        tracing::warn!(
-            bmc_eth0 = %bmc_eth0,
-            "BMC eth0 MAC is locally-administered (pre-sync?); skipping offset derivation",
-        );
-        return None;
-    }
-
-    let derived = mac_to_u64(bmc_eth0).checked_sub(offset)?;
-    let mac = u64_to_mac(derived);
-    tracing::warn!(
-        bmc_eth0 = %bmc_eth0,
-        derived = %mac,
-        "derived DPU base MAC from BMC eth0 via offset fallback",
-    );
-    Some(mac)
-}
-
-/// MAC address as a 48-bit big-endian integer (top two bytes of the u64 are zero).
-pub(crate) fn mac_to_u64(mac: MacAddress) -> u64 {
-    mac.bytes()
-        .iter()
-        .fold(0u64, |acc, &byte| (acc << 8) | u64::from(byte))
-}
-
-/// Inverse of [`mac_to_u64`]; the high 16 bits are discarded.
-pub(crate) fn u64_to_mac(value: u64) -> MacAddress {
-    let b = value.to_be_bytes();
-    MacAddress::new([b[2], b[3], b[4], b[5], b[6], b[7]])
 }
 
 /// Whether a discovered DPU BMC is reporting that it's running as a plain NIC.
@@ -4619,17 +3885,6 @@ fn is_dpu_in_nic_mode(dpu_ep: &ExploredEndpoint, host_ep: &ExploredEndpoint) -> 
         );
     }
     nic_mode
-}
-
-/// The host-facing PF MAC of a discovered DPU, or `None` if it can't be determined.
-fn get_host_pf_mac_address(dpu_ep: &ExploredEndpoint) -> Option<MacAddress> {
-    match find_host_pf_mac_address(dpu_ep) {
-        Ok(m) => Some(m),
-        Err(error) => {
-            tracing::error!(%error, dpu_bmc_ip_address = %dpu_ep.address, "Failed to find base mac address for DPU");
-            None
-        }
-    }
 }
 
 /// Returns the normalized serial when a host PCIe record repeats a BlueField
@@ -4745,32 +4000,6 @@ fn chassis_id_sort_key(id: &str) -> ChassisIdSortKey {
     ChassisIdSortKey { parts }
 }
 
-/// Queues a complete host boot-interface pair for endpoint persistence.
-///
-/// A report that resolves only the MAC must not overwrite the last-known-good
-/// pair already stored for the endpoint.
-fn queue_host_boot_interface(
-    endpoint: &ExploredEndpoint,
-    mac_address: MacAddress,
-    boot_interfaces: &mut Vec<(IpAddr, MachineBootInterface)>,
-) {
-    if let Some(interface_id) = endpoint.report.find_interface_id_for_mac(mac_address) {
-        boot_interfaces.push((
-            endpoint.address,
-            MachineBootInterface {
-                mac_address,
-                interface_id: interface_id.to_string(),
-            },
-        ));
-    } else {
-        tracing::debug!(
-            bmc_ip_address = %endpoint.address,
-            %mac_address,
-            "boot interface MAC has no matching Redfish interface id in the report; keeping last-known-good stored boot interface",
-        );
-    }
-}
-
 /// State from exploring a host's DPUs and pairing them with DPU BMCs.
 ///
 /// The two counts are only ever incremented (monotonic), so the
@@ -4813,8 +4042,8 @@ enum DiscoveredDpu {
     RunningAsDpu(ExploredDpu),
     /// A DPU running as a plain NIC -- counted, but not a managed DPU.
     RunningAsNic,
-    /// Mode didn't match the target; `check_and_configure_dpu_mode` just issued a
-    /// `set_nic_mode`. The host needs a power cycle (handled downstream) before
+    /// Mode didn't match the target; `set_nic_mode` was issued successfully.
+    /// The host needs a power cycle (handled downstream) before
     /// this DPU re-reports in the corrected mode, so we can't pair it this cycle.
     NeedsReconfig,
     /// The DPU's mode couldn't be checked (Redfish error); skip it this cycle.
@@ -4823,8 +4052,7 @@ enum DiscoveredDpu {
 
 /// Classify a discovered DPU against a host.
 ///
-/// The only IO (`check_and_configure_dpu_mode`, which may issue a
-/// `set_nic_mode`) happens in the caller, which passes its result in as
+/// The only IO (`set_nic_mode`) happens in the caller, which passes its result in as
 /// `mode_check` (`None` when the caller deliberately skipped the mode check).
 /// Keeping the decision here makes it unit-testable without a Redfish mock.
 fn classify_matched_dpu(
@@ -4846,7 +4074,7 @@ fn classify_matched_dpu(
 
     DiscoveredDpu::RunningAsDpu(ExploredDpu {
         bmc_ip: dpu_ep.address,
-        host_pf_mac_address: get_host_pf_mac_address(dpu_ep),
+        host_pf_mac_address: dpu_ep.get_host_pf_mac_address(),
         host_chassis_id: None,
         report: dpu_ep.report.clone().into(),
     })
@@ -4915,28 +4143,16 @@ fn health_reports_equal_ignoring_observed_at(
     left == right
 }
 
-/// Whether `create_power_shelf` would refuse this shelf: its BMC MAC or its
-/// non-empty name matches an existing power shelf record.
-fn power_shelf_already_exists(
-    expected_power_shelf: &ExpectedPowerShelf,
-    existing_bmc_macs: &HashSet<MacAddress>,
-    existing_names: &HashSet<String>,
-) -> bool {
-    let name = &expected_power_shelf.metadata.name;
-    existing_bmc_macs.contains(&expected_power_shelf.bmc_mac_address)
-        || (!name.is_empty() && existing_names.contains(name))
-}
-
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::Outcome::*;
-    use carbide_test_support::{Case, Check, check_cases, check_values, value_scenarios};
+    use carbide_test_support::{Check, check_values, value_scenarios};
     use config_version::ConfigVersion;
     use model::site_explorer::{
         ComputerSystem, InitialBmcResetPhase, Inventory, NetworkAdapter, PreingestionState, Service,
     };
 
     use super::*;
+    use crate::test_support::{explored_endpoint, load_bf2_ep_report};
 
     #[test]
     fn enrichment_serializes_rack_position_for_older_versions() {
@@ -4966,54 +4182,6 @@ mod tests {
         assert_eq!(json["ComputeTrayIndex"], 16);
         assert_eq!(json["TopologyId"], 7);
         assert_eq!(json["RevisionId"], 2);
-    }
-
-    #[test]
-    fn power_shelf_already_exists_cases() {
-        let existing_mac: MacAddress = "02:00:00:00:00:01".parse().unwrap();
-        let new_mac: MacAddress = "02:00:00:00:00:02".parse().unwrap();
-        let existing_bmc_macs = HashSet::from([existing_mac]);
-        let existing_names = HashSet::from(["shelf-1".to_string(), String::new()]);
-
-        check_values(
-            [
-                Check {
-                    scenario: "BMC MAC matches an existing shelf: exists",
-                    input: (existing_mac, "shelf-2"),
-                    expect: true,
-                },
-                Check {
-                    scenario: "name matches an existing shelf: exists",
-                    input: (new_mac, "shelf-1"),
-                    expect: true,
-                },
-                Check {
-                    scenario: "empty name does not match an existing empty name: new",
-                    input: (new_mac, ""),
-                    expect: false,
-                },
-                Check {
-                    scenario: "neither matches: new",
-                    input: (new_mac, "shelf-2"),
-                    expect: false,
-                },
-            ],
-            |(bmc_mac_address, name): (MacAddress, &str)| {
-                let expected_power_shelf = ExpectedPowerShelf {
-                    bmc_mac_address,
-                    metadata: model::metadata::Metadata {
-                        name: name.to_string(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                };
-                power_shelf_already_exists(
-                    &expected_power_shelf,
-                    &existing_bmc_macs,
-                    &existing_names,
-                )
-            },
-        );
     }
 
     fn observed_firmware_report(
@@ -5261,13 +4429,6 @@ mod tests {
         let resets = RecentBmcResets::default();
         resets.record_ipmitool(addr, two_hours_ago);
         assert_eq!(Some(recent).max(resets.get(addr).ipmitool), Some(recent));
-    }
-
-    #[test]
-    fn mac_u64_roundtrip() {
-        let mac: MacAddress = "a0:88:c2:46:0c:68".parse().unwrap();
-        assert_eq!(mac_to_u64(mac), 0x0000_a088_c246_0c68);
-        assert_eq!(u64_to_mac(mac_to_u64(mac)), mac);
     }
 
     /// Each BMC reset result updates the cumulative Event counter and writes a
@@ -5528,182 +4689,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn u64_to_mac_discards_high_bits() {
-        // High 16 bits set must not leak into the MAC bytes.
-        assert_eq!(
-            u64_to_mac(0xffff_a088_c246_0c68),
-            "a0:88:c2:46:0c:68".parse().unwrap()
-        );
-    }
-
-    #[test]
-    fn bf3_offset_derives_measured_base_mac() {
-        // Real BF3 DPU measurement (see BF3_ETH0_TO_BASE_MAC_OFFSET):
-        // BMC eth0 - offset must yield the DPU_SYS_IMAGE-derived base MAC.
-        let bmc_eth0: MacAddress = "5c:25:73:9e:ac:eb".parse().unwrap();
-        let base: MacAddress = "5c:25:73:9e:ac:c6".parse().unwrap();
-        let derived = u64_to_mac(mac_to_u64(bmc_eth0) - BF3_ETH0_TO_BASE_MAC_OFFSET);
-        assert_eq!(derived, base);
-        // Cross-check the documented BMC = OOB + 1 relationship.
-        let oob = u64_to_mac(mac_to_u64(bmc_eth0) - 1);
-        assert_eq!(oob, "5c:25:73:9e:ac:ea".parse().unwrap());
-    }
-
-    const BF3_MODEL_VARIANTS: [&str; 2] = ["NVIDIA BlueField 3 DPU", "BlueField-3 DPU"];
-
-    // Minimal BlueField-3 report with a single manager eth0 interface carrying
-    // `eth0_mac`. Classifies as BF3 (system id "Bluefield" + Card1 BF3 chassis).
-    fn bf3_report_with_eth0(model: &str, eth0_mac: &str) -> EndpointExplorationReport {
-        use model::site_explorer::{Chassis, ComputerSystem, EthernetInterface, Manager};
-        EndpointExplorationReport {
-            systems: vec![ComputerSystem {
-                id: "Bluefield".to_string(),
-                ..Default::default()
-            }],
-            chassis: vec![Chassis {
-                id: "Card1".to_string(),
-                model: Some(model.to_string()),
-                ..Default::default()
-            }],
-            managers: vec![Manager {
-                id: "Bluefield_BMC".to_string(),
-                ipmi_port: None,
-                ethernet_interfaces: vec![EthernetInterface {
-                    id: Some("eth0".to_string()),
-                    mac_address: Some(eth0_mac.parse().unwrap()),
-                    ..Default::default()
-                }],
-            }],
-            ..Default::default()
-        }
-    }
-
-    fn bf4_report_with_zero_suffix_ids(system_id: &str) -> EndpointExplorationReport {
-        use model::site_explorer::{Chassis, ComputerSystem, Manager, NetworkAdapter};
-        EndpointExplorationReport {
-            systems: vec![ComputerSystem {
-                id: system_id.to_string(),
-                ..Default::default()
-            }],
-            chassis: vec![Chassis {
-                id: "BlueField_0".to_string(),
-                network_adapters: vec![NetworkAdapter {
-                    id: "BlueField_NIC_0".to_string(),
-                    ..Default::default()
-                }],
-                model: None,
-                ..Default::default()
-            }],
-            managers: vec![Manager {
-                id: "BlueField_BMC_0".to_string(),
-                ..Default::default()
-            }],
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn is_bf4_dpu_report_detects_zero_suffix_ids_without_model_string() {
-        for system_id in ["Bluefield", "BlueField_0"] {
-            let report = bf4_report_with_zero_suffix_ids(system_id);
-            assert!(
-                is_bf4_dpu_report(&report),
-                "expected BF4 detection for system id {system_id}"
-            );
-        }
-    }
-
-    #[test]
-    fn is_bf4_dpu_report_rejects_zero_suffix_ids_without_bf4_nic_topology() {
-        use model::site_explorer::{Chassis, ComputerSystem, Manager};
-        let report = EndpointExplorationReport {
-            systems: vec![ComputerSystem {
-                id: "Bluefield".to_string(),
-                ..Default::default()
-            }],
-            chassis: vec![Chassis {
-                id: "BlueField_0".to_string(),
-                // Missing BlueField_NIC_0 adapter.
-                ..Default::default()
-            }],
-            managers: vec![Manager {
-                id: "BlueField_BMC_0".to_string(),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        assert!(!is_bf4_dpu_report(&report));
-    }
-
-    #[test]
-    fn is_bf4_dpu_report_does_not_match_bf3_shape() {
-        check_values(
-            BF3_MODEL_VARIANTS.map(|model| Check {
-                scenario: model,
-                input: model,
-                expect: false,
-            }),
-            |model| is_bf4_dpu_report(&bf3_report_with_eth0(model, "5c:25:73:9e:ac:eb")),
-        );
-    }
-
-    #[test]
-    fn bmc_eth0_offset_skips_locally_administered_mac() {
-        check_values(
-            [
-                Check {
-                    scenario: "space-separated BF3 model with pre-sync eth0",
-                    input: (BF3_MODEL_VARIANTS[0], "9a:72:d5:07:ae:7e"),
-                    expect: None,
-                },
-                Check {
-                    scenario: "hyphenated BF3 model with pre-sync eth0",
-                    input: (BF3_MODEL_VARIANTS[1], "9a:72:d5:07:ae:7e"),
-                    expect: None,
-                },
-                Check {
-                    scenario: "space-separated BF3 model with synced eth0",
-                    input: (BF3_MODEL_VARIANTS[0], "5c:25:73:9e:ac:eb"),
-                    expect: Some("5c:25:73:9e:ac:c6".parse().unwrap()),
-                },
-                Check {
-                    scenario: "hyphenated BF3 model with synced eth0",
-                    input: (BF3_MODEL_VARIANTS[1], "5c:25:73:9e:ac:eb"),
-                    expect: Some("5c:25:73:9e:ac:c6".parse().unwrap()),
-                },
-            ],
-            |(model, eth0_mac)| {
-                let report = bf3_report_with_eth0(model, eth0_mac);
-                assert_eq!(bmc_eth0_to_base_mac_offset(&report), Some(0x25));
-                derive_base_mac_from_bmc_eth0(&report)
-            },
-        );
-    }
-
-    #[test]
-    fn bmc_eth0_offset_fallback_unsupported_for_bf2() {
-        // BlueField-2 is intentionally not supported by the BMC eth0 offset
-        // fallback, so derivation must return None even when an eth0 MAC exists.
-        let mut report = load_bf2_ep_report();
-        for s in report.systems.iter_mut() {
-            s.base_mac = None;
-        }
-        assert!(bmc_eth0_to_base_mac_offset(&report).is_none());
-        assert!(derive_base_mac_from_bmc_eth0(&report).is_none());
-    }
-
-    fn load_bf2_ep_report() -> EndpointExplorationReport {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/test_data/bf2_report.json");
-        let report: EndpointExplorationReport =
-            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert!(!report.systems.is_empty());
-        assert!(!report.managers.is_empty());
-        assert!(!report.chassis.is_empty());
-        assert!(!report.service.is_empty());
-        report
-    }
-
     fn load_dell_ep_report() -> EndpointExplorationReport {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -5721,25 +4706,6 @@ mod tests {
     #[test]
     fn test_load_dell_report() {
         let _ = load_dell_ep_report();
-    }
-
-    fn explored_endpoint(report: EndpointExplorationReport) -> ExploredEndpoint {
-        ExploredEndpoint {
-            address: "10.0.0.1".parse().unwrap(),
-            report,
-            report_version: ConfigVersion::initial(),
-            preingestion_state: PreingestionState::Initial,
-            waiting_for_explorer_refresh: false,
-            exploration_requested: false,
-            last_redfish_bmc_reset: None,
-            last_ipmitool_bmc_reset: None,
-            last_redfish_reboot: None,
-            last_redfish_powercycle: None,
-            pause_ingestion_and_poweron: false,
-            pause_remediation: false,
-            boot_interface_mac: None,
-            boot_interface_id: None,
-        }
     }
 
     /// A candidate for `plan_explorations`: an explored endpoint at `address`
@@ -6113,7 +5079,7 @@ mod tests {
 
     #[test]
     fn classify_needs_reconfig_when_set_nic_mode_was_issued() {
-        // `Ok(false)` means `check_and_configure_dpu_mode` just issued a `set_nic_mode`.
+        // `Ok(false)` means `set_nic_mode` was issued successfully.
         let dpu = bf2_dpu(Some(BlueFieldOperatingMode::Nic));
         let host = explored_endpoint(load_dell_ep_report());
         assert!(matches!(
@@ -6288,122 +5254,6 @@ mod tests {
                     ..Default::default()
                 })
             },
-        );
-    }
-
-    #[test]
-    fn test_find_host_pf_mac_address() {
-        // A freshly-loaded BF2 endpoint; each case starts from one of these and
-        // perturbs the firmware inventory the legacy MAC lookup reads from.
-        let endpoint = || ExploredEndpoint {
-            address: "10.217.132.202".parse().unwrap(),
-            report: load_bf2_ep_report(),
-            report_version: ConfigVersion::initial(),
-            preingestion_state: PreingestionState::Initial,
-            waiting_for_explorer_refresh: false,
-            exploration_requested: false,
-            last_redfish_bmc_reset: None,
-            last_ipmitool_bmc_reset: None,
-            last_redfish_reboot: None,
-            last_redfish_powercycle: None,
-            pause_ingestion_and_poweron: false,
-            pause_remediation: false,
-            boot_interface_mac: None,
-            boot_interface_id: None,
-        };
-
-        // Override the `DPU_SYS_IMAGE` firmware version the legacy path parses.
-        let with_sys_image = |version: &str| {
-            let mut ep = endpoint();
-            let inv = ep
-                .report
-                .service
-                .iter_mut()
-                .find(|s| s.id == "FirmwareInventory")
-                .unwrap()
-                .inventories
-                .iter_mut()
-                .find(|inv| inv.id == "DPU_SYS_IMAGE")
-                .unwrap();
-            inv.version = Some(version.to_string());
-            ep
-        };
-
-        let bf3_with_empty_sys_image = |model| {
-            let mut ep = explored_endpoint(bf3_report_with_eth0(model, "5c:25:73:9e:ac:eb"));
-            ep.report.service = with_sys_image("").report.service;
-            ep
-        };
-
-        // Drop the firmware-inventory entry whose `id` matches `inventory_id`.
-        let without_inventory = |inventory_id: &str| {
-            let mut ep = endpoint();
-            ep.report
-                .service
-                .iter_mut()
-                .find(|s| s.id == "FirmwareInventory")
-                .unwrap()
-                .inventories
-                .retain(|inv| inv.id != inventory_id);
-            ep
-        };
-
-        // Drop the whole `FirmwareInventory` service.
-        let without_firmware_inventory = || {
-            let mut ep = endpoint();
-            ep.report.service.retain(|s| s.id != "FirmwareInventory");
-            ep
-        };
-
-        check_cases(
-            [
-                Case {
-                    scenario: "report base_mac wins before legacy DPU_SYS_IMAGE path",
-                    input: {
-                        let mut ep = without_firmware_inventory();
-                        ep.report.systems[0].base_mac =
-                            Some("f4:20:4d:49:53:b4".parse::<MacAddress>().unwrap().into());
-                        ep
-                    },
-                    expect: Yields("f4:20:4d:49:53:b4".parse().unwrap()),
-                },
-                Case {
-                    scenario: "legacy sys-image MAC, sanitized",
-                    input: endpoint(),
-                    expect: Yields("B8:3F:D2:90:95:F4".parse().unwrap()),
-                },
-                Case {
-                    scenario: "space-separated BF3 model falls back to BMC eth0",
-                    input: bf3_with_empty_sys_image(BF3_MODEL_VARIANTS[0]),
-                    expect: Yields("5c:25:73:9e:ac:c6".parse().unwrap()),
-                },
-                Case {
-                    scenario: "hyphenated BF3 model falls back to BMC eth0",
-                    input: bf3_with_empty_sys_image(BF3_MODEL_VARIANTS[1]),
-                    expect: Yields("5c:25:73:9e:ac:c6".parse().unwrap()),
-                },
-                Case {
-                    scenario: "legacy sys-image MAC fails sanitization",
-                    input: with_sys_image("b83f:d203:0090:95fz"),
-                    expect: FailsWith("Failed to build sanitized MAC from legacy/service MAC: invalid stripped MAC length: 11 (input: b83fd29095fz, output: b83fd29095f) (source_mac: b83fd29095fz)".to_string()),
-                },
-                Case {
-                    scenario: "legacy sys-image is too short",
-                    input: with_sys_image("abc"),
-                    expect: FailsWith("Invalid sys_image_version length: 3 (abc)".to_string()),
-                },
-                Case {
-                    scenario: "no DPU_SYS_IMAGE inventory",
-                    input: without_inventory("DPU_SYS_IMAGE"),
-                    expect: FailsWith("Missing DPU_SYS_IMAGE".to_string()),
-                },
-                Case {
-                    scenario: "no FirmwareInventory service",
-                    input: without_firmware_inventory(),
-                    expect: FailsWith("Missing FirmwareInventory".to_string()),
-                },
-            ],
-            |ep| find_host_pf_mac_address(&ep),
         );
     }
 

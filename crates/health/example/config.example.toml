@@ -613,6 +613,8 @@ leak_sensors_enabled = false
 # metric path. Label names cannot use `subscription`, `state`, or the endpoint
 # and hardware metadata labels added by the service. Each distinct key
 # combination creates a metric series. At least one metric is required.
+# Mappings under `/system-events/system-event` do not produce Prometheus
+# `/telemetry` series and are still sent to configured OTLP sinks.
 # [[collectors.nvue.gnmi.additional_subscriptions.metrics]]
 # path = ["component", "state", "reading"]
 # metric_type = "component_reading"

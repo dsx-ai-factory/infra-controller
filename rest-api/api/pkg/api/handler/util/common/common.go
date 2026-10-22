@@ -1277,7 +1277,7 @@ func TerminateWorkflowOnTimeOutError(logger zerolog.Logger, temporalClient tclie
 
 // UnwrapWorkflowError removes Temporal wrappers and maps backend errors to HTTP status codes.
 func UnwrapWorkflowError(err error) (code int, unwrappedError error) {
-	code, unwrappedError = http.StatusInternalServerError, err
+	code = http.StatusInternalServerError
 
 	// Attempt to unwrap our way through Temporal's WorkflowExecutionError
 	// and ActivityError layers to reach the underlying cause. These types
@@ -2001,7 +2001,7 @@ var queryTagCache sync.Map // map[reflect.Type][]string
 // Results are cached per type.
 func QueryTagsFor(v any) []string {
 	t := reflect.TypeOf(v)
-	if t.Kind() == reflect.Ptr {
+	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	if cached, ok := queryTagCache.Load(t); ok {

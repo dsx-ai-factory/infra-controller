@@ -6,7 +6,7 @@ package core
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +18,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
@@ -41,7 +42,7 @@ func TestHTTPServiceRoutes(t *testing.T) {
 		s.ServeHTTP(w, req)
 
 		resp := w.Result()
-		body, _ := ioutil.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body)
 		return string(body), resp.StatusCode
 	}
 
@@ -82,13 +83,14 @@ func TestHTTPServiceRoutes(t *testing.T) {
 	// test request body limit
 	{
 		s.HandleFunc("/echo", func(w http.ResponseWriter, r *http.Request) {
-			body, err := ioutil.ReadAll(r.Body)
+			body, err := io.ReadAll(r.Body)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			w.WriteHeader(http.StatusOK)
-			w.Write(body)
+			// Mock response writes are best-effort if the client closes the connection.
+			_, _ = w.Write(body)
 		}).Methods("POST")
 
 		body, code := run("POST", "/echo", "123")
@@ -112,7 +114,7 @@ func TestHTTPServiceRoutes(t *testing.T) {
 				case <-time.After(d):
 					log.Printf("SlowAPIcall done after %v", d)
 					w.WriteHeader(http.StatusOK)
-					w.Write([]byte("ok\n"))
+					_, _ = w.Write([]byte("ok\n"))
 				}
 			}
 		}
@@ -134,7 +136,7 @@ func TestHTTPServiceStart(t *testing.T) {
 
 	get := func(c *http.Client, url string) (string, int) {
 		resp, _ := c.Get(url)
-		body, _ := ioutil.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body)
 		return string(body), resp.StatusCode
 	}
 
@@ -147,7 +149,8 @@ func TestHTTPServiceStart(t *testing.T) {
 		s := NewHTTPService("unix://" + socketPath)
 		s.AddHealthRoute(ctx)
 		s.Use(NewHTTPMiddleware(ctx)...)
-		s.Start(ctx)
+		_, err := s.Start(ctx)
+		require.NoError(t, err)
 
 		c := &http.Client{
 			Timeout: 10 * time.Second,

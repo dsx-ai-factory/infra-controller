@@ -23,8 +23,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use carbide_dpf::types::{
-    DetachedDpuServiceDefinition, DpuServiceObservation, DpuServiceVersion, HostDpfSnapshot,
-    ServiceTemplateVersion,
+    DetachedDpfResourceObservation, DetachedDpuServiceChainDefinition,
+    DetachedDpuServiceDefinition, DetachedDpuServiceInterfaceDefinition, DpfDeletePreconditions,
+    DpuServiceObservation, DpuServiceVersion, HostDpfSnapshot, ServiceTemplateVersion,
 };
 use carbide_dpf::{
     AstraRoutePrefixes, BmcPasswordProvider, DPU_ENABLED_NODE_LABEL, DpfError, DpfSdk,
@@ -32,8 +33,8 @@ use carbide_dpf::{
     ResourceLabeler, node_id_from_dpu_node_cr_name,
 };
 use carbide_uuid::machine::{DpuMachineId, HostMachineId};
-use model::dpa_interface::DpaInterface;
 use model::dpu_machine_update::OutdatedDpfDpu;
+use model::expected_machine::ExpectedMachine;
 use model::machine::{DpuMachine, ManagedHostStateSnapshot};
 use model::machine_pending_action::{MachinePendingAction, MachinePendingActionKind};
 use sqlx::PgPool;
@@ -64,11 +65,13 @@ pub const HOST_BMC_IP_LABEL: &str = "carbide.nvidia.com/host-bmc-ip";
 #[cfg_attr(feature = "test-support", mockall::automock)]
 #[async_trait]
 pub trait DpfOperations: Send + Sync + std::fmt::Debug {
-    /// Register a DPU device.
-    async fn register_dpu_device<'a>(
+    /// Register a DPU device using the full expected-machine entry when available.
+    /// The expected-machine entry contains credentials and must not be logged.
+    async fn register_dpu_device(
         &self,
         info: DpuDeviceInfo,
-        astra_nics: Option<Vec<&'a DpaInterface>>,
+        expected_machine: Option<ExpectedMachine>,
+        deployment_type: DpuDeploymentType,
     ) -> Result<(), DpfError>;
 
     /// Register a DPU node.
@@ -196,15 +199,83 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
         service_name: &str,
     ) -> Result<Option<DpuServiceObservation>, DpfError>;
 
-    /// Merge-patch a detached DPUService for an extension service.
+    /// Apply an RFC 6902 JSON Patch to a detached DPUService for an extension service.
     async fn patch_dpu_service(
         &self,
         service_name: &str,
         patch: serde_json::Value,
+    ) -> Result<DpuServiceObservation, DpfError>;
+
+    /// Delete the exact detached DPUService observed for an extension service.
+    async fn delete_dpu_service(
+        &self,
+        service_name: &str,
+        preconditions: &DpfDeletePreconditions,
     ) -> Result<(), DpfError>;
 
-    /// Delete a detached DPUService for an extension service.
-    async fn delete_dpu_service(&self, service_name: &str) -> Result<(), DpfError>;
+    /// List detached DPUServiceInterface parents, optionally restricted by a label selector.
+    async fn list_detached_dpu_service_interfaces<'a>(
+        &self,
+        label_selector: Option<&'a str>,
+    ) -> Result<Vec<DetachedDpfResourceObservation>, DpfError>;
+
+    /// Get one detached DPUServiceInterface parent by name.
+    async fn get_detached_dpu_service_interface(
+        &self,
+        name: &str,
+    ) -> Result<Option<DetachedDpfResourceObservation>, DpfError>;
+
+    /// Create one detached DPUServiceInterface registration parent.
+    async fn create_detached_dpu_service_interface(
+        &self,
+        definition: &DetachedDpuServiceInterfaceDefinition,
+    ) -> Result<DetachedDpfResourceObservation, DpfError>;
+
+    /// Apply a revision-fenced JSON Patch to one detached DPUServiceInterface.
+    async fn patch_detached_dpu_service_interface(
+        &self,
+        name: &str,
+        patch: serde_json::Value,
+    ) -> Result<DetachedDpfResourceObservation, DpfError>;
+
+    /// Delete the exact detached DPUServiceInterface registration parent observed.
+    async fn delete_detached_dpu_service_interface(
+        &self,
+        name: &str,
+        preconditions: &DpfDeletePreconditions,
+    ) -> Result<(), DpfError>;
+
+    /// List detached DPUServiceChain parents, optionally restricted by a label selector.
+    async fn list_detached_dpu_service_chains<'a>(
+        &self,
+        label_selector: Option<&'a str>,
+    ) -> Result<Vec<DetachedDpfResourceObservation>, DpfError>;
+
+    /// Get one detached DPUServiceChain parent by name.
+    async fn get_detached_dpu_service_chain(
+        &self,
+        name: &str,
+    ) -> Result<Option<DetachedDpfResourceObservation>, DpfError>;
+
+    /// Create one detached DPUServiceChain registration parent.
+    async fn create_detached_dpu_service_chain(
+        &self,
+        definition: &DetachedDpuServiceChainDefinition,
+    ) -> Result<DetachedDpfResourceObservation, DpfError>;
+
+    /// Apply a revision-fenced JSON Patch to one detached DPUServiceChain.
+    async fn patch_detached_dpu_service_chain(
+        &self,
+        name: &str,
+        patch: serde_json::Value,
+    ) -> Result<DetachedDpfResourceObservation, DpfError>;
+
+    /// Delete the exact detached DPUServiceChain registration parent observed.
+    async fn delete_detached_dpu_service_chain(
+        &self,
+        name: &str,
+        preconditions: &DpfDeletePreconditions,
+    ) -> Result<(), DpfError>;
 
     /// Merge changes into a DPUDevice's DPU-cluster node labels.
     async fn merge_dpu_device_node_labels(
@@ -726,16 +797,20 @@ impl std::fmt::Debug for DpfSdkOps {
 /// Delegates everything to the underlying DPF SDK.
 #[async_trait]
 impl DpfOperations for DpfSdkOps {
-    async fn register_dpu_device<'a>(
+    async fn register_dpu_device(
         &self,
         info: DpuDeviceInfo,
-        astra_nics: Option<Vec<&'a DpaInterface>>,
+        expected_machine: Option<ExpectedMachine>,
+        deployment_type: DpuDeploymentType,
     ) -> Result<(), DpfError> {
+        // For BF4 Astra, pair the expected-machine entry with site-configured route
+        // prefixes. The SDK uses this to build the values passed to the dpudevice.
+        let astra_provisioning_inputs = expected_machine
+            .as_ref()
+            .filter(|_| deployment_type == DpuDeploymentType::Bf4Astra)
+            .map(|machine| (machine, self.astra_route_prefixes));
         self.sdk
-            .register_dpu_device(
-                info,
-                astra_nics.map(|nics| (nics, self.astra_route_prefixes)),
-            )
+            .register_dpu_device(info, astra_provisioning_inputs)
             .await
     }
 
@@ -951,12 +1026,104 @@ impl DpfOperations for DpfSdkOps {
         &self,
         service_name: &str,
         patch: serde_json::Value,
-    ) -> Result<(), DpfError> {
+    ) -> Result<DpuServiceObservation, DpfError> {
         self.sdk.patch_dpu_service(service_name, patch).await
     }
 
-    async fn delete_dpu_service(&self, service_name: &str) -> Result<(), DpfError> {
-        self.sdk.delete_dpu_service(service_name).await
+    async fn delete_dpu_service(
+        &self,
+        service_name: &str,
+        preconditions: &DpfDeletePreconditions,
+    ) -> Result<(), DpfError> {
+        self.sdk
+            .delete_dpu_service(service_name, preconditions)
+            .await
+    }
+
+    async fn list_detached_dpu_service_interfaces<'a>(
+        &self,
+        label_selector: Option<&'a str>,
+    ) -> Result<Vec<DetachedDpfResourceObservation>, DpfError> {
+        self.sdk
+            .list_detached_dpu_service_interfaces(label_selector)
+            .await
+    }
+
+    async fn get_detached_dpu_service_interface(
+        &self,
+        name: &str,
+    ) -> Result<Option<DetachedDpfResourceObservation>, DpfError> {
+        self.sdk.get_detached_dpu_service_interface(name).await
+    }
+
+    async fn create_detached_dpu_service_interface(
+        &self,
+        definition: &DetachedDpuServiceInterfaceDefinition,
+    ) -> Result<DetachedDpfResourceObservation, DpfError> {
+        self.sdk
+            .create_detached_dpu_service_interface(definition)
+            .await
+    }
+
+    async fn patch_detached_dpu_service_interface(
+        &self,
+        name: &str,
+        patch: serde_json::Value,
+    ) -> Result<DetachedDpfResourceObservation, DpfError> {
+        self.sdk
+            .patch_detached_dpu_service_interface(name, patch)
+            .await
+    }
+
+    async fn delete_detached_dpu_service_interface(
+        &self,
+        name: &str,
+        preconditions: &DpfDeletePreconditions,
+    ) -> Result<(), DpfError> {
+        self.sdk
+            .delete_detached_dpu_service_interface(name, preconditions)
+            .await
+    }
+
+    async fn list_detached_dpu_service_chains<'a>(
+        &self,
+        label_selector: Option<&'a str>,
+    ) -> Result<Vec<DetachedDpfResourceObservation>, DpfError> {
+        self.sdk
+            .list_detached_dpu_service_chains(label_selector)
+            .await
+    }
+
+    async fn get_detached_dpu_service_chain(
+        &self,
+        name: &str,
+    ) -> Result<Option<DetachedDpfResourceObservation>, DpfError> {
+        self.sdk.get_detached_dpu_service_chain(name).await
+    }
+
+    async fn create_detached_dpu_service_chain(
+        &self,
+        definition: &DetachedDpuServiceChainDefinition,
+    ) -> Result<DetachedDpfResourceObservation, DpfError> {
+        self.sdk.create_detached_dpu_service_chain(definition).await
+    }
+
+    async fn patch_detached_dpu_service_chain(
+        &self,
+        name: &str,
+        patch: serde_json::Value,
+    ) -> Result<DetachedDpfResourceObservation, DpfError> {
+        self.sdk.patch_detached_dpu_service_chain(name, patch).await
+    }
+
+    async fn delete_detached_dpu_service_chain(
+        &self,
+        name: &str,
+        preconditions: &DpfDeletePreconditions,
+    ) -> Result<(), DpfError> {
+        self.sdk
+            .delete_detached_dpu_service_chain(name, preconditions)
+            .await
     }
 
     async fn merge_dpu_device_node_labels(

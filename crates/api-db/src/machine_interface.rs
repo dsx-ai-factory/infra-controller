@@ -1253,12 +1253,7 @@ async fn validate_existing_mac_and_create_inner(
                     .iter()
                     .filter(|segment| authoritative_segment_ids.contains(&segment.id))
                 {
-                    if segment.config.allocation_strategy == AllocationStrategy::Reserved {
-                        return Err(DatabaseError::internal(format!(
-                            "segment {} configured for static DHCP leases only; no static reservation for MAC {mac_address}",
-                            segment.config.name,
-                        )));
-                    }
+                    validate_dynamic_allocation(segment, mac_address)?;
                 }
 
                 if !exact_segment_ids.is_empty() {
@@ -1400,6 +1395,20 @@ async fn validate_existing_mac_and_create_inner(
     }
 }
 
+/// Reject fresh pool allocation on a Reserved segment, where the MAC needs a static reservation.
+fn validate_dynamic_allocation(
+    segment: &NetworkSegment,
+    mac_address: MacAddress,
+) -> DatabaseResult<()> {
+    if segment.config.allocation_strategy == AllocationStrategy::Reserved {
+        return Err(DatabaseError::internal(format!(
+            "segment {} configured for static DHCP leases only; no static reservation for MAC {mac_address}",
+            segment.config.name,
+        )));
+    }
+    Ok(())
+}
+
 /// Ensure a a `machine_interface` exists for the `mac_address` with its
 /// reserved allocation, either falling into a Carbide-managed segment (when
 /// there is a match within a managed prefix), or into the `static_assignments`
@@ -1470,18 +1479,21 @@ pub async fn preallocate_expected_machine_interface(
     expected_interface: &ExpectedInterface,
     retained_window: Option<chrono::Duration>,
 ) -> DatabaseResult<()> {
+    let mac_address = expected_interface
+        .require_mac_address()
+        .map_err(|message| DatabaseError::InvalidArgument(message.to_string()))?;
     let static_ip = expected_interface
         .fixed_reservation_ip()
         .map_err(|message| {
             DatabaseError::InvalidArgument(format!(
                 "expected interface {}: {message}",
-                expected_interface.mac_address,
+                expected_interface.identity(),
             ))
         })?;
 
     preallocate_machine_interface_with_options(
         txn,
-        expected_interface.mac_address,
+        mac_address,
         static_ip,
         PreallocationOptions {
             interface_type: expected_interface.role.interface_type(),
@@ -2861,35 +2873,44 @@ pub async fn move_predicted_machine_interface_to_machine(
     Ok(())
 }
 
-/// This function creates Proactive Host Machine Interface with all available information.
-/// Parsed Mac: Found in DPU's topology data
-/// Relay IP: Taken from fixed Admin network segment. Relay IP is used only to identify related
-/// segment.
-/// Returns: Machine Interface, True if new interface is created.
+/// Finds or creates the host admin interface from the DPU's topology MAC.
+///
+/// IPv6-only segments are eligible only when admin FNN is enabled. Segments with an IPv4
+/// prefix must have an IPv4 gateway. Existing candidate ownership and static addresses are
+/// preserved; an addressless static interface may move to a single eligible segment.
+/// Duplicate MAC rows and ownership on another managed segment are errors.
+///
+/// The caller must keep the transaction open through host association and address repair.
+/// This operation associates the interface with the DPU and may update its segment and DNS
+/// domain. Allocation takes segment locks before interface/address row locks.
+///
+/// Discovery already knows the candidate admin segments. Resolving them through synthetic
+/// DHCP relays would let unrelated DHCPv6 link-address metadata override that selection.
 pub async fn create_host_machine_dpu_interface_proactively(
     txn: &mut PgConnection,
     hardware_info: Option<&HardwareInfo>,
     dpu_id: &MachineId,
+    admin_fnn_enabled: bool,
     retained_window: Option<chrono::Duration>,
 ) -> Result<MachineInterfaceSnapshot, DatabaseError> {
-    let admin_networks = crate::network_segment::admin(txn).await?;
-
-    // Using gateway IP as relay IP. This is just to enable next algorithm to find related network
-    // segment.
-    let mut gateways = vec![];
-    let mut existing_machine = None;
-
-    for admin_network in admin_networks {
-        for prefix in admin_network.prefixes {
-            if let Some(gateway) = prefix.gateway {
-                gateways.push(gateway);
-            }
-        }
-    }
-
-    if gateways.is_empty() {
+    let mut admin_networks = crate::network_segment::admin(txn).await?;
+    // IPv6 FNN admin prefixes omit a gateway because the DPU provides the SVI and router
+    // advertisements. That does not remove the gateway requirement from an IPv4 sibling.
+    admin_networks.retain(|network| {
+        !network.prefixes.is_empty()
+            && network
+                .prefixes
+                .iter()
+                .all(|prefix| prefix.prefix.is_ipv6() || prefix.gateway.is_some())
+            && (admin_fnn_enabled
+                || network
+                    .prefixes
+                    .iter()
+                    .any(|prefix| prefix.prefix.is_ipv4()))
+    });
+    if admin_networks.is_empty() {
         return Err(DatabaseError::AdminNetworkNotConfigured);
-    };
+    }
 
     // Host mac is stored at DPU topology data.
     let host_mac = hardware_info
@@ -2899,24 +2920,39 @@ pub async fn create_host_machine_dpu_interface_proactively(
             id: dpu_id.to_string(),
         })??;
 
-    for gateway in gateways.iter() {
-        existing_machine =
-            crate::machine::find_existing_machine(txn, host_mac, gateway.to_owned()).await?;
-        if existing_machine.is_some() {
-            break;
+    let mut interfaces = find_by_mac_address(&mut *txn, host_mac).await?;
+    let machine_interface = match interfaces.len() {
+        0 => {
+            // Every eligible candidate must allow dynamic allocation. Selecting an available
+            // Dynamic pool must not bypass another candidate's reservation requirement.
+            for segment in &admin_networks {
+                validate_dynamic_allocation(segment, host_mac)?;
+            }
+            create(
+                txn,
+                &admin_networks,
+                &host_mac,
+                true,
+                AddressSelectionStrategy::Automatic,
+                retained_window,
+            )
+            .await?
         }
-    }
-
-    let machine_interface = find_or_create_machine_interface(
-        txn,
-        existing_machine,
-        host_mac,
-        &gateways,
-        None,
-        None,
-        retained_window,
-    )
-    .await?;
+        1 => {
+            let mut interface = interfaces.remove(0);
+            reconcile_interface_segment_candidates(txn, &mut interface, &admin_networks).await?;
+            interface
+        }
+        count => {
+            tracing::warn!(
+                mac_address = %host_mac,
+                matching_interface_count = count,
+                expected_interface_count = 1,
+                "Unexpected number of host admin interfaces for DPU topology MAC",
+            );
+            return Err(DatabaseError::NetworkSegmentDuplicateMacAddress(host_mac));
+        }
+    };
     associate_interface_with_dpu_machine(&machine_interface.id, dpu_id, txn).await?;
 
     Ok(machine_interface)
@@ -3068,6 +3104,12 @@ pub async fn reconcile_admin_addresses_for_host(
                     });
                 active_config_changed = true;
             } else {
+                // Existing addresses and donor transfers remain valid on Reserved segments;
+                // only a new pool allocation requires Dynamic allocation policy.
+                validate_dynamic_allocation(
+                    primary_segment,
+                    interfaces[primary_index].mac_address,
+                )?;
                 let allocated = allocate_address_for_family(
                     txn.as_pgconn(),
                     interfaces[primary_index].id,
@@ -3571,20 +3613,7 @@ pub async fn update_segment_id(
     crate::dns::domain::bump_serial(txn, &changed_zones).await
 }
 
-/// Reconcile an existing interface's segment with the DHCP relay address.
-///
-/// - If the segments match, nothing happens.
-/// - If the interface is on the static-assignments anchor segment with
-///   no addresses (static was removed), move it to the relay's segment.
-/// - If the interface is on static-assignments with addresses, leave it
-///   alone -- the operator's static assignment takes priority over DHCP.
-/// - If the interface is on a different managed segment, error -- this
-///   is a real network mismatch (wrong VLAN/port).
-///
-/// Before moving an addressless static interface, lock it and reread its
-/// segment and addresses. Callers must keep a transaction open through this
-/// function so the lock covers the reread and segment update. Callers that
-/// allocate from a pool must acquire their segment locks first.
+/// Resolve authoritative DHCP candidates before reconciling existing interface ownership.
 async fn reconcile_interface_segment(
     txn: &mut PgConnection,
     existing_interface: &mut MachineInterfaceSnapshot,
@@ -3594,7 +3623,7 @@ async fn reconcile_interface_segment(
     // An explicit typed declaration guards an existing row. Legacy `nic_type`
     // only narrowed initial DHCP selection, so it must not invalidate a row
     // that earlier versions already placed on a different segment type.
-    let relay_segments = if expected_interface
+    let mut relay_segments = if expected_interface
         .and_then(ExpectedInterface::segment_type_guard)
         .is_some()
     {
@@ -3610,17 +3639,28 @@ async fn reconcile_interface_segment(
         )));
     };
     let exact_segment_ids = exact_dhcpv6_link_address_segment_ids(&relay_segments, relays);
-    let authoritative_segment_ids = if exact_segment_ids.is_empty() {
-        relay_segments
-            .iter()
-            .map(|segment| segment.id)
-            .collect::<Vec<_>>()
-    } else {
-        exact_segment_ids
-    };
-
     // Prefix fallback candidates remain useful for allocation fallback, but an
     // exact DHCPv6 link-address is authoritative for existing-MAC ownership.
+    if !exact_segment_ids.is_empty() {
+        relay_segments.retain(|segment| exact_segment_ids.contains(&segment.id));
+    }
+    reconcile_interface_segment_candidates(txn, existing_interface, &relay_segments).await
+}
+
+/// Preserve existing candidate ownership and addressed static assignments; reject other segments.
+///
+/// An addressless static interface may move to a single candidate. Lock and reread it first
+/// so a concurrent static assignment cannot be moved with a stale snapshot. Callers must keep
+/// the transaction open through the update and acquire any allocation segment locks first.
+async fn reconcile_interface_segment_candidates(
+    txn: &mut PgConnection,
+    existing_interface: &mut MachineInterfaceSnapshot,
+    segments: &[NetworkSegment],
+) -> DatabaseResult<()> {
+    let authoritative_segment_ids = segments
+        .iter()
+        .map(|segment| segment.id)
+        .collect::<Vec<_>>();
     if authoritative_segment_ids.contains(&existing_interface.segment_id) {
         return Ok(());
     }
@@ -3644,40 +3684,30 @@ async fn reconcile_interface_segment(
     let on_static_assignments = existing_interface.segment_id == static_segment_id;
 
     // If the interface is on static-assignments with no addresses (as in
-    // the static address was removed), move it to the relay's segment
-    // so it can get a DHCP-allocated IP. The idea here being that someone
-    // removed the static allocation on purpose, and now we're waiting for
-    // the device to DHCP so we can see what segment it's coming in on.
+    // the static address was removed), move it to the discovered segment
+    // so it can get a DHCP-allocated IP.
     if on_static_assignments && existing_interface.addresses.is_empty() {
-        let [relay_segment_id] = authoritative_segment_ids.as_slice() else {
+        let [segment] = segments else {
             return Err(DatabaseError::internal(format!(
-                "Cannot move interface from static-assignments with multiple candidate relays: {} ",
-                relays.iter().join(", ")
+                "cannot move interface from static-assignments with multiple candidate segments: {}",
+                authoritative_segment_ids.iter().join(", ")
             )));
         };
-        let relay_segment = relay_segments
-            .iter()
-            .find(|segment| segment.id == *relay_segment_id)
-            .ok_or_else(|| {
-                DatabaseError::internal(format!(
-                    "Authoritative relay segment {relay_segment_id} was not present in relay candidates"
-                ))
-            })?;
 
         tracing::info!(
             mac_address = %existing_interface.mac_address,
             previous_network_segment_id = %existing_interface.segment_id,
-            next_network_segment_id = %relay_segment.id,
+            next_network_segment_id = %segment.id,
             "Moving interface from static-assignments into DHCP-managed segment"
         );
         update_segment_id(
             txn,
             existing_interface.id,
-            relay_segment.id,
-            relay_segment.config.subdomain_id,
+            segment.id,
+            segment.config.subdomain_id,
         )
         .await?;
-        existing_interface.segment_id = relay_segment.id;
+        existing_interface.segment_id = segment.id;
     } else if on_static_assignments {
         // ...and if the interface is on static-assignments and still has
         // an addresse, the static assignment takes priority, so we leave
@@ -3691,7 +3721,7 @@ async fn reconcile_interface_segment(
         // existing before the static-assigmnents and DHCP "reservation"
         // integration.
         return Err(DatabaseError::internal(format!(
-            "Network segment mismatch for existing MAC address: {} expected: {} actual from network switch: {}",
+            "Network segment mismatch for existing MAC address: {} stored segment: {} discovery candidates: {}",
             existing_interface.mac_address,
             existing_interface.segment_id,
             authoritative_segment_ids

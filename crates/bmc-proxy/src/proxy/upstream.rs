@@ -38,7 +38,7 @@ use crate::metrics::{
     UpstreamRequestCompleted, UpstreamStatus,
 };
 use crate::proxy::credentials::{
-    BmcCredentials, CredentialCache, REDFISH_AUTH_TOKEN_HEADER, get_bmc_credentials,
+    BmcCredentials, CredentialCache, REDFISH_AUTH_TOKEN_HEADER, SwitchProbe, resolve_credentials,
 };
 use crate::proxy::{BmcProxyError, BmcProxyState, ProxyError, error_response};
 use crate::span_isolation::SpanIsolationMiddleware;
@@ -198,6 +198,7 @@ pub(super) async fn send_upstream(
             target_ip,
             &state.api_client,
             &state.credential_cache,
+            &state.switch_probe,
             state.http_client.clone(),
             &state.config.bmc_proxy,
         ),
@@ -346,6 +347,7 @@ async fn create_client(
     ip: IpAddr,
     api_client: &ForgeApiClient,
     credential_cache: &CredentialCache,
+    switch_probe: &SwitchProbe,
     http_client: reqwest_middleware::ClientWithMiddleware,
     bmc_proxy: &Option<HostPortPair>,
 ) -> Result<BmcClientInfo, BmcProxyError> {
@@ -369,7 +371,9 @@ async fn create_client(
     if add_custom_header {
         header_map.insert("forwarded", format!("host={ip}").parse().unwrap());
     }
-    let credentials = get_bmc_credentials(ip, api_client, credential_cache).await?;
+    let credentials = resolve_credentials(ip, api_client, credential_cache, switch_probe)
+        .await?
+        .credentials;
 
     let base_authority = build_authority(host, port);
 
@@ -457,9 +461,13 @@ fn redirect_policy(mode: RedirectMode) -> reqwest::redirect::Policy {
 }
 
 /// Classifies a resolved HTTP(S) redirect target against the given origin.
-/// Other schemes are invalid; matching compares scheme, host, and effective port.
+/// Other schemes and URL credentials are invalid. Matching compares scheme,
+/// host, and effective port only after these checks.
 pub(super) fn classify_redirect_target(origin: &Url, target: &Url) -> RedirectTarget {
-    if !matches!(target.scheme(), "http" | "https") {
+    if !matches!(target.scheme(), "http" | "https")
+        || !target.username().is_empty()
+        || target.password().is_some()
+    {
         return RedirectTarget::Invalid;
     }
     if target.scheme() == origin.scheme()
@@ -501,7 +509,9 @@ mod tests {
     };
     use crate::config::RedirectMode;
     use crate::metrics::RedirectTarget;
-    use crate::proxy::credentials::{BmcCredentials, CREDENTIAL_CACHE_IDLE_TTL, CredentialCache};
+    use crate::proxy::credentials::{
+        BmcCredentials, CREDENTIAL_CACHE_IDLE_TTL, CredentialCache, SwitchProbe,
+    };
     use crate::proxy::idle_bounded_cache;
     use crate::proxy::test_support::*;
 
@@ -598,6 +608,15 @@ mod tests {
                 ("https://bmc.example/redfish/v1", "ftp://bmc.example/Systems")
                     => RedirectTarget::Invalid,
             }
+
+            "URL credentials are invalid regardless of origin" {
+                ("https://bmc.example/redfish/v1", "https://user@bmc.example/Systems")
+                    => RedirectTarget::Invalid,
+                ("https://bmc.example/redfish/v1", "https://:password@bmc.example/Systems")
+                    => RedirectTarget::Invalid,
+                ("https://bmc.example/redfish/v1", "https://user@other.example/Systems")
+                    => RedirectTarget::Invalid,
+            }
         );
     }
 
@@ -644,6 +663,55 @@ mod tests {
         assert_eq!(destination_hits.load(Ordering::SeqCst), 0);
         drop(response);
         stop_http(&mut servers, &shutdown).await;
+    }
+
+    #[tokio::test]
+    async fn upstream_client_does_not_follow_redirect_userinfo() {
+        let mut servers = JoinSet::new();
+        let shutdown = CancellationToken::new();
+        let _shutdown_guard = shutdown.clone().drop_guard();
+        let destination_hits = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route(
+                "/start",
+                get(|headers: HeaderMap| async move {
+                    let host = headers
+                        .get(http::header::HOST)
+                        .expect("request host")
+                        .to_str()
+                        .expect("ASCII host");
+                    (
+                        StatusCode::TEMPORARY_REDIRECT,
+                        [(
+                            http::header::LOCATION,
+                            format!("http://redirect-user:redirect-password@{host}/target"),
+                        )],
+                    )
+                }),
+            )
+            .route(
+                "/target",
+                get(|State(hits): State<Arc<AtomicUsize>>| async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::OK
+                }),
+            )
+            .with_state(destination_hits.clone());
+        let address = spawn_http(app, &mut servers, shutdown.clone()).await;
+        let response = build_http_client(RedirectMode::FollowSameOrigin)
+            .expect("HTTP client builds")
+            .get(format!("http://{address}/start"))
+            .basic_auth("original-user", Some("original-password"))
+            .header("x-auth-token", "original-token")
+            .send()
+            .await
+            .expect("source response returned");
+
+        let status = response.status();
+        drop(response);
+        stop_http(&mut servers, &shutdown).await;
+        assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(destination_hits.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -780,10 +848,10 @@ mod tests {
         credential_cache
             .insert(
                 ip,
-                BmcCredentials::UsernamePassword {
+                for_bmc(BmcCredentials::UsernamePassword {
                     username: "admin".to_string(),
                     password: "secret".to_string(),
-                },
+                }),
             )
             .await;
         let client_config = ForgeClientConfig::default();
@@ -794,6 +862,7 @@ mod tests {
             ip,
             &api_client,
             &credential_cache,
+            &SwitchProbe::default(),
             build_http_client(RedirectMode::FollowSameOrigin).expect("test HTTP client builds"),
             &proxy_override(case),
         )

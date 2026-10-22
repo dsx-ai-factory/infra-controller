@@ -17,7 +17,7 @@
 
 //! State Handler implementation for Machines
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::mem::discriminant as enum_discr;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
@@ -39,6 +39,7 @@ use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_e
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialReader, Credentials,
 };
+use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{
     AsMachineId, DpuMachineId, HostMachineId, MachineId, MachineIdSubtypeTrait,
 };
@@ -61,6 +62,7 @@ use libredfish::model::service_root::RedfishVendor;
 use libredfish::model::task::TaskState;
 use libredfish::model::update_service::{ComponentType, TransferProtocolType};
 use libredfish::{Boot, EnabledDisabled, Redfish, RedfishError, SystemPowerControl};
+use mac_address::MacAddress;
 use machine_validation::{handle_machine_validation_requested, handle_machine_validation_state};
 use measured_boot::records::MeasurementMachineState;
 use model::DpuModel;
@@ -2326,6 +2328,10 @@ impl MachineStateHandler {
     /// We pass in the expected interfaces and the NIC index to enable Astra on.
     /// Returns `true` when the NIC was enabled and the caller
     /// should AC-power-cycle the host for the change to take effect.
+    /// This routine uses Redfish to get the MAC address of the given NIC. It also
+    /// uses the Redfish interface to set EastWestControlEnabled on the given NIC.
+    /// It uses the Astra NIC mapping to get the DPU PCI address for the given NIC.
+    /// Finally, it adds an entry for this NIC in the dpa_interface table.
     async fn enable_astra_nic(
         &self,
         nic_index: u8,
@@ -2344,10 +2350,82 @@ impl MachineStateHandler {
             .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
             .await?;
 
-        // The caller enumerates the declared CX9 NICs by index, so the expected
-        // NIC for this card is simply the one at `nic_index`.
-        let expected_nic = cx9_nics[nic_index as usize];
-        let mac_address = expected_nic.mac_address;
+        let legacy_nic = cx9_nics
+            .iter()
+            .all(|nic| nic.physical_ifname.is_none())
+            .then(|| cx9_nics[nic_index as usize]);
+        let mac_address = if let Some(nic) = legacy_nic {
+            nic.mac_address.ok_or_else(|| {
+                StateHandlerError::GenericError(eyre!(
+                    "legacy astra NIC {nic_index} has no MAC address"
+                ))
+            })?
+        } else {
+            let mac_address = redfish_client
+                .get_spx_nic_mac_address(nic_index)
+                .await
+                .map_err(|e| redfish_error("get_spx_nic_mac_address", e))?
+                .ok_or_else(|| StateHandlerError::MissingData {
+                    object_id: mh_snapshot.host_snapshot.id.to_string(),
+                    missing: "spx_nic_mac_address",
+                })?;
+            MacAddress::from_str(&mac_address).map_err(|e| {
+                StateHandlerError::GenericError(eyre!(
+                    "invalid SPX NIC MAC address {mac_address}: {e}"
+                ))
+            })?
+        };
+
+        // An all-zero MAC (00:00:00:00:00:00) is syntactically valid and parses successfully, but it
+        // never identifies a real NIC. Reject it so we do not register a bogus Astra interface.
+        if mac_address.bytes().iter().all(|&octet| octet == 0) {
+            tracing::error!(
+                machine_id = %mh_snapshot.host_snapshot.id,
+                "SPX NIC MAC address is all zeros"
+            );
+            return Err(StateHandlerError::GenericError(eyre!(
+                "SPX NIC MAC address is all zeros"
+            )));
+        }
+
+        let cage_mpo_encoded_string =
+            model::machine::astra::astra_get_cage_mpo_encoded_string(nic_index);
+
+        let (fixed_ip, dpu_pci_address) = if let Some(nic) = legacy_nic {
+            // Preserve the MAC/IP inventory's original indexed DPA registration.
+            let fixed_ip = nic.fixed_ip.ok_or_else(|| {
+                StateHandlerError::GenericError(eyre!(
+                    "fixed IP not found for legacy astra NIC {nic_index}"
+                ))
+            })?;
+            (fixed_ip, format!("CX_{nic_index}"))
+        } else {
+            // Every declared lane has a validated fixed IP. Use one lane's address
+            // for the card-level DPA registration.
+            let lane_prefix = format!("{cage_mpo_encoded_string}-L");
+            let fixed_ip = cx9_nics
+                .iter()
+                .filter(|nic| {
+                    nic.physical_ifname
+                        .as_deref()
+                        .is_some_and(|name| name.starts_with(&lane_prefix))
+                })
+                .find_map(|nic| nic.fixed_ip)
+                .ok_or_else(|| {
+                    StateHandlerError::GenericError(eyre!(
+                        "fixed IP not found for astra card {cage_mpo_encoded_string}"
+                    ))
+                })?;
+            let dpu_pci_address = model::machine::astra::astra_dpu_pci_address_for_physical_ifname(
+                &format!("{cage_mpo_encoded_string}-L1"),
+            )
+            .ok_or_else(|| {
+                StateHandlerError::GenericError(eyre!(
+                    "DPU PCI address not found for astra card {cage_mpo_encoded_string}"
+                ))
+            })?;
+            (fixed_ip, dpu_pci_address.to_string())
+        };
 
         // Now enable EastWestControlEnabled on this card.
         redfish_client
@@ -2369,7 +2447,7 @@ impl MachineStateHandler {
                 machine_id: mh_snapshot.host_snapshot.id,
                 mac_address,
                 device_type: "Network Adapter Ethernet Interface".to_string(),
-                pci_name: format!("CX_{nic_index}"),
+                pci_name: dpu_pci_address,
                 device_description: Some("NVIDIA Dual ConnectX-9 SuperNIC C9280V for Vera Rubin NVL 144 systems, Crypto Enabled, Secure Boot Enabled, Liquid Cooled".to_string()),
                 interface_type: DpaInterfaceType::Astra,
             },
@@ -2377,7 +2455,7 @@ impl MachineStateHandler {
         )
         .await?;
 
-        dpa_interface.underlay_ip = expected_nic.fixed_ip;
+        dpa_interface.underlay_ip = Some(fixed_ip);
 
         // Call the update_ip routine to update the underlay_ip address of this dpa object,
         // obtaining the underlay ip from the fixed_ip field of the ExpectedInterface object.
@@ -2416,35 +2494,7 @@ impl MachineStateHandler {
         // Look at the entry in the expected_machines table for this managed host, and retrieve the host_nics
         // field. If the host_nics is empty, just return.
 
-        // its unlikely we got here without a bmc mac
-        let Some(bmc_mac_address) = mh_snapshot.host_snapshot.status.bmc_info.mac else {
-            tracing::debug!(
-                machine_id = %mh_snapshot.host_snapshot.id,
-                "No BMC MAC address configured"
-            );
-            return Err(StateHandlerError::MissingData {
-                object_id: mh_snapshot.host_snapshot.id.to_string(),
-                missing: "bmc_mac_address",
-            });
-        };
-
-        let mut txn = ctx.services.db_pool.begin().await?;
-
-        // Retrieve the expected_machines table entry for this managed host.
-        let expected_machine =
-            db::expected_machine::find_by_bmc_mac_address(txn.as_mut(), bmc_mac_address)
-                .await
-                .map_err(|err| {
-                    tracing::error!(
-                        machine_id = %mh_snapshot.host_snapshot.id,
-                        %bmc_mac_address,
-                        error = %err,
-                        "Failed to look up expected machine for Astra enablement"
-                    );
-                    StateHandlerError::DBError(Box::new(err))
-                })?;
-
-        txn.commit().await?;
+        let expected_machine = get_expected_machine_for_mh(mh_snapshot, ctx).await?;
 
         // No expected-machine entry means there are no declared host NICs to act on.
         let Some(expected_machine) = expected_machine else {
@@ -2473,9 +2523,10 @@ impl MachineStateHandler {
             .collect();
         let enabled_any_cx9 = !cx9_nics.is_empty();
 
-        for nic_index in 0..cx9_nics.len() {
+        // Validate and deduplicate lane declarations before making any Redfish changes.
+        for nic_index in astra_nic_indices(&cx9_nics)? {
             if let Err(e) = self
-                .enable_astra_nic(nic_index as u8, mh_snapshot, ctx, &cx9_nics)
+                .enable_astra_nic(nic_index, mh_snapshot, ctx, &cx9_nics)
                 .await
             {
                 tracing::error!(
@@ -2699,6 +2750,49 @@ impl MachineStateHandler {
 
         Ok(None)
     }
+}
+
+/// Looks up the `expected_machines` entry for this managed host by the BMC
+/// MAC address recorded in its host snapshot.
+///
+/// Returns `None` when the host has no BMC MAC, when no matching row exists,
+/// or when a DB error occurs (logged); all are treated by callers as "no
+/// expected-machine declaration to act on".
+async fn get_expected_machine_for_mh(
+    mh_snapshot: &ManagedHostStateSnapshot,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+) -> Result<Option<model::expected_machine::ExpectedMachine>, StateHandlerError> {
+    // its unlikely we got here without a bmc mac
+    let Some(bmc_mac_address) = mh_snapshot.host_snapshot.status.bmc_info.mac else {
+        tracing::error!(
+            machine_id = %mh_snapshot.host_snapshot.id,
+            "get_expected_machine_for_mh: No BMC MAC address configured"
+        );
+        return Err(StateHandlerError::MissingData {
+            object_id: mh_snapshot.host_snapshot.id.to_string(),
+            missing: "bmc_mac_address",
+        });
+    };
+
+    let mut txn = ctx.services.db_pool.begin().await?;
+
+    // Retrieve the expected_machines table entry for this managed host.
+    let expected_machine =
+        db::expected_machine::find_by_bmc_mac_address(txn.as_mut(), bmc_mac_address)
+            .await
+            .map_err(|err| {
+                tracing::error!(
+                    machine_id = %mh_snapshot.host_snapshot.id,
+                    %bmc_mac_address,
+                    error = %err,
+                    "get_expected_machine_for_mh: Failed to look up expected machine"
+                );
+                StateHandlerError::DBError(Box::new(err))
+            })?;
+
+    txn.commit().await?;
+
+    Ok(expected_machine)
 }
 
 fn is_reprovision_restartable_failure(
@@ -3122,6 +3216,8 @@ impl StateHandler for MachineStateHandler {
         _mh_state: &Self::ControllerState, // mh_snapshot above already contains it
         ctx: &mut StateHandlerContext<Self::ContextObjects>,
     ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+        let was_dpf_provisioning = mh_snapshot.managed_state.suppresses_exploration_for_dpf();
+
         // Refresh the per-object info/association series before any early
         // return: hosts stuck erroring must keep their join series alive, or
         // hold-period eviction drops exactly the machines being triaged.
@@ -3229,6 +3325,25 @@ impl StateHandler for MachineStateHandler {
             let mut txn = power_options_pool.begin().await?;
             db::power_options::persist(&power_options, &mut txn).await?;
             txn.commit().await?;
+        }
+
+        if let Ok(outcome) = result {
+            let next_state = match &outcome {
+                StateHandlerOutcome::Transition { next_state, .. } => next_state,
+                _ => &mh_snapshot.managed_state,
+            };
+            let suppress = next_state.suppresses_exploration_for_dpf();
+            // Wait outcomes have no state-version check, so they must not recreate
+            // suppression after a concurrent force-delete clears it.
+            if was_dpf_provisioning != suppress {
+                result =
+                    Ok(
+                        dpf::update_exploration_suppression(outcome, mh_snapshot, suppress, ctx)
+                            .await?,
+                    );
+            } else {
+                result = Ok(outcome);
+            }
         }
 
         result
@@ -6359,6 +6474,60 @@ fn report_has_release_pxe_blocking_network_alert(report: &HealthReport) -> bool 
         .any(is_release_pxe_blocking_network_alert)
 }
 
+/// Resolves declared lanes to distinct Redfish card indices. Only MAC-only legacy
+/// inventory uses declaration order; named inventory uses the fixed Astra topology.
+fn astra_nic_indices(cx9_nics: &[&ExpectedInterface]) -> Result<Vec<u8>, StateHandlerError> {
+    use model::machine::astra::{ASTRA_NIC_MAPPINGS, astra_get_cage_mpo_encoded_string};
+
+    let card_count = ASTRA_NIC_MAPPINGS
+        .iter()
+        .filter(|mapping| mapping.dpu_original_ifname.ends_with("p0"))
+        .count() as u8;
+    if cx9_nics.iter().all(|nic| nic.physical_ifname.is_none()) {
+        if cx9_nics.len() > usize::from(card_count) {
+            return Err(StateHandlerError::GenericError(eyre!(
+                "legacy astra inventory declares more than {card_count} cards"
+            )));
+        }
+        return Ok((0..cx9_nics.len() as u8).collect());
+    }
+
+    let mut indices = BTreeSet::new();
+    for nic in cx9_nics {
+        let physical_ifname = nic.physical_ifname.as_deref().ok_or_else(|| {
+            StateHandlerError::GenericError(eyre!(
+                "astra inventory cannot mix named lane and legacy indexed declarations"
+            ))
+        })?;
+        if nic.fixed_ip.is_none() {
+            return Err(StateHandlerError::GenericError(eyre!(
+                "fixed IP not found for astra lane {physical_ifname}"
+            )));
+        }
+        let mapping = ASTRA_NIC_MAPPINGS
+            .iter()
+            .find(|mapping| mapping.physical_ifname == physical_ifname)
+            .ok_or_else(|| {
+                StateHandlerError::GenericError(eyre!(
+                    "unknown astra physical interface {physical_ifname}"
+                ))
+            })?;
+        let index = (0..card_count)
+            .find(|index| {
+                mapping
+                    .physical_ifname
+                    .starts_with(&format!("{}-L", astra_get_cage_mpo_encoded_string(*index)))
+            })
+            .ok_or_else(|| {
+                StateHandlerError::GenericError(eyre!(
+                    "no redfish card index for astra physical interface {physical_ifname}"
+                ))
+            })?;
+        indices.insert(index);
+    }
+    Ok(indices.into_iter().collect())
+}
+
 /// Checks host and primary DPU health reports using their effective precedence.
 ///
 /// A host Replace report overrides all DPU reports. Otherwise, the primary
@@ -8894,20 +9063,23 @@ impl StateHandler for InstanceStateHandler {
                     )
                     .await?;
                     let extension_services_status = &mut extension_services_status;
+
+                    // Reclaim endpoint-free terminated attachments before computing readiness so
+                    // the returned transaction commits the status entries used by that decision.
                     let txn = if extension_services_status.configs_synced == SyncState::Synced
                         && !extension_services_status
                             .get_terminated_service_keys()
                             .is_empty()
                     {
                         let mut txn = ctx.services.db_pool.begin().await?;
-                        cleanup_terminated_extension_services(
+                        let cleanup_applied = cleanup_terminated_extension_services(
                             instance,
                             extension_services_status,
                             txn.as_mut(),
                         )
                         .await?;
 
-                        Some(txn)
+                        cleanup_applied.then_some(txn)
                     } else {
                         None
                     };
@@ -8935,6 +9107,9 @@ impl StateHandler for InstanceStateHandler {
                                     )
                                 }
                             };
+
+                    // Publish attachment cleanup with the readiness result computed from the same
+                    // InstanceExtensionServicesStatus.
                     Ok(match txn {
                         Some(txn) => outcome.with_txn(txn),
                         None => outcome,
@@ -9055,13 +9230,17 @@ impl StateHandler for InstanceStateHandler {
                                         .is_empty() =>
                             {
                                 let mut txn = ctx.services.db_pool.begin().await?;
-                                cleanup_terminated_extension_services(
+                                // Retain the transaction only when attachment cleanup wrote,
+                                // allowing endpoint-protected tombstones to coexist with Ready work.
+                                if cleanup_terminated_extension_services(
                                     instance,
                                     &mut extension_services_status,
                                     txn.as_mut(),
                                 )
-                                .await?;
-                                txn_opt = Some(txn);
+                                .await?
+                                {
+                                    txn_opt = Some(txn);
+                                }
                             }
                             Ok(_) => {}
                             Err(error) => {
@@ -9513,6 +9692,21 @@ impl StateHandler for InstanceStateHandler {
                                 ));
                     }
 
+                    // Persisted endpoints are the release authority. Placement
+                    // termination alone cannot prove service-network cleanup.
+                    if !db::instance::find_service_vpc_memberships(
+                        &ctx.services.db_pool,
+                        instance.id,
+                    )
+                    .await?
+                    .is_empty()
+                    {
+                        return Ok(StateHandlerOutcome::wait(
+                            "Waiting for service VPC network cleanup before deleting the instance."
+                                .to_string(),
+                        ));
+                    }
+
                     // Extension services should be terminated on all DPUs
                     if mh_snapshot.has_managed_dpus() {
                         let extension_services_status = get_extension_services_status(
@@ -9641,13 +9835,14 @@ impl StateHandler for InstanceStateHandler {
                     handler_host_power_control(mh_snapshot, ctx, SystemPowerControl::ForceRestart)
                         .await?;
 
-                    // Deleting an instance and marking vpc segments deleted must be done together.
-                    // If segments are marked deleted and instance is not deleted (may be due to redfish failure),
-                    // network segment handler will delete those segments forcefully.
-                    // if instance is deleted before, we won't get network segment details as these
-                    // details are stored in instance's network config which is deleted.
+                    // Commit Instance deletion, VPC-segment deletion, and loopback release
+                    // together. If segments are marked deleted without Instance deletion, the
+                    // network segment handler can force-delete them while the Instance still
+                    // depends on them. If Instance deletion commits first, a retry cannot load
+                    // the network config that identifies those segments.
 
-                    // Delete from database now. Once done, reboot and move to next state.
+                    // The reboot request has succeeded; delete the Instance and publish its
+                    // resource cleanup with PostAssignedMeasuring.
                     let mut txn = ctx.services.db_pool.begin().await?;
                     db::instance::delete(instance.id, &mut txn)
                         .await
@@ -10060,29 +10255,42 @@ async fn handle_instance_network_config_update_request(
                 .await?;
             }
 
-            // The cleanup transaction in `force_delete_instance` locks addresses,
-            // then the Instance, then its segments. Clearing the request here avoids
-            // a deadlock even when SLAAC has no stored addresses to lock.
+            // The cleanup transaction in `force_delete_instance` locks addresses, then the
+            // Instance, then its segments. Clearing the request here preserves that order to
+            // avoid deadlocks and holds the Instance lock across the later service-membership
+            // read and loopback deletion, even when SLAAC has no stored addresses to lock.
             db::instance::delete_update_network_config_request(&instance.id, &mut txn).await?;
 
             if !resources_to_be_released.is_empty() {
-                // Resolve VPC membership before old VPC-prefix segments are marked deleted.
-                let old_vpc_ids =
-                    vpc_ids_for_interfaces(&update_request.old_config.interfaces, &mut txn).await?;
-                let new_vpc_ids =
-                    vpc_ids_for_interfaces(&update_request.new_config.interfaces, &mut txn).await?;
-                let released_vpc_ids = old_vpc_ids.difference(&new_vpc_ids).copied().collect_vec();
-
+                // Resolve VPC membership before old VPC-prefix segments are marked deleted,
+                // preserving pre-cleanup DPU/VPC ownership for loopback release.
+                let old_memberships = vpc_dpu_memberships_for_interfaces(
+                    &update_request.old_config.interfaces,
+                    mh_snapshot,
+                    &mut txn,
+                )
+                .await?;
+                let new_memberships = vpc_dpu_memberships_for_interfaces(
+                    &update_request.new_config.interfaces,
+                    mh_snapshot,
+                    &mut txn,
+                )
+                .await?;
                 release_network_segments_with_vpc_prefix(&resources_to_be_released, &mut txn)
                     .await?;
-                release_vpc_dpu_loopback_for_vpcs(
-                    mh_snapshot,
+                release_vpc_dpu_loopback_for_memberships(
+                    instance.id,
                     common_pools.as_deref(),
                     &mut txn,
-                    &released_vpc_ids,
+                    &old_memberships,
+                    &new_memberships,
                 )
                 .await?;
             }
+
+            // Publish address deletion, network-update request deletion, segment deletion, and
+            // loopback release with Ready so retries cannot observe partially released network
+            // resources.
             let next_state = ManagedHostState::Assigned {
                 instance_state: InstanceState::Ready,
             };
@@ -10272,25 +10480,47 @@ pub async fn release_vpc_dpu_loopback(
     Ok(())
 }
 
-/// Releases VPC DPU loopbacks for selected VPCs on every DPU in the managed host.
-async fn release_vpc_dpu_loopback_for_vpcs(
-    mh_snapshot: &ManagedHostStateSnapshot,
+/// Releases candidate DPU/VPC loopbacks only when neither current host nor
+/// service membership retains them.
+///
+/// Candidates identify ownership that may have ended. Retained host membership
+/// and service-interface rows visible through `txn` must reflect post-mutation
+/// state so host cleanup and final service reclamation share one release decision.
+///
+/// Callers must acquire the Instance row lock before any segment or loopback
+/// mutation, preserving address → Instance → segment ordering and preventing
+/// endpoint publication between the membership read and loopback deletion.
+async fn release_vpc_dpu_loopback_for_memberships(
+    instance_id: InstanceId,
     common_pools: Option<&CommonPools>,
     txn: &mut PgConnection,
-    vpc_ids: &[VpcId],
+    candidate_memberships: &HashSet<(DpuMachineId, VpcId)>,
+    retained_host_memberships: &HashSet<(DpuMachineId, VpcId)>,
 ) -> Result<(), StateHandlerError> {
     let Some(common_pools) = common_pools else {
         return Ok(());
     };
 
-    if vpc_ids.is_empty() {
+    if candidate_memberships.is_empty() {
         return Ok(());
     }
 
-    // Release the removed VPC loopbacks from every DPU that may have rendered them.
-    for dpu_snapshot in &mh_snapshot.dpu_snapshots {
-        let dpu_id = dpu_snapshot.id;
-        db::vpc_dpu_loopback::delete_and_deallocate_for_vpcs(common_pools, &dpu_id, vpc_ids, txn)
+    let retained_memberships = db::instance::find_service_vpc_memberships(&mut *txn, instance_id)
+        .await?
+        .into_iter()
+        .chain(retained_host_memberships.iter().copied())
+        .collect::<HashSet<_>>();
+
+    let mut releasable_by_dpu = HashMap::<DpuMachineId, Vec<VpcId>>::new();
+    for &(dpu_id, vpc_id) in candidate_memberships {
+        // Host and service use retain only their exact DPU/VPC loopback.
+        if !retained_memberships.contains(&(dpu_id, vpc_id)) {
+            releasable_by_dpu.entry(dpu_id).or_default().push(vpc_id);
+        }
+    }
+
+    for (dpu_id, vpc_ids) in releasable_by_dpu {
+        db::vpc_dpu_loopback::delete_and_deallocate_for_vpcs(common_pools, &dpu_id, &vpc_ids, txn)
             .await
             .map_err(|e| StateHandlerError::ResourceCleanupError {
                 resource: "VpcLoopbackIp",
@@ -10301,11 +10531,20 @@ async fn release_vpc_dpu_loopback_for_vpcs(
     Ok(())
 }
 
-/// Returns the VPC IDs referenced by the assigned network segments on these interfaces.
-async fn vpc_ids_for_interfaces(
+/// Maps each VPC interface to its exact host DPU when possible and to every current host DPU when
+/// unresolved, preventing cleanup from guessing which DPU/VPC loopback the interface uses.
+async fn vpc_dpu_memberships_for_interfaces(
     interfaces: &[InstanceInterfaceConfig],
+    mh_snapshot: &ManagedHostStateSnapshot,
     txn: &mut PgConnection,
-) -> Result<HashSet<VpcId>, StateHandlerError> {
+) -> Result<HashSet<(DpuMachineId, VpcId)>, StateHandlerError> {
+    // Zero-DPU hosts can have VPC-bound HostInband interfaces but cannot own
+    // DPU loopbacks, so there is no membership to resolve or release.
+    let host_dpu_ids = mh_snapshot.host_snapshot.associated_dpu_machine_ids();
+    if host_dpu_ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+
     let segment_ids = interfaces
         .iter()
         .filter_map(|iface| iface.network_segment_id)
@@ -10323,10 +10562,57 @@ async fn vpc_ids_for_interfaces(
     )
     .await?;
 
-    Ok(segments
+    let vpc_by_segment = segments
         .into_iter()
-        .filter_map(|segment| segment.config.vpc_id)
-        .collect())
+        .filter_map(|segment| segment.config.vpc_id.map(|vpc_id| (segment.id, vpc_id)))
+        .collect::<HashMap<_, _>>();
+    let primary_dpu_id = mh_snapshot.host_snapshot.primary_attached_dpu_machine_id();
+    let dpu_by_locator = mh_snapshot
+        .dpu_snapshots
+        .iter()
+        .filter_map(|dpu| {
+            mh_snapshot
+                .host_snapshot
+                .get_device_locator_for_dpu_id(&dpu.id)
+                .ok()
+                .map(|locator| (locator, dpu.id))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut memberships = HashSet::new();
+
+    for interface in interfaces {
+        let Some(vpc_id) = interface
+            .network_segment_id
+            .and_then(|segment_id| vpc_by_segment.get(&segment_id))
+            .copied()
+        else {
+            continue;
+        };
+
+        // Locator-less legacy interfaces belong to the primary DPU. Explicit
+        // locators preserve exact membership on multi-DPU hosts.
+        let resolved_dpu_id = match &interface.device_locator {
+            Some(locator) => dpu_by_locator.get(locator).copied(),
+            None => primary_dpu_id,
+        };
+
+        if let Some(dpu_id) = resolved_dpu_id {
+            memberships.insert((dpu_id, vpc_id));
+            continue;
+        }
+
+        // Preserve every current host DPU as a possible owner so cleanup cannot assume which
+        // DPU/VPC loopback an unresolved interface uses.
+        tracing::warn!(
+            host_machine_id = %mh_snapshot.host_snapshot.id,
+            device_locator = ?interface.device_locator,
+            %vpc_id,
+            "using every current host DPU because the VPC interface locator cannot be resolved",
+        );
+        memberships.extend(host_dpu_ids.iter().copied().map(|dpu_id| (dpu_id, vpc_id)));
+    }
+
+    Ok(memberships)
 }
 
 async fn release_network_segments_with_vpc_prefix(
@@ -11551,7 +11837,7 @@ impl HostUpgradeState {
                     ArtifactStatus::Available => {}
                     ArtifactStatus::Downloading => {
                         return Ok(StateHandlerOutcome::wait(format!(
-                            "waiting for firmware artifact {} to download",
+                            "waiting for firmware artifact {} to become available",
                             artifact.local_path.display()
                         )));
                     }

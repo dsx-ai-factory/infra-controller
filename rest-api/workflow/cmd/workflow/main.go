@@ -232,7 +232,8 @@ func run(ctx context.Context) error {
 	log.Info().Str("Temporal Namespace", tcfg.Namespace).Msg("registering workflow and activities")
 
 	// Register workflows
-	if tcfg.Namespace == cwfn.CloudNamespace {
+	switch tcfg.Namespace {
+	case cwfn.CloudNamespace:
 		// Workflows triggered by Cloud services
 		w.RegisterWorkflow(vpcWorkflow.DeleteVpcByID)
 
@@ -259,8 +260,12 @@ func run(ctx context.Context) error {
 
 		// InfiniBandPartition workflows
 		w.RegisterWorkflow(ibpWorkflow.DeleteInfiniBandPartitionByID)
-	} else if tcfg.Namespace == cwfn.SiteNamespace {
-		// Workflows triggered by Site Agent
+	case cwfn.SiteNamespace:
+		// Deletes successful inventory workflows before the namespace retention would
+		w.RegisterWorkflow(siteWorkflow.DeleteSuccessfulInventoryWorkflows)
+
+		// Workflows triggered by Site Agent. Keep the inventory workflows in sync with
+		// inventoryWorkflowTypes in pkg/activity/site/retention.go.
 		// Machine Workflows
 		w.RegisterWorkflow(machineWorkflow.UpdateMachineInventory)
 
@@ -457,6 +462,12 @@ func run(ctx context.Context) error {
 		w.RegisterActivity(&userManager)
 	}
 
+	if tcfg.Namespace == cwfn.SiteNamespace {
+		// Inventory retention activities
+		inventoryRetentionManager := siteActivity.NewManageInventoryRetention(tc, cfg.GetTemporalSiteNamespaceSuccessfulInventoryRetention())
+		w.RegisterActivity(&inventoryRetentionManager)
+	}
+
 	// A failing health or metrics server stops the worker so the failure
 	// leaves through run instead of a panic in a goroutine.
 	serveErrs := make(chan error, 2)
@@ -471,8 +482,7 @@ func run(ctx context.Context) error {
 
 	hconfig := cfg.GetHealthzConfig()
 	if hconfig.Enabled {
-		http.HandleFunc("/healthz", cwfh.StatusHandler)
-		http.HandleFunc("/readyz", cwfh.StatusHandler)
+		registerHealthRoutes(http.DefaultServeMux)
 		serve("health check API", hconfig.GetListenAddr())
 	}
 
@@ -491,9 +501,29 @@ func run(ctx context.Context) error {
 		interrupt <- struct{}{}
 	}()
 
+	// This has to run before w.Run, which blocks until the worker shuts down
+	if tcfg.Namespace == cwfn.SiteNamespace {
+		siteRetention := cfg.GetTemporalSiteNamespaceRetention()
+		if siteRetention > 0 {
+			// The worker's certificate may not be allowed to update the namespace, so a failure only logs
+			tnc, nerr := tsdkClient.NewNamespaceClient(tOptions)
+			if nerr != nil {
+				log.Warn().Err(nerr).Msg("failed to create Temporal namespace client")
+			} else {
+				rctx, cancel := context.WithTimeout(ctx, cwfn.RetentionUpdateTimeout)
+				nerr = cwfn.EnsureRetention(rctx, tnc, tcfg.Namespace, siteRetention)
+				cancel()
+				tnc.Close()
+				if nerr != nil {
+					log.Warn().Err(nerr).Msg("failed to ensure Site namespace retention")
+				}
+			}
+		}
+	}
+
 	// Start listening to the Task Queue
 	log.Info().Str("Temporal Namespace", tcfg.Namespace).Msg("starting Temporal worker")
-	err = runWorker(ctx, tc, w, tcfg.Namespace, interrupt)
+	err = runWorker(ctx, tc, w, tcfg.Namespace, cfg.GetTemporalSiteNamespaceSuccessfulInventoryRetention(), interrupt)
 	if err != nil {
 		return fmt.Errorf("failed to run worker for Temporal namespace %s: %w", tcfg.Namespace, err)
 	}
@@ -507,12 +537,20 @@ func run(ctx context.Context) error {
 	return nil
 }
 
-// runWorker triggers the Cloud cron workflows, then runs w until interruptCh fires.
-// w.Run blocks until the worker stops, so the crons have to be triggered before it.
+// registerHealthRoutes serves the health status on GET and HEAD only, so any
+// other method gets 405 rather than a healthy response.
+func registerHealthRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /healthz", cwfh.StatusHandler)
+	mux.HandleFunc("GET /readyz", cwfh.StatusHandler)
+}
+
+// runWorker triggers the cron workflows of the worker's namespace, then runs w until interruptCh
+// fires. w.Run blocks until the worker stops, so the crons have to be triggered before it.
 // ExecuteWorkflow returns the existing run of a cron that is already running, so every
 // start can trigger them. A trigger that still fails after the SDK's retries returns
-// before the worker runs, so the pod restarts and triggers the crons again.
-func runWorker(ctx context.Context, tc tsdkClient.Client, w tsdkWorker.Worker, namespace string, interruptCh <-chan interface{}) error {
+// before the worker runs, so the pod restarts and triggers the crons again. A zero
+// successfulInventoryRetention leaves out the Site worker's successful inventory cleanup.
+func runWorker(ctx context.Context, tc tsdkClient.Client, w tsdkWorker.Worker, namespace string, successfulInventoryRetention time.Duration, interruptCh <-chan interface{}) error {
 	if namespace == cwfn.CloudNamespace {
 		_, err := siteWorkflow.ExecuteMonitorHealthForAllSitesWorkflow(ctx, tc)
 		if err != nil {
@@ -529,6 +567,13 @@ func runWorker(ctx context.Context, tc tsdkClient.Client, w tsdkWorker.Worker, n
 		_, err = siteWorkflow.ExecuteMonitorSiteTemporalNamespaces(ctx, tc)
 		if err != nil {
 			return fmt.Errorf("failed to trigger Monitor Site Temporal Namespaces workflow: %w", err)
+		}
+	}
+
+	if namespace == cwfn.SiteNamespace && successfulInventoryRetention > 0 {
+		_, err := siteWorkflow.ExecuteDeleteSuccessfulInventoryWorkflows(ctx, tc)
+		if err != nil {
+			return fmt.Errorf("failed to trigger Delete Successful Inventory Workflows workflow: %w", err)
 		}
 	}
 

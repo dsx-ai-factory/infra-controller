@@ -19,6 +19,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
+use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -29,8 +31,7 @@ use futures_util::StreamExt;
 use reqwest_middleware::ClientWithMiddleware as Client;
 use reqwest_tracing::ReqwestOtelSpanBackend;
 use sha2::{Digest, Sha256};
-use tokio::fs::File;
-use tokio::io::AsyncWriteExt;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::Instrument;
 use tracing::instrument::WithSubscriber;
 
@@ -93,12 +94,13 @@ pub(crate) struct FirmwareStaleCachedArtifactRemovalFailed {
 pub(crate) enum DownloadOutcome {
     /// Downloaded, verified, and renamed into place.
     Ok,
-    /// The request never produced a response: connection, DNS, or TLS
-    /// trouble (or, for `file://` sources, a source that cannot be opened).
+    /// The request never produced a response: connection, DNS, TLS, or a
+    /// deadline before final headers (or a `file://` source that cannot be opened).
     Fetch,
     /// The server answered, but with a non-success HTTP status.
     Status,
-    /// The response body broke off mid-transfer.
+    /// The response body failed, exceeded its byte limit, or reached a read or
+    /// whole-request deadline. Local copy failures also use this existing label.
     Transfer,
     /// The downloaded artifact failed SHA-256 verification.
     Checksum,
@@ -316,12 +318,121 @@ fn fail(outcome: DownloadOutcome) -> impl FnOnce(Report) -> DownloadError {
     move |report| DownloadError { outcome, report }
 }
 
+// These are operating guardrails, not measured site capacity. Four workers with
+// 4 GiB artifacts allow at most 16 GiB of active HTTP staging; the hard maxima
+// allow 16 * 16 GiB = 256 GiB. Retained cache entries and local file copies are
+// outside that byte envelope. Timeouts bound HTTP transport, not filesystem work.
+const MAX_CONCURRENT_DOWNLOADS: usize = 16;
+const MAX_DOWNLOAD_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+const MAX_CONNECT_TIMEOUT_SECONDS: u64 = 300;
+const MAX_READ_TIMEOUT_SECONDS: u64 = 600;
+const MAX_REQUEST_TIMEOUT_SECONDS: u64 = 7200;
+
+/// `FirmwareDownloadConfig` bounds one coordinator's workers and HTTP transfers.
+/// Omitted fields use their defaults. Settings are fixed at construction; callers
+/// must construct a new downloader to activate changes. Local `file://` copies
+/// share worker admission but retain their existing size and timing behavior.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FirmwareDownloadConfig {
+    /// Maximum admitted cache checks and downloads, from 1 through 16; defaults
+    /// to 4. There is no capacity queue: callers poll again when all workers are busy.
+    pub max_concurrent_downloads: usize,
+    /// Maximum bytes received for one HTTP artifact, from 1 through 16 GiB;
+    /// defaults to 4 GiB. The limit applies even without `Content-Length`.
+    pub max_download_bytes: u64,
+    /// Connection deadline in seconds, from 1 through 300; defaults to 30.
+    /// The initial read and whole-request timers also run while connecting;
+    /// whichever deadline expires first ends the HTTP attempt.
+    pub connect_timeout_seconds: u64,
+    /// Read deadline in seconds, from 1 through 600; defaults to 60. One fixed
+    /// initial timer covers connecting through final response headers. Body reads
+    /// then reset the timer after progress, within `request_timeout_seconds`.
+    pub read_timeout_seconds: u64,
+    /// Whole HTTP request deadline in seconds, from 1 through 7200; defaults
+    /// to 1800. Covers HTTP transport from connecting through body completion,
+    /// even with progress. Must be at least both phase deadlines. This does not
+    /// forcibly stop local I/O, hashing, or cleanup; in-flight filesystem work
+    /// keeps its worker slot until it finishes.
+    pub request_timeout_seconds: u64,
+}
+
+impl Default for FirmwareDownloadConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_downloads: 4,
+            max_download_bytes: 4 * 1024 * 1024 * 1024,
+            connect_timeout_seconds: 30,
+            read_timeout_seconds: 60,
+            request_timeout_seconds: 1800,
+        }
+    }
+}
+
+impl FirmwareDownloadConfig {
+    /// Rejects zero, values above the hard limits, and phase deadlines longer
+    /// than the whole request. Call this before activating operator settings.
+    pub fn validate(&self) -> eyre::Result<()> {
+        if !(1..=MAX_CONCURRENT_DOWNLOADS).contains(&self.max_concurrent_downloads) {
+            return Err(eyre!(
+                "max_concurrent_downloads must be between 1 and {MAX_CONCURRENT_DOWNLOADS}"
+            ));
+        }
+        for (name, value, maximum) in [
+            (
+                "max_download_bytes",
+                self.max_download_bytes,
+                MAX_DOWNLOAD_BYTES,
+            ),
+            (
+                "connect_timeout_seconds",
+                self.connect_timeout_seconds,
+                MAX_CONNECT_TIMEOUT_SECONDS,
+            ),
+            (
+                "read_timeout_seconds",
+                self.read_timeout_seconds,
+                MAX_READ_TIMEOUT_SECONDS,
+            ),
+            (
+                "request_timeout_seconds",
+                self.request_timeout_seconds,
+                MAX_REQUEST_TIMEOUT_SECONDS,
+            ),
+        ] {
+            if !(1..=maximum).contains(&value) {
+                return Err(eyre!("{name} must be between 1 and {maximum}"));
+            }
+        }
+        if self.connect_timeout_seconds > self.request_timeout_seconds
+            || self.read_timeout_seconds > self.request_timeout_seconds
+        {
+            return Err(eyre!(
+                "connect_timeout_seconds and read_timeout_seconds must not exceed request_timeout_seconds"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Uses reqwest's transport deadlines, including its initial response timer.
+    fn client(&self) -> eyre::Result<Client> {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(self.connect_timeout_seconds))
+            .read_timeout(Duration::from_secs(self.read_timeout_seconds))
+            .timeout(Duration::from_secs(self.request_timeout_seconds))
+            .build()
+            .map(download_client)
+            .wrap_err("unable to initialize firmware download client")
+    }
+}
+
 /// What [`FirmwareDownloader::available`] found for an artifact.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ArtifactStatus {
     /// The file is present and satisfies the supplied checksum, when provided.
     Available,
-    /// An attempt is active and no cached file satisfies this caller's checksum yet.
+    /// Verification or download is active, or all workers are busy. Poll again;
+    /// a deferred request does not queue work or consume a download failure.
     Downloading,
     /// The artifact cannot be made available. URL credentials, query parameters,
     /// and fragments are removed from `error`, so it can be shown to operators.
@@ -331,12 +442,15 @@ pub enum ArtifactStatus {
     },
 }
 
-/// Coordinates background firmware downloads and cache verification across
-/// cloned handles.
+/// Coordinates background firmware downloads and cache verification. Clones
+/// share one worker pool and cache state; separately constructed values do not.
+/// `Default` uses the same independent default pool as [`Self::new`].
 #[derive(Clone, Debug)]
 pub struct FirmwareDownloader {
     // Actual structure wrapped in an Arc so that we can clone the FirmwareDownloader and have the clones all point to one instance.
     actual: Arc<Mutex<FirmwareDownloaderActual>>,
+    capacity: Arc<Semaphore>,
+    config: FirmwareDownloadConfig,
 }
 
 #[derive(Debug)]
@@ -353,6 +467,10 @@ struct DownloadAttempt {
     filename: PathBuf,
     span: tracing::Span,
     dispatch: tracing::Dispatch,
+    max_download_bytes: u64,
+    // Released after destination registration and staged-file cleanup, including
+    // blocking work that outlives a cancelled awaiting future.
+    _capacity: Arc<OwnedSemaphorePermit>,
 }
 
 impl DownloadAttempt {
@@ -403,6 +521,34 @@ impl Drop for StagedDownload {
 }
 
 impl StagedDownload {
+    /// Keeps staging and its permit with the physical write, not its awaiting task.
+    async fn write(
+        self,
+        mut file: File,
+        contents: impl AsRef<[u8]> + Send + 'static,
+    ) -> Result<(Self, File), DownloadError> {
+        let context = self.attempt.clone();
+        tokio::task::spawn_blocking(move || {
+            context.in_scope(|| {
+                // `tokio::fs::File::write_all` can return with a blocking write
+                // still pending. Owning the file and guard here prevents a
+                // cancelled await from releasing capacity before that write ends.
+                file.write_all(contents.as_ref())
+                    .wrap_err_with(|| {
+                        format!(
+                            "unable to write firmware staging file {}",
+                            self.path.display()
+                        )
+                    })
+                    .map_err(fail(DownloadOutcome::Io))?;
+                Ok((self, file))
+            })
+        })
+        .await
+        .wrap_err("firmware write worker failed")
+        .map_err(fail(DownloadOutcome::Io))?
+    }
+
     /// Transfers cleanup to the checksum worker until its verified file is returned.
     async fn verify(self, checksum: String) -> Result<Self, DownloadError> {
         // Dropping the awaiting future cannot stop `spawn_blocking`. The
@@ -428,31 +574,58 @@ impl Default for FirmwareDownloader {
 }
 
 impl FirmwareDownloader {
-    /// Creates an empty coordinator; its shared HTTP client is initialized on
-    /// the first download.
+    /// Creates an independent coordinator and worker pool with default limits.
+    /// Clone this value to share its limits. HTTP client initialization is
+    /// deferred until needed; initialization failure is reported by `available`.
     pub fn new() -> FirmwareDownloader {
+        Self::from_config(FirmwareDownloadConfig::default(), None)
+    }
+
+    /// Validates limits and initializes the HTTP client before any work can be
+    /// admitted. Invalid settings or client initialization errors are returned
+    /// to the caller, so service startup can fail before accepting work.
+    pub fn with_config(config: FirmwareDownloadConfig) -> eyre::Result<Self> {
+        config.validate()?;
+        let client = config.client()?;
+        Ok(Self::from_config(config, Some(client)))
+    }
+
+    fn from_config(config: FirmwareDownloadConfig, client: Option<Client>) -> Self {
         FirmwareDownloader {
             actual: Arc::new(Mutex::new(FirmwareDownloaderActual {
                 downloading: HashSet::new(),
                 failures: HashMap::new(),
-                client: None, // Not created until we actually need it
+                client,
             })),
+            capacity: Arc::new(Semaphore::new(config.max_concurrent_downloads)),
+            config,
         }
     }
 
     /// Reports whether the given file is present, starting a background download
     /// when it is not.
-    /// A caller sharing an active attempt gets `Available` if a read-only cache
-    /// check satisfies its checksum, otherwise `Downloading`; it never removes
-    /// the cache entry.
-    /// A failed download is reported as `Failed` to the next caller only; the
-    /// check after that starts a new download, so a caller retries by calling again.
+    /// An admitted caller sharing an active attempt gets `Available` if a
+    /// read-only cache check satisfies its checksum, otherwise `Downloading`;
+    /// it never removes the cache entry.
+    /// A failed download is reported as `Failed` to the next admitted caller
+    /// only; the check after that starts a new download, so a caller retries by
+    /// calling again.
     /// It verifies cached and downloaded files against SHA-256 when a checksum
     /// is provided. Cache verification is awaited on a blocking worker; a started
     /// download continues in the background across polling calls. Cancelling
     /// cache verification releases its destination registration after the
     /// blocking worker finishes.
+    /// All cache checks and downloads require capacity before spawning work.
+    /// Saturation returns `Downloading` immediately without a queue or waiters.
     pub async fn available(&self, filename: &Path, url: &str, sha256: &str) -> ArtifactStatus {
+        let Ok(capacity) = self.capacity.clone().try_acquire_owned() else {
+            tracing::debug!(
+                max_concurrent_downloads = self.config.max_concurrent_downloads,
+                "Firmware download workers are busy; deferring artifact check",
+            );
+            return ArtifactStatus::Downloading;
+        };
+        let capacity = Arc::new(capacity);
         let span = tracing::Span::current();
         let dispatch = tracing::dispatcher::get_default(Clone::clone);
         let attempt = {
@@ -466,6 +639,8 @@ impl FirmwareDownloader {
                     filename: filename.to_path_buf(),
                     span: span.clone(),
                     dispatch: dispatch.clone(),
+                    max_download_bytes: self.config.max_download_bytes,
+                    _capacity: capacity.clone(),
                 }))
             } else {
                 None
@@ -476,6 +651,9 @@ impl FirmwareDownloader {
             let filename = filename.to_path_buf();
             let checksum = sha256.to_owned();
             tokio::task::spawn_blocking(move || {
+                // Even a read-only overlap consumes a worker. The permit must
+                // survive cancellation until that worker actually finishes.
+                let _capacity = capacity;
                 tracing::dispatcher::with_default(&dispatch, || {
                     span.in_scope(|| match attempt {
                         Some(attempt) => cached_file_status(&attempt.filename, &checksum),
@@ -534,10 +712,20 @@ impl FirmwareDownloader {
             if let Some(error) = state.failures.remove(filename) {
                 return ArtifactStatus::Failed { error };
             }
-            state
-                .client
-                .get_or_insert_with(|| download_client(reqwest::Client::new()))
-                .clone()
+            match &state.client {
+                Some(client) => client.clone(),
+                None => match self.config.client() {
+                    Ok(client) => {
+                        state.client = Some(client.clone());
+                        client
+                    }
+                    Err(error) => {
+                        return ArtifactStatus::Failed {
+                            error: redacted_error_chain(error.as_ref()),
+                        };
+                    }
+                },
+            }
         };
 
         let source_url = url.to_owned();
@@ -629,10 +817,11 @@ async fn download_and_publish(
     client: &Client,
     sha256: &str,
 ) -> Result<(), DownloadError> {
+    let max_download_bytes = attempt.max_download_bytes;
     // File creation and its cleanup guard share one blocking operation. Cancelling
     // the await cannot leave a late-created file behind after cleanup has run.
     let context = attempt.clone();
-    let (staged, mut file) = tokio::task::spawn_blocking(move || {
+    let (staged, file) = tokio::task::spawn_blocking(move || {
         context.in_scope(|| {
             let dirname = attempt.filename.parent().ok_or_else(|| {
                 fail(DownloadOutcome::Io)(eyre!("firmware destination has no parent directory"))
@@ -647,21 +836,16 @@ async fn download_and_publish(
                 attempt,
                 published: false,
             };
-            let file = std::fs::File::create(&staged.path)
+            let file = File::create(&staged.path)
                 .wrap_err_with(|| format!("unable to create file {}", staged.path.display()))
                 .map_err(fail(DownloadOutcome::Io))?;
-            Ok::<_, DownloadError>((staged, File::from_std(file)))
+            Ok::<_, DownloadError>((staged, file))
         })
     })
     .await
     .wrap_err("firmware staging worker failed")
     .map_err(fail(DownloadOutcome::Io))??;
-    download(url, client, &mut file).await?;
-    file.flush()
-        .await
-        .wrap_err("unable to flush downloaded firmware")
-        .map_err(fail(DownloadOutcome::Io))?;
-    drop(file);
+    let staged = download(url, client, staged, file, max_download_bytes).await?;
     let mut staged = staged.verify(sha256.to_owned()).await?;
     // No await after verification: a cancelled owner cannot leave behind a
     // blocking worker that publishes the file after a new attempt starts.
@@ -715,22 +899,42 @@ fn cached_file_status(filename: &Path, sha256: &str) -> CachedFileStatus {
     }
 }
 
-async fn download(url: &str, client: &Client, dst_file: &mut File) -> Result<(), DownloadError> {
+async fn download(
+    url: &str,
+    client: &Client,
+    mut staged: StagedDownload,
+    mut dst_file: File,
+    max_download_bytes: u64,
+) -> Result<StagedDownload, DownloadError> {
     if url.starts_with("file://") {
-        // Just copies a local file, for testing
-        let src_filename = url.strip_prefix("file:/").unwrap(); // Leave the second / for the root
-        let mut src_file = File::open(src_filename)
-            .await
-            .wrap_err(format!(
-                "FirmwareDownloader could not open source {}",
-                loggable_url(url)
-            ))
-            .map_err(fail(DownloadOutcome::Fetch))?;
-        return tokio::io::copy(&mut src_file, dst_file)
-            .await
-            .map(|_| ())
-            .wrap_err_with(|| format!("unable to copy firmware from {}", loggable_url(url)))
-            .map_err(fail(DownloadOutcome::Transfer));
+        // The worker owns both local reads and writes. Neither may outlive
+        // staging cleanup or release capacity when its awaiting task cancels.
+        let source_url = url.to_owned();
+        let context = staged.attempt.clone();
+        return tokio::task::spawn_blocking(move || {
+            context.in_scope(|| {
+                // Leave the second slash so absolute local paths remain unchanged.
+                let src_filename = source_url.strip_prefix("file:/").unwrap();
+                let mut src_file = File::open(src_filename)
+                    .wrap_err_with(|| {
+                        format!(
+                            "FirmwareDownloader could not open source {}",
+                            loggable_url(&source_url)
+                        )
+                    })
+                    .map_err(fail(DownloadOutcome::Fetch))?;
+                std::io::copy(&mut src_file, &mut dst_file)
+                    .wrap_err_with(|| {
+                        format!("unable to copy firmware from {}", loggable_url(&source_url))
+                    })
+                    .map_err(fail(DownloadOutcome::Transfer))?;
+                drop(dst_file);
+                Ok(staged)
+            })
+        })
+        .await
+        .wrap_err("firmware copy worker failed")
+        .map_err(fail(DownloadOutcome::Io))?;
     }
 
     let res = client
@@ -750,24 +954,26 @@ async fn download(url: &str, client: &Client, dst_file: &mut File) -> Result<(),
         )));
     }
     let mut body = res.bytes_stream();
+    let mut downloaded_bytes = 0;
     while let Some(segment) = body.next().await {
         let segment = segment
             .wrap_err_with(|| format!("unable to download firmware from {}", loggable_url(url)))
             .map_err(fail(DownloadOutcome::Transfer))?;
-        dst_file
-            .write_all(&segment)
-            .await
-            .wrap_err_with(|| {
-                format!(
-                    "FirmwareDownloader had problems saving file from {}",
-                    loggable_url(url)
-                )
-            })
-            .map_err(fail(DownloadOutcome::Io))?;
+        // Check actual bytes before writing. An absent or inaccurate response
+        // length must not bypass the limit or leave an oversized staging file.
+        if segment.len() as u64 > max_download_bytes - downloaded_bytes {
+            return Err(fail(DownloadOutcome::Transfer)(eyre!(
+                "firmware download from {} exceeds max_download_bytes ({max_download_bytes})",
+                loggable_url(url)
+            )));
+        }
+        downloaded_bytes += segment.len() as u64;
+        (staged, dst_file) = staged.write(dst_file, segment).await?;
     }
 
-    // Success
-    Ok(())
+    // Every physical write has completed before verification can open the file.
+    drop(dst_file);
+    Ok(staged)
 }
 
 /// Checks if the given filename uses the given checksum. This is not meant to be security,
@@ -806,12 +1012,84 @@ mod lifecycle_tests {
     use std::future::Future;
     use std::pin::Pin;
 
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tracing::Instrument;
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::registry::LookupSpan;
 
     use super::*;
+
+    /// Omitted settings keep the operating defaults, while invalid limits fail
+    /// construction before a downloader can admit work.
+    #[test]
+    fn download_configuration_validates_before_activation() {
+        use carbide_test_support::Outcome::{Fails, Yields};
+
+        assert_eq!(
+            toml::from_str::<FirmwareDownloadConfig>("").unwrap(),
+            FirmwareDownloadConfig {
+                max_concurrent_downloads: 4,
+                max_download_bytes: 4 * 1024 * 1024 * 1024,
+                connect_timeout_seconds: 30,
+                read_timeout_seconds: 60,
+                request_timeout_seconds: 1800,
+            },
+        );
+        // A partial section must preserve every omitted setting, not merely
+        // deserialize into some valid configuration.
+        assert_eq!(
+            toml::from_str::<FirmwareDownloadConfig>("max_concurrent_downloads = 1").unwrap(),
+            FirmwareDownloadConfig {
+                max_concurrent_downloads: 1,
+                ..Default::default()
+            },
+        );
+        let activate = |settings: &str| -> Result<(), String> {
+            let config = toml::from_str(settings).map_err(|error| error.to_string())?;
+            FirmwareDownloader::with_config(config)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        };
+        carbide_test_support::scenarios!(activate:
+            "accepted bounds" {
+                // Every positive lower bound is usable, including equal deadlines.
+                "max_concurrent_downloads = 1\nmax_download_bytes = 1\nconnect_timeout_seconds = 1\nread_timeout_seconds = 1\nrequest_timeout_seconds = 1" => Yields(()),
+                // A shorter read deadline is valid even when connection time is longer.
+                "connect_timeout_seconds = 2\nread_timeout_seconds = 1\nrequest_timeout_seconds = 2" => Yields(()),
+                // Hard maxima are inclusive, not merely documented suggestions.
+                "max_concurrent_downloads = 16\nmax_download_bytes = 17179869184\nconnect_timeout_seconds = 300\nread_timeout_seconds = 600\nrequest_timeout_seconds = 7200" => Yields(()),
+            }
+            "invalid limits" {
+                // Zero workers would defer every artifact forever.
+                "max_concurrent_downloads = 0" => Fails,
+                // Operator tuning cannot create an unbounded worker pool.
+                "max_concurrent_downloads = 17" => Fails,
+                // A zero byte limit cannot admit any nonempty firmware.
+                "max_download_bytes = 0" => Fails,
+                // Artifacts cannot exceed the hard per-download budget.
+                "max_download_bytes = 17179869185" => Fails,
+                // A zero connection timer does not mean unlimited waiting.
+                "connect_timeout_seconds = 0" => Fails,
+                // Connections remain bounded independently of body transfers.
+                "connect_timeout_seconds = 301" => Fails,
+                // Read inactivity protection cannot be disabled with zero.
+                "read_timeout_seconds = 0" => Fails,
+                // The read deadline cannot exceed the hard phase maximum.
+                "read_timeout_seconds = 601" => Fails,
+                // Every HTTP request needs a positive cumulative deadline.
+                "request_timeout_seconds = 0" => Fails,
+                // Progress cannot extend the configured hard request maximum.
+                "request_timeout_seconds = 7201" => Fails,
+                // A connection phase cannot outlast its enclosing request.
+                "connect_timeout_seconds = 61\nrequest_timeout_seconds = 60" => Fails,
+                // The read deadline must fit inside the whole request as well.
+                "connect_timeout_seconds = 1\nread_timeout_seconds = 60\nrequest_timeout_seconds = 59" => Fails,
+                // Direct TOML decoding rejects unknown keys; Core's loader
+                // separately applies its warning-or-rejection policy.
+                "max_download_byte = 1" => Fails,
+            }
+        );
+    }
 
     /// Registers the private transfer owner so tests can cancel its awaited work directly.
     fn claim(downloader: &FirmwareDownloader, filename: &Path) -> Arc<DownloadAttempt> {
@@ -828,6 +1106,8 @@ mod lifecycle_tests {
             filename: filename.to_path_buf(),
             span: tracing::Span::current(),
             dispatch: tracing::dispatcher::get_default(Clone::clone),
+            max_download_bytes: downloader.config.max_download_bytes,
+            _capacity: Arc::new(downloader.capacity.clone().try_acquire_owned().unwrap()),
         })
     }
 
@@ -858,9 +1138,10 @@ mod lifecycle_tests {
         .expect("download lifecycle did not finish");
     }
 
-    /// Dropping a stalled transfer removes its partial file and permits a later download.
+    /// Cancelling a stalled body returns the sole worker slot after cleanup,
+    /// allowing a later public download to complete with the same coordinator.
     #[tokio::test]
-    async fn cancelling_a_stalled_body_removes_staging_and_releases_singleflight() {
+    async fn cancelling_a_stalled_body_removes_staging_and_releases_capacity() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}/fw.bin", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -878,13 +1159,18 @@ mod lifecycle_tests {
         let directory = tempfile::tempdir().unwrap();
         let filename = directory.path().join("fw.bin");
         let partial = directory.path().join("fw.bin.download");
-        let downloader = FirmwareDownloader::new();
+        let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
+            max_concurrent_downloads: 1,
+            ..Default::default()
+        })
+        .unwrap();
         let attempt = claim(&downloader, &filename);
         let client = reqwest_middleware::ClientBuilder::new(reqwest::Client::new()).build();
         let source = url.clone();
         let transfer =
             tokio::spawn(async move { download_and_publish(attempt, &source, &client, "").await });
         wait_until(|| partial.metadata().is_ok_and(|metadata| metadata.len() > 0)).await;
+        assert_eq!(downloader.capacity.available_permits(), 0);
         assert_eq!(
             downloader.available(&filename, &url, "").await,
             ArtifactStatus::Downloading
@@ -892,6 +1178,7 @@ mod lifecycle_tests {
 
         transfer.abort();
         assert!(matches!(transfer.await, Err(error) if error.is_cancelled()));
+        wait_until(|| downloader.capacity.available_permits() == 1).await;
         assert!(!partial.exists());
         assert!(!filename.exists());
         assert!(downloader.actual.lock().unwrap().downloading.is_empty());
@@ -907,7 +1194,8 @@ mod lifecycle_tests {
             downloader.available(&filename, &url, "").await,
             ArtifactStatus::Downloading
         );
-        wait_until(|| downloader.actual.lock().unwrap().downloading.is_empty()).await;
+        wait_until(|| downloader.capacity.available_permits() == 1).await;
+        assert!(downloader.actual.lock().unwrap().downloading.is_empty());
         assert_eq!(
             downloader.available(&filename, &url, "").await,
             ArtifactStatus::Available
@@ -915,7 +1203,8 @@ mod lifecycle_tests {
         assert_eq!(std::fs::read(filename).unwrap(), b"firmware");
     }
 
-    /// Cancellation retains ownership through queued filesystem work and cannot publish later.
+    /// Cancellation retains destination ownership and capacity through queued
+    /// filesystem work, so a replacement cannot publish or start another worker.
     #[test]
     fn cancelled_workers_keep_ownership_until_they_finish() {
         #[derive(Clone, Copy, Debug)]
@@ -924,6 +1213,8 @@ mod lifecycle_tests {
             Cached,
             // Staging creation can outlive cancellation before the transfer has a file guard.
             Staging,
+            // A queued write must retain staging and capacity until its actual I/O finishes.
+            Writing,
             // A cancelled transfer must clean staging without ever publishing its verified result.
             Downloaded,
         }
@@ -933,12 +1224,21 @@ mod lifecycle_tests {
             .max_blocking_threads(1)
             .build()
             .unwrap();
-        for stage in [Stage::Cached, Stage::Staging, Stage::Downloaded] {
+        for stage in [
+            Stage::Cached,
+            Stage::Staging,
+            Stage::Writing,
+            Stage::Downloaded,
+        ] {
             runtime.block_on(async {
                 let directory = tempfile::tempdir().unwrap();
                 let filename = directory.path().join("fw.bin");
                 let partial = directory.path().join("fw.bin.download");
-                let downloader = FirmwareDownloader::new();
+                let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
+                    max_concurrent_downloads: 1,
+                    ..Default::default()
+                })
+                .unwrap();
                 let checksum = hex::encode(Sha256::digest(b"firmware"));
                 let mut server = mockito::Server::new_async().await;
                 let response = server
@@ -953,6 +1253,7 @@ mod lifecycle_tests {
 
                 // Each future is the actual publication owner. Holding the
                 // blocking pool makes its queued filesystem work observable.
+                let mut write_observer = None;
                 let mut checking: Pin<Box<dyn Future<Output = ()> + '_>> = match stage {
                     Stage::Cached => {
                         std::fs::write(&filename, b"stale firmware").unwrap();
@@ -966,6 +1267,25 @@ mod lifecycle_tests {
                         let attempt = claim(&downloader, &filename);
                         Box::pin(async move {
                             download_and_publish(attempt, &url, &client, &checksum)
+                                .await
+                                .unwrap_or_else(|failure| {
+                                    panic!("{}", redacted_error_chain(failure.report.as_ref()))
+                                });
+                        })
+                    }
+                    Stage::Writing => {
+                        let file = File::create(&partial).unwrap();
+                        // An open descriptor observes the completed write even
+                        // after cancellation removes the staging pathname.
+                        write_observer = Some(file.try_clone().unwrap());
+                        let staged = StagedDownload {
+                            path: partial.clone(),
+                            attempt: claim(&downloader, &filename),
+                            published: false,
+                        };
+                        Box::pin(async move {
+                            staged
+                                .write(file, b"firmware")
                                 .await
                                 .unwrap_or_else(|failure| {
                                     panic!("{}", redacted_error_chain(failure.report.as_ref()))
@@ -988,7 +1308,7 @@ mod lifecycle_tests {
                         // Run submitted filesystem work, then occupy the
                         // worker again before polling the owner. Once all
                         // body bytes are on disk, the write has completed;
-                        // the next poll flushes it and queues verification.
+                        // the next poll receives the file and queues verification.
                         let (started_rx, next_release, next_blocker) = blocking_gate();
                         release_tx.send(()).unwrap();
                         blocker.await.unwrap();
@@ -1006,6 +1326,23 @@ mod lifecycle_tests {
                     response.assert_async().await;
                 }
                 drop(checking);
+                if let Some(file) = &write_observer {
+                    assert_eq!(
+                        file.metadata().unwrap().len(),
+                        0,
+                        "write must still be queued"
+                    );
+                }
+                assert_eq!(downloader.capacity.available_permits(), 0, "{stage:?}");
+                // A different destination must not enqueue another cache worker
+                // while the cancelled worker still owns the sole permit.
+                let deferred_filename = directory.path().join("deferred.bin");
+                let mut deferred = Box::pin(downloader.available(&deferred_filename, "", ""));
+                assert_eq!(
+                    futures_util::poll!(deferred.as_mut()),
+                    std::task::Poll::Ready(ArtifactStatus::Downloading),
+                    "{stage:?}",
+                );
                 assert!(
                     downloader
                         .actual
@@ -1019,7 +1356,7 @@ mod lifecycle_tests {
                     match stage {
                         Stage::Cached => filename.exists(),
                         Stage::Staging => !partial.exists(),
-                        Stage::Downloaded => partial.exists(),
+                        Stage::Writing | Stage::Downloaded => partial.exists(),
                     },
                     "{stage:?}"
                 );
@@ -1032,7 +1369,15 @@ mod lifecycle_tests {
 
                 release_tx.send(()).unwrap();
                 blocker.await.unwrap();
-                wait_until(|| downloader.actual.lock().unwrap().downloading.is_empty()).await;
+                wait_until(|| downloader.capacity.available_permits() == 1).await;
+                if let Some(file) = &write_observer {
+                    assert_eq!(
+                        file.metadata().unwrap().len(),
+                        8,
+                        "the physical write must finish"
+                    );
+                }
+                assert!(downloader.actual.lock().unwrap().downloading.is_empty());
                 assert!(
                     !filename.exists(),
                     "cancelled {stage:?} verification must not publish"
@@ -1049,7 +1394,8 @@ mod lifecycle_tests {
                     ArtifactStatus::Downloading,
                     "{stage:?}"
                 );
-                wait_until(|| downloader.actual.lock().unwrap().downloading.is_empty()).await;
+                wait_until(|| downloader.capacity.available_permits() == 1).await;
+                assert!(downloader.actual.lock().unwrap().downloading.is_empty());
                 assert_eq!(
                     downloader.available(&filename, &source_url, "").await,
                     ArtifactStatus::Available,
@@ -1093,7 +1439,51 @@ mod lifecycle_tests {
             assert_eq!(first.await, ArtifactStatus::Available);
             assert_eq!(second.await, ArtifactStatus::Available);
             assert!(downloader.actual.lock().unwrap().downloading.is_empty());
-            assert_eq!(std::fs::read(filename).unwrap(), b"firmware");
+            assert_eq!(std::fs::read(&filename).unwrap(), b"firmware");
+        });
+    }
+
+    /// Read-only checks sharing a destination still consume capacity until
+    /// their blocking workers finish, even when the awaiting caller cancels.
+    #[test]
+    fn cancelled_overlapping_cache_check_retains_its_permit() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let filename = directory.path().join("fw.bin");
+            std::fs::write(&filename, b"firmware").unwrap();
+            let checksum = hex::encode(Sha256::digest(b"firmware"));
+            let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
+                max_concurrent_downloads: 2,
+                ..Default::default()
+            })
+            .unwrap();
+            let (started_rx, release_tx, blocker) = blocking_gate();
+            started_rx.await.unwrap();
+            let mut owner = Box::pin(downloader.available(&filename, "", &checksum));
+            let mut overlap = Box::pin(downloader.available(&filename, "", &checksum));
+            assert!(futures_util::poll!(owner.as_mut()).is_pending());
+            assert!(futures_util::poll!(overlap.as_mut()).is_pending());
+
+            // The overlap has no destination registration of its own. Cancelling
+            // it must not admit a third worker while its checksum is still queued.
+            drop(overlap);
+            assert_eq!(downloader.capacity.available_permits(), 0);
+            let mut deferred = Box::pin(downloader.available(&filename, "", &checksum));
+            assert_eq!(
+                futures_util::poll!(deferred.as_mut()),
+                std::task::Poll::Ready(ArtifactStatus::Downloading),
+            );
+            release_tx.send(()).unwrap();
+            blocker.await.unwrap();
+            assert_eq!(owner.await, ArtifactStatus::Available);
+            wait_until(|| downloader.capacity.available_permits() == 2).await;
+            assert!(downloader.actual.lock().unwrap().downloading.is_empty());
+            assert_eq!(std::fs::read(&filename).unwrap(), b"firmware");
         });
     }
 
@@ -1280,6 +1670,7 @@ mod lifecycle_tests {
             let filename = directory.path().join("fw.bin");
             let downloader = FirmwareDownloader::new();
             let records = SpanRecords::default();
+            carbide_instrument::testing::keep_callsites_enabled();
             let subscriber = tracing_subscriber::registry().with(records.clone());
             let client = download_client(request_client);
             let failure = async {
@@ -1363,6 +1754,9 @@ mod lifecycle_tests {
     /// Public cache checks and background downloads retain the caller span across worker boundaries.
     #[tokio::test]
     async fn public_download_events_keep_the_request_parent() {
+        // This log-only proof emits the same counters as the metric tests, so
+        // it must share their serialized capture window.
+        let _metrics = carbide_instrument::testing::MetricsCapture::start();
         let directory = tempfile::tempdir().unwrap();
         let filename = directory.path().join("fw.bin");
         let unusable = directory.path().join("unusable.bin");
@@ -1378,7 +1772,19 @@ mod lifecycle_tests {
         let url = format!("{}/fw.bin", server.url());
         let downloader = FirmwareDownloader::new();
         let records = SpanRecords::default();
-        let subscriber = tracing_subscriber::registry().with(records.clone());
+        carbide_instrument::testing::keep_callsites_enabled();
+        let subscriber =
+            tracing::Dispatch::new(tracing_subscriber::registry().with(records.clone()));
+        // Another untraced worker can register the completion callsite first.
+        std::thread::spawn(|| {
+            emit(DownloadFinished::Ok {
+                took: Duration::ZERO,
+                url: String::new(),
+                filename: String::new(),
+            });
+        })
+        .join()
+        .unwrap();
         async {
             async {
                 assert!(matches!(

@@ -70,7 +70,7 @@ func TestExpectedMachineInterfacesMigration(t *testing.T) {
 		BmcMacAddress:       "02:00:00:00:00:02",
 		ChassisSerialNumber: "new-machine",
 		Interfaces: []model.ExpectedMachineInterface{{
-			MacAddress: "02:00:00:00:00:09",
+			MacAddress: stringPointer("02:00:00:00:00:09"),
 			NicType:    stringPointer("CX9"),
 			FixedIP:    stringPointer("192.0.2.9"),
 		}},
@@ -78,7 +78,7 @@ func TestExpectedMachineInterfacesMigration(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []model.ExpectedMachineInterface{{
-		MacAddress: "02:00:00:00:00:09",
+		MacAddress: stringPointer("02:00:00:00:00:09"),
 		NicType:    stringPointer("CX9"),
 		FixedIP:    stringPointer("192.0.2.9"),
 	}}, created.Interfaces)

@@ -485,6 +485,8 @@ fn admin_ipv6_router_advertisement(
 /// With `StartupFile` and `skip_post`, only save the desired file and return
 /// whether that file was replaced. Errors from saving or applying the desired
 /// configuration are returned to the caller.
+/// `fmds_ipv6_gateway` is resolved from the local agent configuration, not
+/// the Core response, so both startup-file and REST updates use the same peer.
 // The fetcher projects `addresses` into these compatibility fields before rendering.
 #[allow(deprecated)]
 pub(super) async fn update_nvue(
@@ -494,6 +496,7 @@ pub(super) async fn update_nvue(
     service_addrs: &ServiceAddresses,
     hbn_device_names: HBNDeviceNames,
     supplemental_config: Option<&str>,
+    fmds_ipv6_gateway: Option<ipnetwork::Ipv6Network>,
 ) -> eyre::Result<bool> {
     let hbn_version = match update_flavor {
         NvueUpdateFlavor::StartupFile { .. } => hbn::read_version().await?,
@@ -752,6 +755,7 @@ pub(super) async fn update_nvue(
         .collect::<Result<Vec<_>, _>>()
         .wrap_err("invalid route server IP")?;
     let conf = nvue::NvueConfig {
+        fmds_ipv6_gateway,
         is_fnn: false,
         is_dpu_os,
         fmds_gateway_vlan: if !is_dpu_os {
@@ -2904,6 +2908,7 @@ esac
                     &test_service_addresses(),
                     HBNDeviceNames::hbn_23(),
                     None,
+                    None,
                 )
                 .await
             };
@@ -3060,6 +3065,7 @@ esac
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
+            None,
         )
         .await?;
         assert!(
@@ -3112,6 +3118,7 @@ esac
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
+            None,
         )
         .await?;
         assert!(
@@ -3163,6 +3170,7 @@ esac
             &network_config,
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
+            None,
             None,
         )
         .await?;
@@ -3225,6 +3233,7 @@ esac
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
+            None,
         )
         .await?;
         assert!(
@@ -3282,6 +3291,7 @@ esac
             &network_config,
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
+            None,
             None,
         )
         .await?;
@@ -3357,6 +3367,7 @@ esac
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
+            None,
         )
         .await?;
 
@@ -3373,9 +3384,163 @@ esac
         Ok(())
     }
 
+    /// An IPv6-only admin response still uses an IPv4 DPU underlay. Its SVI, RA, and host
+    /// route must render without an empty IPv4 static route or BGP network entry.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn stateful_ipv6_only_admin_renders_without_ipv4()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut network_config = netconf(
+            VpcVirtualizationType::Fnn,
+            32,
+            24,
+            false,
+            None,
+            false,
+            false,
+        );
+        network_config.use_admin_network = true;
+        network_config.network_virtualization_type = Some(rpc::VpcVirtualizationType::Fnn.into());
+        network_config.admin_interface = Some(rpc::FlatInterfaceConfig {
+            function_type: rpc::InterfaceFunctionType::Physical.into(),
+            vlan_id: 123,
+            vni: 5555,
+            vpc_vni: 7777,
+            is_l2_segment: true,
+            ipv6_interface_config: Some(rpc::FlatInterfaceIpv6Config {
+                ip: "2001:db8:9::3".to_string(),
+                interface_prefix: "2001:db8:9::3/128".to_string(),
+                svi_ip: Some("2001:db8:9::2/64".to_string()),
+            }),
+            addresses: vec![rpc::InterfaceAddressConfig {
+                address_family: rpc::AddressFamily::V6.into(),
+                ip: "2001:db8:9::3".to_string(),
+                interface_prefix: "2001:db8:9::3/128".to_string(),
+                prefix: "2001:db8:9::/64".to_string(),
+                svi_ip: Some("2001:db8:9::2/64".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let tempdir = tempfile::tempdir()?;
+        let hbn_root = tempdir.path();
+        fs::create_dir_all(hbn_root.join("var/support"))?;
+        fs::create_dir_all(hbn_root.join("etc/cumulus/acl/policy.d"))?;
+
+        assert!(
+            super::update_nvue(
+                VpcVirtualizationType::Fnn,
+                NvueUpdateFlavor::StartupFile {
+                    hbn_root,
+                    skip_post: true,
+                },
+                &network_config,
+                &test_service_addresses(),
+                HBNDeviceNames::hbn_23(),
+                None,
+                None,
+            )
+            .await?
+        );
+        let output = fs::read_to_string(hbn_root.join(nvue::PATH))?;
+        let docs: serde_yaml::Value = serde_yaml::from_str(&output)?;
+        // Compare the full NVUE configuration without pinning insignificant template whitespace.
+        let expected =
+            include_str!("../templates/tests/nvue_startup_fnn_ipv6_only_admin.yaml.expected");
+        assert_eq!(docs, serde_yaml::from_str::<serde_yaml::Value>(expected)?);
+        let set = &docs.as_sequence().expect("two YAML documents")[1]["set"];
+        assert_eq!(
+            set["nve"]["vxlan"]["source"]["address"].as_str(),
+            Some("10.217.5.39")
+        );
+        let vlan = &set["interface"]["vlan123"];
+        assert_eq!(
+            vlan["ip"]["address"],
+            serde_yaml::from_str::<serde_yaml::Value>("2001:db8:9::2/64: {}\n")?
+        );
+        assert_eq!(
+            vlan["ip"]["vrr"]["address"],
+            serde_yaml::from_str::<serde_yaml::Value>("2001:db8:9::/64: {}\n")?
+        );
+
+        let admin_router = &set["vrf"]["vpc_7777"]["router"];
+        assert_eq!(
+            admin_router["static"]["2001:db8:9::3/128"],
+            serde_yaml::from_str::<serde_yaml::Value>(
+                "address-family: ipv6-unicast\nvia:\n  vlan123:\n    type: interface\n"
+            )?
+        );
+        assert!(admin_router["bgp"]["address-family"]["ipv4-unicast"]["network"].is_null());
+        assert_eq!(
+            admin_router["bgp"]["address-family"]["ipv6-unicast"]["network"],
+            serde_yaml::from_str::<serde_yaml::Value>("2001:db8:9::3/128: {}\n")?
+        );
+
+        // DHCPv6 assigns the host /128; RA advertises its containing segment on the SVI.
+        let snippet = set["system"]["config"]["snippet"]["frr.conf"]
+            .as_str()
+            .expect("IPv6-only admin must render RA");
+        assert!(snippet.contains("interface vlan123 vrf vpc_7777"));
+        assert!(snippet.contains("ipv6 nd prefix 2001:db8:9::/64 no-autoconfig"));
+        assert!(
+            snippet
+                .lines()
+                .any(|line| line.trim() == "ipv6 nd managed-config-flag")
+        );
+        assert!(
+            snippet
+                .lines()
+                .any(|line| line.trim() == "ipv6 nd other-config-flag")
+        );
+        assert!(snippet.contains("ipv6 nd rdnss 2001:db8::53 1800"));
+        assert!(snippet.contains("ipv6 nd rdnss 2001:db8::54 1800"));
+
+        // DHCP keeps its IPv4 transport configuration without requiring an IPv4 host binding.
+        let prepared = prepare_dhcp_server_config(
+            &network_config,
+            &test_service_addresses(),
+            &HBNDeviceNames::hbn_23(),
+        )?;
+        assert_eq!(
+            prepared.dhcp.carbide_dhcp_server,
+            Some("10.217.5.39".parse()?)
+        );
+        assert_eq!(
+            prepared.dhcp.carbide_provisioning_server_ipv4,
+            Some("192.0.2.10".parse()?)
+        );
+        let host_config: HostConfig = serde_yaml::from_str(&prepared.host)?;
+        assert_eq!(
+            host_config
+                .host_ip_addresses
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["vlan123"]
+        );
+        let admin_host = &host_config.host_ip_addresses["vlan123"];
+        assert_eq!(
+            (
+                admin_host.address,
+                admin_host.gateway,
+                admin_host.prefix.as_deref()
+            ),
+            (None, None, None)
+        );
+        let admin_ipv6 = admin_host
+            .ipv6
+            .as_ref()
+            .expect("admin DHCP IPv6 host binding");
+        assert_eq!(admin_ipv6.address, Some("2001:db8:9::3".parse()?));
+        assert_eq!(admin_ipv6.prefix, "2001:db8:9::3/128");
+        Ok(())
+    }
+
     /// Verifies a realistic dual-stack admin response drives the existing SVI,
     /// explicit RA target, resolver changes, and complete IPv6 withdrawal.
     /// Host routes must be originated and withdrawn with that state so routed reachability follows it.
+    /// The local FMDS opt-in must also reach the rendered attachment and be
+    /// removable without changing the retained IPv4 peer.
     #[tokio::test]
     async fn stateful_admin_ipv6_reconciles_svi_ra_and_rdnss()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -3397,6 +3562,14 @@ esac
         fs::create_dir_all(hbn_root.join("var/support"))?;
         fs::create_dir_all(hbn_root.join("etc/cumulus/acl/policy.d"))?;
 
+        // Resolve the operator's existing address list before rendering HBN.
+        let agent_config_path = hbn_root.join("agent.toml");
+        fs::write(
+            &agent_config_path,
+            "[fmds-armos-networking.config]\naddresses = [\"169.254.169.254/30\", \"fd00:76b9::254/127\"]",
+        )?;
+        let agent_config =
+            carbide_host_support::agent_config::AgentConfig::load_from(&agent_config_path)?;
         // Render the populated response through the complete update path.
         assert!(
             super::update_nvue(
@@ -3409,6 +3582,7 @@ esac
                 &test_service_addresses(),
                 HBNDeviceNames::hbn_23(),
                 None,
+                agent_config.fmds_armos_networking.ipv6_gateway()?,
             )
             .await?
         );
@@ -3416,6 +3590,8 @@ esac
         let docs: serde_yaml::Value = serde_yaml::from_str(&output)?;
         let set = &docs.as_sequence().expect("two YAML documents")[1]["set"];
         let vlan = &set["interface"]["vlan123"];
+        assert!(set["interface"]["pf0dpu1_if"]["ip"]["address"]["fd00:76b9::255/127"].is_mapping());
+        assert!(set["interface"]["pf0dpu1_if"]["ip"]["address"]["169.254.169.253/30"].is_mapping());
         let snippet = set["system"]["config"]["snippet"]["frr.conf"]
             .as_str()
             .expect("admin RA should render an FRR snippet");
@@ -3546,6 +3722,7 @@ esac
                 &replacement_services,
                 HBNDeviceNames::hbn_23(),
                 None,
+                None,
             )
             .await?
         );
@@ -3553,6 +3730,15 @@ esac
         let replacement_docs: serde_yaml::Value = serde_yaml::from_str(&replacement)?;
         let replacement_set =
             &replacement_docs.as_sequence().expect("two YAML documents")[1]["set"];
+        // Omitted local opt-in removes only the IPv6 FMDS peer on the next render.
+        assert!(
+            replacement_set["interface"]["pf0dpu1_if"]["ip"]["address"]["fd00:76b9::255/127"]
+                .is_null()
+        );
+        assert!(
+            replacement_set["interface"]["pf0dpu1_if"]["ip"]["address"]["169.254.169.253/30"]
+                .is_mapping()
+        );
         let replacement_snippet = replacement_set["system"]["config"]["snippet"]["frr.conf"]
             .as_str()
             .expect("replacement admin RA should render an FRR snippet");
@@ -3626,6 +3812,7 @@ esac
                 &ipv4_only_services,
                 HBNDeviceNames::hbn_23(),
                 None,
+                None,
             )
             .await?
         );
@@ -3667,6 +3854,7 @@ esac
                 &network_config,
                 &ipv4_only_services,
                 HBNDeviceNames::hbn_23(),
+                None,
                 None,
             )
             .await?
@@ -3737,6 +3925,7 @@ esac
                 &test_service_addresses(),
                 HBNDeviceNames::hbn_23(),
                 None,
+                None,
             )
             .await
             .unwrap_err()
@@ -3777,6 +3966,7 @@ esac
             &network_config,
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
+            None,
             None,
         )
         .await?;
@@ -3833,6 +4023,7 @@ esac
             &network_config,
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
+            None,
             None,
         )
         .await?;
@@ -3892,6 +4083,7 @@ esac
             &network_config,
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
+            None,
             None,
         )
         .await?;
@@ -3961,6 +4153,7 @@ esac
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
             None,
+            None,
         )
         .await?;
         assert!(
@@ -4018,6 +4211,7 @@ esac
             &network_config,
             &test_service_addresses(),
             HBNDeviceNames::hbn_23(),
+            None,
             None,
         )
         .await?;
@@ -4087,6 +4281,7 @@ esac
                 &network_config,
                 &test_service_addresses(),
                 HBNDeviceNames::hbn_23(),
+                None,
                 None,
             )
             .await?;
@@ -4614,18 +4809,28 @@ esac
         Ok(())
     }
 
+    /// ETV must render valid YAML without FNN policy objects, so the shared
+    /// fixture cannot silently select the other virtualization template.
     #[test]
     fn test_nvue_is_yaml_etv() -> Result<(), Box<dyn std::error::Error>> {
         test_nvue_is_yaml_inner(false)
     }
 
+    /// FNN must parse its own template, including its underlay export policy;
+    /// parsing ETV output would not protect FNN template syntax.
     #[test]
     fn test_nvue_is_yaml_fnnv() -> Result<(), Box<dyn std::error::Error>> {
         test_nvue_is_yaml_inner(true)
     }
 
+    /// Render the requested virtualization mode and check a distinguishing
+    /// policy node, so YAML validity is proved for the selected template.
     fn test_nvue_is_yaml_inner(is_fnn: bool) -> Result<(), Box<dyn std::error::Error>> {
-        let vpc_virtualization_type = VpcVirtualizationType::EthernetVirtualizer;
+        let vpc_virtualization_type = if is_fnn {
+            VpcVirtualizationType::Fnn
+        } else {
+            VpcVirtualizationType::EthernetVirtualizer
+        };
 
         let network_security_groups = vec![nvue::NetworkSecurityGroup {
             id: "7777f270-dd02-11ef-80d2-9f8689fc7df7".to_string(),
@@ -4723,6 +4928,8 @@ esac
                 ip: "10.217.4.70".to_string(),
                 ipv6_vlan_config: None,
             }],
+            // Global and per-VPC targets each contribute a separate rendered
+            // entry, so use distinct values in this YAML syntax fixture.
             ct_routing_profile: Some(nvue::RoutingProfile {
                 tenant_leak_communities_accepted: false,
                 leak_default_route_from_underlay: false,
@@ -4731,11 +4938,11 @@ esac
                 allowed_anycast_prefixes: vec!["5.255.254.0/24".to_string()],
                 route_target_imports: vec![nvue::RouteTargetConfig {
                     asn: 44444,
-                    vni: 55555,
+                    vni: 55556,
                 }],
                 route_targets_on_exports: vec![nvue::RouteTargetConfig {
                     asn: 11415,
-                    vni: 200,
+                    vni: 201,
                 }],
             }),
 
@@ -4762,17 +4969,19 @@ esac
             network_security_groups,
             is_dpu_os: true,
             fmds_gateway_vlan: None,
+            fmds_ipv6_gateway: None,
         };
         let startup_yaml = nvue::build(conf)?;
 
-        const ERR_FILE: &str = "/tmp/test_nvue_startup.yaml";
         let yaml_obj: Vec<serde_yaml::Value> = serde_yaml::from_str(&startup_yaml)
-            .inspect_err(|_| {
-                let mut f = fs::File::create(ERR_FILE).unwrap();
-                f.write_all(startup_yaml.as_bytes()).unwrap();
-            })
-            .wrap_err(format!("YAML parser error. output written to {ERR_FILE}"))?;
+            .wrap_err_with(|| format!("failed to parse rendered NVUE YAML:\n{startup_yaml}"))?;
         assert_eq!(yaml_obj.len(), 2); // 'header' and 'set'
+        assert_eq!(
+            yaml_obj[1]["set"]["router"]["policy"]["prefix-list"]["ALLOW_TO_UNDERLAY_PREFIX_LIST"]
+                .is_mapping(),
+            is_fnn,
+            "the requested virtualization mode must select its own template"
+        );
         Ok(())
     }
 

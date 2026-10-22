@@ -26,7 +26,8 @@ use nv_redfish::bmc_http::{
 };
 use nv_redfish::core::upload::{MultipartUpdateRequest, UploadReader};
 use nv_redfish::core::{
-    BmcError, BmcErrorClass, BoxTryStream, ModificationResponse, ODataETag, SessionCreateResponse,
+    BmcError, BmcErrorClass, BoxTryStream, ModificationResponse, ODataETag, Repair,
+    SessionCreateResponse,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -160,6 +161,7 @@ impl HttpClient for AxumRouterHttpClient {
         credentials: &BmcCredentials,
         _: Option<ODataETag>,
         custom_headers: &HeaderMap,
+        repair: &impl Repair,
     ) -> Result<T, Self::Error>
     where
         T: DeserializeOwned,
@@ -175,7 +177,8 @@ impl HttpClient for AxumRouterHttpClient {
                 text: String::from_utf8_lossy(&bytes).to_string(),
             });
         }
-        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(Error::Json)?;
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).map_err(Error::Json)?;
+        repair.repair(&mut value);
         serde_json::from_value(value).map_err(Error::Json)
     }
 
@@ -272,30 +275,32 @@ impl HttpClient for AxumRouterHttpClient {
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::{Check, check_values};
 
     use super::*;
 
     #[test]
     fn bmc_error_classification_distinguishes_http_and_parse_failures() {
         let cases = [
-            Check {
-                scenario: "server failure must not be skipped as an unclassified account slot",
-                input: Error::InvalidResponse {
+            (
+                "server failure must not be skipped as an unclassified account slot",
+                Error::InvalidResponse {
                     url: Url::parse("http://bmc.example/redfish/v1/AccountService/Accounts/1")
                         .unwrap(),
                     status: StatusCode::SERVICE_UNAVAILABLE,
                     text: String::new(),
                 },
-                expect: BmcErrorClass::HttpResponse { status: 503 },
-            },
-            Check {
-                scenario: "malformed response",
-                input: Error::Json(serde_json::from_str::<bool>("invalid").unwrap_err()),
-                expect: BmcErrorClass::ResponseParse,
-            },
+                BmcErrorClass::HttpResponse { status: 503 },
+            ),
+            (
+                "malformed response",
+                Error::Json(serde_json::from_str::<bool>("invalid").unwrap_err()),
+                BmcErrorClass::ResponseParse,
+            ),
         ];
 
-        check_values(cases, |error| error.error_class());
+        for (scenario, error, expected) in cases {
+            let actual = error.error_class();
+            assert_eq!(actual, expected, "{scenario}");
+        }
     }
 }

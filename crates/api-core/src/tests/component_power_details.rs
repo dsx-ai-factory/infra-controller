@@ -32,6 +32,7 @@ use mac_address::MacAddress;
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::expected_machine::ExpectedMachineData;
 use model::expected_power_shelf::ExpectedPowerShelf;
+use model::expected_switch::ExpectedSwitch;
 use model::hardware_info::{DmiData, HardwareInfo};
 use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
 use model::machine_interface_address::MachineInterfaceAssociation;
@@ -1843,7 +1844,7 @@ async fn rms_switch_and_shelf_reads_use_their_roles_without_host_policy(
     let expected_switch = create_expected_switch(&mut txn, 0).await;
     let incomplete_switch = create_expected_switch(&mut txn, 1).await;
     let switch_mac = expected_switch.bmc_mac_address;
-    let nvos_mac = expected_switch.nvos_mac_addresses[0];
+    let nvos_mac = expected_switch.nvos_mac_addresses()[0];
     for (id, expected) in [
         (switch_id, Some(&expected_switch)),
         (incomplete_switch_id, Some(&incomplete_switch)),
@@ -1887,10 +1888,12 @@ async fn rms_switch_and_shelf_reads_use_their_roles_without_host_policy(
     }
     // The second switch has a valid BMC but no NVOS endpoint. Its NVOS
     // credentials are also withheld for a separate check after discovery.
-    db::expected_switch::update_nvos_mac_addresses(
+    db::expected_switch::update(
         &mut txn,
-        incomplete_switch.bmc_mac_address,
-        &[],
+        &ExpectedSwitch {
+            nvos_interfaces: Vec::new(),
+            ..incomplete_switch.clone()
+        },
     )
     .await?;
     let switch_ip = management_ip(&mut txn, switch_mac).await?;
@@ -2230,12 +2233,7 @@ async fn rms_switch_and_shelf_reads_use_their_roles_without_host_policy(
     }
 
     let mut txn = pool.begin().await?;
-    db::expected_switch::update_nvos_mac_addresses(
-        &mut txn,
-        incomplete_switch.bmc_mac_address,
-        &incomplete_switch.nvos_mac_addresses,
-    )
-    .await?;
+    db::expected_switch::update(&mut txn, &incomplete_switch).await?;
     txn.commit().await?;
     let mut api = api_with_rms(&env, pool.clone(), profiles, PowerRole::Switch);
     api.credential_manager = credentials;
@@ -2445,7 +2443,8 @@ async fn tracked_actions_are_independent_of_live_reads_and_reject_invalid_storag
             }),
             rpc::ComponentPowerErrorCode::Disabled,
         ),
-        // Switch needs a strict pending read despite its permissive shared decoder.
+        // `db::switch::find_by` rejects malformed maintenance JSON before
+        // `db::switch::find_maintenance_requests` runs.
         (
             "switch",
             "UPDATE switches SET controller_state = $1, switch_maintenance_requested = $2 WHERE id::text = $3",
@@ -2455,7 +2454,8 @@ async fn tracked_actions_are_independent_of_live_reads_and_reject_invalid_storag
             }),
             rpc::ComponentPowerErrorCode::EndpointUnavailable,
         ),
-        // Shelf has a separate SQL path with the same potential silent decode loss.
+        // `db::power_shelf::find_by` rejects malformed maintenance JSON before
+        // `db::power_shelf::find_maintenance_requests` runs.
         (
             "shelf",
             "UPDATE power_shelves SET controller_state = $1, power_shelf_maintenance_requested = $2 WHERE id::text = $3",

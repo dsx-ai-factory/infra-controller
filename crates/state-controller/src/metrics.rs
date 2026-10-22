@@ -46,6 +46,8 @@ pub struct CommonObjectHandlerMetrics<IO: StateControllerIO> {
     /// A prerequisite or final state write rejected this iteration. No transition
     /// committed, and the object should be reprocessed promptly with fresh state.
     pub iteration_invalidated: bool,
+    /// The handler committed a Wait that requests another iteration without a state transition.
+    pub requeue_immediately: bool,
     /// The time the object was in `initial_state` at the start of the iteration
     pub time_in_state: Duration,
     /// Whether the object was in `initial_state` for longer than allowed by the SLA
@@ -68,6 +70,7 @@ impl<IO: StateControllerIO> Default for CommonObjectHandlerMetrics<IO> {
             initial_state: None,
             next_state: None,
             iteration_invalidated: false,
+            requeue_immediately: false,
             handler_latency: Duration::from_secs(0),
             time_in_state: Duration::from_secs(0),
             time_in_state_above_sla: false,

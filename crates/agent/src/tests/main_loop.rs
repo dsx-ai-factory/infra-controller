@@ -17,6 +17,105 @@
 
 use super::*;
 
+#[path = "fmds_routing.rs"]
+mod fmds_routing;
+
+/// IPv6 tenant prefixes must produce replies from FMDS's configured endpoint,
+/// not its link-local address, without changing IPv4 or enabling IPv6 by default.
+#[test]
+fn fmds_reply_routes_preserve_ipv4_and_use_the_ipv6_metadata_source() {
+    use forge_dpu_agent_utils::FMDS_IPV6_GATEWAY;
+
+    let mut config = comparison_network_config();
+    config.tenant_interfaces = vec![comparison_interface("metadata-host", 274, 1001)];
+    // A routing-only loopback has no tenant subnet and must not create a reply route.
+    config.tenant_interfaces[0]
+        .addresses
+        .push(rpc::InterfaceAddressConfig {
+            address_family: rpc::AddressFamily::V6.into(),
+            tenant_vrf_loopback_ip: Some("2001:db8:ffff::1".to_string()),
+            ..Default::default()
+        });
+    let prefixes = fmds_tenant_routes(&config).expect("tenant prefixes");
+    assert_eq!(
+        prefixes,
+        vec![
+            "10.0.0.0/24".parse::<IpNetwork>().expect("IPv4 prefix"),
+            "2001:db8::/127".parse::<IpNetwork>().expect("IPv6 prefix"),
+        ]
+    );
+
+    // The link-local address comes first, as it can on a real interface. IPv4
+    // deliberately differs from the default to protect its existing override.
+    let mut interfaces: Vec<IpInterface> = serde_json::from_value(serde_json::json!([{
+        "ifindex": 7, "ifname": "fmds0", "flags": ["UP"], "mtu": 1500,
+        "qdisc": "noqueue", "operstate": "UP", "group": "default",
+        "address": "02:00:00:00:00:07", "broadcast": "ff:ff:ff:ff:ff:ff",
+        "addr_info": [
+            {"family": "inet6", "local": "fe80::7", "prefixlen": 64,
+             "scope": "link", "valid_life_time": 4294967295_u32,
+             "preferred_life_time": 4294967295_u32},
+            {"family": "inet", "local": "169.254.169.250", "prefixlen": 29,
+             "scope": "global", "valid_life_time": 4294967295_u32,
+             "preferred_life_time": 4294967295_u32},
+            {"family": "inet6", "local": "fd00:76b9::254", "prefixlen": 127,
+             "scope": "global", "valid_life_time": 4294967295_u32,
+             "preferred_life_time": 4294967295_u32}
+        ]
+    }]))
+    .expect("observed interface");
+    let gateway = Ipv6Network::new(FMDS_IPV6_GATEWAY, 127).expect("metadata peer");
+    let routes = fmds_reply_routes("fmds0", &interfaces, &prefixes, Some(gateway))
+        .expect("dual-stack reply routes");
+    assert_eq!(routes.len(), 2);
+    assert_eq!(
+        routes[0].prefsrc,
+        Some("169.254.169.250".parse().expect("IPv4 source"))
+    );
+    assert_eq!(
+        routes[0].gateway,
+        Some("169.254.169.253".parse().expect("IPv4 peer"))
+    );
+    assert_eq!(routes[1].dst, prefixes[1]);
+    assert_eq!(routes[1].prefsrc, Some(IpAddr::V6(FMDS_IPV6_ADDRESS)));
+    assert_eq!(routes[1].gateway, Some(IpAddr::V6(FMDS_IPV6_GATEWAY)));
+    assert!(
+        routes
+            .iter()
+            .all(|route| route.dev.as_deref() == Some("fmds0"))
+    );
+
+    // An IPv6 tenant does not itself enable metadata transport on older deployments.
+    assert_eq!(
+        fmds_reply_routes("fmds0", &interfaces, &prefixes, None).expect("IPv4-only opt-out"),
+        vec![routes[0].clone()],
+    );
+
+    // Omitting IPv4 on the metadata link must retain the old skip behavior,
+    // independently of whether the tenant configuration still lists IPv4.
+    interfaces[0]
+        .addr_info
+        .retain(|address| address.local.is_ipv6());
+    assert_eq!(
+        fmds_reply_routes("fmds0", &interfaces, &prefixes, Some(gateway))
+            .expect("IPv6-only metadata link"),
+        vec![routes[1].clone()],
+    );
+
+    // An explicitly enabled endpoint must be installed before acknowledging the
+    // routes; falling back to the remaining link-local address would hide failure.
+    interfaces[0]
+        .addr_info
+        .retain(|address| address.local != IpAddr::V6(FMDS_IPV6_ADDRESS));
+    let error = fmds_reply_routes("fmds0", &interfaces, &prefixes, Some(gateway))
+        .expect_err("missing enabled metadata source");
+    assert!(
+        error
+            .to_string()
+            .contains("fmds0 has no metadata source address for 2001:db8::/127")
+    );
+}
+
 #[test]
 fn ipv6_only_network_requires_dhcp_acceptance() {
     for (scenario, loopback, dhcp_changed, expected_error) in [

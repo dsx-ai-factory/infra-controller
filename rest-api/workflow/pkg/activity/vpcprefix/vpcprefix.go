@@ -567,7 +567,9 @@ func getControllerVpcPrefixStatus(status *corev1.VpcPrefixStatus) (string, strin
 	case corev1.TenantState_TERMINATING:
 		return cdbm.VpcPrefixStatusDeleting, "VPC Prefix is being deleted on Site"
 	case corev1.TenantState_TERMINATED:
-		return cdbm.VpcPrefixStatusDeleted, "VPC Prefix has been deleted on Site"
+		// A terminated prefix that the Site still lists in inventory is not gone yet;
+		// the row is removed once inventory omits it, so it stays Deleting until then.
+		return cdbm.VpcPrefixStatusDeleting, "VPC Prefix is deleted on Site, pending removal from inventory"
 	case corev1.TenantState_FAILED:
 		return cdbm.VpcPrefixStatusError, "VPC Prefix is in error state"
 	default:

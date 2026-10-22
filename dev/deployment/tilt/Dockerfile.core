@@ -65,6 +65,14 @@ RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked
     && mkdir -p /out \
     && cp /cargo-target/release/mat-protocol-gateway /out/mat-protocol-gateway
 
+FROM source AS nico-postgres-exporter-builder
+
+RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+    cargo build --locked --release -p nico-postgres-exporter --bin nico-postgres-exporter \
+    && mkdir -p /out \
+    && cp /cargo-target/release/nico-postgres-exporter /out/nico-postgres-exporter
+
 FROM nico-tilt-runtime-base AS api
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -130,5 +138,8 @@ COPY --from=ssh-console-builder /out/ssh-console /opt/carbide/ssh-console
 FROM nico-tilt-runtime-base AS mat-protocol-gateway
 
 COPY --from=mat-protocol-gateway-builder /out/mat-protocol-gateway /mat-protocol-gateway
+
+FROM nico-tilt-runtime-base AS nico-postgres-exporter
+COPY --from=nico-postgres-exporter-builder /out/nico-postgres-exporter /usr/local/bin/nico-postgres-exporter
 
 USER 65534:65534

@@ -320,7 +320,7 @@ impl InternalRBACRules {
         x.perm("DeleteTenantKeyset", vec![SiteAgent]);
         x.perm("ValidateTenantPublicKey", vec![SiteAgent, Ssh, SshRs]);
         x.perm("GetBmcCredentials", vec![Health, BmcProxy]);
-        x.perm("GetSwitchNvosCredentials", vec![Health]);
+        x.perm("GetSwitchNvosCredentials", vec![Health, BmcProxy]);
         x.perm("GetAllManagedHostNetworkStatus", vec![ForgeAdminCLI]);
         x.perm(
             "GetSiteExplorationReport",
@@ -720,6 +720,8 @@ impl InternalRBACRules {
         x.perm("FindNicFirmwareSiteSelectionIds", vec![ForgeAdminCLI]);
         x.perm("FindNicFirmwareSiteSelectionsByIds", vec![ForgeAdminCLI]);
         x.perm("SetMachineNicFirmwareConfig", vec![ForgeAdminCLI]);
+        x.perm("GetTenantNicFirmwareConfig", vec![ForgeAdminCLI]);
+        x.perm("SetTenantNicFirmwareConfig", vec![ForgeAdminCLI]);
         x.perm("GetDesiredNicFirmware", vec![ForgeAdminCLI]);
         x.perm("CreateSku", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GenerateSkuFromMachine", vec![ForgeAdminCLI]);
@@ -888,7 +890,7 @@ impl InternalRBACRules {
         );
         x.perm(
             "FindSwitchIds",
-            vec![ForgeAdminCLI, Machineatron, Flow, Health],
+            vec![ForgeAdminCLI, Machineatron, Flow, Health, BmcProxy],
         );
         x.perm(
             "FindSwitchesByIds",
@@ -957,6 +959,11 @@ impl InternalRBACRules {
             "DeleteAllExpectedRacks",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
+        x.perm("CreateExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("DeleteExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("GetExpectedNvLinkDomain", vec![ForgeAdminCLI, Flow]);
+        x.perm("FindExpectedNvLinkDomainIds", vec![ForgeAdminCLI, Flow]);
+        x.perm("FindExpectedNvLinkDomainsByIds", vec![ForgeAdminCLI, Flow]);
         x.perm(
             "AddExpectedRackGroup",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
@@ -1355,8 +1362,36 @@ mod rbac_rule_tests {
         );
     }
 
+    /// SiteAgent can allocate and configure instances without firmware-setting
+    /// privileges; Core obtains those settings from stored operator selections.
+    #[test]
+    fn site_agent_can_allocate_without_firmware_privileges() {
+        let site_agent = Principal::SpiffeServiceIdentifier("elektra-site-agent".into());
+        for method in [
+            "AllocateInstance",
+            "AllocateInstances",
+            "UpdateInstanceConfig",
+        ] {
+            assert!(
+                InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&site_agent),),
+                "{method} remains available to SiteAgent"
+            );
+        }
+    }
+
+    /// Firmware configuration stays operator-only, including tenant selections
+    /// that ordinary tenant callers must neither read nor change.
     #[test]
     fn nic_firmware_profile_operator_permissions() {
+        // Check the complete grant set for the tenant NIC firmware methods so
+        // service or anonymous grants cannot hide behind the sampled callers below.
+        let operator_principals = RuleInfo::new(vec![ForgeAdminCLI]).principals;
+        for method in ["GetTenantNicFirmwareConfig", "SetTenantNicFirmwareConfig"] {
+            assert_eq!(
+                INTERNAL_RBAC_RULES.perms[method].principals, operator_principals,
+                "{method} must remain operator-only"
+            );
+        }
         for (principal, allowed) in [
             (
                 Principal::ExternalUser(ExternalUserInfo::new(
@@ -1382,6 +1417,8 @@ mod rbac_rule_tests {
                 "FindNicFirmwareSiteSelectionIds",
                 "FindNicFirmwareSiteSelectionsByIds",
                 "SetMachineNicFirmwareConfig",
+                "GetTenantNicFirmwareConfig",
+                "SetTenantNicFirmwareConfig",
                 "GetDesiredNicFirmware",
             ] {
                 assert_eq!(
@@ -1511,6 +1548,37 @@ mod rbac_rule_tests {
                 None,
             ))],
         ));
+    }
+
+    #[test]
+    fn expected_nvlink_domain_inventory_allows_admin_and_flow() {
+        use carbide_test_support::{Check, check_values};
+
+        let principals = [
+            Principal::ExternalUser(ExternalUserInfo::new(None, "nico-admin-cli".into(), None)),
+            Principal::SpiffeServiceIdentifier("nico-flow".into()),
+            Principal::SpiffeServiceIdentifier("elektra-site-agent".into()),
+            Principal::SpiffeServiceIdentifier("unlisted".into()),
+        ];
+        check_values(
+            [
+                "CreateExpectedNvLinkDomain",
+                "DeleteExpectedNvLinkDomain",
+                "GetExpectedNvLinkDomain",
+                "FindExpectedNvLinkDomainIds",
+                "FindExpectedNvLinkDomainsByIds",
+            ]
+            .map(|method| Check {
+                scenario: method,
+                input: method,
+                expect: [true, true, false, false],
+            }),
+            |method| {
+                principals.each_ref().map(|principal| {
+                    InternalRBACRules::allowed_from_static(method, std::slice::from_ref(principal))
+                })
+            },
+        );
     }
 
     #[test]
@@ -1763,7 +1831,12 @@ mod rbac_rule_tests {
             "MachineSetAutoUpdate",
             &[Principal::SpiffeServiceIdentifier("nico-flow".to_string())]
         ));
-        for method in ["FindMacAddressByBmcIp", "GetBmcCredentials"] {
+        for method in [
+            "FindMacAddressByBmcIp",
+            "GetBmcCredentials",
+            "FindSwitchIds",
+            "GetSwitchNvosCredentials",
+        ] {
             assert!(
                 InternalRBACRules::allowed_from_static(
                     method,

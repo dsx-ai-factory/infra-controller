@@ -84,6 +84,7 @@ pub(crate) fn node_info(node_id: &str, mac: &str) -> rms::NodeInfo {
 
 pub(crate) fn node_info_in_rack(rack_id: &str, node_id: &str, mac: &str) -> rms::NodeInfo {
     rms::NodeInfo {
+        additional_host_endpoints: Vec::new(),
         node_id: node_id.to_string(),
         rack_id: rack_id.to_string(),
         // Left unset: the mock matches on address, not on declared type.

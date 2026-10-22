@@ -805,7 +805,7 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupStatusInDB(t *testing.T) {
 				assert.Equal(t, cdbm.SSHKeyGroupStatusSynced, uskg.Status)
 			}
 			if tt.args.expectSSHKeyGroupDelete {
-				assert.Error(t, cdb.ErrDoesNotExist)
+				assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
 				assert.Nil(t, uskg)
 
 				// Verify all SSHKeyAssociations are deleted
@@ -1248,11 +1248,11 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 
 			if tt.deletedKeyset != nil {
 				_, err = sshKeyGroupDAO.GetByID(ctx, nil, tt.deletedKeyset.ID, nil)
-				assert.Error(t, cdb.ErrDoesNotExist)
+				assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
 				// Parent SSHKeyGroup should be deleted as it was in deleting state
 				skgDAO := cdbm.NewSSHKeyGroupDAO(dbSession)
 				_, err = skgDAO.GetByID(ctx, nil, tt.deletedKeyset.SSHKeyGroupID, nil)
-				assert.Error(t, cdb.ErrDoesNotExist)
+				assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
 			}
 		})
 	}
@@ -1459,15 +1459,10 @@ func TestSSHKeyAssociationNoPaginator(t *testing.T) {
 
 	// Build number of ssh keys paginator + 1.
 	expectedKeysNumber := cdbp.DefaultLimit + 1
-	expectedPublicKeys := []*corev1.TenantPublicKey{}
 	for i := 0; i < expectedKeysNumber; i++ {
 		name := fmt.Sprintf("test%v", i)
 		sshKey := util.TestBuildSSHKey(t, dbSession, name, tn, name, tnu)
 		assert.NotNil(t, sshKey)
-		expectedPublicKeys = append(expectedPublicKeys, &corev1.TenantPublicKey{
-			PublicKey: name,
-			Comment:   &name,
-		})
 		ska := util.TestBuildSSHKeyAssociation(t, dbSession, skg.ID, sshKey.ID, tnu.ID)
 		assert.NotNil(t, ska)
 	}

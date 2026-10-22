@@ -83,7 +83,8 @@ fn provisioning_mock_with_dpu_count(
     dpu_count: usize,
 ) -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
-    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_device()
+        .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));
@@ -113,7 +114,7 @@ async fn test_missing_dpf_credential_retries_registration(pool: sqlx::PgPool) {
     let mut mock = MockDpfOperations::new();
 
     let credential_available_for_mock = credential_available.clone();
-    mock.expect_register_dpu_device().returning(move |_, _| {
+    mock.expect_register_dpu_device().returning(move |_, _, _| {
         if credential_available_for_mock.load(Ordering::SeqCst) {
             Ok(())
         } else {
@@ -214,7 +215,8 @@ fn source_deployment_mock_with_verification_observer(
     observer: impl Fn(DpuDeploymentType) + Send + Sync + 'static,
 ) -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
-    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_device()
+        .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));
@@ -836,10 +838,11 @@ fn capturing_mock(
     let mut mock = MockDpfOperations::new();
     expect_dpf_service_inventory(&mut mock);
 
-    mock.expect_register_dpu_device().returning(move |info, _| {
-        registered_devices.lock().unwrap().push(info.device_id);
-        Ok(())
-    });
+    mock.expect_register_dpu_device()
+        .returning(move |info, _, _| {
+            registered_devices.lock().unwrap().push(info.device_id);
+            Ok(())
+        });
 
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
@@ -942,7 +945,8 @@ async fn test_gb200_b3240_pair_uses_specialized_deployment_from_report_or_rack(p
 
     let mut mock = MockDpfOperations::new();
     expect_dpf_service_inventory(&mut mock);
-    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_device()
+        .returning(|_, _, _| Ok(()));
     let registered_deployments_for_mock = registered_deployments.clone();
     mock.expect_register_dpu_node().returning(move |info| {
         registered_deployments_for_mock
@@ -1139,7 +1143,8 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
 
     let mut mock = MockDpfOperations::new();
     expect_dpf_service_inventory(&mut mock);
-    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_device()
+        .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     let released_holds_for_mock = released_holds.clone();
     mock.expect_release_maintenance_hold().returning(move |_| {
@@ -1636,7 +1641,7 @@ async fn test_mixed_dpu_deployment_types_fail_without_registration(pool: sqlx::P
     let mut mock = MockDpfOperations::new();
     expect_dpf_service_inventory(&mut mock);
     let registered_devices_for_mock = registered_devices.clone();
-    mock.expect_register_dpu_device().returning(move |_, _| {
+    mock.expect_register_dpu_device().returning(move |_, _, _| {
         registered_devices_for_mock.fetch_add(1, Ordering::SeqCst);
         Ok(())
     });

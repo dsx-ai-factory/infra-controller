@@ -25,6 +25,9 @@ use sqlx::{FromRow, Row};
 
 use crate::metadata::Metadata;
 
+#[cfg(test)]
+mod test_decode;
+
 pub struct RemediationApplicationStatus {
     pub succeeded: bool,
     pub metadata: Option<Metadata>,
@@ -71,6 +74,11 @@ impl Display for Reviewer {
     }
 }
 
+/// `Remediation` describes a DPU repair script and its review metadata.
+///
+/// Queries must include all columns read by `FromRow`, even for optional values.
+/// SQL `NULL` means an optional value is absent; omitted columns and incompatible
+/// values return SQLx errors.
 #[derive(Debug, Clone)]
 pub struct Remediation {
     pub id: RemediationId,
@@ -86,9 +94,9 @@ pub struct Remediation {
 impl<'r> FromRow<'r, PgRow> for Remediation {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         let metadata_labels: Option<sqlx::types::Json<HashMap<String, String>>> =
-            row.try_get("metadata_labels").ok();
-        let metadata_name: Option<String> = row.try_get("metadata_name").ok();
-        let metadata_description: Option<String> = row.try_get("metadata_description").ok();
+            row.try_get("metadata_labels")?;
+        let metadata_name: Option<String> = row.try_get("metadata_name")?;
+        let metadata_description: Option<String> = row.try_get("metadata_description")?;
 
         let metadata = if metadata_name
             .as_ref()
@@ -112,7 +120,7 @@ impl<'r> FromRow<'r, PgRow> for Remediation {
             None
         };
 
-        let reviewer: Option<String> = row.try_get("script_reviewed_by").ok();
+        let reviewer: Option<String> = row.try_get("script_reviewed_by")?;
         let author: String = row.try_get("script_author")?;
 
         Ok(Self {
@@ -137,6 +145,10 @@ pub struct NewAppliedRemediation {
 }
 
 /// `AppliedRemediation` records one DPU remediation attempt in `applied_dpu_remediations`.
+///
+/// `FromRow` requires `status` in the query result. SQL `NULL` or an empty object
+/// yields an empty status map; missing columns or values that cannot decode as a
+/// string map return SQLx errors.
 #[derive(Clone, Debug, carbide_macros::DbTable)]
 #[db_table(name = "applied_dpu_remediations")]
 pub struct AppliedRemediation {
@@ -150,7 +162,7 @@ pub struct AppliedRemediation {
 
 impl<'r> FromRow<'r, PgRow> for AppliedRemediation {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
-        let status: Option<sqlx::types::Json<HashMap<String, String>>> = row.try_get("status").ok();
+        let status: Option<sqlx::types::Json<HashMap<String, String>>> = row.try_get("status")?;
         let status = status.map(|x| x.0).unwrap_or_default();
 
         Ok(Self {

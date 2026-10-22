@@ -29,10 +29,14 @@ use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use db::TransactionVending;
 use libredfish::SystemPowerControl;
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
+use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{DpfState, DpuInitState, ManagedHostState, PerformPowerOperation};
 use tokio::time::timeout;
 
-use super::{dpf_config, expect_dpf_service_inventory, get_host_state};
+use super::{
+    assert_provisioning_suppressed, dpf_config, expect_dpf_service_inventory, get_host_state,
+};
 use crate::tests::common::api_fixtures::{
     TestEnvOverrides, create_managed_host, create_managed_host_with_dpf,
     create_test_env_with_overrides, get_config, reboot_completed,
@@ -56,7 +60,8 @@ fn dpf_left_operator_provisioning_substates(host: &ManagedHostState) -> bool {
 /// Does NOT set up `get_dpu_phase` -- each test configures it to control the
 /// DPU CR phase (the authoritative readiness signal).
 fn expect_provisioning(mock: &mut MockDpfOperations) {
-    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_device()
+        .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_deployment_type_for_dpu()
         .returning(move |__, _| Ok(DpuDeploymentType::Bf3));
@@ -80,6 +85,7 @@ async fn reset_host_to_dpf_state(
     let state_json = serde_json::to_value(&state).unwrap();
     let version = format!("V999-T{}", chrono::Utc::now().timestamp_micros());
 
+    let mut txn = pool.begin().await.unwrap();
     sqlx::query(
         "UPDATE machines SET \
             controller_state = $1, \
@@ -93,9 +99,36 @@ async fn reset_host_to_dpf_state(
     .bind(sqlx::types::Json(&state_json))
     .bind(&version)
     .bind(host_id)
-    .execute(pool)
+    .execute(txn.as_mut())
     .await
     .unwrap();
+    if state.suppresses_exploration_for_dpf() {
+        let host = db::machine::find_one(txn.as_mut(), host_id, Default::default())
+            .await
+            .unwrap()
+            .unwrap();
+        let dpu = db::machine::find_one(txn.as_mut(), dpu_id, Default::default())
+            .await
+            .unwrap()
+            .unwrap();
+        for mac in [
+            host.status.bmc_info.mac.unwrap(),
+            dpu.status.bmc_info.mac.unwrap(),
+        ] {
+            db::bmc_suppression::upsert(
+                txn.as_mut(),
+                &NewBmcSuppression {
+                    bmc_mac_address: mac,
+                    subsystem: BmcSuppressionSubsystem::SiteExplorer,
+                    source: BmcSuppressionSource::DpfProvisioning,
+                    reason: "provisioning fixture".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+    }
+    txn.commit().await.unwrap();
 }
 
 /// Restores WaitingForReady so tests can replay operator readiness and reboot
@@ -169,6 +202,8 @@ async fn test_waiting_for_ready_reboot_flow(pool: sqlx::PgPool) {
     .await
     .expect("timed out during state controller iterations");
 
+    assert_provisioning_suppressed(&env, &mh, true).await;
+
     let actions = env
         .redfish_sim
         .actions_since(&redfish_timepoint)
@@ -201,6 +236,7 @@ async fn test_waiting_for_ready_reboot_flow(pool: sqlx::PgPool) {
         "Host should have left DPF operator substates after DeviceReady, got: {:?}",
         host
     );
+    assert_provisioning_suppressed(&env, &mh, false).await;
 }
 
 /// WaitingForReady without reboot: enters maintenance, releases hold,
@@ -257,6 +293,41 @@ async fn test_waiting_for_ready_no_reboot(pool: sqlx::PgPool) {
         host
     );
 
+    assert_provisioning_suppressed(&env, &mh, true).await;
+
+    // A wait must not recreate suppression removed by another writer.
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let version_before_wait = host.state.version;
+    db::bmc_suppression::delete_many_for_source(
+        txn.as_mut(),
+        &[
+            host.status.bmc_info.mac.unwrap(),
+            dpu.status.bmc_info.mac.unwrap(),
+        ],
+        BmcSuppressionSubsystem::SiteExplorer,
+        BmcSuppressionSource::DpfProvisioning,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    assert_eq!(host.state.version, version_before_wait);
+    assert!(
+        matches!(
+            &host.controller_state_outcome,
+            Some(PersistentStateHandlerOutcome::Wait { reason, .. })
+                if reason == "Waiting for DPU to reach Ready phase"
+        ),
+        "unexpected outcome: {:?}",
+        host.controller_state_outcome
+    );
+    txn.commit().await.unwrap();
+    assert_provisioning_suppressed(&env, &mh, false).await;
+
     dpu_ready.store(true, Ordering::SeqCst);
 
     timeout(TEST_TIMEOUT, async {
@@ -272,6 +343,7 @@ async fn test_waiting_for_ready_no_reboot(pool: sqlx::PgPool) {
         "Host should have left DPF operator substates after DeviceReady, got: {:?}",
         host
     );
+    assert_provisioning_suppressed(&env, &mh, false).await;
 }
 
 /// Regression for the reprovision race: after `reprovision_dpu` deletes the DPU

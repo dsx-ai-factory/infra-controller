@@ -912,6 +912,7 @@ mod tests {
             instance_type_id: None,
             metadata: Metadata::default(),
             config,
+            nic_firmware_snapshot: None,
             config_version: ConfigVersion::initial(),
             network_config_version: ConfigVersion::initial(),
             ib_config_version: ConfigVersion::initial(),

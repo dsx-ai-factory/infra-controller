@@ -16,6 +16,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 )
@@ -82,7 +83,7 @@ func TestFullIntegration(t *testing.T) {
 // TestOriginalBehaviorMatch verifies that the wrapper behaves exactly like the original
 // for all the original test cases
 func TestOriginalBehaviorMatch(t *testing.T) {
-	provider := trace.NewNoopTracerProvider()
+	provider := noop.NewTracerProvider()
 	setGlobalPropagator(t, propagation.TraceContext{})
 
 	tests := []struct {

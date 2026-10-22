@@ -14,7 +14,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+pub mod allocation;
 pub mod binding;
+pub mod remote;
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -40,7 +42,7 @@ use tokio::sync::oneshot;
 use super::BIND_LIMIT;
 use crate::config_drift::{ConfigDefinitionDrifted, ConfigDriftKind, ConfigResourceKind};
 use crate::db_read::DbReader;
-use crate::{ConditionalWrite, DatabaseError};
+use crate::{ConditionalWrite, DatabaseError, Transaction};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
 pub(crate) enum ResourcePoolOperation {
@@ -273,6 +275,10 @@ where
 /// An omitted `requested_value` requires `auto_assign=true`; an exact request
 /// requires `auto_assign=false`. Use [`allocate_exact`] when an exact request
 /// may claim a free value from either partition.
+///
+/// The allocation statement also inserts the shared [`allocation`] record,
+/// including on an autocommit connection. If that record cannot be written, the
+/// inventory write rolls back too.
 pub async fn allocate<T>(
     value: &ResourcePool<T>,
     txn: &mut PgConnection,
@@ -288,7 +294,7 @@ where
 
     let query = "
 WITH allocate AS (
- SELECT id, value FROM resource_pool
+ SELECT id FROM resource_pool
     WHERE
         name = $1
         AND state = $2
@@ -299,13 +305,24 @@ WITH allocate AS (
     ORDER BY random()
     LIMIT 1
     FOR UPDATE SKIP LOCKED
+), allocated AS (
+    UPDATE resource_pool SET
+        state=$3,
+        allocated=NOW()
+    FROM allocate
+    WHERE resource_pool.id = allocate.id
+    RETURNING resource_pool.id, resource_pool.name, resource_pool.value,
+        resource_pool.value_type, resource_pool.state, resource_pool.auto_assign,
+        resource_pool.allocated
 )
-UPDATE resource_pool SET
-    state=$3,
-    allocated=NOW()
-FROM allocate
-WHERE resource_pool.id = allocate.id
-RETURNING allocate.value
+INSERT INTO resource_pool_allocations (
+    pool_name, owner_type, owner_id, state, integrated_resource_id,
+    value, value_type, auto_assign, allocated_at
+)
+SELECT name, state->>'owner_type', state->>'owner', 'attached', id,
+    value, value_type, auto_assign, allocated
+FROM allocated
+RETURNING value
 ";
     let free_state = ResourcePoolEntryState::Free;
     let allocated_state = ResourcePoolEntryState::Allocated {
@@ -384,7 +401,8 @@ RETURNING allocate.value
 /// `allocate_exact` reserves a specific free value from either assignment partition.
 ///
 /// Unlike [`allocate`], this accepts and preserves either `auto_assign` setting.
-/// It records the owner and allocation time, then returns the requested value.
+/// It atomically records the owner, allocation time, and shared [`allocation`]
+/// record, then returns the requested value.
 /// Missing or allocated values return [`DatabaseError::FailedPrecondition`],
 /// including values already reserved by the same owner. Callers must handle
 /// retained allocations separately. The claim participates in the supplied
@@ -405,8 +423,18 @@ where
         owner: owner_id.to_string(),
         owner_type: owner_type.to_string(),
     };
-    let query = "UPDATE resource_pool SET state = $1, allocated = NOW()
-        WHERE name = $2 AND value = $3 AND state = $4";
+    let query = "WITH allocated AS (
+        UPDATE resource_pool SET state = $1, allocated = NOW()
+        WHERE name = $2 AND value = $3 AND state = $4
+        RETURNING id, name, value, value_type, state, auto_assign, allocated
+    )
+    INSERT INTO resource_pool_allocations (
+        pool_name, owner_type, owner_id, state, integrated_resource_id,
+        value, value_type, auto_assign, allocated_at
+    )
+    SELECT name, state->>'owner_type', state->>'owner', 'attached', id,
+        value, value_type, auto_assign, allocated
+    FROM allocated";
     let result = sqlx::query(query)
         .bind(sqlx::types::Json(&allocated_state))
         .bind(pool.name())
@@ -514,6 +542,10 @@ pub struct ResourcePoolAllocationNotOwned;
 /// changing the pool. Cleanup callers may accept that as already released;
 /// callers requiring an existing reservation must handle the rejection.
 ///
+/// Inventory and its shared [`allocation`] record change atomically, including
+/// on an autocommit connection. An existing caller transaction uses a savepoint
+/// and still requires the caller to commit its outer transaction.
+///
 /// Ownership is not an allocation generation. Callers must separately prevent
 /// an old cleanup from reaching a new allocation for the same owner.
 pub async fn release<T>(
@@ -532,38 +564,63 @@ where
         owner: owner_id.to_string(),
         owner_type: owner_type.to_string(),
     };
+    let result = release_inner(txn, &pool.name, &value, expected_state).await;
+    result.inspect_err(|error| {
+        let event_error = match error {
+            DatabaseError::Sqlx(error) => error.source.to_string(),
+            _ => error.to_string(),
+        };
+        emit(ResourcePoolReleaseFailed {
+            operation: ResourcePoolOperation::Release,
+            failure: ResourcePoolFailure::Database,
+            failure_policy: ResourcePoolFailurePolicy::Required,
+            allocation_mode: ResourcePoolAllocationMode::NotApplicable,
+            value_type: pool.value_type.into(),
+            error: event_error,
+            pool: pool.name.clone(),
+            value,
+        });
+    })
+}
+
+async fn release_inner(
+    txn: &mut PgConnection,
+    pool_name: &str,
+    value: &str,
+    expected_state: ResourcePoolEntryState,
+) -> Result<ConditionalWrite<(), ResourcePoolAllocationNotOwned>, DatabaseError> {
     let query = "
 UPDATE resource_pool SET
   allocated = NULL,
   state = $1
 WHERE name = $2 AND value = $3 AND state = $4
+RETURNING id
 ";
-    let result = sqlx::query(query)
+    let mut inner_txn = Transaction::begin_inner(txn).await?;
+    let resource_id = sqlx::query_scalar::<_, i64>(query)
         .bind(sqlx::types::Json(ResourcePoolEntryState::Free))
-        .bind(&pool.name)
-        .bind(&value)
+        .bind(pool_name)
+        .bind(value)
         .bind(sqlx::types::Json(expected_state))
-        .execute(txn)
+        .fetch_optional(inner_txn.as_pgconn())
         .await
-        .map_err(|source| {
-            let event_error = source.to_string();
-            let error = DatabaseError::query(query, source);
-            emit(ResourcePoolReleaseFailed {
-                operation: ResourcePoolOperation::Release,
-                failure: ResourcePoolFailure::Database,
-                failure_policy: ResourcePoolFailurePolicy::Required,
-                allocation_mode: ResourcePoolAllocationMode::NotApplicable,
-                value_type: pool.value_type.into(),
-                error: event_error,
-                pool: pool.name.clone(),
-                value,
-            });
-            error
-        })?;
-    if result.rows_affected() == 0 {
-        return Ok(ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned));
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if let Some(resource_id) = resource_id {
+        // Take a fresh snapshot after the inventory lock: a same-owner
+        // reallocation may have inserted a new record while UPDATE waited.
+        let query = "DELETE FROM resource_pool_allocations
+                WHERE integrated_resource_id = $1";
+        sqlx::query(query)
+            .bind(resource_id)
+            .execute(inner_txn.as_pgconn())
+            .await
+            .map_err(|error| DatabaseError::query(query, error))?;
     }
-    Ok(ConditionalWrite::Applied(()))
+    inner_txn.commit().await?;
+    Ok(match resource_id {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned),
+    })
 }
 
 pub async fn stats<'c, E>(executor: E, name: &str) -> Result<ResourcePoolStats, DatabaseError>
@@ -1568,6 +1625,7 @@ pub async fn create_common_pools(
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU16;
     use std::str::FromStr;
 
     use carbide_instrument::MetricKind;
@@ -1951,6 +2009,14 @@ mod tests {
         .bind(value.to_string())
         .fetch_one(new_owner.as_mut())
         .await?;
+        let allocation = allocation::list(
+            new_owner.as_mut(),
+            resource_pool.name(),
+            None,
+            NonZeroU16::new(1).unwrap(),
+        )
+        .await?
+        .remove(0);
 
         let new_owner_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *new_owner)
@@ -1997,6 +2063,12 @@ mod tests {
             result?,
             ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned)
         );
+        assert_eq!(
+            allocation::load(&pool, allocation.allocation_id)
+                .await?
+                .as_ref(),
+            Some(&allocation)
+        );
 
         let mut txn = pool.begin().await?;
         assert_eq!(
@@ -2004,6 +2076,10 @@ mod tests {
             ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned)
         );
         txn.commit().await?;
+        assert_eq!(
+            allocation::load(&pool, allocation.allocation_id).await?,
+            Some(allocation)
+        );
         let entry = find_value(&pool, &value.to_string()).await?.remove(0);
         assert_eq!(
             entry.state.0,

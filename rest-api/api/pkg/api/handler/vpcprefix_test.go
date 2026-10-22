@@ -85,8 +85,8 @@ func testIPv4NthUsableInCIDR(t *testing.T, cidr string, nth int) string {
 	bl := int(pp.Bits())
 
 	var usable []netip.Addr
-	switch {
-	case bl == 31:
+	switch bl {
+	case 31:
 		r := netipx.RangeOfPrefix(pp.Masked())
 		a0 := r.From()
 		a1 := r.From().Next()
@@ -94,7 +94,7 @@ func testIPv4NthUsableInCIDR(t *testing.T, cidr string, nth int) string {
 		if pp.Contains(a1) {
 			usable = append(usable, a1)
 		}
-	case bl == 32:
+	case 32:
 		usable = append(usable, pp.Addr())
 	default:
 		r := netipx.RangeOfPrefix(pp.Masked())

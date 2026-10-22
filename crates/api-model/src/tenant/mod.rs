@@ -29,6 +29,7 @@ use sqlx::types::Json;
 use sqlx::{FromRow, Row};
 
 use crate::metadata::Metadata;
+use crate::nic_firmware::NicFirmwareProfileId;
 
 pub mod identity_config_policy;
 
@@ -66,6 +67,19 @@ pub struct Tenant {
     pub organization_id: TenantOrganizationId,
     pub routing_profile_type: Option<String>,
     pub metadata: Metadata,
+    pub version: ConfigVersion,
+}
+
+/// The tenant's operator-managed NIC firmware selection, returned separately
+/// from ordinary tenant configuration but sharing its version.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct TenantNicFirmwareConfig {
+    /// Tenant organization whose NIC firmware selection is being read or changed.
+    pub organization_id: TenantOrganizationId,
+    /// Selected catalog profile, or `None` when the tenant has no selection.
+    #[sqlx(rename = "nic_firmware_profile_id")]
+    pub profile_id: Option<NicFirmwareProfileId>,
+    /// Complete token shared with tenant and identity-configuration updates.
     pub version: ConfigVersion,
 }
 

@@ -108,11 +108,9 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 	inst1 := testInstanceBuildInstance(t, dbSession, "test-instance-2", tn1.ID, ip.ID, st1.ID, &ist1.ID, vpc1.ID, cutil.GetPtr(mc1.ID), &os1.ID, nil, cdbm.InstanceStatusReady)
 	assert.NotNil(t, inst1)
 
-	ifcs := []*cdbm.Interface{}
 	for i := 0; i < 25; i++ {
 		instsub1 := testInstanceBuildInstanceInterface(t, dbSession, inst1.ID, &subnets[i].ID, nil, nil, cdbm.InterfaceStatusProvisioning)
 		assert.NotNil(t, instsub1)
-		ifcs = append(ifcs, instsub1)
 	}
 
 	e := echo.New()

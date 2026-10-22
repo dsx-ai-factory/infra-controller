@@ -129,7 +129,7 @@ pub async fn find_by_segment_id(
 /// deletion consequently retains the existing address-before-instance order.
 /// Allocation holds an `ACCESS EXCLUSIVE` table lock before inserting, so no
 /// new address row can appear between this prelock and the following delete.
-async fn lock_addresses_for_instance(
+pub(super) async fn lock_addresses_for_instance(
     txn: &mut PgConnection,
     instance_id: InstanceId,
 ) -> Result<(), DatabaseError> {
@@ -637,9 +637,15 @@ pub async fn allocate(
     Ok(updated_config)
 }
 
+/// Resolves stored instance allocations and additional exclusions for one segment.
+///
+/// `used_prefixes` preserves stored CIDR widths and adds [`Self::busy_ips`] as
+/// host prefixes.
 pub struct UsedOverlayNetworkIpResolver {
+    /// Segment whose stored instance allocations are unavailable.
     pub segment_id: NetworkSegmentId,
-    // All the IPs which can not be allocated, e.g. SVI IP.
+    /// Addresses the caller reserves, such as SVIs, excluded as /32 or /128 prefixes.
+    /// The caller must supply these; the resolver does not load them.
     pub busy_ips: Vec<IpAddr>,
 }
 
@@ -687,17 +693,7 @@ WHERE network_segments.id = $1::uuid";
         Ok(used_ips)
     }
 
-    // used_prefixes returns the used (or allocated) prefixes
-    // for instances in a given network segment.
-    //
-    // More specifically, this is intended to specifically
-    // target the `prefix` column of the `instance_addresses`
-    // table, which is a `cidr` type. It could contain as
-    // small as a /32 (for single IP instance allocations,
-    // which would effectively match the `address` column),
-    // or a /30 (for FNN prefix allocations), where the `address`
-    // column would contain the host IP allocated from the
-    // /30 prefix.
+    // Keep allocated CIDRs intact and add caller reservations as host prefixes.
     async fn used_prefixes(&self, txn: &mut DB) -> Result<Vec<IpNetwork>, DatabaseError> {
         // IpNetworkContainer is a small private struct used
         // for binding the result of the subsequent SQL
@@ -719,7 +715,9 @@ WHERE network_segments.id = $1::uuid";
             .await
             .map_err(|e| DatabaseError::query(query, e))?;
 
-        Ok(containers.iter().map(|c| c.prefix).collect())
+        let mut used_prefixes: Vec<IpNetwork> = containers.iter().map(|c| c.prefix).collect();
+        used_prefixes.extend(self.busy_ips.iter().copied().map(IpNetwork::from));
+        Ok(used_prefixes)
     }
 }
 
@@ -1051,6 +1049,57 @@ mod tests {
         let config = create_valid_network_config();
         data[9].status.controller_state.value = NetworkSegmentControllerState::Provisioning;
         assert!(super::validate(&data, &config, &[], false).is_err());
+    }
+
+    #[crate::sqlx_test]
+    async fn used_prefixes_include_busy_ips_as_host_prefixes(pool: sqlx::PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        let (instance_id, segment_id, vpc_id) = seed_fk_fixtures(txn.as_mut(), "busy-ips").await;
+        let resolver = UsedOverlayNetworkIpResolver {
+            segment_id,
+            busy_ips: vec!["192.0.2.3".parse().unwrap(), "2001:db8::3".parse().unwrap()],
+        };
+        let used_prefixes = resolver.used_prefixes(txn.as_mut()).await.unwrap();
+        assert_eq!(
+            used_prefixes.into_iter().collect::<HashSet<_>>(),
+            HashSet::from([
+                "192.0.2.3/32".parse().unwrap(),
+                "2001:db8::3/128".parse().unwrap(),
+            ])
+        );
+
+        let rows = [
+            InstanceAddress {
+                instance_id,
+                segment_id,
+                vpc_id,
+                address: "192.0.2.17".parse().unwrap(),
+                prefix: "192.0.2.16/30".parse().unwrap(),
+                hostname: None,
+            },
+            InstanceAddress {
+                instance_id,
+                segment_id,
+                vpc_id,
+                address: "2001:db8::2".parse().unwrap(),
+                prefix: "2001:db8::2/128".parse().unwrap(),
+                hostname: None,
+            },
+        ];
+        insert_instance_addresses(txn.as_mut(), &rows)
+            .await
+            .unwrap();
+
+        let used_prefixes = resolver.used_prefixes(txn.as_mut()).await.unwrap();
+        assert_eq!(
+            used_prefixes.into_iter().collect::<HashSet<_>>(),
+            HashSet::from([
+                "192.0.2.16/30".parse().unwrap(),
+                "2001:db8::2/128".parse().unwrap(),
+                "192.0.2.3/32".parse().unwrap(),
+                "2001:db8::3/128".parse().unwrap(),
+            ])
+        );
     }
 
     // --- DB-backed batched-INSERT tests ---------------------------------

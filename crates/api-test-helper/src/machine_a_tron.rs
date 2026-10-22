@@ -57,12 +57,10 @@ impl tonic_client_wrapper::ConnectionProvider<ForgeClientT> for RoundRobinConnec
     }
 }
 
-/// Run a machine-a-tron instance with the given config in the background, returning a JoinHandle
-/// that can be waited on.
+/// Starts machine-a-tron and returns its provisionable devices and shutdown handle.
 ///
-/// The background job will continually run [HostMachine::process_state] on each machine until each
-/// of them reaches a `Ready` state, then it will return. Callers are responsible for configuring a
-/// timeout in case a ready state is not reached.
+/// Simulators keep running until the caller shuts down or drops the returned handle.
+/// Callers must bound their waits for simulated machines to reach the expected API state.
 pub async fn run_local(
     app_config: MachineATronConfig,
     additional_api_urls: Vec<String>,
@@ -138,10 +136,11 @@ pub async fn run_local(
     let (simulators, _) = mat.make_devices(false).await?;
     let provisionable_handles = simulators.provisionable_handles();
 
-    let (stop_tx, stop_rx) = oneshot::channel();
+    let (stop_tx, stop_rx) = oneshot::channel::<bool>();
     let device_simulators = simulators.devices().to_vec();
     let join_handle = tokio::spawn(async move {
-        stop_rx.await.ok(); // this finishes when stop_tx is dropped
+        // Dropping the handle retains the normal cleanup behavior.
+        let delete_from_api = stop_rx.await.unwrap_or(true);
 
         try_join_all(
             device_simulators
@@ -150,11 +149,13 @@ pub async fn run_local(
         )
         .await?;
 
-        try_join_all(device_simulators.into_iter().map(|simulator| {
-            let api_client = app_context.api_client();
-            async move { simulator.delete_from_api(api_client).await }
-        }))
-        .await?;
+        if delete_from_api {
+            try_join_all(device_simulators.into_iter().map(|simulator| {
+                let api_client = app_context.api_client();
+                async move { simulator.delete_from_api(api_client).await }
+            }))
+            .await?;
+        }
 
         Ok(())
     });
@@ -169,19 +170,30 @@ pub async fn run_local(
     ))
 }
 
+/// Owns a running simulator group and controls its shutdown and API cleanup.
 pub struct MachineATronHandle {
-    _stop_tx: oneshot::Sender<()>,
+    _stop_tx: oneshot::Sender<bool>,
     _join_handle: JoinHandle<eyre::Result<()>>,
     dhcp_service: Option<UdpDhcpService>,
 }
 
 impl MachineATronHandle {
-    pub async fn shutdown(mut self) -> eyre::Result<()> {
-        drop(self._stop_tx);
-        let mat_result = self._join_handle.await?;
+    /// Stops the simulators and deletes their machines through the running API.
+    pub async fn shutdown(self) -> eyre::Result<()> {
+        self.shutdown_with_api_cleanup(true).await
+    }
+
+    /// Stops the simulators after API shutdown, leaving database cleanup to the caller.
+    pub async fn shutdown_without_api_cleanup(self) -> eyre::Result<()> {
+        self.shutdown_with_api_cleanup(false).await
+    }
+
+    async fn shutdown_with_api_cleanup(mut self, delete_from_api: bool) -> eyre::Result<()> {
+        self._stop_tx.send(delete_from_api).ok();
+        let mat_result = self._join_handle.await;
         if let Some(dhcp_service) = self.dhcp_service.take() {
             dhcp_service.shutdown().await?;
         }
-        mat_result
+        mat_result?
     }
 }

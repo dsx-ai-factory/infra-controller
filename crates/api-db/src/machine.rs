@@ -234,6 +234,20 @@ where
         .pop())
 }
 
+/// `find_dpu_id` returns the requested DPU's ID, or `None` if its row is absent.
+/// Other snapshot fields are neither read nor decoded.
+pub async fn find_dpu_id(
+    conn: impl DbReader<'_>,
+    id: &DpuMachineId,
+) -> DatabaseResult<Option<DpuMachineId>> {
+    let query = "SELECT id FROM machines WHERE id = $1";
+    sqlx::query_scalar(query)
+        .bind(id)
+        .fetch_optional(conn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 pub(crate) async fn find_by_nic_firmware_profile(
     db: impl DbReader<'_>,
     profile_id: &NicFirmwareProfileId,
@@ -255,6 +269,21 @@ pub(crate) async fn find_by_nic_firmware_profile(
         .into_iter()
         .map(|machine| machine.try_into_subtype().map_err(Into::into))
         .collect()
+}
+
+/// Lock the machine row before reading its mutable request state. A separate
+/// read after this query sees changes committed by the previous lock holder.
+pub async fn lock_by_id_for_update(
+    txn: &mut PgConnection,
+    id: &MachineId,
+) -> Result<(), DatabaseError> {
+    let query = "SELECT id FROM machines WHERE id = $1 FOR UPDATE";
+    sqlx::query_scalar::<_, MachineId>(query)
+        .bind(id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(())
 }
 
 pub async fn find_existing_machine(
@@ -990,6 +1019,35 @@ pub async fn find_host_by_dpu_machine_id(
         .map_err(|e| DatabaseError::query(query.as_str(), e))?;
 
     Ok(machine)
+}
+
+/// `lookup_host_state_by_dpu_machine_id` returns the associated host's state
+/// by reading only `id` and `controller_state` through a non-BMC interface
+/// owned by a machine other than the requested DPU.
+///
+/// The owner must have a stable or predicted [`HostMachineId`]. Invalid IDs
+/// or state data return decoding errors; no matching association returns `None`.
+/// Selection is unspecified when multiple hosts match. Other snapshot fields
+/// are neither read nor decoded; use [`find_host_by_dpu_machine_id`] for those.
+pub async fn lookup_host_state_by_dpu_machine_id(
+    conn: impl DbReader<'_>,
+    dpu_machine_id: &DpuMachineId,
+) -> DatabaseResult<Option<ManagedHostState>> {
+    let query = r#"SELECT m.id, m.controller_state
+        FROM machines m
+        INNER JOIN machine_interfaces mi ON m.id = mi.machine_id
+        WHERE mi.attached_dpu_machine_id = $1
+          AND mi.interface_type != 'Bmc'
+          AND mi.attached_dpu_machine_id != mi.machine_id
+        LIMIT 1"#;
+
+    let host: Option<(HostMachineId, sqlx::types::Json<ManagedHostState>)> = sqlx::query_as(query)
+        .bind(dpu_machine_id)
+        .fetch_optional(conn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    Ok(host.map(|(_, state)| state.0))
 }
 
 pub async fn lookup_host_machine_ids_by_dpu_ids(
@@ -2589,7 +2647,10 @@ where
     }
 
     if let Some(ovrrd_str) = &search_config.only_with_health_alert {
-        qb.push(" AND health_reports->'merges' ? ");
+        // Match the machine_health_source_keys_gin_idx index.
+        qb.push(
+            " AND jsonb_path_query_array(health_reports, '$.merges.keyvalue().key'::jsonpath) ? ",
+        );
         qb.push_bind(ovrrd_str.clone());
         qb.push(" AND jsonb_array_length(health_reports->'merges'->");
         qb.push_bind(ovrrd_str);
@@ -3948,9 +4009,10 @@ mod test {
     use model::allocation_type::AllocationType;
     use model::bmc_info::BmcInfo;
     use model::hardware_info::HardwareInfo;
-    use model::machine::ManagedHostState;
     use model::machine::machine_search_config::MachineSearchConfig;
     use model::machine::topology::{DiscoveryData, TopologyData};
+    use model::machine::{MachineState, ManagedHostState};
+    use model::machine_interface::InterfaceType;
     use model::resource_pool::common::{
         CommonPools, DPA_VNI, EXTERNAL_VPC_VNI, EthernetPools, FNN_ASN, IbPools, LOOPBACK_IP,
         LOOPBACK_IP_V6, VLANID, VNI, VPC_DPU_LOOPBACK, VPC_VNI,
@@ -3958,6 +4020,236 @@ mod test {
     use model::resource_pool::define::{Range, ResourcePoolDef, ResourcePoolType};
     use model::resource_pool::{ResourcePool, ValueType};
     use tokio::sync::oneshot;
+
+    #[crate::sqlx_test]
+    async fn host_state_lookup_preserves_association_and_decode_checks(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let host_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let dpu_id: DpuMachineId =
+            "fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80".parse()?;
+        let other_dpu_id: DpuMachineId =
+            "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng".parse()?;
+        let host_state = ManagedHostState::HostInit {
+            machine_state: MachineState::WaitingForPlatformConfiguration { retry_count: 3 },
+        };
+        let mut txn = pool.begin().await?;
+        for (machine_id, state) in [
+            (MachineId::from(host_id), host_state.clone()),
+            (MachineId::from(dpu_id), ManagedHostState::Ready),
+            (MachineId::from(other_dpu_id), ManagedHostState::Ready),
+        ] {
+            super::create(txn.as_mut(), None, &machine_id, state, None, 2).await?;
+        }
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('host-state-lookup', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(txn.as_mut())
+        .await?;
+
+        // Keep excluded interfaces present when adding the valid attachment.
+        for (index, (scenario, machine_id, interface_type, expected)) in [
+            (
+                "self attachment",
+                MachineId::from(dpu_id),
+                InterfaceType::Data,
+                None,
+            ),
+            (
+                "BMC attachment",
+                MachineId::from(host_id),
+                InterfaceType::Bmc,
+                None,
+            ),
+            (
+                "data attachment",
+                MachineId::from(host_id),
+                InterfaceType::Data,
+                Some(&host_state),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            sqlx::query(
+                "INSERT INTO machine_interfaces
+                    (machine_id, attached_dpu_machine_id, association_type, segment_id,
+                     mac_address, primary_interface, hostname, interface_type)
+                 VALUES ($1, $2, 'Machine', $3, $4::macaddr, false, 'host-state-lookup', $5)",
+            )
+            .bind(machine_id)
+            .bind(dpu_id)
+            .bind(segment_id)
+            .bind(format!("02:00:00:00:21:{index:02x}"))
+            .bind(interface_type)
+            .execute(txn.as_mut())
+            .await?;
+            let state = super::lookup_host_state_by_dpu_machine_id(txn.as_mut(), &dpu_id).await?;
+            assert_eq!(state.as_ref(), expected, "{scenario}");
+        }
+        assert_eq!(
+            super::lookup_host_state_by_dpu_machine_id(txn.as_mut(), &other_dpu_id).await?,
+            None,
+            "an attachment to one DPU must not match another DPU"
+        );
+
+        for (scenario, owner_id, state, column) in [
+            (
+                "DPU-typed owner is a decode error",
+                MachineId::from(other_dpu_id),
+                serde_json::to_value(ManagedHostState::Ready)?,
+                "0",
+            ),
+            (
+                "malformed host state is not a missing association",
+                MachineId::from(host_id),
+                serde_json::json!({}),
+                "1",
+            ),
+        ] {
+            sqlx::query(
+                "UPDATE machine_interfaces SET machine_id = $1
+                 WHERE attached_dpu_machine_id = $2 AND machine_id != $2
+                   AND interface_type != 'Bmc'",
+            )
+            .bind(owner_id)
+            .bind(dpu_id)
+            .execute(txn.as_mut())
+            .await?;
+            sqlx::query("UPDATE machines SET controller_state = $2 WHERE id = $1")
+                .bind(owner_id)
+                .bind(state)
+                .execute(txn.as_mut())
+                .await?;
+
+            let error = super::lookup_host_state_by_dpu_machine_id(txn.as_mut(), &dpu_id)
+                .await
+                .expect_err(scenario);
+            let crate::DatabaseError::Sqlx(annotated) = &error else {
+                panic!("{scenario}: expected Sqlx, got {error:?}");
+            };
+            let sqlx::Error::ColumnDecode { index, .. } = &annotated.source else {
+                panic!("{scenario}: expected ColumnDecode, got {error:?}");
+            };
+            assert_eq!(index, column, "{scenario}");
+        }
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn health_alert_search_uses_source_keys(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let source = "future.source with 'quotes' and \"double quotes\"";
+        let populated = serde_json::json!({
+            "merges": {
+                source: {"alerts": [{"id": "leak", "message": "nested payload"}]},
+                "empty": {"alerts": []}
+            }
+        });
+        let mut txn = pool.begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        sqlx::query("UPDATE machines SET health_reports = $1 WHERE id = $2")
+            .bind(&populated)
+            .bind(machine_id)
+            .execute(txn.as_mut())
+            .await?;
+        txn.commit().await?;
+
+        // Reconstruct the predecessor index with populated data, then apply the
+        // shipped replacement outside a transaction, as the migrator does.
+        sqlx::raw_sql(
+            "DROP INDEX machine_health_source_keys_gin_idx;
+             CREATE INDEX machine_health_reports_merges_gin_idx ON machines
+             USING gin ((health_reports->'merges'));",
+        )
+        .execute(&pool)
+        .await?;
+        for migration in [
+            include_str!("../migrations/20261013175247_machine_health_source_keys_gin.sql"),
+            include_str!("../migrations/20261013175248_drop_machine_health_reports_merges_gin.sql"),
+        ] {
+            sqlx::raw_sql(migration).execute(&pool).await?;
+        }
+
+        for (scenario, reports, searched_source, expected) in [
+            ("arbitrary source", Some(populated.clone()), source, true),
+            ("empty alerts", Some(populated.clone()), "empty", false),
+            (
+                "nested value is not a source",
+                Some(populated),
+                "leak",
+                false,
+            ),
+            ("absent reports", None, source, false),
+            ("absent merges", Some(serde_json::json!({})), source, false),
+        ] {
+            sqlx::query("UPDATE machines SET health_reports = $1 WHERE id = $2")
+                .bind(reports)
+                .bind(machine_id)
+                .execute(&pool)
+                .await?;
+            let ids: Vec<HostMachineId> = super::find_machine_ids(
+                &pool,
+                MachineSearchConfig {
+                    only_with_health_alert: Some(searched_source.to_string()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+            assert_eq!(ids.contains(&machine_id), expected, "{scenario}");
+        }
+
+        // A generic prepared plan must match the expression index even when
+        // the report source is supplied as a parameter.
+        let mut txn = pool.begin().await?;
+        sqlx::raw_sql(
+            "SET LOCAL enable_seqscan = off; SET LOCAL plan_cache_mode = force_generic_plan",
+        )
+        .execute(txn.as_mut())
+        .await?;
+        let _: Vec<HostMachineId> = super::find_machine_ids(
+            txn.as_mut(),
+            MachineSearchConfig {
+                only_with_health_alert: Some(source.to_string()),
+                ..Default::default()
+            },
+        )
+        .await?;
+        let statement: String = sqlx::query_scalar(
+            "SELECT statement FROM pg_prepared_statements
+             WHERE statement LIKE 'SELECT id FROM machines%'
+             AND statement LIKE '%jsonb_array_length%'",
+        )
+        .fetch_one(txn.as_mut())
+        .await?;
+        let plan: Vec<String> =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!("EXPLAIN {statement}")))
+                .bind(source)
+                .bind(source)
+                .fetch_all(txn.as_mut())
+                .await?;
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("machine_health_source_keys_gin_idx")),
+            "source-key index missing from plan: {plan:?}"
+        );
+        txn.rollback().await?;
+        Ok(())
+    }
 
     #[crate::sqlx_test]
     async fn dpu_agent_upgrade_status_reads_current_attached_host_data(

@@ -21,6 +21,8 @@
 mod env;
 mod health_report;
 mod machine_creator;
+mod machine_fixtures;
+mod machine_location_reconciler;
 mod power_shelf;
 mod reconcile;
 mod site_explorer;

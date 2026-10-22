@@ -30,7 +30,7 @@ func (repo *FirmwareRepo) summary() (string, error) {
 		return sb.String(), nil
 	}
 
-	sb.WriteString(fmt.Sprintf("Firmware Repo supports upgrading powershelves starting at PMC fw version between %s to %s (inclusive)\n", repo.minStartingFwVersion.String(), repo.maxStartingFwVersion.String()))
+	fmt.Fprintf(&sb, "Firmware Repo supports upgrading powershelves starting at PMC fw version between %s to %s (inclusive)\n", repo.minStartingFwVersion.String(), repo.maxStartingFwVersion.String())
 
 	for i, upgrade := range repo.upgrades {
 		file, err := repo.ff.open(upgrade.path)
@@ -44,7 +44,7 @@ func (repo *FirmwareRepo) summary() (string, error) {
 			return "", err
 		}
 
-		sb.WriteString(fmt.Sprintf("FW Upgrade %d: %v from %s to %s (size: %v bytes)\n", i, upgrade.path, upgrade.from, upgrade.to, util.HumanReadableSize(info.Size())))
+		fmt.Fprintf(&sb, "FW Upgrade %d: %v from %s to %s (size: %v bytes)\n", i, upgrade.path, upgrade.from, upgrade.to, util.HumanReadableSize(info.Size()))
 	}
 
 	return sb.String(), nil
@@ -85,7 +85,7 @@ func newFirmwareRepo(v vendor.Vendor, firmwareDir string) (*FirmwareRepo, error)
 		return &FirmwareRepo{ff: ff}, nil
 	}
 
-	var upgrades []FirmwareUpgrade = make([]FirmwareUpgrade, 0, len(fw_entries))
+	var upgrades = make([]FirmwareUpgrade, 0, len(fw_entries))
 	var minStartingFwVersion firmwareVersion
 	var maxStartingFwVersion firmwareVersion
 

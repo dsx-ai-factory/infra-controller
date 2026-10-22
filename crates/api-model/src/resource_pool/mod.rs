@@ -14,9 +14,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+pub mod allocation;
 pub mod binding;
 pub mod common;
 pub mod define;
+pub mod remote;
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -168,7 +170,8 @@ impl fmt::Display for ValueType {
     }
 }
 
-#[derive(Debug, PartialEq, Copy, Clone)]
+/// `OwnerType` identifies the kind of entity holding a resource pool value.
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum OwnerType {
     /// owner_type for loopback_ip
     Machine,
@@ -179,7 +182,7 @@ pub enum OwnerType {
     /// owner_type for pkey
     IBPartition,
 
-    /// owner_type for vpc_cni
+    /// A VPC holding a VNI allocation.
     Vpc,
 
     /// owner_type for East West Networks

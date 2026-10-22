@@ -24,7 +24,6 @@ use carbide_redfish::boot_interface::BootInterfaceTarget;
 use db::ConditionalWrite;
 use db::explored_endpoints::EndpointReportNotCurrent;
 use mac_address::MacAddress;
-use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::expected_entity::ExpectedEntity;
 use model::machine::MachineInterfaceSnapshot;
 use model::site_explorer::{EndpointExplorationError, EndpointExplorationReport, ExploredEndpoint};
@@ -46,6 +45,14 @@ pub enum EndpointExplorationServiceError {
 
     #[error("endpoint exploration is suppressed for BMC {bmc_mac_address} at {bmc_ip}")]
     Suppressed {
+        bmc_ip: IpAddr,
+        bmc_mac_address: MacAddress,
+    },
+
+    #[error(
+        "exploration of BMC {bmc_mac_address} at {bmc_ip} is paused during DPU provisioning; resumes automatically when all site explorer suppressions are cleared"
+    )]
+    DpfProvisioning {
         bmc_ip: IpAddr,
         bmc_mac_address: MacAddress,
     },
@@ -142,6 +149,8 @@ impl EndpointExplorationService {
         self.locks.try_claim(bmc_ip)
     }
 
+    /// Refreshes an endpoint immediately, or queues it during DPF provisioning.
+    /// Queued refreshes return the cached report with `exploration_requested` set.
     pub async fn refresh_endpoint_report(
         &self,
         bmc_ip: IpAddr,
@@ -164,17 +173,33 @@ impl EndpointExplorationService {
                 id: bmc_ip.to_string(),
             })?;
 
-        if db::bmc_suppression::is_suppressed(
+        match crate::suppression::check_exploration_allowed(
             txn.as_pgconn(),
+            bmc_ip,
             bmc_interface.mac_address,
-            BmcSuppressionSubsystem::SiteExplorer,
+            crate::suppression::ExplorationRequest::Refresh,
         )
-        .await?
+        .await
         {
-            return Err(EndpointExplorationServiceError::Suppressed {
-                bmc_ip,
-                bmc_mac_address: bmc_interface.mac_address,
-            });
+            Ok(()) => {}
+            Err(EndpointExplorationServiceError::DpfProvisioning { .. }) => {
+                db::explored_endpoints::request_exploration_for_addresses(
+                    &[bmc_ip],
+                    txn.as_pgconn(),
+                )
+                .await?;
+                let queued = db::explored_endpoints::find_all_by_ip(bmc_ip, &mut txn)
+                    .await?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| EndpointExplorationServiceError::NotFound {
+                        kind: "explored_endpoint",
+                        id: bmc_ip.to_string(),
+                    })?;
+                txn.commit().await?;
+                return Ok(queued);
+            }
+            Err(error) => return Err(error),
         }
 
         let expected_machine =

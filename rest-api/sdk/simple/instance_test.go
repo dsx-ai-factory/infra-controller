@@ -152,13 +152,13 @@ func TestCollectAutoCreatedSSHKeyGroupIDs(t *testing.T) {
 	t.Run("returns only groups matching instance naming convention", func(t *testing.T) {
 		instance := standard.NewInstance()
 		instance.SetName("web")
-		auto := standard.NewSshKeyGroup()
+		auto := standard.NewSshKeyGroupSummaryWithDefaults()
 		auto.SetId("skg-auto")
 		auto.SetName(GetInstanceSshKeyGroupName("web"))
-		manual := standard.NewSshKeyGroup()
+		manual := standard.NewSshKeyGroupSummaryWithDefaults()
 		manual.SetId("skg-manual")
 		manual.SetName("shared-ops-keys")
-		instance.SetSshKeyGroups([]standard.SshKeyGroup{*auto, *manual})
+		instance.SetSshKeyGroups([]standard.SshKeyGroupSummary{*auto, *manual})
 
 		assert.Equal(t, []string{"skg-auto"}, collectAutoCreatedSSHKeyGroupIDs(instance))
 	})
@@ -166,10 +166,10 @@ func TestCollectAutoCreatedSSHKeyGroupIDs(t *testing.T) {
 	t.Run("returns nil when instance has no matching groups", func(t *testing.T) {
 		instance := standard.NewInstance()
 		instance.SetName("web")
-		manual := standard.NewSshKeyGroup()
+		manual := standard.NewSshKeyGroupSummaryWithDefaults()
 		manual.SetId("skg-manual")
 		manual.SetName("shared-ops-keys")
-		instance.SetSshKeyGroups([]standard.SshKeyGroup{*manual})
+		instance.SetSshKeyGroups([]standard.SshKeyGroupSummary{*manual})
 
 		assert.Nil(t, collectAutoCreatedSSHKeyGroupIDs(instance))
 	})
@@ -301,8 +301,8 @@ func TestInstanceManagerDeleteCleansUpAutoCreatedSSHKeyGroup(t *testing.T) {
 				"name":"web",
 				"sshKeyGroupIds":["skg-auto","skg-manual"],
 				"sshKeyGroups":[
-					{"id":"skg-auto","name":"web-ssh-key-group"},
-					{"id":"skg-manual","name":"shared-ops-keys"}
+					{"id":"skg-auto","name":"web-ssh-key-group","description":null,"version":"fbc692b61ffef6fbfc38a3833f6b7e7ae508da75","status":"Synced","created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"},
+					{"id":"skg-manual","name":"shared-ops-keys","description":"Shared operator keys","version":"a3f9c2d1e5b7480f9c6d2e1b0a7f4c3d9e8b5a61","status":"Synced","created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"}
 				]
 			}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v2/org/test-org/nico/instance":
@@ -313,8 +313,8 @@ func TestInstanceManagerDeleteCleansUpAutoCreatedSSHKeyGroup(t *testing.T) {
 				"name":"web",
 				"sshKeyGroupIds":["skg-auto","skg-manual"],
 				"sshKeyGroups":[
-					{"id":"skg-auto","name":"web-ssh-key-group"},
-					{"id":"skg-manual","name":"shared-ops-keys"}
+					{"id":"skg-auto","name":"web-ssh-key-group","description":null,"version":"fbc692b61ffef6fbfc38a3833f6b7e7ae508da75","status":"Synced","created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"},
+					{"id":"skg-manual","name":"shared-ops-keys","description":"Shared operator keys","version":"a3f9c2d1e5b7480f9c6d2e1b0a7f4c3d9e8b5a61","status":"Synced","created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"}
 				]
 			}]`)
 		case r.Method == http.MethodDelete && r.URL.Path == "/v2/org/test-org/nico/instance/inst-1":

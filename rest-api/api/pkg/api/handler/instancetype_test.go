@@ -671,7 +671,7 @@ func TestGetAllInstanceTypeHandler_Handle(t *testing.T) {
 	ipu2 := common.TestBuildUser(t, dbSession, "test-starfleet-id-456", ipOrg, ipRoles)
 	ip2 := common.TestBuildInfrastructureProvider(t, dbSession, "Test Infrastructure Provider 2", ipOrg2, ipu2)
 	st3 := common.TestBuildSite(t, dbSession, ip2, "Test Site 3", ipu2)
-	ip2it := common.TestBuildInstanceType(t, dbSession, fmt.Sprintf("test-instance-type-ip2"), sutil.GetPtr(uuid.New()), st3, map[string]string{
+	ip2it := common.TestBuildInstanceType(t, dbSession, "test-instance-type-ip2", sutil.GetPtr(uuid.New()), st3, map[string]string{
 		"name":        "test-instance-type-ip2",
 		"description": "Test Instance Type IP2 Description",
 	}, ipu2)

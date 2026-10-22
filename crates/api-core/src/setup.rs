@@ -26,7 +26,9 @@ use carbide_dpa::DpaInfo;
 use carbide_dpa_manager::DpaMonitor;
 use carbide_dpf::repository::DpuServiceInterfaceRepository;
 use carbide_dpf::{DpfInterceptBridging, DpuDeploymentType, ServiceVpcSlots};
-use carbide_extension_service_controller::context::ExtensionServiceStateHandlerServices;
+use carbide_extension_service_controller::context::{
+    ExtensionServiceStateHandlerServices, ServiceVpcRegistrationConfig,
+};
 use carbide_extension_service_controller::handler::ExtensionServiceStateHandler;
 use carbide_extension_service_controller::io::ExtensionServiceStateControllerIO;
 use carbide_firmware::FirmwareDownloader;
@@ -755,6 +757,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         bms_client: std::sync::OnceLock::new(),
         secrets_context,
         console_log_source,
+        cancel_token: cancel_token.clone(),
     });
 
     if carbide_config.listen_only {
@@ -857,7 +860,7 @@ async fn reject_unscoped_initialization_with_scoped_interfaces<R: DpuServiceInte
         "Checking for scoped DPUServiceInterfaces before initializing unscoped interfaces"
     );
     let scoped_interfaces = scoped_service_interface_names(
-        DpuServiceInterfaceRepository::list(repo, carbide_dpf::NAMESPACE)
+        DpuServiceInterfaceRepository::list(repo, carbide_dpf::NAMESPACE, None)
             .await
             .map_err(|error| eyre::eyre!("failed to list DPF service interfaces: {error}"))?
             .into_iter()
@@ -1616,6 +1619,21 @@ impl<'a> SeedData<'a> {
     }
 }
 
+/// Builds `ServiceVpcRegistrationConfig` from parsed slot and deployment-family settings so
+/// `initialize_and_start_controllers` and its focused test use identical inputs.
+fn service_vpc_registration_config(
+    carbide_config: &CarbideConfig,
+) -> eyre::Result<ServiceVpcRegistrationConfig> {
+    Ok(ServiceVpcRegistrationConfig {
+        slots: carbide_dpf::ServiceVpcSlots::new(carbide_config.dpu_config.service_vpc_slot_count)
+            .map_err(|error| eyre::eyre!("invalid service-VPC slot inventory: {error}"))?,
+        enabled_address_families: carbide_config
+            .dpf
+            .deployments
+            .service_vpc_address_families(),
+    })
+}
+
 /// Initialize and spawn all controllers and background tasks.
 ///
 /// All background tasks will be spawned into `join_set`, which can be awaited with
@@ -1797,7 +1815,8 @@ async fn initialize_and_start_controllers<'a>(
         );
     }
 
-    let downloader = FirmwareDownloader::new();
+    let downloader =
+        FirmwareDownloader::with_config(carbide_config.firmware_global.downloads.clone())?;
     let upload_limiter = Arc::new(Semaphore::new(carbide_config.firmware_global.max_uploads));
 
     // Create state change emitter with DSX Exchange Event Bus hook if enabled
@@ -2004,6 +2023,7 @@ async fn initialize_and_start_controllers<'a>(
     StateController::<MachineStateControllerIO>::builder()
         .database(db_pool.clone(), work_lock_manager_handle.clone())
         .meter("carbide_machines", meter.clone())
+        .filter_metrics_by_existing_object_ids()
         .processor_id(state_controller_id.clone())
         .services(
             MachineStateHandlerServices {
@@ -2177,6 +2197,7 @@ async fn initialize_and_start_controllers<'a>(
             ExtensionServiceStateHandlerServices {
                 db_pool: db_pool.clone(),
                 dpf_sdk: dpf_sdk.clone(),
+                service_vpc: service_vpc_registration_config(carbide_config)?,
             }
             .into(),
         )
@@ -2405,6 +2426,11 @@ async fn initialize_and_start_controllers<'a>(
         // only way the value gets in, sparing a constructor parameter
         // through `SiteExplorer::new` and every test fixture.
         config.retained_boot_interface_window = carbide_config.retained_boot_interface_window;
+        config.admin_fnn_enabled = carbide_config
+            .fnn
+            .as_ref()
+            .and_then(|fnn| fnn.admin_vpc.as_ref())
+            .is_some_and(|admin| admin.enabled);
         if let Some(window) = config.retained_boot_interface_window {
             tracing::info!(
                 window_seconds = window.num_seconds(),
@@ -2526,6 +2552,7 @@ mod tests {
     use figment::Figment;
     use figment::providers::{Format, Toml};
     use model::expected_machine::HostDpuPolicy;
+    use model::extension_service::ServiceVpcAddressFamily;
     use model::network_segment::{NetworkDefinition, NetworkDefinitionSegmentType};
     use model::resource_pool::ResourcePoolType;
     use model::resource_pool::define::ResourcePoolDef;
@@ -2938,6 +2965,52 @@ mod tests {
             ))
             .extract()
             .expect("minimal CarbideConfig parses")
+    }
+
+    /// Verifies `service_vpc_registration_config` preserves the exact slot count and isolated
+    /// deployment-family sets parsed from DPF configuration.
+    #[test]
+    fn service_vpc_registration_config_preserves_slots_and_deployment_families() {
+        // Configure asymmetric family membership so each startup field remains independently
+        // observable.
+        let mut config = minimal_carbide_config();
+        config.dpu_config.service_vpc_slot_count = 2;
+        config
+            .dpf
+            .deployments
+            .bf3
+            .service_vpc_enabled_address_families =
+            [ServiceVpcAddressFamily::Ipv4].into_iter().collect();
+        config.dpf.deployments.bf4_generic = Some(crate::cfg::file::DpfDeploymentConfig {
+            service_vpc_enabled_address_families: [ServiceVpcAddressFamily::Ipv6]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        });
+
+        // Build the same registration inventory supplied to the production controller.
+        let registration = service_vpc_registration_config(&config)
+            .expect("bounded slot inventory and parsed deployment families are valid");
+
+        // Require the exact slot count and every concrete deployment entry.
+        assert_eq!(registration.slots.len(), 2);
+        assert_eq!(
+            registration.enabled_address_families,
+            BTreeMap::from([
+                (
+                    DpuDeploymentType::Bf3,
+                    BTreeSet::from([ServiceVpcAddressFamily::Ipv4]),
+                ),
+                (
+                    DpuDeploymentType::Bf3Gb200,
+                    BTreeSet::from([ServiceVpcAddressFamily::Ipv4]),
+                ),
+                (
+                    DpuDeploymentType::Bf4Generic,
+                    BTreeSet::from([ServiceVpcAddressFamily::Ipv6]),
+                ),
+            ])
+        );
     }
 
     /// Verifies startup forwards the operator ceiling rather than accepting the SDK default.

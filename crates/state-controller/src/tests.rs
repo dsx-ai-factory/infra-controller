@@ -16,7 +16,7 @@
  */
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -156,7 +156,16 @@ async fn test_delete_outdated_iterations(pool: sqlx::PgPool) -> eyre::Result<()>
 
 #[derive(Debug, Default)]
 pub(crate) struct TestStateControllerIO {
-    history_writes: AtomicUsize,
+    pub(crate) history_writes: AtomicUsize,
+    fail_next_list_objects: AtomicBool,
+}
+
+impl TestStateControllerIO {
+    /// Makes the next database object-ID listing fail so filtering tests can
+    /// verify that a failed read never replaces the last successful list.
+    pub(crate) fn fail_next_list_objects(&self) {
+        self.fail_next_list_objects.store(true, Ordering::SeqCst);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +289,12 @@ impl StateControllerIO for TestStateControllerIO {
         &self,
         txn: &mut PgConnection,
     ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
+        if self.fail_next_list_objects.swap(false, Ordering::SeqCst) {
+            return Err(DatabaseError::Internal {
+                message: "injected database object-ID read failure".to_string(),
+            });
+        }
+
         let query = "SELECT id FROM test_objects";
         let mut results = Vec::new();
         let mut segment_id_stream = sqlx::query_scalar(query).fetch(txn);

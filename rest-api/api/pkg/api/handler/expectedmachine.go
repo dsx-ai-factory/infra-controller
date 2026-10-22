@@ -207,6 +207,7 @@ func (cemh CreateExpectedMachineHandler) Handle(c echo.Context) error {
 				Manufacturer:             apiRequest.Manufacturer,
 				Model:                    apiRequest.Model,
 				Description:              apiRequest.Description,
+				ServerName:               apiRequest.ServerName,
 				SlotID:                   apiRequest.SlotID,
 				TrayIdx:                  apiRequest.TrayIdx,
 				HostID:                   apiRequest.HostID,
@@ -718,6 +719,7 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 				Manufacturer:             apiRequest.Manufacturer,
 				Model:                    apiRequest.Model,
 				Description:              apiRequest.Description,
+				ServerName:               apiRequest.ServerName,
 				SlotID:                   apiRequest.SlotID,
 				TrayIdx:                  apiRequest.TrayIdx,
 				HostID:                   apiRequest.HostID,
@@ -1062,11 +1064,12 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 		existingSerialMap[machine.ChassisSerialNumber] = true
 	}
 
-	// Retrieve all SKUs on Site to validate existence of SKU IDs in request.
+	// Retrieve requested SKUs on the Site to validate their existence.
 	// This is a pure validation read, so it stays outside the write transaction.
 	skuDAO := cdbm.NewSkuDAO(cemh.dbSession)
 	existingSkus, _, err := skuDAO.GetAll(ctx, nil, cdbm.SkuFilterInput{
 		SiteIDs: []uuid.UUID{siteID},
+		SkuIDs:  slices.Collect(maps.Keys(requestedSkuIDs)),
 	}, paginator.PageInput{
 		Limit: cutil.GetPtr(len(requestedSkuIDs)),
 	})
@@ -1136,6 +1139,7 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 			Manufacturer:             machineReq.Manufacturer,
 			Model:                    machineReq.Model,
 			Description:              machineReq.Description,
+			ServerName:               machineReq.ServerName,
 			SlotID:                   machineReq.SlotID,
 			TrayIdx:                  machineReq.TrayIdx,
 			HostID:                   machineReq.HostID,
@@ -1269,6 +1273,7 @@ type expectedMachineUpdateFieldSet struct {
 	manufacturer             bool
 	model                    bool
 	description              bool
+	serverName               bool
 	slotID                   bool
 	trayIdx                  bool
 	hostID                   bool
@@ -1295,6 +1300,7 @@ func expectedMachineUpdateFields(req model.APIExpectedMachineUpdateRequest) expe
 		manufacturer:             req.Manufacturer != nil,
 		model:                    req.Model != nil,
 		description:              req.Description != nil,
+		serverName:               req.ServerName != nil,
 		slotID:                   req.SlotID != nil,
 		trayIdx:                  req.TrayIdx != nil,
 		hostID:                   req.HostID != nil,
@@ -1414,7 +1420,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 	// We will split into multiple queries:
 	// 1. Retrieve SiteID and Site by loading the requested ExpectedMachine records
 	// 2. Retrieve all Expected Machines for that Site to check for Serial uniqueness.
-	// 3. Retrieve all SKUs for that Site to validate SKU IDs in the request.
+	// 3. Retrieve requested SKUs for that Site to validate SKU IDs in the request.
 	// All of these are pure validation reads and stay outside the WithTxResult call below.
 	// TODO: now that we have a unique index on (mac,siteID) we should reconsider adding unique indices on (serial,siteID).
 	//       At this time it is expected that existing serial data may not be unique so we
@@ -1533,11 +1539,12 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 		emMap[em.ID] = *em
 	}
 
-	// Retrieve all SKUs on Site to validate existence of SKU IDs in request.
+	// Retrieve requested SKUs on the Site to validate their existence.
 	// Pure validation read, kept outside the write transaction.
 	skuDAO := cdbm.NewSkuDAO(uemh.dbSession)
 	skus, _, err := skuDAO.GetAll(ctx, nil, cdbm.SkuFilterInput{
 		SiteIDs: []uuid.UUID{siteID},
+		SkuIDs:  slices.Collect(maps.Keys(requestedSkuIDs)),
 	}, paginator.PageInput{
 		Limit: cutil.GetPtr(len(requestedSkuIDs)),
 	})
@@ -1627,6 +1634,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 			Manufacturer:             machineReq.Manufacturer,
 			Model:                    machineReq.Model,
 			Description:              machineReq.Description,
+			ServerName:               machineReq.ServerName,
 			SlotID:                   machineReq.SlotID,
 			TrayIdx:                  machineReq.TrayIdx,
 			HostID:                   machineReq.HostID,
@@ -1809,7 +1817,7 @@ func (h ReplaceAllExpectedMachinesHandler) Handle(c echo.Context) error {
 			SkuID: machine.SkuID, FallbackDpuSerialNumbers: machine.FallbackDPUSerialNumbers,
 			Interfaces: machine.InterfacesToDBModel(),
 			RackID:     machine.RackID, Name: machine.Name, Manufacturer: machine.Manufacturer,
-			Model: machine.Model, Description: machine.Description, SlotID: machine.SlotID,
+			Model: machine.Model, Description: machine.Description, ServerName: machine.ServerName, SlotID: machine.SlotID,
 			TrayIdx: machine.TrayIdx, HostID: machine.HostID, IsDpfEnabled: machine.IsDpfEnabled,
 			Labels: machine.Labels, HostLifecycleProfile: machine.HostLifecycleProfile.ToDBModel(), CreatedBy: dbUser.ID,
 		})

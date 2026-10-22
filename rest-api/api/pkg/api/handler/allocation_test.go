@@ -23,7 +23,6 @@ import (
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
 	"github.com/google/uuid"
@@ -1084,7 +1083,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySiteIDs:   []string{site1.ID.String()},
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedCnt:    paginator.DefaultLimit,
+			expectedCnt:    cdbp.DefaultLimit,
 			expectedTotal:  &totalCount,
 		},
 		{
@@ -1136,7 +1135,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryIncludeRelations3:        nil,
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1149,7 +1148,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryIncludeRelations3:        nil,
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1159,7 +1158,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryTenantIDs: []string{tenant1.ID.String()},
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedCnt:    paginator.DefaultLimit,
+			expectedCnt:    cdbp.DefaultLimit,
 			expectedTotal:  &totalCount,
 		},
 		{
@@ -1170,7 +1169,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySiteIDs:   []string{site1.ID.String()},
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedCnt:    paginator.DefaultLimit,
+			expectedCnt:    cdbp.DefaultLimit,
 			expectedTotal:  &totalCount,
 		},
 		{
@@ -1181,7 +1180,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryTenantIDs:                []string{tenant1.ID.String()},
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1192,7 +1191,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySiteIDs:                  []string{site1.ID.String()},
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1204,7 +1203,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySiteIDs:                  []string{site1.ID.String()},
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1218,7 +1217,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			expectedErr:                       false,
 			expectedInfrastructureProviderOrg: cutil.GetPtr(ip.Org),
 			expectedStatus:                    http.StatusOK,
-			expectedCnt:                       paginator.DefaultLimit,
+			expectedCnt:                       cdbp.DefaultLimit,
 			expectedTotal:                     &totalCount,
 		},
 		{
@@ -1234,7 +1233,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			expectedTenantOrg:                 cutil.GetPtr(tenant1.Org),
 			expectedErr:                       false,
 			expectedStatus:                    http.StatusOK,
-			expectedCnt:                       paginator.DefaultLimit,
+			expectedCnt:                       cdbp.DefaultLimit,
 			expectedTotal:                     &totalCount,
 		},
 		{
@@ -1249,7 +1248,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			expectedSiteName:                  cutil.GetPtr(site1.Name),
 			expectedErr:                       false,
 			expectedStatus:                    http.StatusOK,
-			expectedCnt:                       paginator.DefaultLimit,
+			expectedCnt:                       cdbp.DefaultLimit,
 			expectedTotal:                     &totalCount,
 		},
 		{
@@ -1299,7 +1298,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySearch:                   cutil.GetPtr("allocation-"),
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1323,7 +1322,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySearch:                   cutil.GetPtr("allocation Registered"),
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1371,7 +1370,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryStatuses:                 []string{cdbm.AllocationStatusRegistered},
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -1477,7 +1476,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryTenantIDs: []string{tenant1.ID.String(), tenant2.ID.String()},
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedCnt:    paginator.DefaultLimit,
+			expectedCnt:    cdbp.DefaultLimit,
 			expectedTotal:  &totalCount,
 		},
 		{
@@ -1488,7 +1487,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			querySiteIDs:   []string{site1.ID.String(), site2.ID.String()},
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
-			expectedCnt:    paginator.DefaultLimit,
+			expectedCnt:    cdbp.DefaultLimit,
 			expectedTotal:  &totalCount,
 		},
 		{
@@ -1500,7 +1499,7 @@ func TestAllocationHandler_GetAll(t *testing.T) {
 			queryStatuses:                 []string{cdbm.AllocationStatusRegistered, cdbm.AllocationStatusPending},
 			expectedErr:                   false,
 			expectedStatus:                http.StatusOK,
-			expectedCnt:                   paginator.DefaultLimit,
+			expectedCnt:                   cdbp.DefaultLimit,
 			expectedTotal:                 &totalCount,
 		},
 		{
@@ -2098,6 +2097,7 @@ func TestAllocationHandler_Update(t *testing.T) {
 	ipb := common.TestBuildIPBlock(t, dbSession, "test-ip-block", site, &tenant1.ID, cdbm.IPBlockRoutingTypePublic, "192.168.1.0", 24, cdbm.IPBlockProtocolVersionV4, ipu)
 
 	parentPref, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipb.Prefix, ipb.PrefixLength, ipb.RoutingType, ipb.InfrastructureProviderID.String(), ipb.SiteID.String())
+	require.NoError(t, err)
 	assert.NotNil(t, parentPref)
 
 	acGoodIT := model.APIAllocationConstraintCreateRequest{ResourceType: cdbm.AllocationResourceTypeInstanceType, ResourceTypeID: it1.ID.String(), ConstraintType: cdbm.AllocationConstraintTypeReserved, ConstraintValue: 2}

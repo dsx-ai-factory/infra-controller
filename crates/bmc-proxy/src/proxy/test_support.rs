@@ -28,7 +28,9 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::proxy::admission::Admission;
-use crate::proxy::credentials::{BmcCredentials, CREDENTIAL_CACHE_IDLE_TTL};
+use crate::proxy::credentials::{
+    BmcCredentials, CREDENTIAL_CACHE_IDLE_TTL, SwitchProbe, TargetCredentials, TargetKind,
+};
 use crate::proxy::target::IP_CACHE_TTL;
 use crate::proxy::upstream::build_http_client;
 use crate::proxy::{BmcProxyState, bounded_cache, idle_bounded_cache};
@@ -70,6 +72,7 @@ pub(super) fn test_state_with_config(config: &str) -> BmcProxyState {
         credential_cache: idle_bounded_cache(CREDENTIAL_CACHE_IDLE_TTL),
         ip_cache: bounded_cache(IP_CACHE_TTL),
         admission,
+        switch_probe: Arc::new(SwitchProbe::default()),
     }
 }
 
@@ -81,6 +84,14 @@ pub(super) async fn test_state_with_ip_cache(
         state.ip_cache.insert(lookup_by, ip).await;
     }
     state
+}
+
+/// `credentials` as the cache holds them for a BMC's address.
+pub(super) fn for_bmc(credentials: BmcCredentials) -> TargetCredentials {
+    TargetCredentials {
+        target: TargetKind::Bmc,
+        credentials,
+    }
 }
 
 pub(super) fn summarize_credentials(credentials: BmcCredentials) -> CredentialSummary {

@@ -399,6 +399,22 @@ navigation:
               path: development/tls.md
             - page: nico-admin-cli
               path: manuals/nico-admin-cli.md
+            - section: NIC Firmware CLI Reference
+              contents:
+                - link: NIC Firmware Overview
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic.md
+                - link: Profile Overview
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-profile.md
+                - link: Create a Profile
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-profile-create.md
+                - link: Show a Profile
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-profile-show.md
+                - link: List Profiles
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-profile-list.md
+                - link: Update a Profile
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-profile-update.md
+                - link: Delete a Profile
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/firmware/firmware-nic-profile-delete.md
             - page: NICo mTLS and Authorization
               path: manuals/nico-api-auth.md
             - page: Re-creating Issuer/CA in Local Dev

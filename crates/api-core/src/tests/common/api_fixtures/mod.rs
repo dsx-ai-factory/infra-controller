@@ -24,7 +24,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
-use carbide_extension_service_controller::context::ExtensionServiceStateHandlerServices;
+use carbide_extension_service_controller::context::{
+    ExtensionServiceStateHandlerServices, ServiceVpcRegistrationConfig,
+};
 use carbide_extension_service_controller::handler::ExtensionServiceStateHandler;
 use carbide_extension_service_controller::io::ExtensionServiceStateControllerIO;
 use carbide_ib_fabric::IbFabricMonitor;
@@ -206,6 +208,12 @@ pub(in crate::tests) struct TestEnvOverrides {
     pub(in crate::tests) prevent_allocations_on_stale_dpu_agent_version: Option<bool>,
     pub(in crate::tests) network_segments_drain_period: Option<chrono::Duration>,
     pub(in crate::tests) power_manager_enabled: Option<bool>,
+    /// Enables filtering machine aggregate metrics by database object IDs only
+    /// for tests that need to verify the production controller wiring.
+    pub(in crate::tests) machine_filter_metrics_by_existing_object_ids_enabled: Option<bool>,
+    /// Overrides the machine controller's metric prefix when a test needs to
+    /// isolate its aggregate series from other fixture controllers.
+    pub(in crate::tests) machine_metric_prefix: Option<&'static str>,
     pub(in crate::tests) dpf_sdk: Option<Arc<dyn DpfOperations>>,
     pub(in crate::tests) fnn_config: Option<FnnConfig>,
     pub(in crate::tests) nmxc_default_partition: Option<bool>,
@@ -625,6 +633,18 @@ impl TestEnv {
             .await;
     }
 
+    /// Reports membership in the latest database object-ID list so integration
+    /// tests can verify which identity the machine controller read after discovery.
+    pub(in crate::tests) async fn machine_object_ids_from_database_contains(
+        &self,
+        machine_id: &HostMachineId,
+    ) -> Option<bool> {
+        self.machine_state_controller
+            .lock()
+            .await
+            .object_ids_from_database_contains_for_test(machine_id)
+    }
+
     /// Runs one iteration of the network state controller handler with the services
     /// in this test environment
     pub(in crate::tests) async fn run_network_segment_controller_iteration(&self) {
@@ -654,6 +674,17 @@ impl TestEnv {
             .lock()
             .await
             .run_single_iteration()
+            .boxed()
+            .await;
+    }
+
+    /// Processes extension-service work already queued by a transition.
+    /// Skipping the periodic scan proves the preceding controller pass requested the retry.
+    pub(in crate::tests) async fn run_queued_extension_service_controller_iterations(&self) {
+        self.extension_service_controller
+            .lock()
+            .await
+            .run_queued_iterations()
             .boxed()
             .await;
     }
@@ -1616,10 +1647,24 @@ async fn create_test_env_with_overrides_inner(
         std::time::Duration::from_secs(60),
     );
 
-    let machine_controller = StateController::<MachineStateControllerIO>::builder()
+    let machine_controller_builder = StateController::<MachineStateControllerIO>::builder()
         .database(db_pool.clone(), api.work_lock_manager_handle.clone())
-        .meter("carbide_machines", test_meter.meter())
-        .processor_id(state_controller_id.clone())
+        .meter(
+            overrides
+                .machine_metric_prefix
+                .unwrap_or("carbide_machines"),
+            test_meter.meter(),
+        )
+        .processor_id(state_controller_id.clone());
+    let machine_controller_builder = if overrides
+        .machine_filter_metrics_by_existing_object_ids_enabled
+        .unwrap_or(false)
+    {
+        machine_controller_builder.filter_metrics_by_existing_object_ids()
+    } else {
+        machine_controller_builder
+    };
+    let machine_controller = machine_controller_builder
         .services(
             MachineStateHandlerServices {
                 db_pool: db_pool.clone(),
@@ -1752,6 +1797,13 @@ async fn create_test_env_with_overrides_inner(
             ExtensionServiceStateHandlerServices {
                 db_pool: db_pool.clone(),
                 dpf_sdk: api.dpf_sdk.clone(),
+                service_vpc: ServiceVpcRegistrationConfig {
+                    slots: carbide_dpf::ServiceVpcSlots::new(
+                        config.dpu_config.service_vpc_slot_count,
+                    )
+                    .expect("test configuration has a validated service-VPC slot count"),
+                    enabled_address_families: config.dpf.deployments.service_vpc_address_families(),
+                },
             }
             .into(),
         )
@@ -1799,6 +1851,12 @@ async fn create_test_env_with_overrides_inner(
         SiteExplorerConfig {
             enabled: Arc::new(true.into()),
             retained_boot_interface_window: None,
+            admin_fnn_enabled: api
+                .runtime_config
+                .fnn
+                .as_ref()
+                .and_then(|fnn| fnn.admin_vpc.as_ref())
+                .is_some_and(|admin| admin.enabled),
             // run_interval shouldn't matter, this should not be run(), we only trigger intervals manually.
             run_interval: Duration::seconds(0).to_std().unwrap(),
             concurrent_explorations: 100,

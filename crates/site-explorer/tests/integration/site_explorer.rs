@@ -392,7 +392,7 @@ async fn test_suppression_skips_cached_switch_and_power_shelf_ingestion(
         model::expected_switch::ExpectedSwitch {
             expected_switch_id: None,
             bmc_mac_address: devices[0].mac,
-            nvos_mac_addresses: Vec::new(),
+            nvos_interfaces: Vec::new(),
             serial_number: "SUPPRESSED-SWITCH".to_string(),
             bmc_username: "admin".to_string(),
             bmc_password: "password".to_string(),
@@ -1725,6 +1725,7 @@ async fn test_expected_machine_device_type_metrics(
                 dpu_policy: Default::default(),
                 bmc_ip_allocation: Default::default(),
                 host_lifecycle_profile: Default::default(),
+                server_name: None,
             },
         },
     )
@@ -1751,6 +1752,7 @@ async fn test_expected_machine_device_type_metrics(
                 dpu_policy: Default::default(),
                 bmc_ip_allocation: Default::default(),
                 host_lifecycle_profile: Default::default(),
+                server_name: None,
             },
         },
     )
@@ -1777,6 +1779,7 @@ async fn test_expected_machine_device_type_metrics(
                 dpu_policy: Default::default(),
                 bmc_ip_allocation: Default::default(),
                 host_lifecycle_profile: Default::default(),
+                server_name: None,
             },
         },
     )
@@ -2548,6 +2551,7 @@ async fn test_site_explorer_audit_exploration_results(
     let explorer_config = SiteExplorerConfig {
         enabled: Arc::new(true.into()),
         retained_boot_interface_window: None,
+        admin_fnn_enabled: false,
         explorations_per_run: 7,
         concurrent_explorations: 1,
         run_interval: std::time::Duration::from_secs(1),
@@ -3280,6 +3284,7 @@ async fn test_fallback_dpu_serial(pool: PgPool) -> Result<(), Box<dyn std::error
                 dpu_policy: Default::default(),
                 bmc_ip_allocation: Default::default(),
                 host_lifecycle_profile: Default::default(),
+                server_name: None,
             },
         },
     )
@@ -3336,6 +3341,7 @@ async fn test_fallback_dpu_serial(pool: PgPool) -> Result<(), Box<dyn std::error
         dpu_policy: Default::default(),
         bmc_ip_allocation: Default::default(),
         host_lifecycle_profile: Default::default(),
+        server_name: None,
     };
     db::expected_machine::update(&mut txn, &host1_expected_machine).await?;
     txn.commit().await?;
@@ -3528,7 +3534,7 @@ async fn test_select_host_primary_interface(
 /// `set_nic_mode(Nic)` on the DPU during its per-host matching loop.
 ///
 /// This exercises the full wire (site-explorer iteration → per-host policy
-/// resolution → `check_and_configure_dpu_mode` → mock Redfish
+/// resolution → `update_dpu_mode` → mock Redfish
 /// `set_nic_mode`) that the unit tests only cover in pieces.
 #[sqlx_test]
 async fn test_site_explorer_auto_corrects_nic_mode_per_expected_machine(
@@ -3600,7 +3606,7 @@ async fn test_site_explorer_auto_corrects_nic_mode_per_expected_machine(
         db::explored_endpoints::set_preingestion_complete(ip, &mut txn).await?;
     }
     txn.commit().await?;
-    // Second iteration: per-host DPU matching + check_and_configure_dpu_mode.
+    // Second iteration: per-host DPU matching and NIC-mode correction.
     explorer.run_single_iteration().await.unwrap();
 
     let calls = explorer
@@ -4256,5 +4262,131 @@ async fn test_site_explorer_backfills_boot_interface_id_onto_machine_interface(
         "exploration should backfill the Redfish interface id onto the machine_interface row",
     );
 
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_dpf_suppression_preserves_report_and_resumes(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let metrics = carbide_instrument::testing::MetricsCapture::start();
+    let env = Env::new(pool).await;
+    let mut machines = vec![env.new_machine("02:00:00:00:10:31", "Vendor1")];
+    machines.discover_dhcp(env.api()).await?;
+    let address = machines[0].ip.parse()?;
+    let mut txn = env.pool.begin().await?;
+    db::explored_endpoints::insert(
+        address,
+        &cached_suppression_report("cached"),
+        false,
+        txn.as_mut(),
+    )
+    .await?;
+    let mut input = suppression_input(machines[0].mac, BmcSuppressionSubsystem::SiteExplorer);
+    input.source = BmcSuppressionSource::DpfProvisioning;
+    db::bmc_suppression::upsert(txn.as_mut(), &input).await?;
+    txn.commit().await?;
+    let explorer = env.test_site_explorer(suppression_test_config(1));
+    let queued = explorer
+        .endpoint_exploration_service()
+        .refresh_endpoint_report(address)
+        .await?;
+    assert!(queued.exploration_requested);
+    let before = db::explored_endpoints::find_by_ips(&env.pool, vec![address]).await?;
+    explorer.run_single_iteration().await?;
+    assert!(
+        explorer
+            .endpoint_explorer()
+            .explore_endpoint_calls
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        db::explored_endpoints::find_by_ips(&env.pool, vec![address]).await?,
+        before
+    );
+    assert!(
+        metrics.counter_delta(
+            "carbide_site_explorer_dpf_explorations_deferred_total",
+            &[("request", "periodic")],
+        ) >= 1.0
+    );
+    let mut txn = env.pool.begin().await?;
+    db::bmc_suppression::delete(txn.as_mut(), machines[0].mac, input.subsystem, input.source)
+        .await?;
+    txn.commit().await?;
+    explorer.insert_endpoints(vec![(address, EndpointExplorationReport::default())]);
+    explorer.run_single_iteration().await?;
+    assert_eq!(
+        explorer
+            .endpoint_explorer()
+            .explore_endpoint_calls
+            .lock()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        !db::explored_endpoints::find_by_ips(&env.pool, vec![address]).await?[0]
+            .exploration_requested
+    );
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_queued_refresh_survives_in_flight_exploration(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let mut machine = env.new_machine("02:00:00:00:10:32", "Vendor1");
+    machine.discover_dhcp(env.api()).await?;
+    let address = machine.ip.parse()?;
+    let report = cached_suppression_report("cached");
+    let mut txn = env.pool.begin().await?;
+    db::explored_endpoints::insert(address, &report, false, txn.as_mut()).await?;
+    txn.commit().await?;
+    let explorer = Arc::new(env.test_site_explorer(suppression_test_config(1)));
+    let mut input = suppression_input(machine.mac, BmcSuppressionSubsystem::SiteExplorer);
+    input.source = BmcSuppressionSource::DpfProvisioning;
+
+    // Success and failure persist reports through different database writes.
+    for result in [
+        Ok(report.clone()),
+        Err(EndpointExplorationError::AvoidLockout),
+    ] {
+        explorer.insert_endpoint_results(vec![(address, result)]);
+        let blocker = explorer.endpoint_explorer().block_next_exploration();
+        let running_explorer = Arc::clone(&explorer);
+        let in_flight = tokio::spawn(async move { running_explorer.run_single_iteration().await });
+        blocker.wait_until_started().await;
+        let mut txn = env.pool.begin().await?;
+        db::bmc_suppression::upsert(txn.as_mut(), &input).await?;
+        txn.commit().await?;
+
+        let queued = explorer
+            .endpoint_exploration_service()
+            .refresh_endpoint_report(address)
+            .await?;
+        assert!(queued.exploration_requested);
+        blocker.release();
+        in_flight.await??;
+        explorer.run_single_iteration().await?;
+        assert!(
+            db::explored_endpoints::find_by_ips(&env.pool, vec![address]).await?[0]
+                .exploration_requested
+        );
+
+        let mut txn = env.pool.begin().await?;
+        db::bmc_suppression::delete(txn.as_mut(), machine.mac, input.subsystem, input.source)
+            .await?;
+        txn.commit().await?;
+        explorer.insert_endpoints(vec![(address, report.clone())]);
+        explorer.run_single_iteration().await?;
+        assert!(
+            !db::explored_endpoints::find_by_ips(&env.pool, vec![address]).await?[0]
+                .exploration_requested
+        );
+    }
     Ok(())
 }

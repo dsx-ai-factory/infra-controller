@@ -49,6 +49,7 @@ fn another_switch() -> SimNode {
 /// address can match.
 fn host_only_node_info(node_id: &str, host_ip: &str) -> rms::NodeInfo {
     rms::NodeInfo {
+        additional_host_endpoints: Vec::new(),
         node_id: node_id.to_string(),
         rack_id: "rack-001".to_string(),
         r#type: None,
@@ -84,6 +85,7 @@ fn reset_request(
     domain: Option<&str>,
 ) -> rms::BatchResetSwitchFactoryDefaultRequest {
     rms::BatchResetSwitchFactoryDefaultRequest {
+        allow_ssh_fallback: true,
         nodes: Some(rms::NodeSet { nodes }),
         domain: domain.map(str::to_owned),
     }
@@ -613,6 +615,7 @@ async fn factory_reset_clears_the_switch_fabric_role_once_the_job_completes() {
 
     // switch-8 is made the rack's primary, and reads back as such.
     v2.configure_scale_up_fabric_manager(rms_v2::ConfigureScaleUpFabricManagerRequest {
+        layout: None,
         nodes: Some(node_set()),
         primary_switch_node_id: Some("switch-8".to_string()),
         domain: None,

@@ -131,7 +131,7 @@ func (r *Rule) Validate() error {
 	if err := r.EventType.Validate(); err != nil {
 		return err
 	}
-	if len(r.Policy.Actions) == 0 {
+	if len(r.Actions) == 0 {
 		return fmt.Errorf("actions are required")
 	}
 	return r.Policy.Validate()

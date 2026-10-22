@@ -311,16 +311,6 @@ impl DpuMachineInfo {
         }
     }
 
-    /// The [`bmc_vendor::DpuModel`] this DPU emulates, so the mock can share
-    /// per-model logic (e.g. factory-default credentials) with the rest of the
-    /// stack rather than duplicating it against the local [`DpuType`].
-    fn dpu_model(&self) -> bmc_vendor::DpuModel {
-        match self.dpu_type() {
-            DpuType::Bluefield3 => bmc_vendor::DpuModel::BlueField3,
-            DpuType::Bluefield4 => bmc_vendor::DpuModel::BlueField4,
-        }
-    }
-
     fn bmc_product(&self) -> Option<&'static str> {
         match self.dpu_type() {
             DpuType::Bluefield3 => Some("BlueField-3 DPU"),
@@ -1324,9 +1314,11 @@ impl MachineInfo {
         match self {
             MachineInfo::Host(h) => h.factory_default_account(),
             MachineInfo::Dpu(d) => {
-                // Read the per-model default from the shared source of truth so the
-                // mock and site-explorer's fallback cannot drift.
-                let (username, password) = d.dpu_model().default_factory_credentials();
+                let username = match d.dpu_type() {
+                    DpuType::Bluefield3 => "root",
+                    DpuType::Bluefield4 => "admin",
+                };
+                let password = "0penBmc";
                 redfish::account_service::Account::administrator(username, username, password)
             }
         }
@@ -1409,6 +1401,31 @@ mod tests {
             .expect("valid hardware MAC pool");
         let dpu = DpuMachineInfo::new(hw_type, pool, DpuSettings::default());
         HostMachineInfo::new(hw_type, vec![dpu], pool, hw_mac_addr_pool)
+    }
+
+    #[test]
+    fn bluefield_factory_accounts_use_generation_credentials() {
+        for (hardware_type, username) in [
+            (HardwareType::DellPowerEdgeR750, "root"),
+            (HardwareType::DellPowerEdgeR760Bf4, "admin"),
+        ] {
+            let mut pool = MacAddressPool::new(Config {
+                ranges: None,
+                pool: Some(PoolConfig::new(MacAddress::new([2, 0, 0, 0, 0, 0]), 16).unwrap()),
+            });
+            let info = MachineInfo::Dpu(dpu(
+                hardware_type,
+                &mut pool,
+                DpuFirmwareVersions::default(),
+            ));
+            let accounts =
+                redfish::account_service::AccountServiceState::new(info.factory_default_account());
+            assert!(
+                accounts.is_factory_default_password(username, "0penBmc"),
+                "{hardware_type}"
+            );
+            assert!(accounts.find(username).is_some(), "{hardware_type}");
+        }
     }
 
     #[test]

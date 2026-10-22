@@ -837,6 +837,15 @@ When adding such a field to a bulk-update DAO:
 `bmc_ip_address` this way for a scalar value and `host_lifecycle_profile` for a
 JSONB patch; their mixed-batch tests are the guards.
 
+### Site inventory workflows
+
+`inventoryWorkflowTypes` in `workflow/pkg/activity/site/retention.go` has to
+list every inventory workflow the Site worker registers in
+`workflow/cmd/workflow/main.go`, such as `UpdateMachineInventory`. When adding
+or renaming one, update both. A type missing from the list keeps its successful
+runs for the full `site` namespace retention instead of
+`temporal.siteNamespace.successfulInventoryRetention`.
+
 ## Git Workflow
 
 When writing git commit messages, follow the conventions below:

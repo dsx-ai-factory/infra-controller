@@ -442,6 +442,11 @@ pub(crate) async fn discover_machine(
                 &mut txn,
                 Some(&hardware_info),
                 &machine_id,
+                api.runtime_config
+                    .fnn
+                    .as_ref()
+                    .and_then(|fnn| fnn.admin_vpc.as_ref())
+                    .is_some_and(|admin| admin.enabled),
                 api.runtime_config.retained_boot_interface_window,
             )
             .await?;

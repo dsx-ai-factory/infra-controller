@@ -73,7 +73,7 @@ impl<'de> Deserialize<'de> for NicFirmwareProfileId {
 }
 
 /// `NicFirmwareProfile` stores one definition and its optimistic edit version.
-#[derive(Clone, Debug, sqlx::FromRow)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct NicFirmwareProfile {
     /// Immutable operator-chosen name identifying this catalog definition.
     pub id: NicFirmwareProfileId,

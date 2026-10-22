@@ -21,6 +21,9 @@ mod errors;
 mod metrics;
 mod rack_firmware;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 use std::collections::HashMap;
 use std::default::Default;
 use std::io;
@@ -118,6 +121,10 @@ struct PreingestionManagerStatic {
     bfb_copy_limiter: Arc<Semaphore>,
     ntp_servers: Vec<Ipv4Addr>,
     rack_firmware: Option<RackFirmwareDependencies>,
+
+    // Bound individual requests; firmware jobs may outlive these deadlines.
+    rack_firmware_submission_timeout: Duration,
+    rack_firmware_status_timeout: Duration,
 }
 
 #[derive(Clone)]
@@ -166,6 +173,8 @@ impl PreingestionManager {
                 bfb_copy_limiter: Arc::new(Semaphore::new(config.max_concurrent_bfb_copies)),
                 ntp_servers,
                 rack_firmware: None,
+                rack_firmware_submission_timeout: Duration::from_secs(60),
+                rack_firmware_status_timeout: Duration::from_secs(30),
                 config,
             }),
             metric_holder,
@@ -3331,7 +3340,7 @@ impl PreingestionManagerStatic {
                             tracing::debug!(
                                 bmc_ip_address = %endpoint_clone.address,
                                 path = %artifact.local_path.display(),
-                                "Firmware artifact is being downloaded; update deferred"
+                                "Waiting for firmware artifact availability; update deferred"
                             );
                             return Ok(false);
                         }

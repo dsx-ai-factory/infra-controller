@@ -42,7 +42,7 @@ func (d customProviderConfigDecoder) Name() string {
 }
 
 func (d customProviderConfigDecoder) DefaultConfig() providerapi.ProviderConfig {
-	return customProviderConfig{name: d.name}
+	return customProviderConfig(d)
 }
 
 func (d customProviderConfigDecoder) DecodeYAML(raw yaml.Node) (providerapi.ProviderConfig, error) {

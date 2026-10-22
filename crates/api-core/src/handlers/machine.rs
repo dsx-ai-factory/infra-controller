@@ -31,7 +31,7 @@ use db::ConditionalWrite;
 use db::resource_pool::ResourcePoolAllocationNotOwned;
 use libredfish::SystemPowerControl;
 use model::bmc_info::BmcInfo;
-use model::bmc_suppression::BmcSuppressionSubsystem;
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem};
 use model::hardware_info::MachineNvLinkInfo;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
@@ -954,10 +954,27 @@ pub(crate) async fn admin_force_delete_machine(
             })?;
         }
         let instance_id = db::instance::find_id_by_machine_id(&mut txn, &host_machine.id).await?;
-        if let Some(instance_id) = &instance_id {
+        if let Some(instance_id) = instance_id {
             response.instance_id = instance_id.to_string();
-        }
 
+            // The Machine lock makes concurrent Instance allocation visible here.
+            // TODO(#6125): Endpoint publication must add an Instance-to-Machine
+            // eligibility fence before activation. Reconcile existing
+            // Machine-to-Instance writers first; its address-table and Instance
+            // locks alone do not participate in this Machine lock.
+            // Without explicit orphan consent, rejecting before commit rolls back ForceDeletion
+            // and leaves endpoint cleanup owned by the retained Instance service attachments.
+            if !request.allow_delete_with_orphaned_dpf_crds
+                && !db::instance::find_service_vpc_memberships(&mut txn, instance_id)
+                    .await?
+                    .is_empty()
+            {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "instance {instance_id} retains service VPC endpoints; wait for observed service-network cleanup before force deletion",
+                ))
+                .into());
+            }
+        }
         // Record the opt-in before requesting Admin. Retries must keep waiting
         // even if the Instance is gone or the caller omits the option.
         let requires_admin_ack = db::machine::record_force_delete_admin_ack_requirement(
@@ -1030,6 +1047,25 @@ pub(crate) async fn admin_force_delete_machine(
         }
     }
 
+    // ForceDeletion bypasses the controller's provisioning-exit cleanup.
+    // Preserve independently requested suppressions unless their deletion is opted into.
+    let bmc_macs = host_machine
+        .iter()
+        .filter_map(|machine| machine.status.bmc_info.mac)
+        .chain(
+            dpu_machines
+                .iter()
+                .filter_map(|machine| machine.status.bmc_info.mac),
+        )
+        .collect::<Vec<_>>();
+    db::bmc_suppression::delete_many_for_source(
+        &mut txn,
+        &bmc_macs,
+        BmcSuppressionSubsystem::SiteExplorer,
+        BmcSuppressionSource::DpfProvisioning,
+    )
+    .await?;
+
     if let Some(instance_id) = instance_id {
         // Record the current IB memberships after acquiring the Machine lock,
         // in the same transaction as ForceDeletion. UFM cleanup runs only
@@ -1052,7 +1088,13 @@ pub(crate) async fn admin_force_delete_machine(
 
     // Note: The following deletion steps are all ordered in an idempotent fashion
     if let Some(instance_id) = instance_id {
-        crate::handlers::instance::force_delete_instance(instance_id, api, &mut response).await?;
+        crate::handlers::instance::force_delete_instance(
+            instance_id,
+            api,
+            &mut response,
+            request.allow_delete_with_orphaned_dpf_crds,
+        )
+        .await?;
         if !response.all_done {
             return Ok(Response::new(response));
         }
@@ -1187,20 +1229,34 @@ pub(crate) async fn admin_force_delete_machine(
         if let Some(ref ops) = api.dpf_sdk
             && !dpu_machines.is_empty()
         {
-            let host_dpf_id = machine
-                .dpf_id()
-                .ok_or_else(|| CarbideError::internal("BMC MAC not set for host".to_string()))?;
-            let dpu_device_names: Vec<String> = dpu_machines
-                .iter()
-                .map(|d| {
-                    d.dpf_id().ok_or_else(|| {
-                        CarbideError::internal("BMC MAC not set for DPU".to_string())
+            let cleanup_result: Result<(), CarbideError> = async {
+                let host_dpf_id = machine.dpf_id().ok_or_else(|| {
+                    CarbideError::internal("BMC MAC not set for host".to_string())
+                })?;
+                let dpu_device_names: Vec<String> = dpu_machines
+                    .iter()
+                    .map(|dpu| {
+                        dpu.dpf_id().ok_or_else(|| {
+                            CarbideError::internal("BMC MAC not set for DPU".to_string())
+                        })
                     })
-                })
-                .collect::<Result<_, _>>()?;
-            ops.force_delete_host(&host_dpf_id, &dpu_device_names)
-                .await
-                .map_err(CarbideError::DpfError)?;
+                    .collect::<Result<_, _>>()?;
+                ops.force_delete_host(&host_dpf_id, &dpu_device_names)
+                    .await
+                    .map_err(CarbideError::DpfError)
+            }
+            .await;
+
+            if let Err(error) = cleanup_result {
+                if !request.allow_delete_with_orphaned_dpf_crds {
+                    return Err(error.into());
+                }
+                tracing::warn!(
+                    machine_id = %machine.id,
+                    error = %error,
+                    "Continuing force deletion with explicitly orphaned DPF resources",
+                );
+            }
         }
     }
 

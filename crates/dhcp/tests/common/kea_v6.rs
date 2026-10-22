@@ -65,6 +65,7 @@ pub(crate) struct Kea6Config {
     pub(crate) kea_rapid_commit_v6: bool,
     pub(crate) provisioning_server_ipv6: &'static str,
     pub(crate) dns_servers_ipv6: &'static [&'static str],
+    pub(crate) prefix_pool: bool,
     pub(crate) mac_sources: Option<&'static [&'static str]>,
     pub(crate) expired_leases_processing: Option<Kea6ExpiredLeasesProcessing>,
 }
@@ -80,6 +81,7 @@ impl Default for Kea6Config {
             kea_rapid_commit_v6: true,
             provisioning_server_ipv6: "",
             dns_servers_ipv6: &HOOK_DNS_SERVERS_IPV6,
+            prefix_pool: false,
             mac_sources: None,
             expired_leases_processing: None,
         }
@@ -577,6 +579,13 @@ impl Kea6 {
                 }
             ]
         });
+        if config.prefix_pool {
+            dhcp6["subnet6"][0]["pd-pools"] = json!([{
+                "prefix": "2001:db8:1::",
+                "prefix-len": 64,
+                "delegated-len": 64
+            }]);
+        }
         if let Some(expiration) = config.expired_leases_processing {
             // Most tests use normal lease lifetimes; expiry tests override this
             // block to make Kea reclaim leases within the test timeout.

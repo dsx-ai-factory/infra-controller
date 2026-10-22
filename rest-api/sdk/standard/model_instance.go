@@ -83,8 +83,8 @@ type Instance struct {
 	DpuExtensionServiceDeployments []DpuExtensionServiceDeployment `json:"dpuExtensionServiceDeployments,omitempty"`
 	// IDs of SSH Key Groups associated with this Instance
 	SshKeyGroupIds []string `json:"sshKeyGroupIds,omitempty"`
-	// IDs of SSH Key Groups associated with this Instance
-	SshKeyGroups []SshKeyGroup `json:"sshKeyGroups,omitempty"`
+	// SSH Key Groups associated with this Instance, in summary form
+	SshKeyGroups []SshKeyGroupSummary `json:"sshKeyGroups,omitempty"`
 	// base64 encoded TPM EK Certificate associated with this Instance
 	TpmEkCertificate NullableString `json:"tpmEkCertificate,omitempty"`
 	// Status of the Instance
@@ -1187,9 +1187,9 @@ func (o *Instance) SetSshKeyGroupIds(v []string) {
 }
 
 // GetSshKeyGroups returns the SshKeyGroups field value if set, zero value otherwise.
-func (o *Instance) GetSshKeyGroups() []SshKeyGroup {
+func (o *Instance) GetSshKeyGroups() []SshKeyGroupSummary {
 	if o == nil || IsNil(o.SshKeyGroups) {
-		var ret []SshKeyGroup
+		var ret []SshKeyGroupSummary
 		return ret
 	}
 	return o.SshKeyGroups
@@ -1197,7 +1197,7 @@ func (o *Instance) GetSshKeyGroups() []SshKeyGroup {
 
 // GetSshKeyGroupsOk returns a tuple with the SshKeyGroups field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-func (o *Instance) GetSshKeyGroupsOk() ([]SshKeyGroup, bool) {
+func (o *Instance) GetSshKeyGroupsOk() ([]SshKeyGroupSummary, bool) {
 	if o == nil || IsNil(o.SshKeyGroups) {
 		return nil, false
 	}
@@ -1213,8 +1213,8 @@ func (o *Instance) HasSshKeyGroups() bool {
 	return false
 }
 
-// SetSshKeyGroups gets a reference to the given []SshKeyGroup and assigns it to the SshKeyGroups field.
-func (o *Instance) SetSshKeyGroups(v []SshKeyGroup) {
+// SetSshKeyGroups gets a reference to the given []SshKeyGroupSummary and assigns it to the SshKeyGroups field.
+func (o *Instance) SetSshKeyGroups(v []SshKeyGroupSummary) {
 	o.SshKeyGroups = v
 }
 
