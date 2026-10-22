@@ -24,10 +24,11 @@ use std::time::Duration;
 use carbide_dpf::types::{DpuDeviceSummary, DpuNodeSummary, HostDpfSnapshot};
 use carbide_dpf::{DpuDeploymentType, DpuPhase};
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType, PredictedHostMachineId};
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{
-    CleanupContext, CleanupState, DpuDiscoveringState, FailureDetails, ManagedHostState, ResetState,
+    CleanupContext, CleanupState, DpuDiscoveringState, FailureCause, FailureDetails, FailureSource,
+    ManagedHostState, ResetState, StateMachineArea,
 };
 use rpc::forge::forge_server::Forge;
 use rpc::forge::managed_host_reset_request::Mode;
@@ -36,7 +37,9 @@ use tokio::time::timeout;
 use tonic::{Code, Request};
 
 use crate::tests::common::api_fixtures::instance::seed_service_vpc_endpoint;
-use crate::tests::common::api_fixtures::test_managed_host::TestManagedHost;
+use crate::tests::common::api_fixtures::test_managed_host::{
+    TestManagedHost, TestPredictedManagedHost,
+};
 use crate::tests::common::api_fixtures::{
     TestEnv, TestEnvOverrides, create_managed_host, create_managed_host_with_dpf,
     create_managed_host_with_dpf_multi, create_test_env, create_test_env_with_overrides,
@@ -886,6 +889,142 @@ async fn reset_retains_instance_until_every_dpu_acknowledges_admin(pool: sqlx::P
             .await;
         }
     }
+}
+
+/// A predicted host in Failed/DpfProvisioning with dpf.used_for_ingestion=true
+/// and the HostUpdateInProgress alert can be reset.
+#[crate::sqlx_test]
+async fn reset_set_accepts_predicted_host_after_dpf_failure(pool: sqlx::PgPool) {
+    let env = dpf_test_env(pool).await;
+    let managed_host = dpf_ingested_host(&env).await;
+    // Preserve the DPF fixture's persisted attachments, replacing only its host identity.
+    let predicted_id: PredictedHostMachineId = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [0xAC; 32],
+        MachineType::PredictedHost,
+    )
+    .try_into()
+    .unwrap();
+    let mut txn = env.db_txn().await;
+    let renamed = sqlx::query("UPDATE machines SET id = $1 WHERE id = $2")
+        .bind(predicted_id)
+        .bind(managed_host.id)
+        .execute(&mut *txn)
+        .await
+        .unwrap();
+    assert_eq!(renamed.rows_affected(), 1);
+    let predicted_host = TestPredictedManagedHost {
+        id: predicted_id,
+        dpu_ids: managed_host.dpu_ids,
+        api: env.api.clone(),
+    };
+    let predicted_host_id: MachineId = predicted_host.id.into();
+
+    db::machine::update_state(
+        &mut txn,
+        predicted_id.as_host_machine_id(),
+        &ManagedHostState::Failed {
+            details: FailureDetails {
+                cause: FailureCause::DpfProvisioning {
+                    err: "test failure".to_string(),
+                },
+                failed_at: chrono::Utc::now(),
+                source: FailureSource::StateMachineArea(StateMachineArea::MainFlow),
+            },
+            machine_id: predicted_host_id,
+            retry_count: 0,
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    let mut txn = env.db_txn().await;
+    let snapshot = predicted_host.snapshot(&mut txn).await;
+    assert_eq!(
+        snapshot.host_snapshot.id.machine_type(),
+        MachineType::PredictedHost
+    );
+    assert!(snapshot.host_snapshot.config.dpf.used_for_ingestion);
+    assert!(snapshot.instance.is_none());
+    assert!(matches!(
+        snapshot.managed_state,
+        ManagedHostState::Failed {
+            details: FailureDetails {
+                cause: FailureCause::DpfProvisioning { .. },
+                ..
+            },
+            ..
+        }
+    ));
+    drop(txn);
+
+    let error = env
+        .api
+        .trigger_managed_host_reset(reset_request(predicted_host_id, Mode::Set))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert!(error.message().contains("HostUpdateInProgress"));
+
+    predicted_host.mark_machine_for_updates().await;
+
+    env.api
+        .trigger_managed_host_reset(reset_request(predicted_host_id, Mode::Set))
+        .await
+        .unwrap();
+
+    let mut txn = env.db_txn().await;
+    let request = predicted_host
+        .host()
+        .db_machine(&mut txn)
+        .await
+        .reset_requested
+        .expect("the reset request should persist on the host row");
+    assert_eq!(request.initiator, UpdateInitiator::AdminCli.as_str_name());
+    assert!(request.started_at.is_none(), "a fresh request is unstarted");
+
+    drop(txn);
+
+    // The same host-only gate protects Clear; withdraw before the controller picks it up.
+    env.api
+        .trigger_managed_host_reset(reset_request(predicted_host_id, Mode::Clear))
+        .await
+        .unwrap();
+    let mut txn = env.db_txn().await;
+    assert!(
+        predicted_host
+            .host()
+            .db_machine(&mut txn)
+            .await
+            .reset_requested
+            .is_none()
+    );
+    drop(txn);
+    env.api
+        .trigger_managed_host_reset(reset_request(predicted_host_id, Mode::Set))
+        .await
+        .unwrap();
+
+    env.run_machine_state_controller_iteration().await;
+
+    let mut txn = env.db_txn().await;
+    let snapshot = predicted_host.snapshot(&mut txn).await;
+    assert_eq!(
+        snapshot.managed_state,
+        ManagedHostState::Reset {
+            reset_state: ResetState::DeletingInstance,
+        }
+    );
+    assert!(
+        snapshot
+            .host_snapshot
+            .reset_requested
+            .as_ref()
+            .unwrap()
+            .started_at
+            .is_some()
+    );
 }
 
 /// Verifies reset applies Admin networking before retained service endpoints block Instance

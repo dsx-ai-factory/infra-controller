@@ -1591,6 +1591,8 @@ async fn test_machine_a_tron_scout_stream(
         underlay_dhcp_relay_address,
         move |machine_handle| {
             let scout_stream_api_addrs = scout_stream_api_addrs.clone();
+            let carbide_metrics_addrs = test_env.carbide_metrics_addrs.clone();
+            let db_pool = test_env.db_pool.clone();
             async move {
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
@@ -1622,7 +1624,20 @@ async fn test_machine_a_tron_scout_stream(
 
                 machine_handle.abort_and_wait().await?;
                 scout_stream::wait_for_connection_state(&scout_stream_api_addrs, machine_id, false)
-                    .await
+                    .await?;
+
+                // The aborted scout no longer reports, so the back-dated contact stays timed out.
+                sqlx::query(
+                    "UPDATE machines SET last_scout_contact_time = NOW() - INTERVAL '2 years' WHERE id = $1",
+                )
+                .bind(machine_id)
+                .execute(&db_pool)
+                .await?;
+                let expected_metric = format!(
+                    r#"carbide_hosts_with_scout_heartbeat_timeout{{fresh="true",host_machine_id="{machine_id}"}} 1"#
+                );
+                metrics::wait_for_metric_line(&carbide_metrics_addrs, &expected_metric).await?;
+                Ok(())
             }
         },
     )

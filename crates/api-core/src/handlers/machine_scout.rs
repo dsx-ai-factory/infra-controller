@@ -180,9 +180,7 @@ pub(crate) async fn forge_agent_control(
         let dpu_machine_id = match db::machine::find_dpu_id(&mut txn, &dpu_machine_id).await {
             Err(error) => {
                 tracing::warn!(%machine_id, error = %error, "failed loading machine");
-                return Err(
-                    CarbideError::InvalidArgument("err loading machine".to_string()).into(),
-                );
+                return Err(CarbideError::from(error).into());
             }
             Ok(None) => {
                 tracing::info!(%machine_id, "machine not found");

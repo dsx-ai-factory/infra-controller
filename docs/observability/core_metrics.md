@@ -5,6 +5,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <table>
 <tr><td>Name</td><td>Type</td><td>Description</td></tr>
 <tr><td>carbide_active_host_firmware_update_count</td><td>gauge</td><td>Number of host machines in the system currently working on updating their firmware.</td></tr>
+<tr><td>carbide_alerts_suppressed_count</td><td>gauge</td><td>Whether external metrics based alerting is suppressed for a specific object</td></tr>
 <tr><td>carbide_api_admission_admitted_total</td><td>counter</td><td>Number of API requests admitted for execution</td></tr>
 <tr><td>carbide_api_admission_handler_execution_duration_seconds</td><td>histogram</td><td>Duration of admitted API request handler execution</td></tr>
 <tr><td>carbide_api_admission_pending_requests</td><td>gauge</td><td>Number of API requests currently waiting for an execution slot</td></tr>
@@ -140,6 +141,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_health_redfish_sse_event_record_resolution_failures_total</td><td>counter</td><td>Number of Redfish SSE event records dropped after a referenced record could not be resolved, by failure reason.</td></tr>
 <tr><td>carbide_health_report_submissions_total</td><td>counter</td><td>Number of health report submissions to the NICo API, by report target and outcome.</td></tr>
 <tr><td>carbide_host_reprovision_retries_total</td><td>counter</td><td>Number of times a failed host firmware upgrade was retried during host reprovisioning</td></tr>
+<tr><td>carbide_hosts_alerts_suppressed_count</td><td>gauge</td><td>Whether external metrics based alerting is suppressed for a specific object</td></tr>
 <tr><td>carbide_hosts_by_sku_count</td><td>gauge</td><td>Number of hosts by SKU and device type (&#39;unknown&#39; for hosts without SKU)</td></tr>
 <tr><td>carbide_hosts_health_overrides_count</td><td>gauge</td><td>Number of health overrides configured in the site</td></tr>
 <tr><td>carbide_hosts_health_status_count</td><td>gauge</td><td>Number of managed hosts in the system that have reported either a healthy or not healthy status - based on the presence of health probe alerts</td></tr>
@@ -148,6 +150,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_hosts_unhealthy_by_probe_id_count</td><td>gauge</td><td>Number of objects which reported a certain Health Probe Alert</td></tr>
 <tr><td>carbide_hosts_usable_count</td><td>gauge</td><td>Number of remaining hosts in the NICo deployment available for immediate instance creation</td></tr>
 <tr><td>carbide_hosts_with_bios_password_set</td><td>gauge</td><td>Number of hosts in the system that have their BIOS password set.</td></tr>
+<tr><td>carbide_hosts_with_scout_heartbeat_timeout</td><td>gauge</td><td>Scout heartbeat timeout status for hosts</td></tr>
 <tr><td>carbide_ib_monitor_fabrics_count</td><td>gauge</td><td>Number of monitored InfiniBand fabrics</td></tr>
 <tr><td>carbide_ib_monitor_iteration_latency_milliseconds</td><td>histogram</td><td>The time it took to perform one IB fabric monitor iteration</td></tr>
 <tr><td>carbide_ib_monitor_machine_ib_status_updates_count</td><td>gauge</td><td>Number of Machines whose InfiniBand status observation was updated</td></tr>

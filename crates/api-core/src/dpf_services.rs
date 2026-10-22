@@ -585,6 +585,7 @@ pub(crate) fn dpu_agent_service(
 ) -> ServiceDefinition {
     ServiceDefinition {
         helm_values: Some(dpu_agent_helm_values(cfg, bootstrap_ca)),
+        apply_node_effect: Some(false),
 
         service_daemon_set_annotations: Some(BTreeMap::new()),
 
@@ -626,6 +627,7 @@ pub(crate) fn dhcp_server_service(
         helm_values: Some(helm_values),
 
         interfaces: dhcp_server_service_interfaces(dpu_interfaces),
+        apply_node_effect: Some(false),
 
         service_daemon_set_annotations: Some(BTreeMap::new()),
 
@@ -676,6 +678,7 @@ pub(crate) fn fmds_service(
         helm_values: Some(helm_values),
 
         interfaces: fmds_service_interfaces(dpu_interfaces),
+        apply_node_effect: Some(false),
 
         service_daemon_set_annotations: Some(BTreeMap::new()),
 
@@ -707,6 +710,7 @@ pub(crate) fn otelcol_service(cfg: &DpfServiceConfig) -> ServiceDefinition {
     apply_helm_values(&mut helm_values, cfg);
     ServiceDefinition {
         helm_values: Some(helm_values),
+        apply_node_effect: Some(false),
         service_daemon_set_annotations: Some(BTreeMap::new()),
         config_values: Some(serde_json::json!({
             "nico_dpu_agent": "{{ (index .Services \"carbide-dpu-agent\").Name }}",
@@ -935,6 +939,36 @@ mod tests {
     use super::*;
 
     const TEST_NS: &str = "dpf-operator-system";
+
+    #[test]
+    fn service_upgrade_policies() {
+        let interfaces = build_dpu_interfaces_vec();
+        let bootstrap_ca = DpfDpuAgentBootstrapCa::default();
+        value_scenarios!(
+            run = |service: ServiceDefinition| {
+                build_service_configuration(&service, TEST_NS, "", &BTreeMap::new())
+                    .spec.upgrade_policy.apply_node_effect
+            };
+            "NICo services update without NodeEffect" {
+                dpu_agent_service(&default_dpu_agent_service(), &bootstrap_ca) => Some(false),
+                dhcp_server_service(&default_dhcp_server_service(), &interfaces) => Some(false),
+                fmds_service(&default_fmds_service(), &interfaces, false) => Some(false),
+                otelcol_service(&default_otelcol_service()) => Some(false),
+            }
+            "other services retain the NodeEffect gate" {
+                doca_hbn_service(
+                    &default_doca_hbn_service(),
+                    &interfaces,
+                    ServiceVpcSlots::default(),
+                ) => Some(true),
+                dts_service(&default_dts_service()) => Some(true),
+                ServiceDefinition {
+                    apply_node_effect: Some(true),
+                    ..dts_service(&default_dts_service())
+                } => Some(true),
+            }
+        );
+    }
 
     /// HBN configuration follows the platform inventory used to build service chains.
     #[test]

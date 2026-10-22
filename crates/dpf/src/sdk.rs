@@ -1022,6 +1022,7 @@ pub fn build_service_template(
     }
 }
 
+/// Builds a service configuration, gating upgrades on NodeEffect unless explicitly disabled.
 pub fn build_service_configuration(
     svc: &ServiceDefinition,
     namespace: &str,
@@ -1122,13 +1123,10 @@ pub fn build_service_configuration(
             deployment_service_name: svc.name.clone(),
             interfaces: interfaces.none_if_empty(),
             service_configuration,
-            // Treat a service update as disruptive so DPF creates a new revision
-            // and parks the DPU in the NodeEffect phase instead of restarting
-            // services underneath whatever is running. That phase is the gate
-            // carbide opens once it has confirmed the DPU is not still awaiting
-            // reprovisioning -- see the DPU service sync handler.
+            // NICo-owned services can update independently; other services wait
+            // for the DPU service sync handler to open the NodeEffect gate.
             upgrade_policy: DpuServiceConfigurationUpgradePolicy {
-                apply_node_effect: Some(true),
+                apply_node_effect: Some(svc.apply_node_effect.unwrap_or(true)),
             },
         },
     }
