@@ -12,7 +12,7 @@ NVIDIA Infra Controller (NICo) allows you to do the following with NVLink:
 NICo extends the concept of an *NVLink Partition* with the *NVLink Logical Partition*, which allows users to manage NVLink Partitions without having to learn the datacenter topology.
 
 <Note title="Compatibility note">
-NVLink Partitioning is only supported for GB200 compute nodes.
+NVLink Partitioning is supported for GB200, GB300, and Vera Rubin (VR) compute nodes.
 </Note>
 
 ## Operations: Who Does What

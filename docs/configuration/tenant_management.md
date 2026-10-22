@@ -510,7 +510,7 @@ Prefixes or Subnets and instances.
 | `--site-id` | yes | The site this VPC belongs to |
 | `--routing-profile` | no | One of `external`, `internal`, `privileged-internal` (REST API mapping); see core docs for semantics |
 | `--network-virtualization-type` | no | `FNN` for VPC Prefixes, `ETHERNET_VIRTUALIZER` for IPv4 Subnets, or `FLAT` for zero-DPU and NIC-mode hosts |
-| `--nv-link-logical-partition-id` | no | Attach to a specific NVLink partition (GB200) |
+| `--nv-link-logical-partition-id` | no | Attach to a specific NVLink partition (GB200/GB300/VR) |
 | `--vni` | no | Pin a specific VXLAN Network Identifier |
 | `--description` | no | |
 
