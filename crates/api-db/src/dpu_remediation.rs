@@ -33,6 +33,8 @@ use crate::{DatabaseError, DatabaseResult};
 mod test_decode;
 #[cfg(test)]
 mod test_explicit_columns;
+#[cfg(test)]
+mod test_retry_budget;
 
 pub async fn persist_remediation(
     value: NewRemediation,
@@ -139,13 +141,14 @@ pub async fn find_next_remediation_for_machine(
         .await?
         .into_iter()
     {
-        let max_attempts = remediation.retries + 1;
         let remediations_applied =
             find_remediations_by_remediation_id_and_machine(txn, remediation.id, &machine_id)
                 .await?;
 
-        let attempted_so_far = remediations_applied.len() as i32;
-        if attempted_so_far < max_attempts {
+        let attempted_so_far = remediations_applied.len();
+        // `retries` excludes the initial attempt, so equality permits one more.
+        // Compare directly to avoid overflowing at i32::MAX; negative counts stay ineligible.
+        if usize::try_from(remediation.retries).is_ok_and(|retries| attempted_so_far <= retries) {
             if let Some(last_attempted) = remediations_applied.first()
                 && last_attempted.succeeded
             {
