@@ -45,6 +45,7 @@ use crate::tests::common::api_fixtures::{
     create_managed_host_with_dpf_multi, create_test_env, create_test_env_with_overrides,
     get_config, network_configured_with_health,
 };
+use crate::tests::dpf::phase_observation;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -56,8 +57,8 @@ fn provisioning_mock() -> MockDpfOperations {
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(DpuPhase::Ready));
+    mock.expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(DpuPhase::Ready)));
     mock.expect_deployment_type_for_dpu()
         .returning(|_, _| Ok(DpuDeploymentType::Bf3));
     mock.expect_verify_node_labels().returning(|_, _| Ok(true));

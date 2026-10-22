@@ -47,7 +47,7 @@ use state_controller::controller::StateController;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-use super::{dpf_config, expect_dpf_service_inventory};
+use super::{dpf_config, expect_dpf_service_inventory, phase_observation};
 use crate::cfg::file::CarbideConfig;
 use crate::machine_update_manager::dpu_nic_firmware::DpuNicFirmwareUpdate;
 use crate::machine_update_manager::machine_update_module::MachineUpdateModule;
@@ -116,13 +116,16 @@ async fn fixture_with_config(
     // discovery. Park each device there once so a controller iteration
     // with multiple hosts cannot skip that checkpoint.
     let mut observed_devices = HashSet::new();
-    mock.expect_get_dpu_phase().returning(move |device, _| {
-        Ok(if observed_devices.insert(device.to_string()) {
-            DpuPhase::NodeEffect
-        } else {
-            DpuPhase::Ready
-        })
-    });
+    mock.expect_get_dpu_phase_observation()
+        .returning(move |device, _| {
+            Ok(phase_observation(
+                if observed_devices.insert(device.to_string()) {
+                    DpuPhase::NodeEffect
+                } else {
+                    DpuPhase::Ready
+                },
+            ))
+        });
     mock.expect_deployment_type_for_dpu()
         .returning(move |_, astra_nics| {
             Ok(

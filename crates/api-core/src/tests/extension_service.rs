@@ -55,6 +55,7 @@ use crate::tests::common::api_fixtures::{
     TestEnv, TestEnvOverrides, create_managed_host, create_managed_host_with_dpf, create_test_env,
     create_test_env_with_overrides, get_config,
 };
+use crate::tests::dpf::phase_observation;
 
 const TEST_SERVICE_DATA: &str = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: test\nspec:\n  containers:\n    - name: app\n      image: nginx:1.27";
 const TEST_SERVICE_DATA_VERSION_2: &str = "apiVersion: v1\nkind: Pod\nmetadata:\n  name: version-2\nspec:\n  containers:\n    - name: app\n      image: nginx:1.27";
@@ -3043,8 +3044,8 @@ async fn test_endpoint_free_reference_repairs_shrunk_slots_after_family_disable(
         .expect_is_reboot_required()
         .returning(|_| Ok(false));
     initial_mock
-        .expect_get_dpu_phase()
-        .returning(|_, _| Ok(carbide_dpf::DpuPhase::Ready));
+        .expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(carbide_dpf::DpuPhase::Ready)));
     initial_mock
         .expect_deployment_type_for_dpu()
         .returning(|_, _| Ok(carbide_dpf::DpuDeploymentType::Bf3));
@@ -9158,8 +9159,8 @@ async fn test_rejected_helm_placement_observation_does_not_advance_readiness(
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(carbide_dpf::DpuPhase::Ready));
+    mock.expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(carbide_dpf::DpuPhase::Ready)));
     mock.expect_deployment_type_for_dpu()
         .returning(|_, _| Ok(carbide_dpf::DpuDeploymentType::Bf3));
     mock.expect_verify_node_labels().returning(|_, _| Ok(true));
@@ -9317,8 +9318,8 @@ async fn test_helm_target_placement_status_and_detach(
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(carbide_dpf::DpuPhase::Ready));
+    mock.expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(carbide_dpf::DpuPhase::Ready)));
     mock.expect_deployment_type_for_dpu()
         .returning(|_, _| Ok(carbide_dpf::DpuDeploymentType::Bf3));
     mock.expect_verify_node_labels().returning(|_, _| Ok(true));
