@@ -22,7 +22,7 @@ use clap::{Parser, ValueEnum};
 EXAMPLES:
 
 List in-progress SPDM attestation jobs:
-    $ nico-admin-cli attestation spdm list --selector in-progress
+    $ nico-admin-cli attestation spdm job list --selector in-progress
 
 ")]
 pub(crate) struct Args {

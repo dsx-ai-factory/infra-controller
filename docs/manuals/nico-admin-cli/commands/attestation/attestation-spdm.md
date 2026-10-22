@@ -40,7 +40,6 @@ Print help (see a summary with -h)
 | [`cancel`](./attestation-spdm-cancel.md) | Cancel an attestation job |
 | [`coverage`](./attestation-spdm-coverage.md) | Show which hardware classes the site has and what would attest each |
 | [`job`](./attestation-spdm-job.md) | Inspect SPDM attestation job |
-| [`list`](./attestation-spdm-list.md) | List SPDM attestation jobs by status |
 | [`profile`](./attestation-spdm-profile.md) | Manage the attestation policy stored for each hardware class |
 | [`trigger`](./attestation-spdm-trigger.md) | Trigger attestation for a given machine with id |
 

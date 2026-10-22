@@ -16,6 +16,7 @@
  */
 
 mod get;
+mod list;
 
 use clap::Parser;
 
@@ -25,4 +26,6 @@ use crate::cfg::dispatch::Dispatch;
 pub(crate) enum Cmd {
     #[clap(about = "Get SPDM attestation details for a given job id")]
     Get(get::args::Args),
+    #[clap(about = "List SPDM attestation jobs by status")]
+    List(list::args::Args),
 }

@@ -20,7 +20,7 @@ use ::rpc::forge::{
 };
 use uuid::Uuid;
 
-use crate::attestation::spdm::list::args::{Args, Selector};
+use crate::attestation::spdm::job::list::args::{Args, Selector};
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
 

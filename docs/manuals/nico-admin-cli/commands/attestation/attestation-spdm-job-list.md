@@ -1,16 +1,16 @@
-# `nico-admin-cli attestation spdm list`
+# `nico-admin-cli attestation spdm job list`
 
-*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [spdm](./attestation-spdm.md) › **list***
+*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [spdm](./attestation-spdm.md) › [job](./attestation-spdm-job.md) › **list***
 
 ## NAME
 
-nico-admin-cli-attestation-spdm-list - List SPDM attestation jobs by
+nico-admin-cli-attestation-spdm-job-list - List SPDM attestation jobs by
 status
 
 ## SYNOPSIS
 
 ```text
-nico-admin-cli attestation spdm list <--selector>
+nico-admin-cli attestation spdm job list <--selector>
 [--sort-by] [-h|--help]
 ```
 
@@ -51,7 +51,7 @@ Print help (see a summary with -h)
 ## Examples
 
 ```sh
-nico-admin-cli attestation spdm list --selector in-progress
+nico-admin-cli attestation spdm job list --selector in-progress
 ```
 
 ---

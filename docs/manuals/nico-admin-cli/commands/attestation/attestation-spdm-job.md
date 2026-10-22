@@ -38,6 +38,7 @@ Print help (see a summary with -h)
 | Subcommand | Description |
 |---|---|
 | [`get`](./attestation-spdm-job-get.md) | Get SPDM attestation details for a given job id |
+| [`list`](./attestation-spdm-job-list.md) | List SPDM attestation jobs by status |
 
 ---
 
