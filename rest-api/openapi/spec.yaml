@@ -4509,6 +4509,16 @@ paths:
                 source: nico
                 message: SKU ID specified in request does not exist
                 data: null
+        '500':
+          description: Unexpected server error, including a database error while looking up the supplied `skuId`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              example:
+                source: nico
+                message: Failed to validate SKU ID in request data due to DB error
+                data: null
       tags:
         - Expected Machine
     get:
@@ -4532,6 +4542,7 @@ paths:
             enum:
               - Site
               - Sku
+              - Machine
           in: query
           name: includeRelation
           description: Related entity to expand
@@ -4837,6 +4848,7 @@ paths:
             enum:
               - Site
               - Sku
+              - Machine
           in: query
           name: includeRelation
           description: Related entity to expand
@@ -4911,6 +4923,16 @@ paths:
               example:
                 source: nico
                 message: SKU ID specified in request does not exist
+                data: null
+        '500':
+          description: Unexpected server error, including a database error while looking up the supplied `skuId`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              example:
+                source: nico
+                message: Failed to validate SKU ID in request data due to DB error
                 data: null
       tags:
         - Expected Machine
@@ -30012,10 +30034,11 @@ components:
           type:
             - string
             - 'null'
-          description: Optional ID of the Machine associated with this Expected Machine
+          description: Stored Machine ID for this Expected Machine, or null when no association is stored. The ID can belong to another Site.
         machine:
           $ref: '#/components/schemas/MachineSummary'
-          description: Machine information for this Expected Machine (populated when includeRelation=Machine is specified)
+          description: |-
+            Machine information included when `includeRelation=Machine` is specified and the associated Machine is found at this Expected Machine's Site. For an association to another Site's Machine, REST omits `machine` and returns the stored `machineId`.
         rackId:
           type:
             - string
