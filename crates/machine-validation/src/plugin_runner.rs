@@ -29,13 +29,14 @@ use std::process::Stdio;
 use std::{os::unix::ffi::OsStrExt, os::unix::fs::MetadataExt, os::unix::fs::PermissionsExt};
 
 use carbide_utils::cmd::TokioCmd;
+use machine_validation_adapters::{
+    AdapterContext, AdapterInvocation, AdapterOutput, PluginResult, RuntimeRequirements,
+};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 use uuid::Uuid;
-
-use crate::plugin_contract::{PluginResult, read_plugin_result};
 
 const MAX_OUTPUT_SIZE: usize = 1024 * 1024;
 const MAX_ERROR_OUTPUT_SIZE: usize = 4096;
@@ -63,6 +64,7 @@ pub(crate) enum PluginPrivilege {
 /// Immutable execution settings supplied by a later control-plane integration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PluginRuntimeSpec {
+    pub(crate) container_plugin_adapter: Option<String>,
     pub(crate) image: String,
     pub(crate) entrypoint: Vec<String>,
     pub(crate) privilege: PluginPrivilege,
@@ -92,6 +94,7 @@ pub(crate) enum PluginLogStream {
     Stderr,
 }
 
+#[derive(Clone)]
 struct CapturedOutput {
     bytes: Vec<u8>,
     truncated: bool,
@@ -170,13 +173,24 @@ pub(crate) async fn execute_plugin(
     contract_dir: &Path,
     log_sender: Option<mpsc::Sender<PluginLogChunk>>,
 ) -> Result<PluginExecution, String> {
+    let deadline = tokio::time::Instant::now() + timeout;
     validate_runtime_spec(spec)?;
+    let adapter = machine_validation_adapters::resolve(spec.container_plugin_adapter.as_deref())?;
+    adapter.validate_registration(&spec.entrypoint, &input["parameters"])?;
+    let requirements = adapter.requirements();
     validate_contract_dir(contract_dir)?;
-    let input = serialize_plugin_input(input)?;
+    let serialized_input = serialize_plugin_input(input)?;
     let attempt_dir = plugin_attempt_directory()?;
     let input_dir = attempt_dir.join("input");
     let output_dir = attempt_dir.join("output");
-    if let Err(error) = prepare_plugin_directories(&attempt_dir, &input_dir, &output_dir) {
+    let directory_owner = if requirements.run_as_root {
+        (0, 0)
+    } else {
+        (PLUGIN_UID, PLUGIN_GID)
+    };
+    if let Err(error) =
+        prepare_plugin_directories(&attempt_dir, &input_dir, &output_dir, directory_owner)
+    {
         return match remove_attempt_directory(&attempt_dir) {
             Ok(()) => Err(error),
             Err(cleanup_error) => Err(format!("{error}; {cleanup_error}")),
@@ -184,8 +198,33 @@ pub(crate) async fn execute_plugin(
     }
 
     let (execution, remove_attempt_dir) = async {
-        if let Err(error) = std::fs::write(input_dir.join("input.json"), input) {
+        if let Err(error) = std::fs::write(input_dir.join("input.json"), serialized_input) {
             return (Err(format!("failed to write plugin input: {error}")), true);
+        }
+
+        let context = AdapterContext {
+            input,
+            input_dir: &input_dir,
+            output_dir: &output_dir,
+            contract_dir,
+        };
+        let invocation =
+            match tokio::time::timeout_at(deadline, adapter.prepare(context, &spec.entrypoint))
+                .await
+            {
+                Ok(Ok(invocation)) => invocation,
+                Ok(Err(error)) => return (Err(error), true),
+                Err(_) => {
+                    return (
+                        Err("plugin timeout exhausted preparing invocation".to_owned()),
+                        true,
+                    );
+                }
+            };
+        if let Err(error) =
+            validate_invocation(&invocation, requirements, spec.privilege, contract_dir)
+        {
+            return (Err(error), true);
         }
 
         let container_name = format!("mv-plugin-{}", Uuid::new_v4());
@@ -197,6 +236,8 @@ pub(crate) async fn execute_plugin(
                 &container_name,
                 spec,
                 contract_dir,
+                requirements,
+                &invocation,
             ))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -208,31 +249,32 @@ pub(crate) async fn execute_plugin(
         };
         let mut cleanup_guard =
             ContainerCleanupGuard::new(container_name.clone(), schedule_container_cleanup);
-        match tokio::time::timeout(timeout, collect_plugin_output(child, log_sender)).await {
-            Ok(Ok((status, stdout, stderr))) if status.success() => {
-                cleanup_guard.disarm();
-                warn_if_log_chunks_dropped(&stdout, &stderr);
-                (
-                    read_plugin_result(&output_dir.join("result.json")).map(|result| {
-                        PluginExecution {
-                            stdout: output_to_string(stdout),
-                            stderr: output_to_string(stderr),
-                            result,
-                        }
-                    }),
-                    true,
-                )
-            }
+        match tokio::time::timeout_at(deadline, collect_plugin_output(child, log_sender)).await {
             Ok(Ok((status, stdout, stderr))) => {
                 cleanup_guard.disarm();
                 warn_if_log_chunks_dropped(&stdout, &stderr);
+                let result = adapter
+                    .interpret(
+                        context,
+                        AdapterOutput {
+                            exit_code: status.code(),
+                            stdout: &stdout.bytes,
+                            stdout_truncated: stdout.truncated,
+                        },
+                    )
+                    .map_err(|error| {
+                        format!(
+                            "{error}; stdout: {}; stderr: {}",
+                            output_error_summary(stdout.clone()),
+                            output_error_summary(stderr.clone())
+                        )
+                    });
                 (
-                    Err(format!(
-                        "plugin exited unsuccessfully with status {:?}; ignoring result.json; stdout: {}; stderr: {}",
-                        status.code(),
-                        output_error_summary(stdout),
-                        output_error_summary(stderr),
-                    )),
+                    result.map(|result| PluginExecution {
+                        stdout: output_to_string(stdout),
+                        stderr: output_to_string(stderr),
+                        result,
+                    }),
                     true,
                 )
             }
@@ -313,7 +355,7 @@ fn validate_contract_dir(contract_dir: &Path) -> Result<(), String> {
     {
         return Err("plugin contract directory must be an absolute normalized path".to_owned());
     }
-    if contract_dir.to_string_lossy().contains(',') {
+    if contract_dir.to_string_lossy().contains([',', '\0']) {
         return Err("plugin contract directory must not contain commas".to_owned());
     }
     Ok(())
@@ -440,12 +482,65 @@ fn output_error_summary(output: CapturedOutput) -> String {
     )
 }
 
+// Adapter dependencies are typed read-only data, never arbitrary runtime flags.
+fn validate_invocation(
+    invocation: &AdapterInvocation,
+    requirements: RuntimeRequirements,
+    privilege: PluginPrivilege,
+    contract_dir: &Path,
+) -> Result<(), String> {
+    if !invocation.mounts.is_empty()
+        && !requirements.run_as_root
+        && privilege == PluginPrivilege::Isolated
+    {
+        return Err(
+            "plugin host dependencies require approved adapter access or privilege".to_owned(),
+        );
+    }
+    for mount in &invocation.mounts {
+        validate_contract_dir(&mount.source)?;
+        validate_contract_dir(&mount.target)?;
+        if mount.source == Path::new("/")
+            || mount.target == Path::new("/")
+            || mount.target.starts_with(contract_dir)
+            || contract_dir.starts_with(&mount.target)
+        {
+            return Err(
+                "adapter dependencies must not mount the host root or replace contract files"
+                    .to_owned(),
+            );
+        }
+    }
+    if invocation
+        .environment
+        .keys()
+        .any(|key| key.is_empty() || key.contains(['=', '\0']) || key == PLUGIN_CONTRACT_DIR_ENV)
+        || invocation
+            .environment
+            .values()
+            .any(|value| value.contains('\0'))
+        || invocation
+            .arguments
+            .iter()
+            .any(|argument| argument.contains('\0'))
+        || invocation
+            .entrypoint
+            .as_ref()
+            .is_some_and(|entrypoint| entrypoint.is_empty() || entrypoint.contains('\0'))
+    {
+        return Err("invalid adapter invocation".to_owned());
+    }
+    Ok(())
+}
+
 fn plugin_runtime_args(
     input_dir: &Path,
     output_dir: &Path,
     container_name: &str,
     spec: &PluginRuntimeSpec,
     contract_dir: &Path,
+    requirements: RuntimeRequirements,
+    invocation: &AdapterInvocation,
 ) -> Vec<String> {
     let input_path = contract_dir.join("input");
     let output_path = contract_dir.join("output");
@@ -475,7 +570,11 @@ fn plugin_runtime_args(
     match spec.privilege {
         PluginPrivilege::Isolated => args.extend([
             "--user".to_owned(),
-            format!("{PLUGIN_UID}:{PLUGIN_GID}"),
+            if requirements.run_as_root {
+                "0:0".to_owned()
+            } else {
+                format!("{PLUGIN_UID}:{PLUGIN_GID}")
+            },
             "--cap-drop".to_owned(),
             "ALL".to_owned(),
             "--security-opt".to_owned(),
@@ -491,12 +590,35 @@ fn plugin_runtime_args(
         ]),
     }
 
+    if requirements.run_as_root && spec.privilege != PluginPrivilege::Isolated {
+        args.extend(["--user".to_owned(), "0:0".to_owned()]);
+    }
+    if requirements.all_gpus {
+        args.extend(["--gpus".to_owned(), "all".to_owned()]);
+    }
+    if let Some(entrypoint) = &invocation.entrypoint {
+        args.extend(["--entrypoint".to_owned(), entrypoint.clone()]);
+    }
+    for (key, value) in &invocation.environment {
+        args.extend(["--env".to_owned(), format!("{key}={value}")]);
+    }
+    for mount in &invocation.mounts {
+        args.extend([
+            "--mount".to_owned(),
+            format!(
+                "type=bind,src={},dst={},readonly",
+                mount.source.display(),
+                mount.target.display()
+            ),
+        ]);
+    }
+
     args.extend([
         "--name".to_owned(),
         container_name.to_owned(),
         spec.image.clone(),
     ]);
-    args.extend(spec.entrypoint.iter().cloned());
+    args.extend(invocation.arguments.iter().cloned());
     args
 }
 
@@ -600,6 +722,7 @@ fn prepare_plugin_directories(
     attempt_dir: &Path,
     input_dir: &Path,
     output_dir: &Path,
+    owner: (u32, u32),
 ) -> Result<(), String> {
     std::fs::create_dir_all(attempt_dir)
         .map_err(|error| format!("failed to create plugin attempt directory: {error}"))?;
@@ -611,11 +734,11 @@ fn prepare_plugin_directories(
             .map_err(|error| format!("failed to create plugin directory: {error}"))?;
         let path = CString::new(directory.as_os_str().as_bytes())
             .map_err(|_| "plugin directory path contains a null byte".to_owned())?;
-        // Scout creates these directories for the fixed non-root container
-        // identity. The restrictive mode prevents another host user from
-        // pre-seeding or replacing the plugin's result.
+        // Match the approved container identity, including root without DAC
+        // override capabilities. Restrictive modes prevent other host users
+        // from pre-seeding inputs or replacing results.
         // SAFETY: `path` is NUL-terminated and remains valid for this call.
-        if unsafe { libc::chown(path.as_ptr(), PLUGIN_UID, PLUGIN_GID) } != 0 {
+        if unsafe { libc::chown(path.as_ptr(), owner.0, owner.1) } != 0 {
             return Err(format!(
                 "failed to grant plugin directory access: {}",
                 std::io::Error::last_os_error()
@@ -632,6 +755,7 @@ fn prepare_plugin_directories(
     _attempt_dir: &Path,
     _input_dir: &Path,
     _output_dir: &Path,
+    _owner: (u32, u32),
 ) -> Result<(), String> {
     Err("machine validation plugin execution requires a Unix host".to_owned())
 }
@@ -647,6 +771,7 @@ mod tests {
 
     fn spec(privilege: PluginPrivilege) -> PluginRuntimeSpec {
         PluginRuntimeSpec {
+            container_plugin_adapter: None,
             image: "registry.example/plugin@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
             entrypoint: vec!["/plugin/check".to_owned(), "--verify".to_owned()],
             privilege,
@@ -661,6 +786,11 @@ mod tests {
             "plugin-test",
             &spec(PluginPrivilege::Isolated),
             Path::new(DEFAULT_PLUGIN_CONTRACT_DIR),
+            RuntimeRequirements::default(),
+            &AdapterInvocation {
+                arguments: spec(PluginPrivilege::Isolated).entrypoint,
+                ..Default::default()
+            },
         );
 
         assert!(args.windows(2).any(|pair| pair == ["--network", "none"]));
@@ -694,6 +824,122 @@ mod tests {
         assert!(!args.iter().any(|arg| arg.contains("dst=/host")));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn attempt_directories_use_the_selected_container_identity() {
+        let attempt = std::env::temp_dir().join(format!("adapter-directories-{}", Uuid::new_v4()));
+        std::fs::create_dir(&attempt).unwrap();
+        let metadata = std::fs::metadata(&attempt).unwrap();
+        let owner = (metadata.uid(), metadata.gid());
+        let input = attempt.join("input");
+        let output = attempt.join("output");
+        prepare_plugin_directories(&attempt, &input, &output, owner).unwrap();
+        for directory in [&input, &output] {
+            let metadata = std::fs::metadata(directory).unwrap();
+            assert_eq!((metadata.uid(), metadata.gid()), owner);
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        }
+        std::fs::remove_dir_all(attempt).unwrap();
+    }
+
+    #[test]
+    fn approved_gpu_adapter_uses_root_without_privileged_or_host_root_access() {
+        let requirements = RuntimeRequirements {
+            all_gpus: true,
+            run_as_root: true,
+        };
+        let invocation = AdapterInvocation {
+            entrypoint: Some("/custom/check".to_owned()),
+            arguments: vec!["run".to_owned()],
+            environment: [(
+                "NVIDIA_DRIVER_CAPABILITIES".to_owned(),
+                "utility".to_owned(),
+            )]
+            .into(),
+            mounts: vec![machine_validation_adapters::ReadOnlyMount {
+                source: "/usr/bin/journalctl".into(),
+                target: "/usr/bin/journalctl".into(),
+            }],
+        };
+        let contract = Path::new(DEFAULT_PLUGIN_CONTRACT_DIR);
+        validate_invocation(
+            &invocation,
+            requirements,
+            PluginPrivilege::Isolated,
+            contract,
+        )
+        .unwrap();
+        assert!(
+            validate_invocation(
+                &invocation,
+                RuntimeRequirements::default(),
+                PluginPrivilege::Isolated,
+                contract
+            )
+            .is_err()
+        );
+        let runtime = spec(PluginPrivilege::Isolated);
+        let args = plugin_runtime_args(
+            Path::new("/tmp/input"),
+            Path::new("/tmp/output"),
+            "test",
+            &runtime,
+            contract,
+            requirements,
+            &invocation,
+        );
+        for pair in [
+            ["--gpus", "all"],
+            ["--user", "0:0"],
+            ["--cap-drop", "ALL"],
+            ["--network", "none"],
+            ["--entrypoint", "/custom/check"],
+            ["--env", "NVIDIA_DRIVER_CAPABILITIES=utility"],
+            [
+                "--mount",
+                "type=bind,src=/usr/bin/journalctl,dst=/usr/bin/journalctl,readonly",
+            ],
+        ] {
+            assert!(args.windows(2).any(|actual| actual == pair));
+        }
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--privileged" || arg == "--pid" || arg.contains("dst=/host"))
+        );
+        assert_eq!(&args[args.len() - 2..], [runtime.image, "run".to_owned()]);
+    }
+
+    #[test]
+    fn adapter_mounts_cannot_inject_options_or_replace_contract_files() {
+        for (source, target) in [
+            ("/", "/dependency"),
+            ("/host/lib,readonly=false", "/dependency"),
+            ("/host/lib", "/opt/forge/mv/input"),
+            ("/host/lib", "/"),
+        ] {
+            let invocation = AdapterInvocation {
+                mounts: vec![machine_validation_adapters::ReadOnlyMount {
+                    source: source.into(),
+                    target: target.into(),
+                }],
+                ..Default::default()
+            };
+            assert!(
+                validate_invocation(
+                    &invocation,
+                    RuntimeRequirements {
+                        run_as_root: true,
+                        ..Default::default()
+                    },
+                    PluginPrivilege::Isolated,
+                    Path::new(DEFAULT_PLUGIN_CONTRACT_DIR)
+                )
+                .is_err()
+            );
+        }
+    }
+
     #[test]
     fn plugin_contract_directory_can_be_changed_for_a_scout_deployment() {
         let contract_dir = Path::new("/var/lib/nico/plugin-contract");
@@ -703,6 +949,11 @@ mod tests {
             "plugin-test",
             &spec(PluginPrivilege::Isolated),
             contract_dir,
+            RuntimeRequirements::default(),
+            &AdapterInvocation {
+                arguments: spec(PluginPrivilege::Isolated).entrypoint,
+                ..Default::default()
+            },
         );
 
         assert!(
@@ -737,6 +988,11 @@ mod tests {
             "plugin-test",
             &spec(PluginPrivilege::Privileged),
             Path::new(DEFAULT_PLUGIN_CONTRACT_DIR),
+            RuntimeRequirements::default(),
+            &AdapterInvocation {
+                arguments: spec(PluginPrivilege::Isolated).entrypoint,
+                ..Default::default()
+            },
         );
 
         assert!(args.iter().any(|arg| arg == "--privileged"));
@@ -752,6 +1008,11 @@ mod tests {
             "plugin-test",
             &spec(PluginPrivilege::FullHost),
             Path::new(DEFAULT_PLUGIN_CONTRACT_DIR),
+            RuntimeRequirements::default(),
+            &AdapterInvocation {
+                arguments: spec(PluginPrivilege::Isolated).entrypoint,
+                ..Default::default()
+            },
         );
 
         assert!(args.iter().any(|arg| arg == "--privileged"));
