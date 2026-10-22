@@ -17941,6 +17941,11 @@ paths:
         call, `200 OK` on subsequent updates. See the Tenant Identity tag
         description for upsert semantics and the `enabled` vs DELETE
         distinction.
+
+        Concurrent creation can return `409 Conflict`, leaving the stored
+        configuration and tenant version unchanged. Read it before retrying,
+        since a retry can update it. An explicit `rotateKey: true` request can
+        instead rotate a concurrently created configuration found during the write.
       requestBody:
         required: true
         content:
@@ -17966,6 +17971,16 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: The configuration was created concurrently. The stored configuration and tenant version are unchanged; read it before retrying an update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              example:
+                source: nico
+                message: Failed to create or update Tenant Identity Config
+                data: null
         '500':
           description: Internal server error while loading the Tenant or Site, contacting the Core gRPC API, starting the configuration workflow, or after the workflow timed out and was terminated.
           $ref: '#/components/responses/GenericHttpError'

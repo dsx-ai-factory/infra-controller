@@ -1078,6 +1078,11 @@ service Forge {
   rpc SignMachineIdentity(MachineIdentityRequest) returns (MachineIdentityResponse);
   // Get, set, or delete per-org tenant identity configuration (issuer, audiences, TTL, signing key)
   rpc GetTenantIdentityConfiguration(GetTenantIdentityConfigRequest) returns (TenantIdentityConfigResponse);
+  // Creates or updates the per-org tenant identity configuration.
+  // Concurrent creation can return ALREADY_EXISTS, leaving the stored configuration
+  // and tenant version unchanged. Read it before retrying, since a retry can update it.
+  // An explicit rotate_key request can instead rotate a concurrently created
+  // configuration found during the write.
   rpc SetTenantIdentityConfiguration(SetTenantIdentityConfigRequest) returns (TenantIdentityConfigResponse);
   rpc DeleteTenantIdentityConfiguration(GetTenantIdentityConfigRequest) returns (google.protobuf.Empty);
   // Token delegation: get, set, or delete per-org token exchange config

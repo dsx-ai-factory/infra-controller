@@ -1451,6 +1451,11 @@ type ForgeClient interface {
 	SignMachineIdentity(ctx context.Context, in *MachineIdentityRequest, opts ...grpc.CallOption) (*MachineIdentityResponse, error)
 	// Get, set, or delete per-org tenant identity configuration (issuer, audiences, TTL, signing key)
 	GetTenantIdentityConfiguration(ctx context.Context, in *GetTenantIdentityConfigRequest, opts ...grpc.CallOption) (*TenantIdentityConfigResponse, error)
+	// Creates or updates the per-org tenant identity configuration.
+	// Concurrent creation can return ALREADY_EXISTS, leaving the stored configuration
+	// and tenant version unchanged. Read it before retrying, since a retry can update it.
+	// An explicit rotate_key request can instead rotate a concurrently created
+	// configuration found during the write.
 	SetTenantIdentityConfiguration(ctx context.Context, in *SetTenantIdentityConfigRequest, opts ...grpc.CallOption) (*TenantIdentityConfigResponse, error)
 	DeleteTenantIdentityConfiguration(ctx context.Context, in *GetTenantIdentityConfigRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Token delegation: get, set, or delete per-org token exchange config
@@ -7953,6 +7958,11 @@ type ForgeServer interface {
 	SignMachineIdentity(context.Context, *MachineIdentityRequest) (*MachineIdentityResponse, error)
 	// Get, set, or delete per-org tenant identity configuration (issuer, audiences, TTL, signing key)
 	GetTenantIdentityConfiguration(context.Context, *GetTenantIdentityConfigRequest) (*TenantIdentityConfigResponse, error)
+	// Creates or updates the per-org tenant identity configuration.
+	// Concurrent creation can return ALREADY_EXISTS, leaving the stored configuration
+	// and tenant version unchanged. Read it before retrying, since a retry can update it.
+	// An explicit rotate_key request can instead rotate a concurrently created
+	// configuration found during the write.
 	SetTenantIdentityConfiguration(context.Context, *SetTenantIdentityConfigRequest) (*TenantIdentityConfigResponse, error)
 	DeleteTenantIdentityConfiguration(context.Context, *GetTenantIdentityConfigRequest) (*emptypb.Empty, error)
 	// Token delegation: get, set, or delete per-org token exchange config
