@@ -483,6 +483,7 @@ section Per-pod Services). NICo dials each BMC IP directly, with no
 | `machine-a-tron-multipod.yaml` | 2 pods x 100 hosts x 2 DPUs |
 | `machine-a-tron-10racks.yaml` | 10 GB200 NVL72 racks, one per pod, behind the protocol gateway (180 hosts x 2 DPUs, 90 switches, 80 power shelves) |
 | `machine-a-tron-250racks.yaml` | 250 GB200 NVL72 racks, 25 per pod across 10 pods, behind the protocol gateway (4,500 hosts x 2 DPUs, 2,250 switches, 2,000 power shelves) |
+| `machine-a-tron-556racks.yaml` | 556 GB200 NVL72 racks, 24 or 25 per pod across 23 pods, behind the protocol gateway with per-pod Services (10,008 hosts x 2 DPUs, 5,004 switches, 4,448 power shelves) |
 | `machine-a-tron-scale-4500.yaml` | 4,500 hosts x 2 DPUs across 3 pods, one BMC segment per pod |
 | `machine-a-tron-scale-4500-proxy.yaml` | 4,500 hosts x 2 DPUs in one pod behind one shared proxy Service, without the controller |
 

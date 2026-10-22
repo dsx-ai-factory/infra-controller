@@ -1,6 +1,6 @@
-# Scaling NICo with machine-a-tron: 100 → 1000 → 4500 simulated hosts
+# Scaling NICo with machine-a-tron: 100 → 1000 → 4500 → 10,000 simulated hosts
 
-> **Status:** Scale testing validated with up to 13,500 BMC endpoints.
+> **Status:** Scale testing validated with up to 39,476 BMC endpoints (556 GB200 NVL72 racks).
 
 ## Quick start
 
@@ -84,6 +84,265 @@ protocol gateway. To replicate it on a fresh site:
    [Time to Ready Is a Concurrency Setting](large-site-sizing-and-settings.md#time-to-ready-is-a-concurrency-setting)
    gives the measured range and how to set it, and the settings table lists the
    `[api_admission_control]` value used for the simulated fleet.
+
+## 10,000-Host Simulated Fleet
+
+`helm-prereqs/values/machine-a-tron-556racks.yaml` and
+`helm-prereqs/values/nico-core-10k-hosts.yaml` define a fleet of 556 GB200
+NVL72 racks: 10,008 hosts with 2 data processing units (DPUs) each, 5,004
+NVLink switch trays, and 4,448 power shelves, which is 39,476 BMC endpoints
+and 30,024 NICo machines. It runs as 23 machine-a-tron pods behind the
+protocol gateway with
+[per-pod Services](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/charts/nico-machine-a-tron/README.md#per-pod-services),
+two Services per pod instead of one per BMC, so the cluster ServiceCIDR no
+longer caps the fleet. The figures in this section come from simulated fleets
+of that size on a three-node site controller and are labeled as such. Unless a
+sentence names the earlier run on the previous build, they are from the latest
+run, which used a pre-release build of `main` with a set of scaling fixes,
+all but one since merged, so the site explorer and the partition monitor it
+measured behave differently from a release. Read the figures as expectations
+rather than as a reproduction target.
+Times count from fleet-up, the point at which all 23 simulator pods are Ready
+and the protocol gateway answers.
+[Large Site Sizing and Settings](large-site-sizing-and-settings.md) records
+the 250-rack measurements that these settings build on. This section is the
+10,000-host fleet definition behind the site controller sizing guidance.
+
+### Hardware Baseline
+
+Three control-plane nodes of the class the 250-rack measurement used, 96 cores
+and 256 GiB each, carrying NICo, its Postgres, and the simulator. Treat 96
+cores and 256 GiB per node as the minimum for this fleet. The measured per-node
+peaks (simulation) were 43.1 cores (p90 39.8) and 98.9 GiB of working set on
+the node carrying the Postgres primary and nico-api, and 15.8 and 22.6 cores
+with 51.7 and 58.2 GiB on the other two nodes. The same fleet on the previous
+build, with nico-api and Postgres at 16 cores each, peaked at 56 to 75 cores
+sustained and 69 to 99 GiB per node. The Postgres primary peaked at 36.9 GiB of
+its 96 GiB limit and ran a mean of 14 to 15 of its 32 cores from the third
+hour after fleet-up to convergence, with a 26.8-core peak in the first minutes.
+nico-api ran its 32 Tokio workers at 49 percent busy over the run and 59 to 68
+percent during the ready ramp, peaked at 18.9 cores, and grew to 22.8 GiB of
+its 32 GiB limit.
+
+### Commands
+
+Run every command from the repository root with the site kubeconfig and the
+image variables exported. Replace each placeholder:
+
+```bash
+export KUBECONFIG=<kubeconfig>              # path to the site cluster kubeconfig
+export NICO_IMAGE_REGISTRY=<registry>       # registry and repository prefix of the NICo images, without https://
+export NICO_CORE_IMAGE_TAG=<core-tag>       # NICo Core image tag
+export NICO_REST_IMAGE_TAG=<rest-tag>       # NICo REST image tag from the same main revision as the charts (refer to the caveats)
+export REGISTRY_PULL_SECRET=<registry-key>  # registry password or API key, unset for a public or preloaded registry
+export REGISTRY_PULL_USERNAME='$oauthtoken'  # registry user for the pull Secrets, $oauthtoken for NGC
+export MAT_IMAGE_TAG=<mat-tag>              # machine-a-tron and mat-k8s-controller image tag
+export DPF_SIM_IMAGE_TAG=<dpf-sim-tag>      # dpf-sim-controller image tag
+```
+
+`setup.sh` creates the `imagepullsecret` Secret that the Core values reference
+from `REGISTRY_PULL_SECRET`. The protocol gateway serves the Rack Manager
+Service (RMS) mock, so the install skips the RMS chart with `--skip-rms` and
+needs no `NICO_RMS_IMAGE_TAG`.
+
+1. Size Postgres and enable the site credentials Secret in
+   `helm-prereqs/values.yaml`. `setup.sh` has no flag or environment variable
+   for the prerequisites values, and `helmfile.yaml` fixes the `nico-prereqs`
+   release to `values.yaml` and `values/nico-prereqs-dynamic.yaml.gotmpl`, so
+   edit the file. The Postgres limits apply to each of the three Patroni
+   instances:
+
+   ```yaml
+   siteCredentials:
+     enabled: true
+   postgresql:
+     resources:
+       limits:
+         cpu: "32"
+         memory: "96Gi"
+       requests:
+         cpu: "2"
+         memory: "4Gi"
+   ```
+
+   Teardown deletes the `postgres` namespace, so a resize applied to the live
+   cluster is lost on the next install.
+1. Copy the Core template and fill in the fields marked `REQUIRED`. The copy
+   holds site addresses, so keep it out of version control:
+
+   ```bash
+   cp helm-prereqs/values/nico-core-10k-hosts.yaml helm-prereqs/values/nico-core-10k-hosts.site.yaml
+   ```
+
+   The template already points
+   `nico-api.credentials.file.existingSecret.name` at `nico-site-credentials`,
+   the Secret that step 1 renders under its default
+   `siteCredentials.secretName`. It carries the `[site_explorer]` budget of
+   3200 explorations, 300 machines, and 480 concurrent explorations per run,
+   `max_database_connections = 900`, `max_concurrency = 80`,
+   `partition_monitor_max_concurrent_groups = 64`, the nico-api limits of 32
+   CPU and 32 GiB with `TOKIO_WORKER_THREADS=32`,
+   `apiAdmissionControl.enabled: false`, `nico-api.rms.apiUrl` pointed at the
+   gateway, and the simulated segments and pools sized for the fleet:
+   `simulated-oob` as a `/16`, `simulated-admin` and `simulated-underlay` as
+   a `/17`, 65,534 loopback addresses, and 30,000 autonomous system numbers
+   (ASNs). The `/16` is the smallest prefix that holds 39,476 BMC leases. Do
+   not widen it further, because the allocator cost grows with the prefix
+   ([DHCP Address Space](machine-a-tron-deployment.md#dhcp-address-space)).
+   The site TOML also carries `machine_creation_concurrency = 8`,
+   `switch_and_power_shelf_pass_interval = "5m"`, and
+   `admin_lock_admission_permits = 32` from
+   [pull request 8142](https://github.com/dsx-ai-factory/infra-controller/pull/8142).
+   A nico-api build without that change logs each of them as an unknown
+   configuration key and starts with its own defaults, because
+   `deny_unknown_fields` is off by default.
+1. Deploy the DOCA Platform Framework (DPF) simulator, then install NICo.
+   `setup.sh` resolves `--core-values` against `helm-prereqs/`, so it runs
+   from there in a subshell. For a registry that needs credentials, create
+   the pull Secret before `make deploy` and keep the `PULL_SECRET` argument.
+   Otherwise drop the two `kubectl` commands and the argument:
+
+   ```bash
+   kubectl create namespace dpf-operator-system --dry-run=client -o yaml | kubectl apply -f -
+   kubectl -n dpf-operator-system create secret docker-registry dpf-sim-pull \
+     --docker-server="${NICO_IMAGE_REGISTRY%%/*}" \
+     --docker-username="${REGISTRY_PULL_USERNAME:-\$oauthtoken}" \
+     --docker-password="${REGISTRY_PULL_SECRET}" \
+     --dry-run=client -o yaml | kubectl apply -f -
+   make -C dev/k8s/dpf-sim-controller deploy \
+     IMG="${NICO_IMAGE_REGISTRY}/dpf-sim-controller:${DPF_SIM_IMAGE_TAG}" PULL_SECRET=dpf-sim-pull
+   (cd helm-prereqs && ./setup.sh --skip-dpf --skip-rms --core-values values/nico-core-10k-hosts.site.yaml)
+   ```
+
+1. Create the labeled `nico-mat` namespace and its pull Secret, run the
+   ServiceCIDR check, and install the fleet. The values file's
+   `rack_profile_id`, `GB200_NVL72R1_C2G4_WIWYNN`, is the id nico-api derives
+   from the rack group machine-a-tron declares, and the nico-api chart ships
+   it. Step 5 of the 250-rack list explains the derivation and the
+   `nico-admin-cli expected-rack-group` commands for a site installed before
+   machine-a-tron declared its groups. Skip the Secret command when the
+   registry needs no credentials.
+
+   ```bash
+   kubectl create namespace nico-mat --dry-run=client -o yaml | kubectl apply -f -
+   kubectl label namespace nico-mat nico.nvidia.com/managed=true --overwrite
+   kubectl -n nico-mat create secret docker-registry machine-a-tron-pull \
+     --docker-server="${NICO_IMAGE_REGISTRY%%/*}" \
+     --docker-username="${REGISTRY_PULL_USERNAME:-\$oauthtoken}" \
+     --docker-password="${REGISTRY_PULL_SECRET}" \
+     --dry-run=client -o yaml | kubectl apply -f -
+   python3 helm-prereqs/check-mat-service-cidr.py helm-prereqs/values/machine-a-tron-556racks.yaml \
+     --site-config helm-prereqs/values/nico-core-10k-hosts.site.yaml &&
+   helm upgrade --install nico-machine-a-tron helm/charts/nico-machine-a-tron \
+     -n nico-mat --qps 15 --burst-limit 30 --set createNamespace=false \
+     --set image.repository="${NICO_IMAGE_REGISTRY}/machine-a-tron" \
+     --set image.tag="${MAT_IMAGE_TAG}" \
+     --set mat-k8s-controller.image.repository="${NICO_IMAGE_REGISTRY}/mat-k8s-controller" \
+     --set mat-k8s-controller.image.tag="${MAT_IMAGE_TAG}" \
+     -f helm-prereqs/values/machine-a-tron-556racks.yaml
+   ```
+
+   The controller publishes two Services per pod, 46 in total, once the pods
+   hold leases:
+
+   ```bash
+   kubectl -n nico-mat get svc -l app.kubernetes.io/managed-by=mat-k8s-controller --no-headers | wc -l
+   ```
+
+### What to Expect
+
+From `helm upgrade` to fleet-up took 10 to 15 minutes on the 556-rack
+simulations, with all 23 pods Ready within 10 minutes. Measured from fleet-up
+on the latest run:
+
+| Milestone | Time after fleet-up |
+|---|---|
+| First machines `ready` | 1 h 40 min |
+| All power shelves `ready` | 1 h 50 min |
+| All 30,024 machines created | 2 h 15 min |
+| All switches `ready` | 4 h 15 min |
+| First racks `ready` | 4 h 45 min |
+| Half of the racks `ready` | 6 h 35 min |
+| All 556 racks `ready` | 7 h 55 min |
+
+The per-machine pipeline took 4.4 h at the median from creation to `ready`
+(p90 5.2 h, maximum 5.4 h). Machines were 50, 90, and 100 percent `ready` at
+5.8, 7.1, and 7.5 h, and racks at 6.6, 7.7, and 7.9 h. Plan for about 8 hours
+from fleet-up to convergence with these settings, plus about an hour of
+teardown, install, and simulator deploy before fleet-up. The same fleet on the
+previous build, with nico-api and Postgres at 16 cores each, created its last
+machine at 2.9 h, took 6 h at the median from creation to `ready`, and
+converged at 10.5 h.
+
+### What to Watch
+
+- Postgres primary memory and CPU. The working set rises toward 37 GiB over
+  the run, most of it in the last three hours as the nico-api connection pool
+  opens toward its 900 cap, and the primary runs at 14 to 15 of its 32 cores
+  from the third hour. Both are expected. A non-zero `oom_kill` count is not.
+  On the previous build, at a 16-core limit, the primary was CPU-bound from
+  the sixth hour. The command resolves the primary through its
+  `spilo-role=master` label:
+
+  ```bash
+  kubectl -n postgres exec "$(kubectl -n postgres get pods -l spilo-role=master -o name)" -c postgres -- sh -c \
+    'cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.max && grep oom_kill /sys/fs/cgroup/memory.events'
+  ```
+
+- nico-api restarts. The reference run had none. A restart under load points
+  at the connection pool or at admission control (refer to the caveats):
+
+  ```bash
+  kubectl -n nico-system get pods -l app.kubernetes.io/name=nico-api
+  ```
+
+- Explorer and partition monitor iteration time, from the nico-api metrics
+  endpoint on port 1080 (`carbide_site_explorer_iteration_latency_milliseconds`
+  and `carbide_nvlink_partition_monitor_iteration_latency_milliseconds`, refer
+  to [Core Metrics](../observability/core_metrics.md)). The partition monitor
+  averaged 10.4 s per iteration over the latest run, and its 10 minute window
+  means peaked at 24 s as the last racks came `ready`. An iteration longer than
+  the 60 s monitor interval is an overrun, and the latest run logged none. On
+  the previous build the mean was 17.1 s, the window means reached 42 s, and 8
+  overruns occurred during the rack ramp. The maximum iteration time is not
+  recorded, because the top finite bucket of the latency histogram is 10 s.
+
+### Caveats
+
+- Admission control stays off for the simulator. The 23 machine-a-tron pods
+  present one client key, so the per-client limits of `[api_admission_control]`
+  reject the whole fleet at once and the agents retry together, which turns a
+  rejection into a retry storm. On this fleet with admission control enabled,
+  the global limits raised to 512 requests in flight and 8,192 pending, and
+  the per-client limits of 8 and 64 and the 5 s pending timeout at their
+  defaults, nico-api rejected 97.4 million of 113.4 million calls in 8 hours,
+  86 percent, most of them DPU agent calls. Only 1,386 of 30,024 machines and
+  no rack reached `ready`, and the simulator pods restarted 16 times at
+  startup on the rejections. Keep
+  `apiAdmissionControl.enabled: false` for the simulated fleet, and keep
+  `apiAdmissionControl.enabled: true`, the chart default, on any fleet where
+  each DPU has its own client identity.
+- Give each simulator pod 12 GiB. At a 6 GiB limit, pods of this fleet were
+  killed by the out-of-memory (OOM) killer on a prior run while nico-api was
+  slow, and a restarted pod discards its mock state and repeats its 30 minute
+  registration.
+  `machine-a-tron-556racks.yaml` sets limits of 4 CPU and 12 GiB and requests
+  of 1 CPU and 4 GiB per pod.
+- Build the REST image from the same `main` revision as the charts. `setup.sh`
+  installs the in-tree `helm/rest` charts, and a REST image older than those
+  charts can fail to start because the charts pass flags that the older binary
+  does not know. With such a tag, `nico-rest-site-manager` crash-looped on an
+  unknown flag and `setup.sh` failed phase `[7g/7]` on its Helm wait
+  (simulation).
+- Reset the DPF custom resources (CRs) with the inventory. At this size the
+  truncate in [Inventory Reset](machine-a-tron-deployment.md#inventory-reset)
+  leaves about 20,000 objects each of `dpudevices` and `dpus` behind. Delete
+  each kind with the collection delete given there and repeat it until the
+  kind lists no objects, because one pass can leave thousands behind. Expect
+  about 5 minutes for the four kinds.
+- The Service count is 46, not the BMC count. The 250-rack check that the
+  controller-managed Services approach the BMC count does not apply at pod
+  granularity.
 
 ## What this work delivers
 
@@ -196,6 +455,7 @@ equivalent. An operator clears a latched endpoint with
 | Stage 1 | 100 hosts × 2 DPUs = 300 BMCs (proxy-direct) | ✅ 300/300 endpoints stable, machines created and advancing through `hostinit`/`dpuinit` |
 | Stage 2 | 1000 hosts × 2 DPUs = 3000 BMCs | ✅ **END TO END OK - 3000/3000 machines** in one unattended run. About 25 min total, creation about 240 machines/min. |
 | Stage 3 | 4500 hosts × 2 DPUs = 13,500 BMCs | ✅ **13,500/13,500 machines - 100% fleet.** The first run explored 13,500 endpoints and created over 10,000 machines. A rerun on the ClusterIP chart and a fresh cluster reached every counter: 13,500 explored, 13,500 preingestion-complete, 4,500 hosts, 13,500 machines, about 15 h unattended. |
+| Stage 4 | 556 GB200 NVL72 racks = 10,008 hosts × 2 DPUs, 39,476 BMCs (Controller Mode, per-pod Services) | ✅ **30,024/30,024 machines and 556/556 racks ready** 7.9 h after fleet-up on the latest build, with no nico-api or simulator restart. The first convergence of this fleet, on the previous build with nico-api and Postgres at 16 cores each, took 10.5 h. Refer to the section [10,000-Host Simulated Fleet](#10000-host-simulated-fleet) on this page. |
 
 Stage-3 observations worth reviewers' attention:
 
