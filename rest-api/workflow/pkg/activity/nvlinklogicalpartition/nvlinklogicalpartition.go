@@ -132,13 +132,16 @@ func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx c
 				// name chosen during recovery, or fail validation and block the rest of this update.
 				usable := isValidNVLinkLogicalPartitionName(siteName)
 				if usable {
-					taken, terr := isNVLinkLogicalPartitionNameTaken(ctx, nil, nvlinklogicalpartitionDAO, nvllp.TenantID, siteName)
+					sameNameNvllps, _, terr := nvlinklogicalpartitionDAO.GetAll(ctx, nil, cdbm.NVLinkLogicalPartitionFilterInput{
+						Names:     []string{siteName},
+						TenantIDs: []uuid.UUID{nvllp.TenantID},
+					}, cdbp.PageInput{Limit: cutil.GetPtr(1)}, nil)
 					if terr != nil {
 						slogger.Error().Err(terr).Msg("failed to check NVLink Logical Partition name uniqueness in DB")
 						continue
 					}
 
-					usable = !taken
+					usable = len(sameNameNvllps) == 0
 				}
 
 				if usable {
@@ -422,12 +425,15 @@ func (mnlp ManageNVLinkLogicalPartition) createOrUpdateNVLinkLogicalPartitionFro
 
 		reportedNvllp.Name = baseName
 		for attempt := 1; ; attempt++ {
-			taken, nameErr := isNVLinkLogicalPartitionNameTaken(ctx, tx, nvllpDAO, tenant.ID, reportedNvllp.Name)
+			sameNameNvllps, _, nameErr := nvllpDAO.GetAll(ctx, tx, cdbm.NVLinkLogicalPartitionFilterInput{
+				Names:     []string{reportedNvllp.Name},
+				TenantIDs: []uuid.UUID{tenant.ID},
+			}, cdbp.PageInput{Limit: cutil.GetPtr(1)}, nil)
 			if nameErr != nil {
 				return nil, fmt.Errorf("unable to create NVLink Logical Partition found on Site: failed to retrieve Partition by name, DB error: %w", nameErr)
 			}
 
-			if !taken {
+			if len(sameNameNvllps) == 0 {
 				break
 			}
 
@@ -528,32 +534,6 @@ func isValidNVLinkLogicalPartitionName(name string) bool {
 	return nameLen >= cdbm.NVLinkLogicalPartitionNameMinLength &&
 		nameLen <= cdbm.NVLinkLogicalPartitionNameMaxLength &&
 		strings.TrimSpace(name) == name
-}
-
-// isNVLinkLogicalPartitionNameTaken reports whether an active NVLink Logical Partition of the
-// Tenant already uses name. Names are unique per Tenant across Sites, matching the API handlers.
-func isNVLinkLogicalPartitionNameTaken(
-	ctx context.Context,
-	tx *cdb.Tx,
-	nvllpDAO cdbm.NVLinkLogicalPartitionDAO,
-	tenantID uuid.UUID,
-	name string,
-) (bool, error) {
-	nvllps, _, err := nvllpDAO.GetAll(
-		ctx,
-		tx,
-		cdbm.NVLinkLogicalPartitionFilterInput{
-			Names:     []string{name},
-			TenantIDs: []uuid.UUID{tenantID},
-		},
-		cdbp.PageInput{Limit: cutil.GetPtr(1)},
-		nil,
-	)
-	if err != nil {
-		return false, err
-	}
-
-	return len(nvllps) > 0, nil
 }
 
 // NewManageNVLinkLogicalPartition returns a new ManageNVLinkLogicalPartition activity
