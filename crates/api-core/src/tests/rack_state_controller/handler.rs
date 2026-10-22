@@ -1156,7 +1156,7 @@ async fn test_critical_component_health_preserves_unresolved_profile(
 }
 
 #[crate::sqlx_test]
-async fn test_critical_component_health_persists_during_handler_errors(
+async fn test_critical_component_health_waits_for_successful_handler(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let fetcher = Arc::new(StaticFirmwareObjectFetcher {
@@ -1198,17 +1198,16 @@ async fn test_critical_component_health_persists_during_handler_errors(
             nvos_update: NvosUpdateState::Start,
         },
     };
-    super::fixtures::rack::set_rack_controller_state(
-        pool.acquire().await?.as_mut(),
-        &rack_id,
-        maintenance.clone(),
-    )
-    .await?;
-
     for (iteration, recovered) in [false, true].into_iter().enumerate() {
         if recovered {
             attach_switch_with_nvos_credentials(&env, &rack_id).await?;
         }
+        super::fixtures::rack::set_rack_controller_state(
+            pool.acquire().await?.as_mut(),
+            &rack_id,
+            maintenance.clone(),
+        )
+        .await?;
         env.run_rack_controller_iteration().await;
         let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
         assert_eq!(rack.controller_state.value, maintenance);
@@ -1222,7 +1221,30 @@ async fn test_critical_component_health_persists_during_handler_errors(
             rack.health_reports
                 .merges
                 .contains_key("rack-component-inventory"),
+            recovered,
+            "failed handlers must not persist report creation or removal",
+        );
+        let history_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM rack_health_history WHERE object_id = $1")
+                .bind(rack_id.to_string())
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(history_count, iteration as i64);
+
+        super::fixtures::rack::set_rack_controller_state(
+            pool.acquire().await?.as_mut(),
+            &rack_id,
+            RackState::Created,
+        )
+        .await?;
+        env.run_rack_controller_iteration().await;
+        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        assert_eq!(
+            rack.health_reports
+                .merges
+                .contains_key("rack-component-inventory"),
             !recovered,
+            "a subsequent successful handler must reconcile the report",
         );
         let histories = db::health_history::find_by_object_ids(
             pool.acquire().await?.as_mut(),
@@ -1239,7 +1261,7 @@ async fn test_critical_component_health_persists_during_handler_errors(
                 .iter()
                 .any(|alert| alert.id.as_str() == "MissingRackComponent"),
             !recovered,
-            "history must agree with the persisted report despite handler failure",
+            "history must agree with the report after a successful handler",
         );
     }
     Ok(())

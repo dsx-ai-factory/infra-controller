@@ -205,24 +205,13 @@ impl StateHandler for RackStateHandler {
 
         let capabilities = resolve_capabilities(id, state.rack_profile_id.as_ref(), ctx).cloned();
         let component_counts = RackComponentCounts::load(&ctx.services.db_pool, id).await?;
-        let mut health_writes = DbWriteBatch::new();
         self.reconcile_component_health(
             state,
             capabilities.as_ref(),
             component_counts,
-            &mut health_writes,
+            ctx.pending_db_writes,
         );
-        let aggregate_health = derive_rack_aggregate_health(&state.health_reports);
-        health_writes.push(PersistRackHealthHistory {
-            rack_id: state.id.clone(),
-            health_report: aggregate_health.clone(),
-        });
-        // Inventory observations remain valid even if a subsequent maintenance RPC fails.
-        // Commit them with their history before entering state-specific work.
-        let mut txn = ctx.services.db_pool.begin().await?;
-        health_writes.apply_all(&mut txn).await?;
-        txn.commit().await?;
-        self.record_metrics(state, &aggregate_health, ctx);
+        self.record_health(state, ctx);
 
         self.attempt_state_transition(
             id,
