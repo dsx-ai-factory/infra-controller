@@ -1382,77 +1382,36 @@ impl SiteExplorer {
         } = matches;
         let needs_expected_serial_fallback = dpu_inventory.needs_expected_serial_fallback();
 
-        let mut dpu_exploration = DpuExplorationState::new();
-        for matched_dpu in inventory_matches {
-            // Apply the target selected during matching. Report a change only after
-            // `set_nic_mode` succeeds, so failures skip this device.
-            let mode_check = Some(match matched_dpu.target_operating_mode {
-                Some(target) => self.update_dpu_mode(&matched_dpu, target, metrics).await,
-                None => Ok(true),
-            });
-
-            dpu_exploration.record_matched_dpu(&matched_dpu, ep, mode_check);
-        }
+        let inventory_cfg_status = self
+            .configure_matched_dpus(ep, inventory_matches, metrics)
+            .await;
+        let fallback_cfg_status = self
+            .configure_matched_dpus(ep, fallback_matches, metrics)
+            .await;
 
         let has_unready_matches = dpu_inventory.matched_total
-            > dpu_exploration.running_as_dpu.len() + dpu_exploration.running_as_nic_total;
+            > inventory_cfg_status.running_as_dpu.len() + inventory_cfg_status.running_as_nic_total;
 
         let host_reported_dpus_total = dpu_inventory.reported_total;
 
-        // Bring the accumulated counts into variables that the rest
-        // of this function uses.
-        let DpuExplorationState {
-            running_as_nic_total: mut host_reported_dpus_nic_mode_total,
-            all_configured: mut all_dpus_configured_properly_in_host,
-            running_as_dpu: mut dpus_explored_for_host,
-        } = dpu_exploration;
-
-        // Fallback changes the counts; preserve the initial decision for reset/wait.
+        // The reset/wait decision uses inventory readiness before fallback.
         let incomplete_dpu_exploration = needs_expected_serial_fallback
             || has_unready_matches
-            || dpus_explored_for_host.is_empty()
-            || dpus_explored_for_host.len()
-                != host_reported_dpus_total.saturating_sub(host_reported_dpus_nic_mode_total);
-        let mut dpu_added = false;
+            || inventory_cfg_status.running_as_dpu.is_empty()
+            || inventory_cfg_status.running_as_dpu.len()
+                != host_reported_dpus_total
+                    .saturating_sub(inventory_cfg_status.running_as_nic_total);
 
-        for matched_dpu in fallback_matches {
-            let mode_check = Some(match matched_dpu.target_operating_mode {
-                Some(target) => self.update_dpu_mode(&matched_dpu, target, metrics).await,
-                None => Ok(true),
-            });
-
-            match classify_matched_dpu(&matched_dpu, ep, mode_check) {
-                DiscoveredDpu::RunningAsDpu(dpu) => {
-                    // The expected-machine fallback list is the source of
-                    // truth here, so discard whatever the PCIe scan found
-                    // on the first confirmed match.
-                    if !dpu_added {
-                        dpus_explored_for_host.clear();
-                    }
-                    dpu_added = true;
-                    dpus_explored_for_host.push(dpu);
-                }
-                DiscoveredDpu::RunningAsNic => {
-                    host_reported_dpus_nic_mode_total += 1;
-                }
-                DiscoveredDpu::NeedsReconfig => {
-                    // `set_nic_mode` was just issued; the host needs a
-                    // reset before this DPU re-reports in the new mode, so
-                    // mark it not-yet-configured and let the reset path
-                    // below run.
-                    all_dpus_configured_properly_in_host = false;
-                }
-                DiscoveredDpu::ModeCheckFailed(err) => {
-                    matched_dpu.warn_mode_check_failed(&err);
-                }
-            }
-        }
+        let host_reported_dpus_nic_mode_total =
+            inventory_cfg_status.running_as_nic_total + fallback_cfg_status.running_as_nic_total;
+        let configuration_requests = inventory_cfg_status.configuration_requests
+            + fallback_cfg_status.configuration_requests;
 
         // The site explorer should only create a managed host after exploring all of the DPUs attached to the host.
         // If a host reports that it has two DPUs, the site explorer must wait until **both** DPUs have made the DHCP request.
         // If only one of the two DPUs have made the DHCP request, the site explorer must wait until it has explored the latter DPU's BMC
         // (ensuring that the second DPU has also made the DHCP request).
-        if incomplete_dpu_exploration && !dpu_added {
+        if incomplete_dpu_exploration && fallback_cfg_status.running_as_dpu.is_empty() {
             // Net DPUs still expected to pair: reported DPU minus those
             // confirmed to be running as plain NICs.
             let expected_managed_dpus_total =
@@ -1462,21 +1421,19 @@ impl SiteExplorer {
             // queue a flip even on a host whose BMC reports no DPU over PCIe
             // (`expected_managed_dpus_total == 0`), which is the usual reason we are
             // on the fallback path at all.
-            if expected_managed_dpus_total > 0
-                || has_unready_matches
-                || !all_dpus_configured_properly_in_host
+            if expected_managed_dpus_total > 0 || has_unready_matches || configuration_requests > 0
             {
                 if expected_managed_dpus_total > 0 {
                     tracing::warn!(
                         bmc_ip_address = %ep.address,
-                        discovered_dpu_count = dpus_explored_for_host.len(),
+                        discovered_dpu_count = inventory_cfg_status.running_as_dpu.len(),
                         expected_managed_dpu_count = expected_managed_dpus_total,
-                        all_dpus_configured_properly_in_host,
+                        all_dpus_configured_properly_in_host = configuration_requests == 0,
                         "cannot identify managed host because the site explorer has not discovered all attached DPUs"
                     );
                 }
 
-                if !all_dpus_configured_properly_in_host {
+                if configuration_requests > 0 {
                     // A queued `set_nic_mode` only takes effect after a host
                     // power cycle, so drive one for every vendor --
                     // `redfish_powercycle` issues `PowerCycle` and falls back
@@ -1557,7 +1514,34 @@ impl SiteExplorer {
             }
         }
 
-        Some(dpus_explored_for_host)
+        // Expected serials replace inventory DPUs only after a ready DPU match.
+        // An all-NIC or unsuccessful fallback keeps the inventory DPU list.
+        if fallback_cfg_status.running_as_dpu.is_empty() {
+            Some(inventory_cfg_status.running_as_dpu)
+        } else {
+            Some(fallback_cfg_status.running_as_dpu)
+        }
+    }
+
+    /// Applies the selected target modes and records each matched DPU's outcome.
+    async fn configure_matched_dpus(
+        &self,
+        host_ep: &ExploredEndpoint,
+        matched_dpus: Vec<MatchedDpu<'_>>,
+        metrics: &mut SiteExplorationMetrics,
+    ) -> DpuConfigStatus {
+        let mut cfg_status = DpuConfigStatus::new();
+        for matched_dpu in matched_dpus {
+            // Only a successful mode-change request marks the host for reset.
+            let mode_check = Some(match matched_dpu.target_operating_mode {
+                Some(target) => self.update_dpu_mode(&matched_dpu, target, metrics).await,
+                None => Ok(true),
+            });
+
+            cfg_status.record_matched_dpu(&matched_dpu, host_ep, mode_check);
+        }
+
+        cfg_status
     }
 
     async fn persist_identified_managed_hosts(
@@ -3559,22 +3543,22 @@ fn host_dpu_inventory_records(chassis: &Chassis) -> Vec<HostDpuInventoryCandidat
         .collect()
 }
 
-/// Results of classifying matched DPUs after mode checks or configuration.
+/// Status of matched DPUs after applying target operating modes.
 #[derive(Debug)]
-struct DpuExplorationState {
+struct DpuConfigStatus {
     /// Matched DPUs confirmed running as a plain NIC, excluded from management.
     running_as_nic_total: usize,
-    /// `false` once a `set_nic_mode` request succeeds; drives the host power cycle.
-    all_configured: bool,
+    /// Successful mode-change requests that require a host power cycle.
+    configuration_requests: usize,
     /// DPUs running in DPU mode and configured correctly, attached to the host.
     running_as_dpu: Vec<ExploredDpu>,
 }
 
-impl DpuExplorationState {
+impl DpuConfigStatus {
     fn new() -> Self {
         Self {
             running_as_nic_total: 0,
-            all_configured: true,
+            configuration_requests: 0,
             running_as_dpu: Vec::new(),
         }
     }
@@ -3589,7 +3573,7 @@ impl DpuExplorationState {
         match classify_matched_dpu(matched_dpu, host_ep, mode_check) {
             DiscoveredDpu::RunningAsDpu(dpu) => self.running_as_dpu.push(dpu),
             DiscoveredDpu::RunningAsNic => self.running_as_nic_total += 1,
-            DiscoveredDpu::NeedsReconfig => self.all_configured = false,
+            DiscoveredDpu::NeedsReconfig => self.configuration_requests += 1,
             DiscoveredDpu::ModeCheckFailed(err) => {
                 matched_dpu.warn_mode_check_failed(&err);
             }
