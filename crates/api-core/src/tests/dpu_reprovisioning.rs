@@ -16,6 +16,7 @@
  */
 
 use std::collections::HashMap;
+use std::error::Error as _;
 
 use carbide_machine_controller::handler::MachineStateHandlerBuilder;
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
@@ -39,6 +40,7 @@ use rpc::forge::forge_server::Forge;
 use rpc::forge_agent_control_response::Action;
 use rpc::model::instance::snapshot::instance_snapshot_derive_status;
 
+use crate::errors::{CarbideError, CarbideErrorWithLocation};
 use crate::tests::common;
 use crate::tests::common::api_fixtures::dpu::create_dpu_machine_in_waiting_for_network_install;
 use crate::tests::common::api_fixtures::instance::TestInstance;
@@ -664,6 +666,69 @@ async fn test_dpu_agent_control_preserves_database_error_details(pool: sqlx::PgP
     assert_eq!(
         error.metadata().get("nico-error-code").unwrap(),
         "NICO-API-500"
+    );
+}
+
+#[crate::sqlx_test]
+async fn test_dpu_agent_control_preserves_lookup_error(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let dpu_id: DpuMachineId = "fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80"
+        .parse()
+        .unwrap();
+
+    // Keep transaction acquisition working while find_dpu_id cannot read machines.id.
+    sqlx::query("ALTER TABLE machines RENAME COLUMN id TO unavailable_id")
+        .execute(&env.pool)
+        .await
+        .expect("rename the machine ID column");
+
+    let response = env
+        .api
+        .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
+            machine_id: Some(dpu_id.into()),
+        }))
+        .await;
+
+    // Restore the schema before asserting so a failed test leaves the database inspectable.
+    sqlx::query("ALTER TABLE machines RENAME COLUMN unavailable_id TO id")
+        .execute(&env.pool)
+        .await
+        .expect("restore the machine ID column");
+
+    let error = response.expect_err("the DPU lookup must fail");
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert_eq!(error.message(), "internal database error");
+    assert_eq!(
+        error.metadata().get("nico-error-code").unwrap(),
+        "NICO-API-500"
+    );
+    assert_eq!(
+        error.metadata().get("nico-error-text").unwrap(),
+        "internal database error"
+    );
+
+    let source = error
+        .source()
+        .expect("status retains its error source")
+        .downcast_ref::<CarbideErrorWithLocation>()
+        .expect("status retains the CarbideError");
+    let CarbideError::DBError(database_error) = &source.error else {
+        panic!("expected the DPU lookup's database error: {source:?}");
+    };
+    assert!(
+        database_error
+            .to_string()
+            .contains("query=SELECT id FROM machines WHERE id = $1."),
+        "{database_error}"
+    );
+    assert_eq!(
+        database_error
+            .source
+            .as_database_error()
+            .expect("retain the Postgres error")
+            .code()
+            .as_deref(),
+        Some("42703")
     );
 }
 
