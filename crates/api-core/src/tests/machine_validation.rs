@@ -536,6 +536,70 @@ async fn test_create_update_external_config(
 }
 
 #[crate::sqlx_test]
+async fn test_get_external_configs_filters_by_requested_names(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{Case, check_cases_async};
+
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let config = b"{}".to_vec();
+    // Add/update is disabled, so seed the stored configurations through the database.
+    let mut txn = env.pool.begin().await?;
+    for name in ["config-a", "config-b", "config-c"] {
+        db::machine_validation_config::save(txn.as_mut(), name, "validation parameters", &config)
+            .await?;
+    }
+    txn.commit().await?;
+
+    let api = &env.api;
+    check_cases_async(
+        [
+            Case {
+                scenario: "stored matches survive missing names and exclude unrelated configurations",
+                input: vec!["config-a", "missing", "config-c"],
+                expect: Yields(["config-a", "config-c"].map(String::from).to_vec()),
+            },
+            Case {
+                scenario: "names match exactly rather than by case or pattern",
+                input: vec!["CONFIG-A", "config-%"],
+                expect: Yields(vec![]),
+            },
+            Case {
+                scenario: "empty names list all stored configurations",
+                input: vec![],
+                expect: Yields(
+                    ["config-a", "config-b", "config-c"]
+                        .map(String::from)
+                        .to_vec(),
+                ),
+            },
+        ],
+        |requested_names| async move {
+            let response = api
+                .get_machine_validation_external_configs(tonic::Request::new(
+                    rpc::forge::GetMachineValidationExternalConfigsRequest {
+                        names: requested_names.into_iter().map(String::from).collect(),
+                    },
+                ))
+                .await
+                .map_err(|error| error.to_string())?
+                .into_inner();
+            let mut returned_names = response
+                .configs
+                .into_iter()
+                .map(|config| config.name)
+                .collect::<Vec<_>>();
+            returned_names.sort();
+            Ok::<_, String>(returned_names)
+        },
+    )
+    .await;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn test_remove_external_config_decode_failure_rolls_back(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {

@@ -7669,9 +7669,12 @@ message  GetMachineValidationExternalConfigResponse {
 }
 
 message GetMachineValidationExternalConfigsRequest {
+  // Exact configuration names to return. Omitted or empty names list all stored
+  // configurations. Names with no stored configuration contribute no entries.
   repeated string names = 1;
 }
 message  GetMachineValidationExternalConfigsResponse {
+  // Each selected configuration appears once. The order is unspecified.
   repeated MachineValidationExternalConfig configs = 1;
 }
 

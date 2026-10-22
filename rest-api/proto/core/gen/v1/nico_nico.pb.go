@@ -42343,8 +42343,10 @@ func (x *GetMachineValidationExternalConfigResponse) GetConfig() *MachineValidat
 }
 
 type GetMachineValidationExternalConfigsRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Names         []string               `protobuf:"bytes,1,rep,name=names,proto3" json:"names,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Exact configuration names to return. Omitted or empty names list all stored
+	// configurations. Names with no stored configuration contribute no entries.
+	Names         []string `protobuf:"bytes,1,rep,name=names,proto3" json:"names,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -42387,7 +42389,8 @@ func (x *GetMachineValidationExternalConfigsRequest) GetNames() []string {
 }
 
 type GetMachineValidationExternalConfigsResponse struct {
-	state         protoimpl.MessageState             `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Each selected configuration appears once. The order is unspecified.
 	Configs       []*MachineValidationExternalConfig `protobuf:"bytes,1,rep,name=configs,proto3" json:"configs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

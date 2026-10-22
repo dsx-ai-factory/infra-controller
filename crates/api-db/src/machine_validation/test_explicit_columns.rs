@@ -264,7 +264,7 @@ async fn exercise_config_queries(
     assert_eq!(expected.description, description);
     assert_eq!(expected.config, config);
     assert_eq!(expected.version.version_nr(), 1);
-    let configs = machine_validation_config::find_configs(txn.as_mut()).await?;
+    let configs = machine_validation_config::find_configs(txn.as_mut(), &[]).await?;
     assert_eq!(configs.len(), 1);
     assert_eq!(
         serde_json::to_value(&configs[0])?,
@@ -276,7 +276,7 @@ async fn exercise_config_queries(
         serde_json::to_value(&expected)?
     );
     assert!(
-        machine_validation_config::find_configs(txn.as_mut())
+        machine_validation_config::find_configs(txn.as_mut(), &[])
             .await?
             .is_empty()
     );
