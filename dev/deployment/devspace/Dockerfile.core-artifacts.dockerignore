@@ -14,6 +14,13 @@
 !include/**
 !dev
 !dev/
+!dev/docker
+!dev/docker/
+!dev/docker/Dockerfile.build-container-x86_64
+!dev/docker/Dockerfile.build-container-aarch64
+!dev/docker/build-kea.sh
+!dev/docker/kea-reuse-null.patch
+!dev/docker/kea.version
 !dev/ipmi
 !dev/ipmi/
 !dev/ipmi/cmd.conf

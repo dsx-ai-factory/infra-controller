@@ -22,7 +22,8 @@
 #include <dhcp/option6_status_code.h>
 #include <vector>
 #include <dhcpsrv/lease_mgr_factory.h>
-#include <atomic>
+#include <mutex>
+#include <set>
 #if CARBIDE_KEA_HOOKS_VERSION >= 20400
 #include <dhcpsrv/cfgmgr.h>
 #endif
@@ -31,40 +32,90 @@
 isc::log::Logger logger("carbide-callouts");
 
 namespace {
-// Kea's allocation locks do not cover existing-DUID REQUEST, renewal, or
-// release. Hold ownership from packet receive until all native persistence
-// has finished. Contending clients retry instead of blocking worker threads.
-std::atomic_flag lease6_busy = ATOMIC_FLAG_INIT;
+// Keep packet ownership through native persistence without serializing unrelated
+// clients behind a discovery RPC. Keys are released with the callout context.
+std::mutex lease6_mutex;
+std::set<std::string> lease6_busy;
+const std::string lease6_mac_prefix = "mac:";
 const std::string lease6_guard_context = "carbide_lease6_transaction";
+const std::string lease6_reclaim_refused_context = "carbide_lease6_reclaim_refused";
 struct Lease6Transaction {
-  bool owned = false;
-  ~Lease6Transaction() { if (owned) lease6_busy.clear(std::memory_order_release); }
+  std::set<std::string> keys;
+  ~Lease6Transaction() {
+    std::lock_guard<std::mutex> lock(lease6_mutex);
+    for (const auto &key : keys) {
+      lease6_busy.erase(key);
+    }
+  }
 };
 
-bool own_lease6_transaction(CalloutHandle &handle) {
+bool own_lease6_transaction(CalloutHandle &handle, const std::string &key) {
   boost::shared_ptr<Lease6Transaction> transaction;
   try {
     handle.getContext(lease6_guard_context, transaction);
   } catch (const isc::hooks::NoSuchCalloutContext &) {
   }
-  if (transaction) {
+  if (!transaction) {
+    transaction.reset(new Lease6Transaction());
+    handle.setContext(lease6_guard_context, transaction);
+  }
+  std::lock_guard<std::mutex> lock(lease6_mutex);
+  if (transaction->keys.count(key)) {
     return true;
   }
-  // Allocate before claiming ownership so allocation failure cannot strand it.
-  transaction.reset(new Lease6Transaction());
-  if (lease6_busy.test_and_set(std::memory_order_acquire)) {
-    // A failed claimant must not release another transaction's flag.
-    transaction.reset();
+  if (lease6_busy.count(key)) {
     return false;
   }
-  transaction->owned = true;
-  handle.setContext(lease6_guard_context, transaction);
+  transaction->keys.insert(key);
+  lease6_busy.insert(key);
   return true;
+}
+
+bool own_lease6_address(CalloutHandle &handle, const isc::asiolink::IOAddress &address) {
+  return own_lease6_transaction(handle, "address:" + address.toText());
+}
+
+// Hints are untrusted: only lock them after discovery, immediately before
+// native processing can read or mutate those lease rows.
+bool own_lease6_hints(CalloutHandle &handle, const Pkt6Ptr &query) {
+  for (const auto &option : query->getOptions(D6O_IA_NA)) {
+    const auto ia = boost::dynamic_pointer_cast<Option6IA>(option.second);
+    if (!ia) {
+      continue;
+    }
+    for (const auto &nested : ia->getOptions()) {
+      if (nested.first != D6O_IAADDR) {
+        continue;
+      }
+      const auto address = boost::dynamic_pointer_cast<Option6IAAddr>(nested.second);
+      if (address && !own_lease6_address(handle, address->getAddress())) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+std::string lease6_mac(const Lease6Ptr &lease) {
+  if (lease->hwaddr_ && !lease->hwaddr_->hwaddr_.empty()) {
+    return lease->hwaddr_->toText(false);
+  }
+  if (lease->duid_) {
+    const auto &duid = lease->duid_->getDuid();
+    char *mac = carbide_mac_from_duid(duid.empty() ? nullptr : duid.data(), duid.size());
+    if (mac) {
+      const std::string result(mac);
+      carbide_free_mac_string(mac);
+      return result;
+    }
+  }
+  return "";
 }
 }
 
 const int IPV4_ADDR_SIZEB = 4;
 const int IPV6_ADDR_SIZEB = 16;
+const char LEASE_TRANSACTION_BUSY[] = "lease_transaction_busy";
 const char REQUESTED_PREFIX_IAIDS[] = "requested_prefix_iaids";
 
 const uint8_t *nullable_data(const OptionBuffer &buffer) {
@@ -1271,13 +1322,6 @@ int pkt6_receive(CalloutHandle &handle) {
     return 1;
   }
 
-  handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
-  if (!own_lease6_transaction(handle)) {
-    record_dropped_v6_request("lease_transaction_busy");
-    return 0;
-  }
-  handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
-
   LOG_INFO(logger, "LOG_CARBIDE_PKT6_RECEIVE: %1")
       .arg(query6_ptr->toText());
 
@@ -1318,6 +1362,27 @@ int pkt6_receive(CalloutHandle &handle) {
   remote_id = option_data(relay, D6O_REMOTE_ID);
   client_link_layer = option_data(relay, D6O_CLIENT_LINKLAYER_ADDR);
 
+  // Serialize boot-stage identities of the same NIC before discovery, but
+  // allow unrelated cached clients to proceed while Core is slow.
+  std::string mac;
+  if (client_link_layer.size() == 8 && client_link_layer[0] == 0 && client_link_layer[1] == HTYPE_ETHER) {
+    const std::vector<uint8_t> bytes(client_link_layer.begin() + 2, client_link_layer.end());
+    mac = HWAddr(bytes, HTYPE_ETHER).toText(false);
+  } else if (const auto client_id = query6_ptr->getOption(D6O_CLIENTID)) {
+    const auto &duid = client_id->getData();
+    char *decoded = carbide_mac_from_duid(nullable_data(duid), duid.size());
+    if (decoded) {
+      mac = decoded;
+      carbide_free_mac_string(decoded);
+    }
+  }
+  handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
+  if (!mac.empty() && !own_lease6_transaction(handle, lease6_mac_prefix + mac)) {
+    record_dropped_v6_request(LEASE_TRANSACTION_BUSY);
+    return 0;
+  }
+  handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
+
   Machine *machine = nullptr;
   V6HookResult result = carbide_pkt6_receive(
       nullable_data(query6_ptr->data_), query6_ptr->data_.size(), relay_count,
@@ -1331,6 +1396,14 @@ int pkt6_receive(CalloutHandle &handle) {
       machine_free(ptr);
     });
     handle.setContext("machine", machinePtr);
+    isc::asiolink::IOAddress selected_address("::");
+    if ((machine_ipv6_address(machine, selected_address) &&
+         !own_lease6_address(handle, selected_address)) ||
+        !own_lease6_hints(handle, query6_ptr)) {
+      handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
+      record_dropped_v6_request(LEASE_TRANSACTION_BUSY);
+      return 0;
+    }
     // Existing leases can bypass lease6_select, and renewal SKIP still lets
     // Kea return an old prefix. Keep IA_PD out of allocation entirely, then
     // return an IA-scoped refusal without disrupting the address exchange.
@@ -1375,6 +1448,11 @@ int pkt6_receive(CalloutHandle &handle) {
   }
 
   if (result == V6HookResult::Ignore) {
+    if (!own_lease6_hints(handle, query6_ptr)) {
+      handle.setStatus(CalloutHandle::NEXT_STEP_DROP);
+      record_dropped_v6_request(LEASE_TRANSACTION_BUSY);
+      return 0;
+    }
     handle.setContext("lease_end_message_validated", true);
     return 0;
   }
@@ -1420,44 +1498,34 @@ int lease6_select(CalloutHandle &handle) {
     return 1;
   }
 
-  // Firmware and the OS may use different DUIDs on the same NIC. Kea indexes
-  // leases by address and otherwise retries its entire pool when the hook
-  // redirects a new allocation onto that NIC's existing lease.
   auto &leases = isc::dhcp::LeaseMgrFactory::instance();
-  // An unchanged address may be Kea's reuseExpiredLease path, which performs
-  // an update after this hook. Never delete or re-key that row.
+  bool reclaim_refused = false;
+  try {
+    handle.getContext(lease6_reclaim_refused_context, reclaim_refused);
+  } catch (const isc::hooks::NoSuchCalloutContext &) {
+  }
+  if (reclaim_refused || !own_lease6_address(handle, proposed_address) ||
+      !own_lease6_address(handle, lease6->addr_)) {
+    return 1;
+  }
   if (proposed_address == lease6->addr_) {
     handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
     return 0;
   }
-  if (leases.getLease6(lease6->type_, proposed_address)) {
-    handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
+  const auto candidate = leases.getLease6(lease6->type_, proposed_address);
+  Lease6Ptr previous = leases.getLease6(lease6->type_, lease6->addr_);
+  if (candidate && !candidate->expired()) {
     return 1;
   }
-  Lease6Ptr previous = leases.getLease6(lease6->type_, lease6->addr_);
-  if (!previous) {
-    handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
-    return 0;
-  }
-  std::string previous_mac;
-  if (previous->hwaddr_ && !previous->hwaddr_->hwaddr_.empty()) {
-    previous_mac = previous->hwaddr_->toText(false);
-  } else if (previous->duid_) {
-    const auto &duid = previous->duid_->getDuid();
-    char *mac = carbide_mac_from_duid(nullable_data(duid), duid.size());
-    if (mac) {
-      previous_mac = mac;
-      carbide_free_mac_string(mac);
-    }
-  }
+  const std::string previous_mac = previous ? lease6_mac(previous) : "";
   char *selected_mac = nullptr;
   boost::shared_ptr<Machine> machine;
   handle.getContext("machine", machine);
   selected_mac = machine_get_discovery_mac(machine.get());
-  const bool same_owner = selected_mac && previous_mac == selected_mac &&
+  const bool same_owner = !previous || (selected_mac && previous_mac == selected_mac &&
                           previous->subnet_id_ == lease6->subnet_id_ &&
                           previous->state_ == Lease::STATE_DEFAULT &&
-                          lease6->type_ == Lease::TYPE_NA;
+                          lease6->type_ == Lease::TYPE_NA);
   if (selected_mac) {
     machine_free_discovery_mac(selected_mac);
   }
@@ -1467,36 +1535,46 @@ int lease6_select(CalloutHandle &handle) {
     handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
     return 1;
   }
-  // SOLICIT is only an offer: retain the previous lease until REQUEST commits
-  // the new boot-stage identity. Do not notify Core of expiry during a handoff.
+  // SOLICIT remains an offer. A reused candidate makes Kea UPDATE the final
+  // address, so prepare that row instead of deleting the target as CREATE needs.
   if (!fake_allocation) {
-    if (!leases.deleteLease(previous)) {
-      handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
+    if (candidate) {
+      if (previous) {
+        lease6->current_cltt_ = previous->cltt_;
+        lease6->current_valid_lft_ = previous->valid_lft_;
+      } else if (!leases.addLease(lease6)) {
+        return 1;
+      }
+      if (!leases.deleteLease(candidate)) {
+        if (!previous) {
+          leases.deleteLease(lease6);
+        }
+        return 1;
+      }
+    } else if (previous && !leases.deleteLease(previous)) {
       return 1;
     }
     Subnet6Ptr subnet;
     handle.getArgument("subnet6", subnet);
-    // Balance createLease6's active-lease increments; cumulative allocations
-    // still count the new boot-stage lease.
-    if (subnet->inPool(Lease::TYPE_NA, previous->addr_)) {
-      using isc::stats::StatsMgr;
-      StatsMgr::instance().addValue(
-          StatsMgr::generateName("subnet", previous->subnet_id_, "assigned-nas"),
-          static_cast<int64_t>(-1));
-      // Per-pool gauges and Pool::getID were added in Kea 2.4.
+    using isc::stats::StatsMgr;
+    auto &stats = StatsMgr::instance();
+    // CREATE counts the original pool candidate; REUSE counts the final
+    // address. Both must leave one assignment after replacing an active row.
+    const bool reuse_outside_pool = candidate &&
+        !subnet->inPool(Lease::TYPE_NA, lease6->addr_);
+    const int64_t adjustment = int64_t(reuse_outside_pool) - int64_t(bool(previous));
+    if (adjustment) {
+      stats.addValue(StatsMgr::generateName("subnet", lease6->subnet_id_, "assigned-nas"), int64_t(adjustment));
+    }
 #if CARBIDE_KEA_HOOKS_VERSION >= 20400
+    if (previous) {
       auto pool = subnet->getPool(Lease::TYPE_NA, previous->addr_, false);
       if (pool) {
-        const auto pool_stat = StatsMgr::generateName(
-            "subnet", previous->subnet_id_,
-            StatsMgr::generateName("pool", pool->getID(), "assigned-nas"));
-        // Kea 2.2 has no per-pool gauges; later versions initialize these.
-        if (StatsMgr::instance().getObservation(pool_stat)) {
-          StatsMgr::instance().addValue(pool_stat, static_cast<int64_t>(-1));
-        }
+        stats.addValue(StatsMgr::generateName("subnet", previous->subnet_id_,
+            StatsMgr::generateName("pool", pool->getID(), "assigned-nas")), int64_t(-1));
       }
-#endif
     }
+#endif
   }
   handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
   return 0;
@@ -1679,15 +1757,33 @@ int lease6_expire(CalloutHandle &handle) {
     stats.addValue(StatsMgr::generateName("subnet", lease->subnet_id_, "reclaimed-leases"), int64_t(-direction));
   };
   compensate(1);
-  if (!own_lease6_transaction(handle)) {
+  handle.setContext(lease6_reclaim_refused_context, true);
+  const auto mac = lease6_mac(lease);
+  if ((!mac.empty() && !own_lease6_transaction(handle, lease6_mac_prefix + mac)) ||
+      !own_lease6_address(handle, lease->addr_)) {
     return 0;
   }
   const auto current = isc::dhcp::LeaseMgrFactory::instance().getLease6(lease->type_, lease->addr_);
   if (!current || *current != *lease) {
     return 0;
   }
+  const int result = handle_carbide_lease6_end(handle, "lease6_expire");
+  boost::shared_ptr<Machine> machine;
+  try {
+    handle.getContext("machine", machine);
+  } catch (const isc::hooks::NoSuchCalloutContext &) {
+  }
+  if (machine) {
+    // Allocation-time reclamation leaves the old database row unchanged.
+    // Persist its reclaimed state before SELECT can refuse the replacement,
+    // otherwise every retry expires Core and decrements assigned-nas again.
+    Lease6Ptr reclaimed(new Lease6(*lease));
+    reclaimed->state_ = Lease::STATE_EXPIRED_RECLAIMED;
+    isc::dhcp::LeaseMgrFactory::instance().updateLease6(reclaimed);
+  }
   compensate(-1);
+  handle.setContext(lease6_reclaim_refused_context, false);
   handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
-  return handle_carbide_lease6_end(handle, "lease6_expire");
+  return result;
 }
 }
