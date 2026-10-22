@@ -13,6 +13,7 @@
 | 0.5 | 06/02/2026 | Binu Ramakrishnan | Site master encryption key re-wrap (`ReencryptTenantIdentitySecrets` gRPC); envelope `key_id` in ciphertext (drop DB `encryption_key_id` column) |
 | 0.6 | 08/07/2026 | Parham Armani | Expose re-wrap via NICo REST (`POST .../tenant-identity/re-encrypt`, provider-admin), keeping `dryRun`; previously gRPC/Forge-Admin-CLI only |
 | 0.7 | 09/02/2026 | Bill Minckler | Read the signing-key master key through the credential chain rather than only from Vault |
+| 0.8 | 10/21/2026 | Bill Minckler | Link §3.1.1 to the planned credential-store design for signing keys and token-delegation secrets |
 |  |  |  |  |
 
 ## 1. Introduction
@@ -150,6 +151,8 @@ SetTenantIdentityConfiguration (PUT tenant-identity/config)
 #### 3.1.1 Site master encryption key rotation (KEK re-wrap)
 
 Per-org signing private keys and token-delegation credentials are encrypted at rest with a **site master encryption key** (AES-256-GCM envelope, scheme version 1). This is **separate** from per-org **JWT signing key rotation** (§3.1 above).
+
+A planned design, [Tenant Identity Secret Storage](tenant-identity-secret-storage.md), stores these secrets as credentials and retires the site master key. It is tracked by [#3255](https://github.com/dsx-ai-factory/infra-controller/issues/3255).
 
 | Concept | Where it lives |
 | :------ | :------------- |
