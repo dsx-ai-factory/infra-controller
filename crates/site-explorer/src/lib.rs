@@ -471,6 +471,14 @@ pub(crate) struct IdentifiedManagedHost {
     pub(crate) primary_interface_selection: Option<HostPrimaryInterfaceSelection>,
 }
 
+/// A host and its matching decisions, collected before DPU configuration.
+struct IngestionCandidate<'a> {
+    endpoint: ExploredEndpoint,
+    dpu_matches: HostDpuMatches<'a>,
+    host_dpu_policy: HostDpuPolicy,
+    declared_primary: Option<MacAddress>,
+}
+
 /// Result of applying a boot interface selected from a report to DPU ordering.
 ///
 /// An empty DPU list needs no ordering. When DPU records exist, exactly one of
@@ -1419,20 +1427,31 @@ impl SiteExplorer {
                 continue;
             }
 
-            let matches =
+            let dpu_matches =
                 HostDpuMatches::new(&ep, &dpu_sn_to_endpoint, expected_machine, host_dpu_policy);
+            let candidate = IngestionCandidate {
+                endpoint: ep,
+                dpu_matches,
+                host_dpu_policy,
+                declared_primary,
+            };
             let Some(dpus_explored_for_host) = self
-                .configure_host_dpus(&ep, matches, host_dpu_policy, metrics)
+                .configure_host_dpus(
+                    &candidate.endpoint,
+                    candidate.dpu_matches,
+                    candidate.host_dpu_policy,
+                    metrics,
+                )
                 .await
             else {
                 continue;
             };
 
             if let Some(managed_host) = Self::build_managed_host(
-                ep,
+                candidate.endpoint,
                 dpus_explored_for_host,
-                host_dpu_policy,
-                declared_primary,
+                candidate.host_dpu_policy,
+                candidate.declared_primary,
                 &mut boot_interfaces,
                 metrics,
             ) {
