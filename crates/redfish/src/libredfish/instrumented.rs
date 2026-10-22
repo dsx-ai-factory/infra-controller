@@ -130,6 +130,11 @@ pub(super) async fn instrumented_redfish_initialization<'a, T>(
 /// Records `NotSupported` as an expected `unsupported` outcome for ordinary
 /// operations, while initialization deliberately passes `false` so it keeps
 /// the pre-existing error contract. All other failures emit one WARN.
+#[tracing::instrument(
+    name = "redfish_call",
+    skip_all,
+    fields(backend = REDFISH_BACKEND, operation = operation, outcome = tracing::field::Empty)
+)]
 async fn instrumented_redfish_call<'a, T>(
     operation: &'static str,
     not_supported_is_expected: bool,
@@ -160,6 +165,7 @@ async fn instrumented_redfish_call<'a, T>(
         Err(_) if is_expected_not_supported => "unsupported",
         Err(_) => "error",
     };
+    tracing::Span::current().record("outcome", outcome);
     red::record(
         REDFISH_BACKEND,
         operation,

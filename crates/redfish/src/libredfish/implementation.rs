@@ -29,6 +29,7 @@ use carbide_utils::redfish::{
 };
 use libredfish::model::service_root::RedfishVendor;
 use libredfish::{Endpoint, Redfish};
+use tracing::Instrument;
 
 use crate::libredfish::instrumented::{InstrumentedRedfish, instrumented_redfish_initialization};
 use crate::libredfish::{RedfishAuth, RedfishClientCreationError, RedfishClientPool};
@@ -68,6 +69,7 @@ impl RedfishClientPoolImpl {
 
 #[async_trait]
 impl RedfishClientPool for RedfishClientPoolImpl {
+    #[tracing::instrument(name = "redfish_create_client", skip_all, fields(bmc_host = host))]
     async fn create_client(
         &self,
         host: &str,
@@ -98,6 +100,7 @@ impl RedfishClientPool for RedfishClientPoolImpl {
                 let credentials = self
                     .credential_reader
                     .get_credentials(&credential_key)
+                    .instrument(tracing::info_span!("redfish_credentials"))
                     .await?
                     .ok_or_else(|| RedfishClientCreationError::MissingCredentials {
                         key: credential_key.to_key_str().to_string(),
@@ -239,6 +242,7 @@ impl ProxiedRedfishClientPoolImpl {
 
 #[async_trait]
 impl RedfishClientPool for ProxiedRedfishClientPoolImpl {
+    #[tracing::instrument(name = "redfish_create_client", skip_all, fields(bmc_host = host))]
     async fn create_client(
         &self,
         host: &str,
