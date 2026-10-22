@@ -581,10 +581,7 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 			}
 			createdMatches := projected.Created.IsZero() || existing.Created.Equal(projected.Created)
 			descriptionMatches := description == nil || existing.Description == *description
-			deviceTypeMatches := reflect.DeepEqual(existing.DeviceType, deviceType)
-			if apiReq.Components == nil && deviceType == nil {
-				deviceTypeMatches = true
-			}
+			deviceTypeMatches := deviceType == nil || reflect.DeepEqual(existing.DeviceType, deviceType)
 			if createdMatches && descriptionMatches && deviceTypeMatches &&
 				existing.SchemaVersion == projected.SchemaVersion &&
 				existing.Components.Equal(components) &&

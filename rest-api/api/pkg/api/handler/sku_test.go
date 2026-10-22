@@ -1253,7 +1253,7 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "returns stored device type when Core omits it during component replacement",
+			name: "preserves stored device type and skips writes for unchanged component replacement",
 			run: func(t *testing.T) {
 				existing := existingSkuProto()
 				existing.SchemaVersion = model.CoreSkuSchemaVersion
@@ -1267,15 +1267,22 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 				})
 				skuDAO := cdbm.NewSkuDAO(fixture.updateHandler.dbSession)
 				deviceType := "REST device type"
+				created := existing.Created.AsTime()
+				// Match the other Core fields so the first PATCH must write for the component change alone.
 				_, err := skuDAO.Update(context.Background(), nil, cdbm.SkuUpdateInput{
-					SkuID:      "sku-1",
-					DeviceType: &deviceType,
+					SkuID:         "sku-1",
+					DeviceType:    &deviceType,
+					Description:   existing.Description,
+					SchemaVersion: cutil.GetPtr(existing.SchemaVersion),
+					Components:    &cdbm.SkuComponents{SkuComponents: existing.Components},
+					Created:       &created,
 				})
 				require.NoError(t, err)
 
-				rec := fixture.request(t, http.MethodPatch, "sku-1", model.APISkuUpdateRequest{
+				updateRequest := model.APISkuUpdateRequest{
 					Components: components,
-				}, fixture.updateHandler.Handle)
+				}
+				rec := fixture.request(t, http.MethodPatch, "sku-1", updateRequest, fixture.updateHandler.Handle)
 
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 				require.Len(t, fixture.requests, 2)
@@ -1301,6 +1308,31 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 				assert.True(t, proto.Equal(replacementResponse.Components, saved.Components.SkuComponents))
 				assert.True(t, existingSkuCreatedTime().Round(time.Microsecond).Equal(saved.Created))
 				assert.False(t, response.Created.Equal(saved.Created))
+
+				// Backdate `Updated` so the repeat PATCH proves there is no write,
+				// even if both requests finish within the database's timestamp precision.
+				_, err = fixture.updateHandler.dbSession.DB.NewUpdate().Model((*cdbm.SKU)(nil)).
+					Set("updated = ?", saved.Updated.Add(-time.Hour)).Where("id = ?", saved.ID).Exec(context.Background())
+				require.NoError(t, err)
+				beforeRepeat, err := skuDAO.Get(context.Background(), nil, "sku-1")
+				require.NoError(t, err)
+				require.True(t, beforeRepeat.Updated.Before(saved.Updated))
+
+				rec = fixture.request(t, http.MethodPatch, "sku-1", updateRequest, fixture.updateHandler.Handle)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				require.Len(t, fixture.requests, 4)
+				assert.Equal(t, corev1.Forge_FindSkusByIds_FullMethodName, fixture.requests[2].FullMethod)
+				assert.Equal(t, corev1.Forge_ReplaceSku_FullMethodName, fixture.requests[3].FullMethod)
+				var repeatCoreReq corev1.Sku
+				require.NoError(t, protojson.Unmarshal(fixture.requests[3].RequestJSON, &repeatCoreReq))
+				assert.True(t, proto.Equal(&coreReq, &repeatCoreReq), "repeat PATCH must send the same replacement to Core")
+
+				var repeatResponse model.APISku
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &repeatResponse))
+				assert.Equal(t, response, repeatResponse)
+				afterRepeat, err := skuDAO.Get(context.Background(), nil, "sku-1")
+				require.NoError(t, err)
+				assert.Equal(t, beforeRepeat, afterRepeat, "unchanged component PATCH must preserve the row and Updated")
 
 				getHandler := NewGetSkuHandler(fixture.updateHandler.dbSession, nil, &config.Config{})
 				getRec := fixture.request(t, http.MethodGet, "sku-1", nil, getHandler.Handle)
