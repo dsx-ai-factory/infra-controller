@@ -579,6 +579,157 @@ async fn test_suppressed_unexplored_endpoint_does_not_consume_budget_and_resumes
     Ok(())
 }
 
+/// An expected BMC whose first probe fails must be retried before older routine
+/// reports. Recovery must release that capacity so routine refresh can resume.
+#[sqlx_test]
+async fn test_failed_first_probe_is_retried_before_routine_refresh(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Use synthetic BMC identities and an older identified endpoint to expose the backlog.
+    let env = Env::new(pool).await;
+    let mut machines = vec![
+        env.new_machine("02:00:00:00:13:01", "Vendor1"),
+        env.new_machine("02:00:00:00:13:02", "Vendor2"),
+    ];
+    machines.discover_dhcp(env.api()).await?;
+    let routine_ip: IpAddr = machines[0].ip.parse()?;
+    let retry_ip: IpAddr = machines[1].ip.parse()?;
+    let mut txn = env.pool.begin().await?;
+    // Only declared BMCs receive priority retries under the current scheduling rules.
+    db::expected_machine::create(
+        &mut txn,
+        ExpectedMachine {
+            id: None,
+            bmc_mac_address: machines[1].mac,
+            data: ExpectedMachineData {
+                serial_number: "synthetic-first-probe-retry".to_string(),
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    db::explored_endpoints::insert(
+        routine_ip,
+        &cached_suppression_report("synthetic later probe failure"),
+        false,
+        txn.as_mut(),
+    )
+    .await?;
+    db::explored_endpoints::set_preingestion_complete(routine_ip, txn.as_mut()).await?;
+    db::explored_endpoints::set_waiting_for_explorer_refresh(routine_ip, txn.as_mut()).await?;
+    let routine_before = db::explored_endpoints::find_all_by_ip(routine_ip, txn.as_mut()).await?;
+    txn.commit().await?;
+
+    // Keep automatic ingestion enabled so the failure retains the production Initial state.
+    let explorer = env.test_site_explorer(SiteExplorerConfig {
+        create_machines: Arc::new(true.into()),
+        ..suppression_test_config(1)
+    });
+    let error = EndpointExplorationError::ConnectionRefused {
+        details: "synthetic first probe failure".to_string(),
+    };
+    explorer.insert_endpoint_result(retry_ip, Err(error.clone()));
+    explorer.insert_endpoints(vec![(
+        routine_ip,
+        EndpointExplorationReport {
+            endpoint_type: EndpointType::Bmc,
+            ..Default::default()
+        },
+    )]);
+
+    // The unseen interface gets its first attempt; reload the actual persisted failure row.
+    explorer.run_single_iteration().await?;
+    let mut txn = env.pool.begin().await?;
+    let first_failure = db::explored_endpoints::find_all_by_ip(retry_ip, txn.as_mut()).await?;
+    txn.commit().await?;
+    assert_eq!(first_failure.len(), 1);
+    assert_eq!(first_failure[0].report_version.version_nr(), 1);
+    assert_eq!(first_failure[0].report.endpoint_type, EndpointType::Unknown);
+    assert_eq!(
+        first_failure[0].preingestion_state,
+        PreingestionState::Initial
+    );
+    assert!(!first_failure[0].waiting_for_explorer_refresh);
+    assert!(!first_failure[0].exploration_requested);
+    assert_eq!(
+        first_failure[0].report.last_exploration_error,
+        Some(error.clone())
+    );
+    assert!(
+        routine_before[0].report_version.timestamp() < first_failure[0].report_version.timestamp()
+    );
+
+    // A repeated failure must still be attempted before the older identified report.
+    explorer.run_single_iteration().await?;
+    let mut txn = env.pool.begin().await?;
+    let repeated_failure = db::explored_endpoints::find_all_by_ip(retry_ip, txn.as_mut()).await?;
+    let routine_after = db::explored_endpoints::find_all_by_ip(routine_ip, txn.as_mut()).await?;
+    txn.commit().await?;
+    assert_eq!(
+        repeated_failure[0].report.endpoint_type,
+        EndpointType::Unknown
+    );
+    assert_eq!(
+        repeated_failure[0].report.last_exploration_error,
+        Some(error)
+    );
+    assert!(repeated_failure[0].waiting_for_explorer_refresh);
+    assert_eq!(
+        repeated_failure[0].report_version.version_nr(),
+        first_failure[0].report_version.version_nr() + 1
+    );
+    assert_eq!(
+        routine_after[0].report_version,
+        routine_before[0].report_version
+    );
+
+    // Restore reachability and verify that the saved report clears the failure and wait.
+    explorer.insert_endpoints(vec![(
+        retry_ip,
+        EndpointExplorationReport {
+            endpoint_type: EndpointType::Bmc,
+            ..Default::default()
+        },
+    )]);
+    explorer.run_single_iteration().await?;
+    let mut txn = env.pool.begin().await?;
+    let recovered = db::explored_endpoints::find_all_by_ip(retry_ip, txn.as_mut()).await?;
+    txn.commit().await?;
+    assert_eq!(recovered[0].report.endpoint_type, EndpointType::Bmc);
+    assert!(recovered[0].report.last_exploration_error.is_none());
+    assert!(!recovered[0].waiting_for_explorer_refresh);
+    assert_eq!(
+        recovered[0].report_version.version_nr(),
+        repeated_failure[0].report_version.version_nr() + 1
+    );
+
+    // After identification, the older routine report must regain the single available slot.
+    explorer.run_single_iteration().await?;
+    let mut txn = env.pool.begin().await?;
+    let retry_after = db::explored_endpoints::find_all_by_ip(retry_ip, txn.as_mut()).await?;
+    let routine_after = db::explored_endpoints::find_all_by_ip(routine_ip, txn.as_mut()).await?;
+    txn.commit().await?;
+    assert_eq!(retry_after[0].report_version, recovered[0].report_version);
+    assert_eq!(
+        routine_after[0].report_version.version_nr(),
+        routine_before[0].report_version.version_nr() + 1
+    );
+    assert_eq!(
+        explorer
+            .endpoint_explorer()
+            .explore_endpoint_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|call| call.ip_address)
+            .collect::<Vec<_>>(),
+        vec![retry_ip, retry_ip, retry_ip, routine_ip],
+        "first failure, failed retry, recovery, then routine refresh must each use one probe"
+    );
+
+    Ok(())
+}
+
 /// A BMC preingestion parked with `waiting_for_explorer_refresh` is probed
 /// ahead of an older routine report inside the `explorations_per_run` budget,
 /// while a parked endpoint that preingestion has completed is not.
