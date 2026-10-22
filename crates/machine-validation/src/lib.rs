@@ -27,7 +27,6 @@ use serde::{Deserialize, Serialize};
 
 mod errors;
 mod machine_validation;
-mod plugin_contract;
 mod plugin_runner;
 
 pub const MACHINE_VALIDATION_SERVER: &str = "carbide-pxe.forge";

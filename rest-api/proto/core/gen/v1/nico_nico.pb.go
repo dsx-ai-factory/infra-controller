@@ -45325,9 +45325,14 @@ type MachineValidationPlugin struct {
 	Privileged     bool   `protobuf:"varint,4,opt,name=privileged,proto3" json:"privileged,omitempty"`
 	HostAccessFull bool   `protobuf:"varint,5,opt,name=host_access_full,json=hostAccessFull,proto3" json:"host_access_full,omitempty"`
 	// Plugin implementation type. `container` is the currently supported type.
-	Type          string `protobuf:"bytes,6,opt,name=type,proto3" json:"type,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Type string `protobuf:"bytes,6,opt,name=type,proto3" json:"type,omitempty"`
+	// Optional contract adapter for this immutable container revision.
+	// Omission uses the standard NICo input.json/result.json contract.
+	// DSXHealthValidation prepares HealthValidation inputs and interprets only
+	// overall_severity in its JSON stdout. Unknown or empty names are rejected.
+	ContainerPluginAdapter *string `protobuf:"bytes,7,opt,name=container_plugin_adapter,json=containerPluginAdapter,proto3,oneof" json:"container_plugin_adapter,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *MachineValidationPlugin) Reset() {
@@ -45398,6 +45403,13 @@ func (x *MachineValidationPlugin) GetHostAccessFull() bool {
 func (x *MachineValidationPlugin) GetType() string {
 	if x != nil {
 		return x.Type
+	}
+	return ""
+}
+
+func (x *MachineValidationPlugin) GetContainerPluginAdapter() string {
+	if x != nil && x.ContainerPluginAdapter != nil {
+		return *x.ContainerPluginAdapter
 	}
 	return ""
 }
@@ -77738,7 +77750,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\n" +
 	"\b_timeoutB\x14\n" +
 	"\x12_extra_output_fileB\t\n" +
-	"\a_plugin\"\xd6\x01\n" +
+	"\a_plugin\"\xb2\x02\n" +
 	"\x17MachineValidationPlugin\x12\x14\n" +
 	"\x05image\x18\x01 \x01(\tR\x05image\x12\x1e\n" +
 	"\n" +
@@ -77749,7 +77761,9 @@ const file_nico_nico_proto_rawDesc = "" +
 	"privileged\x18\x04 \x01(\bR\n" +
 	"privileged\x12(\n" +
 	"\x10host_access_full\x18\x05 \x01(\bR\x0ehostAccessFull\x12\x12\n" +
-	"\x04type\x18\x06 \x01(\tR\x04type\"a\n" +
+	"\x04type\x18\x06 \x01(\tR\x04type\x12=\n" +
+	"\x18container_plugin_adapter\x18\a \x01(\tH\x00R\x16containerPluginAdapter\x88\x01\x01B\x1b\n" +
+	"\x19_container_plugin_adapter\"a\n" +
 	",MachineValidationTestFullHostApprovalRequest\x12\x17\n" +
 	"\atest_id\x18\x01 \x01(\tR\x06testId\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\"I\n" +
@@ -85307,6 +85321,7 @@ func file_nico_nico_proto_init() {
 	file_nico_nico_proto_msgTypes[582].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[584].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[589].OneofWrappers = []any{}
+	file_nico_nico_proto_msgTypes[590].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[599].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[600].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[601].OneofWrappers = []any{}

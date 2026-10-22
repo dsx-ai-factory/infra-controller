@@ -11,7 +11,8 @@ Validation plugin
 
 ```text
 nico-admin-cli machine-validation plugins create <--name>
-[--type] <--image> <--entrypoint> [--parameters]
+[--type] [--container-plugin-adapter] <--image>
+<--entrypoint> [--arg] [--parameters]
 [--context] [--platform] [--timeout]
 [--privileged] [--host-access-full] [--extended]
 [--sort-by] [-h|--help]
@@ -31,9 +32,22 @@ Create an OCI Machine Validation plugin
 
 - container
 
+`--container-plugin-adapter <CONTAINER_PLUGIN_ADAPTER>`
+
+Container contract adapter; omit for the standard NICo contract
+
+*Possible values:*
+
+> - DSXHealthValidation
+
 `--image <IMAGE>`
 
 `--entrypoint <ENTRYPOINT>`
+
+`--arg <COMMAND_ARGS>`
+
+Append a command argument; repeat as needed, using --arg=--flag for
+flags
 
 `--parameters <PARAMETERS> [default: {}]`
 
@@ -74,6 +88,7 @@ Print help (see a summary with -h)
 ```sh
 nico-admin-cli machine-validation plugins create --name gpu-health --image registry.example.com/plugins/gpu-health@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --entrypoint /plugin/entrypoint --entrypoint check-gpus --context Discovery --platform HGX-B200 --parameters '{"expectedGpuCount":8}'
 nico-admin-cli machine-validation plugins create --name host-gpu-health --image registry.example.com/plugins/host-gpu-health@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --entrypoint /plugin/entrypoint --context Discovery --platform HGX-B200 --parameters '{"expectedGpuCount":8}' --privileged --host-access-full
+nico-admin-cli machine-validation plugins create --name dsx-health --type container --container-plugin-adapter DSXHealthValidation --image ghcr.io/dsx-ai-factory/health-validation@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --entrypoint /health-validation --arg run --context OnDemand --platform GB200 --parameters '{"gpu_count":4}'
 ```
 
 ---

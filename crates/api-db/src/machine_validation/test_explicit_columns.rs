@@ -343,9 +343,10 @@ async fn exercise_execution_queries(
         is_enabled: Some(false),
         plugin: Some(MachineValidationPlugin {
             plugin_type: MachineValidationPlugin::CONTAINER_TYPE.to_string(),
+            container_plugin_adapter: Some("DSXHealthValidation".to_owned()),
             image: format!("example.com/diagnostic@sha256:{}", "a".repeat(64)),
             entrypoint: vec!["/diagnose".to_string()],
-            parameters_json: "{\"iterations\":7}".to_string(),
+            parameters_json: "{\"gpu_count\":4}".to_string(),
             privileged: true,
             host_access_full: true,
         }),

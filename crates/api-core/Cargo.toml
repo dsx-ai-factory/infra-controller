@@ -52,6 +52,7 @@ carbide-kmip = { path = "../kmip" }
 carbide-kms-provider = { path = "../kms-provider" }
 carbide-libmlx = { path = "../libmlx" }
 carbide-machine-controller = { path = "../machine-controller" }
+carbide-machine-validation-adapters = { path = "../machine-validation-adapters" }
 carbide-measured-boot = { path = "../measured-boot", features = ["sqlx"] }
 carbide-metrics-utils = { path = "../metrics-utils" }
 carbide-mqtt-common = { path = "../mqtt-common" }
