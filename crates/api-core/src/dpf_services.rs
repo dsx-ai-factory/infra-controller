@@ -962,6 +962,10 @@ mod tests {
                     ServiceVpcSlots::default(),
                 ) => Some(true),
                 dts_service(&default_dts_service()) => Some(true),
+                ServiceDefinition {
+                    apply_node_effect: Some(true),
+                    ..dts_service(&default_dts_service())
+                } => Some(true),
             }
         );
     }
