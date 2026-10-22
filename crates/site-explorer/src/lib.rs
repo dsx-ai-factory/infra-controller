@@ -1379,6 +1379,7 @@ impl SiteExplorer {
             inventory: dpu_inventory,
             inventory_matches,
             fallback_matches,
+            expected_fallback_count,
         } = matches;
         let needs_expected_serial_fallback = dpu_inventory.needs_expected_serial_fallback();
 
@@ -1394,7 +1395,6 @@ impl SiteExplorer {
 
         let host_reported_dpus_total = dpu_inventory.reported_total;
 
-        // The reset/wait decision uses inventory readiness before fallback.
         let incomplete_dpu_exploration = needs_expected_serial_fallback
             || has_unready_matches
             || inventory_cfg_status.running_as_dpu.is_empty()
@@ -1407,6 +1407,66 @@ impl SiteExplorer {
         let configuration_requests = inventory_cfg_status.configuration_requests
             + fallback_cfg_status.configuration_requests;
 
+        if configuration_requests > 0 {
+            // A queued `set_nic_mode` only takes effect after a host
+            // power cycle, so drive one for every vendor --
+            // `redfish_powercycle` issues `PowerCycle` and falls back
+            // to a cold `ACPowercycle` for vendors that refuse it --
+            // throttled by `reset_rate_limit`. A BMC that refuses both
+            // surfaces the host as needing a manual power cycle via
+            // the pairing-blocker metric.
+            let time_since_redfish_powercycle =
+                Utc::now().signed_duration_since(ep.last_redfish_powercycle.unwrap_or_default());
+            if time_since_redfish_powercycle > self.config.reset_rate_limit {
+                tracing::warn!(
+                    bmc_ip_address = %ep.address,
+                    %time_since_redfish_powercycle,
+                    "power cycling host to apply nic mode change for its incorrectly configured DPUs"
+                );
+                metrics.increment_dpu_migration_signal(DpuMigrationSignal::ResetRequested);
+
+                if let Err(err) = self.redfish_powercycle(ep.address).await {
+                    tracing::warn!(
+                        bmc_ip_address = %ep.address,
+                        error = %err,
+                        "site explorer failed to power cycle host to apply DPU mode changes; a manual power cycle may be required"
+                    );
+                    metrics.increment_host_dpu_pairing_blocker(
+                        PairingBlockerReason::ManualPowerCycleRequired,
+                    );
+                }
+            } else {
+                // We power-cycled within the rate limit and the
+                // DPUs still aren't in the target operating
+                // mode -- either the change is mid-flight (the
+                // host is booting, a pass or two of normal
+                // convergence) or this
+                // vendor's `PowerCycle` is a warm reset that never
+                // actually drops power. Keep the pairing-blocker
+                // signal standing so a host stuck in the warm-reset
+                // loop stays visible to operators instead of
+                // rebooting hourly in silence.
+                //
+                // The reset above already escalates a refused
+                // `PowerCycle` to a cold `ACPowercycle`
+                // (`redfish_powercycle`), so a host still unflipped
+                // here is mid-flight or genuinely stuck -- either way
+                // it stays visible via the metric.
+                metrics.increment_host_dpu_pairing_blocker(
+                    PairingBlockerReason::ManualPowerCycleRequired,
+                );
+            }
+            return None;
+        }
+
+        // Every selected fallback serial must be discovered and ready, whether
+        // the DPU is managed or intentionally runs as a NIC.
+        if fallback_cfg_status.running_as_dpu.len() + fallback_cfg_status.running_as_nic_total
+            != expected_fallback_count
+        {
+            return None;
+        }
+
         // The site explorer should only create a managed host after exploring all of the DPUs attached to the host.
         // If a host reports that it has two DPUs, the site explorer must wait until **both** DPUs have made the DHCP request.
         // If only one of the two DPUs have made the DHCP request, the site explorer must wait until it has explored the latter DPU's BMC
@@ -1416,13 +1476,7 @@ impl SiteExplorer {
             // confirmed to be running as plain NICs.
             let expected_managed_dpus_total =
                 host_reported_dpus_total.saturating_sub(host_reported_dpus_nic_mode_total);
-            // Enter the reset/wait path when DPUs are still expected to pair, or
-            // when a `set_nic_mode` was just issued -- a fallback-serial match can
-            // queue a flip even on a host whose BMC reports no DPU over PCIe
-            // (`expected_managed_dpus_total == 0`), which is the usual reason we are
-            // on the fallback path at all.
-            if expected_managed_dpus_total > 0 || has_unready_matches || configuration_requests > 0
-            {
+            if expected_managed_dpus_total > 0 || has_unready_matches {
                 if expected_managed_dpus_total > 0 {
                     tracing::warn!(
                         bmc_ip_address = %ep.address,
@@ -1431,57 +1485,6 @@ impl SiteExplorer {
                         all_dpus_configured_properly_in_host = configuration_requests == 0,
                         "cannot identify managed host because the site explorer has not discovered all attached DPUs"
                     );
-                }
-
-                if configuration_requests > 0 {
-                    // A queued `set_nic_mode` only takes effect after a host
-                    // power cycle, so drive one for every vendor --
-                    // `redfish_powercycle` issues `PowerCycle` and falls back
-                    // to a cold `ACPowercycle` for vendors that refuse it --
-                    // throttled by `reset_rate_limit`. A BMC that refuses both
-                    // surfaces the host as needing a manual power cycle via
-                    // the pairing-blocker metric.
-                    let time_since_redfish_powercycle = Utc::now()
-                        .signed_duration_since(ep.last_redfish_powercycle.unwrap_or_default());
-                    if time_since_redfish_powercycle > self.config.reset_rate_limit {
-                        tracing::warn!(
-                            bmc_ip_address = %ep.address,
-                            %time_since_redfish_powercycle,
-                            "power cycling host to apply nic mode change for its incorrectly configured DPUs"
-                        );
-                        metrics.increment_dpu_migration_signal(DpuMigrationSignal::ResetRequested);
-
-                        if let Err(err) = self.redfish_powercycle(ep.address).await {
-                            tracing::warn!(
-                                bmc_ip_address = %ep.address,
-                                error = %err,
-                                "site explorer failed to power cycle host to apply DPU mode changes; a manual power cycle may be required"
-                            );
-                            metrics.increment_host_dpu_pairing_blocker(
-                                PairingBlockerReason::ManualPowerCycleRequired,
-                            );
-                        }
-                    } else {
-                        // We power-cycled within the rate limit and the
-                        // DPUs still aren't in the target operating
-                        // mode -- either the change is mid-flight (the
-                        // host is booting, a pass or two of normal
-                        // convergence) or this
-                        // vendor's `PowerCycle` is a warm reset that never
-                        // actually drops power. Keep the pairing-blocker
-                        // signal standing so a host stuck in the warm-reset
-                        // loop stays visible to operators instead of
-                        // rebooting hourly in silence.
-                        //
-                        // The reset above already escalates a refused
-                        // `PowerCycle` to a cold `ACPowercycle`
-                        // (`redfish_powercycle`), so a host still unflipped
-                        // here is mid-flight or genuinely stuck -- either way
-                        // it stays visible via the metric.
-                        metrics.increment_host_dpu_pairing_blocker(
-                            PairingBlockerReason::ManualPowerCycleRequired,
-                        );
-                    }
                 }
 
                 return None;
@@ -1515,7 +1518,7 @@ impl SiteExplorer {
         }
 
         // Expected serials replace inventory DPUs only after a ready DPU match.
-        // An all-NIC or unsuccessful fallback keeps the inventory DPU list.
+        // An empty or all-NIC fallback keeps the inventory DPU list.
         if fallback_cfg_status.running_as_dpu.is_empty() {
             Some(inventory_cfg_status.running_as_dpu)
         } else {

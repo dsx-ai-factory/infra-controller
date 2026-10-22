@@ -28,6 +28,8 @@ pub(super) struct HostDpuMatches<'a> {
     pub(super) inventory: DpuInventoryState,
     pub(super) inventory_matches: Vec<MatchedDpu<'a>>,
     pub(super) fallback_matches: Vec<MatchedDpu<'a>>,
+    /// Number of serials when fallback is selected, including undiscovered DPUs.
+    pub(super) expected_fallback_count: usize,
 }
 
 impl<'a> HostDpuMatches<'a> {
@@ -111,26 +113,31 @@ impl<'a> HostDpuMatches<'a> {
         // reported DPU is matched, mode changes and configuration errors
         // must wait for the next iteration.
         let mut fallback_matches = Vec::new();
-        if needs_expected_serial_fallback && let Some(expected_machine) = expected_machine {
-            for dpu_sn in &expected_machine.data.fallback_dpu_serial_numbers {
-                if let Some(dpu_ep) = dpu_sn_to_endpoint.get(dpu_sn.as_str()) {
-                    // Fallback matching has only the expected serial and the
-                    // discovered DPU BMC report; use the DPU's own part number
-                    // to resolve the target mode.
-                    fallback_matches.push(MatchedDpu {
-                        endpoint: dpu_ep,
-                        target_operating_mode: host_dpu_policy
-                            .target_operating_mode(dpu_ep.report.dpu_part_number()),
-                        source: DpuMatchSource::ExpectedSerial(dpu_sn),
-                    });
+        let expected_fallback_count =
+            if needs_expected_serial_fallback && let Some(expected_machine) = expected_machine {
+                for dpu_sn in &expected_machine.data.fallback_dpu_serial_numbers {
+                    if let Some(dpu_ep) = dpu_sn_to_endpoint.get(dpu_sn.as_str()) {
+                        // Fallback matching has only the expected serial and the
+                        // discovered DPU BMC report; use the DPU's own part number
+                        // to resolve the target mode.
+                        fallback_matches.push(MatchedDpu {
+                            endpoint: dpu_ep,
+                            target_operating_mode: host_dpu_policy
+                                .target_operating_mode(dpu_ep.report.dpu_part_number()),
+                            source: DpuMatchSource::ExpectedSerial(dpu_sn),
+                        });
+                    }
                 }
-            }
-        }
+                expected_machine.data.fallback_dpu_serial_numbers.len()
+            } else {
+                0
+            };
 
         Self {
             inventory: dpu_inventory,
             inventory_matches,
             fallback_matches,
+            expected_fallback_count,
         }
     }
 }
