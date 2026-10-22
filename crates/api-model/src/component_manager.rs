@@ -55,20 +55,21 @@ pub enum ConfigureSwitchCertificateState {
 pub struct SwitchCertificateFailure {
     /// Parent (or single-switch child) job ID, absent when submission returned none.
     pub job_id: Option<String>,
-    /// All reported node failures, ordered by node ID and child job ID.
+    /// Reported node failures and missing child statuses, ordered by node ID and child job ID.
     pub node_failures: Vec<SwitchCertificateNodeFailure>,
 }
 
-/// One failed node operation; multiple child jobs may refer to the same node.
+/// A failed node operation or missing child status; multiple child jobs may refer to the same node.
+/// A missing status records unavailable diagnostics, not a confirmed child failure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwitchCertificateNodeFailure {
     /// RMS node identity; an empty value means RMS did not identify the node.
     pub node_id: String,
     /// Child job ID, absent for a rejection before child-job creation.
     pub job_id: Option<String>,
-    /// RMS JobError numeric value, including unknown values; absent on submission.
+    /// RMS JobError numeric value, including unknown values; absent on submission or missing status.
     pub error_code: Option<i32>,
-    /// Error message returned by RMS, preserved verbatim.
+    /// Error message returned by RMS verbatim, or an explanation that the child status is missing.
     pub message: String,
 }
 

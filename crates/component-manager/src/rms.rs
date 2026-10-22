@@ -4815,11 +4815,20 @@ fn certificate_node_failures(
         if !visited.insert(id) {
             continue;
         }
-        let job = jobs.iter().find(|job| job.job_id == id).ok_or_else(|| {
-            ComponentManagerError::Unavailable(format!(
-                "RMS certificate job {id} results are not yet available"
-            ))
-        })?;
+        let Some(job) = jobs.iter().find(|job| job.job_id == id) else {
+            if id == job_id {
+                return Err(ComponentManagerError::Unavailable(format!(
+                    "RMS certificate job {id} results are not yet available"
+                )));
+            }
+            failures.push(SwitchCertificateNodeFailure {
+                node_id: String::new(),
+                job_id: Some(id.to_string()),
+                error_code: None,
+                message: "RMS returned no status for this child job".to_string(),
+            });
+            continue;
+        };
         match rms::JobExecutionState::try_from(job.execution_state) {
             Ok(rms::JobExecutionState::Completed | rms::JobExecutionState::Failed) => {}
             state => {
@@ -4915,13 +4924,11 @@ async fn rms_get_configure_switch_certificate_job_status(
             ))
         })?;
         let node_failures = certificate_node_failures(job_id, &jobs.job_states)?;
-        let message = if response.error_message.is_empty() {
-            response.message
-        } else {
-            response.error_message
-        };
+        let error = (!response.error_message.is_empty())
+            .then_some(response.error_message)
+            .or_else(|| (!response.message.is_empty()).then_some(response.message));
         (
-            Some(message),
+            error,
             Some(SwitchCertificateFailure {
                 job_id: Some(job_id.to_string()),
                 node_failures,
@@ -6668,16 +6675,36 @@ mod tests {
         };
         let a = child("a", rms::JobError::Timeout as i32);
         let b = child("b", rms::JobError::Unauthenticated as i32);
+        let failure_a = SwitchCertificateNodeFailure {
+            node_id: "node-a".into(),
+            job_id: Some("a".into()),
+            error_code: Some(rms::JobError::Timeout as i32),
+            message: "certificate installation failed on node-a".into(),
+        };
+        let failure_b = SwitchCertificateNodeFailure {
+            node_id: "node-b".into(),
+            job_id: Some("b".into()),
+            error_code: Some(rms::JobError::Unauthenticated as i32),
+            message: "certificate installation failed on node-b".into(),
+        };
         let cases = [
             (
                 "both failures despite reversed response order",
                 vec![parent.clone(), b.clone(), a.clone()],
-                None,
+                Ok(vec![failure_a.clone(), failure_b]),
             ),
             (
                 "missing declared child",
                 vec![parent.clone(), a.clone()],
-                Some("RMS certificate job b results are not yet available"),
+                Ok(vec![
+                    SwitchCertificateNodeFailure {
+                        node_id: String::new(),
+                        job_id: Some("b".into()),
+                        error_code: None,
+                        message: "RMS returned no status for this child job".into(),
+                    },
+                    failure_a,
+                ]),
             ),
             (
                 "child still running",
@@ -6689,12 +6716,12 @@ mod tests {
                         ..b.clone()
                     },
                 ],
-                Some("RMS certificate job b has execution state JOB_EXECUTION_STATE_RUNNING (2)"),
+                Err("RMS certificate job b has execution state JOB_EXECUTION_STATE_RUNNING (2)"),
             ),
             (
                 "parent absent",
                 vec![a.clone(), b.clone()],
-                Some("RMS certificate job parent results are not yet available"),
+                Err("RMS certificate job parent results are not yet available"),
             ),
             (
                 "unknown child state",
@@ -6706,29 +6733,19 @@ mod tests {
                         ..b
                     },
                 ],
-                Some("RMS certificate job b has execution state unknown (999)"),
+                Err("RMS certificate job b has execution state unknown (999)"),
             ),
         ];
-        for (scenario, jobs, expected_error) in cases {
+        for (scenario, jobs, expected) in cases {
             let result = certificate_node_failures("parent", &jobs);
-            if let Some(expected_error) = expected_error {
-                let Err(ComponentManagerError::Unavailable(message)) = result else {
-                    panic!("{scenario}: expected a retryable diagnostic lookup failure");
-                };
-                assert!(message.contains(expected_error), "{scenario}: {message}");
-            } else {
-                let failures = result.unwrap();
-                assert_eq!(failures.len(), 2, "{scenario}");
-                assert_eq!(failures[0].node_id, "node-a");
-                assert_eq!(
-                    failures[0].message,
-                    "certificate installation failed on node-a"
-                );
-                assert_eq!(failures[1].node_id, "node-b");
-                assert_eq!(
-                    failures[1].message,
-                    "certificate installation failed on node-b"
-                );
+            match expected {
+                Err(expected_error) => {
+                    let Err(ComponentManagerError::Unavailable(message)) = result else {
+                        panic!("{scenario}: expected a retryable diagnostic lookup failure");
+                    };
+                    assert!(message.contains(expected_error), "{scenario}: {message}");
+                }
+                Ok(failures) => assert_eq!(result.unwrap(), failures, "{scenario}"),
             }
         }
     }
