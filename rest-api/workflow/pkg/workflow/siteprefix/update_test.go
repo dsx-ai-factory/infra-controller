@@ -30,11 +30,36 @@ func TestUpdateSitePrefixInventory(t *testing.T) {
 		finalErr      error
 		metricsErr    error
 	}{
-		{"success tolerates metrics failure", corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, nil, false, nil, errors.New("metrics unavailable")},
-		{"transient Site lookup failure recovers", corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, errors.New("Site lookup unavailable"), true, nil, nil},
-		{"retries are bounded", corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, errors.New("database unavailable"), true, errors.New("database unavailable"), nil},
-		{"invalid inventory does not retry", corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, temporal.NewNonRetryableApplicationError("invalid inventory", "InvalidSitePrefixInventory", nil), false, errors.New("invalid inventory"), nil},
-		{"diagnostic uses shared retries", corev1.InventoryStatus_INVENTORY_STATUS_FAILED, errors.New("diagnostic failure"), true, nil, nil},
+		{
+			name:       "success tolerates metrics failure",
+			status:     corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			metricsErr: errors.New("metrics unavailable"),
+		},
+		{
+			name:          "transient Site lookup failure recovers",
+			status:        corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			firstErr:      errors.New("Site lookup unavailable"),
+			secondAttempt: true,
+		},
+		{
+			name:          "retries are bounded",
+			status:        corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			firstErr:      errors.New("database unavailable"),
+			secondAttempt: true,
+			finalErr:      errors.New("database unavailable"),
+		},
+		{
+			name:     "invalid inventory does not retry",
+			status:   corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			firstErr: temporal.NewNonRetryableApplicationError("invalid inventory", "InvalidSitePrefixInventory", nil),
+			finalErr: errors.New("invalid inventory"),
+		},
+		{
+			name:          "diagnostic uses shared retries",
+			status:        corev1.InventoryStatus_INVENTORY_STATUS_FAILED,
+			firstErr:      errors.New("diagnostic failure"),
+			secondAttempt: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

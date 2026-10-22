@@ -36,18 +36,43 @@ func TestIPBlockManagedUpMigration(t *testing.T) {
 				sitePrefixID *uuid.UUID
 				deleted      bool
 			}{
-				{name: "legacy provider root"},
-				{name: "linked provider root", sitePrefixID: cutil.GetPtr(uuid.New())},
-				{name: "allocated tenant block", tenantID: &tenant.ID},
-				{name: "tenant-created block", tenantID: &tenant.ID, sitePrefixID: cutil.GetPtr(uuid.New())},
-				{name: "retired tenant-created block", tenantID: &tenant.ID, sitePrefixID: cutil.GetPtr(uuid.New()), deleted: true},
+				{
+					name: "legacy provider root",
+				},
+				{
+					name:         "linked provider root",
+					sitePrefixID: cutil.GetPtr(uuid.New()),
+				},
+				{
+					name:     "allocated tenant block",
+					tenantID: &tenant.ID,
+				},
+				{
+					name:         "tenant-created block",
+					tenantID:     &tenant.ID,
+					sitePrefixID: cutil.GetPtr(uuid.New()),
+				},
+				{
+					name:         "retired tenant-created block",
+					tenantID:     &tenant.ID,
+					sitePrefixID: cutil.GetPtr(uuid.New()),
+					deleted:      true,
+				},
 			} {
-				block := model.IPBlock{ID: uuid.New(), Name: tc.name,
-					SiteID: site.ID, InfrastructureProviderID: provider.ID,
-					TenantID: tc.tenantID, SitePrefixID: tc.sitePrefixID,
-					RoutingType: model.IPBlockRoutingTypeDatacenterOnly, Prefix: "10.0.0.0", PrefixLength: 24,
-					ProtocolVersion: model.IPBlockProtocolVersionV4, Status: model.IPBlockStatusReady,
-					CreatedBy: &user.ID, Managed: true,
+				block := model.IPBlock{
+					ID:                       uuid.New(),
+					Name:                     tc.name,
+					SiteID:                   site.ID,
+					InfrastructureProviderID: provider.ID,
+					TenantID:                 tc.tenantID,
+					SitePrefixID:             tc.sitePrefixID,
+					RoutingType:              model.IPBlockRoutingTypeDatacenterOnly,
+					Prefix:                   "10.0.0.0",
+					PrefixLength:             24,
+					ProtocolVersion:          model.IPBlockProtocolVersionV4,
+					Status:                   model.IPBlockStatusReady,
+					CreatedBy:                &user.ID,
+					Managed:                  true,
 				}
 				if tc.deleted {
 					block.Deleted = cutil.GetPtr(site.Created)

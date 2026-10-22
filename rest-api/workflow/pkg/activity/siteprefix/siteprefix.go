@@ -23,7 +23,11 @@ import (
 	"go.temporal.io/sdk/temporal"
 )
 
-const sitePrefixInventoryStatusMessage = "Reported by Core SitePrefix inventory"
+const (
+	sitePrefixInventoryStatusMessage = "Reported by Core SitePrefix inventory"
+	invalidSitePrefixInventory       = "InvalidSitePrefixInventory"
+	sitePrefixNameMaxLength          = 256
+)
 
 // ManageSitePrefix reconciles reported Core roots without inferring absence.
 type ManageSitePrefix struct {
@@ -37,7 +41,7 @@ func NewManageSitePrefix(session *cdb.Session) ManageSitePrefix {
 
 // UpdateSitePrefixesInDB reconciles each reported prefix in its own transaction.
 // It looks up the active IP Block, creates, adopts, or restores one when missing, then
-// applies lifecycle without changing REST metadata or the block's identity.
+// applies lifecycle without changing REST metadata or the block's Site, owner, or CIDR.
 // Unreconcilable entries are logged and skipped; later entries still proceed.
 // Publication, absence processing, and retiring the legacy importer belong to
 // the follow-up SitePrefix publication and retirement implementation.
@@ -71,8 +75,8 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 		logger.Info().Msgf("Received SitePrefix inventory page: %d of %d, page size: %d, total count: %d",
 			page.CurrentPage, page.TotalPages, page.PageSize, page.TotalItems)
 	}
-	// Load the page's active identities once, as other inventory receivers do.
-	// Core identities are global; validate ownership before changing a matched row.
+	// Load the IP Blocks linked to this page's SitePrefix IDs once, as other inventory receivers do.
+	// SitePrefix IDs are global, so validate ownership before changing a matched IP Block.
 	prefixIDs := []uuid.UUID{}
 	for _, prefix := range inventory.SitePrefixes {
 		id, err := uuid.Parse(prefix.GetId().GetValue())
@@ -104,7 +108,7 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 				Msg("received invalid SitePrefix")
 			continue
 		}
-		// Keep one prefix's REST identity, IPAM changes, and status detail atomic.
+		// Keep one prefix's IP Block, IPAM changes, and status detail atomic.
 		// A failed prefix must not roll back earlier prefixes in the page.
 		isLockContention := false
 		id := uuid.MustParse(prefix.GetId().GetValue()) // validated before the transaction
@@ -161,7 +165,7 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 				}
 			} else {
 				// Existing links may change lifecycle, but not ownership or CIDR.
-				err = validateSitePrefixIdentity(block, lockedSite, prefix, tenantID)
+				err = validateIPBlockMatchesSitePrefix(block, lockedSite, prefix, tenantID)
 				if err != nil {
 					return err
 				}
@@ -191,6 +195,12 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 					Msg("skipping SitePrefix after bounded Site fabric lock contention retries")
 				continue
 			}
+			var applicationErr *temporal.ApplicationError
+			if errors.As(err, &applicationErr) && applicationErr.Type() == invalidSitePrefixInventory {
+				logger.Warn().Err(err).Str("Site Prefix ID", prefix.GetId().GetValue()).
+					Msg("skipping unreconcilable SitePrefix")
+				continue
+			}
 			logger.Error().Err(err).Str("Site Prefix ID", prefix.GetId().GetValue()).
 				Msg("failed to reconcile SitePrefix in DB")
 			continue
@@ -204,16 +214,17 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 	return ctx.Err()
 }
 
-// createOrUpdateSitePrefixFromSite creates, adopts, or restores an IP Block for a
-// validated prefix with no active REST identity. The caller holds the Site fabric
-// and active Site row locks and keeps this helper and subsequent updates in one tx.
-// Adoption preserves the REST ID, IPAM tree, and allocations. Only newly created
-// blocks receive an initial status detail here; ordinary updates belong to the caller.
-// Retired blocks still reported as Deleting are skipped. Other reports restore
-// the same identity, with IPAM only for operator roots. Tenant recovery waits out
-// the Site's stale-inventory window to avoid undoing a newer deletion.
-// A nil block without an error skips a retired block.
-// This helper never removes roots or infers absence.
+// createOrUpdateSitePrefixFromSite creates, adopts, or restores the IP Block for
+// a validated SitePrefix whose ID has no active IP Block. It returns a nil block
+// without an error when it skips the SitePrefix. The caller must hold the Site
+// fabric and Site row locks, and applies lifecycle changes in the same transaction.
+//
+// Adoption links an existing unlinked root with the same CIDR, keeping its REST
+// ID, IPAM entry, and Allocations. Restoration undeletes the same IP Block and
+// recreates IPAM only for an operator root. A soft-deleted block stays deleted
+// while Core reports it as Deleting, and a Tenant block also stays deleted if this
+// inventory may predate its deletion. An operator prefix reported as Deleting is
+// not created if there is no root to adopt. This never removes IP Blocks or infers absence.
 func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Context, tx *cdb.Tx, site *cdbm.Site, prefix *corev1.SitePrefix, tenantID *uuid.UUID) (*cdbm.IPBlock, error) {
 	id := uuid.MustParse(prefix.GetId().GetValue()) // validated before the transaction
 	cidr := netip.MustParsePrefix(prefix.Config.Prefix)
@@ -223,8 +234,8 @@ func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Con
 		family = cdbm.IPBlockProtocolVersionV4
 	}
 	dao := cdbm.NewIPBlockDAO(manager.dbSession)
-	// The page had no active match. Recheck under the Site locks for a concurrent
-	// creation or retired identity, following the inventory create/undelete pattern.
+	// Recheck under the Site locks for a concurrent creation or a soft-deleted IP Block
+	// with this SitePrefix ID, following the inventory create/undelete pattern.
 	matches, _, err := dao.GetAll(ctx, tx, cdbm.IPBlockFilterInput{
 		SitePrefixIDs: []uuid.UUID{id}, IncludeDeleted: true,
 	}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
@@ -238,14 +249,14 @@ func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Con
 	logger := log.With().Str("Activity", "UpdateSitePrefixesInDB").Str("Site ID", site.ID.String()).
 		Str("Site Prefix ID", id.String()).Logger()
 	if existingBlock != nil {
-		err := validateSitePrefixIdentity(existingBlock, site, prefix, tenantID)
+		err := validateIPBlockMatchesSitePrefix(existingBlock, site, prefix, tenantID)
 		if err != nil {
 			return nil, err
 		}
 		if existingBlock.Deleted == nil {
 			return dao.GetByIDForUpdate(ctx, tx, existingBlock.ID)
 		}
-		// REST soft-deleted this block while Core still reports the same identity.
+		// REST soft-deleted this block while Core still reports its SitePrefix ID.
 		if prefix.Status.LifecycleState == corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING {
 			logger.Info().Msg("Skipping retired SitePrefix still reported as Deleting")
 			return nil, nil
@@ -257,6 +268,10 @@ func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Con
 			return nil, nil
 		}
 	}
+	name := prefix.Metadata.Name
+	if name == "" {
+		name = cidr.String()
+	}
 	if tenantID == nil {
 		// Adopt only an exact, compatible, unlinked operator root. Linking it in
 		// place preserves its REST ID, IPAM tree, and existing allocations.
@@ -266,7 +281,9 @@ func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Con
 			return nil, err
 		}
 		var exact []cdbm.IPBlock
+		rootNames := make(map[string]bool, len(roots))
 		for _, root := range roots {
+			rootNames[root.Name] = true
 			other, err := netip.ParsePrefix(fmt.Sprintf("%s/%d", root.Prefix, root.PrefixLength))
 			if err != nil {
 				return nil, invalidSitePrefixTemporalApplicationError("existing operator IP Block %s has an invalid prefix", root.ID)
@@ -285,18 +302,32 @@ func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Con
 			if err != nil {
 				return nil, err
 			}
-			expected := cdbm.IPBlock{
-				SiteID: site.ID, InfrastructureProviderID: site.InfrastructureProviderID, Managed: true,
-				Prefix: cidr.Addr().String(), PrefixLength: cidr.Bits(),
-				ProtocolVersion: family, RoutingType: routingType,
+			err = validateIPBlockMatchesSitePrefix(candidate, site, prefix, tenantID)
+			if err != nil {
+				return nil, err
 			}
-			if candidate.Key() != expected.Key() {
-				return nil, invalidSitePrefixTemporalApplicationError("operator SitePrefix %s has an incompatible adoption candidate", id)
+			if candidate.SitePrefixID != nil {
+				return nil, invalidSitePrefixTemporalApplicationError("operator SitePrefix %s matches root %s, which is already linked to SitePrefix %s", id, candidate.ID, *candidate.SitePrefixID)
 			}
-			if candidate.SitePrefixID != nil || existingBlock != nil {
-				return nil, invalidSitePrefixTemporalApplicationError("operator SitePrefix %s conflicts with an existing root identity", id)
+			if existingBlock != nil {
+				return nil, invalidSitePrefixTemporalApplicationError("operator SitePrefix %s belongs to deleted IP Block %s, but root %s now has its prefix", id, existingBlock.ID, candidate.ID)
 			}
 			return dao.LinkSitePrefix(ctx, tx, candidate.ID, id)
+		}
+		if prefix.Status.LifecycleState == corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING {
+			logger.Info().Msg("Skipping operator SitePrefix reported as Deleting with no root to adopt")
+			return nil, nil
+		}
+		if existingBlock != nil && rootNames[existingBlock.Name] {
+			return nil, invalidSitePrefixTemporalApplicationError("operator SitePrefix %s preserved name %q is already used by another root", id, existingBlock.Name)
+		}
+		if existingBlock == nil && rootNames[name] {
+			// Match inventory recovery naming while respecting the IP Block name limit.
+			suffix := fmt.Sprintf("-recovered-%s", id.String()[:8])
+			name = name[:min(len(name), sitePrefixNameMaxLength-len(suffix))] + suffix
+			if rootNames[name] {
+				return nil, invalidSitePrefixTemporalApplicationError("operator SitePrefix %s recovery name %q is already used by another root", id, name)
+			}
 		}
 	}
 	var description *string
@@ -314,13 +345,9 @@ func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Con
 		}
 	}
 	if existingBlock != nil {
-		// Restore the same REST identity after recreating IPAM for an operator
+		// Restore the soft-deleted IP Block after recreating IPAM for an operator
 		// root, or without IPAM for a tenant block. The caller applies lifecycle.
 		return dao.Clear(ctx, tx, cdbm.IPBlockClearInput{IPBlockID: existingBlock.ID, Deleted: true})
-	}
-	name := prefix.Metadata.Name
-	if name == "" {
-		name = cidr.String()
 	}
 	status := getSitePrefixStatus(prefix.Status.LifecycleState)
 	block, err := dao.Create(ctx, tx, cdbm.IPBlockCreateInput{
@@ -343,7 +370,7 @@ func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Con
 	return block, nil
 }
 
-func validateSitePrefixIdentity(block *cdbm.IPBlock, site *cdbm.Site, prefix *corev1.SitePrefix, tenantID *uuid.UUID) error {
+func validateIPBlockMatchesSitePrefix(block *cdbm.IPBlock, site *cdbm.Site, prefix *corev1.SitePrefix, tenantID *uuid.UUID) error {
 	cidr := netip.MustParsePrefix(prefix.Config.Prefix)
 	family := cdbm.IPBlockProtocolVersionV6
 	if cidr.Addr().Is4() {
@@ -356,7 +383,7 @@ func validateSitePrefixIdentity(block *cdbm.IPBlock, site *cdbm.Site, prefix *co
 		ProtocolVersion: family, RoutingType: cdbm.GetSiteFabricIPBlockRoutingType(cidr),
 	}
 	if block.Key() != expected.Key() {
-		return invalidSitePrefixTemporalApplicationError("Core SitePrefix %s conflicts with its immutable REST identity", prefix.GetId().GetValue())
+		return invalidSitePrefixTemporalApplicationError("IP Block %s does not match Core SitePrefix %s", block.ID, prefix.GetId().GetValue())
 	}
 	return nil
 }
@@ -371,7 +398,7 @@ func getSitePrefixStatus(state corev1.SitePrefixLifecycleState) string {
 }
 
 func invalidSitePrefixTemporalApplicationError(format string, args ...any) error {
-	return temporal.NewNonRetryableApplicationError(fmt.Sprintf(format, args...), "InvalidSitePrefixInventory", nil)
+	return temporal.NewNonRetryableApplicationError(fmt.Sprintf(format, args...), invalidSitePrefixInventory, nil)
 }
 
 func validatePrefix(prefix *corev1.SitePrefix) error {
@@ -410,7 +437,7 @@ func validatePrefix(prefix *corev1.SitePrefix) error {
 	default:
 		return invalidSitePrefixTemporalApplicationError("unsupported SitePrefix authority")
 	}
-	if len(metadata.Name) < minName || len(metadata.Name) > 256 ||
+	if len(metadata.Name) < minName || len(metadata.Name) > sitePrefixNameMaxLength ||
 		strings.ContainsFunc(metadata.Name, func(r rune) bool { return r > unicode.MaxASCII }) ||
 		strings.ContainsFunc(metadata.Name, unicode.IsControl) || len(metadata.Description) > 1024 ||
 		!utf8.ValidString(metadata.Description) || strings.ContainsRune(metadata.Description, '\x00') || len(metadata.Labels) > 16 {
