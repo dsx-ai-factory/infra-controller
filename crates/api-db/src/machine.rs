@@ -85,6 +85,10 @@ lazy_static! {
         "SELECT row_to_json(m.*) FROM ({}) m INNER JOIN machines ON machines.id = m.id",
         queries::MACHINE_SNAPSHOTS_WITH_HISTORY.as_str(),
     );
+    /// Filters appended to this query must constrain `m.id` directly or through an id
+    /// array such as `m.id = ANY(ARRAY(SELECT ...))`. A filter joined through another
+    /// table is planned after the fleet-wide enrichment once the FROM list exceeds
+    /// `join_collapse_limit`.
     pub static ref JSON_MACHINE_SNAPSHOT_QUERY: String = format!(
         "SELECT row_to_json(m.*) FROM ({}) m INNER JOIN machines ON machines.id = m.id",
         queries::MACHINE_SNAPSHOTS_NO_HISTORY.as_str(),
@@ -253,11 +257,11 @@ pub(crate) async fn find_by_nic_firmware_profile(
     profile_id: &NicFirmwareProfileId,
 ) -> DatabaseResult<Vec<HostMachine>> {
     let query = format!(
-        "{} WHERE m.id IN (\
+        "{} WHERE m.id = ANY(ARRAY(\
             SELECT id FROM machines WHERE nic_firmware_profile_id = $1 \
             UNION \
             SELECT machine_id FROM machine_nic_firmware_overrides WHERE profile_id = $1\
-        )",
+        ))",
         JSON_MACHINE_SNAPSHOT_QUERY.as_str()
     );
     let machines: Vec<AnyMachine> = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
@@ -478,10 +482,12 @@ pub async fn find_by_ip(
     lazy_static! {
         static ref query: String = format!(
             r#"{}
-                INNER JOIN machine_interfaces mi ON mi.machine_id = m.id
-                INNER JOIN machine_interface_addresses mia on mia.interface_id=mi.id
-                WHERE mia.address = $1::inet
-                AND mi.interface_type != 'Bmc'"#,
+                WHERE m.id = ANY(ARRAY(
+                    SELECT mi.machine_id FROM machine_interfaces mi
+                    INNER JOIN machine_interface_addresses mia ON mia.interface_id = mi.id
+                    WHERE mia.address = $1::inet
+                    AND mi.interface_type != 'Bmc'
+                    AND mi.machine_id IS NOT NULL))"#,
             JSON_MACHINE_SNAPSHOT_QUERY.deref()
         );
     }
@@ -682,7 +688,7 @@ pub async fn find_by_hostname(
 ) -> Result<Option<AnyMachine>, DatabaseError> {
     lazy_static! {
         static ref query: String = format!(
-            "{} JOIN machine_interfaces mi ON m.id = mi.machine_id WHERE mi.hostname = $1 AND mi.interface_type != 'Bmc'",
+            "{} WHERE m.id = ANY(ARRAY(SELECT mi.machine_id FROM machine_interfaces mi WHERE mi.hostname = $1 AND mi.interface_type != 'Bmc' AND mi.machine_id IS NOT NULL))",
             JSON_MACHINE_SNAPSHOT_QUERY.deref()
         );
     }
@@ -702,7 +708,7 @@ pub async fn find_by_mac_address(
 ) -> Result<Option<AnyMachine>, DatabaseError> {
     lazy_static! {
         static ref query: String = format!(
-            "{} JOIN machine_interfaces mi ON m.id = mi.machine_id WHERE mi.mac_address = $1::macaddr AND mi.interface_type != 'Bmc'",
+            "{} WHERE m.id = ANY(ARRAY(SELECT mi.machine_id FROM machine_interfaces mi WHERE mi.mac_address = $1::macaddr AND mi.interface_type != 'Bmc' AND mi.machine_id IS NOT NULL))",
             JSON_MACHINE_SNAPSHOT_QUERY.deref()
         );
     }
@@ -1005,10 +1011,11 @@ pub async fn find_host_by_dpu_machine_id(
 ) -> Result<Option<HostMachine>, DatabaseError> {
     lazy_static! {
         static ref query: String = format!(
-            r#"{} INNER JOIN machine_interfaces mi ON m.id = mi.machine_id
-                    WHERE mi.attached_dpu_machine_id=$1
+            r#"{} WHERE m.id = ANY(ARRAY(
+                    SELECT mi.machine_id FROM machine_interfaces mi
+                    WHERE mi.attached_dpu_machine_id = $1
                     AND mi.interface_type != 'Bmc'
-                    AND mi.attached_dpu_machine_id != mi.machine_id"#,
+                    AND mi.attached_dpu_machine_id != mi.machine_id))"#,
             JSON_MACHINE_SNAPSHOT_QUERY.deref()
         );
     }
@@ -1113,25 +1120,28 @@ pub async fn get_host_use_admin_network_for_dpa_interface(
     Ok(flag.unwrap_or(true))
 }
 
+lazy_static! {
+    static ref FIND_DPUS_BY_HOST_MACHINE_ID_QUERY: String = format!(
+        r#"{}
+                WHERE m.id = ANY(ARRAY(
+                    SELECT mi.attached_dpu_machine_id FROM machine_interfaces mi
+                    WHERE mi.machine_id = $1
+                    AND mi.interface_type != 'Bmc'
+                    AND mi.attached_dpu_machine_id IS NOT NULL))"#,
+        JSON_MACHINE_SNAPSHOT_QUERY.deref()
+    );
+}
+
 pub async fn find_dpus_by_host_machine_id(
     txn: &mut PgConnection,
     host_machine_id: &HostMachineId,
 ) -> Result<Vec<DpuMachine>, DatabaseError> {
-    lazy_static! {
-        static ref query: String = format!(
-            r#"{}
-                    INNER JOIN machine_interfaces mi
-                      ON m.id = mi.attached_dpu_machine_id
-                    WHERE mi.machine_id=$1
-                    AND mi.interface_type != 'Bmc'"#,
-            JSON_MACHINE_SNAPSHOT_QUERY.deref()
-        );
-    }
-    let machines = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
+    let query = FIND_DPUS_BY_HOST_MACHINE_ID_QUERY.as_str();
+    let machines = sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(host_machine_id)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query.as_str(), e))?;
+        .map_err(|e| DatabaseError::query(query, e))?;
 
     Ok(machines)
 }
@@ -4002,8 +4012,8 @@ mod test {
 
     use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
     use carbide_uuid::machine::{
-        DpuMachineId, HostMachineId, HostMachineIdSubtypeTrait, MachineId, MachineInterfaceId,
-        StableHostMachineId,
+        DpuMachineId, HostMachineId, HostMachineIdSubtypeTrait, MachineId, MachineIdSource,
+        MachineInterfaceId, MachineType, StableHostMachineId,
     };
     use carbide_uuid::network::NetworkSegmentId;
     use model::allocation_type::AllocationType;
@@ -4020,6 +4030,10 @@ mod test {
     use model::resource_pool::define::{Range, ResourcePoolDef, ResourcePoolType};
     use model::resource_pool::{ResourcePool, ValueType};
     use tokio::sync::oneshot;
+
+    fn machine_id(seed: u8, ty: MachineType) -> MachineId {
+        MachineId::new(MachineIdSource::ProductBoardChassisSerial, [seed; 32], ty)
+    }
 
     #[crate::sqlx_test]
     async fn host_state_lookup_preserves_association_and_decode_checks(
@@ -4135,6 +4149,112 @@ mod test {
             };
             assert_eq!(index, column, "{scenario}");
         }
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    /// `find_dpus_by_host_machine_id` returns each DPU attached to the host through a
+    /// non-BMC interface once, and restricts the snapshot to those DPUs before the
+    /// per-machine enrichment runs. The lateral topology join executes once per machine
+    /// that reaches it, so its loop count shows which machines were enriched.
+    #[crate::sqlx_test]
+    async fn find_dpus_by_host_enriches_only_the_matching_dpus(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let host_id = HostMachineId::try_from(machine_id(1, MachineType::Host))?;
+        let dpu_ids = [
+            DpuMachineId::try_from(machine_id(2, MachineType::Dpu))?,
+            DpuMachineId::try_from(machine_id(3, MachineType::Dpu))?,
+        ];
+        let bmc_only_dpu_id = DpuMachineId::try_from(machine_id(8, MachineType::Dpu))?;
+        // Unrelated hosts and DPUs make a fleet-wide plan observable.
+        let other_pairs = [
+            (
+                HostMachineId::try_from(machine_id(4, MachineType::Host))?,
+                DpuMachineId::try_from(machine_id(5, MachineType::Dpu))?,
+            ),
+            (
+                HostMachineId::try_from(machine_id(6, MachineType::Host))?,
+                DpuMachineId::try_from(machine_id(7, MachineType::Dpu))?,
+            ),
+        ];
+
+        let mut txn = pool.begin().await?;
+        let fleet = [MachineId::from(host_id), MachineId::from(bmc_only_dpu_id)]
+            .into_iter()
+            .chain(dpu_ids.map(MachineId::from))
+            .chain(
+                other_pairs
+                    .iter()
+                    .flat_map(|(host, dpu)| [MachineId::from(*host), MachineId::from(*dpu)]),
+            );
+        for id in fleet {
+            super::create(txn.as_mut(), None, &id, ManagedHostState::Ready, None, 2).await?;
+        }
+        let segment_id: NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version)
+             VALUES ('dpus-by-host', 'V1-T0') RETURNING id",
+        )
+        .fetch_one(txn.as_mut())
+        .await?;
+        // The first DPU is attached through two data interfaces and must be returned once;
+        // the DPU attached only through a BMC interface must be excluded.
+        let attachments = [
+            (host_id, dpu_ids[0], InterfaceType::Data),
+            (host_id, dpu_ids[0], InterfaceType::Data),
+            (host_id, dpu_ids[1], InterfaceType::Data),
+            (host_id, bmc_only_dpu_id, InterfaceType::Bmc),
+            (other_pairs[0].0, other_pairs[0].1, InterfaceType::Data),
+            (other_pairs[1].0, other_pairs[1].1, InterfaceType::Data),
+        ];
+        for (index, (owner_id, dpu_id, interface_type)) in attachments.into_iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO machine_interfaces
+                    (machine_id, attached_dpu_machine_id, association_type, segment_id,
+                     mac_address, primary_interface, hostname, interface_type)
+                 VALUES ($1, $2, 'Machine', $3, $4::macaddr, false, 'dpus-by-host', $5)",
+            )
+            .bind(MachineId::from(owner_id))
+            .bind(dpu_id)
+            .bind(segment_id)
+            .bind(format!("02:00:00:00:22:{index:02x}"))
+            .bind(interface_type)
+            .execute(txn.as_mut())
+            .await?;
+        }
+
+        let mut found: Vec<DpuMachineId> =
+            super::find_dpus_by_host_machine_id(txn.as_mut(), &host_id)
+                .await?
+                .into_iter()
+                .map(|dpu| dpu.id)
+                .collect();
+        found.sort();
+        let mut expected = dpu_ids.to_vec();
+        expected.sort();
+        assert_eq!(found, expected);
+
+        fn actual_loops(node: &serde_json::Value, relation: &str, loops: &mut Vec<u64>) {
+            if node["Relation Name"] == relation {
+                loops.push(node["Actual Loops"].as_u64().unwrap_or_default());
+            }
+            for child in node["Plans"].as_array().into_iter().flatten() {
+                actual_loops(child, relation, loops);
+            }
+        }
+        let explain = format!(
+            "EXPLAIN (ANALYZE, FORMAT JSON) {}",
+            super::FIND_DPUS_BY_HOST_MACHINE_ID_QUERY.as_str()
+        );
+        let sqlx::types::Json(plan): sqlx::types::Json<serde_json::Value> =
+            sqlx::query_scalar(sqlx::AssertSqlSafe(explain.as_str()))
+                .bind(host_id)
+                .fetch_one(txn.as_mut())
+                .await?;
+        let mut loops = Vec::new();
+        actual_loops(&plan[0]["Plan"], "machine_topologies", &mut loops);
+        assert_eq!(loops, vec![dpu_ids.len() as u64], "{plan:#}");
+
         txn.rollback().await?;
         Ok(())
     }
@@ -4921,19 +5041,8 @@ mod test {
     async fn syncing_stable_id_cascades_dpa_interfaces_to_stable_id(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use carbide_uuid::machine::{MachineIdSource, MachineType};
         use mac_address::MacAddress;
         use model::dpa_interface::{DpaInterfaceType, DpaSearchConfig, NewDpaInterface};
-
-        fn machine_id(marker: u8, machine_type: MachineType) -> MachineId {
-            let mut hardware_id = [0u8; 32];
-            hardware_id[0] = marker;
-            MachineId::new(
-                MachineIdSource::ProductBoardChassisSerial,
-                hardware_id,
-                machine_type,
-            )
-        }
 
         let predicted_id = HostMachineId::try_from(machine_id(1, MachineType::PredictedHost))?;
         let stable_id = StableHostMachineId::try_from(machine_id(1, MachineType::Host))?;
