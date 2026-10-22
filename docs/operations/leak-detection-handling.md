@@ -74,6 +74,13 @@ BMS-based and derived rack leak health alerts come with these classifications:
 - `SensorCritical`
 - `PreventAllocations`
 
+Flow polls NICo's aggregate rack health and treats every active `RackLeak`
+classification as a rack-scoped leak. The default response submits a forced
+power-off operation for every component currently known to Flow in that rack.
+This handling is in addition to any electrical or liquid isolation performed
+by the BMS. Rack alerts do not populate the component-level `leakStatus` field;
+that field remains the tray-sensor status of each component.
+
 `PreventAllocations` blocks new allocations for hosts affected by the active tray- or rack-health condition. When the health alert clears later, NICo recalculates aggregate health; allocation eligibility can recover when no other active health condition prevents allocation.
 
 Tray list and detail responses expose `leakStatus` (`Unknown`, `Leaking`, or `NoLeak`) and `leakHandlingStatus` (`Unknown`, `None`, `ShuttingDown`, `Down`, or `Failed`). Rack responses expose these fields on objects in `components[]` only when `includeComponents=true`, not on the rack itself. These summarize detection and handling separately; `Unknown` is not confirmation that no leak exists. See [Rack-Level Administration](../manuals/rack_level_admin.md) for the inventory endpoints.
