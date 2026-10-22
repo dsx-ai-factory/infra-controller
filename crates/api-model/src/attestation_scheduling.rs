@@ -26,10 +26,11 @@
 //! kept. It is stored on the machine rather than on the job because five of the
 //! seven outcomes create no job.
 
+use health_report::HealthProbeAlert;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::attestation::profile::UnsatisfiedRequirement;
+use crate::attestation::profile::{ANY_HARDWARE_CLASS, ComponentIdMatch, UnsatisfiedRequirement};
 
 /// What scheduling decided for one machine.
 ///
@@ -84,10 +85,160 @@ pub struct AttestationScheduling {
     pub job_id: Option<Uuid>,
 }
 
+impl AttestationScheduling {
+    /// Returns the coverage alert this decision calls for, or `None` when the
+    /// outcome reports no gap between the profile and the hardware.
+    ///
+    /// The four outcomes that raise nothing either had nothing to report or had
+    /// no policy to report against.
+    pub fn coverage_alert(&self) -> Option<HealthProbeAlert> {
+        match self.outcome {
+            SchedulingOutcome::NoAttestersFound => {
+                Some(HealthProbeAlert::attestation_no_attesters(
+                    self.hardware_class.clone(),
+                    self.message(
+                        "Nothing was attested",
+                        "applied, but the BMC reported no eligible attester",
+                    ),
+                ))
+            }
+            SchedulingOutcome::PartiallySatisfied => {
+                Some(HealthProbeAlert::attestation_policy_unsatisfied(
+                    self.hardware_class.clone(),
+                    self.message("Attesting less than requested", &self.unsatisfied_detail()),
+                ))
+            }
+            SchedulingOutcome::PolicyMatchedNothing => {
+                Some(HealthProbeAlert::attestation_policy_unsatisfied(
+                    self.hardware_class.clone(),
+                    self.message("Nothing was attested", &self.unsatisfied_detail()),
+                ))
+            }
+            SchedulingOutcome::Scheduled
+            | SchedulingOutcome::AttestationDisabled
+            | SchedulingOutcome::ClassNotRecorded
+            | SchedulingOutcome::NoProfile => None,
+        }
+    }
+
+    /// Names the profile that decided, so an operator can see which revision to
+    /// look at, and follows it with what went wrong.
+    fn message(&self, prefix: &str, detail: &str) -> String {
+        let name = if self.used_any_fallback {
+            ANY_HARDWARE_CLASS
+        } else {
+            self.hardware_class.as_deref().unwrap_or("unknown")
+        };
+        match &self.profile_version {
+            Some(version) => {
+                format!("{prefix}: attestation profile '{name}' version {version} {detail}.")
+            }
+            None => format!("{prefix}: attestation profile '{name}' {detail}."),
+        }
+    }
+
+    fn unsatisfied_detail(&self) -> String {
+        match &self.unsatisfied {
+            Some(UnsatisfiedRequirement::AllowlistPatterns(patterns)) => {
+                let patterns: Vec<String> = patterns
+                    .iter()
+                    .map(|pattern| match pattern {
+                        ComponentIdMatch::Exact(id) => format!("'{id}'"),
+                        ComponentIdMatch::Prefix(prefix) => format!("'{prefix}*'"),
+                    })
+                    .collect();
+                format!(
+                    "requires attesters matching {}, which the BMC did not report",
+                    patterns.join(", ")
+                )
+            }
+            Some(UnsatisfiedRequirement::DenylistExcludedEverything) => {
+                "excluded every attester the BMC reported".to_string()
+            }
+            None => "left a requirement unsatisfied".to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::value_scenarios;
+
     use super::*;
-    use crate::attestation::profile::ComponentIdMatch;
+
+    /// A decision whose profile named one attester the BMC did not report.
+    fn scheduling(outcome: SchedulingOutcome) -> AttestationScheduling {
+        AttestationScheduling {
+            outcome,
+            hardware_class: Some("nvidia_dgx-h100".to_string()),
+            used_any_fallback: false,
+            profile_version: Some("V7-T1760631000000000".to_string()),
+            unsatisfied: Some(UnsatisfiedRequirement::AllowlistPatterns(vec![
+                ComponentIdMatch::Exact("HGX_ERoT_GPU_7".to_string()),
+            ])),
+            job_id: None,
+        }
+    }
+
+    #[test]
+    fn each_outcome_raises_the_coverage_alert_it_calls_for() {
+        fn alert_id(outcome: SchedulingOutcome) -> Option<String> {
+            scheduling(outcome)
+                .coverage_alert()
+                .map(|alert| alert.id.as_str().to_string())
+        }
+
+        value_scenarios!(
+            run = alert_id;
+
+            "a gap between the profile and the hardware is reported" {
+                SchedulingOutcome::NoAttestersFound => Some("AttestationNoAttesters".to_string()),
+                SchedulingOutcome::PartiallySatisfied =>
+                    Some("AttestationPolicyUnsatisfied".to_string()),
+                SchedulingOutcome::PolicyMatchedNothing =>
+                    Some("AttestationPolicyUnsatisfied".to_string()),
+            }
+
+            // Two of these got what the policy asked for, and two had no policy
+            // to report against.
+            "an outcome with no gap raises nothing" {
+                SchedulingOutcome::Scheduled => None,
+                SchedulingOutcome::AttestationDisabled => None,
+                SchedulingOutcome::ClassNotRecorded => None,
+                SchedulingOutcome::NoProfile => None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_coverage_alert_names_the_profile_version_and_requirement() {
+        // An operator reads these to find which revision decided, so they are
+        // asserted whole rather than by substring.
+        let patterns = scheduling(SchedulingOutcome::PolicyMatchedNothing)
+            .coverage_alert()
+            .expect("the outcome raises a coverage alert");
+        assert_eq!(patterns.target.as_deref(), Some("nvidia_dgx-h100"));
+        assert_eq!(
+            patterns.message,
+            "Nothing was attested: attestation profile 'nvidia_dgx-h100' version \
+             V7-T1760631000000000 requires attesters matching 'HGX_ERoT_GPU_7', which the BMC \
+             did not report."
+        );
+
+        let denylist = AttestationScheduling {
+            used_any_fallback: true,
+            unsatisfied: Some(UnsatisfiedRequirement::DenylistExcludedEverything),
+            ..scheduling(SchedulingOutcome::PolicyMatchedNothing)
+        };
+        assert_eq!(
+            denylist
+                .coverage_alert()
+                .expect("the outcome raises a coverage alert")
+                .message,
+            "Nothing was attested: attestation profile 'any' version V7-T1760631000000000 \
+             excluded every attester the BMC reported."
+        );
+    }
 
     #[test]
     fn scheduling_round_trips_through_its_stored_shape() {

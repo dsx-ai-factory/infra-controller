@@ -339,11 +339,13 @@ pub mod spdm {
     }
 
     impl SpdmDeviceAttestationDetails {
-        /// Describes an effective terminal failure, preserving its stored reason unless waived.
-        /// An operator failure supplies a reason only when the stored state has not failed.
-        pub fn get_failure_cause(&self) -> Option<String> {
+        /// Why the device effectively failed, or `None` when it did not. An
+        /// operator override outranks the stored result, so this is not the
+        /// same question as whether [`Self::state`] is
+        /// [`SpdmAttestationState::Failed`].
+        pub fn failure_reason(&self) -> Option<&str> {
             // A waiver suppresses the failure; an operator failure must not hide its original cause.
-            let reason = match (&self.state, self.cancellation_target) {
+            match (&self.state, self.cancellation_target) {
                 (_, Some(SpdmCancellationTarget::Waive)) => None,
                 (SpdmAttestationState::Failed(reason), _) => Some(reason.as_str()),
                 (
@@ -351,8 +353,14 @@ pub mod spdm {
                     Some(SpdmCancellationTarget::Fail),
                 ) => Some("Failed by operator"),
                 _ => None,
-            };
-            reason.map(|msg| format!("Device: {}, failed reason: {}", self.device_id, msg))
+            }
+        }
+
+        /// Describes an effective terminal failure, preserving its stored reason unless waived.
+        /// An operator failure supplies a reason only when the stored state has not failed.
+        pub fn get_failure_cause(&self) -> Option<String> {
+            self.failure_reason()
+                .map(|msg| format!("Device: {}, failed reason: {}", self.device_id, msg))
         }
     }
 

@@ -22,6 +22,45 @@ all specified tests on the host.
 An alert with this ID is placed on a host in case the SKU validation workflow failed.
 The alert will make the host un-allocatable by tenants.
 
+## SPDM attestation health probe identifiers
+
+Attestation alerts are reported under the `attestation` source. Every update
+replaces all of that source's alerts at once, so an alert goes away by not
+being in the next update rather than being cleared on its own. A machine that
+no attestation profile covered raises no alert at all.
+
+### `SpdmAttestationFailed`
+
+Indicates that an attester's newest finished SPDM attestation failed. The
+target is the attester ID the machine's BMC reports, such as `HGX_ERoT_GPU_3`,
+so a machine carries one alert per failed attester. The message is the stored
+failure text from the attestation result. The alert prevents allocations.
+
+It clears when that attester is attested again and passes, or when a profile
+change stops selecting it. Starting a new job does not clear it, because the
+attester's newest finished result is unchanged until that job finishes the
+attester. A missing alert therefore means NICo is making no claim about the
+attester right now, not that the problem is fixed.
+
+### `AttestationNoAttesters`
+
+Indicates that an attestation profile applied to the machine, but its BMC
+offered no eligible attester. The target is the machine's hardware class, and
+is absent when no class is recorded. The alert carries no classification and
+does not prevent allocations, because it reports a gap between the profile and
+the hardware rather than a bad result from a device.
+
+### `AttestationPolicyUnsatisfied`
+
+Indicates that an attestation profile asked for attesters that the machine's
+BMC did not offer. The message names the profile that applied, the requirement
+that went unsatisfied, and the profile version, so an operator can see which
+revision decided. The target and classification match `AttestationNoAttesters`.
+
+A machine can carry this alert alongside `SpdmAttestationFailed` alerts. When
+only some of a profile's patterns matched nothing, the attesters that did match
+are still attested, so a device can then fail.
+
 ## Repair workflow integrations related health probe identifiers
 
 ### `TenantReportedIssue`
