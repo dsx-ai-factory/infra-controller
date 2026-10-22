@@ -626,59 +626,111 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 		})
 	}
 
-	t.Run("defer association until the linked machine exists in REST", func(t *testing.T) {
-		emID := uuid.New()
-		bmcMAC := "00:11:22:33:77:01"
-		predictedMachineID := "fm100p-predicted-host"
-		inventory := &corev1.ExpectedMachineInventory{
-			ExpectedMachines: []*corev1.ExpectedMachine{
-				{
-					Id:                  &corev1.UUID{Value: emID.String()},
-					BmcMacAddress:       bmcMAC,
-					ChassisSerialNumber: "SN-LINKED-MACHINE",
+	foreignMachine := cwu.TestBuildMachine(t, dbSession, ip.ID, st.ID, nil, cutil.GetPtr(false), cdbm.MachineStatusReady)
+	for _, tc := range []struct {
+		name                 string
+		bmcMAC               string
+		rejectedMachineID    string
+		companionMachine     *cdbm.Machine
+		updatedChassisSerial string
+	}{
+		{
+			name:                 "defer association until the linked machine exists in REST",
+			bmcMAC:               "00:11:22:33:77:01",
+			rejectedMachineID:    "fm100p-predicted-host",
+			updatedChassisSerial: "SN-LINKED-MACHINE",
+		},
+		{
+			name:                 "foreign Site Machine cannot create or replace an association",
+			bmcMAC:               "00:11:22:33:77:02",
+			rejectedMachineID:    foreignMachine.ID,
+			companionMachine:     cwu.TestBuildMachine(t, dbSession, ip.ID, st4.ID, nil, cutil.GetPtr(false), cdbm.MachineStatusReady),
+			updatedChassisSerial: "SN-UPDATED-WITH-FOREIGN-LINK",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			emID := uuid.New()
+			inventory := &corev1.ExpectedMachineInventory{
+				ExpectedMachines: []*corev1.ExpectedMachine{
+					{
+						Id:                  &corev1.UUID{Value: emID.String()},
+						BmcMacAddress:       tc.bmcMAC,
+						ChassisSerialNumber: "SN-LINKED-MACHINE",
+					},
 				},
-			},
-			LinkedMachines: []*corev1.LinkedExpectedMachine{
-				{
-					BmcMacAddress: bmcMAC,
-					MachineId:     &corev1.MachineId{Id: predictedMachineID},
+				LinkedMachines: []*corev1.LinkedExpectedMachine{
+					{
+						BmcMacAddress: tc.bmcMAC,
+						MachineId:     &corev1.MachineId{Id: tc.rejectedMachineID},
+					},
 				},
-			},
-			Timestamp:       timestamppb.Now(),
-			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
-		}
+				Timestamp:       timestamppb.Now(),
+				InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			}
+			var companionID uuid.UUID
+			if tc.companionMachine != nil {
+				companionID = uuid.New()
+				inventory.ExpectedMachines = append(inventory.ExpectedMachines, &corev1.ExpectedMachine{
+					Id:                  &corev1.UUID{Value: companionID.String()},
+					BmcMacAddress:       "00:11:22:33:77:03",
+					ChassisSerialNumber: "SN-SAME-SITE-COMPANION",
+				})
+				inventory.LinkedMachines = append(inventory.LinkedMachines, &corev1.LinkedExpectedMachine{
+					BmcMacAddress: "00:11:22:33:77:03",
+					MachineId:     &corev1.MachineId{Id: tc.companionMachine.ID},
+				})
+			}
 
-		mei := ManageExpectedMachine{dbSession: dbSession}
-		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedMachine)(nil))
-		err := mei.UpdateExpectedMachinesInDB(ctx, st4.ID, inventory)
-		require.NoError(t, err)
+			mei := ManageExpectedMachine{dbSession: dbSession}
+			cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedMachine)(nil))
+			err := mei.UpdateExpectedMachinesInDB(ctx, st4.ID, inventory)
+			require.NoError(t, err)
 
-		reconciled, err := emDAO.Get(ctx, nil, emID, nil, false)
-		require.NoError(t, err)
-		assert.Nil(t, reconciled.MachineID)
+			reconciled, err := emDAO.Get(ctx, nil, emID, nil, false)
+			require.NoError(t, err)
+			assert.Equal(t, emID, reconciled.ID)
+			assert.Equal(t, st4.ID, reconciled.SiteID)
+			assert.Equal(t, tc.bmcMAC, reconciled.BmcMacAddress)
+			assert.Equal(t, "SN-LINKED-MACHINE", reconciled.ChassisSerialNumber)
+			assert.Nil(t, reconciled.MachineID)
+			if tc.companionMachine != nil {
+				companion, err := emDAO.Get(ctx, nil, companionID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, st4.ID, companion.SiteID)
+				assert.Equal(t, &tc.companionMachine.ID, companion.MachineID)
+			}
 
-		permanentMachine := cwu.TestBuildMachine(t, dbSession, ip.ID, st4.ID, nil, cutil.GetPtr(false), cdbm.MachineStatusReady)
-		inventory.LinkedMachines[0].MachineId.Id = permanentMachine.ID
+			permanentMachine := cwu.TestBuildMachine(t, dbSession, ip.ID, st4.ID, nil, cutil.GetPtr(false), cdbm.MachineStatusReady)
+			inventory.LinkedMachines[0].MachineId.Id = permanentMachine.ID
 
-		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedMachine)(nil))
-		err = mei.UpdateExpectedMachinesInDB(ctx, st4.ID, inventory)
-		require.NoError(t, err)
+			cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedMachine)(nil))
+			err = mei.UpdateExpectedMachinesInDB(ctx, st4.ID, inventory)
+			require.NoError(t, err)
 
-		reconciled, err = emDAO.Get(ctx, nil, emID, nil, false)
-		require.NoError(t, err)
-		assert.Equal(t, &permanentMachine.ID, reconciled.MachineID)
+			reconciled, err = emDAO.Get(ctx, nil, emID, nil, false)
+			require.NoError(t, err)
+			assert.Equal(t, &permanentMachine.ID, reconciled.MachineID)
 
-		inventory.LinkedMachines[0].MachineId.Id = predictedMachineID
-		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedMachine)(nil))
-		beforeMissingTarget, err := emDAO.Get(ctx, nil, emID, nil, false)
-		require.NoError(t, err)
-		err = mei.UpdateExpectedMachinesInDB(ctx, st4.ID, inventory)
-		require.NoError(t, err)
-		reconciled, err = emDAO.Get(ctx, nil, emID, nil, false)
-		require.NoError(t, err)
-		assert.Equal(t, &permanentMachine.ID, reconciled.MachineID)
-		assert.Equal(t, beforeMissingTarget.Updated, reconciled.Updated)
-	})
+			inventory.LinkedMachines[0].MachineId.Id = tc.rejectedMachineID
+			inventory.ExpectedMachines[0].ChassisSerialNumber = tc.updatedChassisSerial
+			cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedMachine)(nil))
+			beforeRejectedLink, err := emDAO.Get(ctx, nil, emID, nil, false)
+			require.NoError(t, err)
+			err = mei.UpdateExpectedMachinesInDB(ctx, st4.ID, inventory)
+			require.NoError(t, err)
+			reconciled, err = emDAO.Get(ctx, nil, emID, nil, false)
+			require.NoError(t, err)
+			assert.Equal(t, &permanentMachine.ID, reconciled.MachineID)
+			assert.Equal(t, emID, reconciled.ID)
+			assert.Equal(t, st4.ID, reconciled.SiteID)
+			assert.Equal(t, tc.updatedChassisSerial, reconciled.ChassisSerialNumber)
+			if tc.updatedChassisSerial == beforeRejectedLink.ChassisSerialNumber {
+				assert.Equal(t, beforeRejectedLink.Updated, reconciled.Updated)
+			} else {
+				assert.True(t, reconciled.Updated.After(beforeRejectedLink.Updated))
+			}
+		})
+	}
 
 	t.Run("API write after inventory read survives reconciliation", func(t *testing.T) {
 		site := cwu.TestBuildSite(t, dbSession, ip, "concurrent-update-site", cdbm.SiteStatusRegistered, nil, ipu)

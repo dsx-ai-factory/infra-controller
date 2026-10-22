@@ -613,8 +613,8 @@ func TestGetAllExpectedMachineHandler_Handle(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotNil(t, machine)
 
-	// Create expected machines - one on managed site, one on unmanaged site
-	// Link the managed EM to the machine via machine_id
+	// Both Expected Machines reference `machine`. `unmanagedEM` deliberately
+	// stores that reference across Sites so reads must omit its expansion.
 	emDAO := cdbm.NewExpectedMachineDAO(dbSession)
 	managedEM, err := emDAO.Create(ctx, nil, cdbm.ExpectedMachineCreateInput{
 		ExpectedMachineID:        uuid.New(),
@@ -635,6 +635,7 @@ func TestGetAllExpectedMachineHandler_Handle(t *testing.T) {
 		ChassisSerialNumber:      "UNMANAGED-CHASSIS",
 		SkuID:                    &foreignSKU.ID,
 		FallbackDpuSerialNumbers: []string{"DPU002"},
+		MachineID:                &machineID,
 	})
 	assert.Nil(t, err)
 	assert.NotNil(t, unmanagedEM)
@@ -1035,6 +1036,35 @@ func TestGetAllExpectedMachineHandler_Handle(t *testing.T) {
 			},
 		},
 		{
+			name:             "includeRelation=Machine omits foreign Site details from stored mismatch",
+			orgName:          dualRoleOrg,
+			siteId:           unmanagedSite.ID.String(),
+			includeRelations: []string{"Machine"},
+			setupContext: func(c echo.Context) {
+				c.Set("user", dualRoleUser)
+				c.SetParamNames("orgName")
+				c.SetParamValues(dualRoleOrg)
+			},
+			expectedStatus: http.StatusOK,
+			checkResponseContent: func(t *testing.T, body []byte) {
+				var response []model.APIExpectedMachine
+				require.NoError(t, json.Unmarshal(body, &response))
+				require.Len(t, response, 1)
+				assert.Equal(t, unmanagedEM.ID, response[0].ID)
+				assert.Equal(t, unmanagedEM.SiteID, response[0].SiteID)
+				assert.Equal(t, unmanagedEM.SkuID, response[0].SkuID)
+				assert.Equal(t, unmanagedEM.MachineID, response[0].MachineID)
+				assert.Nil(t, response[0].Machine)
+				var fields []map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(body, &fields))
+				assert.NotContains(t, fields[0], "machine")
+				assert.NotContains(t, string(body), *machine.ProductName)
+				stored, err := emDAO.Get(ctx, nil, unmanagedEM.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, unmanagedEM, stored, "relation expansion must not rewrite stored associations")
+			},
+		},
+		{
 			name:    "dual-role org GetAll with siteId on provider-only site succeeds",
 			orgName: dualRoleOrg,
 			siteId:  dualRoleSiteNoTenant.ID.String(),
@@ -1171,6 +1201,16 @@ func TestGetExpectedMachineHandler_Handle(t *testing.T) {
 	testMachine, err := mDAO.Create(ctx, nil, createMachineInput)
 	assert.Nil(t, err)
 	assert.NotNil(t, testMachine)
+	foreignMachineID := uuid.NewString()
+	foreignMachine, err := mDAO.Create(ctx, nil, cdbm.MachineCreateInput{
+		MachineID:                foreignMachineID,
+		InfrastructureProviderID: unmanagedIP.ID,
+		SiteID:                   unmanagedSite.ID,
+		ControllerMachineID:      foreignMachineID,
+		ProductName:              cutil.GetPtr("private foreign Machine details"),
+		Status:                   cdbm.MachineStatusReady,
+	})
+	require.NoError(t, err)
 
 	// Create a test ExpectedMachine on managed site linked to the machine
 	emDAO := cdbm.NewExpectedMachineDAO(dbSession)
@@ -1203,8 +1243,9 @@ func TestGetExpectedMachineHandler_Handle(t *testing.T) {
 		ExpectedMachineID:   uuid.New(),
 		SiteID:              site.ID,
 		BmcMacAddress:       "00:11:22:33:44:AB",
-		ChassisSerialNumber: "LEGACY-SKU-MISMATCH",
+		ChassisSerialNumber: "LEGACY-SITE-MISMATCH",
 		SkuID:               &foreignSKU.ID,
+		MachineID:           &foreignMachine.ID,
 	})
 	require.NoError(t, err)
 
@@ -1287,6 +1328,33 @@ func TestGetExpectedMachineHandler_Handle(t *testing.T) {
 				assert.Equal(t, &foreignSKU.ID, response.SkuID)
 				assert.Nil(t, response.Sku)
 				assert.NotContains(t, string(body), foreignSKU.Description)
+				stored, err := emDAO.Get(ctx, nil, legacyEM.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, legacyEM, stored, "relation expansion must not rewrite stored associations")
+			},
+		},
+		{
+			name:            "includeRelation=Machine omits foreign Site details from stored mismatch",
+			id:              legacyEM.ID.String(),
+			includeRelation: "Machine",
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, legacyEM.ID.String())
+			},
+			expectedStatus: http.StatusOK,
+			checkResponseContent: func(t *testing.T, body []byte) {
+				var response model.APIExpectedMachine
+				require.NoError(t, json.Unmarshal(body, &response))
+				assert.Equal(t, legacyEM.ID, response.ID)
+				assert.Equal(t, legacyEM.SiteID, response.SiteID)
+				assert.Equal(t, legacyEM.SkuID, response.SkuID)
+				assert.Equal(t, legacyEM.MachineID, response.MachineID)
+				assert.Nil(t, response.Machine)
+				var fields map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(body, &fields))
+				assert.NotContains(t, fields, "machine")
+				assert.NotContains(t, string(body), *foreignMachine.ProductName)
 				stored, err := emDAO.Get(ctx, nil, legacyEM.ID, nil, false)
 				require.NoError(t, err)
 				assert.Equal(t, legacyEM, stored, "relation expansion must not rewrite stored associations")
