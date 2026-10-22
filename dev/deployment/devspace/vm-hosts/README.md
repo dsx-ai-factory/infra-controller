@@ -107,8 +107,8 @@ The profile waits for Core Ready, a responding Scout, and REST inventory for
 all targets. These checks do not establish successful tenant OS installation.
 See [backend validation evidence](VALIDATION.md) and the
 [IPv6 validation record](IPV6-VALIDATION.md) for the exercised revisions and scope.
-The historical IPv6 runs predate this rebase; they do not establish live
-validation of the combined tree.
+The validation record distinguishes historical runs from the later combined
+PR integration and its runtime configuration.
 
 ### Networking
 
@@ -136,6 +136,87 @@ Internet IPv6 reachability. The profile does not provide tenant network isolatio
 
 Use a fresh lab network and site for this dual-stack extension: it does not
 upgrade an existing IPv4-only Docker network or HostInband segment in place.
+
+### IPv6-only host-facing provisioning
+
+After the `vm-hosts` profile has configured the lab, run this on its Linux
+Docker host in the same kind context:
+
+```bash
+python3 dev/deployment/devspace/vm-hosts/configure_ipv6.py --help
+python3 dev/deployment/devspace/vm-hosts/configure_ipv6.py \
+  --output "$HOME/.local/share/nico-vm-hosts/ipv6-provisioning"
+```
+
+`--output` is required and holds original configuration snapshots, generated
+Service manifests, and `ipv6-services.json` with the allocated addresses.
+Reruns preserve the original snapshots. The helper uses
+`LOCAL_DEV_VM_HOSTS_DIR` and `LOCAL_DEV_NAMESPACE` with the same defaults as
+setup. It requires the existing inventory, cluster identity and network state,
+a single-node kind context, and an IPv6 kind node address. It rejects a
+snapshot directory from another cluster, unrelated companion Service names,
+conflicting routes, ambiguous DNS blocks, and ambiguous NICo DHCPv6 hooks.
+The host needs `kubectl`, `kind`, Docker, `ip`, and permission to run `sudo ip`.
+
+The helper adds IPv6-only companion Services for Core, PXE and cluster DNS,
+retaining their original Services and ports. It routes their `/128` addresses
+through the kind node, adds provisioning AAAA records alongside existing A
+records, and configures the DHCPv6 hook's DNS and provisioning-server addresses.
+A pod-template configuration digest reconciles CoreDNS and DHCPv6 even when a
+previous run stopped after updating the ConfigMap. Newly created routes use
+the existing lab cleanup ledger; matching pre-existing routes are left alone.
+
+This is a separate lab preparation step, not an additional DevSpace profile.
+Base setup can regenerate the managed DNS block, so run this helper after base
+setup when using the IPv6-only experiment. Host routes need re-establishing
+after the outer VM restarts. Companion Services and ConfigMaps remain in the
+cluster after `lab.py stop`; this helper does not restore snapshots automatically.
+
+The remaining lifecycle steps require explicit orchestration: serve and
+register an OS image reachable through IPv6, verify IPv6 Redfish access before
+changing each BMC registration, and supply tenant cloud-init network
+configuration with `dhcp4: false`, `dhcp6: true`, `accept-ra: true`,
+`link-local: [ipv6]`, and IPv6 DNS. Copy an authorized public SSH key into the
+tenant configuration. Keep guest disks, NICo/Vault state and BMC credentials
+paired. The helper does not allocate, release, reboot or modify guests or BMCs,
+and does not configure the upstream gateway or build images.
+
+Mixed address/prefix DHCPv6 requests are handled by
+[PR 7702](https://github.com/dsx-ai-factory/infra-controller/pull/7702).
+Do not infer a missing product fix from the historical experiment's
+`UseDelegatedPrefix=no` override. Include
+[PR 7728](https://github.com/dsx-ai-factory/infra-controller/pull/7728) to avoid
+retaining the extracted network block in cloud-init user-data.
+
+Copy `validate_ipv6_only.py` into each installed guest. Run it in both
+directions, substituting the guest address, the other guest's address, the DNS
+address printed by setup, and the interface name. For the recorded lab:
+
+```bash
+python3 /tmp/validate_ipv6_only.py --help
+python3 /tmp/validate_ipv6_only.py \
+  --address fd42:84:30::a --peer fd42:84:30::b \
+  --dns fd00:10:96::fdbe --interface enp1s0
+```
+
+All four options are required; address options accept unicast, non-loopback
+IPv6 addresses. The peer must not be any address configured on the local guest.
+The validator requires Python 3, `ip`, `resolvectl`, `curl`, `ping`, cloud-init,
+and noninteractive `sudo` for flushing the DNS cache and checking cloud-init's
+schema. It does not change network configuration. It emits a JSON array and
+exits zero only when every check passes; check failures exit one, invalid
+arguments exit two, and missing tools or command timeouts also exit nonzero.
+
+Checks cover IPv6 addressing, absence of non-loopback IPv4 addresses/routes,
+IPv6-only DNS with the expected resolver, uncached AAAA resolution,
+certificate-verified Google HTTPS with explicit IPv6 and normal address
+selection, an IPv4 negative control, peer ICMP and SSH banners, and cloud-init
+status/schema. Cloud-init warnings are failures, including the known warning
+before PR 7728; review the exact diagnostic separately rather than treating a
+nonzero result as a pass. The validator does not prove the root disk, instance
+identity, BMC transport, boot-ID change, or provisioning transport. Those
+require separate lifecycle evidence and an IPv4/ARP guard if proving that
+provisioning cannot fall back to IPv4.
 
 ## Persistent state and cleanup
 
