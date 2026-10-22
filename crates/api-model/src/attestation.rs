@@ -120,6 +120,8 @@ pub mod spdm {
         FetchCertificate,
         TriggerEvidenceCollection {
             retry_count: i32,
+            /// Redfish retry count, defaulting to zero for persisted states without this field.
+            #[serde(default)]
             redfish_retry_count: i32,
             last_redfish_failure_tstamp: Option<DateTime<Utc>>,
         },
@@ -1051,6 +1053,24 @@ mod test {
 
     fn machine_id() -> MachineId {
         VALID_MACHINE_ID.parse().expect("valid machine id")
+    }
+
+    #[test]
+    fn spdm_trigger_evidence_collection_deserializes_legacy_state() {
+        // Persisted states without Redfish retry fields must remain readable after an upgrade.
+        let state = serde_json::from_str::<SpdmAttestationState>(
+            r#"{"TriggerEvidenceCollection":{"retry_count":2}}"#,
+        )
+        .expect("legacy trigger state deserializes");
+
+        assert_eq!(
+            state,
+            SpdmAttestationState::TriggerEvidenceCollection {
+                retry_count: 2,
+                redfish_retry_count: 0,
+                last_redfish_failure_tstamp: None,
+            }
+        );
     }
 
     #[test]
