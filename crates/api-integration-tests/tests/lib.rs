@@ -24,7 +24,8 @@ use std::time::{self, Duration};
 use ::carbide_utils::HostPortPair;
 use ::machine_a_tron::lifecycle_timings::{LifecycleTimingOverrides, PartialLifecycleTimings};
 use ::machine_a_tron::{
-    BmcMockRegistry, DeviceHandle, DhcpType, LogFormat, MachineATronConfig, MachineConfig,
+    BmcMockRegistry, DeviceHandle, DhcpType, DpuMachineHandle, LogFormat, MachineATronConfig,
+    MachineConfig,
 };
 use api_test_helper::api_server::{TEST_BMC_DHCP_RELAY_ADDRESS, TEST_BMC_NETWORK_PREFIX};
 use api_test_helper::machine_a_tron::MachineATronHandle;
@@ -522,6 +523,21 @@ async fn run_integration() -> eyre::Result<()> {
     cleanup_metric_result?;
     let mut metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
     metric_infos.push(collect_ssh_console_metric_info().await?);
+    metric_infos.extend(collect_dhcp_metric_infos().await?);
+    for name in [
+        "carbide_dpu_client_certificate_expiration_time",
+        "carbide_dpu_client_certificate_expiration_time_seconds",
+    ] {
+        let info = metric_infos
+            .iter()
+            .find(|info| info.name == name)
+            .with_context(|| format!("final catalogue scrape did not expose {name}"))?;
+        assert_eq!(info.ty, "gauge");
+        assert_eq!(
+            info.help,
+            "The expiration time (epoch seconds) for the client certificate associated with a given DPU.",
+        );
+    }
     generate_core_metric_docs(metric_infos);
     drop(mqtt_client);
 
@@ -593,6 +609,52 @@ async fn wait_for_count_metric_aliases(test_env: &IntegrationTestEnvironment) ->
         }
     }
     Ok(())
+}
+
+/// Collects DHCP certificate-expiry metadata from a fixture using the real HTTP exporter.
+/// The fixture registers the gauge and alias without starting the Kea hook or
+/// certificate loop.
+async fn collect_dhcp_metric_infos() -> eyre::Result<Vec<metrics::MetricInfo>> {
+    use metrics_endpoint::{MetricsEndpointConfig, run_metrics_endpoint_with_listener};
+
+    let expiry = 1_893_456_000;
+    let setup = dhcp::test_support::metrics_setup_with_certificate_expiry(expiry)?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let config = MetricsEndpointConfig {
+        address,
+        registry: setup.registry.clone(),
+        health_controller: None,
+        additional_prefix: None,
+    };
+    let cancel_token = CancellationToken::new();
+    let server_token = cancel_token.clone();
+    let server = tokio::spawn(async move {
+        run_metrics_endpoint_with_listener(&config, server_token, listener).await
+    });
+
+    let scrape_result = metrics::collect_metric_infos(&[address])
+        .and_then(|infos| metrics::metrics(&address).map(|samples| (infos, samples)));
+    cancel_token.cancel();
+    let server_result = server.await.wrap_err("joining the DHCP metrics endpoint")?;
+    // Keep setup.meter_provider alive through both HTTP scrapes so it retains the callbacks.
+    drop(setup);
+    server_result.wrap_err("serving the DHCP metrics endpoint")?;
+    let (infos, samples) = scrape_result?;
+
+    for name in [
+        "carbide_dhcp_certificate_expiration_time",
+        "carbide_dhcp_certificate_expiration_time_seconds",
+    ] {
+        let info = infos
+            .iter()
+            .find(|info| info.name == name)
+            .with_context(|| format!("DHCP endpoint did not expose {name}"))?;
+        assert_eq!(info.ty, "gauge");
+        assert_eq!(info.help, "The certificate expiration time (epoch seconds)");
+        metrics::assert_metric_line(&samples, &format!("\n{name} {expiry}\n"));
+    }
+    Ok(infos)
 }
 
 async fn exercise_dpf_exploration_suppression(
@@ -1621,6 +1683,7 @@ async fn test_machine_a_tron_dual_stack(
 /// Tests dual-stack on an FNN L2 segment (shared subnet with SVI/VRR).
 /// The segment is pre-created with both IPv4 and IPv6 prefixes, and the
 /// handler allocates SVI IPs for both. Instances get one IP per prefix.
+/// After release, leaves the DPU paused with an expiry observation for the metric catalogue.
 async fn test_machine_a_tron_dual_stack_l2(
     hw_type: HardwareType,
     test_env: &IntegrationTestEnvironment,
@@ -1683,11 +1746,61 @@ async fn test_machine_a_tron_dual_stack_l2(
                     machine_id = %machine_id,
                     "Machine back to Ready after dual-stack L2 release",
                 );
+                prepare_dpu_certificate_expiry(&machine_handle.dpus()[0], test_env).await?;
                 Ok::<(), eyre::Report>(())
             }
         },
     )
     .await
+}
+
+/// Keeps a DPU expiry observable through catalogue collection, leaving its simulator paused.
+async fn prepare_dpu_certificate_expiry(
+    dpu: &DpuMachineHandle,
+    test_env: &IntegrationTestEnvironment,
+) -> eyre::Result<()> {
+    // MaT reports no expiry; pause it so later reports cannot replace the persisted timestamp.
+    dpu.pause()?;
+    // The waiter runs on the same actor queue as pause, so its return acknowledges the pause.
+    dpu.wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
+        .await?;
+    let dpu_id: carbide_uuid::machine::DpuMachineId = dpu
+        .observed_machine_id()
+        .context("ready DPU has no observed machine ID")?
+        .try_into()?;
+    let mut txn = test_env.db_pool.begin().await?;
+    let mut observation = db::machine::find_one(
+        &mut *txn,
+        &dpu_id,
+        model::machine::machine_search_config::MachineSearchConfig {
+            include_dpus: true,
+            for_update: true,
+            ..Default::default()
+        },
+    )
+    .await?
+    .context("ready DPU is absent from the database")?
+    .network_status_observation
+    .context("ready DPU has no network observation")?;
+    let expiry = 1_893_456_000;
+    observation.client_certificate_expiry = Some(expiry);
+    assert_eq!(
+        db::machine::update_network_status_observation(&mut txn, &dpu_id, &observation).await?,
+        db::ConditionalWrite::Applied(()),
+    );
+    txn.commit().await?;
+    for name in [
+        "carbide_dpu_client_certificate_expiration_time",
+        "carbide_dpu_client_certificate_expiration_time_seconds",
+    ] {
+        let samples = metrics::wait_for_metric_line(
+            &test_env.carbide_metrics_addrs,
+            &format!("\n{name}{{dpu_machine_id=\"{dpu_id}\",fresh=\"true\"}} {expiry}\n"),
+        )
+        .await?;
+        metrics::assert_metric_line(&samples, &format!("\n# TYPE {name} gauge\n"));
+    }
+    Ok(())
 }
 
 async fn test_machine_a_tron_scout_stream(

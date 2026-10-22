@@ -70,6 +70,8 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_database_transaction_rollback_failures_total</td><td>counter</td><td>Number of database transaction rollback failures, by trigger.</td></tr>
 <tr><td>carbide_db_pool_idle_conns</td><td>gauge</td><td>Number of idle connections in the carbide database pool</td></tr>
 <tr><td>carbide_db_pool_total_conns</td><td>gauge</td><td>Number of (active + idle) connections in the carbide database pool</td></tr>
+<tr><td>carbide_dhcp_certificate_expiration_time</td><td>gauge</td><td>The certificate expiration time (epoch seconds)</td></tr>
+<tr><td>carbide_dhcp_certificate_expiration_time_seconds</td><td>gauge</td><td>The certificate expiration time (epoch seconds)</td></tr>
 <tr><td>carbide_dhcp_dropped_requests_total</td><td>counter</td><td>Number of DHCPv4 packets dropped without a reply, by drop reason.</td></tr>
 <tr><td>carbide_dhcp_replies_sent_total</td><td>counter</td><td>Number of DHCPv4 replies sent, by reply message type.</td></tr>
 <tr><td>carbide_dhcp_requests_total</td><td>counter</td><td>Number of DHCPv4 packets received and decoded, by DHCP message type.</td></tr>
@@ -90,6 +92,8 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_dpu_agent_service_restart_attempts_total</td><td>counter</td><td>Number of DPU-agent service restart attempts, by service and result.</td></tr>
 <tr><td>carbide_dpu_agent_version_count</td><td>gauge</td><td>Number of DPU agents which have reported a certain version.</td></tr>
 <tr><td>carbide_dpu_bmc_service_credential_rotation_results_total</td><td>counter</td><td>Number of persisted DPU BMC service credential rotation results, by result</td></tr>
+<tr><td>carbide_dpu_client_certificate_expiration_time</td><td>gauge</td><td>The expiration time (epoch seconds) for the client certificate associated with a given DPU.</td></tr>
+<tr><td>carbide_dpu_client_certificate_expiration_time_seconds</td><td>gauge</td><td>The expiration time (epoch seconds) for the client certificate associated with a given DPU.</td></tr>
 <tr><td>carbide_dpu_firmware_version_count</td><td>gauge</td><td>Number of DPUs which have reported a certain firmware version.</td></tr>
 <tr><td>carbide_dpu_remediation_executor_failures_total</td><td>counter</td><td>Number of DPU remediation executor failures, by failure stage.</td></tr>
 <tr><td>carbide_dpu_uefi_password_setup_skips_total</td><td>counter</td><td>Number of DPU UEFI password setup operations skipped, by reason.</td></tr>

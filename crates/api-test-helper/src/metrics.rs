@@ -19,12 +19,17 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::process;
 
+/// Scrapes an endpoint with a five-second connect limit and a fifteen-second
+/// total `curl` limit.
 pub fn metrics(metrics_endpoint: &SocketAddr) -> eyre::Result<String> {
     let endpoint = format!("http://{metrics_endpoint}/metrics");
     let args = vec![endpoint.clone()];
     // We don't pass the full path to curl here and rely on the fact
     // that `Command` searches the PATH. This makes function signatures tidier.
-    let out = process::Command::new("curl").args(args).output()?;
+    let out = process::Command::new("curl")
+        .args(["--connect-timeout", "5", "--max-time", "15"])
+        .args(args)
+        .output()?;
     let response = String::from_utf8_lossy(&out.stdout);
     if !out.status.success() {
         tracing::error!("curl {endpoint} STDOUT: {response}");
@@ -82,7 +87,9 @@ pub fn collect_metric_infos(metrics_endpoints: &[SocketAddr]) -> eyre::Result<Ve
     Ok(infos)
 }
 
-/// Waits for a specific metric line to show up. Returns the metrics
+/// Waits for a specific metric line to show up. Returns the metrics.
+/// The 30-second polling budget is checked between rounds; an in-flight
+/// synchronous scrape can finish after it.
 pub async fn wait_for_metric_line(
     metrics_endpoints: &[SocketAddr],
     expected_line: &str,
