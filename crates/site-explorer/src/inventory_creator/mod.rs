@@ -36,6 +36,7 @@ mod machine_creator;
 mod power_shelf_creator;
 mod switch_creator;
 
+pub(super) use machine_creator::ConfiguredIngestionCandidate;
 pub use machine_creator::MachineCreator;
 pub use power_shelf_creator::PowerShelfCreator;
 pub use switch_creator::SwitchCreator;

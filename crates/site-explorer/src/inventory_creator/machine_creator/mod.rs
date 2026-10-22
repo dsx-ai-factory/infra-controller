@@ -57,6 +57,9 @@ use crate::explored_endpoint_index::ExploredEndpointIndex;
 use crate::managed_host::ManagedHost;
 use crate::metrics::SiteExplorationMetrics;
 
+mod host_identification;
+pub(crate) use host_identification::ConfiguredIngestionCandidate;
+
 const DESIRED_BOOT_INTERFACE_RECONCILE_PAGE_SIZE: i64 = 100;
 
 /// Creates machines from site-explorer managed-host reports.
