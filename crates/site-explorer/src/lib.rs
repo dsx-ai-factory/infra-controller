@@ -81,7 +81,7 @@ pub use redfish::{BmcAccess, EstablishedBmc, ProxiedPools};
 mod boot_interfaces;
 use boot_interfaces::{HostBootInterfaces, NicBootInterfaces};
 mod host_dpu_matches;
-use host_dpu_matches::HostDpuMatches;
+use host_dpu_matches::{HostDpuMatches, MatchedDpu};
 mod boot_order_tracker;
 use boot_order_tracker::BootOrderTracker;
 mod inventory_creator;
@@ -539,50 +539,6 @@ struct HostDpuInventoryCandidate<'a> {
     part_number: Option<&'a str>,
     /// Serial number joined to the DPU endpoint report.
     serial_number: Option<&'a str>,
-}
-
-/// A host/DPU association established by serial, independent of mode readiness.
-struct MatchedDpu<'a> {
-    /// Already discovered DPU BMC endpoint.
-    endpoint: &'a ExploredEndpoint,
-    /// Part number from the matching source, used unchanged by policy heuristics.
-    part_number: Option<&'a str>,
-    /// Source of the association and its failure diagnostic context.
-    source: DpuMatchSource<'a>,
-}
-
-/// Where a host/DPU serial association was found.
-#[derive(Clone, Copy)]
-enum DpuMatchSource<'a> {
-    /// A PCIe device in the host report.
-    Pcie,
-    /// A chassis or network adapter in the host report.
-    Chassis,
-    /// An ExpectedMachine fallback serial, retained for failure diagnostics.
-    ExpectedSerial(&'a str),
-}
-
-impl MatchedDpu<'_> {
-    fn warn_mode_check_failed(&self, err: &SiteExplorerError) {
-        let dpu_ep = self.endpoint;
-        match self.source {
-            DpuMatchSource::Pcie | DpuMatchSource::Chassis => {
-                tracing::warn!(
-                    bmc_ip_address = %dpu_ep.address,
-                    error = %err,
-                    "failed to check DPU mode; skipping this device",
-                );
-            }
-            DpuMatchSource::ExpectedSerial(serial_number) => {
-                tracing::warn!(
-                    bmc_ip_address = %dpu_ep.address,
-                    dpu_serial_number = %serial_number,
-                    error = %err,
-                    "failed to check fallback-matched DPU mode; skipping this device this pass",
-                );
-            }
-        }
-    }
 }
 
 /// When Site Explorer last physically reset a BMC, tracked per reset method.
@@ -1463,7 +1419,8 @@ impl SiteExplorer {
                 continue;
             }
 
-            let matches = HostDpuMatches::new(&ep, &dpu_sn_to_endpoint, expected_machine);
+            let matches =
+                HostDpuMatches::new(&ep, &dpu_sn_to_endpoint, expected_machine, host_dpu_policy);
             let Some(dpus_explored_for_host) = self
                 .configure_host_dpus(&ep, matches, host_dpu_policy, metrics)
                 .await
@@ -1507,14 +1464,12 @@ impl SiteExplorer {
 
         let mut dpu_exploration = DpuExplorationState::new();
         for matched_dpu in inventory_matches {
-            // Resolve the DPU's mode against what the host declared. Report a change
-            // only after `set_nic_mode` succeeds, so failures keep the existing skip path.
-            let mode_check = Some(
-                match host_dpu_policy.target_operating_mode(matched_dpu.part_number) {
-                    Some(target) => self.update_dpu_mode(&matched_dpu, target, metrics).await,
-                    None => Ok(true),
-                },
-            );
+            // Apply the target selected during matching. Report a change only after
+            // `set_nic_mode` succeeds, so failures skip this device.
+            let mode_check = Some(match matched_dpu.target_operating_mode {
+                Some(target) => self.update_dpu_mode(&matched_dpu, target, metrics).await,
+                None => Ok(true),
+            });
 
             dpu_exploration.record_matched_dpu(&matched_dpu, ep, mode_check);
         }
@@ -1541,12 +1496,10 @@ impl SiteExplorer {
         let mut dpu_added = false;
 
         for matched_dpu in fallback_matches {
-            let mode_check = Some(
-                match host_dpu_policy.target_operating_mode(matched_dpu.part_number) {
-                    Some(target) => self.update_dpu_mode(&matched_dpu, target, metrics).await,
-                    None => Ok(true),
-                },
-            );
+            let mode_check = Some(match matched_dpu.target_operating_mode {
+                Some(target) => self.update_dpu_mode(&matched_dpu, target, metrics).await,
+                None => Ok(true),
+            });
 
             match classify_matched_dpu(&matched_dpu, ep, mode_check) {
                 DiscoveredDpu::RunningAsDpu(dpu) => {
@@ -4154,6 +4107,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::host_dpu_matches::matched_pcie_dpu;
     use crate::test_support::{bf2_dpu, explored_endpoint};
 
     #[test]
@@ -5327,14 +5281,6 @@ mod tests {
                 "{}: candidates",
                 case.name
             );
-        }
-    }
-
-    fn matched_pcie_dpu(endpoint: &ExploredEndpoint) -> MatchedDpu<'_> {
-        MatchedDpu {
-            endpoint,
-            part_number: endpoint.report.dpu_part_number(),
-            source: DpuMatchSource::Pcie,
         }
     }
 

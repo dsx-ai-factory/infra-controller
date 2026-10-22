@@ -17,10 +17,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use model::expected_machine::ExpectedMachine;
-use model::site_explorer::{ExploredEndpoint, is_bluefield_part_number};
+use model::expected_machine::{ExpectedMachine, HostDpuPolicy};
+use model::site_explorer::{BlueFieldOperatingMode, ExploredEndpoint, is_bluefield_part_number};
 
-use crate::{DpuMatchSource, MatchedDpu, duplicate_bluefield_serial, host_dpu_inventory_records};
+use crate::errors::SiteExplorerError;
+use crate::{duplicate_bluefield_serial, host_dpu_inventory_records};
 
 /// DPU inventory counts and host/BMC matches collected before mode configuration.
 pub(super) struct HostDpuMatches<'a> {
@@ -30,11 +31,12 @@ pub(super) struct HostDpuMatches<'a> {
 }
 
 impl<'a> HostDpuMatches<'a> {
-    /// Matches PCIe, chassis, and expected serials to discovered DPU BMCs.
+    /// Matches host serials to discovered DPU BMCs and resolves their target modes.
     pub(super) fn new(
-        ep: &'a ExploredEndpoint,
+        ep: &ExploredEndpoint,
         dpu_sn_to_endpoint: &'a HashMap<String, ExploredEndpoint>,
         expected_machine: Option<&'a ExpectedMachine>,
+        host_dpu_policy: HostDpuPolicy,
     ) -> Self {
         // Record the host's DPU devices against the discovered DPU BMCs.
         // A DPU can appear as a PCIe device under a system or as a chassis
@@ -65,6 +67,7 @@ impl<'a> HostDpuMatches<'a> {
                     pcie_device.serial_number.as_deref(),
                     dpu_sn_to_endpoint,
                     DpuMatchSource::Pcie,
+                    host_dpu_policy,
                 ) {
                     inventory_matches.push(matched_dpu);
                 }
@@ -95,6 +98,7 @@ impl<'a> HostDpuMatches<'a> {
                         record.serial_number,
                         dpu_sn_to_endpoint,
                         DpuMatchSource::Chassis,
+                        host_dpu_policy,
                     ) {
                         inventory_matches.push(matched_dpu);
                     }
@@ -111,11 +115,12 @@ impl<'a> HostDpuMatches<'a> {
             for dpu_sn in &expected_machine.data.fallback_dpu_serial_numbers {
                 if let Some(dpu_ep) = dpu_sn_to_endpoint.get(dpu_sn.as_str()) {
                     // Fallback matching has only the expected serial and the
-                    // discovered DPU BMC report; pass the DPU's own part number
-                    // for the legacy BF3 heuristic.
+                    // discovered DPU BMC report; use the DPU's own part number
+                    // to resolve the target mode.
                     fallback_matches.push(MatchedDpu {
                         endpoint: dpu_ep,
-                        part_number: dpu_ep.report.dpu_part_number(),
+                        target_operating_mode: host_dpu_policy
+                            .target_operating_mode(dpu_ep.report.dpu_part_number()),
                         source: DpuMatchSource::ExpectedSerial(dpu_sn),
                     });
                 }
@@ -126,6 +131,52 @@ impl<'a> HostDpuMatches<'a> {
             inventory: dpu_inventory,
             inventory_matches,
             fallback_matches,
+        }
+    }
+}
+
+/// A host/DPU association established by serial, independent of mode readiness.
+pub(super) struct MatchedDpu<'a> {
+    /// Already discovered DPU BMC endpoint.
+    pub(super) endpoint: &'a ExploredEndpoint,
+    /// Target resolved from the host policy and this match's source part number.
+    pub(super) target_operating_mode: Option<BlueFieldOperatingMode>,
+    /// Source of the association and its failure diagnostic context.
+    source: DpuMatchSource<'a>,
+}
+
+/// Where a host/DPU serial association was found.
+#[derive(Clone, Copy)]
+enum DpuMatchSource<'a> {
+    /// A PCIe device in the host report.
+    Pcie,
+    /// A chassis or network adapter in the host report.
+    Chassis,
+    /// An ExpectedMachine fallback serial, retained for failure diagnostics.
+    ExpectedSerial(&'a str),
+}
+
+impl MatchedDpu<'_> {
+    pub(super) fn warn_mode_check_failed(&self, err: &SiteExplorerError) {
+        let dpu_ep = self.endpoint;
+        match self.source {
+            DpuMatchSource::Pcie | DpuMatchSource::Chassis => {
+                tracing::warn!(
+                    target: "carbide_site_explorer",
+                    bmc_ip_address = %dpu_ep.address,
+                    error = %err,
+                    "failed to check DPU mode; skipping this device",
+                );
+            }
+            DpuMatchSource::ExpectedSerial(serial_number) => {
+                tracing::warn!(
+                    target: "carbide_site_explorer",
+                    bmc_ip_address = %dpu_ep.address,
+                    dpu_serial_number = %serial_number,
+                    error = %err,
+                    "failed to check fallback-matched DPU mode; skipping this device this pass",
+                );
+            }
         }
     }
 }
@@ -142,13 +193,14 @@ pub(super) struct DpuInventoryState {
 }
 
 impl DpuInventoryState {
-    /// Counts reported DPUs and tracks BMC matches independently of mode checks.
+    /// Counts reported DPUs and resolves BMC matches with their target modes.
     fn record_reported_device<'a>(
         &mut self,
-        part_number: Option<&'a str>,
+        part_number: Option<&str>,
         serial_number: Option<&str>,
         dpu_sn_to_endpoint: &'a HashMap<String, ExploredEndpoint>,
         source: DpuMatchSource<'a>,
+        host_dpu_policy: HostDpuPolicy,
     ) -> Option<MatchedDpu<'a>> {
         // Count every DPU the host reports, independent of whether we've
         // discovered its BMC yet.
@@ -176,7 +228,7 @@ impl DpuInventoryState {
         }
         Some(MatchedDpu {
             endpoint,
-            part_number,
+            target_operating_mode: host_dpu_policy.target_operating_mode(part_number),
             source,
         })
     }
@@ -187,12 +239,64 @@ impl DpuInventoryState {
 }
 
 #[cfg(test)]
+pub(super) fn matched_pcie_dpu(endpoint: &ExploredEndpoint) -> MatchedDpu<'_> {
+    MatchedDpu {
+        endpoint,
+        target_operating_mode: None,
+        source: DpuMatchSource::Pcie,
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use carbide_test_harness::test_support::fixture_config::{
+        FixtureDefault as _, ManagedHostConfigExt as _,
+    };
     use carbide_test_support::{Check, check_values};
-    use model::site_explorer::BlueFieldOperatingMode;
+    use model::expected_machine::ExpectedMachineData;
+    use model::site_explorer::EndpointExplorationReport;
+    use model::test_support::{DpuConfig, ManagedHostConfig};
 
     use super::*;
-    use crate::test_support::bf2_dpu;
+    use crate::test_support::{bf2_dpu, explored_endpoint};
+
+    #[test]
+    fn matched_targets_preserve_part_number_source_after_host_report_is_dropped() {
+        let dpu = DpuConfig::default();
+        let serial = dpu.serial.clone();
+        let host_report: EndpointExplorationReport = ManagedHostConfig::default()
+            .with_dpus(vec![dpu.clone(), DpuConfig::default()])
+            .into();
+        let endpoints = HashMap::from([(serial.clone(), explored_endpoint(dpu.into()))]);
+        let expected_machine = ExpectedMachine {
+            id: None,
+            bmc_mac_address: "00:11:22:33:44:55".parse().unwrap(),
+            data: ExpectedMachineData {
+                fallback_dpu_serial_numbers: vec![serial],
+                ..Default::default()
+            },
+        };
+        let matches = {
+            let mut host = explored_endpoint(host_report);
+            host.report.systems[0].pcie_devices[0].part_number =
+                Some("900-9D3B4-00EN-EA0".to_string());
+            HostDpuMatches::new(
+                &host,
+                &endpoints,
+                Some(&expected_machine),
+                HostDpuPolicy::Manage,
+            )
+        };
+
+        assert_eq!(
+            matches.inventory_matches[0].target_operating_mode,
+            Some(BlueFieldOperatingMode::Nic),
+        );
+        assert_eq!(
+            matches.fallback_matches[0].target_operating_mode,
+            Some(BlueFieldOperatingMode::Dpu),
+        );
+    }
 
     #[test]
     fn expected_serial_fallback_depends_on_matching() {
@@ -245,6 +349,7 @@ mod tests {
                         serial_number,
                         &endpoints,
                         DpuMatchSource::Pcie,
+                        HostDpuPolicy::Manage,
                     );
                 }
                 (
