@@ -50,3 +50,4 @@ RUN --mount=type=cache,id=nico-devspace-cargo-home,target=/cargo-home,sharing=lo
 FROM scratch
 
 COPY --from=builder /artifacts /artifacts
+COPY --from=builder /opt/kea/kea-common.deb /artifacts/kea-common.deb
