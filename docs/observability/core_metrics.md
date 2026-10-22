@@ -209,11 +209,22 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_machines_total</td><td>gauge</td><td>Number of carbide_machines in the system</td></tr>
 <tr><td>carbide_machines_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of state-handling errors for carbide_machines in a given state</td></tr>
 <tr><td>carbide_managed_loop_iterations_total</td><td>counter</td><td>Number of managed loop iterations, by manager and outcome; the measured boot metrics collector&#39;s iterations are counted by its latency histogram instead</td></tr>
+<tr><td>carbide_measured_boot_bundles_count</td><td>gauge</td><td>Number of measured boot bundles.</td></tr>
+<tr><td>carbide_measured_boot_bundles_per_pcr_value_count</td><td>gauge</td><td>Number of measured boot bundles containing a given PCR value at a given PCR index.</td></tr>
 <tr><td>carbide_measured_boot_bundles_total</td><td>gauge</td><td>Number of measured boot bundles.</td></tr>
 <tr><td>carbide_measured_boot_collector_iteration_latency_milliseconds</td><td>histogram</td><td>Number of milliseconds a full measured boot metrics collector iteration took, by outcome</td></tr>
+<tr><td>carbide_measured_boot_machines_count</td><td>gauge</td><td>Number of discovered candidate machines, including machines without measurements.</td></tr>
+<tr><td>carbide_measured_boot_machines_per_bundle_count</td><td>gauge</td><td>Number of machines per measured boot bundle.</td></tr>
+<tr><td>carbide_measured_boot_machines_per_bundle_state_count</td><td>gauge</td><td>Number of machines per measured boot bundle state.</td></tr>
 <tr><td>carbide_measured_boot_machines_per_bundle_state_total</td><td>gauge</td><td>Number of machines per measured boot bundle state.</td></tr>
+<tr><td>carbide_measured_boot_machines_per_bundle_total</td><td>gauge</td><td>Number of machines per measured boot bundle.</td></tr>
+<tr><td>carbide_measured_boot_machines_per_machine_state_count</td><td>gauge</td><td>Number of machines per measured boot machine state.</td></tr>
 <tr><td>carbide_measured_boot_machines_per_machine_state_total</td><td>gauge</td><td>Number of machines per measured boot machine state.</td></tr>
+<tr><td>carbide_measured_boot_machines_per_pcr_value_total</td><td>gauge</td><td>Number of machines with a given PCR value at a given PCR index.</td></tr>
+<tr><td>carbide_measured_boot_machines_per_profile_count</td><td>gauge</td><td>Number of machines per measured boot system profile.</td></tr>
+<tr><td>carbide_measured_boot_machines_per_profile_total</td><td>gauge</td><td>Number of machines per measured boot system profile.</td></tr>
 <tr><td>carbide_measured_boot_machines_total</td><td>gauge</td><td>Number of machines reporting measurements.</td></tr>
+<tr><td>carbide_measured_boot_profiles_count</td><td>gauge</td><td>Number of measured boot profiles.</td></tr>
 <tr><td>carbide_measured_boot_profiles_total</td><td>gauge</td><td>Number of measured boot profiles.</td></tr>
 <tr><td>carbide_measured_boot_verification_failures_total</td><td>counter</td><td>Number of measured boot verification failures, across quote verification and attestation handling, by cause</td></tr>
 <tr><td>carbide_metrics_scrape_failures_total</td><td>counter</td><td>Number of /metrics scrape failures, by outcome.</td></tr>

@@ -31,8 +31,8 @@ use api_test_helper::api_server::{TEST_BMC_DHCP_RELAY_ADDRESS, TEST_BMC_NETWORK_
 use api_test_helper::machine_a_tron::MachineATronHandle;
 use api_test_helper::utils::TestApiServerArgs;
 use api_test_helper::{
-    IntegrationTestEnvironment, domain, instance, machine, metrics, scout_stream, subnet, tenant,
-    utils, vpc, vpc_prefix,
+    IntegrationTestEnvironment, domain, instance, machine, measured_boot, metrics, scout_stream,
+    subnet, tenant, utils, vpc, vpc_prefix,
 };
 use bmc_mock::test_support::TEST_MAC_POOL;
 use bmc_mock::{HardwareType, ListenerOrAddress};
@@ -316,6 +316,8 @@ async fn run_integration() -> eyre::Result<()> {
     let dual_stack_l2_segment_id =
         subnet::create_dual_stack(carbide_api_addrs, &fnn_vpc, &domain_id, 13).await?;
 
+    // Measured-boot collection needs DMI on every discovered host in this
+    // inventory; one missing identity prevents the entire collector pass.
     // Run several tests in parallel.
     let all_tests = join_all([
         test_force_delete_waits_for_instance_dpu(
@@ -500,6 +502,7 @@ async fn run_integration() -> eyre::Result<()> {
         }
     }
     wait_for_count_metric_aliases(&test_env).await?;
+    prepare_measured_boot_metric_aliases(&test_env).await?;
     // Exercise the library sampler on the server's meter without activating a
     // remote backend. Stop its task before catalogue collection and generation,
     // which can return early or panic on I/O errors.
@@ -655,6 +658,108 @@ async fn collect_dhcp_metric_infos() -> eyre::Result<Vec<metrics::MetricInfo>> {
         metrics::assert_metric_line(&samples, &format!("\n{name} {expiry}\n"));
     }
     Ok(infos)
+}
+
+/// Seeds measured-boot data and waits for both names before the catalogue scrape.
+async fn prepare_measured_boot_metric_aliases(
+    test_env: &IntegrationTestEnvironment,
+) -> eyre::Result<()> {
+    use rpc::protos::measured_boot::{
+        CreateMeasurementBundleRequest, CreateMeasurementSystemProfileRequest,
+        MeasurementBundleStatePb, PcrRegisterValuePb,
+    };
+
+    // Deliberately avoid matching any fixture hardware so the bundle has
+    // no associated machine measurements. Its PCR count must still be one.
+    let profile = measured_boot::create_profile(
+        &test_env.carbide_api_addrs,
+        CreateMeasurementSystemProfileRequest {
+            name: Some("metric-catalogue-profile".to_string()),
+            vendor: "metric-catalogue".to_string(),
+            product: "metric-catalogue".to_string(),
+            extra_attrs: Vec::new(),
+        },
+    )
+    .await?;
+    measured_boot::create_bundle(
+        &test_env.carbide_api_addrs,
+        CreateMeasurementBundleRequest {
+            profile_id: profile.profile_id,
+            name: Some("metric-catalogue-bundle".to_string()),
+            pcr_values: vec![PcrRegisterValuePb {
+                pcr_register: 0,
+                sha_any: "aa".to_string(),
+            }],
+            state: MeasurementBundleStatePb::Active.into(),
+        },
+    )
+    .await?;
+
+    // The seed supplies profile, bundle, and PCR observations; discovered
+    // MaT machines supply the bundle-state and machine-state observations.
+    for (legacy, alias) in [
+        (
+            "carbide_measured_boot_profiles_total",
+            "carbide_measured_boot_profiles_count",
+        ),
+        (
+            "carbide_measured_boot_bundles_total",
+            "carbide_measured_boot_bundles_count",
+        ),
+        (
+            "carbide_measured_boot_machines_total",
+            "carbide_measured_boot_machines_count",
+        ),
+        (
+            "carbide_measured_boot_machines_per_profile_total",
+            "carbide_measured_boot_machines_per_profile_count",
+        ),
+        (
+            "carbide_measured_boot_machines_per_bundle_total",
+            "carbide_measured_boot_machines_per_bundle_count",
+        ),
+        (
+            "carbide_measured_boot_machines_per_bundle_state_total",
+            "carbide_measured_boot_machines_per_bundle_state_count",
+        ),
+        (
+            "carbide_measured_boot_machines_per_machine_state_total",
+            "carbide_measured_boot_machines_per_machine_state_count",
+        ),
+        (
+            "carbide_measured_boot_machines_per_pcr_value_total",
+            "carbide_measured_boot_bundles_per_pcr_value_count",
+        ),
+    ] {
+        for name in [legacy, alias] {
+            metrics::wait_for_metric_line(
+                &test_env.carbide_metrics_addrs,
+                &format!("# TYPE {name} gauge\n"),
+            )
+            .await?;
+        }
+    }
+    for name in [
+        "carbide_measured_boot_machines_per_pcr_value_total",
+        "carbide_measured_boot_bundles_per_pcr_value_count",
+    ] {
+        metrics::wait_for_metric_line(
+            &test_env.carbide_metrics_addrs,
+            &format!("\n{name}{{pcr_index=\"0\",pcr_value=\"aa\"}} 1\n"),
+        )
+        .await?;
+    }
+    metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        "# HELP carbide_measured_boot_machines_count Number of discovered candidate machines, including machines without measurements.\n",
+    )
+    .await?;
+    metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        "# HELP carbide_measured_boot_bundles_per_pcr_value_count Number of measured boot bundles containing a given PCR value at a given PCR index.\n",
+    )
+    .await?;
+    Ok(())
 }
 
 async fn exercise_dpf_exploration_suppression(
