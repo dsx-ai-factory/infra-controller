@@ -1,4 +1,4 @@
-# Historical IPv6 VM-hosts validation
+# IPv6 VM-hosts validation
 
 This record describes the ARM64 experiments completed before the branch was
 rebased onto [PR 7564](https://github.com/dsx-ai-factory/infra-controller/pull/7564).
@@ -310,3 +310,65 @@ used for these cycles.
 The lab has no GPU, DPU, or TPM. It does not establish hardware attestation,
 firmware validation, DPU forwarding, secure erasure of physical storage, or
 tenant isolation on physical hardware.
+
+## IPv6-only host lifecycle validation on 2026-10-21
+
+The combined PR integration at `477f831b9aefaf22b428c8b7a52e31c4b2d3e6b4`
+provisioned two no-DPU ARM64 guests with IPv6-only installed OS networking.
+The outer control plane and gateway remained dual-stack; Internet IPv6 used
+existing gateway NAT. This did not test IPv6-only stack bootstrap or DPU/HBN
+forwarding.
+
+Both guests, `fd42:84:30::a` and `fd42:84:30::b`, passed Internet HTTPS with TLS
+verification, normal address selection, IPv6 DNS, bidirectional ICMP and SSH
+reachability, and absence of non-loopback IPv4 addresses and routes. The same
+checks passed after supported NICo instance reboots, with changed boot IDs and
+both machines in `Assigned/Ready`. Root filesystem and per-instance markers
+were verified separately; no failed systemd units remained.
+
+ARP and IPv4 were blocked for both host and BMC MAC addresses through
+installation and reboot. IPv6 BMC registrations, firmware/iPXE HTTP requests,
+OS image downloads and DHCPv6 exchanges were observed. Only the first target
+underwent release and Scout cleanup while that guard was active; the second
+was already Ready. This does not establish secure erasure of virtio disks.
+The temporary guard and captures were removed after validation, leaving both
+IPv6-only tenants running.
+
+This was not an unmodified default-artifact run. Additional IPv6 Core/PXE/DNS
+Services, routes, AAAA records, DHCPv6 options and an IPv6 image listener were
+configured. The rebuilt Scout and imager used the historical address-only
+`UseDelegatedPrefix=no` policy, including Scout's generated preferred-interface
+configuration. [PR 7702](https://github.com/dsx-ai-factory/infra-controller/pull/7702)
+was already merged and present in the tested source; the override does not
+establish that another prefix-delegation fix is necessary. Mixed IA_NA/IA_PD
+behavior was not requalified by this run. The lab extension does not add that
+override to production boot sources.
+
+Each guest passed 15 functional checks before and after reboot. The two
+remaining checks reported the known cloud-init user-data schema warning
+covered by [PR 7728](https://github.com/dsx-ai-factory/infra-controller/pull/7728).
+The exact error was the unexpected top-level `network` property. Network-config
+was valid; a temporary user-data copy with only that extracted property removed
+passed schema validation. All cloud-init execution-error lists were empty.
+The raw nonzero validator results were retained rather than relabeled as an
+unqualified pass.
+
+Nested disk imaging was slow, and the outer kernel reported a KVM memory-unmap
+soft lockup during an installer reboot. It recovered; installed-OS startup and
+both supported reboots completed. This run does not establish a fix for that
+performance issue.
+
+The reusable `configure_ipv6.py` and `validate_ipv6_only.py` helpers preserve
+these setup and guest-check operations on the lab-extension branch. Their
+follow-up validation reapplies configuration to the retained lab and checks
+both guests; it does not replace the original provisioning/guard evidence.
+Machine-specific captures, credentials, instance identifiers and private lab
+artifacts are not part of this branch. The IPv6 lifecycle prerequisites and
+remaining manual steps are described in [the profile README](README.md).
+
+The final reusable setup helper was applied twice to the retained lab: service
+addresses and CoreDNS/DHCPv6 pod identities remained stable on the second run.
+Both guests then passed the same 15 functional checks using the reusable
+validator, which retained the two known schema/warning failures. All 30
+portable VM-host tests passed with the documented PyYAML prerequisite;
+independent review also passed the nine new helper/validator regression tests.
