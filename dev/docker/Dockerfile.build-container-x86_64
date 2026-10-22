@@ -15,6 +15,12 @@
 # limitations under the License.
 #
 
+ARG DEBIAN_IMAGE=debian:12-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+FROM ${DEBIAN_IMAGE} AS kea-builder
+ARG KEA_VERSION
+COPY dev/docker/build-kea.sh dev/docker/kea-reuse-null.patch /tmp/kea-build/
+RUN /tmp/kea-build/build-kea.sh "${KEA_VERSION}"
+
 # This should match rust-toolchain.toml
 FROM rust:1.97.1-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3
 
@@ -73,19 +79,15 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update && \
 	git && \
 	rm -rf /var/lib/apt/lists/*
 
+# Install the same patched Kea library used by runtime images and retain the
+# package for the DevSpace artifact image.
+COPY --from=kea-builder /kea-packages /opt/kea
+RUN dpkg -i /opt/kea/kea-common.deb && \
+	install -m 0644 /opt/kea/cfg_globals.h /usr/include/kea/dhcpsrv/cfg_globals.h && \
+	printf '#include <dhcpsrv/lease_mgr_factory.h>\n' | c++ -x c++ -fsyntax-only -I/usr/include/kea -
+
 RUN test "$(dpkg-query -W -f='${Version}' kea-dev)" = "${KEA_VERSION}" && \
 	kea-dhcp6 -V
-
-# Debian's Kea 2.2.0-6 development package omits a header required by
-# lease_mgr_factory.h. Restore the upstream declaration without changing Kea.
-RUN if [ ! -f /usr/include/kea/dhcpsrv/cfg_globals.h ]; then \
-	test "${KEA_VERSION}" = "2.2.0-6" && \
-	curl -fsSL https://raw.githubusercontent.com/isc-projects/kea/becddc2abdfba6d2ae305768c5ea334d9dede0de/src/lib/dhcpsrv/cfg_globals.h -o /tmp/kea-cfg_globals.h && \
-	echo 'e536a71235493949d9fc07c1ec1ff69b82c9d215627ba4bd1bfd2e2e6ac5c50e  /tmp/kea-cfg_globals.h' | sha256sum -c - && \
-	install -m 0644 /tmp/kea-cfg_globals.h /usr/include/kea/dhcpsrv/cfg_globals.h && \
-	rm /tmp/kea-cfg_globals.h; \
-	fi && \
-	printf '#include <dhcpsrv/lease_mgr_factory.h>\n' | c++ -x c++ -fsyntax-only -I/usr/include/kea -
 
 # make LLVM's linker lld the default, because ld crashes using too much memory
 RUN update-alternatives --install /usr/bin/ld ld /usr/bin/lld 50
