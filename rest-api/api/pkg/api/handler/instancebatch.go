@@ -547,7 +547,13 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 
 	// Authorize foreign selectors before validating them, so a Tenant without the
 	// capability can't read a foreign VPC or VPC Prefix's state from the errors.
-	if apiErr := apiRequest.AuthorizeAndValidateInterfaceVpcs(ctx, &logger, bcih.dbSession, tenant, site.ID, interfaceVpcIDMap, vpcPrefixIDMap); apiErr != nil {
+	if apiRequest.IntroducesForeignVpcAttachment(tenant.ID, interfaceVpcIDMap, vpcPrefixIDMap) {
+		if apiErr := common.AuthorizeForeignVpcAttachment(ctx, logger, bcih.dbSession, tenant, site.ID); apiErr != nil {
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
+		}
+	}
+	if apiErr := model.ValidateInterfaceVpcs(interfaceVpcIDMap, apiRequest.Interfaces, site.ID); apiErr != nil {
+		logger.Warn().Err(apiErr).Msg("failed to validate VPCs specified by batch Instance interfaces")
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
 
