@@ -321,6 +321,10 @@ impl RmsInventory for ControlState {
         self.device_by_bmc_mac(bmc_mac)?
             .set_nvos_password(username, password)
     }
+
+    fn reset_switch(&self, bmc_mac: MacAddress) -> eyre::Result<()> {
+        self.device_by_bmc_mac(bmc_mac)?.reset_nvos()
+    }
 }
 
 /// The Redfish reset an RMS power operation stands for; RMS documents `RESET`
@@ -652,7 +656,10 @@ async fn process(State(mut state): State<ControlRouter>, request: Request<Body>)
 async fn call_inner_router(router: &mut Router, request: Request<Body>) -> Response {
     let (head, body) = request.into_parts();
 
-    let mut rb = Request::builder().uri(&head.uri).method(&head.method);
+    let mut rb = Request::builder()
+        .uri(&head.uri)
+        .method(&head.method)
+        .version(head.version);
     for (key, value) in &head.headers {
         rb = rb.header(key, value);
     }
@@ -668,7 +675,7 @@ mod tests {
 
     use axum::Router;
     use axum::body::{Body, to_bytes};
-    use axum::http::{Method, Request, StatusCode};
+    use axum::http::{Method, Request, StatusCode, Version};
     use axum::routing::get;
     use bmc_mock::mac_address_pool::PoolConfig as MacAddressPoolConfig;
     use bmc_mock::{HardwareType, HostMachineInfo, RackInfo, RackType};
@@ -1014,6 +1021,35 @@ mod tests {
         assert!(state.power_state(unknown).is_err());
     }
 
+    #[test]
+    fn rms_switch_reset_reaches_nvos_and_rejects_other_devices() {
+        let switch = DeviceHandle::for_control_test_switch(
+            rack_member_info(HardwareType::NvidiaSwitchNd5200Ld, 19, 0x19),
+            "switch-19",
+            None,
+        );
+        let host = DeviceHandle::for_control_test(Vec::new(), None);
+        let switch_mac = switch.host_info().bmc_mac_address;
+        let host_mac = host.host_info().bmc_mac_address;
+        let state = control_state(vec![switch.clone(), host]);
+        let factory_admin = switch.persisted().nvos_admin.unwrap();
+        state
+            .set_switch_password(switch_mac, &factory_admin.username, "rotated")
+            .unwrap();
+        let power_before = state.power_state(switch_mac).unwrap();
+
+        state.reset_switch(switch_mac).unwrap();
+
+        assert_eq!(switch.persisted().nvos_admin, Some(factory_admin));
+        assert_eq!(state.power_state(switch_mac).unwrap(), power_before);
+        assert!(state.reset_switch(host_mac).is_err());
+        assert!(
+            state
+                .reset_switch(MacAddress::new([2, 0, 0, 0, 0, 0x99]))
+                .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn expected_inventory_status_reports_registration_summary() {
         let summary = ExpectedInventorySummary {
@@ -1327,6 +1363,37 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert_eq!(&body[..], b"bmc");
+    }
+
+    #[tokio::test]
+    async fn authority_misses_preserve_http_version_through_control_router() {
+        let inner = bmc_mock::combined_router(Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )));
+        let router = append(Some(inner), control_state(Vec::new()));
+        for (version, expected) in [(Version::HTTP_11, Some("close")), (Version::HTTP_2, None)] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/redfish/v1")
+                        .header("host", "172.20.0.20")
+                        .version(version)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{version:?}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get("connection")
+                    .map(|v| v.to_str().unwrap()),
+                expected,
+                "{version:?}"
+            );
+        }
     }
 
     #[tokio::test]

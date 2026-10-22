@@ -1411,16 +1411,20 @@ dependencies = [
  "eyre",
  "futures",
  "itertools 0.14.0",
+ "librms",
  "mac_address",
  "metrics-endpoint",
  "mqttea",
  "opentelemetry 0.32.0",
+ "reqwest 0.13.4",
  "serde_json",
  "serial_test",
  "sqlx",
  "temp-dir",
  "tokio",
  "tokio-util",
+ "toml 1.1.2+spec-1.1.0",
+ "tonic",
  "tracing",
 ]
 
@@ -1481,12 +1485,14 @@ name = "carbide-api-test-helper"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "axum",
  "bmc-mock",
  "bmc-vendor",
  "carbide-api",
  "carbide-api-db",
  "carbide-instrument",
  "carbide-machine-a-tron",
+ "carbide-rms-mock",
  "carbide-rpc",
  "carbide-secrets",
  "carbide-tls",
@@ -1512,6 +1518,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "toml 1.1.2+spec-1.1.0",
  "tonic",
  "tonic-client-wrapper 0.1.0",
  "tracing",
@@ -2582,6 +2589,7 @@ dependencies = [
 name = "carbide-machine-a-tron"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "axum",
  "base64",
  "bmc-mock",
@@ -2622,6 +2630,7 @@ dependencies = [
  "tokio-util",
  "toml 1.1.2+spec-1.1.0",
  "tonic",
+ "tonic-client-wrapper 0.1.0",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -11862,6 +11871,7 @@ dependencies = [
  "futures-core",
  "futures-io",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "slab",
  "tokio",

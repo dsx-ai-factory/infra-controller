@@ -1955,6 +1955,7 @@ where
         )]),
         carbide_api_url: format!("https://{}:{}", api_addr.ip(), api_addr.port()),
         dhcp: DhcpType::Api {},
+        bmc_dhcp_renewal_interval: Duration::from_secs(900),
         log_file: None,
         log_format: LogFormat::Compact,
         bmc_mock_port: 0, // unused, we're using dynamic ports on localhost

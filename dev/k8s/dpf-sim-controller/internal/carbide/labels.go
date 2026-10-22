@@ -74,6 +74,13 @@ const (
 	// so reconciles fire far more often than PhaseDwell; this timestamp is what
 	// actually gates dwell phases, not the requeue cadence. Simulator-local.
 	AnnSimPhaseEnteredAt = "sim.dpu.nvidia.com/phase-entered-at"
+
+	// AnnSimBFBInstallTask holds the path of the Redfish task the simulator
+	// started to install the BFB while the DPU is in OS Installing (only when
+	// the Redfish install is enabled). It stops a later reconcile from
+	// submitting a second install, and is cleared when the DPU leaves the
+	// phase. Simulator-local.
+	AnnSimBFBInstallTask = "sim.dpu.nvidia.com/bfb-install-task"
 )
 
 // MaintenanceHoldName is the DPUNodeMaintenance CR name for a node's
