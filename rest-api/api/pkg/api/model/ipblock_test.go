@@ -196,6 +196,7 @@ func TestAPIIPBlockNew(t *testing.T) {
 	dbObj := &cdbm.IPBlock{
 		ID:                       uuid.New(),
 		Name:                     "test",
+		Managed:                  true,
 		SiteID:                   uuid.New(),
 		InfrastructureProviderID: uuid.New(),
 		TenantID:                 cutil.GetPtr(uuid.New()),
@@ -207,6 +208,8 @@ func TestAPIIPBlockNew(t *testing.T) {
 		Created:                  cdb.GetCurTime(),
 		Updated:                  cdb.GetCurTime(),
 	}
+	unmanaged := *dbObj
+	unmanaged.Managed = false
 	dbsds := []cdbm.StatusDetail{
 		{
 			ID:       uuid.New(),
@@ -241,6 +244,7 @@ func TestAPIIPBlockNew(t *testing.T) {
 			apiObj: &APIIPBlock{
 				ID:                       dbObj.ID.String(),
 				Name:                     dbObj.Name,
+				Managed:                  true,
 				Description:              dbObj.Description,
 				SiteID:                   dbObj.SiteID.String(),
 				InfrastructureProviderID: dbObj.InfrastructureProviderID.String(),
@@ -263,8 +267,8 @@ func TestAPIIPBlockNew(t *testing.T) {
 			},
 		},
 		{
-			desc:       "test creating API IPBlock nil usage stats",
-			dbObj:      dbObj,
+			desc:       "test creating unmanaged API IPBlock with nil usage stats",
+			dbObj:      &unmanaged,
 			sdObj:      dbsds,
 			dbUsageObj: nil,
 			apiObj: &APIIPBlock{
@@ -290,23 +294,13 @@ func TestAPIIPBlockNew(t *testing.T) {
 		t.Run(tc.desc, func(t *testing.T) {
 			got := NewAPIIPBlock(tc.dbObj, tc.sdObj, tc.dbUsageObj)
 			assert.Equal(t, tc.apiObj, got)
-		})
-	}
-}
-
-func TestAPIIPBlock_MarshalJSON(t *testing.T) {
-	for _, managed := range []bool{true, false} {
-		t.Run(fmt.Sprintf("managed=%t", managed), func(t *testing.T) {
-			block := &cdbm.IPBlock{Managed: managed}
-			for _, response := range []interface{}{NewAPIIPBlock(block, nil, nil), NewAPIIPBlockSummary(block)} {
-				data, err := json.Marshal(response)
-				require.NoError(t, err)
-				var fields map[string]interface{}
-				require.NoError(t, json.Unmarshal(data, &fields))
-				value, present := fields["managed"]
-				require.True(t, present, "false is a supported value, not an omitted field")
-				require.Equal(t, managed, value)
-			}
+			data, err := json.Marshal(got)
+			require.NoError(t, err)
+			var fields map[string]interface{}
+			require.NoError(t, json.Unmarshal(data, &fields))
+			value, present := fields["managed"]
+			require.True(t, present, "false is a supported value, not an omitted field")
+			require.Equal(t, tc.dbObj.Managed, value)
 		})
 	}
 }
@@ -315,6 +309,7 @@ func TestAPIIPBlockNewIPBlockSummary(t *testing.T) {
 	dbObj := &cdbm.IPBlock{
 		ID:                       uuid.New(),
 		Name:                     "test",
+		Managed:                  true,
 		SiteID:                   uuid.New(),
 		InfrastructureProviderID: uuid.New(),
 		TenantID:                 cutil.GetPtr(uuid.New()),
@@ -326,6 +321,8 @@ func TestAPIIPBlockNewIPBlockSummary(t *testing.T) {
 		Created:                  cdb.GetCurTime(),
 		Updated:                  cdb.GetCurTime(),
 	}
+	unmanaged := *dbObj
+	unmanaged.Managed = false
 	tests := []struct {
 		desc   string
 		dbObj  *cdbm.IPBlock
@@ -334,6 +331,19 @@ func TestAPIIPBlockNewIPBlockSummary(t *testing.T) {
 		{
 			desc:  "test creating API IPBlockSummary",
 			dbObj: dbObj,
+			apiObj: &APIIPBlockSummary{
+				ID:           dbObj.ID.String(),
+				Name:         dbObj.Name,
+				Managed:      true,
+				RoutingType:  dbObj.RoutingType,
+				Prefix:       dbObj.Prefix,
+				PrefixLength: dbObj.PrefixLength,
+				Status:       dbObj.Status,
+			},
+		},
+		{
+			desc:  "test creating unmanaged API IPBlockSummary",
+			dbObj: &unmanaged,
 			apiObj: &APIIPBlockSummary{
 				ID:           dbObj.ID.String(),
 				Name:         dbObj.Name,
@@ -348,6 +358,13 @@ func TestAPIIPBlockNewIPBlockSummary(t *testing.T) {
 		t.Run(tc.desc, func(t *testing.T) {
 			got := NewAPIIPBlockSummary(tc.dbObj)
 			assert.Equal(t, tc.apiObj, got)
+			data, err := json.Marshal(got)
+			require.NoError(t, err)
+			var fields map[string]interface{}
+			require.NoError(t, json.Unmarshal(data, &fields))
+			value, present := fields["managed"]
+			require.True(t, present, "false is a supported value, not an omitted field")
+			require.Equal(t, tc.dbObj.Managed, value)
 		})
 	}
 }

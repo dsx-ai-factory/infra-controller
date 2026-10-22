@@ -41,6 +41,7 @@ var inventoryWorkflowTypes = []string{
 	"UpdateOperatingSystemInventory",
 	"UpdateIpxeTemplateInventory",
 	"UpdateVpcPrefixInventory",
+	"UpdateSitePrefixInventory",
 	"UpdateVpcPeeringInventory",
 	"UpdateExpectedMachineInventory",
 	"UpdateExpectedPowerShelfInventory",

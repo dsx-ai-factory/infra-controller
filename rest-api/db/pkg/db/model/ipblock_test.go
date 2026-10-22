@@ -75,35 +75,145 @@ func TestGetSiteFabricIPBlockRoutingType(t *testing.T) {
 }
 
 func TestIPBlock_Key(t *testing.T) {
+	siteID, providerID := uuid.New(), uuid.New()
 	base := IPBlock{
-		SiteID: uuid.New(), InfrastructureProviderID: uuid.New(), Managed: true,
-		Prefix: "10.0.0.0", PrefixLength: 24,
-		ProtocolVersion: IPBlockProtocolVersionV4, RoutingType: IPBlockRoutingTypeDatacenterOnly,
+		SiteID:                   siteID,
+		InfrastructureProviderID: providerID,
+		Managed:                  true,
+		Prefix:                   "10.0.0.0",
+		PrefixLength:             24,
+		ProtocolVersion:          IPBlockProtocolVersionV4,
+		RoutingType:              IPBlockRoutingTypeDatacenterOnly,
 	}
 	tests := []struct {
-		name   string
-		change func(*IPBlock)
-		equal  bool
+		name  string
+		block IPBlock
+		equal bool
 	}{
-		{"Site", func(b *IPBlock) { b.SiteID = uuid.New() }, false},
-		{"provider", func(b *IPBlock) { b.InfrastructureProviderID = uuid.New() }, false},
-		{"tenant", func(b *IPBlock) { b.TenantID = cutil.GetPtr(uuid.New()) }, false},
-		{"management", func(b *IPBlock) { b.Managed = false }, false},
-		{"prefix", func(b *IPBlock) { b.Prefix = "10.1.0.0" }, false},
-		{"length", func(b *IPBlock) { b.PrefixLength = 25 }, false},
-		{"family", func(b *IPBlock) { b.ProtocolVersion = IPBlockProtocolVersionV6 }, false},
-		{"routing", func(b *IPBlock) { b.RoutingType = IPBlockRoutingTypePublic }, false},
-		{"IDs metadata and lifecycle are excluded", func(b *IPBlock) {
-			b.ID, b.SitePrefixID = uuid.New(), cutil.GetPtr(uuid.New())
-			b.Name, b.Description = "REST name", cutil.GetPtr("REST description")
-			b.Status, b.Deleted = IPBlockStatusDeleting, cutil.GetPtr(time.Now())
-		}, true},
+		{
+			name:  "same block",
+			block: base,
+			equal: true,
+		},
+		{
+			name: "Site",
+			block: IPBlock{
+				SiteID:                   uuid.New(),
+				InfrastructureProviderID: providerID,
+				Managed:                  true,
+				Prefix:                   "10.0.0.0",
+				PrefixLength:             24,
+				ProtocolVersion:          IPBlockProtocolVersionV4,
+				RoutingType:              IPBlockRoutingTypeDatacenterOnly,
+			},
+		},
+		{
+			name: "provider",
+			block: IPBlock{
+				SiteID:                   siteID,
+				InfrastructureProviderID: uuid.New(),
+				Managed:                  true,
+				Prefix:                   "10.0.0.0",
+				PrefixLength:             24,
+				ProtocolVersion:          IPBlockProtocolVersionV4,
+				RoutingType:              IPBlockRoutingTypeDatacenterOnly,
+			},
+		},
+		{
+			name: "tenant",
+			block: IPBlock{
+				SiteID:                   siteID,
+				InfrastructureProviderID: providerID,
+				Managed:                  true,
+				Prefix:                   "10.0.0.0",
+				PrefixLength:             24,
+				ProtocolVersion:          IPBlockProtocolVersionV4,
+				RoutingType:              IPBlockRoutingTypeDatacenterOnly,
+				TenantID:                 cutil.GetPtr(uuid.New()),
+			},
+		},
+		{
+			name: "management",
+			block: IPBlock{
+				SiteID:                   siteID,
+				InfrastructureProviderID: providerID,
+				Prefix:                   "10.0.0.0",
+				PrefixLength:             24,
+				ProtocolVersion:          IPBlockProtocolVersionV4,
+				RoutingType:              IPBlockRoutingTypeDatacenterOnly,
+			},
+		},
+		{
+			name: "prefix",
+			block: IPBlock{
+				SiteID:                   siteID,
+				InfrastructureProviderID: providerID,
+				Managed:                  true,
+				Prefix:                   "10.1.0.0",
+				PrefixLength:             24,
+				ProtocolVersion:          IPBlockProtocolVersionV4,
+				RoutingType:              IPBlockRoutingTypeDatacenterOnly,
+			},
+		},
+		{
+			name: "length",
+			block: IPBlock{
+				SiteID:                   siteID,
+				InfrastructureProviderID: providerID,
+				Managed:                  true,
+				Prefix:                   "10.0.0.0",
+				PrefixLength:             25,
+				ProtocolVersion:          IPBlockProtocolVersionV4,
+				RoutingType:              IPBlockRoutingTypeDatacenterOnly,
+			},
+		},
+		{
+			name: "family",
+			block: IPBlock{
+				SiteID:                   siteID,
+				InfrastructureProviderID: providerID,
+				Managed:                  true,
+				Prefix:                   "10.0.0.0",
+				PrefixLength:             24,
+				ProtocolVersion:          IPBlockProtocolVersionV6,
+				RoutingType:              IPBlockRoutingTypeDatacenterOnly,
+			},
+		},
+		{
+			name: "routing",
+			block: IPBlock{
+				SiteID:                   siteID,
+				InfrastructureProviderID: providerID,
+				Managed:                  true,
+				Prefix:                   "10.0.0.0",
+				PrefixLength:             24,
+				ProtocolVersion:          IPBlockProtocolVersionV4,
+				RoutingType:              IPBlockRoutingTypePublic,
+			},
+		},
+		{
+			name: "IDs metadata and lifecycle are excluded",
+			block: IPBlock{
+				SiteID:                   siteID,
+				InfrastructureProviderID: providerID,
+				Managed:                  true,
+				Prefix:                   "10.0.0.0",
+				PrefixLength:             24,
+				ProtocolVersion:          IPBlockProtocolVersionV4,
+				RoutingType:              IPBlockRoutingTypeDatacenterOnly,
+				ID:                       uuid.New(),
+				SitePrefixID:             cutil.GetPtr(uuid.New()),
+				Name:                     "REST name",
+				Description:              cutil.GetPtr("REST description"),
+				Status:                   IPBlockStatusDeleting,
+				Deleted:                  cutil.GetPtr(time.Now()),
+			},
+			equal: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			block := base
-			tt.change(&block)
-			require.Equal(t, tt.equal, base.Key() == block.Key())
+			require.Equal(t, tt.equal, base.Key() == tt.block.Key())
 		})
 	}
 }
@@ -583,18 +693,26 @@ func TestIPBlockSQLDAO_GetOne(t *testing.T) {
 		wantErr error
 	}{
 		{
-			name: "provider sees linked Allocation", id: linkedAllocation.ID, filter: providerVisibleFilter,
+			name:   "provider sees linked Allocation",
+			id:     linkedAllocation.ID,
+			filter: providerVisibleFilter,
 		},
 		{
-			name: "Allocation filter sees linked Allocation", id: linkedAllocation.ID, filter: tenantAllocatedFilter,
+			name:   "Allocation filter sees linked Allocation",
+			id:     linkedAllocation.ID,
+			filter: tenantAllocatedFilter,
 		},
 		{
-			name: "provider cannot see unlinked tenant-created block", id: unlinkedTenantBlock.ID,
-			filter: providerVisibleFilter, wantErr: db.ErrDoesNotExist,
+			name:    "provider cannot see unlinked tenant-created block",
+			id:      unlinkedTenantBlock.ID,
+			filter:  providerVisibleFilter,
+			wantErr: db.ErrDoesNotExist,
 		},
 		{
-			name: "Allocation filter excludes unlinked tenant-created block", id: unlinkedTenantBlock.ID,
-			filter: tenantAllocatedFilter, wantErr: db.ErrDoesNotExist,
+			name:    "Allocation filter excludes unlinked tenant-created block",
+			id:      unlinkedTenantBlock.ID,
+			filter:  tenantAllocatedFilter,
+			wantErr: db.ErrDoesNotExist,
 		},
 		{
 			name:   "provider sees Site fabric root",

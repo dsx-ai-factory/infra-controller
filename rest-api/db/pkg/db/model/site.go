@@ -262,7 +262,7 @@ func (ssd SiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, incl
 	query := db.GetIDB(tx, ssd.dbSession).NewSelect().Model(st).Where("st.id = ?", id)
 	if forUpdate {
 		// Exclude Site deletion while allowing child inserts to check their Site foreign key.
-		query = query.For("NO KEY UPDATE")
+		query = query.For("NO KEY UPDATE OF st")
 	}
 	for _, relation := range includeRelations {
 		query = query.Relation(relation)
