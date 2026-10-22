@@ -255,7 +255,11 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
             .links
             .as_ref()
             .and_then(|l| l.manager_for_servers.as_ref())
-            .is_some_and(|servers| servers.iter().any(|s| *s.id() == system.raw().odata_id))
+            .is_some_and(|servers| {
+                servers
+                    .iter()
+                    .any(|s| *s.id() == explored_system.system.raw().odata_id)
+            })
     }) {
         Some(i) => managers.swap_remove(i),
         None => managers
