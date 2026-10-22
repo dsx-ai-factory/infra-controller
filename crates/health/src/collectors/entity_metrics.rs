@@ -549,8 +549,27 @@ macro_rules! nvidia_common_processor_fields {
             "nvidia_nvofa_utilization",
             "percent"
         );
-        scalar!(out, m, pcie_tx_bytes, "nvidia_pcie_tx", "bytes");
-        scalar!(out, m, pcie_rx_bytes, "nvidia_pcie_rx", "bytes");
+        // NVIDIA defines these as total bytes sent and received over PCIe.
+        scalar!(
+            out,
+            m,
+            pcie_tx_bytes,
+            "nvidia_pcie_tx",
+            "bytes",
+            device_total(
+                "Number of bytes sent by the NVIDIA processor PCIe transmitter, by processor_id and system_id"
+            )
+        );
+        scalar!(
+            out,
+            m,
+            pcie_rx_bytes,
+            "nvidia_pcie_rx",
+            "bytes",
+            device_total(
+                "Number of bytes received by the NVIDIA processor PCIe receiver, by processor_id and system_id"
+            )
+        );
         scalar!(
             out,
             m,
@@ -593,29 +612,45 @@ macro_rules! nvidia_common_processor_fields {
             "nvidia_nvlink_data_rx_bandwidth",
             "gbps"
         );
+        // NVIDIA defines these throttling durations as totals since reset.
         duration_seconds!(
             out,
             m,
             hardware_violation_throttle_duration,
-            "nvidia_hardware_violation_throttle"
+            "nvidia_hardware_violation_throttle",
+            device_total(
+                "Number of seconds the NVIDIA processor has throttled due to hardware violation since reset, by processor_id and system_id"
+            )
         );
         duration_seconds!(
             out,
             m,
             global_software_violation_throttle_duration,
-            "nvidia_global_software_violation_throttle"
+            "nvidia_global_software_violation_throttle",
+            device_total(
+                "Number of seconds the NVIDIA processor has throttled due to global software violation since reset, by processor_id and system_id"
+            )
         );
+        // These accumulate while the driver is loaded. SBR or fundamental resets
+        // and `ClearAccumulatedUtilizationCounters` clear them; they also roll
+        // over to zero after about 49 days of activity.
         duration_seconds!(
             out,
             m,
             accumulated_gpu_context_utilization_duration,
-            "nvidia_accumulated_gpu_context_utilization"
+            "nvidia_accumulated_gpu_context_utilization",
+            device_total(
+                "Number of seconds of GPU context utilization accumulated with the driver loaded, by processor_id and system_id; resets on SBR, fundamental reset, or ClearAccumulatedUtilizationCounters and wraps after approximately 49 days of activity"
+            )
         );
         duration_seconds!(
             out,
             m,
             accumulated_sm_utilization_duration,
-            "nvidia_accumulated_sm_utilization"
+            "nvidia_accumulated_sm_utilization",
+            device_total(
+                "Number of seconds of SM utilization accumulated with the driver loaded, by processor_id and system_id; resets on SBR, fundamental reset, or ClearAccumulatedUtilizationCounters and wraps after approximately 49 days of activity"
+            )
         );
 
         // `ThrottleReasons` is a list of strings; project only how many
@@ -775,11 +810,15 @@ fn nvidia_processor_metric_fields(m: &NvidiaProcessorMetrics) -> Vec<MetricField
                 memory_spare_channel_presence,
                 "nvidia_memory_spare_channel_present"
             );
+            // NVIDIA defines power-brake duration as total asserted time since reset.
             duration_seconds!(
                 out,
                 generic,
                 power_brake_assertion_duration,
-                "nvidia_power_brake_assertion"
+                "nvidia_power_brake_assertion",
+                device_total(
+                    "Number of seconds the NVIDIA processor power brake has been asserted since reset, by processor_id and system_id"
+                )
             );
             duration_seconds!(out, generic, cpu_uptime, "nvidia_cpu_uptime");
         }
@@ -794,19 +833,26 @@ fn nvidia_memory_metric_fields(m: &NvidiaMemoryMetrics) -> Vec<MetricField> {
         return out;
     };
 
+    // NVIDIA defines these as total row remappings caused by memory errors.
     scalar!(
         out,
         rr,
         correctable_row_remapping_count,
         "nvidia_correctable_row_remapping",
-        "count"
+        "count",
+        device_total(
+            "Number of memory row remappings due to correctable errors reported by the NVIDIA device, by memory_id and system_id"
+        )
     );
     scalar!(
         out,
         rr,
         uncorrectable_row_remapping_count,
         "nvidia_uncorrectable_row_remapping",
-        "count"
+        "count",
+        device_total(
+            "Number of memory row remappings due to uncorrectable errors reported by the NVIDIA device, by memory_id and system_id"
+        )
     );
 
     // The schema carries each bank-availability counter under both the
@@ -1008,6 +1054,26 @@ pub(crate) fn catalogue_samples() -> Result<Vec<MetricSample>, HealthError> {
         "ReadIOKiBytes": 5,
         "WriteIOKiBytes": 6
     }))?);
+    let nvidia_processor = nvidia_processor_metric_fields(&NvidiaProcessorMetrics::Generic(
+        Arc::new(serde_json::from_value(json!({
+            "@odata.type": "#NvidiaProcessorMetrics.v1_5_0.NvidiaProcessorMetrics",
+            "PCIeTXBytes": 1,
+            "PCIeRXBytes": 2,
+            "HardwareViolationThrottleDuration": "PT3S",
+            "GlobalSoftwareViolationThrottleDuration": "PT4S",
+            "AccumulatedGPUContextUtilizationDuration": "PT5S",
+            "AccumulatedSMUtilizationDuration": "PT6S",
+            "PowerBrakeAssertionDuration": "PT7S"
+        }))?),
+    ));
+    let nvidia_memory = nvidia_memory_metric_fields(&serde_json::from_value(json!({
+        "@odata.type": "#NvidiaMemoryMetrics.v1_2_0.NvidiaMemoryMetrics",
+        "RowRemapping": {
+            "CorrectableRowRemappingCount": 1,
+            "UncorrectableRowRemappingCount": 2
+        }
+    }))?);
+
     Ok([
         (
             processor,
@@ -1031,6 +1097,22 @@ pub(crate) fn catalogue_samples() -> Result<Vec<MetricSample>, HealthError> {
             vec![
                 (Cow::Borrowed("drive_id"), "D0".to_string()),
                 (Cow::Borrowed("storage_id"), "1".to_string()),
+                (Cow::Borrowed("system_id"), "1".to_string()),
+            ],
+        ),
+        (
+            nvidia_processor,
+            "/redfish/v1/Systems/1/Processors/GPU0",
+            vec![
+                (Cow::Borrowed("processor_id"), "GPU0".to_string()),
+                (Cow::Borrowed("system_id"), "1".to_string()),
+            ],
+        ),
+        (
+            nvidia_memory,
+            "/redfish/v1/Systems/1/Memory/GPU0_DRAM",
+            vec![
+                (Cow::Borrowed("memory_id"), "GPU0_DRAM".to_string()),
                 (Cow::Borrowed("system_id"), "1".to_string()),
             ],
         ),
@@ -1885,6 +1967,11 @@ mod tests {
                             "NVLinkRawTxBandwidthGbps": 100.0,
                             "NVLinkRawRxBandwidthGbps": 99.0,
                             "PCIeRawTxBandwidthGbps": 25.0,
+                            "PCIeTXBytes": 21,
+                            "PCIeRXBytes": 22,
+                            "HardwareViolationThrottleDuration": "PT1S",
+                            "GlobalSoftwareViolationThrottleDuration": "PT2S",
+                            "AccumulatedGPUContextUtilizationDuration": "PT3S",
                             "AccumulatedSMUtilizationDuration": "PT1M30S",
                             "SMUtilizationPercent": 77.0,
                             "IntegerActivityUtilizationPercent": 5.0,
@@ -1894,23 +1981,53 @@ mod tests {
                             "SRAMECCErrorThresholdExceeded": true
                         }),
                     },
-                    expect: expected([
-                        ("nvidia_sm_activity", "percent", 88.0),
-                        ("nvidia_sm_occupancy", "percent", 41.0),
-                        ("nvidia_graphics_engine_activity", "percent", 90.5),
-                        ("nvidia_fp64_activity", "percent", 10.0),
-                        ("nvidia_fp32_activity", "percent", 20.0),
-                        ("nvidia_fp16_activity", "percent", 30.0),
-                        ("nvidia_nvlink_raw_tx_bandwidth", "gbps", 100.0),
-                        ("nvidia_nvlink_raw_rx_bandwidth", "gbps", 99.0),
-                        ("nvidia_pcie_raw_tx_bandwidth", "gbps", 25.0),
-                        ("nvidia_accumulated_sm_utilization", "seconds", 90.0),
-                        ("nvidia_sm_utilization", "percent", 77.0),
-                        ("nvidia_integer_activity_utilization", "percent", 5.0),
-                        ("nvidia_dram_memory_cache_hit", "percent", 95.0),
-                        ("nvidia_dram_memory_cache_miss", "percent", 5.0),
-                        ("nvidia_c2c_data_tx_bandwidth", "gbps", 300.0),
-                        ("nvidia_sramecc_error_threshold_exceeded", "bool", 1.0),
+                    expect: expected_with_semantics([
+                        ("nvidia_sm_activity", "percent", 88.0, Gauge),
+                        ("nvidia_sm_occupancy", "percent", 41.0, Gauge),
+                        ("nvidia_graphics_engine_activity", "percent", 90.5, Gauge),
+                        ("nvidia_fp64_activity", "percent", 10.0, Gauge),
+                        ("nvidia_fp32_activity", "percent", 20.0, Gauge),
+                        ("nvidia_fp16_activity", "percent", 30.0, Gauge),
+                        ("nvidia_nvlink_raw_tx_bandwidth", "gbps", 100.0, Gauge),
+                        ("nvidia_nvlink_raw_rx_bandwidth", "gbps", 99.0, Gauge),
+                        ("nvidia_pcie_raw_tx_bandwidth", "gbps", 25.0, Gauge),
+                        ("nvidia_pcie_tx", "bytes", 21.0, COUNTER),
+                        ("nvidia_pcie_rx", "bytes", 22.0, COUNTER),
+                        (
+                            "nvidia_hardware_violation_throttle",
+                            "seconds",
+                            1.0,
+                            COUNTER,
+                        ),
+                        (
+                            "nvidia_global_software_violation_throttle",
+                            "seconds",
+                            2.0,
+                            COUNTER,
+                        ),
+                        (
+                            "nvidia_accumulated_gpu_context_utilization",
+                            "seconds",
+                            3.0,
+                            COUNTER,
+                        ),
+                        (
+                            "nvidia_accumulated_sm_utilization",
+                            "seconds",
+                            90.0,
+                            COUNTER,
+                        ),
+                        ("nvidia_sm_utilization", "percent", 77.0, Gauge),
+                        ("nvidia_integer_activity_utilization", "percent", 5.0, Gauge),
+                        ("nvidia_dram_memory_cache_hit", "percent", 95.0, Gauge),
+                        ("nvidia_dram_memory_cache_miss", "percent", 5.0, Gauge),
+                        ("nvidia_c2c_data_tx_bandwidth", "gbps", 300.0, Gauge),
+                        (
+                            "nvidia_sramecc_error_threshold_exceeded",
+                            "bool",
+                            1.0,
+                            Gauge,
+                        ),
                     ]),
                 },
                 Check {
@@ -1929,12 +2046,12 @@ mod tests {
                             "SMUtilizationPercent": 99.0
                         }),
                     },
-                    expect: expected([
-                        ("nvidia_sm_activity", "percent", 12.0),
-                        ("nvidia_memory_page_retirement", "count", 4.0),
-                        ("nvidia_memory_spare_channel_present", "bool", 0.0),
-                        ("nvidia_power_brake_assertion", "seconds", 3.0),
-                        ("nvidia_cpu_uptime", "seconds", 86400.0),
+                    expect: expected_with_semantics([
+                        ("nvidia_sm_activity", "percent", 12.0, Gauge),
+                        ("nvidia_memory_page_retirement", "count", 4.0, Gauge),
+                        ("nvidia_memory_spare_channel_present", "bool", 0.0, Gauge),
+                        ("nvidia_power_brake_assertion", "seconds", 3.0, COUNTER),
+                        ("nvidia_cpu_uptime", "seconds", 86400.0, Gauge),
                     ]),
                 },
                 Check {
@@ -1990,14 +2107,14 @@ mod tests {
                             }
                         }),
                     },
-                    expect: expected([
-                        ("nvidia_correctable_row_remapping", "count", 12.0),
-                        ("nvidia_uncorrectable_row_remapping", "count", 0.0),
-                        ("nvidia_max_availability_banks", "count", 30.0),
-                        ("nvidia_high_availability_banks", "count", 6.0),
-                        ("nvidia_partial_availability_banks", "count", 2.0),
-                        ("nvidia_low_availability_banks", "count", 1.0),
-                        ("nvidia_no_availability_banks", "count", 0.0),
+                    expect: expected_with_semantics([
+                        ("nvidia_correctable_row_remapping", "count", 12.0, COUNTER),
+                        ("nvidia_uncorrectable_row_remapping", "count", 0.0, COUNTER),
+                        ("nvidia_max_availability_banks", "count", 30.0, Gauge),
+                        ("nvidia_high_availability_banks", "count", 6.0, Gauge),
+                        ("nvidia_partial_availability_banks", "count", 2.0, Gauge),
+                        ("nvidia_low_availability_banks", "count", 1.0, Gauge),
+                        ("nvidia_no_availability_banks", "count", 0.0, Gauge),
                     ]),
                 },
                 Check {
@@ -2126,13 +2243,24 @@ mod tests {
         value: f64,
         labels: &[(&str, &str)],
     ) -> ObservedEvent {
+        metric_with_semantics(key, metric_type, unit, value, Gauge, labels)
+    }
+
+    fn metric_with_semantics(
+        key: &str,
+        metric_type: &str,
+        unit: &str,
+        value: f64,
+        semantics: MetricSemantics,
+        labels: &[(&str, &str)],
+    ) -> ObservedEvent {
         ObservedEvent::Metric(ObservedMetric {
             key: key.to_string(),
             name: "hw_metric".to_string(),
             metric_type: metric_type.to_string(),
             unit: unit.to_string(),
             value,
-            semantics: MetricSemantics::Gauge,
+            semantics,
             labels: labels
                 .iter()
                 .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
@@ -2242,18 +2370,26 @@ mod tests {
                                     12.25,
                                     LABELS,
                                 ),
-                                metric(
+                                metric_with_semantics(
                                     &format!("{PREFIX}/nvidia_pcie_tx"),
                                     "nvidia_pcie_tx",
                                     "bytes",
                                     51108.0,
+                                    MetricSemantics::CumulativeCounter {
+                                        description: "Number of bytes sent by the NVIDIA processor PCIe transmitter, by processor_id and system_id",
+                                        start_time: None,
+                                    },
                                     LABELS,
                                 ),
-                                metric(
+                                metric_with_semantics(
                                     &format!("{PREFIX}/nvidia_pcie_rx"),
                                     "nvidia_pcie_rx",
                                     "bytes",
                                     45388.0,
+                                    MetricSemantics::CumulativeCounter {
+                                        description: "Number of bytes received by the NVIDIA processor PCIe receiver, by processor_id and system_id",
+                                        start_time: None,
+                                    },
                                     LABELS,
                                 ),
                                 metric(
@@ -2263,11 +2399,15 @@ mod tests {
                                     18.5,
                                     LABELS,
                                 ),
-                                metric(
+                                metric_with_semantics(
                                     &format!("{PREFIX}/nvidia_hardware_violation_throttle"),
                                     "nvidia_hardware_violation_throttle",
                                     "seconds",
                                     2.0,
+                                    MetricSemantics::CumulativeCounter {
+                                        description: "Number of seconds the NVIDIA processor has throttled due to hardware violation since reset, by processor_id and system_id",
+                                        start_time: None,
+                                    },
                                     LABELS,
                                 ),
                                 metric(
@@ -2321,18 +2461,26 @@ mod tests {
                                     8192.0,
                                     LABELS,
                                 ),
-                                metric(
+                                metric_with_semantics(
                                     &format!("{PREFIX}/nvidia_correctable_row_remapping"),
                                     "nvidia_correctable_row_remapping",
                                     "count",
                                     3.0,
+                                    MetricSemantics::CumulativeCounter {
+                                        description: "Number of memory row remappings due to correctable errors reported by the NVIDIA device, by memory_id and system_id",
+                                        start_time: None,
+                                    },
                                     LABELS,
                                 ),
-                                metric(
+                                metric_with_semantics(
                                     &format!("{PREFIX}/nvidia_uncorrectable_row_remapping"),
                                     "nvidia_uncorrectable_row_remapping",
                                     "count",
                                     1.0,
+                                    MetricSemantics::CumulativeCounter {
+                                        description: "Number of memory row remappings due to uncorrectable errors reported by the NVIDIA device, by memory_id and system_id",
+                                        start_time: None,
+                                    },
                                     LABELS,
                                 ),
                                 metric(

@@ -239,7 +239,7 @@ fn assert_prometheus_family(
     assert_eq!(value, expected_value, "{name}");
 }
 
-const EXPECTED_SOURCE_NAMES: [&str; 45] = [
+const EXPECTED_SOURCE_NAMES: [&str; 54] = [
     "hw_metric_pcie_correctable_errors_count",
     "hw_metric_pcie_non_fatal_errors_count",
     "hw_metric_pcie_fatal_errors_count",
@@ -268,6 +268,15 @@ const EXPECTED_SOURCE_NAMES: [&str; 45] = [
     "hw_metric_uncorrectable_io_write_errors_count",
     "hw_metric_read_io_kibibytes",
     "hw_metric_write_io_kibibytes",
+    "hw_metric_nvidia_pcie_tx_bytes",
+    "hw_metric_nvidia_pcie_rx_bytes",
+    "hw_metric_nvidia_hardware_violation_throttle_seconds",
+    "hw_metric_nvidia_global_software_violation_throttle_seconds",
+    "hw_metric_nvidia_accumulated_gpu_context_utilization_seconds",
+    "hw_metric_nvidia_accumulated_sm_utilization_seconds",
+    "hw_metric_nvidia_power_brake_assertion_seconds",
+    "hw_metric_nvidia_correctable_row_remapping_count",
+    "hw_metric_nvidia_uncorrectable_row_remapping_count",
     "nvue_gnmi_interface_in_errors_count",
     "nvue_gnmi_interface_out_errors_count",
     "nvue_gnmi_interface_out_discards_count",
