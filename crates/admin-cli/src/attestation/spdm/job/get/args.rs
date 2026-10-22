@@ -23,7 +23,7 @@ use uuid::Uuid;
 EXAMPLES:
 
 Get the SPDM attestation details for a job:
-    $ nico-admin-cli attestation spdm get 12345678-1234-5678-90ab-cdef01234567
+    $ nico-admin-cli attestation spdm job get 12345678-1234-5678-90ab-cdef01234567
 
 ")]
 pub(crate) struct Args {

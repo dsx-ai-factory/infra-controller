@@ -9,7 +9,7 @@ nico-admin-cli-attestation-spdm - Perform SPDM attestation
 ## SYNOPSIS
 
 ```text
-nico-admin-cli attestation spdm [--extended] [--sort-by]
+nico-admin-cli attestation spdm [--sort-by]
 [-h|--help] <subcommands>
 ```
 
@@ -18,14 +18,6 @@ nico-admin-cli attestation spdm [--extended] [--sort-by]
 Perform SPDM attestation
 
 ## OPTIONS
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--sort-by <SORT_BY> [default: primary-id]`
 
@@ -47,7 +39,7 @@ Print help (see a summary with -h)
 |---|---|
 | [`cancel`](./attestation-spdm-cancel.md) | Cancel an attestation job |
 | [`coverage`](./attestation-spdm-coverage.md) | Show which hardware classes the site has and what would attest each |
-| [`get`](./attestation-spdm-get.md) | Get SPDM attestation details for a given job id |
+| [`job`](./attestation-spdm-job.md) | Inspect SPDM attestation job |
 | [`list`](./attestation-spdm-list.md) | List SPDM attestation jobs by status |
 | [`profile`](./attestation-spdm-profile.md) | Manage the attestation policy stored for each hardware class |
 | [`trigger`](./attestation-spdm-trigger.md) | Trigger attestation for a given machine with id |

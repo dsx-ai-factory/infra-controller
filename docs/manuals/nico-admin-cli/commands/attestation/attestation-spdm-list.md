@@ -11,7 +11,7 @@ status
 
 ```text
 nico-admin-cli attestation spdm list <--selector>
-[--extended] [--sort-by] [-h|--help]
+[--sort-by] [-h|--help]
 ```
 
 ## DESCRIPTION
@@ -33,14 +33,6 @@ Filter attestation jobs by status
 > - failed
 >
 > - passed
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--sort-by <SORT_BY> [default: primary-id]`
 

@@ -9,8 +9,8 @@ nico-admin-cli-attestation-spdm-cancel - Cancel an attestation job
 ## SYNOPSIS
 
 ```text
-nico-admin-cli attestation spdm cancel [--extended]
-[--sort-by] [-h|--help] <JOB_ID>
+nico-admin-cli attestation spdm cancel [--sort-by]
+[-h|--help] <JOB_ID>
 ```
 
 ## DESCRIPTION
@@ -18,14 +18,6 @@ nico-admin-cli attestation spdm cancel [--extended]
 Cancel an attestation job
 
 ## OPTIONS
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--sort-by <SORT_BY> [default: primary-id]`
 

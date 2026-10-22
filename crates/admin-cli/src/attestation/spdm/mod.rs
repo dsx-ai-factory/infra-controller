@@ -17,7 +17,7 @@
 
 mod cancel;
 mod coverage;
-mod get;
+mod job;
 mod list;
 mod profile;
 mod trigger;
@@ -64,8 +64,9 @@ pub(crate) enum Cmd {
     Cancel(cancel::args::Args),
     #[clap(about = "Show which hardware classes the site has and what would attest each")]
     Coverage(coverage::args::Args),
-    #[clap(about = "Get SPDM attestation details for a given job id")]
-    Get(get::args::Args),
+    #[dispatch]
+    #[clap(subcommand, about = "Inspect SPDM attestation job")]
+    Job(job::Cmd),
     #[clap(about = "List SPDM attestation jobs by status")]
     List(list::args::Args),
     #[dispatch]

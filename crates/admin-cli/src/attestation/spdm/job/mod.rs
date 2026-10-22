@@ -15,19 +15,14 @@
  * limitations under the License.
  */
 
-use crate::attestation::spdm::get::Args;
-use crate::errors::CarbideCliResult;
-use crate::rpc::ApiClient;
+mod get;
 
-pub(super) async fn get(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
-    let attestation = api_client
-        .0
-        .get_attestation(::rpc::common::Uuid {
-            value: args.job_id.to_string(),
-        })
-        .await?;
+use clap::Parser;
 
-    println!("{}", serde_json::to_string_pretty(&attestation)?);
+use crate::cfg::dispatch::Dispatch;
 
-    Ok(())
+#[derive(Dispatch, Parser, Debug)]
+pub(crate) enum Cmd {
+    #[clap(about = "Get SPDM attestation details for a given job id")]
+    Get(get::args::Args),
 }
