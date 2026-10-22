@@ -1297,6 +1297,7 @@ async fn plugin_full_host_approval_and_enablement_are_server_managed(
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
     let plugin = rpc::forge::MachineValidationPlugin {
         r#type: "container".to_owned(),
+        container_plugin_adapter: None,
         image: "registry.example.com/plugins/gpu-health@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
         entrypoint: vec!["/plugin/entrypoint".to_owned()],
         parameters_json: "{}".to_owned(),
@@ -3146,6 +3147,7 @@ async fn test_machine_validation_tests_on_startup_default_mode(
         ],
         approved_plugin_registries: vec![],
         allowed_plugin_types: vec!["container".to_owned()],
+        allowed_container_plugin_adapters: Vec::new(),
         allow_privileged_plugins: false,
         allow_full_host_plugins: false,
         attempt_logs: Default::default(),
@@ -3227,6 +3229,7 @@ async fn test_machine_validation_tests_enable_all_mode(
         }],
         approved_plugin_registries: vec![],
         allowed_plugin_types: vec!["container".to_owned()],
+        allowed_container_plugin_adapters: Vec::new(),
         allow_privileged_plugins: false,
         allow_full_host_plugins: false,
         attempt_logs: Default::default(),
@@ -3294,6 +3297,7 @@ async fn test_machine_validation_tests_on_startup_disable_all_mode(
         }],
         approved_plugin_registries: vec![],
         allowed_plugin_types: vec!["container".to_owned()],
+        allowed_container_plugin_adapters: Vec::new(),
         allow_privileged_plugins: false,
         allow_full_host_plugins: false,
         attempt_logs: Default::default(),
@@ -3414,6 +3418,7 @@ async fn test_machine_validation_tests_on_startup_missing_tests_config(
         tests: vec![], // Empty test configuration
         approved_plugin_registries: vec![],
         allowed_plugin_types: vec!["container".to_owned()],
+        allowed_container_plugin_adapters: Vec::new(),
         allow_privileged_plugins: false,
         allow_full_host_plugins: false,
         attempt_logs: Default::default(),
@@ -3450,6 +3455,7 @@ async fn test_machine_validation_tests_on_startup_missing_tests_config(
         tests: vec![], // Empty test configuration
         approved_plugin_registries: vec![],
         allowed_plugin_types: vec!["container".to_owned()],
+        allowed_container_plugin_adapters: Vec::new(),
         allow_privileged_plugins: false,
         allow_full_host_plugins: false,
         attempt_logs: Default::default(),

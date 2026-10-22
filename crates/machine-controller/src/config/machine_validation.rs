@@ -77,6 +77,10 @@ pub struct MachineValidationConfig {
     /// plugin registrations; legacy tests are unaffected.
     #[serde(default = "MachineValidationConfig::default_allowed_plugin_types")]
     pub allowed_plugin_types: Vec<String>,
+    /// Approved named container adapters and their declared GPU/root/read-only
+    /// dependency access. Empty by default; the standard contract needs no entry.
+    #[serde(default)]
+    pub allowed_container_plugin_adapters: Vec<String>,
     /// Allows plugin registration with the privileged container profile.
     #[serde(default)]
     pub allow_privileged_plugins: bool,
@@ -216,6 +220,9 @@ impl MachineValidationConfig {
                 "machine validation allowed_plugin_types contains unsupported type {plugin_type:?}"
             ));
         }
+        for adapter in &self.allowed_container_plugin_adapters {
+            machine_validation_adapters::resolve(Some(adapter))?;
+        }
         self.attempt_logs.validate()
     }
 }
@@ -230,6 +237,7 @@ impl Default for MachineValidationConfig {
             tests: Vec::new(),
             approved_plugin_registries: Vec::new(),
             allowed_plugin_types: Self::default_allowed_plugin_types(),
+            allowed_container_plugin_adapters: Vec::new(),
             allow_privileged_plugins: false,
             allow_full_host_plugins: false,
             attempt_logs: MachineValidationAttemptLogConfig::default(),
@@ -240,6 +248,22 @@ impl Default for MachineValidationConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn container_adapter_access_requires_explicit_site_configuration() {
+        assert!(
+            MachineValidationConfig::default()
+                .allowed_container_plugin_adapters
+                .is_empty()
+        );
+        let mut config = MachineValidationConfig {
+            allowed_container_plugin_adapters: vec!["DSXHealthValidation".to_owned()],
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+        config.allowed_container_plugin_adapters = vec!["unknown".to_owned()];
+        assert!(config.validate().is_err());
+    }
 
     #[test]
     fn attempt_log_policy_rejects_invalid_limits() {
