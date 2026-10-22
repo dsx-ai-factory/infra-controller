@@ -24,7 +24,7 @@ use prometheus::{Counter, CounterVec, Opts};
 
 use super::dedup_queue::{DedupQueue, SaveOutcome};
 use super::event_mapper::RedfishEventMapper;
-use super::{CollectorEvent, DataSink, EventContext, LogRecord, MetricSample};
+use super::{CollectorEvent, DataSink, EventContext, LogRecord, MetricSample, SharedMetric};
 use crate::HealthError;
 use crate::config::OtlpTargetConfig;
 use crate::metrics::MetricsManager;
@@ -98,7 +98,10 @@ pub(crate) fn is_otlp_log_relevant(event: &CollectorEvent) -> bool {
     )
 }
 
-fn metric_queue_key(context: &EventContext, sample: &MetricSample) -> OtlpMetricQueueKey {
+pub(super) fn metric_queue_key(
+    context: &EventContext,
+    sample: &MetricSample,
+) -> OtlpMetricQueueKey {
     OtlpMetricQueueKey {
         endpoint_key: context.endpoint_key.clone(),
         collector_type: context.collector_type,
@@ -320,6 +323,26 @@ impl DataSink for OtlpSink {
         let outcome = self
             .metrics_queue
             .save_latest(key, QueuedMetric::Shared(Arc::clone(shared)));
+
+        self.record_save_outcome(outcome, OtlpSignal::Metrics);
+
+        Ok(())
+    }
+
+    fn try_handle_shared_metric_with_identity(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+        shared: &SharedMetric,
+    ) -> Result<(), HealthError> {
+        if !matches!(event, CollectorEvent::Metric(_)) {
+            return self.try_handle_event(context, event);
+        }
+
+        let outcome = self.metrics_queue.save_latest(
+            Arc::clone(&shared.key),
+            QueuedMetric::Shared(Arc::clone(&shared.payload)),
+        );
 
         self.record_save_outcome(outcome, OtlpSignal::Metrics);
 
@@ -841,16 +864,19 @@ mod tests {
         for event in events {
             composite.handle_event(&context, &event);
 
-            let (_, QueuedMetric::Shared(first_value)) = first.metrics_queue.pop().unwrap() else {
+            let (first_key, QueuedMetric::Shared(first_value)) = first.metrics_queue.pop().unwrap()
+            else {
                 panic!("first target must retain a shared metric");
             };
 
-            let (_, QueuedMetric::Shared(second_value)) = second.metrics_queue.pop().unwrap()
+            let (second_key, QueuedMetric::Shared(second_value)) =
+                second.metrics_queue.pop().unwrap()
             else {
                 panic!("second target must retain a shared metric");
             };
 
             assert!(Arc::ptr_eq(&first_value, &second_value));
+            assert!(Arc::ptr_eq(&first_key, &second_key));
 
             let CollectorEvent::Metric(sample) = event else {
                 panic!("fixture must contain a metric");
@@ -1046,6 +1072,112 @@ mod tests {
         assert_eq!(second_other.pair().1.key, "b");
         assert!(first.metrics_queue.pop().is_none());
         assert!(second.metrics_queue.pop().is_none());
+    }
+
+    #[test]
+    fn shared_metric_identity_preserves_existing_hook_and_releases_replaced_payloads() {
+        struct SharedHookSink {
+            payload: std::sync::Mutex<Option<std::sync::Weak<(EventContext, MetricSample)>>>,
+        }
+
+        impl DataSink for SharedHookSink {
+            fn sink_type(&self) -> &'static str {
+                "shared_hook_sink"
+            }
+
+            fn accepts_shared_metric(&self) -> bool {
+                true
+            }
+
+            fn try_handle_event(
+                &self,
+                _context: &EventContext,
+                _event: &CollectorEvent,
+            ) -> Result<(), HealthError> {
+                panic!("shared fanout must call the existing shared hook");
+            }
+
+            fn try_handle_shared_metric(
+                &self,
+                _context: &EventContext,
+                _event: &CollectorEvent,
+                shared: &Arc<(EventContext, MetricSample)>,
+            ) -> Result<(), HealthError> {
+                *self.payload.lock().unwrap() = Some(Arc::downgrade(shared));
+                Ok(())
+            }
+        }
+
+        let first = Arc::new(test_sink());
+        let second = Arc::new(test_sink());
+
+        let hook = Arc::new(SharedHookSink {
+            payload: Default::default(),
+        });
+
+        let metrics_manager = Arc::new(MetricsManager::new("otlp_identity_lifetime_test").unwrap());
+
+        let composite = CompositeDataSink::new(
+            vec![first.clone(), second.clone(), hook.clone()],
+            metrics_manager,
+        );
+
+        let context = test_context();
+        let event = metric_event();
+
+        composite.handle_event(&context, &event);
+
+        let initial = hook.payload.lock().unwrap().take().unwrap();
+
+        assert!(initial.upgrade().is_some());
+
+        composite.handle_event(&context, &event);
+
+        assert!(initial.upgrade().is_none());
+
+        let replacement = hook.payload.lock().unwrap().take().unwrap();
+        let (_, first_value) = first.metrics_queue.pop().unwrap();
+        let (_, second_value) = second.metrics_queue.pop().unwrap();
+
+        let QueuedMetric::Shared(first_value) = first_value else {
+            panic!("first target must retain a shared metric");
+        };
+
+        let QueuedMetric::Shared(second_value) = second_value else {
+            panic!("second target must retain a shared metric");
+        };
+
+        assert!(std::sync::Weak::ptr_eq(
+            &replacement,
+            &Arc::downgrade(&first_value)
+        ));
+
+        assert!(Arc::ptr_eq(&first_value, &second_value));
+        assert_eq!(first.metrics_replaced_total.get() as u64, 1);
+        assert_eq!(second.metrics_replaced_total.get() as u64, 1);
+    }
+
+    #[test]
+    fn shared_metric_identity_preserves_nonmetric_dispatch() {
+        let sink = test_sink();
+        let context = test_context();
+
+        let CollectorEvent::Metric(sample) = metric_event() else {
+            panic!("fixture must contain a metric");
+        };
+
+        let shared = SharedMetric {
+            key: Arc::new(metric_queue_key(&context, &sample)),
+            payload: Arc::new((context.clone(), *sample)),
+        };
+
+        let event = log_event("OpenBMC.0.1.Test", r#"["sensor1"]"#);
+
+        sink.try_handle_shared_metric_with_identity(&context, &event, &shared)
+            .unwrap();
+
+        assert!(sink.metrics_queue.pop().is_none());
+        assert!(sink.queue.pop().is_some());
     }
 
     #[test]
