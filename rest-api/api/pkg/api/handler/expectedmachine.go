@@ -151,8 +151,8 @@ func (cemh CreateExpectedMachineHandler) Handle(c echo.Context) error {
 			SkuIDs:  []string{*apiRequest.SkuID},
 		}, paginator.PageInput{Limit: cutil.GetPtr(1)})
 		if err != nil {
-			logger.Warn().Err(err).Msg("error validating SKU ID in request data")
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate SKU ID in request data due to DB error", nil)
+			logger.Error().Err(err).Msg("error validating SKU ID in request data")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate SKU ID in request data due to DB error", nil)
 		}
 		if len(skus) == 0 {
 			logger.Warn().Msg("SKU ID specified in request does not exist")
@@ -687,8 +687,8 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 			SkuIDs:  []string{*apiRequest.SkuID},
 		}, paginator.PageInput{Limit: cutil.GetPtr(1)})
 		if err != nil {
-			logger.Warn().Err(err).Msg("error validating SKU ID in request data")
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate SKU ID in request data due to DB error", nil)
+			logger.Error().Err(err).Msg("error validating SKU ID in request data")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to validate SKU ID in request data due to DB error", nil)
 		}
 		if len(skus) == 0 {
 			logger.Warn().Msg("SKU ID specified in request does not exist")
