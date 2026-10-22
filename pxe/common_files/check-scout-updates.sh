@@ -16,6 +16,8 @@
 # limitations under the License.
 #
 
+set -o pipefail
+
 MIN_UPTIME=86400
 ROOTFS_INFO_FILE="/rootfs_info.txt"
 
