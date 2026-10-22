@@ -18,5 +18,3 @@ cd isc-kea-2.2.0
 patch -p1 < /tmp/kea-build/kea-reuse-null.patch
 DEB_BUILD_OPTIONS="nocheck parallel=8" dpkg-buildpackage -b -uc -us
 cp ../kea-common_*.deb /kea-packages/kea-common.deb
-# Debian's development package omits this header required by LeaseMgrFactory.
-cp src/lib/dhcpsrv/cfg_globals.h /kea-packages/cfg_globals.h
