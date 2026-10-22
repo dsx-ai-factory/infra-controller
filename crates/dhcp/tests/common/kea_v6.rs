@@ -66,6 +66,7 @@ pub(crate) struct Kea6Config {
     pub(crate) provisioning_server_ipv6: &'static str,
     pub(crate) dns_servers_ipv6: &'static [&'static str],
     pub(crate) prefix_pool: bool,
+    pub(crate) address_pool: &'static str,
     pub(crate) mac_sources: Option<&'static [&'static str]>,
     pub(crate) expired_leases_processing: Option<Kea6ExpiredLeasesProcessing>,
 }
@@ -82,6 +83,7 @@ impl Default for Kea6Config {
             provisioning_server_ipv6: "",
             dns_servers_ipv6: &HOOK_DNS_SERVERS_IPV6,
             prefix_pool: false,
+            address_pool: "2001:db8::1-2001:db8::ffff",
             mac_sources: None,
             expired_leases_processing: None,
         }
@@ -581,7 +583,7 @@ impl Kea6 {
                     // remains the policy gate by stripping option 14.
                     "rapid-commit": config.kea_rapid_commit_v6,
                     "pools": [{
-                        "pool": "2001:db8::1-2001:db8::ffff"
+                        "pool": config.address_pool
                     }]
                 }
             ],
