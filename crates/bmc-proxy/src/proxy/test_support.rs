@@ -114,6 +114,18 @@ pub(super) struct SwitchCa {
 
 impl SwitchCa {
     pub(super) fn new() -> Self {
+        Self::with(|_| {})
+    }
+
+    /// A CA whose certificate expired in 2021.
+    pub(super) fn expired() -> Self {
+        Self::with(|params| {
+            params.not_before = rcgen::date_time_ymd(2020, 1, 1);
+            params.not_after = rcgen::date_time_ymd(2021, 1, 1);
+        })
+    }
+
+    fn with(adjust: impl FnOnce(&mut CertificateParams)) -> Self {
         let mut params = CertificateParams::new(Vec::new()).expect("CA parameters");
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         params
@@ -123,6 +135,7 @@ impl SwitchCa {
             KeyUsagePurpose::KeyCertSign,
             KeyUsagePurpose::DigitalSignature,
         ];
+        adjust(&mut params);
         let key = KeyPair::generate().expect("CA key");
         let certificate = params.self_signed(&key).expect("CA certificate");
         Self {

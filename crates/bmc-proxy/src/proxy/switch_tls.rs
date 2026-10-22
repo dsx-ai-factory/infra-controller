@@ -173,8 +173,9 @@ struct SwitchTlsReloadFailed {
 
 /// A certificate in `[tls.switch]`'s files is expired or not yet valid, as
 /// the files' load or a check of them found: a switch refuses an expired
-/// client certificate, and the proxy refuses a switch whose certificate only
-/// an expired CA anchors.
+/// client certificate. For a CA, this is only a report: rustls-webpki keeps
+/// no validity for a trust anchor, so a switch whose certificate an expired
+/// CA in the bundle anchors is still accepted.
 #[derive(Event)]
 #[event(
     event_name = "bmc_proxy_switch_tls_certificate_out_of_validity",

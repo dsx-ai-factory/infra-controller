@@ -164,8 +164,9 @@ switch 30 seconds later, rather than five minutes. Adding or removing the table 
 An expired or not yet valid certificate in `client_cert_path` or `ca_cert_path` still loads, so
 it does not stop the proxy or its BMC traffic, but the load and every check after it increment
 `carbide_bmc_proxy_switch_tls_certificate_out_of_validity_total` with the file as `file`
-(`client_certificate` or `ca_bundle`). A switch refuses an expired client certificate, and the
-proxy refuses a switch whose certificate only an expired CA anchors.
+(`client_certificate` or `ca_bundle`). A switch refuses an expired client certificate. An expired
+CA is only reported: the proxy keeps trusting it, and still accepts a switch whose certificate it
+anchors, so remove a CA from the bundle to stop trusting it.
 
 `NICO_BMC_PROXY__TLS__SWITCH__CA_CERT_PATH`, `NICO_BMC_PROXY__TLS__SWITCH__CLIENT_CERT_PATH`,
 `NICO_BMC_PROXY__TLS__SWITCH__CLIENT_KEY_PATH`, and `NICO_BMC_PROXY__TLS__SWITCH__TLS_SERVER_NAME`

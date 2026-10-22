@@ -2452,6 +2452,42 @@ async fn a_switch_requiring_a_client_certificate_is_reached_with_the_proxys() {
     .await;
 }
 
+/// An expired CA in `[tls.switch]`'s bundle is reported, not distrusted: a
+/// switch whose certificate it anchors is still reached, as rustls-webpki
+/// keeps no validity for a trust anchor.
+#[tokio::test]
+async fn a_switch_an_expired_ca_anchors_is_reached_and_the_ca_reported() {
+    let metrics = MetricsCapture::start();
+    let ca = SwitchCa::expired();
+    let certificate = ca.issue(&[SWITCH_NAME], ExtendedKeyUsagePurpose::ServerAuth);
+    let (addr, switch) = spawn_switch_requiring_client_certificates(&ca, certificate);
+    let files = tempfile::tempdir().expect("TLS files directory");
+    let state = proxy_configured_for(
+        &format!(":{}", addr.port()),
+        r#"["/**"]"#,
+        "",
+        &switch_tls_table(&ca.switch_tls(files.path(), Some(SWITCH_NAME))),
+        TargetCredentials {
+            target: TargetKind::SwitchNvos,
+            credentials: root_password(),
+        },
+        "follow_same_origin",
+    )
+    .await;
+
+    let answer = exchange(&metrics, &state, get(NVUE_SYSTEM_PATH)).await;
+
+    assert_eq!(answer.status, 200);
+    assert_eq!(switch.received().len(), 1);
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_bmc_proxy_switch_tls_certificate_out_of_validity_total",
+            &[("file", "ca_bundle")],
+        ),
+        1.0
+    );
+}
+
 /// An address cached as a switch's NVOS interface that now belongs to a BMC
 /// is served as the BMC: the switch client refuses the BMC's self-signed
 /// certificate before sending anything, the proxy drops the cached entry,
