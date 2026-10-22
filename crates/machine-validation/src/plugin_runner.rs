@@ -778,6 +778,90 @@ mod tests {
         }
     }
 
+    // Hardware qualification is opt-in: never run containers on a developer
+    // host merely because the unit test suite is being executed.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "requires root, a pre-pulled HealthValidation image, GPUs, and Scout journal/runtime dependencies"]
+    async fn dsx_scout_qualification() {
+        // SAFETY: geteuid has no arguments or memory-safety preconditions.
+        assert_eq!(unsafe { libc::geteuid() }, 0, "qualification requires root");
+        let image = std::env::var("NICO_MV_DSX_TEST_IMAGE")
+            .expect("set NICO_MV_DSX_TEST_IMAGE to a pre-pulled digest-pinned image");
+        let expected = std::env::var("NICO_MV_DSX_EXPECTED_SEVERITY")
+            .expect("set NICO_MV_DSX_EXPECTED_SEVERITY to the established node severity");
+        let (outcome, severity) = match expected.as_str() {
+            "PASS" => ("pass", None),
+            "INFO" => ("pass", Some("info")),
+            "WARNING" => ("pass", Some("warning")),
+            "CRITICAL" => ("fail", Some("critical")),
+            "UNKNOWN" => ("fail", Some("unknown")),
+            _ => panic!("unsupported expected severity {expected:?}"),
+        };
+        let mut parameters = serde_json::json!({});
+        if let Ok(count) = std::env::var("NICO_MV_DSX_GPU_COUNT") {
+            parameters["gpu_count"] = count.parse::<u32>().expect("invalid GPU count").into();
+        }
+        let input = serde_json::json!({
+            "machineId": "nico-dsx-qualification",
+            "parameters": parameters,
+        });
+        let mut runtime = spec(PluginPrivilege::Isolated);
+        runtime.image = image;
+        runtime.container_plugin_adapter = Some("DSXHealthValidation".to_owned());
+        runtime.entrypoint = vec!["/health-validation".to_owned(), "run".to_owned()];
+        let (sender, mut receiver) = mpsc::channel::<PluginLogChunk>(1024);
+        let logs = tokio::spawn(async move {
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+            while let Some(chunk) = receiver.recv().await {
+                match chunk.stream {
+                    PluginLogStream::Stdout => stdout.push_str(&chunk.content),
+                    PluginLogStream::Stderr => stderr.push_str(&chunk.content),
+                }
+            }
+            (stdout, stderr)
+        });
+        let execution = execute_plugin(
+            &runtime,
+            &input,
+            std::time::Duration::from_secs(180),
+            Path::new(DEFAULT_PLUGIN_CONTRACT_DIR),
+            Some(sender),
+        )
+        .await
+        .expect("the real DSX adapter must complete an assessment");
+        let (stdout, stderr) = logs.await.unwrap();
+        assert_eq!(stdout, execution.stdout, "stdout must reach attempt logs");
+        assert_eq!(stderr, execution.stderr, "stderr must reach attempt logs");
+        let report: Value = serde_json::from_str(&execution.stdout).unwrap();
+        assert_eq!(report["overall_severity"], expected);
+        assert_eq!(execution.result.outcome, outcome);
+        assert_eq!(execution.result.severity.as_deref(), severity);
+        println!("HealthValidation stdout: {}", execution.stdout);
+        println!("HealthValidation stderr: {}", execution.stderr);
+
+        // The published Ubuntu-based image also supplies a shell and sleep.
+        // Exercise the same GPU/root/journal profile with a process that cannot
+        // complete before the deadline. Success here requires container removal
+        // and attempt-directory cleanup, otherwise execute_plugin adds an error.
+        runtime.entrypoint = vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "exec sleep 30".to_owned(),
+        ];
+        let error = execute_plugin(
+            &runtime,
+            &input,
+            std::time::Duration::from_secs(5),
+            Path::new(DEFAULT_PLUGIN_CONTRACT_DIR),
+            None,
+        )
+        .await
+        .expect_err("qualification process must time out");
+        assert_eq!(error, "plugin timed out after 5 seconds");
+    }
+
     #[test]
     fn isolated_plugin_is_non_root_and_network_isolated() {
         let args = plugin_runtime_args(
@@ -822,6 +906,15 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "--privileged"));
         assert!(!args.iter().any(|arg| arg == "--pid"));
         assert!(!args.iter().any(|arg| arg.contains("dst=/host")));
+        assert!(!args.iter().any(|arg| arg == "--entrypoint"));
+        assert_eq!(
+            &args[args.len() - 3..],
+            [
+                spec(PluginPrivilege::Isolated).image,
+                "/plugin/check".to_owned(),
+                "--verify".to_owned()
+            ]
+        );
     }
 
     #[cfg(unix)]
