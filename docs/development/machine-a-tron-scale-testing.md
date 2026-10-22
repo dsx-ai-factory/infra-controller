@@ -1,6 +1,9 @@
 # Scaling NICo with machine-a-tron: 100 → 1000 → 4500 → 10,000 simulated hosts
 
-> **Status:** Scale testing validated with up to 39,476 BMC endpoints (556 GB200 NVL72 racks).
+> **Status:** Scale testing validated with up to 39,476 BMC endpoints (556 GB200
+> NVL72 racks). Refer to
+> [Sizing and Scale Guidance](../getting-started/sizing-and-scale.md) for the
+> fleet-level scale table.
 
 ## Quick start
 
