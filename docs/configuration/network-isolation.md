@@ -8,13 +8,14 @@ BlueField DPUs running HBN (Host-Based Networking with Containerized Cumulus) en
 Floating blackhole routes for `site_fabric_null_routes` are installed, and authorized route imports, such as compatible VPC peer routes, take precedence only when they are at least as specific as the applicable blackhole.
 
 Key properties:
+
 - Per-VPC VRF with dedicated VNI (VXLAN Network Identifier) from the site's VNI pool
 - Null-routes prevent unauthorized upstream-VRF hairpinning
 - Route targets control which VRFs can exchange routes
 - `deny_prefixes` ACLs block tenant traffic from reaching management networks
-- Network Security Groups provide per-subnet firewall rules
+- [Network Security Groups](../manuals/networking/network_security_groups.md) attach to VPCs or instances. An instance NSG replaces the inherited VPC NSG
 
-For the full networking architecture, see [VPC Network Virtualization](../manuals/vpc/vpc_network_virtualization.md).
+For the full networking architecture, see [VPC Network Virtualization](../manuals/vpc/vpc_network_virtualization.md). For ingress and access to storage outside managed DPUs, see [Tenant Connectivity and Shared Services](../manuals/vpc/tenant_connectivity.md).
 
 ## InfiniBand (East-West)
 
@@ -22,7 +23,7 @@ UFM assigns P_Key partitions to each tenant's IB ports. Only hosts sharing a P_K
 
 View IB partition assignments:
 
-```
+```text
 nicocli tui
 > infiniband-partition list
 > infiniband-partition get
@@ -34,7 +35,7 @@ NMX-C APIs configure GPU membership in NVLink partitions. A physical NVLink doma
 
 View NVLink partition state:
 
-```
+```text
 nicocli tui
 > nvlink-logical-partition list
 > nvlink-logical-partition get
