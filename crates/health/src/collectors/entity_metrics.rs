@@ -956,6 +956,7 @@ impl<B: Bmc + 'static> MetricsCollector<B> {
         for field in fields {
             self.emit_event(CollectorEvent::Metric(
                 MetricSample {
+                    semantics: crate::sink::MetricSemantics::Gauge,
                     key: format!("{entity_key}/{}", field.metric_type),
                     name: "hw_metric".to_string(),
                     metric_type: field.metric_type.to_string(),

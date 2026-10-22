@@ -18,6 +18,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::nvlink::NvLinkDomainId;
@@ -290,6 +291,33 @@ pub struct SensorThresholdContext {
     pub bmc_health: BmcHealth,
 }
 
+/// `MetricSemantics` distinguishes current readings from device accumulation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MetricSemantics {
+    /// A current value that may increase or decrease.
+    Gauge,
+    /// An absolute device total, which may decrease when the device resets.
+    /// Finite, nonnegative values also produce a `_total` counter in Prometheus;
+    /// negative and non-finite values retain only the legacy gauge. Callers must
+    /// keep the alias name distinct from other gauge names in the telemetry registry.
+    /// OTLP keeps the legacy gauge until cumulative export is added in
+    /// <https://github.com/dsx-ai-factory/infra-controller/issues/8008>.
+    CumulativeCounter {
+        /// When the device began accumulating this value, if the source reports it.
+        /// A connection or exporter start time does not establish this epoch.
+        /// Retained for OTLP; Prometheus text export does not expose this epoch.
+        start_time: Option<SystemTime>,
+    },
+}
+
+impl MetricSemantics {
+    /// Whether this value is a finite, nonnegative cumulative total.
+    pub(crate) fn exports_counter(self, value: f64) -> bool {
+        matches!(self, Self::CumulativeCounter { .. }) && value.is_finite() && value >= 0.0
+    }
+}
+
+/// `MetricSample` is one metric observation shared by the configured sinks.
 #[derive(Clone, Debug)]
 pub struct MetricSample {
     pub key: String,
@@ -297,6 +325,8 @@ pub struct MetricSample {
     pub metric_type: String,
     pub unit: String,
     pub value: f64,
+    /// Whether the value is current state or an accumulated device total.
+    pub semantics: MetricSemantics,
     pub labels: Vec<MetricLabel>,
     pub context: Option<SensorThresholdContext>,
 }

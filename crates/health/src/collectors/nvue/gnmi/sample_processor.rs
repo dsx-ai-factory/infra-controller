@@ -404,6 +404,7 @@ impl GnmiSampleProcessor {
         self.emit_sample(
             source,
             MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key,
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
                 metric_type: metric_type.to_string(),
@@ -599,6 +600,7 @@ impl GnmiSampleProcessor {
         self.emit_sample(
             source,
             MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: metric_type.to_string(),
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
                 metric_type: metric_type.to_string(),
@@ -623,6 +625,7 @@ impl GnmiSampleProcessor {
         self.emit_sample(
             source,
             MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: metric_type.to_string(),
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
                 metric_type: metric_type.to_string(),
@@ -653,6 +656,7 @@ impl GnmiSampleProcessor {
         self.emit_sample(
             source,
             MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key,
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
                 metric_type: metric_type.to_string(),
@@ -692,6 +696,7 @@ impl GnmiSampleProcessor {
             self.emit_sample(
                 source,
                 MetricSample {
+                    semantics: crate::sink::MetricSemantics::Gauge,
                     key,
                     name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
                     metric_type: metric_type.to_string(),

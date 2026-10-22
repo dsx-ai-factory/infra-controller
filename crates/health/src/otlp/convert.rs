@@ -464,8 +464,9 @@ pub fn build_export_request(
 /// Every sample maps to an OTLP `Gauge` point stamped with `observed_nanos`,
 /// the batch's export time. Samples with the same name, type, and unit share
 /// one metric envelope within their endpoint, preserving their input order as
-/// datapoints. Sum and Histogram mapping can be added when the health metric
-/// model exposes those temporality choices.
+/// datapoints. Cumulative readings retain the legacy gauge until Sum export
+/// and source accumulation starts are added in
+/// <https://github.com/dsx-ai-factory/infra-controller/issues/8008>.
 pub fn build_metrics_export_request(
     batch: &[(EventContext, MetricSample)],
     observed_nanos: u64,
@@ -568,8 +569,7 @@ fn build_metrics_export_request_from_pairs<'a>(
                     entry.insert(metrics.len());
 
                     metrics.push(OtlpMetric {
-                        // Match the Prometheus sink's full series name exactly so
-                        // Grafana queries resolve identically across both export paths.
+                        // Preserve the legacy gauge name shared with Prometheus.
                         name: format!(
                             "{}_{}_{}_{}",
                             metric_name_prefix, sample.name, sample.metric_type, sample.unit
@@ -1719,6 +1719,7 @@ mod tests {
             ..base_ctx
         };
         let sample = |name: &str| MetricSample {
+            semantics: crate::sink::MetricSemantics::Gauge,
             key: "status:swp1".to_string(),
             name: name.to_string(),
             metric_type: "interface_oper_status".to_string(),
@@ -1759,6 +1760,7 @@ mod tests {
         };
 
         let sample = |metric_type: &str, unit: &str, interface: &str, value: f64| MetricSample {
+            semantics: crate::sink::MetricSemantics::Gauge,
             key: interface.to_string(),
             name: "nvue_gnmi".to_string(),
             metric_type: metric_type.to_string(),
@@ -1860,6 +1862,7 @@ mod tests {
     fn metric_export_name_uses_full_prometheus_series_name() {
         let ctx = test_context();
         let sample = MetricSample {
+            semantics: crate::sink::MetricSemantics::Gauge,
             key: "asic0/oper_status".to_string(),
             name: "nvue_gnmi".to_string(),
             metric_type: "interface_oper_status".to_string(),
@@ -1898,6 +1901,7 @@ mod tests {
             rack_id: None,
         };
         let sample = |key: &str| MetricSample {
+            semantics: crate::sink::MetricSemantics::Gauge,
             key: key.to_string(),
             name: "switch_nmxt".to_string(),
             metric_type: "effective_ber".to_string(),
@@ -1945,6 +1949,7 @@ mod tests {
             metric_type: "temperature".to_string(),
             unit: "celsius".to_string(),
             value: 20.0,
+            semantics: crate::sink::MetricSemantics::Gauge,
             labels: vec![
                 (Cow::Borrowed("sensor"), "first".to_string()),
                 (Cow::Owned("sensor".to_string()), "second".to_string()),
@@ -2029,6 +2034,7 @@ mod tests {
             rack_id: Some(RackId::new("RACK_2")),
         };
         let sample = MetricSample {
+            semantics: crate::sink::MetricSemantics::Gauge,
             key: "effective_ber".to_string(),
             name: "switch_nmxt".to_string(),
             metric_type: "effective_ber".to_string(),

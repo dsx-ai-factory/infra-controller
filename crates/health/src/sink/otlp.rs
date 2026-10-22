@@ -562,6 +562,7 @@ mod tests {
         unit: &str,
     ) -> CollectorEvent {
         CollectorEvent::Metric(Box::new(MetricSample {
+            semantics: crate::sink::MetricSemantics::Gauge,
             key: key.to_string(),
             name: name.to_string(),
             metric_type: metric_type.to_string(),
@@ -940,6 +941,7 @@ mod tests {
             ),
         ] {
             let sample = MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: format!("nvue_gnmi_events:{id}"),
                 name: name.into(),
                 metric_type: metric_type.into(),

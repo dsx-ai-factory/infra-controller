@@ -113,6 +113,7 @@ fn metric_events(batch_size: usize, unique_keys: usize) -> Vec<CollectorEvent> {
 
             CollectorEvent::Metric(
                 MetricSample {
+                    semantics: carbide_health::sink::MetricSemantics::Gauge,
                     key: key.clone(),
                     name: "hw_sensor".to_string(),
                     metric_type: "temperature".to_string(),
@@ -454,6 +455,7 @@ fn bench_otlp_metric_conversion(c: &mut Criterion) {
         let batch: Vec<_> = (0..2_048)
             .map(|index| {
                 let sample = MetricSample {
+                    semantics: carbide_health::sink::MetricSemantics::Gauge,
                     key: format!("interface-{index}"),
                     name: "nvue_gnmi_extended".into(),
                     metric_type: format!("reading_{:04}", index % descriptor_count),
