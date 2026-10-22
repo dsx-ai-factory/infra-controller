@@ -107,6 +107,10 @@ auth:
   ## SPIFFE service-id of the API allowed full access (allowed_principals + ACL).
   apiPrincipal: nico-api
 
+## nico-api Service the default config dials,
+## configFiles.nicoBmcProxyConfig replaces the default config
+apiServiceName: nico-api
+
 configFiles:
   nicoBmcProxyConfig: ""
 

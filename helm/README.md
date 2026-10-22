@@ -546,6 +546,7 @@ nico-api:
 
 nico-bmc-proxy:
   nameOverride: carbide-bmc-proxy
+  apiServiceName: carbide-api
   certificate:
     identityNamespace: forge-system
   auth:
@@ -603,8 +604,9 @@ This is also available as a ready-to-use overlay at
   `spiffe://forge.local/forge-system/sa/carbide-api`).
 - `auth.namespace: forge-system` — tells `nico-api` to accept SPIFFE IDs whose path contains
   `/forge-system/`, which is what pre-2.0.0 client certificates present.
-- `apiServiceName: carbide-api` — tells `nico-pxe`, `nico-dhcp`, `nico-dns`, and
-  `nico-ssh-console-rs` to dial `carbide-api` (the name the Service has after `nameOverride`),
+- `apiServiceName: carbide-api` — tells `nico-pxe`, `nico-dhcp`, `nico-dns`,
+  `nico-ssh-console-rs`, and `nico-bmc-proxy` to dial `carbide-api` (the name the Service has
+  after `nameOverride`),
   rather than the new default `nico-api`. Without this, those services build a URL pointing at
   a Service that does not exist.
 
