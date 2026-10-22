@@ -478,10 +478,12 @@ async fn vpc_consumers_observe_external_pool_growth_after_a_miss(
                 .routing_profile_type("EXTERNAL".to_string())
                 .tonic_request()
                 .into_inner();
+            // Every intentional miss increments the global counter, including
+            // the cases that do not assert its value below.
+            let metrics = MetricsCapture::start();
             let create = api.create_vpc(tonic::Request::new(request.clone()));
             let result = if name == "local" && matches!(growth, Growth::PublicApi) {
                 let metric_name = "carbide_resource_pool_lifecycle_failures_total";
-                let metrics = MetricsCapture::start();
                 let (result, logs) = capture_logs_async(create).await;
                 let events: Vec<_> = logs
                     .iter()
@@ -1702,6 +1704,8 @@ async fn change_vpc_routing_profile_rejects_unsupported_state_without_changes(
         };
         let before = find_test_vpc(&env, vpc_id).await?;
         let allocations_before = vpc_vni_pool_state(&env).await?;
+        // Allocation failures share the global counter measured by other tests.
+        let metrics = MetricsCapture::start();
         let error = env
             .api
             .change_vpc_routing_profile(tonic::Request::new(
@@ -1714,6 +1718,7 @@ async fn change_vpc_routing_profile_rejects_unsupported_state_without_changes(
             ))
             .await
             .expect_err(expected.message);
+        drop(metrics);
         assert_eq!(error.code(), expected.code, "{failure:?}: {error}");
         assert!(
             error.message().contains(expected.message),
@@ -2232,10 +2237,13 @@ async fn create_vpc_rejects_allocations_without_external_pool(
             .tonic_request()
             .into_inner();
         request.vni = requested_vni;
+        // These failures emit the global counter even without asserting it here.
+        let metrics = MetricsCapture::start();
         let error = api
             .create_vpc(tonic::Request::new(request))
             .await
             .expect_err("a missing pool must reject both allocation modes");
+        drop(metrics);
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
         assert_eq!(
             error.message(),
@@ -2281,11 +2289,14 @@ async fn create_vpc_rejects_unconfigured_assignment_mode(
             .tonic_request()
             .into_inner();
         request.vni = requested_vni;
+        // These failures emit the global counter even without asserting it here.
+        let metrics = MetricsCapture::start();
         let error = env
             .api
             .create_vpc(tonic::Request::new(request))
             .await
             .expect_err("the pool must reject an unconfigured assignment mode");
+        drop(metrics);
         assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{scenario}");
         let assignment_mode = if requested_vni.is_some() {
             "explicit"

@@ -1192,6 +1192,7 @@ dependencies = [
  "carbide-rack-controller",
  "carbide-redfish",
  "carbide-resource-pool",
+ "carbide-resource-pool-api",
  "carbide-rpc",
  "carbide-rpc-utils",
  "carbide-secrets",

@@ -18,7 +18,9 @@ use sqlx::postgres::PgPoolOptions;
 use tonic::Code;
 use uuid::Uuid;
 
-use super::{PreparedRegistration, RegistrationError, accepted, define, prepare, resume};
+use super::{
+    PreparedRegistration, RegistrationError, accepted, define, latest_accepted, prepare, resume,
+};
 use crate::grpc::test_server::{Fault, FaultProvider, Gate, TestServer, bounded, pool, provider};
 use crate::grpc::{GrpcResourcePoolBackend, GrpcResourcePoolError, MAX_MESSAGE_BYTES};
 use crate::transaction::DATABASE_WAIT_TIMEOUT;
@@ -468,6 +470,71 @@ async fn failed_acknowledgement_leaves_provider_acceptance_replayable(
         Some(original_record)
     );
     harness.stop().await;
+    Ok(())
+}
+
+/// Inspection keeps using the provider's accepted pool identity while a newer
+/// definition awaits acknowledgement, and switches only after that acknowledgement.
+#[carbide_macros::sqlx_test]
+async fn latest_accepted_keeps_the_previous_revision_during_pending_growth(
+    database: PgPool,
+) -> TestResult {
+    let mut txn = database.begin().await?;
+    let binding = binding::bind_or_verify(&mut txn, &selection()).await?;
+    txn.commit().await?;
+    assert_eq!(latest_accepted(&database, &binding).await?, None);
+
+    // The provider's saved pool ID differs from its configured lookup alias.
+    // Inspection must return the saved ID so Stats queries the original pool.
+    let original = v1::DefineRequest {
+        pool: Some(v1::PoolBinding {
+            authority_id: binding.authority_id.clone(),
+            pool_id: "provider-pool-id".into(),
+            binding_id: binding.binding_id.to_string(),
+            logical_pool: binding.pool_name.clone(),
+        }),
+        eligibility_revision: "1".into(),
+        previous_revision: None,
+        value_domain: v1::ValueDomain::Integer as i32,
+        eligibility: eligibility().entries,
+    };
+    let mut grown = original.clone();
+    grown.eligibility_revision = "2".into();
+    grown.previous_revision = Some("1".into());
+    grown
+        .eligibility
+        .push(range(6, 10, v1::AssignmentMode::Automatic));
+
+    let mut txn = database.begin().await?;
+    storage::lock_binding(&mut txn, binding.binding_id).await?;
+    storage::insert(
+        &mut txn,
+        &ResourcePoolRegistration {
+            binding_id: binding.binding_id,
+            revision: 1,
+            request: original.encode_to_vec(),
+            accepted: true,
+        },
+    )
+    .await?;
+    storage::insert(
+        &mut txn,
+        &ResourcePoolRegistration {
+            binding_id: binding.binding_id,
+            revision: 2,
+            request: grown.encode_to_vec(),
+            accepted: false,
+        },
+    )
+    .await?;
+    txn.commit().await?;
+    assert_eq!(latest_accepted(&database, &binding).await?, Some(original));
+
+    // Committing acceptance makes the newer revision available to inspection.
+    let mut txn = database.begin().await?;
+    storage::acknowledge(&mut txn, binding.binding_id, 2).await?;
+    txn.commit().await?;
+    assert_eq!(latest_accepted(&database, &binding).await?, Some(grown));
     Ok(())
 }
 
@@ -938,7 +1005,7 @@ async fn corrupt_saved_requests_are_not_replayed(database: PgPool) -> TestResult
     Ok(())
 }
 
-/// Cancelling either public lookup must eventually release its pooled connection
+/// Cancelling each public lookup must eventually release its pooled connection
 /// even when PostgreSQL cannot finish the read until its statement timeout expires.
 #[carbide_macros::sqlx_test]
 async fn cancelled_registration_reads_return_the_only_connection(database: PgPool) -> TestResult {
@@ -946,6 +1013,7 @@ async fn cancelled_registration_reads_return_the_only_connection(database: PgPoo
     enum Read {
         Resume,
         Accepted,
+        LatestAccepted,
     }
     let harness = Harness::new(database, Fault::None).await;
     let single_connection = PgPoolOptions::new()
@@ -955,7 +1023,7 @@ async fn cancelled_registration_reads_return_the_only_connection(database: PgPoo
     sqlx::query("SET statement_timeout = 0")
         .execute(&single_connection)
         .await?;
-    for operation in [Read::Resume, Read::Accepted] {
+    for operation in [Read::Resume, Read::Accepted, Read::LatestAccepted] {
         let mut blocker = harness.database.begin().await?;
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *blocker)
@@ -969,6 +1037,9 @@ async fn cancelled_registration_reads_return_the_only_connection(database: PgPoo
                     .await
                     .map(drop),
                 Read::Accepted => accepted(&single_connection, &harness.binding, 1)
+                    .await
+                    .map(drop),
+                Read::LatestAccepted => latest_accepted(&single_connection, &harness.binding)
                     .await
                     .map(drop),
             }

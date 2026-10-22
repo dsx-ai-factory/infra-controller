@@ -1384,6 +1384,13 @@ impl Forge for Api {
         crate::handlers::resource_pool::grow(self, request).await
     }
 
+    async fn admin_inspect_resource_pools(
+        &self,
+        request: Request<rpc::InspectResourcePoolsRequest>,
+    ) -> Result<Response<rpc::InspectResourcePoolsResponse>, Status> {
+        crate::handlers::resource_pool::inspect(self, request).await
+    }
+
     async fn admin_list_resource_pools(
         &self,
         request: Request<rpc::ListResourcePoolsRequest>,

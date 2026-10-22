@@ -425,8 +425,12 @@ service Forge {
   // Starts the managed host decommissioning workflow. The host must be Ready.
   rpc DecommissionManagedHost(DecommissionManagedHostRequest) returns (DecommissionManagedHostResponse);
 
-  // List existing resource pools and their stats
+  // Lists local inventory counts and bounds, including IPv6 prefixes with their lengths.
+  // Any saved gRPC binding makes the whole call fail with FailedPrecondition;
+  // use AdminInspectResourcePools to inspect every backend.
   rpc AdminListResourcePools(ListResourcePoolsRequest) returns (ResourcePools);
+  // Inspects local and remote pools without treating unknown capacity as zero.
+  rpc AdminInspectResourcePools(InspectResourcePoolsRequest) returns (InspectResourcePoolsResponse);
 
   // Add capacity to a resource pool
   rpc AdminGrowResourcePool(GrowResourcePoolRequest) returns (GrowResourcePoolResponse);
@@ -12812,4 +12816,96 @@ message ExpectedNvLinkDomainsByIdsRequest {
 message ExpectedNvLinkDomainList {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   repeated ExpectedNvLinkDomain domains = 1;
+}
+
+// `InspectResourcePoolsRequest` selects every pool with local inventory or a saved binding.
+message InspectResourcePoolsRequest {
+}
+
+// `InspectResourcePoolsResponse` keeps unavailable pools alongside healthy ones.
+message InspectResourcePoolsResponse {
+  // Pools ordered by their NICo name; an empty list means no pools were found.
+  repeated ResourcePoolInspection pools = 1;
+}
+
+// `ResourcePoolInspection` identifies a pool and reports the counts its backend can provide.
+message ResourcePoolInspection {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // NICo's logical pool name, e.g. vpc-vni.
+  string name = 1;
+  // Implementation selected for this pool; local inventory without a binding is Integrated.
+  ResourcePoolBackendKind backend_kind = 2;
+  // Configured backend name when bound; absent for the default Integrated backend.
+  optional string backend_name = 3;
+  // Saved binding UUID; absent for local inventory that has not been bound.
+  optional string binding_id = 4;
+  // Allocator identity; Integrated uses local-db within this deployment's database.
+  string authority_id = 5;
+  // Configured provider lookup name; defaults to the NICo pool name.
+  string remote_pool = 6;
+  // Provider's stable pool ID from the accepted registration; absent for Integrated
+  // and when no accepted remote registration can be read.
+  optional string provider_pool_id = 7;
+  // Accepted provider eligibility revision; absent for Integrated and when no
+  // accepted remote registration can be read.
+  optional string accepted_revision = 8;
+  // Smallest value in local inventory; absent for remote pools or empty local inventory.
+  // Integers use signed decimal text, IP addresses omit host-prefix suffixes,
+  // and IPv6 prefixes retain their CIDR prefix lengths.
+  optional string min = 9;
+  // Largest value in local inventory; absent for remote pools or empty local inventory.
+  // Uses the same value format as min.
+  optional string max = 10;
+  // Present only with KNOWN status. Absence never means an empty pool.
+  ResourcePoolStats stats = 11;
+  // Whether counts were obtained, unsupported, or could not be read.
+  ResourcePoolStatsStatus stats_status = 12;
+  // Explanation for UNKNOWN or UNAVAILABLE; absent when counts are known.
+  optional string stats_message = 13;
+  // NICo's time of receiving successful counts; absent when counts are not known.
+  // This is not a provider clock or a guarantee that capacity remains available.
+  google.protobuf.Timestamp observed_at = 14;
+}
+
+// `ResourcePoolBackendKind` names the allocator implementation used by a pool.
+enum ResourcePoolBackendKind {
+  // No implementation supplied; inspection never returns this value.
+  RESOURCE_POOL_BACKEND_KIND_UNSPECIFIED = 0;
+  // Allocation uses resource rows in the nico-api database.
+  RESOURCE_POOL_BACKEND_KIND_INTEGRATED = 1;
+  // Allocation uses a remote gRPC resource pool service.
+  RESOURCE_POOL_BACKEND_KIND_GRPC = 2;
+}
+
+// `ResourcePoolStatsStatus` distinguishes unavailable information from zero capacity.
+enum ResourcePoolStatsStatus {
+  // No observation status supplied; clients must treat counts as unavailable.
+  RESOURCE_POOL_STATS_STATUS_UNSPECIFIED = 0;
+  // All six counts and their total fit in uint64; stats and observed_at are present.
+  RESOURCE_POOL_STATS_STATUS_KNOWN = 1;
+  // The Stats RPC returned Unimplemented; stats and observed_at are absent.
+  // This can also indicate that the endpoint does not serve the expected RPC.
+  RESOURCE_POOL_STATS_STATUS_UNKNOWN = 2;
+  // Reading or validating counts failed, including a missing accepted registration
+  // or numeric overflow; stats and observed_at are absent.
+  RESOURCE_POOL_STATS_STATUS_UNAVAILABLE = 3;
+}
+
+// `ResourcePoolStats` reports the same six counts as the resource pool provider API.
+// Used and free each equal the sum of their automatic and manual partitions.
+// For remote pools, only values within the accepted eligibility revision count.
+message ResourcePoolStats {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Allocated values, including allocations held by other bindings when eligible here.
+  uint64 used = 1;
+  // Values available for allocation; unavailable values are excluded from both totals.
+  uint64 free = 2;
+  // Allocated values in the automatic partition.
+  uint64 auto_assign_used = 3;
+  // Available values in the automatic partition.
+  uint64 auto_assign_free = 4;
+  // Allocated values in the manual partition.
+  uint64 non_auto_assign_used = 5;
+  // Available values in the manual partition.
+  uint64 non_auto_assign_free = 6;
 }

@@ -51,6 +51,22 @@ pub async fn latest(
         .map_err(|error| DatabaseError::query(query, error))
 }
 
+/// `latest_accepted` returns the newest revision acknowledged by the provider.
+/// A pending successor does not hide that revision. `None` means no revision
+/// has been acknowledged for this binding.
+pub async fn latest_accepted(
+    db: impl DbReader<'_>,
+    binding_id: Uuid,
+) -> Result<Option<ResourcePoolRegistration>, DatabaseError> {
+    let query = "SELECT binding_id, revision, request, accepted FROM resource_pool_registration
+        WHERE binding_id = $1 AND accepted ORDER BY revision DESC LIMIT 1";
+    sqlx::query_as(query)
+        .bind(binding_id)
+        .fetch_optional(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// `load` returns the exact saved revision, or `None` when it does not exist.
 pub async fn load(
     db: impl DbReader<'_>,

@@ -213,6 +213,27 @@ pub async fn accepted(
     .map_err(|_| RegistrationError::DeadlineExceeded)?
 }
 
+/// `latest_accepted` loads the newest acknowledged definition for pool inspection.
+/// Pending growth leaves the previous accepted revision available. `None` means
+/// this binding has no acknowledged definition; malformed saved requests return
+/// an error. The saved provider pool identity and revision are returned unchanged.
+/// This read has a 30-second budget, including acquiring a database connection,
+/// and does not contact the provider or change registration state.
+pub async fn latest_accepted(
+    database: &PgPool,
+    binding: &ResourcePoolBinding,
+) -> Result<Option<v1::DefineRequest>, RegistrationError> {
+    tokio::time::timeout(REGISTRATION_TIMEOUT, async {
+        check_binding(binding)?;
+        let mut txn = database_transaction(database).await?;
+        let stored = storage::latest_accepted(txn.as_pgconn(), binding.binding_id).await?;
+        txn.commit().await?;
+        stored.map(|stored| decode(&stored, binding)).transpose()
+    })
+    .await
+    .map_err(|_| RegistrationError::DeadlineExceeded)?
+}
+
 /// `PreparedRegistration` distinguishes a saved retry from a request to insert.
 enum PreparedRegistration {
     Existing(ResourcePoolRegistration),

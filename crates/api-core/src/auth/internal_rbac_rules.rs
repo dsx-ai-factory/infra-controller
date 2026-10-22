@@ -365,6 +365,7 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI, Machineatron],
         );
         x.perm("AdminListResourcePools", vec![ForgeAdminCLI]);
+        x.perm("AdminInspectResourcePools", vec![ForgeAdminCLI]);
         x.perm("AdminGrowResourcePool", vec![ForgeAdminCLI]);
         x.perm("SetMaintenance", vec![ForgeAdminCLI, SiteAgent, Flow]);
         x.perm("SetDynamicConfig", vec![ForgeAdminCLI, Machineatron]);
@@ -1235,6 +1236,8 @@ mod rbac_rule_tests {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
+    use carbide_test_support::{Check, check_values};
+
     use super::*;
     use crate::auth::Principal;
 
@@ -1276,6 +1279,38 @@ mod rbac_rule_tests {
                 );
             }
         }
+    }
+
+    /// Pool inspection exposes allocator details to operators; unrelated services
+    /// and requests without an authenticated principal must remain denied.
+    #[test]
+    fn resource_pool_inspection_operator_permissions() {
+        check_values(
+            [
+                Check {
+                    scenario: "admin CLI may inspect pools",
+                    input: vec![Principal::ExternalUser(ExternalUserInfo::new(
+                        None,
+                        "nico-cli-client".into(),
+                        None,
+                    ))],
+                    expect: true,
+                },
+                Check {
+                    scenario: "DNS service has no operator access",
+                    input: vec![Principal::SpiffeServiceIdentifier("nico-dns".into())],
+                    expect: false,
+                },
+                Check {
+                    scenario: "no authenticated principal",
+                    input: vec![],
+                    expect: false,
+                },
+            ],
+            |principals| {
+                InternalRBACRules::allowed_from_static("AdminInspectResourcePools", &principals)
+            },
+        );
     }
 
     #[test]

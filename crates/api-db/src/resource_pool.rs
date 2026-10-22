@@ -722,6 +722,9 @@ pub async fn all_stored_defs(
         .collect())
 }
 
+/// `all` returns local inventory bounds and counts, ordered by pool name.
+/// Pools do not need a saved backend binding to appear here. Address bounds
+/// omit the host prefix length; delegated IPv6 prefixes retain theirs.
 pub async fn all(txn: &mut PgConnection) -> Result<Vec<ResourcePoolSnapshot>, DatabaseError> {
     let mut out = Vec::with_capacity(4);
 
@@ -746,6 +749,8 @@ pub async fn all(txn: &mut PgConnection) -> Result<Vec<ResourcePoolSnapshot>, Da
                 FROM resource_pool WHERE value_type = 'integer' GROUP BY name
             ) snapshot";
 
+    // IPv4 and IPv6 addresses can share a pool, so group by name rather than
+    // value type. Prefix pools keep their length in the displayed bounds.
     let query_ip_address = "
             SELECT
                 name,
@@ -759,12 +764,18 @@ pub async fn all(txn: &mut PgConnection) -> Result<Vec<ResourcePoolSnapshot>, Da
                 (auto_assign_free + non_auto_assign_free) AS free
             FROM
             (
-                SELECT name, host(min(value::inet)) AS min, host(max(value::inet)) AS max,
+                SELECT name,
+                    CASE WHEN bool_and(value_type = 'ipv6prefix')
+                        THEN min(value::inet)::text
+                        ELSE host(min(value::inet)) END AS min,
+                    CASE WHEN bool_and(value_type = 'ipv6prefix')
+                        THEN max(value::inet)::text
+                        ELSE host(max(value::inet)) END AS max,
                     count(*) FILTER (WHERE state = '{\"state\": \"free\"}' AND auto_assign) AS auto_assign_free,
                     count(*) FILTER (WHERE state != '{\"state\": \"free\"}' AND auto_assign) AS auto_assign_used,
                     count(*) FILTER (WHERE state = '{\"state\": \"free\"}' AND NOT auto_assign) AS non_auto_assign_free,
                     count(*) FILTER (WHERE state != '{\"state\": \"free\"}' AND NOT auto_assign) AS non_auto_assign_used
-                FROM resource_pool WHERE value_type IN ('ipv4', 'ipv6') GROUP BY name
+                FROM resource_pool WHERE value_type IN ('ipv4', 'ipv6', 'ipv6prefix') GROUP BY name
             ) snapshot";
 
     for query in [query_int, query_ip_address] {
