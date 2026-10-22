@@ -20,6 +20,7 @@ mod dpu_service_sync_release;
 mod happy_path;
 mod reprovisioning;
 mod stale_labels;
+mod update_preflight;
 mod waiting_for_ready;
 
 use carbide_dpf::DpuServiceVersion;
