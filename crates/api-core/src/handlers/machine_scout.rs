@@ -193,7 +193,8 @@ pub(crate) async fn forge_agent_control(
             Ok(Some(id)) => id,
         };
         let state = db::machine::lookup_host_state_by_dpu_machine_id(&mut txn, &dpu_machine_id)
-            .await?
+            .await
+            .map_err(CarbideError::from)?
             .ok_or(CarbideError::NotFoundError {
                 kind: "machine",
                 id: machine_id.to_string(),
@@ -206,7 +207,9 @@ pub(crate) async fn forge_agent_control(
         let (machine, mut txn) = api
             .load_machine(&machine_id, MachineSearchConfig::default())
             .await?;
-        db::machine::update_scout_contact_time(&machine_id, &mut txn).await?;
+        db::machine::update_scout_contact_time(&machine_id, &mut txn)
+            .await
+            .map_err(CarbideError::from)?;
         let host_machine = HostMachine::try_from(machine.clone())
             .map_err(|error| CarbideError::internal(format!("invalid host machine: {error}")))?;
         let state = host_machine.current_state();

@@ -733,6 +733,116 @@ async fn test_dpu_agent_control_preserves_lookup_error(pool: sqlx::PgPool) {
 }
 
 #[crate::sqlx_test]
+async fn test_dpu_agent_control_preserves_host_state_decode_error(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let mh = create_managed_host(&env).await;
+
+    // DPU requests decode the attached host's `controller_state`.
+    sqlx::query("UPDATE machines SET controller_state = '{}'::jsonb WHERE id = $1")
+        .bind(mh.id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    let error = env
+        .api
+        .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
+            machine_id: Some(mh.dpu_ids[0].into()),
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert_eq!(error.message(), "internal database error");
+    assert_eq!(
+        error.metadata().get("nico-error-code").unwrap(),
+        "NICO-API-500"
+    );
+    assert_eq!(
+        error.metadata().get("nico-error-text").unwrap(),
+        error.message()
+    );
+    let source = error
+        .source()
+        .unwrap()
+        .downcast_ref::<CarbideErrorWithLocation>()
+        .expect("status should retain the API error and conversion location");
+    assert!(source.location.contains("handlers/machine_scout.rs:"));
+    let CarbideError::DBError(annotated) = &source.error else {
+        panic!("expected host state query error, got {:?}", source.error);
+    };
+    assert!(
+        annotated
+            .to_string()
+            .contains("SELECT m.id, m.controller_state")
+    );
+    assert!(matches!(
+        &annotated.source,
+        sqlx::Error::ColumnDecode { index, .. } if index == "1"
+    ));
+}
+
+#[crate::sqlx_test]
+async fn test_host_agent_control_preserves_scout_contact_write_error(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let mh = create_managed_host(&env).await;
+    // Clear the fixture's contact time so the row satisfies the new constraint.
+    sqlx::query("UPDATE machines SET last_scout_contact_time = NULL WHERE id = $1")
+        .bind(mh.id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+    // The constraint rejects only this host's scout contact write.
+    // DDL substitutes a typed machine ID, not caller-supplied SQL.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE machines ADD CONSTRAINT test_reject_scout_contact \
+         CHECK (id <> '{}' OR last_scout_contact_time IS NULL)",
+        mh.id,
+    )))
+    .execute(&env.pool)
+    .await
+    .unwrap();
+    let error = env
+        .api
+        .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
+            machine_id: Some(mh.id.into()),
+        }))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert_eq!(error.message(), "internal database error");
+    assert_eq!(
+        error.metadata().get("nico-error-code").unwrap(),
+        "NICO-API-500"
+    );
+    assert_eq!(
+        error.metadata().get("nico-error-text").unwrap(),
+        error.message()
+    );
+    let source = error
+        .source()
+        .unwrap()
+        .downcast_ref::<CarbideErrorWithLocation>()
+        .expect("status should retain the API error and conversion location");
+    assert!(source.location.contains("handlers/machine_scout.rs:"));
+    let CarbideError::DBError(annotated) = &source.error else {
+        panic!("expected scout contact query error, got {:?}", source.error);
+    };
+    assert!(
+        annotated
+            .to_string()
+            .contains("UPDATE machines SET last_scout_contact_time=NOW()")
+    );
+    let database_error = annotated.source.as_database_error().unwrap();
+    assert_eq!(database_error.code().as_deref(), Some("23514"));
+    assert_eq!(
+        database_error.constraint(),
+        Some("test_reject_scout_contact")
+    );
+}
+
+#[crate::sqlx_test]
 async fn test_dpu_agent_control_uses_host_state_and_requires_attachment(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = create_managed_host(&env).await;
