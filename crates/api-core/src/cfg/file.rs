@@ -7171,22 +7171,47 @@ enabled = true
     }
 
     #[test]
-    fn test_max_concurrent_updates() -> eyre::Result<()> {
-        let test = MaxConcurrentUpdates {
-            absolute: Some(10),
-            percent: None,
-        };
-        assert_eq!(test.max_concurrent_updates(1000, 5), Some(10));
-        let test = MaxConcurrentUpdates {
-            absolute: None,
-            percent: Some(10),
-        };
-        assert_eq!(test.max_concurrent_updates(0, 500), Some(50));
-        assert_eq!(test.max_concurrent_updates(7, 500), Some(43));
-        assert_eq!(test.max_concurrent_updates(50, 500), Some(0));
-        assert_eq!(test.max_concurrent_updates(0, 9), Some(1));
+    fn test_max_concurrent_updates() {
+        struct Input {
+            absolute: Option<i32>,
+            percent: Option<i32>,
+            unhealthy: i32,
+            out_of: i32,
+        }
 
-        Ok(())
+        value_scenarios!(
+            run = |Input { absolute, percent, unhealthy, out_of }| {
+                MaxConcurrentUpdates { absolute, percent }.max_concurrent_updates(unhealthy, out_of)
+            };
+            "absolute limit ignores health counts" {
+                Input { absolute: Some(10), percent: None, unhealthy: 1000, out_of: 5 } => Some(10),
+            }
+            "no configured limit" {
+                Input { absolute: None, percent: None, unhealthy: 0, out_of: 500 } => None,
+            }
+            "percentage budget accounts for unhealthy hosts" {
+                Input { absolute: None, percent: Some(10), unhealthy: 0, out_of: 500 } => Some(50),
+                Input { absolute: None, percent: Some(10), unhealthy: 7, out_of: 500 } => Some(43),
+                Input { absolute: None, percent: Some(10), unhealthy: 50, out_of: 500 } => Some(0),
+            }
+            "unhealthy hosts exceeding the budget saturate at zero" {
+                Input { absolute: None, percent: Some(10), unhealthy: 51, out_of: 500 } => Some(0),
+            }
+            "fractional percentage budget rounds up" {
+                Input { absolute: None, percent: Some(10), unhealthy: 0, out_of: 9 } => Some(1),
+            }
+            "nonpositive percentage disables updates despite an absolute limit" {
+                Input { absolute: Some(10), percent: Some(0), unhealthy: 0, out_of: 500 } => Some(0),
+                Input { absolute: Some(10), percent: Some(-1), unhealthy: 0, out_of: 500 } => Some(0),
+            }
+            "empty fleet has no percentage budget" {
+                Input { absolute: Some(10), percent: Some(10), unhealthy: 0, out_of: 0 } => Some(0),
+            }
+            "absolute limit caps the remaining percentage budget" {
+                Input { absolute: Some(20), percent: Some(10), unhealthy: 7, out_of: 500 } => Some(20),
+                Input { absolute: Some(45), percent: Some(10), unhealthy: 7, out_of: 500 } => Some(43),
+            }
+        );
     }
 
     #[test]
