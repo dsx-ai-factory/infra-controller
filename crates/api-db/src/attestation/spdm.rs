@@ -279,16 +279,19 @@ pub async fn find_machine_ids_for_attestation(
 
 /// Lists jobs matching the aggregate device status selected by `selector`.
 /// Unfinished devices take precedence, followed by failure, cancellation, and all-passed.
+/// Each summary includes distinct machine IDs from retained device attestations, sorted by ID.
 pub async fn list_all_attestation_statuses(
     txn: &mut PgConnection,
     selector: SpdmAttestationStatus,
-) -> Result<Vec<(uuid::Uuid, SpdmAttestationStatus)>, DatabaseError> {
+) -> Result<Vec<(uuid::Uuid, SpdmAttestationStatus, Vec<MachineId>)>, DatabaseError> {
+    // Aggregate membership over the same complete job as its status, before filtering jobs.
     let query = match selector {
         SpdmAttestationStatus::InProgress => {
             r#"
         WITH machine_attestation_statuses AS (
             SELECT
                 job_id,
+                array_agg(DISTINCT machine_id ORDER BY machine_id) AS machine_ids,
                 CASE
                     WHEN bool_or(state NOT IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb) AND NOT (state ? 'Failed'))
                         THEN 'in_progress'
@@ -304,7 +307,8 @@ pub async fn list_all_attestation_statuses(
         )
         SELECT
             job_id,
-            attestation_status
+            attestation_status,
+            machine_ids
         FROM machine_attestation_statuses
         WHERE attestation_status = 'in_progress';
             "#
@@ -314,6 +318,7 @@ pub async fn list_all_attestation_statuses(
         WITH machine_attestation_statuses AS (
             SELECT
                 job_id,
+                array_agg(DISTINCT machine_id ORDER BY machine_id) AS machine_ids,
                 CASE
                     WHEN bool_or(state NOT IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb) AND NOT (state ? 'Failed'))
                         THEN 'in_progress'
@@ -329,7 +334,8 @@ pub async fn list_all_attestation_statuses(
         )
         SELECT
             job_id,
-            attestation_status
+            attestation_status,
+            machine_ids
         FROM machine_attestation_statuses
         WHERE attestation_status = 'failed';
         "#
@@ -339,6 +345,7 @@ pub async fn list_all_attestation_statuses(
         WITH machine_attestation_statuses AS (
             SELECT
                 job_id,
+                array_agg(DISTINCT machine_id ORDER BY machine_id) AS machine_ids,
                 CASE
                     WHEN bool_or(state NOT IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb) AND NOT (state ? 'Failed'))
                         THEN 'in_progress'
@@ -354,7 +361,8 @@ pub async fn list_all_attestation_statuses(
         )
         SELECT
             job_id,
-            attestation_status
+            attestation_status,
+            machine_ids
         FROM machine_attestation_statuses
         WHERE attestation_status = 'cancelled';
             "#
@@ -364,6 +372,7 @@ pub async fn list_all_attestation_statuses(
         WITH machine_attestation_statuses AS (
             SELECT
                 job_id,
+                array_agg(DISTINCT machine_id ORDER BY machine_id) AS machine_ids,
                 CASE
                     WHEN bool_or(state NOT IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb) AND NOT (state ? 'Failed'))
                         THEN 'in_progress'
@@ -379,7 +388,8 @@ pub async fn list_all_attestation_statuses(
         )
         SELECT
             job_id,
-            attestation_status
+            attestation_status,
+            machine_ids
         FROM machine_attestation_statuses
         WHERE attestation_status = 'passed';
             "#
@@ -405,7 +415,15 @@ pub async fn list_all_attestation_statuses(
                 .try_get("attestation_status")
                 .map_err(|e| DatabaseError::new(query, e))?;
 
-            Ok((job_id, convert_status_str_to_model_status(status.as_str())?))
+            let machine_ids: Vec<MachineId> = elem
+                .try_get("machine_ids")
+                .map_err(|e| DatabaseError::new(query, e))?;
+
+            Ok((
+                job_id,
+                convert_status_str_to_model_status(status.as_str())?,
+                machine_ids,
+            ))
         })
         .collect::<Result<Vec<_>, DatabaseError>>()?;
 
@@ -875,7 +893,7 @@ mod tests {
     #[crate::sqlx_test]
     async fn mixed_cancelled_attestation_statuses(pool: sqlx::PgPool) {
         struct Input {
-            machine_seed: u8,
+            machine_seeds: &'static [u8],
             gpu_0_state: SpdmAttestationState,
             expected_status: SpdmAttestationStatus,
         }
@@ -891,7 +909,7 @@ mod tests {
             Case {
                 scenario: "passed and cancelled devices make a cancelled job",
                 input: Input {
-                    machine_seed: 1,
+                    machine_seeds: &[1],
                     gpu_0_state: SpdmAttestationState::Passed,
                     expected_status: SpdmAttestationStatus::Cancelled,
                 },
@@ -904,7 +922,7 @@ mod tests {
             Case {
                 scenario: "failure takes precedence over cancellation",
                 input: Input {
-                    machine_seed: 2,
+                    machine_seeds: &[2, 1],
                     gpu_0_state: SpdmAttestationState::Failed("verification failed".to_string()),
                     expected_status: SpdmAttestationStatus::Failed,
                 },
@@ -917,7 +935,7 @@ mod tests {
             Case {
                 scenario: "unfinished devices keep a cancelled job in progress",
                 input: Input {
-                    machine_seed: 3,
+                    machine_seeds: &[3],
                     gpu_0_state: SpdmAttestationState::FetchMetadata,
                     expected_status: SpdmAttestationStatus::InProgress,
                 },
@@ -933,36 +951,54 @@ mod tests {
             let pool = &pool;
             async move {
                 let mut txn = pool.begin().await.map_err(|e| e.to_string())?;
-                let machine_id = MachineId::new(
-                    MachineIdSource::ProductBoardChassisSerial,
-                    [input.machine_seed; 32],
-                    MachineType::Host,
-                );
+                let mut machine_ids = input
+                    .machine_seeds
+                    .iter()
+                    .map(|seed| {
+                        MachineId::new(
+                            MachineIdSource::ProductBoardChassisSerial,
+                            [*seed; 32],
+                            MachineType::Host,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let machine_id = machine_ids[0];
                 let job_id = uuid::Uuid::new_v4();
-                sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
-                    .bind(machine_id)
-                    .execute(&mut *txn)
-                    .await
-                    .map_err(|e| e.to_string())?;
 
-                for (device_id, state) in [
-                    ("GPU_0", input.gpu_0_state),
-                    ("GPU_1", SpdmAttestationState::Cancelled),
-                ] {
-                    sqlx::query(
-                        "INSERT INTO spdm_machine_devices_attestation \
-                         (machine_id, device_id, nonce, state, job_id, started_at) \
-                         VALUES ($1, $2, $3, $4, $5, now())",
-                    )
-                    .bind(machine_id)
-                    .bind(device_id)
-                    .bind(uuid::Uuid::new_v4())
-                    .bind(sqlx::types::Json(state))
-                    .bind(job_id)
-                    .execute(&mut *txn)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                // Insert members in fixture order to exercise sorting as well as device deduplication.
+                for (index, member_id) in machine_ids.iter().enumerate() {
+                    sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+                        .bind(member_id)
+                        .execute(&mut *txn)
+                        .await
+                        .map_err(|e| e.to_string())?;
+
+                    // A passed second machine must be included even when another machine makes the job fail.
+                    let devices = if index == 0 {
+                        vec![
+                            ("GPU_0", input.gpu_0_state.clone()),
+                            ("GPU_1", SpdmAttestationState::Cancelled),
+                        ]
+                    } else {
+                        vec![("GPU_0", SpdmAttestationState::Passed)]
+                    };
+                    for (device_id, state) in devices {
+                        sqlx::query(
+                            "INSERT INTO spdm_machine_devices_attestation \
+                             (machine_id, device_id, nonce, state, job_id, started_at) \
+                             VALUES ($1, $2, $3, $4, $5, now())",
+                        )
+                        .bind(member_id)
+                        .bind(device_id)
+                        .bind(uuid::Uuid::new_v4())
+                        .bind(sqlx::types::Json(state))
+                        .bind(job_id)
+                        .execute(&mut *txn)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    }
                 }
+                machine_ids.sort_by_key(ToString::to_string);
 
                 let job_status = get_attestation_job_status(&mut txn, &job_id)
                     .await
@@ -985,7 +1021,7 @@ mod tests {
                         .await
                         .map_err(|e| e.to_string())?;
                     let expected = if selector == input.expected_status {
-                        vec![(job_id, input.expected_status)]
+                        vec![(job_id, input.expected_status, machine_ids.clone())]
                     } else {
                         Vec::new()
                     };

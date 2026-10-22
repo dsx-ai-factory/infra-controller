@@ -934,6 +934,7 @@ pub(in crate::tests) mod tests {
 
         assert_eq!(1, statuses.len());
         assert_eq!(Some(&job_id), statuses[0].job_id.as_ref());
+        assert_eq!(vec![MachineId::from(machine_id)], statuses[0].machine_ids);
 
         // check that attestation's status is InProgress
         assert_eq!(

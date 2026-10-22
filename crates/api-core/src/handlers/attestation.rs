@@ -216,13 +216,16 @@ pub(crate) async fn list_attestation(
         .map(|statuses| {
             Response::new(rpc::SpdmListAttestationResponse {
                 statuses: statuses
-                    .iter()
-                    .map(|elem| rpc::SpdmAttestationJobStatus {
-                        job_id: Some(::rpc::common::Uuid {
-                            value: elem.0.to_string(),
-                        }),
-                        attestation_status: convert_model_status_to_rpc_status(elem.1).into(),
-                    })
+                    .into_iter()
+                    .map(
+                        |(job_id, status, machine_ids)| rpc::SpdmAttestationJobStatus {
+                            job_id: Some(::rpc::common::Uuid {
+                                value: job_id.to_string(),
+                            }),
+                            attestation_status: convert_model_status_to_rpc_status(status).into(),
+                            machine_ids,
+                        },
+                    )
                     .collect(),
             })
         })?;

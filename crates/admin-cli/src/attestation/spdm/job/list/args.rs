@@ -18,6 +18,12 @@
 use clap::{Parser, ValueEnum};
 
 #[derive(Parser, Debug)]
+#[command(long_about = "List SPDM attestation jobs by status.\n\n\
+    Always prints JSON to stdout: an array of [job_id, status, machine_ids] entries, or [] when no jobs match. \
+    Status names are SPDM_ATT_IN_PROGRESS, SPDM_ATT_CANCELLED, SPDM_ATT_FAILED, and SPDM_ATT_PASSED. \
+    Machine IDs are distinct, sorted, and describe retained \
+    device attestations for each job. Older Core versions return an empty machine-ID array; \
+    upgrade Core first to obtain membership.")]
 #[command(after_long_help = "\
 EXAMPLES:
 

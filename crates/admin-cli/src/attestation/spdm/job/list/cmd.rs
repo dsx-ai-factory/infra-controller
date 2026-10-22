@@ -18,6 +18,7 @@
 use ::rpc::forge::{
     SpdmAttestationStatus, SpdmListAttestationRequest, SpdmListAttestationRequestSelector,
 };
+use carbide_uuid::machine::MachineId;
 use uuid::Uuid;
 
 use crate::attestation::spdm::job::list::args::{Args, Selector};
@@ -32,7 +33,8 @@ pub(super) async fn list(args: Args, api_client: &ApiClient) -> CarbideCliResult
         Selector::Passed => SpdmListAttestationRequestSelector::SpdmListPassed,
     };
 
-    let attestations: Vec<(Uuid, String)> = api_client
+    // Keep the job ID and status positions stable, appending the job's machine membership.
+    let attestations: Vec<(Uuid, String, Vec<MachineId>)> = api_client
         .0
         .list_attestation(SpdmListAttestationRequest {
             selector: selector.into(),
@@ -57,9 +59,9 @@ pub(super) async fn list(args: Args, api_client: &ApiClient) -> CarbideCliResult
                 ))?
                 .as_str_name()
                 .to_string();
-            Ok((job_id, att_status))
+            Ok((job_id, att_status, elem.machine_ids))
         })
-        .collect::<CarbideCliResult<Vec<(Uuid, String)>>>()?;
+        .collect::<CarbideCliResult<Vec<_>>>()?;
 
     println!("{}", serde_json::to_string_pretty(&attestations)?);
 

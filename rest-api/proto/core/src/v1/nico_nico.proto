@@ -1262,6 +1262,8 @@ message SpdmAttestationJobStatus {
   reserved "machine_id";
   SpdmAttestationStatus attestation_status = 2;
   common.UUID job_id = 3;
+  // Distinct machines this job affects.
+  repeated common.MachineId machine_ids = 4;
 }
 
 // Why one attestation scheduling attempt ended as it did.
