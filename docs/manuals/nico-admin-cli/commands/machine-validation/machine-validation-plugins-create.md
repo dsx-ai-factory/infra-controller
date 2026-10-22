@@ -44,6 +44,10 @@ Container contract adapter; omit for the standard NICo contract
 
 `--entrypoint <ENTRYPOINT>`
 
+Command vector; repeat for arguments. Standard contract: appended to the
+image ENTRYPOINT. DSXHealthValidation: first value overrides the
+executable
+
 `--arg <COMMAND_ARGS>`
 
 Append a command argument; repeat as needed, using --arg=--flag for

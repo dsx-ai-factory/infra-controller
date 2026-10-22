@@ -50,11 +50,12 @@ nico-admin-cli machine-validation plugins create \
   --platform GB200
 ```
 
-`--type` is optional and defaults to `container`. `--entrypoint` names the
-executable; repeatable `--arg` values supply ordered command arguments. Retain
-the existing repeated-entrypoint syntax for backward compatibility. Store the
-command as an argument vector and execute it without a shell. Entrypoint changes
-require a new revision and qualification, rather than a framework change.
+`--type` is optional and defaults to `container`. Repeated `--entrypoint` values
+form the command vector; repeatable `--arg` values append ordered arguments.
+The standard contract preserves the image ENTRYPOINT and supplies the vector
+after the image reference. DSX explicitly overrides the executable with the
+first vector element. Preserve this distinction for existing revisions and
+execute without a shell. Command changes require a new revision and qualification.
 
 `--parameters` carries structured input, separate from command arguments. The
 standard adapter puts it into NICo's `input.json`; the DSX adapter maps optional
@@ -89,3 +90,9 @@ Validate on Scout using the tested GPU and journal setup. A valid `CRITICAL`
 verdict must produce a completed, failed validation rather than an execution
 error. Standard container plugins must retain their existing contract and
 qualification, verification, access-approval, and enablement workflow.
+
+Full Scout qualification remains pending. Upgrade API instances and Scouts
+before introducing adapter revisions. Record the image digest, software and
+hardware versions, actual-profile GPU/journal access, persisted verdicts, logs,
+and timeout cleanup as described in the
+[operator qualification guide](../../docs/provisioning/machine-validation.md#qualification-evidence).

@@ -45317,9 +45317,13 @@ func (x *MachineValidationTest) GetFullHostApproved() bool {
 // A generic OCI plugin. The image is an immutable digest-pinned reference and
 // entrypoint arguments are passed directly to the container runtime.
 type MachineValidationPlugin struct {
-	state      protoimpl.MessageState `protogen:"open.v1"`
-	Image      string                 `protobuf:"bytes,1,opt,name=image,proto3" json:"image,omitempty"`
-	Entrypoint []string               `protobuf:"bytes,2,rep,name=entrypoint,proto3" json:"entrypoint,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Image string                 `protobuf:"bytes,1,opt,name=image,proto3" json:"image,omitempty"`
+	// Command vector invoked without a shell. The standard contract appends it
+	// to the image ENTRYPOINT (or uses it as the command when ENTRYPOINT is empty).
+	// DSXHealthValidation overrides the executable with the first element and
+	// passes the remaining elements as arguments.
+	Entrypoint []string `protobuf:"bytes,2,rep,name=entrypoint,proto3" json:"entrypoint,omitempty"`
 	// JSON object of non-secret site-defined values included in input.json.
 	ParametersJson string `protobuf:"bytes,3,opt,name=parameters_json,json=parametersJson,proto3" json:"parameters_json,omitempty"`
 	Privileged     bool   `protobuf:"varint,4,opt,name=privileged,proto3" json:"privileged,omitempty"`

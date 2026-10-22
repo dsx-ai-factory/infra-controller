@@ -8046,6 +8046,10 @@ message MachineValidationTest {
 // entrypoint arguments are passed directly to the container runtime.
 message MachineValidationPlugin {
   string image = 1;
+  // Command vector invoked without a shell. The standard contract appends it
+  // to the image ENTRYPOINT (or uses it as the command when ENTRYPOINT is empty).
+  // DSXHealthValidation overrides the executable with the first element and
+  // passes the remaining elements as arguments.
   repeated string entrypoint = 2;
   // JSON object of non-secret site-defined values included in input.json.
   string parameters_json = 3;

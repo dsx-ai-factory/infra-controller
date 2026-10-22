@@ -40,7 +40,11 @@ pub(crate) struct CreateArgs {
     container_plugin_adapter: Option<String>,
     #[clap(long)]
     image: String,
-    #[clap(long, required = true)]
+    #[clap(
+        long,
+        required = true,
+        help = "Command vector; repeat for arguments. Standard contract: appended to the image ENTRYPOINT. DSXHealthValidation: first value overrides the executable"
+    )]
     entrypoint: Vec<String>,
     #[clap(
         long = "arg",
