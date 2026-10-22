@@ -113,7 +113,7 @@ impl OtlpExport for MetricsExport {
 mod tests {
     use super::*;
     use crate::otlp::metrics::{
-        Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, metric,
+        Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, Sum, metric,
     };
 
     #[test]
@@ -121,22 +121,33 @@ mod tests {
         let request = ExportMetricsServiceRequest {
             resource_metrics: vec![ResourceMetrics {
                 scope_metrics: vec![ScopeMetrics {
-                    metrics: vec![Metric {
-                        data: Some(metric::Data::Gauge(Gauge {
-                            data_points: vec![
-                                NumberDataPoint::default(),
-                                NumberDataPoint::default(),
-                                NumberDataPoint::default(),
-                            ],
-                        })),
-                        ..Default::default()
-                    }],
+                    metrics: vec![
+                        Metric {
+                            data: Some(metric::Data::Gauge(Gauge {
+                                data_points: vec![
+                                    NumberDataPoint::default(),
+                                    NumberDataPoint::default(),
+                                ],
+                            })),
+                            ..Default::default()
+                        },
+                        Metric {
+                            data: Some(metric::Data::Sum(Sum {
+                                data_points: vec![
+                                    NumberDataPoint::default(),
+                                    NumberDataPoint::default(),
+                                ],
+                                ..Default::default()
+                            })),
+                            ..Default::default()
+                        },
+                    ],
                     ..Default::default()
                 }],
                 ..Default::default()
             }],
         };
 
-        assert_eq!(MetricsExport::record_count(&request), 3);
+        assert_eq!(MetricsExport::record_count(&request), 4);
     }
 }

@@ -297,15 +297,15 @@ pub enum MetricSemantics {
     /// A current value that may increase or decrease.
     Gauge,
     /// An absolute device total, which may decrease when the device resets.
-    /// Finite, nonnegative values also produce a `_total` counter in Prometheus;
-    /// negative and non-finite values retain only the legacy gauge. Callers must
-    /// keep the alias name distinct from other gauge names in the telemetry registry.
-    /// OTLP keeps the legacy gauge until cumulative export is added in
-    /// <https://github.com/dsx-ai-factory/infra-controller/issues/8008>.
+    /// Finite, nonnegative values also produce a `_total` alias: a counter in
+    /// Prometheus and a monotonic cumulative `Sum` in OTLP. Negative and non-finite
+    /// values retain only the legacy gauge. Callers must keep the alias name
+    /// distinct from other metric names in both Prometheus and OTLP exports.
     CumulativeCounter {
         /// When the device began accumulating this value, if the source reports it.
+        /// After a reset, report the new accumulation start, or `None` if unknown.
         /// A connection or exporter start time does not establish this epoch.
-        /// Retained for OTLP; Prometheus text export does not expose this epoch.
+        /// Used by OTLP; Prometheus text export does not expose this epoch.
         start_time: Option<SystemTime>,
     },
 }

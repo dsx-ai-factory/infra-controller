@@ -715,7 +715,7 @@ pub struct OtlpTargetConfig {
     ///
     /// A batch whose request would be larger is split and sent in parts, as is
     /// a batch the target rejects with `RESOURCE_EXHAUSTED`. A single log
-    /// record or metric point is always sent on its own, so the target still
+    /// record or metric sample is always sent on its own, so the target still
     /// decides whether to accept it. Defaults to 4 MiB, the default gRPC
     /// receive limit of the OpenTelemetry Collector, and must be greater than
     /// zero.
