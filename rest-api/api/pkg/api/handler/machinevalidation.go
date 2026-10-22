@@ -1763,6 +1763,9 @@ func (handler DeleteMachineValidationExternalConfigHandler) Handle(c echo.Contex
 		WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
 		TaskQueue:                queue.SiteTaskQueue,
 	}
+	deleteProtoRequest := &corev1.RemoveMachineValidationExternalConfigRequest{
+		Name: extCfgName,
+	}
 
 	logger.Info().Msg("triggering MachineValidationExternalConfig delete workflow")
 
@@ -1770,15 +1773,15 @@ func (handler DeleteMachineValidationExternalConfigHandler) Handle(c echo.Contex
 	defer cancel()
 
 	// Trigger Site workflow
-	deleteWorkflowRun, err := temporalClient.ExecuteWorkflow(deleteCtx, deleteWorkflowOptions, "RemoveMachineValidationExternalConfig")
+	deleteWorkflowRun, err := temporalClient.ExecuteWorkflow(deleteCtx, deleteWorkflowOptions, "RemoveMachineValidationExternalConfig", deleteProtoRequest)
 	if err != nil {
-		logger.Error().Err(err).Msg("failed to synchronously start Temporal workflow to delete update MachineValidationExternalConfig")
+		logger.Error().Err(err).Msg("failed to synchronously start Temporal workflow to delete MachineValidationExternalConfig")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to start sync workflow to delete Machine Validation External Config on Site: %s", err), nil)
 	}
 	deleteWorkflowID := deleteWorkflowRun.GetID()
 	logger.Info().Str("Workflow ID", deleteWorkflowID).Msg("executed synchronous delete MachineValidationExternalConfig workflow")
 
-	// Execute update workflow synchronously
+	// Wait for the removal workflow to finish.
 	err = deleteWorkflowRun.Get(deleteCtx, nil)
 	if err != nil {
 		var timeoutErr *tp.TimeoutError
