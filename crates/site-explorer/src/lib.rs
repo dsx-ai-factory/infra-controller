@@ -474,7 +474,8 @@ pub(crate) struct IdentifiedManagedHost {
 /// A host and its matching decisions, collected before DPU configuration.
 struct IngestionCandidate<'a> {
     endpoint: ExploredEndpoint,
-    dpu_matches: HostDpuMatches<'a>,
+    /// `None` when `Ignore` skips DPU matching and configuration.
+    dpu_matches: Option<HostDpuMatches<'a>>,
     host_dpu_policy: HostDpuPolicy,
     declared_primary: Option<MacAddress>,
 }
@@ -1373,8 +1374,7 @@ impl SiteExplorer {
             }
         }
 
-        let mut managed_hosts = Vec::new();
-        let mut boot_interfaces = HostBootInterfaces::new();
+        let mut candidates = Vec::with_capacity(explored_hosts.len());
         for (_, ep) in explored_hosts {
             let expected_machine =
                 expected_explored_endpoint_index.matched_expected_machine(&ep.address);
@@ -1395,6 +1395,26 @@ impl SiteExplorer {
             let declared_primary =
                 expected_machine.and_then(|expected| expected.data.declared_primary_mac());
 
+            let dpu_matches = match host_dpu_policy {
+                HostDpuPolicy::Ignore => None,
+                HostDpuPolicy::Manage | HostDpuPolicy::Nic => Some(HostDpuMatches::new(
+                    &ep,
+                    &dpu_sn_to_endpoint,
+                    expected_machine,
+                    host_dpu_policy,
+                )),
+            };
+            candidates.push(IngestionCandidate {
+                endpoint: ep,
+                dpu_matches,
+                host_dpu_policy,
+                declared_primary,
+            });
+        }
+
+        let mut managed_hosts = Vec::new();
+        let mut boot_interfaces = HostBootInterfaces::new();
+        for candidate in candidates {
             // If the resolved policy says to ignore this host's DPUs, treat it
             // as zero-DPU, regardless of what BMC hardware
             // enumeration says about attached DPUs. Without this check,
@@ -1403,7 +1423,9 @@ impl SiteExplorer {
             // that aren't actually cabled up, and we're instead using a
             // basic NIC. Since they aren't cabled, we'll never be able to
             // discover + link them; just ignore them entirely.
-            if matches!(host_dpu_policy, HostDpuPolicy::Ignore) {
+            let Some(dpu_matches) = candidate.dpu_matches else {
+                let ep = candidate.endpoint;
+                let declared_primary = candidate.declared_primary;
                 // `Ignore` deliberately skips DPU discovery, but the host's
                 // explicitly declared primary NIC still needs to refresh the
                 // endpoint-level boot-interface pair. Keep the DPU slice empty
@@ -1425,20 +1447,12 @@ impl SiteExplorer {
                 });
                 metrics.exploration_identified_managed_hosts += 1;
                 continue;
-            }
-
-            let dpu_matches =
-                HostDpuMatches::new(&ep, &dpu_sn_to_endpoint, expected_machine, host_dpu_policy);
-            let candidate = IngestionCandidate {
-                endpoint: ep,
-                dpu_matches,
-                host_dpu_policy,
-                declared_primary,
             };
+
             let Some(dpus_explored_for_host) = self
                 .configure_host_dpus(
                     &candidate.endpoint,
-                    candidate.dpu_matches,
+                    dpu_matches,
                     candidate.host_dpu_policy,
                     metrics,
                 )
