@@ -319,6 +319,12 @@ for the requested behavior.
 - Verification should exercise the behavior that changed. Do not claim a fix is
   covered by an unrelated build, a nearby test, generated examples, or a mocked
   path that avoids the real integration being changed.
+- Report relevant checks in the task handoff or [PR comments](#pull-request-guidelines):
+  command or manual check, scope, and outcome (passed, failed, blocked, timed out,
+  or not run).
+  Explain incomplete checks. An interrupted run or a filtered run that selects
+  no intended tests does not verify that behavior. Reporting a limitation does
+  not waive required checks.
 - Use the real service, repository, dataset, device, workflow, command, and
   integration path that the change affects whenever practical. Call out any
   lower-fidelity substitute instead of treating it as equivalent coverage.
@@ -351,8 +357,8 @@ cargo make pre-commit-verify-workspace
 
 This skips the release build and test suite, but still requires the lint,
 formatting, dependency-policy, and REST protobuf generation tools. Run the
-focused checks relevant to your change and document any verification limitations
-in the pull request.
+focused checks relevant to your change and report their outcomes as described
+above.
 
 ## Pull Request Guidelines
 
@@ -378,7 +384,7 @@ The human submitter must proofread the pull request text before submitting, the
 human is accountable for the pull-request description, comments, and code
 that's being assisted with AI.
 
-Do not submit AI slop in pull requests or in comments.  A human is reviewing
+Do not submit AI slop in pull requests or in comments. A human is reviewing
 your submission, treat their time with respect.
 
 ### Pull request review

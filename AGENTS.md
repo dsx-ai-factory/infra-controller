@@ -24,6 +24,15 @@ reuse, evidence, and verification. Preserve others' work. Do not edit any
 Never commit secrets or local environment files; keep local secrets in
 gitignored `.local_envrc` and follow [secret scanning](CONTRIBUTING.md#secret-scanning).
 
+When asked to update agent guidance, add only durable repository constraints or
+required workflows that apply beyond a single PR. A review incident may reveal
+such a constraint; record the general rule, not the incident. State its scope,
+action, and consequence, backed by code, CI, a contract, or a documented
+maintainer decision. Keep PR narratives, review disputes, and PR-specific
+workarounds or exceptions in the relevant PR or issue, not in `AGENTS.md`.
+Keep component-only rules with the component and shared rules here; link
+canonical procedures instead of repeating them.
+
 ## Find the authoritative source
 
 - Rust implementations: `crates/`; package names, descriptions, and dependencies:
@@ -46,9 +55,10 @@ gitignored `.local_envrc` and follow [secret scanning](CONTRIBUTING.md#secret-sc
 ## Build, test, and lint
 
 Install `cargo-make` with `cargo install cargo-make`. Use the task definitions and
-[local CI guidance](CONTRIBUTING.md#local-ci-verification) for prerequisites and
-scope. Core workflows primarily use cargo-make; use direct Cargo commands where
-listed below. REST workflows use the top-level or `rest-api/` Makefiles.
+[verification guidance](CONTRIBUTING.md#verification) for prerequisites, scope,
+and reporting results. Core workflows primarily use cargo-make; use direct Cargo
+commands where listed below. REST workflows use the top-level or `rest-api/`
+Makefiles.
 
 | Purpose | Command |
 | --- | --- |

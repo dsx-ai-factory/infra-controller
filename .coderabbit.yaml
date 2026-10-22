@@ -93,7 +93,8 @@ reviews:
         a fixed reply or intermediate commit does not prove the fix remains.
         A resolved or deferred bot comment is not itself a defect or blocker.
         Apply this threshold to every matching path. Repository instructions
-        guide implementation; they do not require a review comment for every rule.
+        guide implementation. Authoring preferences and missing verification
+        reports alone are not findings.
     - path: "crates/**/*.rs"
       instructions: >-
         Apply STYLE_GUIDE.md within the finding threshold above. Awaiting
@@ -142,11 +143,13 @@ reviews:
         sources, not imported generated declarations.
     - path: "**/*.md"
       instructions: >-
-        Check operator commands within the threshold above. Report a command
-        that fails as written, exposes a credential in arguments or logs, writes
-        a secret to a predictable or broadly readable path, or runs a destructive
-        step before the backup or export it depends on succeeds. Spelling,
-        grammar, ordering, and link style alone are not findings.
+        Check operator commands within the threshold above. Recognizable
+        placeholders in command templates are not defects by themselves.
+        Report missing or incorrect prerequisites and failures that remain after
+        valid substitutions and documented setup. Also report credentials exposed
+        in arguments or logs, secrets written to predictable or broadly readable
+        paths, or destructive steps before their required backup or export
+        succeeds. Spelling, grammar, ordering, and link style alone are not findings.
     - path: "**/*.sh"
       instructions: >-
         Check scripts within the threshold above. Report an ignored failure that
