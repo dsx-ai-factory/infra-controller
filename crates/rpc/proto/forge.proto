@@ -202,7 +202,16 @@ service Forge {
 
   // forge-dpu-agent -> carbide-api
   rpc GetManagedHostNetworkConfig(ManagedHostNetworkConfigRequest) returns (ManagedHostNetworkConfigResponse);
-  rpc RecordDpuNetworkStatus(DpuNetworkStatus) returns (DpuNetworkStatusResponse);
+  // Records operational status. A rejected attached LLDP report fails this
+  // legacy RPC after the operational status and follow-up work have completed.
+  rpc RecordDpuNetworkStatus(DpuNetworkStatus) returns (google.protobuf.Empty);
+  // Records the same operational status while reporting attached LLDP
+  // acceptance separately. Agents select this method when Version advertises
+  // its capability. Implementations advertising that capability must reserve
+  // Unimplemented for rejecting this method before processing starts, because
+  // agents retry the legacy RPC only for that status; authorization and all
+  // other failures are final.
+  rpc RecordDpuNetworkStatusWithLldpAcknowledgment(DpuNetworkStatus) returns (DpuNetworkStatusResponse);
   // Lists all health report sources for a Machine
   rpc ListMachineHealthReports(common.MachineId) returns (ListHealthReportResponse);
   // Adds a health report source for a Machine
@@ -1965,6 +1974,8 @@ message VersionRequest {
 enum BuildCapability {
   BUILD_CAPABILITY_UNSPECIFIED = 0;
   BUILD_CAPABILITY_VPC_SLAAC = 1;
+  // Core supports explicit LLDP acceptance on DPU network-status reports.
+  BUILD_CAPABILITY_DPU_NETWORK_STATUS_LLDP_ACKNOWLEDGMENT = 2;
 }
 
 message BuildInfo {
@@ -6652,13 +6663,10 @@ message DpuNetworkStatus {
   // LLDP neighbors this DPU sees, attached to the status push rather than sent
   // on its own RPC. Absent when the agent did not attempt a collection.
   optional LldpReport lldp = 18;
-  // True when the agent understands DpuNetworkStatusResponse.lldp_accepted and
-  // will not acknowledge a rejected snapshot. False or omission identifies a
-  // legacy agent, for which an LLDP rejection keeps the RPC non-OK.
-  bool lldp_acknowledgment_supported = 19;
 }
 
-// Reports LLDP acceptance independently from the operational status write.
+// Reports LLDP acceptance independently from the operational status write for
+// RecordDpuNetworkStatusWithLldpAcknowledgment.
 message DpuNetworkStatusResponse {
   // Absent when the request carried no LLDP report. True means the attached
   // report was accepted and the outer status transaction committed. False

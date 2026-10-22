@@ -60,6 +60,7 @@ struct State {
     last_network_status: Option<rpc::forge::DpuNetworkStatus>,
     reject_next_network_status: bool,
     network_status_reports: Vec<(Instant, bool)>,
+    network_status_methods: Vec<&'static str>,
     reject_dhcp_update: bool,
     dhcp_updates: Vec<(bool, Bytes)>,
     include_ipv6_tenant: bool,
@@ -260,8 +261,9 @@ async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) ->
                 "rejected configuration was acknowledged: {rejected:?}"
             );
             eyre::ensure!(
-                rejected.lldp_acknowledgment_supported,
-                "agent did not advertise separate LLDP acknowledgment support"
+                state.lock().await.network_status_methods.last()
+                    == Some(&"acknowledgment"),
+                "agent did not select the LLDP acknowledgment RPC"
             );
             if fail_fmds_route {
                 let startup: Vec<serde_yaml::Value> =
@@ -857,8 +859,12 @@ fn mock_core(state: Arc<Mutex<State>>) -> Router {
             post(handle_netconf),
         )
         .route(
+            ::rpc::service_path!("RecordDpuNetworkStatusWithLldpAcknowledgment"),
+            post(handle_record_netstat_with_lldp_acknowledgment),
+        )
+        .route(
             ::rpc::service_path!("RecordDpuNetworkStatus"),
-            post(handle_record_netstat),
+            post(handle_record_netstat_legacy),
         )
         .route(
             ::rpc::service_path!("DpuAgentUpgradeCheck"),
@@ -876,7 +882,7 @@ fn mock_core(state: Arc<Mutex<State>>) -> Router {
             ::rpc::service_path!("FindInterfaces"),
             post(handle_find_interfaces),
         )
-        // ForgeApiClient needs a working Version route for connection retrying
+        // Connection checks and status-method selection share the Version route.
         .route(::rpc::service_path!("Version"), post(handle_version))
         .fallback(handler)
         .with_state(state)
@@ -902,16 +908,14 @@ async fn handle_discover(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl
 }
 
 async fn handle_version() -> impl IntoResponse {
-    let mut resp = rpc::forge::BuildInfo::default();
-
-    let rc = rpc::forge::RuntimeConfig {
-        sitename: Some("testsite".to_string()),
+    common::respond(rpc::forge::BuildInfo {
+        capabilities: vec![rpc::forge::BuildCapability::DpuNetworkStatusLldpAcknowledgment as i32],
+        runtime_config: Some(rpc::forge::RuntimeConfig {
+            sitename: Some("testsite".to_string()),
+            ..Default::default()
+        }),
         ..Default::default()
-    };
-
-    resp.runtime_config = Some(rc);
-
-    common::respond(resp)
+    })
 }
 
 // This mock omits `addresses` to exercise the rolling-upgrade fallback for older Core versions.
@@ -1493,14 +1497,49 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
     common::respond(netconf)
 }
 
-async fn handle_record_netstat(
+/// Serves the acknowledgment-aware status RPC and mirrors Core's response
+/// presence rule for attached versus absent LLDP reports.
+async fn handle_record_netstat_with_lldp_acknowledgment(
     AxumState(state): AxumState<Arc<Mutex<State>>>,
     body: Bytes,
 ) -> Result<axum::response::Response, StatusCode> {
+    let (rejected, lldp_attached) =
+        record_network_status_request(&state, body, "acknowledgment").await?;
+    if rejected {
+        return Ok(rejected_network_status_response());
+    }
+    Ok(common::respond(rpc::forge::DpuNetworkStatusResponse {
+        lldp_accepted: lldp_attached.then_some(true),
+    })
+    .into_response())
+}
+
+/// Serves the original status RPC so the full-agent fixture detects any
+/// unexpected fallback despite advertising the additive method.
+async fn handle_record_netstat_legacy(
+    AxumState(state): AxumState<Arc<Mutex<State>>>,
+    body: Bytes,
+) -> Result<axum::response::Response, StatusCode> {
+    let (rejected, _) = record_network_status_request(&state, body, "legacy").await?;
+    if rejected {
+        return Ok(rejected_network_status_response());
+    }
+    Ok(common::respond(()).into_response())
+}
+
+/// Decodes and records one mock status request while keeping both wire
+/// wrappers' injected rejection and observation behavior identical.
+async fn record_network_status_request(
+    state: &Arc<Mutex<State>>,
+    body: Bytes,
+    method: &'static str,
+) -> Result<(bool, bool), StatusCode> {
     let payload = body.get(5..).ok_or(StatusCode::BAD_REQUEST)?;
     let status =
         rpc::forge::DpuNetworkStatus::decode(payload).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let lldp_attached = status.lldp.is_some();
     let mut state = state.lock().await;
+    state.network_status_methods.push(method);
     state.num_health_reports.fetch_add(1, Ordering::SeqCst);
     state.post_config_wait_seen |= status.dpu_health.as_ref().is_some_and(|health| {
         health
@@ -1513,18 +1552,23 @@ async fn handle_record_netstat(
         .network_status_reports
         .push((Instant::now(), rejected));
     if rejected {
-        return Ok((
-            [
-                ("content-type", "application/grpc"),
-                ("grpc-status", "14"),
-                ("grpc-message", "injected%20status%20rejection"),
-            ],
-            "",
-        )
-            .into_response());
+        return Ok((true, lldp_attached));
     }
     state.last_network_status = Some(status);
-    Ok(common::respond(()).into_response())
+    Ok((false, lldp_attached))
+}
+
+/// Builds the injected gRPC failure shared by both status RPC wrappers.
+fn rejected_network_status_response() -> axum::response::Response {
+    (
+        [
+            ("content-type", "application/grpc"),
+            ("grpc-status", "14"),
+            ("grpc-message", "injected%20status%20rejection"),
+        ],
+        "",
+    )
+        .into_response()
 }
 
 async fn handle_dpu_agent_upgrade_check(

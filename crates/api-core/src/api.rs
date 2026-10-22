@@ -696,8 +696,17 @@ impl Forge for Api {
     async fn record_dpu_network_status(
         &self,
         request: Request<rpc::DpuNetworkStatus>,
-    ) -> Result<Response<rpc::DpuNetworkStatusResponse>, Status> {
+    ) -> Result<Response<()>, Status> {
         crate::handlers::dpu::record_dpu_network_status(self, request).await
+    }
+
+    /// Records DPU status and reports whether Core accepted an attached LLDP snapshot.
+    async fn record_dpu_network_status_with_lldp_acknowledgment(
+        &self,
+        request: Request<rpc::DpuNetworkStatus>,
+    ) -> Result<Response<rpc::DpuNetworkStatusResponse>, Status> {
+        crate::handlers::dpu::record_dpu_network_status_with_lldp_acknowledgment(self, request)
+            .await
     }
 
     async fn list_machine_health_reports(

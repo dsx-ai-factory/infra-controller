@@ -27,7 +27,8 @@ use rpc::forge::forge_server::Forge;
 use crate::tests::common;
 use crate::tests::common::api_fixtures::dpu::dpu_discover_machine;
 use crate::tests::common::api_fixtures::{
-    create_managed_host, network_configured_with_lldp, try_network_configured_with_lldp,
+    create_managed_host, network_configured_with_lldp, try_legacy_network_configured_with_lldp,
+    try_network_configured_with_lldp, try_network_configured_with_optional_lldp,
 };
 
 #[crate::sqlx_test]
@@ -479,7 +480,6 @@ async fn test_dpu_lldp_rejection_commits_status_and_preserves_neighbors(pool: sq
         &env,
         &dpu_id,
         lldp_report(Updated, vec![prior_neighbor.clone()]),
-        true,
     )
     .await
     .unwrap();
@@ -518,8 +518,8 @@ async fn test_dpu_lldp_rejection_commits_status_and_preserves_neighbors(pool: sq
         .await
         .unwrap();
 
-        // Send a capable-agent report and inspect the explicit LLDP outcome.
-        let response = try_network_configured_with_lldp(&env, &dpu_id, report, true)
+        // Send the acknowledgment-aware report and inspect its explicit LLDP outcome.
+        let response = try_network_configured_with_lldp(&env, &dpu_id, report)
             .await
             .unwrap_or_else(|error| panic!("{name}: {error}"));
         assert_eq!(response.lldp_accepted, Some(false), "{name}");
@@ -539,6 +539,22 @@ async fn test_dpu_lldp_rejection_commits_status_and_preserves_neighbors(pool: sq
         );
         assert_eq!(stored_links(&env, &dpu_id).await, links_before, "{name}");
     }
+}
+
+/// Proves the additive method omits LLDP acknowledgment only when the request
+/// carries no LLDP report, preserving meaningful optional-field presence.
+#[crate::sqlx_test]
+async fn test_dpu_status_without_lldp_omits_acknowledgment(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let dpu_id = create_managed_host(&env).await.dpu().id;
+
+    // Report ordinary operational status through the additive method.
+    let response = try_network_configured_with_optional_lldp(&env, &dpu_id, None)
+        .await
+        .unwrap();
+
+    // Absence is reserved for a request that had no LLDP outcome to report.
+    assert_eq!(response.lldp_accepted, None);
 }
 
 /// Proves a legacy agent still receives a non-OK result after operational
@@ -567,12 +583,11 @@ async fn test_legacy_dpu_lldp_rejection_returns_error_after_status_commit(pool: 
     .unwrap();
     let links_before = stored_links(&env, &dpu_id).await;
 
-    // Omit the request capability and reject malformed LLDP.
-    let status = try_network_configured_with_lldp(
+    // Use the original RPC and reject malformed LLDP.
+    let status = try_legacy_network_configured_with_lldp(
         &env,
         &dpu_id,
         lldp_report(Updated, vec![neighbor("not-a-mac", "aa", "swp1")]),
-        false,
     )
     .await
     .expect_err("legacy client must receive LLDP rejection");

@@ -130,8 +130,167 @@ fn one_lldp_neighbor() -> carbide_host_support::lldp_collector::LldpNeighbor {
     }
 }
 
-/// Proves explicit acceptance, rejection, and legacy-server success each
-/// produce the required cache confirmation and retransmission behavior.
+/// Configures one deterministic response from a network-status mock endpoint.
+#[derive(Clone, Debug)]
+enum NetworkStatusMockReply {
+    Version(Vec<i32>),
+    Acknowledgment(Option<bool>),
+    Empty,
+    Error(tonic::Code),
+}
+
+/// Captures method selection and request data for capability and fallback tests.
+#[derive(Default)]
+struct NetworkStatusRpcState {
+    calls: Vec<&'static str>,
+    version_display_config: Vec<bool>,
+    version_replies: std::collections::VecDeque<NetworkStatusMockReply>,
+    acknowledgment_replies: std::collections::VecDeque<NetworkStatusMockReply>,
+    legacy_replies: std::collections::VecDeque<NetworkStatusMockReply>,
+    legacy_status: Option<rpc::DpuNetworkStatus>,
+}
+
+/// Builds a header-only gRPC error response for a selected status code.
+fn grpc_error_response(code: tonic::Code) -> axum::response::Response {
+    let mut response = axum::response::Response::new(axum::body::Body::empty());
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/grpc"),
+    );
+    response
+        .headers_mut()
+        .insert("grpc-status", (code as i32).into());
+    response
+}
+
+/// Records the Version request and serves the next configured capability result.
+async fn handle_network_status_version(
+    axum::extract::State(state): axum::extract::State<
+        std::sync::Arc<tokio::sync::Mutex<NetworkStatusRpcState>>,
+    >,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let payload = body.get(5..).expect("gRPC request has a frame header");
+    let request = <rpc::VersionRequest as prost::Message>::decode(payload).unwrap();
+    let reply = {
+        let mut state = state.lock().await;
+        state.calls.push("version");
+        state.version_display_config.push(request.display_config);
+        state
+            .version_replies
+            .pop_front()
+            .expect("version reply configured")
+    };
+    match reply {
+        NetworkStatusMockReply::Version(capabilities) => {
+            crate::tests::common::respond(rpc::BuildInfo {
+                capabilities,
+                ..Default::default()
+            })
+            .into_response()
+        }
+        NetworkStatusMockReply::Error(code) => grpc_error_response(code),
+        reply => panic!("invalid version reply: {reply:?}"),
+    }
+}
+
+/// Records an acknowledgment-aware mutation and serves its configured result.
+async fn handle_network_status_with_acknowledgment(
+    axum::extract::State(state): axum::extract::State<
+        std::sync::Arc<tokio::sync::Mutex<NetworkStatusRpcState>>,
+    >,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let reply = {
+        let mut state = state.lock().await;
+        state.calls.push("acknowledgment");
+        state
+            .acknowledgment_replies
+            .pop_front()
+            .expect("acknowledgment reply configured")
+    };
+    match reply {
+        NetworkStatusMockReply::Acknowledgment(lldp_accepted) => {
+            crate::tests::common::respond(rpc::DpuNetworkStatusResponse { lldp_accepted })
+                .into_response()
+        }
+        NetworkStatusMockReply::Error(code) => grpc_error_response(code),
+        reply => panic!("invalid acknowledgment reply: {reply:?}"),
+    }
+}
+
+/// Records the original mutation and retains its payload for fallback assertions.
+async fn handle_original_network_status(
+    axum::extract::State(state): axum::extract::State<
+        std::sync::Arc<tokio::sync::Mutex<NetworkStatusRpcState>>,
+    >,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let payload = body.get(5..).expect("gRPC request has a frame header");
+    let status = <rpc::DpuNetworkStatus as prost::Message>::decode(payload).unwrap();
+    let reply = {
+        let mut state = state.lock().await;
+        state.calls.push("legacy");
+        state.legacy_status = Some(status);
+        state
+            .legacy_replies
+            .pop_front()
+            .expect("legacy reply configured")
+    };
+    match reply {
+        NetworkStatusMockReply::Empty => crate::tests::common::respond(()).into_response(),
+        NetworkStatusMockReply::Error(code) => grpc_error_response(code),
+        reply => panic!("invalid legacy reply: {reply:?}"),
+    }
+}
+
+/// Routes Version and both status methods through one shared deterministic state.
+fn network_status_mock(
+    state: std::sync::Arc<tokio::sync::Mutex<NetworkStatusRpcState>>,
+) -> axum::Router {
+    use axum::routing::{get, post};
+
+    axum::Router::new()
+        .route("/up", get(|| async {}))
+        .route(
+            ::rpc::service_path!("Version"),
+            post(handle_network_status_version),
+        )
+        .route(
+            ::rpc::service_path!("RecordDpuNetworkStatusWithLldpAcknowledgment"),
+            post(handle_network_status_with_acknowledgment),
+        )
+        .route(
+            ::rpc::service_path!("RecordDpuNetworkStatus"),
+            post(handle_original_network_status),
+        )
+        .with_state(state)
+}
+
+/// Runs one status operation under a deadline so a broken mock fails deterministically.
+async fn record_network_status_before_deadline(
+    address: std::net::SocketAddr,
+    status: rpc::DpuNetworkStatus,
+) -> Result<rpc::DpuNetworkStatusResponse, eyre::Report> {
+    let client_config = forge_tls_client::ForgeClientConfig {
+        root_ca_path: concat!(env!("CARGO_MANIFEST_DIR"), "/test-certs/tls.crt").into(),
+        ..Default::default()
+    };
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        record_network_status(status, &format!("https://{address}"), &client_config),
+    )
+    .await
+    .map_err(|_| eyre::eyre!("network status report exceeded its test deadline"))?
+}
+
+/// Proves only explicit acceptance confirms a snapshot; rejection or a missing
+/// acknowledgment leaves it pending for retransmission.
 #[test]
 fn lldp_acknowledgment_controls_snapshot_confirmation() {
     use ::rpc::forge::LldpReportResult;
@@ -142,8 +301,8 @@ fn lldp_acknowledgment_controls_snapshot_confirmation() {
         ("accepted", Some(true), LldpReportResult::Unchanged),
         // Explicit rejection keeps the snapshot pending for retransmission.
         ("rejected", Some(false), LldpReportResult::Updated),
-        // A successful legacy response has no field but implies acceptance.
-        ("legacy server", None, LldpReportResult::Unchanged),
+        // An acknowledgment-aware response may not silently omit the result.
+        ("missing acknowledgment", None, LldpReportResult::Updated),
     ];
 
     for (name, lldp_accepted, expected_next_result) in cases {
@@ -162,73 +321,385 @@ fn lldp_acknowledgment_controls_snapshot_confirmation() {
     }
 }
 
-/// Proves a new agent sends attached LLDP to a legacy server and treats that
-/// server's successful empty response as acceptance of the exact snapshot.
+/// Capability presence alone selects the additive method; absence, including
+/// an unknown-only list, selects the original method.
 #[tokio::test]
-async fn legacy_server_success_confirms_attached_lldp() -> eyre::Result<()> {
-    use std::sync::Arc;
-
-    use axum::Router;
-    use axum::body::Bytes;
-    use axum::extract::State;
-    use axum::routing::{get, post};
-    use carbide_host_support::lldp_snapshot_cache::result_of;
-    use tokio::sync::Mutex;
-
-    let received = Arc::new(Mutex::new(None));
-    let app =
-        Router::new()
-            .route("/up", get(|| async {}))
-            .route(
-                ::rpc::service_path!("RecordDpuNetworkStatus"),
-                post(
-                    |State(received): State<Arc<Mutex<Option<rpc::DpuNetworkStatus>>>>,
-                     body: Bytes| async move {
-                        let payload = body.get(5..).expect("gRPC request has a frame header");
-                        let status =
-                            <rpc::DpuNetworkStatus as prost::Message>::decode(payload).unwrap();
-                        *received.lock().await = Some(status);
-                        crate::tests::common::respond(())
-                    },
-                ),
-            )
-            .with_state(received.clone());
-    let (address, server) = crate::tests::common::run_grpc_server(app).await?;
-
-    let result = async {
-        // Attach a newly classified snapshot to the capable agent request.
-        let mut cache = LldpSnapshotCache::new();
-        let report = cache.classify(Ok(vec![one_lldp_neighbor()]));
-        let status = rpc::DpuNetworkStatus {
-            lldp: Some(report.clone()),
-            lldp_acknowledgment_supported: true,
+async fn build_capability_selects_network_status_method() -> eyre::Result<()> {
+    let capability = rpc::BuildCapability::DpuNetworkStatusLldpAcknowledgment as i32;
+    for (name, capabilities, expected_method) in [
+        // The recognized capability selects the acknowledgment-aware method.
+        ("recognized", vec![capability], "acknowledgment"),
+        // Additional unknown capabilities do not hide the recognized value.
+        (
+            "recognized plus unknown",
+            vec![i32::MAX, capability],
+            "acknowledgment",
+        ),
+        // An empty list is the older-server representation.
+        ("absent", vec![], "legacy"),
+        // Unknown values alone do not opt the server into the new contract.
+        ("unknown only", vec![i32::MAX], "legacy"),
+    ] {
+        // Configure both mutation routes so the observed call order proves selection.
+        let state = std::sync::Arc::new(tokio::sync::Mutex::new(NetworkStatusRpcState {
+            version_replies: [NetworkStatusMockReply::Version(capabilities)].into(),
+            acknowledgment_replies: [NetworkStatusMockReply::Acknowledgment(None)].into(),
+            legacy_replies: [NetworkStatusMockReply::Empty].into(),
             ..Default::default()
-        };
-        let client_config = forge_tls_client::ForgeClientConfig {
-            root_ca_path: concat!(env!("CARGO_MANIFEST_DIR"), "/test-certs/tls.crt").into(),
-            ..Default::default()
-        };
+        }));
+        let (address, server) =
+            crate::tests::common::run_grpc_server(network_status_mock(state.clone())).await?;
 
-        // A legacy Empty response decodes as a response with no acknowledgment.
-        let response =
-            record_network_status(status, &format!("https://{address}"), &client_config).await?;
-        assert_eq!(response.lldp_accepted, None);
-        confirm_lldp_if_accepted(&mut cache, Some(report), response);
+        // Report once through the generated client and stop the case-local server.
+        let result =
+            record_network_status_before_deadline(address, rpc::DpuNetworkStatus::default()).await;
+        server.abort();
+        result?;
 
-        // Verify the report crossed the wire and legacy success confirmed it.
-        let received = received.lock().await;
-        let received = received.as_ref().expect("server received network status");
-        assert!(received.lldp.is_some());
-        assert!(received.lldp_acknowledgment_supported);
-        assert_eq!(
-            result_of(&cache.classify(Ok(vec![one_lldp_neighbor()]))),
-            rpc::LldpReportResult::Unchanged
-        );
-        Ok(())
+        // Method order and the Version request prove uncached, config-free discovery.
+        let state = state.lock().await;
+        assert_eq!(state.calls, ["version", expected_method], "{name}");
+        assert_eq!(state.version_display_config, [false], "{name}");
     }
+    Ok(())
+}
+
+/// Authorization failures from capability discovery stop before either
+/// mutation, while other lookup failures retain the original status path.
+#[tokio::test]
+async fn version_failure_controls_status_dispatch() -> eyre::Result<()> {
+    for (name, code, expected_calls, expected_error) in [
+        // A transient discovery failure uses the compatible original method.
+        (
+            "unavailable",
+            tonic::Code::Unavailable,
+            &["version", "legacy"][..],
+            None,
+        ),
+        // Permission denial must not be reinterpreted as an older server.
+        (
+            "permission denied",
+            tonic::Code::PermissionDenied,
+            &["version"][..],
+            Some(tonic::Code::PermissionDenied),
+        ),
+        // Missing authentication has the same stop-before-mutation boundary.
+        (
+            "unauthenticated",
+            tonic::Code::Unauthenticated,
+            &["version"][..],
+            Some(tonic::Code::Unauthenticated),
+        ),
+    ] {
+        // Configure a lookup failure and a legacy route that only non-auth failures may reach.
+        let state = std::sync::Arc::new(tokio::sync::Mutex::new(NetworkStatusRpcState {
+            version_replies: [NetworkStatusMockReply::Error(code)].into(),
+            legacy_replies: [NetworkStatusMockReply::Empty].into(),
+            ..Default::default()
+        }));
+        let (address, server) =
+            crate::tests::common::run_grpc_server(network_status_mock(state.clone())).await?;
+
+        // Execute one report under the shared deterministic deadline.
+        let result =
+            record_network_status_before_deadline(address, rpc::DpuNetworkStatus::default()).await;
+        server.abort();
+
+        // Preserve authorization errors and otherwise require successful legacy selection.
+        match expected_error {
+            Some(code) => assert_eq!(
+                result
+                    .expect_err(name)
+                    .downcast_ref::<tonic::Status>()
+                    .map(tonic::Status::code),
+                Some(code),
+                "{name}"
+            ),
+            None => {
+                result?;
+            }
+        }
+        // Authorization cases must stop after Version; the transient case reaches legacy.
+        let state = state.lock().await;
+        assert_eq!(state.calls, expected_calls, "{name}");
+        assert_eq!(state.version_display_config, [false], "{name}");
+    }
+    Ok(())
+}
+
+/// The advertised server contract permits legacy replay only for Unimplemented.
+#[tokio::test]
+async fn only_unimplemented_falls_back_after_capability_selection() -> eyre::Result<()> {
+    let capability = rpc::BuildCapability::DpuNetworkStatusLldpAcknowledgment as i32;
+    for (name, acknowledgment_code, expected_calls, succeeds) in [
+        // The mock uses Unimplemented as the contracted pre-processing rejection.
+        (
+            "unimplemented",
+            tonic::Code::Unimplemented,
+            &["version", "acknowledgment", "legacy"][..],
+            true,
+        ),
+        // Availability failure may follow a committed mutation, so it is final.
+        (
+            "unavailable",
+            tonic::Code::Unavailable,
+            &["version", "acknowledgment"][..],
+            false,
+        ),
+        // Internal failure has the same no-replay requirement.
+        (
+            "internal",
+            tonic::Code::Internal,
+            &["version", "acknowledgment"][..],
+            false,
+        ),
+        // A deadline can leave the mutation outcome unknown, so it is final.
+        (
+            "deadline exceeded",
+            tonic::Code::DeadlineExceeded,
+            &["version", "acknowledgment"][..],
+            false,
+        ),
+        // Authentication failure from the mutation must not be bypassed.
+        (
+            "unauthenticated",
+            tonic::Code::Unauthenticated,
+            &["version", "acknowledgment"][..],
+            false,
+        ),
+    ] {
+        // Advertise support, then configure the selected mutation outcome.
+        let state = std::sync::Arc::new(tokio::sync::Mutex::new(NetworkStatusRpcState {
+            version_replies: [NetworkStatusMockReply::Version(vec![capability])].into(),
+            acknowledgment_replies: [NetworkStatusMockReply::Error(acknowledgment_code)].into(),
+            legacy_replies: [NetworkStatusMockReply::Empty].into(),
+            ..Default::default()
+        }));
+        let (address, server) =
+            crate::tests::common::run_grpc_server(network_status_mock(state.clone())).await?;
+
+        // Execute one report so any legacy call can only come from fallback.
+        let result =
+            record_network_status_before_deadline(address, rpc::DpuNetworkStatus::default()).await;
+        server.abort();
+
+        // Only Unimplemented succeeds through one legacy replay.
+        assert_eq!(result.is_ok(), succeeds, "{name}: {result:?}");
+        assert_eq!(state.lock().await.calls, expected_calls, "{name}");
+    }
+    Ok(())
+}
+
+/// A successful original fallback retains existing LLDP acceptance behavior
+/// and sends the attached report unchanged.
+#[tokio::test]
+async fn unimplemented_fallback_confirms_attached_lldp() -> eyre::Result<()> {
+    use carbide_host_support::lldp_snapshot_cache::result_of;
+
+    // Advertise the new method, reject it before processing, and accept legacy.
+    let capability = rpc::BuildCapability::DpuNetworkStatusLldpAcknowledgment as i32;
+    let state = std::sync::Arc::new(tokio::sync::Mutex::new(NetworkStatusRpcState {
+        version_replies: [NetworkStatusMockReply::Version(vec![capability])].into(),
+        acknowledgment_replies: [NetworkStatusMockReply::Error(tonic::Code::Unimplemented)].into(),
+        legacy_replies: [NetworkStatusMockReply::Empty].into(),
+        ..Default::default()
+    }));
+    let (address, server) =
+        crate::tests::common::run_grpc_server(network_status_mock(state.clone())).await?;
+
+    // Send one classified LLDP snapshot through the acknowledgment-to-legacy path.
+    let mut cache = LldpSnapshotCache::new();
+    let report = cache.classify(Ok(vec![one_lldp_neighbor()]));
+    let sent_report = report.clone();
+    let response = record_network_status_before_deadline(
+        address,
+        rpc::DpuNetworkStatus {
+            lldp: Some(sent_report.clone()),
+            ..Default::default()
+        },
+    )
     .await;
     server.abort();
-    result
+    let response = response?;
+    assert_eq!(response.lldp_accepted, Some(true));
+    confirm_lldp_if_accepted(&mut cache, Some(report), response);
+
+    // Fallback must happen once, preserve the complete LLDP payload, and confirm the cache.
+    let state = state.lock().await;
+    assert_eq!(state.calls, ["version", "acknowledgment", "legacy"]);
+    assert_eq!(
+        state
+            .legacy_status
+            .as_ref()
+            .expect("server received network status")
+            .lldp
+            .as_ref(),
+        Some(&sent_report)
+    );
+    assert_eq!(
+        result_of(&cache.classify(Ok(vec![one_lldp_neighbor()]))),
+        rpc::LldpReportResult::Unchanged
+    );
+    Ok(())
+}
+
+/// A fallback rejection remains final and leaves the attached LLDP snapshot
+/// pending after one call to each mutation method.
+#[tokio::test]
+async fn legacy_fallback_rejection_keeps_attached_lldp_pending() -> eyre::Result<()> {
+    use carbide_host_support::lldp_snapshot_cache::result_of;
+
+    // Configure pre-processing rejection followed by a legacy LLDP rejection.
+    let capability = rpc::BuildCapability::DpuNetworkStatusLldpAcknowledgment as i32;
+    let state = std::sync::Arc::new(tokio::sync::Mutex::new(NetworkStatusRpcState {
+        version_replies: [NetworkStatusMockReply::Version(vec![capability])].into(),
+        acknowledgment_replies: [NetworkStatusMockReply::Error(tonic::Code::Unimplemented)].into(),
+        legacy_replies: [NetworkStatusMockReply::Error(tonic::Code::InvalidArgument)].into(),
+        ..Default::default()
+    }));
+    let (address, server) =
+        crate::tests::common::run_grpc_server(network_status_mock(state.clone())).await?;
+
+    // Send one pending snapshot through both methods.
+    let cache = LldpSnapshotCache::new();
+    let report = cache.classify(Ok(vec![one_lldp_neighbor()]));
+    let result = record_network_status_before_deadline(
+        address,
+        rpc::DpuNetworkStatus {
+            lldp: Some(report),
+            ..Default::default()
+        },
+    )
+    .await;
+    server.abort();
+
+    // The final legacy error must leave the exact snapshot pending for retransmission.
+    let error = result.expect_err("legacy LLDP rejection must remain an error");
+    assert_eq!(
+        error
+            .downcast_ref::<tonic::Status>()
+            .map(tonic::Status::code),
+        Some(tonic::Code::InvalidArgument)
+    );
+    assert_eq!(
+        state.lock().await.calls,
+        ["version", "acknowledgment", "legacy"]
+    );
+    assert_eq!(
+        result_of(&cache.classify(Ok(vec![one_lldp_neighbor()]))),
+        rpc::LldpReportResult::Updated
+    );
+    Ok(())
+}
+
+/// Capability selection is refreshed for every report so an upgraded server is
+/// used without restarting the agent.
+#[tokio::test]
+async fn capability_changes_are_observed_between_reports() -> eyre::Result<()> {
+    // Model one server changing from legacy-only to acknowledgment-capable.
+    let capability = rpc::BuildCapability::DpuNetworkStatusLldpAcknowledgment as i32;
+    let state = std::sync::Arc::new(tokio::sync::Mutex::new(NetworkStatusRpcState {
+        version_replies: [
+            NetworkStatusMockReply::Version(vec![]),
+            NetworkStatusMockReply::Version(vec![capability]),
+        ]
+        .into(),
+        acknowledgment_replies: [NetworkStatusMockReply::Acknowledgment(None)].into(),
+        legacy_replies: [NetworkStatusMockReply::Empty].into(),
+        ..Default::default()
+    }));
+    let (address, server) =
+        crate::tests::common::run_grpc_server(network_status_mock(state.clone())).await?;
+
+    // Report twice without restarting or replacing agent-side state.
+    record_network_status_before_deadline(address, rpc::DpuNetworkStatus::default()).await?;
+    record_network_status_before_deadline(address, rpc::DpuNetworkStatus::default()).await?;
+    server.abort();
+
+    // A fresh Version call must change method selection on the second report.
+    let state = state.lock().await;
+    assert_eq!(
+        state.calls,
+        ["version", "legacy", "version", "acknowledgment"]
+    );
+    assert_eq!(state.version_display_config, [false, false]);
+    Ok(())
+}
+
+/// A server change after capability discovery can expose an older RBAC layer;
+/// PermissionDenied remains final rather than bypassing it through legacy RPC.
+#[tokio::test]
+async fn downgrade_race_does_not_fall_back_on_permission_denied() -> eyre::Result<()> {
+    // Model a capable Version response followed by an older RBAC routing result.
+    let capability = rpc::BuildCapability::DpuNetworkStatusLldpAcknowledgment as i32;
+    let state = std::sync::Arc::new(tokio::sync::Mutex::new(NetworkStatusRpcState {
+        version_replies: [NetworkStatusMockReply::Version(vec![capability])].into(),
+        acknowledgment_replies: [NetworkStatusMockReply::Error(tonic::Code::PermissionDenied)]
+            .into(),
+        ..Default::default()
+    }));
+    let (address, server) =
+        crate::tests::common::run_grpc_server(network_status_mock(state.clone())).await?;
+
+    // Attempt one report after capability discovery.
+    let error = record_network_status_before_deadline(address, rpc::DpuNetworkStatus::default())
+        .await
+        .expect_err("PermissionDenied must be final");
+    server.abort();
+
+    // PermissionDenied must remain visible and must not invoke the original mutation.
+    assert_eq!(
+        error
+            .downcast_ref::<tonic::Status>()
+            .map(tonic::Status::code),
+        Some(tonic::Code::PermissionDenied)
+    );
+    assert_eq!(state.lock().await.calls, ["version", "acknowledgment"]);
+    Ok(())
+}
+
+/// A successful additive response that omits an attached report's
+/// acknowledgment fails clearly and leaves that snapshot pending.
+#[tokio::test]
+async fn missing_attached_lldp_acknowledgment_is_not_confirmed() -> eyre::Result<()> {
+    use carbide_host_support::lldp_snapshot_cache::result_of;
+
+    // Advertise support but omit acknowledgment from a successful response.
+    let capability = rpc::BuildCapability::DpuNetworkStatusLldpAcknowledgment as i32;
+    let state = std::sync::Arc::new(tokio::sync::Mutex::new(NetworkStatusRpcState {
+        version_replies: [NetworkStatusMockReply::Version(vec![capability])].into(),
+        acknowledgment_replies: [NetworkStatusMockReply::Acknowledgment(None)].into(),
+        ..Default::default()
+    }));
+    let (address, server) =
+        crate::tests::common::run_grpc_server(network_status_mock(state.clone())).await?;
+
+    // Send one classified snapshot whose acceptance must be explicit.
+    let cache = LldpSnapshotCache::new();
+    let report = cache.classify(Ok(vec![one_lldp_neighbor()]));
+    let error = record_network_status_before_deadline(
+        address,
+        rpc::DpuNetworkStatus {
+            lldp: Some(report),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("attached LLDP requires acknowledgment");
+    server.abort();
+
+    // Missing acknowledgment is final, avoids fallback, and retains the snapshot.
+    assert!(
+        error
+            .to_string()
+            .contains("returned no LLDP acknowledgment")
+    );
+    assert_eq!(state.lock().await.calls, ["version", "acknowledgment"]);
+    assert_eq!(
+        result_of(&cache.classify(Ok(vec![one_lldp_neighbor()]))),
+        rpc::LldpReportResult::Updated
+    );
+    Ok(())
 }
 
 #[test]

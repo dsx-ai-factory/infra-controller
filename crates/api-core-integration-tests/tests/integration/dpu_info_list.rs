@@ -94,7 +94,6 @@ async fn test_get_dpu_info_list(pool: PgPool) {
             dpu_extension_services: vec![],
             astra_config_status: None,
             lldp: None,
-            lldp_acknowledgment_supported: false,
         }))
         .await
         .unwrap();

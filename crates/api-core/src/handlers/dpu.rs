@@ -995,13 +995,49 @@ pub(crate) async fn update_agent_reported_inventory(
     Ok(Response::new(()))
 }
 
+/// Result of shared network-status processing before an RPC wrapper applies
+/// its rolling-upgrade LLDP acknowledgment contract.
+struct DpuNetworkStatusOutcome {
+    lldp_accepted: Option<bool>,
+    lldp_error: Option<CarbideError>,
+}
+
+/// Records DPU status through the original RPC contract, deferring any LLDP
+/// rejection until the operational status and follow-up work have completed.
 pub(crate) async fn record_dpu_network_status(
+    api: &Api,
+    request: Request<rpc::DpuNetworkStatus>,
+) -> Result<Response<()>, tonic::Status> {
+    log_request_data(&request);
+
+    let outcome = process_dpu_network_status(api, request.into_inner()).await?;
+    if let Some(error) = outcome.lldp_error {
+        return Err(error.into());
+    }
+
+    Ok(Response::new(()))
+}
+
+/// Records DPU status while returning explicit acceptance for an attached LLDP
+/// report, allowing newer agents to confirm only snapshots Core retained.
+pub(crate) async fn record_dpu_network_status_with_lldp_acknowledgment(
     api: &Api,
     request: Request<rpc::DpuNetworkStatus>,
 ) -> Result<Response<rpc::DpuNetworkStatusResponse>, tonic::Status> {
     log_request_data(&request);
 
-    let mut request = request.into_inner();
+    let outcome = process_dpu_network_status(api, request.into_inner()).await?;
+    Ok(Response::new(rpc::DpuNetworkStatusResponse {
+        lldp_accepted: outcome.lldp_accepted,
+    }))
+}
+
+/// Applies one DPU status report while keeping operational status, LLDP
+/// savepoint handling, commits, and follow-up work identical for both RPCs.
+async fn process_dpu_network_status(
+    api: &Api,
+    mut request: rpc::DpuNetworkStatus,
+) -> Result<DpuNetworkStatusOutcome, tonic::Status> {
     let dpu_machine_id: DpuMachineId = convert_and_log_machine_id(request.dpu_machine_id.as_ref())?;
 
     let mut txn = api.txn_begin().await?;
@@ -1251,15 +1287,10 @@ pub(crate) async fn record_dpu_network_status(
         });
     }
 
-    if let Some(error) = lldp_error
-        && !request.lldp_acknowledgment_supported
-    {
-        return Err(error.into());
-    }
-
-    Ok(Response::new(rpc::DpuNetworkStatusResponse {
+    Ok(DpuNetworkStatusOutcome {
         lldp_accepted,
-    }))
+        lldp_error,
+    })
 }
 
 async fn wakeup_host_state_handler_by_dpu_id(
