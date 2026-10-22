@@ -36,8 +36,10 @@ pub enum RegistrationError {
     MissingMachineId,
     #[error("attestation failed")]
     AttestationFailed,
-    #[error("failed to retrieve or write client certificate: {0}")]
-    ClientCertificateError(eyre::Report),
+    /// Certificate retrieval or writing failed. Display includes the cause chain,
+    /// and `Error::source()` preserves it for typed inspection.
+    #[error("failed to retrieve or write client certificate: {0:#}")]
+    ClientCertificateError(#[source] eyre::Report),
     #[error("missing certificate in DiscoverMachine reply")]
     MissingCertificate,
 }
@@ -427,6 +429,19 @@ mod tests {
         let error = finalize_attestation(response, Some(&paths))
             .await
             .expect_err("key write failure must fail attestation");
+        let io_error =
+            std::iter::successors(std::error::Error::source(&error), |&cause| cause.source())
+                .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+                .expect("filesystem error remains in the standard source chain");
+        assert_eq!(io_error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "failed to retrieve or write client certificate: failed to write new machine certificate key to: {}: {io_error}",
+                paths.key_path
+            )
+        );
+
         let RegistrationError::ClientCertificateError(error) = error else {
             panic!("expected client certificate error, got {error:?}");
         };
@@ -437,13 +452,6 @@ mod tests {
                 "failed to write new machine certificate key to: {}",
                 paths.key_path
             )
-        );
-        assert_eq!(
-            error
-                .downcast_ref::<std::io::Error>()
-                .expect("filesystem error source is preserved")
-                .kind(),
-            std::io::ErrorKind::NotFound
         );
         assert_eq!(
             std::fs::read_to_string(&paths.cert_path).expect("certificate write succeeded"),

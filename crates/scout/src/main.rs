@@ -176,10 +176,7 @@ async fn initial_setup(config: &Options) -> Result<(uuid::Uuid, MachineId), eyre
     .await
     {
         Ok(machine_id) => machine_id,
-        Err(e) => {
-            report_scout_error(config, None, config.machine_interface_id, &e).await?;
-            return Err(e.into());
-        }
+        Err(error) => return Err(report_registration_error(config, error).await),
     };
 
     if !Path::new(REBOOT_COMPLETED_PATH).exists() {
@@ -199,6 +196,17 @@ async fn initial_setup(config: &Options) -> Result<(uuid::Uuid, MachineId), eyre
     };
 
     Ok((machine_interface_id, machine_id))
+}
+
+/// Reports a registration failure, but returns the original error even if reporting fails.
+async fn report_registration_error(config: &Options, error: CarbideClientError) -> eyre::Report {
+    if let Err(report_error) =
+        report_scout_error(config, None, config.machine_interface_id, &error).await
+    {
+        tracing::error!(error = %report_error, "Failed to report registration error");
+    }
+
+    error.into()
 }
 
 async fn run_as_service(config: &Options) -> Result<(), eyre::Report> {
@@ -1206,7 +1214,43 @@ fn check_certs_validity(client_cert_path: &str) -> CarbideClientResult<bool> {
 
 #[cfg(test)]
 mod tests {
+    use carbide_instrument::testing::capture_logs_async;
+    use clap::Parser;
+
     use super::*;
+
+    #[tokio::test]
+    async fn registration_error_is_preserved_when_reporting_fails() {
+        // URI parsing fails before the reporter reads credentials or connects.
+        let config = Options::try_parse_from(["forge-scout", "--api=not a valid URI"])
+            .expect("scout options");
+        let registration_error =
+            CarbideClientError::RegistrationError(registration::RegistrationError::TransportError(
+                "registration connection failed".into(),
+            ));
+        let expected_message = registration_error.to_string();
+
+        let (error, logs) =
+            capture_logs_async(report_registration_error(&config, registration_error)).await;
+
+        assert_eq!(error.to_string(), expected_message);
+        assert!(matches!(
+            error.downcast_ref::<CarbideClientError>(),
+            Some(CarbideClientError::RegistrationError(
+                registration::RegistrationError::TransportError(message)
+            )) if message == "registration connection failed"
+        ));
+        let report_failure = logs
+            .iter()
+            .find(|log| log.message == "Failed to report registration error")
+            .expect("secondary reporting failure is logged");
+        assert_eq!(report_failure.level, tracing::Level::ERROR);
+        let report_error = report_failure
+            .field("error")
+            .expect("reporting error field");
+        assert!(report_error.contains("invalid URI"));
+        assert!(report_error.contains(&config.api));
+    }
 
     /// The exit code decides, the status string catches the exit-0 cases that
     /// still mean nothing applied, and anything unfamiliar is unknown rather
