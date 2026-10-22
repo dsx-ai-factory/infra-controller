@@ -282,11 +282,19 @@ A plugin that also needs a writable host-root mount requires
 `--host-access-full`, `allow_full_host_plugins = true`, and the approval in the
 next step. The full-host profile also shares the host PID namespace.
 
-`--type` is optional and defaults to `container`. `--entrypoint` identifies the
-executable, and repeatable `--arg` values append command arguments in order.
+`--type` is optional and defaults to `container`. Repeatable `--entrypoint`
+values form a command vector, and repeatable `--arg` values append arguments.
 Use `--arg=--flag` for arguments beginning with a hyphen. The existing repeated
 `--entrypoint` syntax remains supported; any `--arg` values are appended after
 that vector. NICo executes the vector without a shell.
+
+With the standard contract, the vector is passed after the image reference:
+the image's existing `ENTRYPOINT` is retained. If the image has no `ENTRYPOINT`,
+the first vector element is the executable. For example, with image
+`ENTRYPOINT ["/old-check"]`, `--entrypoint /new-check --arg run` executes
+`/old-check /new-check run`, not `/new-check run`. This preserves existing plugin
+revisions. With `DSXHealthValidation`, the first element explicitly overrides
+the image's `ENTRYPOINT`, and remaining elements become its arguments.
 
 Optional `--container-plugin-adapter` selects the container's integration
 contract. Omission uses the standard NICo contract. Adapter selection, image,
@@ -418,6 +426,12 @@ normalizes its aggregate health result. HealthValidation owns check selection,
 GPU-count evaluation, and diagnostic findings. NICo owns execution and the
 validation lifecycle and does not execute remediation recommendations.
 
+Upgrade all NICo API instances and target Scouts to a release containing
+`DSXHealthValidation` before registering or qualifying adapter revisions. An
+older API can discard the new protobuf field, and an older Scout cannot honor
+adapter selection. Use a matching admin CLI to expose the adapter flag. Keep
+adapter revisions disabled during a rollback to versions without this support.
+
 Allow the registry and adapter in the site's existing policy, retaining other
 registries and settings the site requires:
 
@@ -496,6 +510,44 @@ completed health failure, not an execution error.
 Qualify, verify, and enable the revision through
 [the existing lifecycle](#4-qualify-verify-approve-and-enable). Add `Discovery` or
 `Cleanup` contexts when the qualified revision should run in those workflows.
+
+#### Qualification evidence
+
+The manual Scout run of `0.2.0-rc1` demonstrated GPU and journal access and a
+`CRITICAL` JSON verdict. It did not exercise this adapter's capability-dropping
+profile or NICo's complete execution path. Full Scout qualification of this
+integration remains pending; unit tests alone do not establish hardware support.
+
+Before verifying a revision, retain the following evidence with its qualification
+record:
+
+| Evidence | Required detail |
+| --- | --- |
+| Software | Exact image digest, NICo API and Scout versions, and adapter name. |
+| Hardware and runtime | Machine ID, CPU architecture, platform, GPU count, driver and NVIDIA Container Toolkit versions. |
+| Execution | Configured command and parameters, native snapshotter, GPU visibility, and successful host journal reads under the adapter's actual profile. |
+| Results | Raw stdout/stderr and persisted Machine Validation outcome; `CRITICAL` must complete as a failed health assessment. |
+| Cleanup | Timeout removes the container and its attempt directory; diagnostic logs remain available. |
+
+The opt-in `dsx_scout_qualification` test in
+`crates/machine-validation/src/plugin_runner.rs` exercises the real adapter and
+`nerdctl`, including streamed logs and timeout cleanup. It requires root and the
+Scout runtime prerequisites above; its timeout probe also requires `/bin/sh`
+and `sleep` in the image. Pre-pull the digest-pinned image into
+nerdctl's `default` namespace, then run the test on the qualification host:
+
+```sh
+export NICO_MV_DSX_TEST_IMAGE='ghcr.io/dsx-ai-factory/health-validation@sha256:<verified-digest>'
+export NICO_MV_DSX_EXPECTED_SEVERITY=CRITICAL
+export NICO_MV_DSX_GPU_COUNT=4
+cargo test -p carbide-machine-validation --lib \
+  plugin_runner::tests::dsx_scout_qualification -- --ignored --exact --nocapture
+```
+
+Set the expected severity to the independently established result for that
+machine. GPU count is optional; omission uses catalog defaults. Run against
+representative healthy and unhealthy nodes, and finish qualification through
+the admin CLI workflow to verify persisted results and logs.
 
 ## Legacy External Configuration
 

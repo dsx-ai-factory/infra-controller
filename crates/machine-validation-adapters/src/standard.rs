@@ -45,6 +45,8 @@ impl ContainerPluginAdapter for StandardAdapter {
         entrypoint: &'a [String],
     ) -> BoxFuture<'a, Result<AdapterInvocation, String>> {
         Box::pin(async move {
+            // Preserve existing revisions: their vector is passed after the
+            // image, so the image's ENTRYPOINT remains authoritative.
             Ok(AdapterInvocation {
                 arguments: entrypoint.to_vec(),
                 ..Default::default()
