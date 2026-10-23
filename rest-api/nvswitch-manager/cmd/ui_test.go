@@ -105,12 +105,25 @@ func (w *uiResponseWriter) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 
-func TestUIServerResponseWrites(t *testing.T) {
+func captureUILogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var logs bytes.Buffer
+	logger := log.StandardLogger()
+	originalOutput := logger.Out
+	originalFormatter := logger.Formatter
+	logger.SetOutput(&logs)
+	logger.SetFormatter(&nsmlog.JSONFormatter{})
+	t.Cleanup(func() {
+		logger.SetOutput(originalOutput)
+		logger.SetFormatter(originalFormatter)
+	})
+	return &logs
+}
+
+func TestUIServer_handleAPIUpdateLog(t *testing.T) {
 	writeError := errors.New("test response write failed")
 	tests := []struct {
 		name       string
-		json       bool
-		template   string
 		writeError error
 		wantBody   string
 		wantLog    string
@@ -118,16 +131,53 @@ func TestUIServerResponseWrites(t *testing.T) {
 	}{
 		{
 			name:     "JSON response",
-			json:     true,
 			wantBody: "{\"error\":\"Log file not found. This update may not use the script strategy or hasn't started yet.\",\"found\":false}\n",
 		},
 		{
 			name:       "JSON write failure",
-			json:       true,
 			writeError: writeError,
 			wantLog:    "Failed to write JSON response",
 			wantError:  writeError.Error(),
 		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logs := captureUILogs(t)
+			recorder := httptest.NewRecorder()
+			writer := &uiResponseWriter{ResponseWriter: recorder, writeError: tt.writeError}
+			server := &UIServer{}
+			id := uuid.NewString()
+			_, err := os.Stat("/tmp/nsm-script-" + id + ".log")
+			require.ErrorIs(t, err, os.ErrNotExist)
+			request := httptest.NewRequest(http.MethodGet, "/api/update-log?id="+id, nil)
+			server.handleAPIUpdateLog(writer, request)
+			assert.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
+			assert.Equal(t, http.StatusOK, recorder.Code)
+			assert.Zero(t, writer.statusWrites)
+			assert.Equal(t, tt.wantBody, recorder.Body.String())
+			if tt.wantLog == "" {
+				assert.Empty(t, logs.String())
+			} else {
+				assert.Contains(t, logs.String(), tt.wantLog)
+				assert.Contains(t, logs.String(), tt.wantError)
+				if tt.writeError != nil {
+					assert.Equal(t, 1, writer.writes)
+				}
+			}
+		})
+	}
+}
+
+func TestUIServer_renderError(t *testing.T) {
+	writeError := errors.New("test response write failed")
+	tests := []struct {
+		name       string
+		writeError error
+		wantBody   string
+		wantLog    string
+		wantError  string
+		template   string
+	}{
 		{
 			name:     "template response",
 			template: `{{define "layout.html"}}{{.ErrorTitle}}: {{.ErrorMessage}}{{end}}`,
@@ -149,33 +199,14 @@ func TestUIServerResponseWrites(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var logs bytes.Buffer
-			logger := log.StandardLogger()
-			originalOutput := logger.Out
-			originalFormatter := logger.Formatter
-			logger.SetOutput(&logs)
-			logger.SetFormatter(&nsmlog.JSONFormatter{})
-			t.Cleanup(func() {
-				logger.SetOutput(originalOutput)
-				logger.SetFormatter(originalFormatter)
-			})
-
+			logs := captureUILogs(t)
 			recorder := httptest.NewRecorder()
 			writer := &uiResponseWriter{ResponseWriter: recorder, writeError: tt.writeError}
 			server := &UIServer{}
-			if tt.json {
-				id := uuid.NewString()
-				_, err := os.Stat("/tmp/nsm-script-" + id + ".log")
-				require.ErrorIs(t, err, os.ErrNotExist)
-				request := httptest.NewRequest(http.MethodGet, "/api/update-log?id="+id, nil)
-				server.handleAPIUpdateLog(writer, request)
-				assert.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
-			} else {
-				var err error
-				server.templates, err = template.New("").Parse(tt.template)
-				require.NoError(t, err)
-				server.renderError(writer, "title", "message")
-			}
+			var err error
+			server.templates, err = template.New("").Parse(tt.template)
+			require.NoError(t, err)
+			server.renderError(writer, "title", "message")
 			assert.Equal(t, http.StatusOK, recorder.Code)
 			assert.Zero(t, writer.statusWrites)
 			assert.Equal(t, tt.wantBody, recorder.Body.String())
