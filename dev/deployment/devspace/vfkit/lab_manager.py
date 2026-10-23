@@ -23,6 +23,7 @@ DEFAULT_ROOT = Path.home() / ".nico-devspace/vfkit-labs"
 OWNER = "nico-vfkit-labs-v1\n"
 ALPINE_VERSION = "3.24.1"
 HTTPS_PROBE = "https://www.cloudflare.com/cdn-cgi/trace"
+WAN_IPV4_MARKER = "VFLAB_WAN_IPV4"
 
 
 def run(args, **kwargs):
@@ -222,8 +223,13 @@ class Lab:
         if not serial.exists():
             return None
         text = serial.read_text(errors="replace").rsplit("OpenRC", 1)[-1]
-        matches = re.findall(r"eth0: leased ([0-9.]+) for DHCP", text)
-        return matches[-1] if matches else None
+        matches = re.findall(rf"\b{WAN_IPV4_MARKER}: leased ([0-9.]+) for DHCP\r?$", text, re.MULTILINE)
+        if matches:
+            return matches[-1]
+        # Keep gateways with the old hook manageable after a host checkout
+        # update, including failed boots. Only WAN runs DHCP; LAN is static.
+        leases = re.findall(r"\S+: leased ([0-9.]+) for DHCP\r?$", text, re.MULTILINE)
+        return leases[-1] if leases else None
 
     def ssh(self, command, **kwargs):
         address = self.gateway_ip()

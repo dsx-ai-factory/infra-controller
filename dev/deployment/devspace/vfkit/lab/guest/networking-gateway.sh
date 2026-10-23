@@ -66,9 +66,12 @@ printf '%s\n' "${WAN_IF}" > /etc/vxlab/wan_if
 printf '%s\n' "${LAN_IF}" > /etc/vxlab/lan_if
 printf '%s\n' "$LAN_MODE" > /etc/vxlab/lan_mode
 cat > /etc/dhcpcd.exit-hook <<'HOOK'
-case "$reason" in
+case "${reason:-}" in
   BOUND|RENEW|REBIND|REBOOT)
-    printf '%s: leased %s for DHCP\n' "$interface" "$new_ip_address" > /dev/hvc0;;
+    if [ -n "${new_ip_address:-}" ] && [ -n "${interface:-}" ] &&
+       [ "$interface" = "$(cat /etc/vxlab/wan_if)" ]; then
+      printf 'VFLAB_WAN_IPV4: leased %s for DHCP\n' "$new_ip_address" > /dev/hvc0
+    fi;;
 esac
 HOOK
 
