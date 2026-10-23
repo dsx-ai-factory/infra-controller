@@ -35,7 +35,7 @@ use nv_redfish::bmc_http::reqwest::{
 };
 use nv_redfish::bmc_http::{BmcCredentials, CacheSettings, HttpBmc};
 use nv_redfish::core::query::{ExpandQuery, FilterQuery};
-use nv_redfish::core::upload::{MultipartUpdateRequest, UploadReader};
+use nv_redfish::core::upload::{HttpPushUriUpdateRequest, MultipartUpdateRequest, UploadReader};
 use nv_redfish::core::{
     Action, Bmc, BoxTryStream, EntityTypeRef, Expandable, ModificationResponse, ODataETag, ODataId,
     Repair, RepairError, SessionCreateResponse,
@@ -350,6 +350,19 @@ impl Bmc for RedfishBmc {
     {
         let result = self.inner.multipart_update(uri, request).await;
         self.finish("multipart_update", result)
+    }
+
+    async fn http_push_uri_update<U, R>(
+        &self,
+        uri: &str,
+        request: HttpPushUriUpdateRequest<U>,
+    ) -> Result<ModificationResponse<R>, Self::Error>
+    where
+        U: UploadReader,
+        R: Send + Sync + for<'de> Deserialize<'de>,
+    {
+        let result = self.inner.http_push_uri_update(uri, request).await;
+        self.finish("http_push_uri_update", result)
     }
 
     async fn stream<T: Sized + for<'de> Deserialize<'de> + Send + 'static>(

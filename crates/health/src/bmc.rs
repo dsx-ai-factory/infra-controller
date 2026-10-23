@@ -35,7 +35,7 @@ use nv_redfish::bmc_http::{
     BmcCredentials as NvBmcCredentials, CacheSettings, ConcurrencyLimitedBmc, HttpBmc, HttpClient,
 };
 use nv_redfish::core::query::{ExpandQuery, FilterQuery};
-use nv_redfish::core::upload::{MultipartUpdateRequest, UploadReader};
+use nv_redfish::core::upload::{HttpPushUriUpdateRequest, MultipartUpdateRequest, UploadReader};
 use nv_redfish::core::{
     Action, Bmc, BoxTryStream, EntityTypeRef, Expandable, ModificationResponse, ODataETag, ODataId,
     Repair, RepairError, SessionCreateResponse, StreamEvent,
@@ -1202,6 +1202,33 @@ impl HttpClient for InstrumentedHttpClient {
         result
     }
 
+    async fn post_http_push_uri_update<U, T>(
+        &self,
+        url: Url,
+        request: HttpPushUriUpdateRequest<U>,
+        credentials: &nv_redfish::bmc_http::BmcCredentials,
+        custom_headers: &HeaderMap,
+    ) -> Result<ModificationResponse<T>, Self::Error>
+    where
+        U: UploadReader,
+        T: DeserializeOwned + Send + Sync,
+    {
+        let request_url = url.clone();
+        // Measure only the transport future and stop as soon as it resolves.
+        let started = Instant::now();
+        let result = self
+            .inner
+            .post_http_push_uri_update::<U, T>(url, request, credentials, custom_headers)
+            .await;
+
+        let external_duration = started.elapsed();
+
+        // Sanitize and classify locally without charging that work to BMC latency.
+        let result = redact_request_credential(result, credentials);
+        self.observe_modification_result("POST", &request_url, &result, "200", external_duration);
+        result
+    }
+
     async fn patch<B, T>(
         &self,
         url: Url,
@@ -1357,7 +1384,9 @@ fn modification_result_status_code<T>(
     entity_status_code: &str,
 ) -> String {
     match result {
-        Ok(ModificationResponse::Entity(_)) => entity_status_code.to_string(),
+        Ok(ModificationResponse::Entity(_) | ModificationResponse::Message(_)) => {
+            entity_status_code.to_string()
+        }
         Ok(ModificationResponse::Task(_)) => http::StatusCode::ACCEPTED.as_u16().to_string(),
         Ok(ModificationResponse::Empty) => http::StatusCode::NO_CONTENT.as_u16().to_string(),
         Err(error) => {
@@ -1564,6 +1593,29 @@ impl Bmc for BmcClient {
             })
             .await;
         self.finish("multipart_update", result)
+    }
+
+    async fn http_push_uri_update<U, R>(
+        &self,
+        uri: &str,
+        request: HttpPushUriUpdateRequest<U>,
+    ) -> Result<ModificationResponse<R>, Self::Error>
+    where
+        U: UploadReader,
+        R: Send + Sync + for<'de> Deserialize<'de>,
+    {
+        self.ensure_credentials().await?;
+
+        let result = self
+            .guarded(async {
+                self.inner
+                    .http_push_uri_update(uri, request)
+                    .await
+                    .map_err(HealthError::from)
+            })
+            .await;
+
+        self.finish("http_push_uri_update", result)
     }
 
     async fn delete<R: EntityTypeRef + for<'de> Deserialize<'de>>(
