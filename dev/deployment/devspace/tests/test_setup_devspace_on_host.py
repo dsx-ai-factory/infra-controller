@@ -12,43 +12,80 @@ SCRIPT = Path(__file__).resolve().parents[1] / "setup-devspace-on-host.sh"
 
 
 class SetupDevSpaceOnHostTest(unittest.TestCase):
-    def test_kind_config_cleanup(self):
+    def test_cluster_setup_delegates_before_tls_and_wait(self):
         source = SCRIPT.read_text()
         prepare = source[source.index("prepare_cluster() {"):
                          source.index("\nkind_node_has_image() {")]
+        # Temporary-config cleanup is exercised through the shared public CLI.
         for status in (0, 42):
-            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
-                config_path = Path(directory) / "config-path"
-                waited = Path(directory) / "waited"
+            with self.subTest(status=status):
                 result = subprocess.run(
                     ["bash", "-c", """set -euo pipefail
-log() { :; }
-die() { printf '%s\\n' "$*" >&2; exit 1; }
-chown() { :; }
-configure_kind_node_tls() { :; }
+configure_kind_node_tls() { printf 'TLS\\n'; }
 run_as_user() {
-  case "$1 $2" in
-    'kind get'|'docker pull') return 0 ;;
-    'kind create')
-      while [ "$1" != --config ]; do shift; done
-      printf '%s\\n' "$2" > "$CONFIG_PATH"
-      test -s "$2" || exit 99
-      return "$CREATE_STATUS"
-      ;;
-    'kubectl wait') touch "$WAITED" ;;
-    *) exit 98 ;;
-  esac
+  printf '<%s>\\n' "$@"
+  if [[ "$1" == bash ]]; then return "$CREATE_STATUS"; fi
 }
 """ + prepare + "\nprepare_cluster\n"],
-                    env={**os.environ, "TMPDIR": directory, "CONFIG_PATH": str(config_path),
-                         "WAITED": str(waited), "CREATE_STATUS": str(status),
-                         "CLUSTER_NAME": "fixture", "KIND_NODE_IMAGE": "fixture-image",
-                         "IP_FAMILY": "ipv4", "DEV_USER": "fixture", "USER_GROUP": "fixture"},
+                    env={**os.environ, "CREATE_STATUS": str(status), "CLUSTER_NAME": "fixture",
+                         "IP_FAMILY": "dual", "REPO_DIR": "/repo with spaces", "USER_HOME": "/user home"},
                     capture_output=True, text=True, timeout=10,
                 )
-                self.assertEqual(result.returncode == 0, status == 0, result.stderr)
-                self.assertFalse(Path(config_path.read_text().strip()).exists())
-                self.assertEqual(waited.exists(), status == 0)
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertIn("</repo with spaces/dev/deployment/setup-kind.sh>\n"
+                              "<--name>\n<fixture>\n<--ip-family>\n<dual>\n"
+                              "<--kubeconfig>\n</user home/.kube/config>\n", result.stdout)
+                self.assertEqual("TLS\n" in result.stdout, status == 0)
+                self.assertEqual("<kubectl>\n<--context>\n<kind-fixture>\n" in result.stdout, status == 0)
+
+    def test_selected_checkout_requires_shared_bootstrap(self):
+        source = SCRIPT.read_text()
+        prepare = source[source.index("prepare_checkout() {"):
+                         source.index("\nconfigure_kind_node_tls() {")]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "devspace.yaml").touch()
+            for present in (False, True):
+                with self.subTest(present=present):
+                    if present:
+                        helper = root / "dev/deployment/setup-kind.sh"
+                        helper.parent.mkdir(parents=True)
+                        helper.touch()
+                    result = subprocess.run(
+                        ["bash", "-c", "set -euo pipefail\ndie() { echo \"$*\" >&2; exit 1; }\n"
+                         + prepare + "\nprepare_checkout\n"],
+                        env={**os.environ, "REPO_DIR": directory, "REPO_REF": ""},
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertEqual(result.returncode == 0, present, result.stderr)
+                    if not present:
+                        self.assertIn("selected checkout lacks dev/deployment/setup-kind.sh", result.stderr)
+
+    def test_invalid_cluster_name_fails_before_host_setup(self):
+        for name in ("bad.name", "a" * 50):
+            with self.subTest(name=name):
+                result = subprocess.run(
+                    ["bash", str(SCRIPT), "--cluster-name", name],
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("--cluster-name must be a lowercase DNS label", result.stderr)
+
+    def test_user_commands_use_the_exported_kubeconfig(self):
+        source = SCRIPT.read_text()
+        runner = source[source.index("run_as_user() {"):
+                        source.index("\nensure_user_directory() {")]
+        result = subprocess.run(
+            ["bash", "-c", runner + """
+runuser() { shift 3; "$@"; }
+run_as_user sh -c 'printf "%s" "$KUBECONFIG"'
+"""],
+            env={**os.environ, "DEV_USER": "fixture", "USER_HOME": "/user home",
+                 "KUBECONFIG": "/unrelated/config"},
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "/user home/.kube/config")
 
     def test_profile_selection(self):
         source = SCRIPT.read_text()
