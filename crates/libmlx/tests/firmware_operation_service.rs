@@ -1090,7 +1090,8 @@ async fn renamed_daemon_runs_firmware_and_rejects_changed_profile_reuse() {
     .expect("renamed-daemon test exceeded its independent watchdog");
 }
 
-/// Cancellation retains preparation evidence and releases host exclusion across distinct slots.
+/// Cancellation retains preparation evidence and releases host exclusion. Each
+/// slot keeps its own receipt even when callers reuse an operation ID.
 #[tokio::test]
 async fn stalled_http_prepare_cancels_and_preserves_requested_report_after_restart() {
     timeout(TEST_TIMEOUT, async {
@@ -1174,14 +1175,19 @@ async fn stalled_http_prepare_cancels_and_preserves_requested_report_after_resta
             daemon_with_executable(fixture, Path::new(SUPERVISOR), "ffff:fd:1f.0");
         let mut other_client = connect_slot(&mut other_process, fixture, other_slot).await;
         assert_eq!(other_client.status().await.unwrap().device_identity, other_slot);
+        // The host claim serializes these slots, but receipt lookup stays local
+        // to each slot. Reusing the ID must not return the first slot's work.
         let exclusion = other_client
-            .submit("other-slot", None, ObserverExitBehavior::Continue)
+            .submit("stalled-prepare", None, ObserverExitBehavior::Continue)
             .await
             .expect_err("another slot cannot admit work while preparation owns the host");
         assert!(matches!(exclusion, FirmwareSupervisorClientError::Rpc(status)
             if status.code() == tonic::Code::ResourceExhausted
                 && status.message() == "another firmware operation owns the host or requires reconciliation"));
-        let missing = other_client.get("other-slot").await.expect_err("rejected work has no receipt");
+        let missing = other_client
+            .get("stalled-prepare")
+            .await
+            .expect_err("rejected work has no receipt");
         assert!(matches!(missing, FirmwareSupervisorClientError::Rpc(status)
             if status.code() == tonic::Code::NotFound));
         assert_eq!(
@@ -1227,16 +1233,17 @@ async fn stalled_http_prepare_cancels_and_preserves_requested_report_after_resta
         assert!(!fixture.join("burns").exists());
         assert_eq!(fs::read(&staged_image).unwrap(), b"fixture firmware image\n");
         let saved = serde_json::to_value(canceled).unwrap();
+        let saved_ledger = fs::read(&ledger_path).unwrap();
 
         let other_accepted = other_client
-            .submit("other-slot", None, ObserverExitBehavior::Continue)
+            .submit("stalled-prepare", None, ObserverExitBehavior::Continue)
             .await
             .expect("the same second-slot request can be admitted after safe cancellation");
         assert_eq!(other_accepted.state, FirmwareOperationState::Accepted);
-        assert_eq!(other_accepted.operation_id, "other-slot");
+        assert_eq!(other_accepted.operation_id, "stalled-prepare");
         let complete = timeout(WATCHDOG, async {
             loop {
-                let operation = other_client.get("other-slot").await.unwrap();
+                let operation = other_client.get("stalled-prepare").await.unwrap();
                 if operation.state == FirmwareOperationState::Complete {
                     return operation;
                 }
@@ -1258,6 +1265,18 @@ async fn stalled_http_prepare_cancels_and_preserves_requested_report_after_resta
         assert_eq!(
             serde_json::to_value(client.get("stalled-prepare").await.unwrap()).unwrap(),
             saved
+        );
+        // Completion in the second slot must persist independently, without
+        // replacing the canceled request saved in the first slot.
+        assert_eq!(fs::read(&ledger_path).unwrap(), saved_ledger);
+        let other_ledger: serde_json::Value = serde_json::from_slice(
+            &fs::read(fixture.join("state").join(other_slot).join("operations.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(other_ledger["execution_device"], "ffff:fd:1f.0");
+        assert_eq!(
+            other_ledger["records"][0]["operation"],
+            serde_json::to_value(&complete).unwrap()
         );
         assert_eq!(fs::read_to_string(fixture.join("invocations")).unwrap(), invocations);
         drop(other_client);

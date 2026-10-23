@@ -2612,6 +2612,7 @@ pub(in crate::tests) async fn forge_agent_control(
     env.api
         .forge_agent_control(Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(machine_id.into()),
+            ..Default::default()
         }))
         .await
         .unwrap()

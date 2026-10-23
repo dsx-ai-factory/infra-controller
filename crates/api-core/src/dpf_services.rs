@@ -2245,8 +2245,8 @@ mod tests {
                 // Verify each NAD retains the bridge and MTU assigned by its service contract.
                 let (expected_bridge, expected_mtu) = match name.as_str() {
                     "service-vpc-dhcp-slot0" => ("br-svc-0", carbide_dpf::SERVICE_VPC_MTU),
-                    DHCP_SERVER_SERVICE_NAD_NAME => ("br-sfc", DHCP_SERVER_SERVICE_MTU),
-                    FMDS_SERVICE_NAD_NAME => ("br-sfc", FMDS_SERVICE_MTU),
+                    DHCP_SERVER_SERVICE_NAD_NAME => ("br-sfc", 1500),
+                    FMDS_SERVICE_NAD_NAME => ("br-sfc", 1500),
                     _ => unreachable!("rendered NAD names were checked above"),
                 };
                 assert_eq!(nad.metadata.name.as_deref(), Some(name.as_str()));

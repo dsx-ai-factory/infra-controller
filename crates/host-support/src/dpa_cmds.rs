@@ -84,6 +84,11 @@ impl TryFrom<DpaCommandPb> for DpaCommand<'static> {
                             .transpose()?,
                     }
                 }
+                Command::UpdateFirmware(_) => {
+                    return Err(
+                        "UpdateFirmware requires the typed NIC firmware command path".to_string(),
+                    );
+                }
             },
         })
     }
@@ -196,6 +201,7 @@ mod tests {
             Some(C::ApplyFirmwareOperation(f)) => {
                 format!("apply_firmware_operation:{}", f.profile.is_some())
             }
+            Some(C::UpdateFirmware(_)) => "update_firmware".to_string(),
         }
     }
 
@@ -279,6 +285,19 @@ mod tests {
                     profile: None,
                     operation_id: "operation".to_string(),
                 }) => Yields("apply_firmware:false".to_string()),
+            }
+
+            // DPA JSON has no phase identity or expected digests, so conversion
+            // must reject rather than weakening the generic command contract.
+            "update_firmware cannot become a legacy DPA command" {
+                Command::UpdateFirmware(fac::MlxDeviceUpdateFirmware {
+                    operation_id: "operation".into(),
+                    phase_id: "update:1".into(),
+                    profile: Some(valid_firmware_pb()),
+                    ..Default::default()
+                }) => FailsWith(
+                    "UpdateFirmware requires the typed NIC firmware command path".to_string()
+                ),
             }
 
             "apply_firmware with a complete profile" {

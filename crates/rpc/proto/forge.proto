@@ -6337,8 +6337,21 @@ message MachineCredentialsUpdateRequest {
 message MachineCredentialsUpdateResponse {
 }
 
+// Optional actions understood by a Scout control client. Core ignores unknown
+// values and must not send an action whose capability is absent.
+enum ForgeAgentControlCapability {
+  // No optional capability; this value never enables an action.
+  FORGE_AGENT_CONTROL_CAPABILITY_UNSPECIFIED = 0;
+  // Supports immutable, digest-checked MlxDeviceUpdateFirmware workflows and
+  // correlated firmware_update_result observations.
+  NIC_FIRMWARE_UPDATE_V1 = 1;
+}
+
 message ForgeAgentControlRequest {
   common.MachineId machine_id = 1;
+  // Unordered supported capabilities. Omitted/empty advertises no optional
+  // capabilities; duplicates have no additional meaning.
+  repeated ForgeAgentControlCapability capabilities = 2;
 }
 
 message ForgeAgentControlResponse {
@@ -6352,7 +6365,7 @@ message ForgeAgentControlResponse {
     MEASURE = 5; // Machine needs to send measurements for attestation.
     LOGERROR = 6; // Log error.
     MACHINE_VALIDATION = 7; // Machine validation.
-    MLX_ACTION = 8; // MlxAction for DPA NICs
+    MLX_ACTION = 8; // MlxAction; only legacy-compatible DPA commands use its JSON payload.
     FIRMWARE_UPGRADE = 9; // Firmware upgrade through scout
   }
   LegacyAction legacy_action = 1;
@@ -6420,6 +6433,9 @@ message ForgeAgentControlResponse {
       MlxDeviceApplyFirmware apply_firmware = 6;
       // Durable firmware work uses a distinct tag so older Scouts ignore it.
       MlxDeviceApplyFirmwareOperation apply_firmware_operation = 7;
+      // Whole NIC firmware workflow with immutable identity and checked inputs.
+      // Requires NIC_FIRMWARE_UPDATE_V1; never projected into legacy JSON.
+      MlxDeviceUpdateFirmware update_firmware = 8;
     }
   }
 
@@ -6452,6 +6468,34 @@ message ForgeAgentControlResponse {
     // when profile is absent; a later state entry receives a different value.
     // Omitted or empty values are rejected.
     string operation_id = 2;
+  }
+
+  // Submit or observe one immutable firmware workflow. The containing
+  // MlxDeviceAction.pci_name must be a full, lowercase PCI BDF (dddd:bb:dd.f).
+  // This target does not establish physical-card identity or reset isolation.
+  // Within the target PCI slot's journal, repeated identical requests observe
+  // the existing receipt; changed inputs under the same operation_id conflict.
+  // Another slot has an independent journal, so callers resolving uncertainty
+  // must preserve both the original target and operation_id. This command is
+  // not representable by legacy DPA commands or JSON.
+  message MlxDeviceUpdateFirmware {
+    // Required stable ID containing 1-256 printable nonspace ASCII bytes.
+    // The dpa-firmware: prefix is reserved for legacy DPA state entries.
+    string operation_id = 1;
+    // Required immutable token, with the same syntax as operation_id, for this
+    // whole workflow. Burn/reset/verification remain supervisor-owned steps.
+    string phase_id = 2;
+    // Required exact target, source, and options. Omission is invalid, never a
+    // successful no-work decision. Reset and verification follow profile options.
+    // Flash-only completion does not certify firmware activation or host
+    // readiness.
+    // Image and optional configuration sources must use unauthenticated HTTP(S)
+    // without user information, query strings, or fragments. Redirects are
+    // rejected, and both credential fields must be absent.
+    mlx_device.FirmwareFlasherProfile profile = 3;
+    // Required expected bytes, checked after supervisor-owned staging and before
+    // configuration or burn. A configuration digest is required iff configured.
+    mlx_device.FirmwareArtifactDigests expected_digests = 4;
   }
 
   message FirmwareUpgrade {

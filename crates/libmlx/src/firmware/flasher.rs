@@ -35,7 +35,8 @@ use crate::firmware::error::{
     AttemptError, FirmwareApplyError, FirmwareError, FirmwarePhase, FirmwareResult,
 };
 use crate::firmware::preflight::{
-    FirmwarePreflightError, check_hardware_identity, check_readable_file, is_usable_literal,
+    FirmwarePreflightError, LocalFirmwareFiles, check_hardware_identity, check_readable_file,
+    inspect_prepared_firmware_with_executor, is_usable_literal,
 };
 use crate::firmware::reset::{DEFAULT_RESET_LEVEL, MlxFwResetRunner};
 use crate::firmware::source::FirmwareSource;
@@ -117,7 +118,9 @@ pub(crate) enum FirmwareProgressEvent {
 /// Legacy `FlashSpec` has no digests: preparation does not certify file contents.
 /// After a real burn, call `finish` only when every requested phase succeeded.
 /// Otherwise dropping this owner retains its inputs, including after a failed
-/// or cancelled standalone reset. Preparations dropped before mutation are removed.
+/// or cancelled standalone reset. Successfully prepared inputs dropped before
+/// mutation are removed. A failed prepared-input checkpoint, digest check, or
+/// checked preflight retains the files even though mutation has not started.
 /// Cancelled I/O, failed mutations, and unresolved cleanup retain the directory
 /// and log its path for diagnosis and reconciliation.
 pub struct PreparedFirmware {
@@ -167,6 +170,7 @@ pub struct FirmwareFlasher {
     executor: FirmwareToolExecutor,
     progress: Option<Arc<dyn FirmwareProgress>>,
     preparation_cancel: Option<(String, watch::Receiver<Option<String>>)>,
+    checked_update: bool,
 }
 
 impl FirmwareFlasher {
@@ -195,6 +199,7 @@ impl FirmwareFlasher {
             executor,
             progress: None,
             preparation_cancel: None,
+            checked_update: false,
         })
     }
 
@@ -202,6 +207,13 @@ impl FirmwareFlasher {
     /// existing apply pipeline without implementing a second execution path.
     pub(crate) fn with_progress(mut self, progress: Arc<dyn FirmwareProgress>) -> Self {
         self.progress = Some(progress);
+        self
+    }
+
+    /// Select the source and preflight policy for checked updates. The operation
+    /// owner verifies expected hashes in the durable `Prepared` callback.
+    pub(super) fn with_update_validation(mut self) -> Self {
+        self.checked_update = true;
         self
     }
 
@@ -248,9 +260,10 @@ impl FirmwareFlasher {
             retain: true,
         };
         let staging = async {
-            prepared.image = stage_source(&firmware, &prepared.image).await?;
+            prepared.image = stage_source(&firmware, &prepared.image, self.checked_update).await?;
             if let (Some(source), Some(directory)) = (configuration, &prepared.device_config) {
-                prepared.device_config = Some(stage_source(&source, directory).await?);
+                prepared.device_config =
+                    Some(stage_source(&source, directory, self.checked_update).await?);
             }
             check_readable_file(&prepared.image).await?;
             if let Some(configuration) = &prepared.device_config {
@@ -273,6 +286,21 @@ impl FirmwareFlasher {
             configuration: prepared.device_config.clone(),
         })
         .await?;
+        if self.checked_update {
+            // Both hashes are durable before the shared read-only preflight.
+            // In addition to part/PSID, it checks the reported PCI function and
+            // requires a usable installed version before allowing mutation.
+            inspect_prepared_firmware_with_executor(
+                &self.device_id,
+                &self.firmware_spec,
+                LocalFirmwareFiles {
+                    image: &prepared.image,
+                    device_config: prepared.device_config.as_deref(),
+                },
+                &self.executor,
+            )
+            .await?;
+        }
         prepared.retain = false;
         Ok(prepared)
     }
@@ -721,9 +749,17 @@ impl FirmwareFlasher {
 // Remote sources resolve into this owned directory, while local sources return
 // their original path. Copy those local bytes too so later phases use the staged
 // input rather than a source the caller could replace between commands.
-async fn stage_source(source: &FirmwareSource, directory: &Path) -> FirmwareResult<PathBuf> {
+async fn stage_source(
+    source: &FirmwareSource,
+    directory: &Path,
+    checked_update: bool,
+) -> FirmwareResult<PathBuf> {
     tokio::fs::create_dir(directory).await?;
-    let resolved = source.resolve(directory).await?;
+    let resolved = if checked_update {
+        source.resolve_for_update(directory).await?
+    } else {
+        source.resolve(directory).await?
+    };
     check_readable_file(&resolved).await?;
     if resolved.parent() == Some(directory) {
         return Ok(resolved);
@@ -2189,6 +2225,7 @@ esac
             executor: FirmwareToolExecutor::default(),
             progress: None,
             preparation_cancel: None,
+            checked_update: false,
         }
         .with_dry_run(true)
     }

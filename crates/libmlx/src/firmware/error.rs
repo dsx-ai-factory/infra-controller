@@ -68,6 +68,14 @@ impl From<FirmwareError> for FirmwareApplyError {
 /// device-internal operation stopped.
 #[derive(Debug, Error)]
 pub enum FirmwareError {
+    /// Staged image bytes differ from the immutable update request.
+    #[error("firmware image SHA-256 does not match the requested digest")]
+    ImageDigestMismatch,
+
+    /// Staged configuration bytes differ from the immutable update request.
+    #[error("firmware configuration SHA-256 does not match the requested digest")]
+    ConfigurationDigestMismatch,
+
     /// The operation owner requested cancellation at a phase boundary.
     /// Earlier completed or uncertain mutations still require reconciliation.
     #[error("firmware operation was canceled")]
