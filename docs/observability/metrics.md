@@ -560,7 +560,7 @@ token lifetime, Postgres secrets operations, inbound TLS handshakes, certificate
 reloads, and outbound TCP connect outcomes.
 
 **DPUs and firmware** - DPUs online compared with healthy, failing health checks,
-firmware and dpu-agent versions, host inventory component versions, and the DPU NIC and
+firmware and dpu-agent versions, DPU inventory component versions, and the DPU NIC and
 host firmware update backlogs.
 
 **Site explorer** - Whether exploration is enabled, last run status, endpoints explored
@@ -601,7 +601,7 @@ distinct API versions deployed.
 and tenant footprint across sites.
 
 **Deployed versions** - API build per site, sites per build, and the dpu-agent, DPU
-firmware and host inventory component version spread.
+firmware and DPU inventory component version spread.
 
 **Inventory and lifecycle** - Hosts, network segments and InfiniBand partitions managed
 per site, with the stuck objects of each type.
