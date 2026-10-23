@@ -129,16 +129,20 @@ func testExpectedMachineSetupTestData(t *testing.T, dbSession *cdb.Session, org 
 	return ip, site
 }
 
-// testExpectedMachineSKULookupFailureHook simulates a `SkuSQLDAO.GetAll` error.
-// Bun hooks cannot return errors, so it runs the first SKU `COUNT` with a
-// canceled child of the query context, before `GetAll` can scan rows.
+// Bun hooks cannot return errors, so fail the SKU attachment lookup with a
+// canceled child of the query context.
 type testExpectedMachineSKULookupFailureHook struct {
-	armed bool
-	fired bool
+	armed   bool
+	fired   bool
+	selects int
 }
 
 func (h *testExpectedMachineSKULookupFailureHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
-	if !h.armed || !strings.HasPrefix(event.Query, `SELECT count(*) FROM "sku"`) {
+	if !strings.HasPrefix(event.Query, "SELECT ") || !strings.Contains(event.Query, `FROM "sku"`) {
+		return ctx
+	}
+	h.selects++
+	if !h.armed || !strings.Contains(event.Query, "FOR KEY SHARE") {
 		return ctx
 	}
 	h.armed = false
@@ -151,9 +155,22 @@ func (h *testExpectedMachineSKULookupFailureHook) BeforeQuery(ctx context.Contex
 func (h *testExpectedMachineSKULookupFailureHook) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
-	t.Run("complete mutation conflict", func(t *testing.T) {
-		testExpectedMachineMutationRejectsCompleteMutationLock(t, "single create")
-	})
+	scenarios := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "complete mutation conflict", run: func(t *testing.T) {
+			testExpectedMachineMutationRejectsCompleteMutationLock(t, "single create")
+		}},
+		{name: "SKU recreated on another Site before attachment", run: func(t *testing.T) {
+			testExpectedMachineRejectsRecreatedSKU(t, "single create")
+		}},
+		{name: "BMC credentials forwarded to workflow", run: testCreateExpectedMachineBmcCredentialsForwardedToWorkflow},
+		{name: "DPF setting forwarded to workflow", run: testCreateExpectedMachineDpfEnabledForwardedToWorkflow},
+	}
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, scenario.run)
+	}
 
 	// Setup
 	e := echo.New()
@@ -197,7 +214,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 		Name:                     "other-managed-site",
 		Org:                      org,
 		InfrastructureProviderID: infraProv.ID,
-		Status:                   cdbm.SiteStatusRegistered,
+		Status:                   cdbm.SiteStatusPending,
 	}
 	_, err = dbSession.DB.NewInsert().Model(otherSite).Exec(ctx)
 	require.NoError(t, err)
@@ -458,15 +475,32 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 			rejectsMutation:  true,
 		},
 		{
-			name: "invalid SKU ID returns 422",
+			name: "invalid SKU takes precedence over duplicate MAC",
 			requestBody: model.APIExpectedMachineCreateRequest{
 				SiteID:              site.ID.String(),
-				BmcMacAddress:       "00:11:22:33:44:AA",
+				BmcMacAddress:       existingMAC,
 				DefaultBmcUsername:  cutil.GetPtr("admin"),
 				DefaultBmcPassword:  cutil.GetPtr("password"),
 				ChassisSerialNumber: "CHASSIS129",
 				SkuID:               cutil.GetPtr("invalid-sku-id-that-does-not-exist"),
 				Labels:              map[string]string{"env": "test"},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus:   http.StatusUnprocessableEntity,
+			expectedErrorMsg: cutil.GetPtr("SKU ID specified in request does not exist"),
+			rejectsMutation:  true,
+		},
+		{
+			name: "invalid SKU takes precedence over pending Site",
+			requestBody: model.APIExpectedMachineCreateRequest{
+				SiteID:              otherSite.ID.String(),
+				BmcMacAddress:       "00:11:22:33:44:AA",
+				ChassisSerialNumber: "CHASSIS-PENDING-SITE",
+				SkuID:               cutil.GetPtr("missing-sku"),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -522,6 +556,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			skuLookupFailure.armed = tt.failSKULookup
 			skuLookupFailure.fired = false
+			skuLookupFailure.selects = 0
 			wantSKUFailure := tt.failSKULookup && tt.expectedStatus == http.StatusInternalServerError
 			workflowCallsBefore := len(mockTemporalClient.Calls)
 			var logs bytes.Buffer
@@ -562,7 +597,10 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				t.Errorf("Response: %v", rec.Body.String())
 			}
 			if tt.failSKULookup {
-				assert.Equal(t, wantSKUFailure, skuLookupFailure.fired, "Site authorization must precede the SKU COUNT query")
+				assert.Equal(t, wantSKUFailure, skuLookupFailure.fired, "Site authorization must precede the SKU attachment lookup")
+			}
+			if tt.expectedStatus == http.StatusForbidden {
+				assert.Zero(t, skuLookupFailure.selects, "denied requests must not perform any SKU lookup")
 			}
 			if wantSKUFailure {
 				assert.JSONEq(t, `{"source":"","message":"Failed to validate SKU ID in request data due to DB error","data":null}`, rec.Body.String())
@@ -576,7 +614,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				}
 				require.NotNil(t, lookupErrorLog, "SKU lookup failure must be logged")
 				assert.Equal(t, "error", lookupErrorLog["level"])
-				assert.Equal(t, paginator.ErrQueryTotalCount.Error()+": "+context.Canceled.Error(), lookupErrorLog["error"])
+				assert.Equal(t, context.Canceled.Error(), lookupErrorLog["error"])
 			}
 
 			if tt.rejectsMutation {
@@ -1580,6 +1618,9 @@ func TestUpdateExpectedMachineHandler_Handle(t *testing.T) {
 	t.Run("complete mutation conflict", func(t *testing.T) {
 		testExpectedMachineMutationRejectsCompleteMutationLock(t, "single update")
 	})
+	t.Run("SKU recreated on another Site before attachment", func(t *testing.T) {
+		testExpectedMachineRejectsRecreatedSKU(t, "single update")
+	})
 
 	tests := []struct {
 		name string
@@ -1924,10 +1965,11 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid SKU ID returns 422",
+			name: "invalid SKU takes precedence over changed MAC",
 			id:   testEM.ID.String(),
 			requestBody: model.APIExpectedMachineUpdateRequest{
-				SkuID: cutil.GetPtr("invalid-sku-id-for-update"),
+				SkuID:         cutil.GetPtr("invalid-sku-id-for-update"),
+				BmcMacAddress: cutil.GetPtr("AA:BB:CC:DD:EE:FF"),
 			},
 			setupContext: func(c echo.Context) {
 				c.Set("user", createMockUser(org))
@@ -1963,6 +2005,7 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			skuLookupFailure.armed = tt.failSKULookup
 			skuLookupFailure.fired = false
+			skuLookupFailure.selects = 0
 			wantSKUFailure := tt.failSKULookup && tt.expectedStatus == http.StatusInternalServerError
 			scheduleCall.Return(mockWorkflowRun, tt.scheduleErr)
 			workflowCallsBefore := len(mockTemporalClient.Calls)
@@ -1999,7 +2042,10 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 				t.Errorf("Response: %v", rec.Body.String())
 			}
 			if tt.failSKULookup {
-				assert.Equal(t, wantSKUFailure, skuLookupFailure.fired, "Site authorization must precede the SKU COUNT query")
+				assert.Equal(t, wantSKUFailure, skuLookupFailure.fired, "Site authorization must precede the SKU attachment lookup")
+			}
+			if tt.expectedStatus == http.StatusForbidden {
+				assert.Zero(t, skuLookupFailure.selects, "denied requests must not perform any SKU lookup")
 			}
 			if wantSKUFailure {
 				assert.JSONEq(t, `{"source":"","message":"Failed to validate SKU ID in request data due to DB error","data":null}`, rec.Body.String())
@@ -2013,7 +2059,7 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 				}
 				require.NotNil(t, lookupErrorLog, "SKU lookup failure must be logged")
 				assert.Equal(t, "error", lookupErrorLog["level"])
-				assert.Equal(t, paginator.ErrQueryTotalCount.Error()+": "+context.Canceled.Error(), lookupErrorLog["error"])
+				assert.Equal(t, context.Canceled.Error(), lookupErrorLog["error"])
 			}
 			if tt.scheduleErr != nil {
 				assert.Contains(t, logs.String(), tt.scheduleErr.Error())
@@ -2809,6 +2855,9 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 	t.Run("complete mutation conflict", func(t *testing.T) {
 		testExpectedMachineMutationRejectsCompleteMutationLock(t, "batch create")
 	})
+	t.Run("SKU recreated on another Site before attachment", func(t *testing.T) {
+		testExpectedMachineRejectsRecreatedSKU(t, "batch create")
+	})
 
 	// Setup
 	e := echo.New()
@@ -3228,14 +3277,14 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 	}
 }
 
-// TestCreateExpectedMachineHandler_BmcCredentialsForwardedToWorkflow is a regression test for a
+// testCreateExpectedMachineBmcCredentialsForwardedToWorkflow is a regression test for a
 // bug where the OpenAPI spec documented "bmcUsername" / "bmcPassword" as the request field names
 // while the Go struct (APIExpectedMachineCreateRequest) used JSON tags "defaultBmcUsername" /
 // "defaultBmcPassword". Clients following the spec sent keys that the JSON decoder could not bind,
 // leaving DefaultBmcUsername / DefaultBmcPassword nil and silently dropping credentials before
 // they reached the workflow. The spec has been corrected to use "defaultBmcUsername" /
 // "defaultBmcPassword" to match the Go struct tags.
-func TestCreateExpectedMachineHandler_BmcCredentialsForwardedToWorkflow(t *testing.T) {
+func testCreateExpectedMachineBmcCredentialsForwardedToWorkflow(t *testing.T) {
 	e := echo.New()
 	dbSession := testExpectedMachineInitDB(t)
 	defer dbSession.Close()
@@ -3315,7 +3364,7 @@ func TestCreateExpectedMachineHandler_BmcCredentialsForwardedToWorkflow(t *testi
 	}
 }
 
-func TestCreateExpectedMachineHandler_DpfEnabledForwardedToWorkflow(t *testing.T) {
+func testCreateExpectedMachineDpfEnabledForwardedToWorkflow(t *testing.T) {
 	e := echo.New()
 	dbSession := testExpectedMachineInitDB(t)
 	defer dbSession.Close()
@@ -3670,6 +3719,9 @@ func TestExpectedMachineUpdateFields(t *testing.T) {
 func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
 	t.Run("complete mutation conflict", func(t *testing.T) {
 		testExpectedMachineMutationRejectsCompleteMutationLock(t, "batch update")
+	})
+	t.Run("SKU recreated on another Site before attachment", func(t *testing.T) {
+		testExpectedMachineRejectsRecreatedSKU(t, "batch update")
 	})
 
 	tests := []struct {
