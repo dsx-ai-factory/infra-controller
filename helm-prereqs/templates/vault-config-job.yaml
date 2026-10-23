@@ -1,11 +1,15 @@
 {{- if .Values.vault.configJob.enabled }}
+{{- $caSecretName := .Values.vault.configJob.caSecretName | default "" }}
+{{- if and $caSecretName (not (hasPrefix "https://" .Values.vault.address)) }}
+{{- fail "vault.configJob.caSecretName requires an https:// vault.address" }}
+{{- end }}
 ## =============================================================================
 ## Vault PKI Configuration Job (post-install hook)
 ## Uses only tools built into hashicorp/vault image (busybox wget/sed/grep).
 ## No apk install — works on clusters without outbound internet access.
 ##
 ## Flow:
-##   initContainer: wait for Vault to be healthy (HTTPS, tls-skip-verify)
+##   initContainer: wait for Vault to be healthy (verify TLS when CA configured)
 ##   container:     wait for site-root Secret, then:
 ##     - Import site-root CA into Vault PKI engine (nicoca)
 ##     - Configure PKI role (nico-cluster) with SPIFFE URI SANs
@@ -86,8 +90,7 @@ spec:
       initContainers:
         ## ---------------------------------------------------------------
         ## Wait for Vault to be unsealed and accepting requests.
-        ## Uses the vault binary (same image as configure) so TLS skip-verify
-        ## works reliably with self-signed certs.
+        ## Uses the vault binary and the configured CA, when supplied.
         ## ---------------------------------------------------------------
         - name: wait-vault
           image: {{ .Values.vault.configJob.vaultImage | quote }}
@@ -99,13 +102,21 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             - name: VAULT_SKIP_VERIFY
-              value: "true"
+              value: {{ ternary "false" "true" (not (empty $caSecretName)) | quote }}
+            {{- if $caSecretName }}
+            - name: VAULT_CACERT
+              value: /vault-ca/ca.crt
+          volumeMounts:
+            - name: vault-ca
+              mountPath: /vault-ca
+              readOnly: true
+            {{- end }}
           command:
             - sh
             - -c
             - |
               echo "Waiting for Vault at {{ .Values.vault.address }} to be unsealed..."
-              until vault status -tls-skip-verify -format=json 2>/dev/null \
+              until vault status {{ if not $caSecretName }}-tls-skip-verify {{ end }}-format=json 2>/dev/null \
                 | grep -q '"sealed":[[:space:]]*false'; do
                 echo "  Vault sealed or unreachable, retrying in 5s..."
                 sleep 5
@@ -113,6 +124,21 @@ spec:
               echo "Vault is unsealed, waiting 15s for leader election to stabilize..."
               sleep 15
               echo "Vault ready"
+        {{- if $caSecretName }}
+        - name: fetch-site-root
+          image: {{ .Values.vault.configJob.kubectlImage | quote }}
+          volumeMounts:
+            - name: site-root
+              mountPath: /site-root
+          command:
+            - sh
+            - -ec
+            - |
+              until kubectl get secret site-root -n {{ .Values.certManagerNamespace | quote }} \
+                -o 'jsonpath={.data.tls\.crt}{"\n"}{.data.tls\.key}{"\n"}' > /site-root/bundle; do
+                sleep 5
+              done
+        {{- end }}
       volumes:
         ## Shared emptyDir: configure container writes AppRole credentials here,
         ## patch-approle-secret container reads them and patches the K8s secret.
@@ -120,6 +146,17 @@ spec:
         ## by a separate kubectl container that mounts the same volume.
         - name: approle-creds
           emptyDir: {}
+        {{- if $caSecretName }}
+        - name: vault-ca
+          secret:
+            secretName: {{ $caSecretName | quote }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        - name: site-root
+          emptyDir:
+            medium: Memory
+        {{- end }}
       containers:
         ## ---------------------------------------------------------------
         ## Configure Vault PKI using only vault CLI + busybox tools
@@ -135,7 +172,11 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             - name: VAULT_SKIP_VERIFY
-              value: "true"
+              value: {{ ternary "false" "true" (not (empty $caSecretName)) | quote }}
+            {{- if $caSecretName }}
+            - name: VAULT_CACERT
+              value: /vault-ca/ca.crt
+            {{- end }}
             - name: VAULT_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -144,6 +185,14 @@ spec:
           volumeMounts:
             - name: approle-creds
               mountPath: /approle-creds
+            {{- if $caSecretName }}
+            - name: vault-ca
+              mountPath: /vault-ca
+              readOnly: true
+            - name: site-root
+              mountPath: /site-root
+              readOnly: true
+            {{- end }}
           command:
             - /bin/sh
             - -c
@@ -157,6 +206,12 @@ spec:
                 *:*) APISERVER_HOST="[${APISERVER_HOST}]" ;;
               esac
               APISERVER="https://${APISERVER_HOST}:${KUBERNETES_SERVICE_PORT}"
+              {{- if $caSecretName }}
+              CA_CERT=$(sed -n '1p' /site-root/bundle | base64 -d)
+              CA_KEY=$(sed -n '2p' /site-root/bundle | base64 -d)
+              test -n "$CA_CERT"
+              test -n "$CA_KEY"
+              {{- else }}
               SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
               OPERATORS_NS="{{ .Values.certManagerNamespace }}"
 
@@ -176,6 +231,7 @@ spec:
               KEY_B64=$(sed -n 's/.*"tls\.key": *"\([^"]*\)".*/\1/p' /tmp/secret.json)
               CA_CERT=$(echo "$CERT_B64" | base64 -d)
               CA_KEY=$(echo "$KEY_B64" | base64 -d)
+              {{- end }}
               echo "CA cert and key extracted"
 
               # ---- Enable PKI engine ----
