@@ -254,6 +254,7 @@ strum = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tonic-prost = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 
 [lints]
 workspace = true

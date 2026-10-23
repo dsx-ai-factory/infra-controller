@@ -1284,6 +1284,7 @@ dependencies = [
  "tower-http 0.7.0",
  "trace-propagation",
  "tracing",
+ "tracing-opentelemetry 0.33.0",
  "tracing-subscriber",
  "tss-esapi",
  "url",
@@ -7308,7 +7309,11 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "criterion",
+ "opentelemetry 0.32.0",
+ "opentelemetry_sdk",
+ "trace-propagation",
  "tracing",
+ "tracing-opentelemetry 0.33.0",
  "tracing-subscriber",
 ]
 
