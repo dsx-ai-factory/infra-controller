@@ -2134,6 +2134,7 @@ message PrefixFilterPolicyEntries {
 
 // Routing-profile properties set directly on a VPC. Present properties
 // override its named routing profile; omitted properties inherit from it.
+// Route targets retain symbolic `vni_self` values in this stored definition.
 // `internal` and `access_tier` are intentionally not exposed because allocation
 // and access controls must always come from the named base profile.
 message VpcRoutingProfileOverrides {
@@ -2146,9 +2147,9 @@ message VpcRoutingProfileOverrides {
   optional PrefixFilterPolicyEntries allowed_anycast_prefixes = 7;
 }
 
-// The fully resolved routing profile currently applied to an FNN VPC.
-// Unlike VpcRoutingProfileOverrides, this includes the protected properties
-// inherited from the named base profile and has no presence-aware fields.
+// The fully resolved routing profile applied to an FNN VPC. Unlike
+// VpcRoutingProfileOverrides, this includes protected base-profile properties,
+// and every route target has a present concrete `vni` with `vni_self` cleared.
 message VpcEffectiveRoutingProfile {
   repeated common.RouteTarget route_target_imports = 1;
   repeated common.RouteTarget route_targets_on_exports = 2;
@@ -5431,11 +5432,13 @@ message ManagedHostNetworkConfigResponse {
   // tenant routes, reducing the coordination needed
   // between nico and GNI.  We'll double-tag our
   // internal tenant routes with this tag.
+  // This global target is always literal and has `vni_self` false.
   optional common.RouteTarget common_internal_route_target = 109;
 
   // Additional RTs that we can import if needed for additional services,
   // or to make it easier to handle GNI changes, such as a swap
   // in the default-route RT.
+  // These global targets are always literal and have `vni_self` false.
   repeated common.RouteTarget additional_route_target_imports = 110;
 
   // Rules to be inserted before any other NSG rules.Action
@@ -10181,6 +10184,8 @@ message PrefixFilterPolicyEntry {
   string prefix = 1;
 }
 
+// A concrete per-VPC profile sent to the DPU. Every route target has a present
+// `vni` and `vni_self` false.
 message RoutingProfile {
   repeated common.RouteTarget route_target_imports             = 1;
   repeated common.RouteTarget route_targets_on_exports         = 2;

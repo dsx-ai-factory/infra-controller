@@ -534,10 +534,17 @@ func (x *Uint32List) GetItems() []uint32 {
 	return nil
 }
 
+// A BGP route target. `vni` is the route-target local-administrator component,
+// not a VXLAN-validity assertion. An absent `vni` with `vni_self` false means
+// legacy literal zero. A two-byte ASN permits a four-byte local administrator.
+// A four-byte ASN requires a local administrator no greater than 65535.
 type RouteTarget struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Asn           uint32                 `protobuf:"varint,1,opt,name=asn,proto3" json:"asn,omitempty"`
-	Vni           uint32                 `protobuf:"varint,2,opt,name=vni,proto3" json:"vni,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Asn   uint32                 `protobuf:"varint,1,opt,name=asn,proto3" json:"asn,omitempty"`
+	Vni   *uint32                `protobuf:"varint,2,opt,name=vni,proto3,oneof" json:"vni,omitempty"`
+	// Resolve from the current VPC's L3 VNI. Mutually exclusive with `vni`;
+	// effective and DPU-bound profiles always clear this field.
+	VniSelf       bool `protobuf:"varint,3,opt,name=vni_self,json=vniSelf,proto3" json:"vni_self,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -580,10 +587,17 @@ func (x *RouteTarget) GetAsn() uint32 {
 }
 
 func (x *RouteTarget) GetVni() uint32 {
-	if x != nil {
-		return x.Vni
+	if x != nil && x.Vni != nil {
+		return *x.Vni
 	}
 	return 0
+}
+
+func (x *RouteTarget) GetVniSelf() bool {
+	if x != nil {
+		return x.VniSelf
+	}
+	return false
 }
 
 // A list of route targets. Unlike a repeated field, this message can be optional,
@@ -1685,10 +1699,12 @@ const file_common_nico_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\"\"\n" +
 	"\n" +
 	"Uint32List\x12\x14\n" +
-	"\x05items\x18\x01 \x03(\rR\x05items\"1\n" +
+	"\x05items\x18\x01 \x03(\rR\x05items\"Y\n" +
 	"\vRouteTarget\x12\x10\n" +
-	"\x03asn\x18\x01 \x01(\rR\x03asn\x12\x10\n" +
-	"\x03vni\x18\x02 \x01(\rR\x03vni\";\n" +
+	"\x03asn\x18\x01 \x01(\rR\x03asn\x12\x15\n" +
+	"\x03vni\x18\x02 \x01(\rH\x00R\x03vni\x88\x01\x01\x12\x19\n" +
+	"\bvni_self\x18\x03 \x01(\bR\avniSelfB\x06\n" +
+	"\x04_vni\";\n" +
 	"\fRouteTargets\x12+\n" +
 	"\x06values\x18\x01 \x03(\v2\x13.common.RouteTargetR\x06values\" \n" +
 	"\bDomainId\x12\x14\n" +
@@ -1818,6 +1834,7 @@ func file_common_nico_proto_init() {
 	if File_common_nico_proto != nil {
 		return
 	}
+	file_common_nico_proto_msgTypes[10].OneofWrappers = []any{}
 	file_common_nico_proto_msgTypes[33].OneofWrappers = []any{
 		(*DeviceId_MachineId)(nil),
 		(*DeviceId_SwitchId)(nil),

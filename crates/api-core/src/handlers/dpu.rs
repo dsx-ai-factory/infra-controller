@@ -292,6 +292,7 @@ async fn get_managed_host_network_config_inner(
         .fnn
         .as_ref()
         .and_then(|f| f.admin_vpc.as_ref())
+        .filter(|admin| admin.enabled)
         .map(|v| &v.routing_profile);
 
     let (admin_interface_rpc, host_interface_id) = ethernet_virtualization::admin_network(
@@ -537,7 +538,7 @@ async fn get_managed_host_network_config_inner(
     // Deprecated compatibility field for DPU agents that do not yet read
     // FlatInterfaceConfig.vpc_routing_profile.
     let deprecated_routing_profile = if tenant_interfaces.is_empty() {
-        admin_vpc_routing_profile.map(rpc::RoutingProfile::from)
+        admin_interface_rpc.vpc_routing_profile.clone()
     } else {
         tenant_interfaces
             .first()
@@ -738,6 +739,34 @@ async fn get_managed_host_network_config_inner(
 
     let astra_config = get_astra_config(api, &snapshot).await?;
 
+    // Normalize legacy zero and reject symbolic global settings before serving DPU configuration.
+    let resolve_global_route_target =
+        |target: &cfg::file::RouteTargetConfig| -> Result<rpc_common::RouteTarget, CarbideError> {
+            target
+                .resolve(None)
+                .map(rpc_common::RouteTarget::from)
+                .map_err(|error| CarbideError::InvalidArgument(error.to_string()))
+        };
+    let common_internal_route_target = api
+        .runtime_config
+        .fnn
+        .as_ref()
+        .and_then(|fnn| fnn.common_internal_route_target.as_ref())
+        .map(resolve_global_route_target)
+        .transpose()?;
+    let additional_route_target_imports = api
+        .runtime_config
+        .fnn
+        .as_ref()
+        .map(|fnn| {
+            fnn.additional_route_target_imports
+                .iter()
+                .map(resolve_global_route_target)
+                .collect::<Result<Vec<_>, CarbideError>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+
     let resp = rpc::ManagedHostNetworkConfigResponse {
         // TODO(Service VPC): Populate these fields for the authenticated receiving
         // DPU when managed-host responses include service networking.
@@ -829,30 +858,9 @@ async fn get_managed_host_network_config_inner(
         min_dpu_functioning_links: api.runtime_config.min_dpu_functioning_links,
         dpu_network_pinger_type: api.runtime_config.dpu_network_monitor_pinger_type.clone(),
         internet_l3_vni: Some(api.runtime_config.internet_l3_vni), // Deprecated.  Remove when all agents and controllers are on a version that doesn't expect this.
-        common_internal_route_target: api.runtime_config.fnn.as_ref().and_then(|c| {
-            c.common_internal_route_target
-                .as_ref()
-                .map(|rt| rpc_common::RouteTarget {
-                    asn: rt.asn,
-                    vni: rt.vni,
-                })
-        }),
+        common_internal_route_target,
         routing_profile: deprecated_routing_profile,
-
-        additional_route_target_imports: api
-            .runtime_config
-            .fnn
-            .as_ref()
-            .map(|c| {
-                c.additional_route_target_imports
-                    .iter()
-                    .map(|i| rpc_common::RouteTarget {
-                        asn: i.asn,
-                        vni: i.vni,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        additional_route_target_imports,
         instance: maybe_instance,
         dpu_extension_services: extension_services,
         bgp_leaf_session_password: match api.runtime_config.bgp_leaf_session_password.as_ref() {

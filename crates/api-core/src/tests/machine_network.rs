@@ -1473,6 +1473,61 @@ async fn test_managed_host_network_config_with_sitewide_bgp_password(pool: sqlx:
     );
 }
 
+/// Verifies legacy global route targets with omitted VNIs become explicit zero
+/// values in both managed-host response fields before reaching the DPU.
+#[crate::sqlx_test]
+async fn test_managed_host_network_config_normalizes_legacy_global_route_targets(
+    pool: sqlx::PgPool,
+) {
+    // Omit each local administrator while distinct ASNs identify both fields.
+    let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
+    let fnn_config = overrides
+        .fnn_config
+        .as_mut()
+        .expect("fixture FNN configuration");
+    fnn_config.common_internal_route_target = Some(RouteTargetConfig {
+        asn: 64_512,
+        vni: None,
+        vni_self: false,
+    });
+    fnn_config.additional_route_target_imports = vec![RouteTargetConfig {
+        asn: 64_513,
+        vni: None,
+        vni_self: false,
+    }];
+    let env = api_fixtures::create_test_env_with_overrides(pool, overrides).await;
+    let host_config = env.managed_host_config();
+    let dpu_machine_id = dpu::create_dpu_machine(&env, &host_config).await;
+
+    // Fetch the response carrying both global route-target fields.
+    let response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Both fields must contain concrete zero rather than omitted legacy values.
+    assert_eq!(
+        response.common_internal_route_target,
+        Some(rpc::common::RouteTarget {
+            asn: 64_512,
+            vni: Some(0),
+            vni_self: false,
+        })
+    );
+    assert_eq!(
+        response.additional_route_target_imports,
+        vec![rpc::common::RouteTarget {
+            asn: 64_513,
+            vni: Some(0),
+            vni_self: false,
+        }]
+    );
+}
+
 #[crate::sqlx_test]
 async fn test_managed_host_network_config_narrows_interface_anycast_prefixes(pool: sqlx::PgPool) {
     let profile_type = "ANYCAST_SUBSET_TEST";
@@ -1483,7 +1538,8 @@ async fn test_managed_host_network_config_narrows_interface_anycast_prefixes(poo
     ];
     let inherited_import = RouteTargetConfig {
         asn: 65001,
-        vni: 123,
+        vni: Some(123),
+        vni_self: false,
     };
 
     // Configure inherited properties and a base prefix that the VPC will replace.
@@ -1617,18 +1673,20 @@ async fn test_managed_host_network_config_narrows_interface_anycast_prefixes(poo
     assert!(vpc_routing_profile.leak_default_route_from_underlay);
     assert_eq!(vpc_routing_profile.route_target_imports.len(), 1);
     assert_eq!(vpc_routing_profile.route_target_imports[0].asn, 65001);
-    assert_eq!(vpc_routing_profile.route_target_imports[0].vni, 123);
+    assert_eq!(vpc_routing_profile.route_target_imports[0].vni, Some(123));
+    assert!(!vpc_routing_profile.route_target_imports[0].vni_self);
 }
 
+/// Verifies Core resolves one symbolic target independently for each interface
+/// VPC and policy direction so the DPU receives only concrete values.
 #[crate::sqlx_test]
 async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool: sqlx::PgPool) {
-    let internal_import = RouteTargetConfig {
-        asn: 65001,
-        vni: 111,
-    };
-    let external_export = RouteTargetConfig {
-        asn: 65002,
-        vni: 222,
+    // Reuse one symbolic target so only the associated VPC distinguishes
+    // rendered values.
+    let symbolic_target = RouteTargetConfig {
+        asn: 429_000_000,
+        vni: None,      // Keep one definition reusable across distinct VPCs.
+        vni_self: true, // Each interface must substitute its own allocated VNI.
     };
 
     // Configure two distinguishable FNN routing profiles.
@@ -1645,7 +1703,7 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
                         internal: Some(true),
                         access_tier: Some(1),
                         leak_default_route_from_underlay: Some(true),
-                        route_target_imports: Some(vec![internal_import.clone()]),
+                        route_target_imports: Some(vec![symbolic_target.clone()]),
                         ..Default::default()
                     },
                 ),
@@ -1655,7 +1713,7 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
                         internal: Some(false),
                         access_tier: Some(2),
                         leak_tenant_host_routes_to_underlay: Some(true),
-                        route_targets_on_exports: Some(vec![external_export.clone()]),
+                        route_targets_on_exports: Some(vec![symbolic_target.clone()]),
                         ..Default::default()
                     },
                 ),
@@ -1789,8 +1847,9 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
     assert_eq!(
         internal_profile.route_target_imports,
         vec![rpc::common::RouteTarget {
-            asn: internal_import.asn,
-            vni: internal_import.vni,
+            asn: symbolic_target.asn,
+            vni: Some(internal_vni),
+            vni_self: false,
         }]
     );
 
@@ -1799,9 +1858,57 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
     assert_eq!(
         external_profile.route_targets_on_exports,
         vec![rpc::common::RouteTarget {
-            asn: external_export.asn,
-            vni: external_export.vni,
+            asn: symbolic_target.asn,
+            vni: Some(external_vni),
+            vni_self: false,
         }]
+    );
+}
+
+/// Verifies tenant-interface rendering rejects a retained negative VPC VNI so
+/// managed-host configuration cannot publish its wrapped unsigned value.
+#[crate::sqlx_test]
+async fn test_managed_host_network_config_rejects_negative_tenant_vni(pool: sqlx::PgPool) {
+    // Create one valid tenant interface before changing its persisted VPC status.
+    let env = api_fixtures::create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let managed_host = create_managed_host(&env).await;
+    managed_host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+
+    // Inject retained state allowed by JSONB but not produced by current APIs.
+    let mut txn = env.db_txn().await;
+    let vpc = db::vpc::find_by_segment(txn.as_mut(), segment_id)
+        .await
+        .unwrap()
+        .expect("fixture segment belongs to a VPC");
+    sqlx::query("UPDATE vpcs SET status = $1 WHERE id = $2")
+        .bind(sqlx::types::Json(model::vpc::VpcStatus {
+            vni: Some(-1), // Drives the defensive signed-to-unsigned conversion.
+        }))
+        .bind(vpc.id)
+        .execute(txn.as_mut())
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    // Request the DPU configuration that renders the retained tenant VPC.
+    let error = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(managed_host.dpu().id),
+        }))
+        .await
+        .expect_err("negative retained VNI must be rejected");
+
+    // Fail explicitly instead of returning the wrapped `u32`.
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert_eq!(
+        error.message(),
+        format!("internal error: VPC attached to segment {segment_id} has a negative VNI")
     );
 }
 
@@ -1969,11 +2076,14 @@ async fn test_managed_host_network_config_includes_fnn_vrf_loopback_when_enabled
     assert_eq!(loopback.loopback_ip.to_string(), loopback_ip);
 }
 
+/// Verifies the admin VPC resolves symbolic targets once for both routing-profile
+/// response fields while the default loopback setting remains disabled.
 #[crate::sqlx_test]
 #[allow(deprecated)]
 async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_default(
     pool: sqlx::PgPool,
 ) {
+    // Configure one symbolic admin target and a fixed VNI for deterministic resolution.
     let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
         enabled: true,
@@ -1981,8 +2091,9 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
         routing_profile: FnnRoutingProfileConfig {
             leak_default_route_from_underlay: Some(true),
             route_target_imports: Some(vec![RouteTargetConfig {
-                asn: 64512,
-                vni: 10000,
+                asn: 429_000_000,
+                vni: None,      // Keep the configured target symbolic.
+                vni_self: true, // Resolve from the allocated admin VPC VNI.
             }]),
             ..Default::default()
         },
@@ -2019,7 +2130,6 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
     assert!(response.use_admin_network);
     assert_eq!(admin_interface.vpc_vni, 10000);
     assert!(admin_interface.tenant_vrf_loopback_ip.is_none());
-    assert!(response.routing_profile.is_some());
 
     let routing_profile = admin_interface
         .vpc_routing_profile
@@ -2028,8 +2138,10 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
     assert!(admin_interface.interface_routing_profile.is_none());
     assert!(routing_profile.leak_default_route_from_underlay);
     assert_eq!(routing_profile.route_target_imports.len(), 1);
-    assert_eq!(routing_profile.route_target_imports[0].asn, 64512);
-    assert_eq!(routing_profile.route_target_imports[0].vni, 10000);
+    assert_eq!(routing_profile.route_target_imports[0].asn, 429_000_000);
+    assert_eq!(routing_profile.route_target_imports[0].vni, Some(10000));
+    assert!(!routing_profile.route_target_imports[0].vni_self);
+    assert_eq!(response.routing_profile.as_ref(), Some(routing_profile));
 
     // Verify the admin VPC also did not allocate a VPC/DPU loopback row.
     let mut txn = env.db_txn().await;
@@ -2045,6 +2157,48 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
         .await
         .unwrap();
     assert!(loopback.is_none());
+}
+
+/// Verifies disabled admin FNN policy is omitted because no admin VPC exists
+/// to resolve its symbolic route targets.
+#[crate::sqlx_test]
+#[allow(deprecated)]
+async fn test_managed_host_network_config_omits_disabled_admin_fnn_routing_profile(
+    pool: sqlx::PgPool,
+) {
+    // Configure a symbolic admin target while leaving admin FNN disabled.
+    let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
+    overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
+        enabled: false, // Prevents creation of the required admin VPC.
+        vpc_vni: None,
+        routing_profile: FnnRoutingProfileConfig {
+            leak_default_route_from_underlay: Some(true),
+            route_target_imports: Some(vec![RouteTargetConfig {
+                asn: 429_000_000,
+                vni: None,
+                vni_self: true, // Must remain unused while admin FNN is disabled.
+            }]),
+            ..Default::default()
+        },
+    });
+    let env = api_fixtures::create_test_env_with_overrides(pool, overrides).await;
+    let managed_host = create_managed_host(&env).await;
+
+    // Fetch configuration for a DPU remaining on the non-FNN admin network.
+    let response = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(managed_host.dpu_ids[0]),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    // Neither field may expose policy from the disabled admin configuration.
+    let admin_interface = response.admin_interface.expect("admin interface");
+    assert_eq!(admin_interface.vpc_vni, 0);
+    assert!(admin_interface.vpc_routing_profile.is_none());
+    assert!(response.routing_profile.is_none());
 }
 
 #[crate::sqlx_test]

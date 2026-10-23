@@ -805,7 +805,9 @@ impl CurrentNetworkVersion {
         config.anycast_site_prefixes.sort_unstable();
         config
             .additional_route_target_imports
-            .sort_by_key(|route_target| (route_target.asn, route_target.vni));
+            .sort_by_key(|route_target| {
+                (route_target.asn, route_target.vni, route_target.vni_self)
+            });
 
         if let Some(admin_interface) = &mut config.admin_interface {
             Self::normalize_interface(admin_interface);
@@ -855,10 +857,14 @@ impl CurrentNetworkVersion {
     fn normalize_routing_profile(routing_profile: &mut rpc::RoutingProfile) {
         routing_profile
             .route_target_imports
-            .sort_by_key(|route_target| (route_target.asn, route_target.vni));
+            .sort_by_key(|route_target| {
+                (route_target.asn, route_target.vni, route_target.vni_self)
+            });
         routing_profile
             .route_targets_on_exports
-            .sort_by_key(|route_target| (route_target.asn, route_target.vni));
+            .sort_by_key(|route_target| {
+                (route_target.asn, route_target.vni, route_target.vni_self)
+            });
         Self::sort_prefix_entries(&mut routing_profile.accepted_leaks_from_underlay);
         Self::sort_prefix_entries(&mut routing_profile.allowed_anycast_prefixes);
     }

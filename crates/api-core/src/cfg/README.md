@@ -1012,8 +1012,8 @@ client-certificate authentication is not used.
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `admin_vpc` | `Option<AdminFnnConfig>` | — | FNN configuration for the admin network VPC. |
-| `common_internal_route_target` | `Option<RouteTargetConfig>` | — | Double-tag for internal tenant routes (consumed by the network infrastructure). |
-| `additional_route_target_imports` | `Vec<RouteTargetConfig>` | `[]` | Extra route targets imported on DPU VRFs. |
+| `common_internal_route_target` | `Option<RouteTargetConfig>` | — | Literal double-tag for internal tenant routes. `vni_self` is rejected because this value has no single VPC owner. |
+| `additional_route_target_imports` | `Vec<RouteTargetConfig>` | `[]` | Literal route targets imported on DPU VRFs. `vni_self` is rejected because these values have no single VPC owner. |
 | `routing_profiles` | `HashMap<String, FnnRoutingProfileConfig>` | `{}` | Named per-VPC routing profiles (see [FnnRoutingProfileConfig](#fnnroutingprofileconfig)). |
 | `use_vpc_vrf_loopback` | `bool` | `false` | Whether IPs are allocated for VPC loopbacks. When false, the VPC loopback pool is unused and no VPC/VRF loopback IP is sent to the DPU. |
 
@@ -1021,8 +1021,8 @@ client-certificate authentication is not used.
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
-| `route_target_imports` | `Option<Vec<RouteTargetConfig>>` | — (effective `[]`) | Route targets imported into DPU VRFs for VPC routes. |
-| `route_targets_on_exports` | `Option<Vec<RouteTargetConfig>>` | — (effective `[]`) | Route targets added to routes exported by the DPU. |
+| `route_target_imports` | `Option<Vec<RouteTargetConfig>>` | — (effective `[]`) | Route targets imported into DPU VRFs for VPC routes. Each target can use a literal `vni` or `vni_self = true`. |
+| `route_targets_on_exports` | `Option<Vec<RouteTargetConfig>>` | — (effective `[]`) | Route targets added to routes exported by the DPU. Each target can use a literal `vni` or `vni_self = true`. |
 | `internal` | `Option<bool>` | — (effective `false`) | Whether the profile uses internal VNI allocation. This property cannot be overridden on a VPC. |
 | `tenant_prefix_overlap_eligible` | `bool` | `false` | Base routing profile opt-in for [tenant prefix overlap checks](#tenant-prefix-overlap-checks). This setting cannot be overridden on a VPC. |
 | `leak_default_route_from_underlay` | `Option<bool>` | — (effective `false`) | Leak the default route from the underlay/default VRF into tenant VRFs. Do not enable this for an address family whose effective `site_fabric_null_routes` contains `/0`; the imported default has a better administrative distance than the equal-prefix blackhole. |
@@ -1035,6 +1035,34 @@ client-certificate authentication is not used.
 Unset properties retain presence information so a VPC's inline
 `routing_profile_overrides` can inherit them. After the named profile and VPC
 override are combined, properties still unset use the effective defaults above.
+
+### RouteTargetConfig
+
+The following table describes the route-target settings:
+
+| Field | Type | Default | Description |
+| ----- | ---- | ------- | ----------- |
+| `asn` | `u32` | `0` | Autonomous System Number component of the BGP route target. |
+| `vni` | `Option<u32>` | — (effective literal `0`) | Literal route-target local-administrator value. This is not validated as a VXLAN VNI, and zero is valid. |
+| `vni_self` | `bool` | `false` | Use the current VPC's allocated L3 VNI as the route-target local administrator. This is mutually exclusive with `vni`. |
+
+A two-byte ASN permits a four-byte local administrator. A four-byte ASN permits only a two-byte local administrator, so `asn` and the resolved local administrator cannot both exceed 65535.
+
+`vni_self` ([issue #7232](https://github.com/dsx-ai-factory/infra-controller/issues/7232)) is supported only in `route_target_imports` and `route_targets_on_exports`, including VPC `routing_profile_overrides`.
+
+The following example derives an imported route target from the current VPC:
+
+```toml
+route_target_imports = [
+    { asn = 429000000, vni_self = true },
+]
+```
+
+Core preserves the symbolic value in site configuration, persisted VPC overrides, and VPC configuration responses. `VpcEffectiveRoutingProfile` and DPU network configuration contain a concrete `vni` and `vni_self = false`.
+
+Core rejects conflicting or unencodable literals during site configuration loading or VPC mutation. If a symbolic target becomes unencodable after substituting the allocated VPC VNI, the effective-profile or DPU-configuration request fails instead of truncating the value.
+
+Deploy the supporting Core version before allowing clients to submit `vni_self`. Existing DPU agents remain compatible because Core sends the concrete field-2 value. An older Core can ignore field 3 and interpret an absent field 2 as zero. Before downgrading Core, replace persisted symbolic overrides with concrete route targets and remove symbolic values from site configuration. REST support belongs to a later deployment phase.
 
 ### SitePrefix isolation rules
 

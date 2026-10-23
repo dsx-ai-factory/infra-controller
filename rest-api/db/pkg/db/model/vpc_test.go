@@ -43,6 +43,64 @@ func testVpcSetupSchema(t *testing.T, dbSession *db.Session) {
 	require.NoError(t, err)
 }
 
+// TestVpcRouteTarget_ToProto verifies literal zero remains present on the Core
+// wire because REST route targets cannot request symbolic VNI resolution.
+func TestVpcRouteTarget_ToProto(t *testing.T) {
+	// Use zero because proto3 scalar evolution can otherwise erase its presence.
+	target := VpcRouteTarget{
+		ASN: 64_512,
+		VNI: 0, // Zero is a valid literal route-target local administrator.
+	}
+
+	// Convert through the mapper shared by configured and effective profiles.
+	protoTarget := target.ToProto()
+
+	// Preserve the literal source without accidentally selecting `vni_self`.
+	assert.Equal(t, target.ASN, protoTarget.Asn)
+	require.NotNil(t, protoTarget.Vni)
+	assert.Equal(t, target.VNI, *protoTarget.Vni)
+	assert.False(t, protoTarget.VniSelf)
+}
+
+// TestVpcRouteTarget_FromProto verifies present and predecessor-omitted zero
+// VNIs both decode as literal zero because REST predates protobuf presence.
+func TestVpcRouteTarget_FromProto(t *testing.T) {
+	tests := []struct {
+		name        string
+		protoTarget *corev1.RouteTarget
+		want        VpcRouteTarget
+	}{
+		// Predecessor scalar zero arrives without presence and must retain literal-zero meaning.
+		{
+			name:        "decodes omitted predecessor zero",
+			protoTarget: &corev1.RouteTarget{Asn: 64_512},
+			want:        VpcRouteTarget{ASN: 64_512, VNI: 0},
+		},
+		// A present zero follows the new literal encoding while producing the same REST value.
+		{
+			name: "decodes explicit zero",
+			protoTarget: &corev1.RouteTarget{
+				Asn: 64_513,
+				Vni: cutil.GetPtr(uint32(0)),
+			},
+			want: VpcRouteTarget{ASN: 64_513, VNI: 0},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Seed both fields so the conversion must replace the complete value.
+			target := VpcRouteTarget{ASN: 1, VNI: 1}
+
+			// Decode through the mapper used by configured and effective profiles.
+			target.FromProto(tt.protoTarget)
+
+			// Both compatible encodings must produce the literal REST route target.
+			assert.Equal(t, tt.want, target)
+		})
+	}
+}
+
 func TestVpcSQLDAO_GetByID(t *testing.T) {
 	type fields struct {
 		dbSession *db.Session

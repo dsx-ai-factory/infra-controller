@@ -328,10 +328,22 @@ async fn lost_reply_and_restart_recover_one_assignment(database: PgPool) -> Test
             mode: ProviderRouteTargetMode::Replace,
             imports: Some(vec![]),
             exports: Some(vec![
-                RouteTargetConfig { asn: 64512, vni: 1 },
-                RouteTargetConfig { asn: 64512, vni: 1 },
+                RouteTargetConfig {
+                    asn: 64512,
+                    vni: Some(1),
+                    vni_self: false,
+                },
+                RouteTargetConfig {
+                    asn: 64512,
+                    vni: Some(1),
+                    vni_self: false,
+                },
             ]),
-            peer_identity: vec![RouteTargetConfig { asn: 64512, vni: 1 }],
+            peer_identity: vec![RouteTargetConfig {
+                asn: 64512,
+                vni: Some(1),
+                vni_self: false,
+            }],
         }),
     );
     assert_eq!(harness.fault.allocation_calls.load(Ordering::SeqCst), 1);

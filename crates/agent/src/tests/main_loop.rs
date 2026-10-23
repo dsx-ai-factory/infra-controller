@@ -278,21 +278,25 @@ fn comparison_routing_profile() -> rpc::RoutingProfile {
         route_target_imports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_001,
-                vni: 101,
+                vni: Some(101),
+                vni_self: false,
             },
             ::rpc::common::RouteTarget {
                 asn: 65_002,
-                vni: 102,
+                vni: Some(102),
+                vni_self: false,
             },
         ],
         route_targets_on_exports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_003,
-                vni: 103,
+                vni: Some(103),
+                vni_self: false,
             },
             ::rpc::common::RouteTarget {
                 asn: 65_004,
-                vni: 104,
+                vni: Some(104),
+                vni_self: false,
             },
         ],
         leak_default_route_from_underlay: false,
@@ -465,16 +469,19 @@ fn comparison_network_config() -> ManagedHostNetworkConfigResponse {
         datacenter_asn: 65_100,
         common_internal_route_target: Some(::rpc::common::RouteTarget {
             asn: 65_200,
-            vni: 5_000,
+            vni: Some(5_000),
+            vni_self: false,
         }),
         additional_route_target_imports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_201,
-                vni: 5_001,
+                vni: Some(5_001),
+                vni_self: false,
             },
             ::rpc::common::RouteTarget {
                 asn: 65_202,
-                vni: 5_002,
+                vni: Some(5_002),
+                vni_self: false,
             },
         ],
         network_security_policy_overrides: vec![
