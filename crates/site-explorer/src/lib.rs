@@ -49,8 +49,8 @@ use model::machine_interface::InterfaceType;
 use model::rack_type::RackProfileConfig;
 use model::resource_pool::common::CommonPools;
 use model::site_explorer::{
-    BlueFieldOperatingMode, Chassis, EndpointExplorationError, EndpointExplorationReport,
-    EndpointType, ExplorationTier, ExploredDpu, ExploredEndpoint, ExploredManagedHost,
+    BlueFieldOperatingMode, EndpointExplorationError, EndpointExplorationReport, EndpointType,
+    ExplorationTier, ExploredDpu, ExploredEndpoint, ExploredManagedHost,
     HostPrimaryInterfaceSelection, MachineExpectation, PowerState, PreingestionState,
     SiteExplorerLastRun, is_bluefield_part_number,
 };
@@ -90,6 +90,7 @@ pub use inventory_creator::{
 use inventory_creator::{ConfiguredIngestionCandidate, InventoryCreator};
 mod machine_location_reconciler;
 pub use machine_location_reconciler::MachineLocationReconciler;
+mod endpoint_exploration_report_ext;
 mod explored_endpoint_ext;
 use explored_endpoint_ext::ExploredEndpointExt;
 pub use explored_endpoint_ext::get_sys_image_version;
@@ -477,15 +478,6 @@ struct IngestionCandidate<'a> {
     dpu_matches: Option<HostDpuMatches<'a>>,
     host_dpu_policy: HostDpuPolicy,
     declared_primary: Option<MacAddress>,
-}
-
-/// Host inventory fields that can identify one DPU by serial number.
-#[derive(Clone, Copy)]
-struct HostDpuInventoryCandidate<'a> {
-    /// Part number used by the existing BlueField detection and mode checks.
-    part_number: Option<&'a str>,
-    /// Serial number joined to the DPU endpoint report.
-    serial_number: Option<&'a str>,
 }
 
 /// When Site Explorer last physically reset a BMC, tracked per reset method.
@@ -3510,40 +3502,6 @@ fn duplicate_bluefield_serial<'a>(
 
     let serial_number = serial_number.map(str::trim).none_if_empty()?;
     (!seen.insert(serial_number)).then_some(serial_number)
-}
-
-/// `host_dpu_inventory_records` applies the existing chassis inventory rule in
-/// one place. Some BMCs put the BlueField identity on the chassis itself;
-/// others put it on a nested network adapter. Reading only one form avoids
-/// duplicate representations within this chassis. The same serial can still
-/// appear in other chassis, so callers counting DPUs must deduplicate per host.
-fn host_dpu_inventory_records(chassis: &Chassis) -> Vec<HostDpuInventoryCandidate<'_>> {
-    let chassis_is_bluefield = chassis
-        .part_number
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(is_bluefield_part_number);
-    let chassis_has_serial = chassis
-        .serial_number
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|serial| !serial.is_empty());
-
-    if chassis_is_bluefield && chassis_has_serial {
-        return vec![HostDpuInventoryCandidate {
-            part_number: chassis.part_number.as_deref(),
-            serial_number: chassis.serial_number.as_deref(),
-        }];
-    }
-
-    chassis
-        .network_adapters
-        .iter()
-        .map(|adapter| HostDpuInventoryCandidate {
-            part_number: adapter.part_number.as_deref(),
-            serial_number: adapter.serial_number.as_deref(),
-        })
-        .collect()
 }
 
 /// Status of matched DPUs after applying target operating modes.

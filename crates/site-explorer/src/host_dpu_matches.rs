@@ -20,8 +20,11 @@ use std::collections::{HashMap, HashSet};
 use model::expected_machine::{ExpectedMachine, HostDpuPolicy};
 use model::site_explorer::{BlueFieldOperatingMode, ExploredEndpoint, is_bluefield_part_number};
 
+use crate::duplicate_bluefield_serial;
+use crate::endpoint_exploration_report_ext::{
+    EndpointExplorationReportExt, host_dpu_inventory_records,
+};
 use crate::errors::SiteExplorerError;
-use crate::{duplicate_bluefield_serial, host_dpu_inventory_records};
 
 /// DPU inventory counts and host/BMC matches collected before mode configuration.
 pub(super) struct HostDpuMatches<'a> {
@@ -40,46 +43,41 @@ impl<'a> HostDpuMatches<'a> {
         expected_machine: Option<&'a ExpectedMachine>,
         host_dpu_policy: HostDpuPolicy,
     ) -> Self {
-        // Record the host's DPU devices against the discovered DPU BMCs.
-        // A DPU can appear as a PCIe device under a system or as a chassis
-        // network adapter (vendor-dependent), so we scan the PCIe inventory first
-        // and fall back to chassis adapters if no DPU BMCs matched.
-        // Keep inventory counts separate from configuration results so mode
-        // checks cannot affect fallback selection.
-        let mut dpu_inventory = DpuInventoryState::default();
-        let mut seen_bluefield_serials = HashSet::new();
-        let mut inventory_matches = Vec::new();
-        for system in ep.report.systems.iter() {
-            for pcie_device in system.pcie_devices.iter() {
-                if let Some(serial_number) = duplicate_bluefield_serial(
-                    pcie_device.part_number.as_deref(),
-                    pcie_device.serial_number.as_deref(),
-                    &mut seen_bluefield_serials,
-                ) {
-                    tracing::warn!(
-                        host_bmc_ip_address = %ep.address,
-                        %serial_number,
-                        pcie_device_id = ?pcie_device.id,
-                        "duplicate BlueField serial in host PCIe inventory; skipping duplicate record",
-                    );
-                    continue;
-                }
-                if let Some(matched_dpu) = dpu_inventory.record_reported_device(
-                    pcie_device.part_number.as_deref(),
-                    pcie_device.serial_number.as_deref(),
-                    dpu_sn_to_endpoint,
-                    DpuMatchSource::Pcie,
-                    host_dpu_policy,
-                ) {
-                    inventory_matches.push(matched_dpu);
-                }
-            }
-        }
+        let pcie_devices = ep.report.pcie_devices_dpu_candidates();
+        let mut inventory_matches = pcie_devices
+            .iter()
+            .filter_map(|device| {
+                let endpoint = device
+                    .serial_number()
+                    .and_then(|serial| dpu_sn_to_endpoint.get(serial))?;
+                Some(MatchedDpu {
+                    endpoint,
+                    target_operating_mode: host_dpu_policy
+                        .target_operating_mode(device.part_number),
+                    source: DpuMatchSource::Pcie,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let reported_total = ep
+            .report
+            .pcie_devices_dpu_count(|serial| dpu_sn_to_endpoint.contains_key(serial));
+        let matched_total = inventory_matches.len();
+        let mut dpu_inventory = DpuInventoryState {
+            reported_total,
+            matched_total,
+            has_unmatched_reported_dpu: reported_total > matched_total,
+        };
 
         // A DPU can show up as a chassis instead of a PCIe device on some
         // BMCs; fall back only if PCIe matched no discovered DPU BMC,
         // independently of the matched DPUs' modes or configuration results.
         if dpu_inventory.matched_total == 0 {
+            let mut seen_bluefield_serials = pcie_devices
+                .into_iter()
+                .filter(|device| device.is_bluefield())
+                .filter_map(|device| device.serial_number())
+                .collect::<HashSet<_>>();
             for chassis in ep.report.chassis.iter() {
                 for record in host_dpu_inventory_records(chassis) {
                     if let Some(serial_number) = duplicate_bluefield_serial(
@@ -287,6 +285,9 @@ mod tests {
             let mut host = explored_endpoint(host_report);
             host.report.systems[0].pcie_devices[0].part_number =
                 Some("900-9D3B4-00EN-EA0".to_string());
+            let mut duplicate = host.report.systems[0].pcie_devices[0].clone();
+            duplicate.part_number = None;
+            host.report.systems[0].pcie_devices.insert(0, duplicate);
             HostDpuMatches::new(
                 &host,
                 &endpoints,
@@ -295,6 +296,7 @@ mod tests {
             )
         };
 
+        assert_eq!(matches.inventory_matches.len(), 1);
         assert_eq!(
             matches.inventory_matches[0].target_operating_mode,
             Some(BlueFieldOperatingMode::Nic),
@@ -330,6 +332,14 @@ mod tests {
                     expect: (1, false),
                 },
                 Check {
+                    scenario: "a duplicate without a part number is matched once",
+                    input: vec![
+                        (Some(BLUEFIELD), Some("known-dpu")),
+                        (None, Some(" known-dpu ")),
+                    ],
+                    expect: (1, false),
+                },
+                Check {
                     scenario: "unmatched device without a BlueField part number",
                     input: vec![(None, Some("other-device"))],
                     expect: (0, true),
@@ -349,19 +359,32 @@ mod tests {
                 },
             ],
             |devices| {
-                let mut inventory = DpuInventoryState::default();
-                for (part_number, serial_number) in devices {
-                    inventory.record_reported_device(
-                        part_number,
-                        serial_number,
-                        &endpoints,
-                        DpuMatchSource::Pcie,
-                        HostDpuPolicy::Manage,
-                    );
-                }
+                let mut host = explored_endpoint(ManagedHostConfig::zero_dpu().into());
+                host.report.chassis.clear();
+                host.report.systems[0].pcie_devices = devices
+                    .into_iter()
+                    .map(
+                        |(part_number, serial_number)| model::site_explorer::PCIeDevice {
+                            part_number: part_number.map(str::to_string),
+                            serial_number: serial_number.map(str::to_string),
+                            description: None,
+                            firmware_version: None,
+                            gpu_vendor: None,
+                            id: None,
+                            manufacturer: None,
+                            name: None,
+                            status: None,
+                        },
+                    )
+                    .collect();
+                let matches = HostDpuMatches::new(&host, &endpoints, None, HostDpuPolicy::Manage);
+                assert_eq!(
+                    matches.inventory.matched_total,
+                    matches.inventory_matches.len()
+                );
                 (
-                    inventory.reported_total,
-                    inventory.needs_expected_serial_fallback(),
+                    matches.inventory.reported_total,
+                    matches.inventory.needs_expected_serial_fallback(),
                 )
             },
         );
