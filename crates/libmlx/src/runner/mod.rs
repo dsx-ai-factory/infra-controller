@@ -37,6 +37,7 @@ pub(crate) use supervisor_protocol::{HELLO, Request, Response};
 
 /// Unit-test binaries live in `deps`, while Cargo places the helper beside it.
 #[cfg(test)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn test_firmware_executor() -> FirmwareToolExecutor {
     let executable = std::env::current_exe().unwrap();
     let helper = executable

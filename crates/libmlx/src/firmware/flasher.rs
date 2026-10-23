@@ -57,6 +57,7 @@ pub(crate) trait FirmwareProgress: Send + Sync {
 
 /// `FirmwareProgressEvent` exposes staging and execution boundaries to the
 /// durable operation owner. Tool discovery does not replace a mutation's state.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) enum FirmwareProgressEvent {
     Prepare,
     Prepared {
@@ -158,6 +159,7 @@ impl FirmwareFlasher {
 
     /// `with_progress` lets the operation owner persist boundaries around the
     /// existing apply pipeline without implementing a second execution path.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn with_progress(mut self, progress: Arc<dyn FirmwareProgress>) -> Self {
         self.progress = Some(progress);
         self
@@ -165,6 +167,7 @@ impl FirmwareFlasher {
 
     /// `with_preparation_cancel` permits dropping only pre-mutation staging.
     /// The operation owner sends this signal after persisting cancellation.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn with_preparation_cancel(
         mut self,
         operation_id: String,
