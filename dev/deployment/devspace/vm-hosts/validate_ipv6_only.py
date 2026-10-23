@@ -197,10 +197,18 @@ def main():
     r = run(
         "cloud-init",
         ["cloud-init", "status", "--format=json"],
-        lambda r: r.returncode in (0, 2)
-        and json.loads(r.stdout).get("status") == "done",
+        lambda r: r.returncode in (0, 2),
     )
-    status = json.loads(r.stdout)
+    try:
+        status = json.loads(r.stdout)
+    except json.JSONDecodeError:
+        status = None
+    status_valid = isinstance(status, dict)
+    rows[-1]["passed"] = (
+        rows[-1]["passed"] and status_valid and status.get("status") == "done"
+    )
+    if not status_valid:
+        rows[-1]["error"] = "cloud-init status did not return a JSON object"
 
     def scan(value, key):
         if isinstance(value, dict):
@@ -215,7 +223,11 @@ def main():
     errors = list(scan(status, "errors"))
     warnings = list(scan(status, "recoverable_errors"))
     rows.append(
-        {"check": "no-cloud-init-errors", "passed": not errors, "errors": errors}
+        {
+            "check": "no-cloud-init-errors",
+            "passed": status_valid and not errors,
+            "errors": errors,
+        }
     )
     # Custom network is validated separately by NICo, but this PXE revision also
     # returns it in user-data. Keep the raw schema result for explicit review.
@@ -227,7 +239,7 @@ def main():
     rows.append(
         {
             "check": "no-unreviewed-cloud-init-warnings",
-            "passed": not warnings,
+            "passed": status_valid and not warnings,
             "warnings": warnings,
         }
     )

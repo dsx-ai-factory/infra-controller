@@ -211,6 +211,96 @@ class IPv6SetupTests(unittest.TestCase):
             self.assertEqual(error.exception.code, 2)
             self.assertEqual(run.call_count, 1)
 
+    def test_validator_retains_results_when_cloud_init_status_is_unusable(self):
+        arguments = [
+            "validate_ipv6_only.py",
+            "--address",
+            "fd00::1",
+            "--peer",
+            "fd00::2",
+            "--dns",
+            "fd00::53",
+            "--interface",
+            "eth0",
+        ]
+        cases = [
+            ("empty", 0, "", False, False, False),
+            ("command failure", 1, "failed to read status", False, False, False),
+            ("wrong JSON shape", 2, "[]", False, False, False),
+            ("healthy", 0, '{"status":"done"}', True, True, True),
+            (
+                "reported error",
+                1,
+                '{"status":"error","errors":["failure"]}',
+                False,
+                False,
+                True,
+            ),
+            (
+                "reported warning",
+                2,
+                '{"status":"done","recoverable_errors":{"WARNING":["warning"]}}',
+                True,
+                True,
+                False,
+            ),
+        ]
+        for name, code, output, complete, no_errors, no_warnings in cases:
+            with self.subTest(name=name):
+
+                def execute(command, **kwargs):
+                    result_code, stdout = 0, ""
+                    if command == ["ip", "-j", "address"]:
+                        stdout = json.dumps(
+                            [
+                                {
+                                    "ifname": "eth0",
+                                    "addr_info": [
+                                        {"family": "inet6", "local": "fd00::1"}
+                                    ],
+                                }
+                            ]
+                        )
+                    elif command[:3] == ["ip", "-j", "-4"]:
+                        stdout = "[]"
+                    elif command[:2] == ["resolvectl", "dns"]:
+                        stdout = "Link 2 (eth0): fd00::53"
+                    elif command[0] == "curl":
+                        if "-4" in command:
+                            result_code = 7
+                        else:
+                            stdout = "status=200 local=fd00::1 remote=2001:db8::1 ssl_verify=0"
+                    elif command[:2] == ["cloud-init", "status"]:
+                        result_code, stdout = code, output
+                    return subprocess.CompletedProcess(command, result_code, stdout, "")
+
+                captured = io.StringIO()
+                with patch.object(sys, "argv", arguments), patch.object(
+                    sys, "stdout", captured
+                ), patch.object(
+                    validator.subprocess, "run", side_effect=execute
+                ), patch.object(
+                    validator.socket, "create_connection"
+                ) as connection:
+                    connection.return_value.__enter__.return_value.recv.return_value = (
+                        b"SSH-2.0-test"
+                    )
+                    with self.assertRaises(SystemExit) as result:
+                        validator.main()
+                self.assertEqual(result.exception.code, 0 if name == "healthy" else 1)
+                rows = json.loads(captured.getvalue())
+                checks = {row["check"]: row for row in rows}
+                self.assertTrue(checks["internet-ipv6"]["passed"])
+                self.assertTrue(checks["peer-ipv6-ssh"]["passed"])
+                self.assertEqual(checks["cloud-init"]["stdout"], output)
+                self.assertEqual(checks["cloud-init"]["returncode"], code)
+                self.assertEqual(checks["cloud-init"]["passed"], complete)
+                self.assertEqual(checks["no-cloud-init-errors"]["passed"], no_errors)
+                self.assertEqual(
+                    checks["no-unreviewed-cloud-init-warnings"]["passed"], no_warnings
+                )
+                self.assertTrue(checks["cloud-init-schema"]["passed"])
+
     def test_guest_validator_rejects_ipv4_and_self_peer_before_running_checks(self):
         script = Path(__file__).with_name("validate_ipv6_only.py")
         for own, peer in (("192.0.2.1", "fd00::2"), ("fd00::1", "fd00::1")):
