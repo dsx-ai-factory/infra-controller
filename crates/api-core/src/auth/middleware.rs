@@ -571,20 +571,10 @@ mod tests {
     }
 
     #[test]
-    fn machineatron_scout_stream_requires_explicit_devspace_opt_in() {
+    fn machineatron_scout_stream_requires_explicit_opt_in() {
         // Denied cases emit the same global counter asserted by the denial tests.
         let _metrics = MetricsCapture::start();
-        let values: serde_yaml::Value = serde_yaml::from_str(include_str!(
-            "../../../../dev/deployment/devspace/values.base.yaml"
-        ))
-        .unwrap();
-        let devspace_config: toml::Table = toml::from_str(
-            values["nico-api"]["siteConfig"]["nicoApiSiteConfig"]
-                .as_str()
-                .unwrap(),
-        )
-        .unwrap();
-        let enabled = toml::to_string(&devspace_config["auth"]).unwrap();
+        let enabled = "permissive_mode = true\nallow_machineatron_scout_stream = true";
         let disabled = "permissive_mode = true\nallow_machineatron_scout_stream = false";
         let mat = || Principal::SpiffeServiceIdentifier("machine-a-tron".to_string());
         let stream = ::rpc::service_path!("ScoutStream");
@@ -607,14 +597,14 @@ mod tests {
                     expect: false,
                 },
                 Check {
-                    scenario: "DevSpace explicitly permits MAT streams",
-                    input: (Some(enabled.as_str()), stream, mat()),
+                    scenario: "explicit opt-in permits MAT streams",
+                    input: (Some(enabled), stream, mat()),
                     expect: true,
                 },
                 Check {
                     scenario: "opt-in does not admit unrelated services",
                     input: (
-                        Some(enabled.as_str()),
+                        Some(enabled),
                         stream,
                         Principal::SpiffeServiceIdentifier("nico-dns".to_string()),
                     ),
@@ -622,11 +612,7 @@ mod tests {
                 },
                 Check {
                     scenario: "opt-in still requires an authenticated service identity",
-                    input: (
-                        Some(enabled.as_str()),
-                        stream,
-                        Principal::TrustedCertificate,
-                    ),
+                    input: (Some(enabled), stream, Principal::TrustedCertificate),
                     expect: false,
                 },
                 Check {
@@ -641,7 +627,7 @@ mod tests {
                 Check {
                     scenario: "opt-in does not grant MAT administrative stream RPCs",
                     input: (
-                        Some(enabled.as_str()),
+                        Some(enabled),
                         ::rpc::service_path!("ScoutStreamDisconnect"),
                         mat(),
                     ),
