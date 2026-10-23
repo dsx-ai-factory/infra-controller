@@ -169,6 +169,14 @@ pub mod test_support {
             client
         }
 
+        /// Drops every partition and restarts id allocation from 1, like an NMX-C
+        /// controller that came back without its persisted fabric state
+        /// (`FABRIC_MODE_RESTART=0`).
+        pub fn wipe_state(&self) {
+            self._partitions.lock().unwrap().clear();
+            *self._next_partition_id.lock().unwrap() = 1;
+        }
+
         fn default_gpu_uids() -> Vec<u64> {
             vec![
                 0xdb488cb17978480,

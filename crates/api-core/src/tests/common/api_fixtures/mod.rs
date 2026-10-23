@@ -90,7 +90,6 @@ use db::work_lock_manager;
 use futures::FutureExt as _;
 use health_report::{HealthReport, HealthReportApplyMode};
 use ipnetwork::IpNetwork;
-use libnmxc::NmxcPool;
 use measured_boot::pcr::PcrRegisterValue;
 use model::attestation::profile::{
     AttestationPolicyDocument, AttesterSelection, AttesterSelectionMode, ComponentIdMatch,
@@ -323,7 +322,7 @@ pub(crate) struct TestEnv {
     pub(in crate::tests) test_meter: TestMeter,
     pub(in crate::tests) attestation_enabled: bool,
     pub(in crate::tests) site_explorer: SiteExplorer,
-    pub(in crate::tests) nmxc_sim: Arc<dyn NmxcPool>,
+    pub(in crate::tests) nmxc_sim: Arc<NmxcSimClient>,
     /// True when the test env uses [`NmxcSimClient::simulator_for_nvlink_config`] (gRPC proxy to a local simulator).
     pub(in crate::tests) nmxc_grpc_simulator: bool,
     pub(in crate::tests) endpoint_explorer: MockEndpointExplorer,
@@ -1368,19 +1367,17 @@ async fn create_test_env_with_overrides_inner(
         .unwrap_or_default();
 
     let nmxc_grpc_simulator = overrides.nmxc_simulator == Some(true);
-    let nmxc_sim: Arc<dyn NmxcPool> = if nmxc_grpc_simulator {
-        Arc::new(NmxcSimClient::simulator_for_nvlink_config(
-            &nvlink_for_nmxc_sim,
-        ))
+    let nmxc_sim = Arc::new(if nmxc_grpc_simulator {
+        NmxcSimClient::simulator_for_nvlink_config(&nvlink_for_nmxc_sim)
     } else if let Some(n) = overrides.nmxc_fail_after_n_creates {
-        Arc::new(NmxcSimClient::with_fail_after_n_creates(n))
+        NmxcSimClient::with_fail_after_n_creates(n)
     } else if overrides.nmxc_default_partition == Some(true) {
-        Arc::new(NmxcSimClient::with_default_partition())
+        NmxcSimClient::with_default_partition()
     } else if overrides.nmxc_unknown_partition == Some(true) {
-        Arc::new(NmxcSimClient::with_unknown_partition())
+        NmxcSimClient::with_unknown_partition()
     } else {
-        Arc::new(NmxcSimClient::default())
-    };
+        NmxcSimClient::default()
+    });
 
     let mut config = overrides.config.unwrap_or(get_config());
     if let Some(threshold) = overrides.dpu_agent_version_staleness_threshold {
