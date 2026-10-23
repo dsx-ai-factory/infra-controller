@@ -850,7 +850,6 @@ struct InitialVpcAllocationFailureRecord {
     owner_id_is_vpc: bool,
     pool: Option<String>,
     error: Option<String>,
-    counter_delta: f64,
 }
 
 #[crate::sqlx_test]
@@ -882,7 +881,6 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                     owner_id_is_vpc: true,
                     pool: Some("initial-vpc-empty".to_string()),
                     error: None,
-                    counter_delta: 1.0,
                 }),
             },
             Case {
@@ -909,7 +907,6 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                         "`42` not an available value for resource-pool `initial-vpc-requested`"
                             .to_string(),
                     ),
-                    counter_delta: 1.0,
                 }),
             },
             Case {
@@ -936,7 +933,6 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                         "resource-pool `initial-vpc-unconfigured` has no automatic allocation range"
                             .to_string(),
                     ),
-                    counter_delta: 1.0,
                 }),
             },
         ],
@@ -1027,6 +1023,15 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                 assert_eq!(event_logs.len(), 1);
                 let log = event_logs[0];
 
+                // Tests without a `MetricsCapture` can increment this shared
+                // counter. The log capture above checks this request's event.
+                let observed =
+                    metrics.counter_delta(LIFECYCLE_FAILURES_METRIC, &failure.metric_labels());
+                assert!(
+                    observed >= 1.0,
+                    "expected at least one {failure:?} allocation failure, observed {observed}"
+                );
+
                 Ok::<_, ()>(InitialVpcAllocationFailureRecord {
                     error_kind,
                     error_message: returned_error.to_string(),
@@ -1045,8 +1050,6 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                         .is_some_and(|owner_id| VpcId::from_str(owner_id).is_ok()),
                     pool: log.field("pool").map(str::to_string),
                     error: log.field("error").map(str::to_string),
-                    counter_delta: metrics
-                        .counter_delta(LIFECYCLE_FAILURES_METRIC, &failure.metric_labels()),
                 })
             }
         },

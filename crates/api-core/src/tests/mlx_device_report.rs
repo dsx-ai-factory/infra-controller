@@ -1032,7 +1032,22 @@ async fn firmware_observation_write_failure_rolls_back_and_allows_retry(pool: sq
     .await;
     let error = result.unwrap_err();
     assert_eq!(error.code(), tonic::Code::Internal);
-    assert!(error.message().contains("test_reject_card_observation"));
+    assert_eq!(error.message(), "internal database error");
+    let source = std::error::Error::source(&error)
+        .expect("database status source")
+        .downcast_ref::<crate::errors::CarbideErrorWithLocation>()
+        .expect("Carbide error source");
+    let crate::errors::CarbideError::DBError(annotated) = &source.error else {
+        panic!("expected the original database error: {source:?}");
+    };
+    let database_error = annotated
+        .source
+        .as_database_error()
+        .expect("database constraint error");
+    assert_eq!(
+        database_error.constraint(),
+        Some("test_reject_card_observation")
+    );
     // The first failed receipt reached PostgreSQL but was rolled back. Its
     // attention warning must wait until the whole batch has committed.
     assert!(

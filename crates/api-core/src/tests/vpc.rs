@@ -504,7 +504,13 @@ async fn vpc_consumers_observe_external_pool_growth_after_a_miss(
                 for (key, value) in labels {
                     assert_eq!(event.field(key), Some(value), "{key}");
                 }
-                assert_eq!(metrics.counter_delta(metric_name, &labels), 1.0);
+                // Tests without a `MetricsCapture` can increment this shared
+                // counter. The log capture above checks this request's event.
+                let observed = metrics.counter_delta(metric_name, &labels);
+                assert!(
+                    observed >= 1.0,
+                    "expected at least one external pool allocation failure, observed {observed}"
+                );
                 result
             } else {
                 create.await
