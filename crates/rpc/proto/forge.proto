@@ -8351,6 +8351,10 @@ message MachineValidationPlugin {
   option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   string image = 1;
+  // Command vector invoked without a shell. The standard contract appends it
+  // to the image ENTRYPOINT (or uses it as the command when ENTRYPOINT is empty).
+  // DSXHealthValidation overrides the executable with the first element and
+  // passes the remaining elements as arguments.
   repeated string entrypoint = 2;
   // JSON object of non-secret site-defined values included in input.json.
   string parameters_json = 3;
@@ -8358,6 +8362,11 @@ message MachineValidationPlugin {
   bool host_access_full = 5;
   // Plugin implementation type. `container` is the currently supported type.
   string type = 6;
+  // Optional contract adapter for this immutable container revision.
+  // Omission uses the standard NICo input.json/result.json contract.
+  // DSXHealthValidation prepares HealthValidation inputs and interprets only
+  // overall_severity in its JSON stdout. Unknown or empty names are rejected.
+  optional string container_plugin_adapter = 7;
 }
 
 message MachineValidationTestFullHostApprovalRequest {

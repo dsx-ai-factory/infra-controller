@@ -29,17 +29,28 @@ pub(crate) enum Args {
 
 #[derive(Parser, Debug)]
 #[command(
-    after_long_help = "EXAMPLES:\n\n    Create an unprivileged plugin:\n\n        $ nico-admin-cli machine-validation plugins create --name gpu-health --image registry.example.com/plugins/gpu-health@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --entrypoint /plugin/entrypoint --entrypoint check-gpus --context Discovery --platform HGX-B200 --parameters '{\"expectedGpuCount\":8}'\n\n    Create a privileged plugin with a writable host-root mount:\n\n        $ nico-admin-cli machine-validation plugins create --name host-gpu-health --image registry.example.com/plugins/host-gpu-health@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --entrypoint /plugin/entrypoint --context Discovery --platform HGX-B200 --parameters '{\"expectedGpuCount\":8}' --privileged --host-access-full\n"
+    after_long_help = "EXAMPLES:\n\n    Create an unprivileged plugin:\n\n        $ nico-admin-cli machine-validation plugins create --name gpu-health --image registry.example.com/plugins/gpu-health@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --entrypoint /plugin/entrypoint --entrypoint check-gpus --context Discovery --platform HGX-B200 --parameters '{\"expectedGpuCount\":8}'\n\n    Create a privileged plugin with a writable host-root mount:\n\n        $ nico-admin-cli machine-validation plugins create --name host-gpu-health --image registry.example.com/plugins/host-gpu-health@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --entrypoint /plugin/entrypoint --context Discovery --platform HGX-B200 --parameters '{\"expectedGpuCount\":8}' --privileged --host-access-full\n\n    Create a HealthValidation adapter revision:\n\n        $ nico-admin-cli machine-validation plugins create --name dsx-health --type container --container-plugin-adapter DSXHealthValidation --image ghcr.io/dsx-ai-factory/health-validation@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --entrypoint /health-validation --arg run --context OnDemand --platform GB200 --parameters '{\"gpu_count\":4}'\n"
 )]
 pub(crate) struct CreateArgs {
     #[clap(long)]
     name: String,
     #[clap(long = "type", value_enum, default_value_t = PluginType::Container)]
     plugin_type: PluginType,
+    #[clap(long, value_parser = clap::builder::PossibleValuesParser::new(machine_validation_adapters::adapter_names()), help = "Container contract adapter; omit for the standard NICo contract")]
+    container_plugin_adapter: Option<String>,
     #[clap(long)]
     image: String,
-    #[clap(long, required = true)]
+    #[clap(
+        long,
+        required = true,
+        help = "Command vector; repeat for arguments. Standard contract: appended to the image ENTRYPOINT. DSXHealthValidation: first value overrides the executable"
+    )]
     entrypoint: Vec<String>,
+    #[clap(
+        long = "arg",
+        help = "Append a command argument; repeat as needed, using --arg=--flag for flags"
+    )]
+    command_args: Vec<String>,
     #[clap(long, default_value = "{}")]
     parameters: String,
     #[clap(long, default_value = "OnDemand")]
@@ -52,6 +63,42 @@ pub(crate) struct CreateArgs {
     privileged: bool,
     #[clap(long)]
     host_access_full: bool,
+}
+
+impl CreateArgs {
+    fn into_request(self) -> forgerpc::MachineValidationTestAddRequest {
+        let mut entrypoint = self.entrypoint;
+        entrypoint.extend(self.command_args);
+        forgerpc::MachineValidationTestAddRequest {
+            name: self.name,
+            description: None,
+            contexts: self.context,
+            img_name: None,
+            execute_in_host: None,
+            container_arg: None,
+            command: String::new(),
+            args: String::new(),
+            extra_err_file: None,
+            external_config_file: None,
+            pre_condition: None,
+            timeout: Some(self.timeout),
+            extra_output_file: None,
+            supported_platforms: self.platform,
+            read_only: None,
+            custom_tags: Vec::new(),
+            components: Vec::new(),
+            is_enabled: None,
+            plugin: Some(forgerpc::MachineValidationPlugin {
+                r#type: self.plugin_type.as_str().to_owned(),
+                container_plugin_adapter: self.container_plugin_adapter,
+                image: self.image,
+                entrypoint,
+                parameters_json: self.parameters,
+                privileged: self.privileged,
+                host_access_full: self.host_access_full,
+            }),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -85,34 +132,7 @@ impl Run for Args {
                 let response = ctx
                     .api_client
                     .0
-                    .add_machine_validation_test(forgerpc::MachineValidationTestAddRequest {
-                        name: args.name,
-                        description: None,
-                        contexts: args.context,
-                        img_name: None,
-                        execute_in_host: None,
-                        container_arg: None,
-                        command: String::new(),
-                        args: String::new(),
-                        extra_err_file: None,
-                        external_config_file: None,
-                        pre_condition: None,
-                        timeout: Some(args.timeout),
-                        extra_output_file: None,
-                        supported_platforms: args.platform,
-                        read_only: None,
-                        custom_tags: Vec::new(),
-                        components: Vec::new(),
-                        is_enabled: None,
-                        plugin: Some(forgerpc::MachineValidationPlugin {
-                            r#type: args.plugin_type.as_str().to_owned(),
-                            image: args.image,
-                            entrypoint: args.entrypoint,
-                            parameters_json: args.parameters,
-                            privileged: args.privileged,
-                            host_access_full: args.host_access_full,
-                        }),
-                    })
+                    .add_machine_validation_test(args.into_request())
                     .await?;
                 println!(
                     "Created plugin revision: {} {}",
@@ -182,6 +202,68 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     use super::Args;
+
+    #[test]
+    fn create_keeps_adapter_selection_and_ordered_arguments_in_the_request() {
+        let Args::Create(args) = Args::try_parse_from([
+            "plugins", "create", "--name", "dsx-health", "--type", "container",
+            "--container-plugin-adapter", "DSXHealthValidation", "--image", "example.com/health@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "--entrypoint", "/custom/hv", "--arg", "run", "--arg=--execution-context", "--arg", "OPERATOR_INFRA",
+            "--parameters", r#"{"gpu_count":4}"#,
+        ]).unwrap() else { panic!("expected create"); };
+        let plugin = args.into_request().plugin.unwrap();
+        assert_eq!(plugin.r#type, "container");
+        assert_eq!(
+            plugin.container_plugin_adapter.as_deref(),
+            Some("DSXHealthValidation")
+        );
+        assert_eq!(
+            plugin.entrypoint,
+            ["/custom/hv", "run", "--execution-context", "OPERATOR_INFRA"]
+        );
+        assert!(!plugin.privileged);
+    }
+
+    #[test]
+    fn legacy_command_syntax_defaults_to_the_standard_container_contract() {
+        let Args::Create(args) = Args::try_parse_from([
+            "plugins",
+            "create",
+            "--name",
+            "custom",
+            "--image",
+            "example.com/health",
+            "--entrypoint",
+            "/check",
+            "--entrypoint",
+            "run",
+        ])
+        .unwrap() else {
+            panic!("expected create");
+        };
+        let plugin = args.into_request().plugin.unwrap();
+        assert_eq!(plugin.r#type, "container");
+        assert!(plugin.container_plugin_adapter.is_none());
+        assert_eq!(plugin.entrypoint, ["/check", "run"]);
+    }
+
+    #[test]
+    fn unknown_adapter_is_rejected_before_sending_a_request() {
+        let error = Args::try_parse_from([
+            "plugins",
+            "create",
+            "--name",
+            "custom",
+            "--image",
+            "example.com/health",
+            "--entrypoint",
+            "/check",
+            "--container-plugin-adapter",
+            "unknown",
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidValue);
+    }
 
     #[test]
     fn parses_a_full_host_plugin_definition() {

@@ -1179,6 +1179,7 @@ dependencies = [
  "carbide-libmlx",
  "carbide-libmlx-model",
  "carbide-machine-controller",
+ "carbide-machine-validation-adapters",
  "carbide-macros",
  "carbide-measured-boot",
  "carbide-metrics-utils",
@@ -2644,6 +2645,7 @@ dependencies = [
  "carbide-instrument",
  "carbide-ipmi",
  "carbide-libmlx-model",
+ "carbide-machine-validation-adapters",
  "carbide-measured-boot",
  "carbide-proto-compiler",
  "carbide-redfish",
@@ -2693,6 +2695,7 @@ name = "carbide-machine-validation"
 version = "0.0.0"
 dependencies = [
  "carbide-instrument",
+ "carbide-machine-validation-adapters",
  "carbide-rpc",
  "carbide-test-support",
  "carbide-tls",
@@ -2708,6 +2711,19 @@ dependencies = [
  "tokio",
  "tonic",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "carbide-machine-validation-adapters"
+version = "0.0.0"
+dependencies = [
+ "carbide-test-support",
+ "futures-util",
+ "libc",
+ "serde",
+ "serde_json",
+ "tokio",
  "uuid",
 ]
 
@@ -7813,6 +7829,7 @@ dependencies = [
  "carbide-health-report",
  "carbide-libmlx",
  "carbide-libmlx-model",
+ "carbide-machine-validation-adapters",
  "carbide-macros",
  "carbide-measured-boot",
  "carbide-network",

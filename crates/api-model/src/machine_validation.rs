@@ -87,9 +87,15 @@ pub struct MachineValidationPlugin {
         default = "MachineValidationPlugin::default_type"
     )]
     pub plugin_type: String,
+    /// Optional container contract adapter. Omission uses the standard NICo contract.
+    /// Adapter selection is immutable with the rest of the plugin revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_plugin_adapter: Option<String>,
     /// OCI image reference pinned to a digest.
     pub image: String,
-    /// Executable and arguments invoked without a shell.
+    /// Command vector invoked without a shell. The standard contract appends it
+    /// to the image ENTRYPOINT; DSXHealthValidation overrides the executable
+    /// with its first element and passes the remaining elements as arguments.
     pub entrypoint: Vec<String>,
     /// Non-secret JSON object copied to the plugin input contract.
     pub parameters_json: String,
