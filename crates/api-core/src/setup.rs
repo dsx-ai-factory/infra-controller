@@ -732,10 +732,16 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             .wrap_err("failed to build the firmware-object HTTP client")?,
     );
 
+    let resource_pool_monitor = crate::resource_pool::ResourcePoolMonitor::new(
+        db_pool.clone(),
+        &carbide_config.resource_pool_backends,
+    )?;
+
     let api_service = Arc::new(Api {
         certificate_provider,
         common_pools,
         resource_pool_registry: registry,
+        resource_pool_monitor,
         credential_manager,
         node_jwt_validator,
         database_connection: db_pool.clone(),
@@ -1769,11 +1775,17 @@ async fn initialize_and_start_controllers<'a>(
         txn.commit().await?;
     }
 
+    let resource_pool_stats = crate::resource_pool::metrics::start_pool_stats(
+        api_service.resource_pool_monitor.clone(),
+        common_pools,
+        join_set,
+        cancel_token.clone(),
+    )?;
     let health_pool = db_pool.clone();
     start_export_service_health_metrics(ServiceHealthContext {
         meter: meter.clone(),
         database_pool: health_pool,
-        resource_pool_stats: common_pools.pool_stats.clone(),
+        resource_pool_stats,
     });
 
     if let Some(seed_data) = seed_data {

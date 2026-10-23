@@ -15,26 +15,18 @@
  * limitations under the License.
  */
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 use ::rpc::forge as rpc;
-use carbide_resource_pool::grpc::{GrpcResourcePoolBackend, GrpcResourcePoolError};
-use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry, registration};
-use carbide_resource_pool_api::v1;
-use chrono::{DateTime, Utc};
-use futures::{StreamExt, stream};
+use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry};
+use futures::StreamExt;
 use model::resource_pool::binding::{
-    INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolBinding, ResourcePoolSelection,
+    INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolSelection,
 };
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
 use crate::api::Api;
-use crate::cfg::resource_pool::ResourcePoolBackendConfig;
-
-// Each listing may observe up to eight remote pools at once. This keeps slow
-// providers from serializing the listing while limiting the work one request starts.
-const MAX_CONCURRENT_POOL_OBSERVATIONS: usize = 8;
 
 pub(crate) async fn grow(
     api: &Api,
@@ -146,161 +138,20 @@ pub(crate) async fn list(
     }))
 }
 
-/// `inspect` combines local inventory with saved bindings. A provider failure
-/// belongs to its pool's row, so operators can still inspect the other pools.
+/// `inspect` reads current backend statistics through the shared monitor,
+/// sorted by pool name for a stable admin listing. Unlike metrics, the listing
+/// omits local pools that have neither inventory nor a saved binding.
 pub(crate) async fn inspect(
     api: &Api,
     request: Request<rpc::InspectResourcePoolsRequest>,
 ) -> Result<Response<rpc::InspectResourcePoolsResponse>, Status> {
     crate::api::log_request_data(&request);
-    let mut txn = api.txn_begin().await?;
-    let inventory = db::resource_pool::all(&mut txn)
-        .await
-        .map_err(CarbideError::from)?;
-    let bindings = db::resource_pool::binding::all(txn.as_pgconn())
-        .await
-        .map_err(CarbideError::from)?;
-    // Release the database transaction before waiting for any provider.
-    txn.commit().await?;
-
-    // Local rows remain visible even when no configuration has created a binding.
-    // Their bounds describe stored inventory, not the ranges allowed by TOML.
-    let observed_at = Utc::now();
-    let mut pools = BTreeMap::new();
-    for snapshot in inventory {
-        let mut pool = integrated_inspection(snapshot.name, observed_at);
-        pool.min = Some(snapshot.min);
-        pool.max = Some(snapshot.max);
-        pool.stats = Some(snapshot.stats.into());
-        pools.insert(pool.name.clone(), pool);
-    }
-
-    let mut remote = Vec::new();
-    for binding in bindings {
-        if binding.backend_kind == ResourcePoolBackendKind::Grpc {
-            remote.push(binding);
-            continue;
-        }
-        // A bound Integrated pool with no rows is empty. This is a known count,
-        // unlike a provider that cannot report its inventory.
-        let pool = pools
-            .entry(binding.pool_name.clone())
-            .or_insert_with(|| integrated_inspection(binding.pool_name, observed_at));
-        pool.binding_id = Some(binding.binding_id.to_string());
-        pool.backend_name = binding.backend_name;
-    }
-
-    let mut observations = stream::iter(remote)
-        .map(|binding| inspect_remote(api, binding))
-        .buffer_unordered(MAX_CONCURRENT_POOL_OBSERVATIONS);
-    while let Some(pool) = observations.next().await {
-        pools.insert(pool.name.clone(), pool);
-    }
-    Ok(Response::new(rpc::InspectResourcePoolsResponse {
-        pools: pools.into_values().collect(),
-    }))
-}
-
-/// `integrated_inspection` starts with the known empty state of a local pool.
-/// Inventory observations replace its counts and add bounds when rows exist.
-fn integrated_inspection(name: String, observed_at: DateTime<Utc>) -> rpc::ResourcePoolInspection {
-    rpc::ResourcePoolInspection {
-        remote_pool: name.clone(),
-        name,
-        backend_kind: rpc::ResourcePoolBackendKind::Integrated as i32,
-        authority_id: INTEGRATED_AUTHORITY_ID.to_owned(),
-        stats: Some(rpc::ResourcePoolStats::default()),
-        stats_status: rpc::ResourcePoolStatsStatus::Known as i32,
-        observed_at: Some(observed_at.into()),
-        ..Default::default()
-    }
-}
-
-/// `inspect_remote` uses the acknowledged definition's exact provider identity
-/// and revision. The configured alias is only a label here; resolving it again
-/// could report a different provider pool after the alias changes.
-async fn inspect_remote(api: &Api, binding: ResourcePoolBinding) -> rpc::ResourcePoolInspection {
-    let mut pool = rpc::ResourcePoolInspection {
-        name: binding.pool_name.clone(),
-        backend_kind: rpc::ResourcePoolBackendKind::Grpc as i32,
-        backend_name: binding.backend_name.clone(),
-        binding_id: Some(binding.binding_id.to_string()),
-        authority_id: binding.authority_id.clone(),
-        remote_pool: binding.remote_pool.clone(),
-        stats_status: rpc::ResourcePoolStatsStatus::Unavailable as i32,
-        ..Default::default()
-    };
-    let definition = match registration::latest_accepted(&api.database_connection, &binding).await {
-        Ok(Some(definition)) => definition,
-        Ok(None) => {
-            pool.stats_message = Some("no accepted pool definition".to_owned());
-            return pool;
-        }
-        Err(error) => {
-            tracing::warn!(pool_name = %binding.pool_name, %error, "could not read resource pool definition");
-            pool.stats_message = Some("could not read accepted pool definition".to_owned());
-            return pool;
-        }
-    };
-    pool.provider_pool_id = definition
-        .pool
-        .as_ref()
-        .map(|identity| identity.pool_id.clone());
-    pool.accepted_revision = Some(definition.eligibility_revision.clone());
-    let Some(ResourcePoolBackendConfig::Grpc { endpoint, tls }) = binding
-        .backend_name
-        .as_ref()
-        .and_then(|name| api.runtime_config.resource_pool_backends.get(name))
-    else {
-        pool.stats_message = Some("saved gRPC backend is not configured".to_owned());
-        return pool;
-    };
-    let stats = async {
-        // Production remote selection remains gated. Reuse the runtime's shared
-        // clients during https://github.com/dsx-ai-factory/infra-controller/issues/7140,
-        // before production activation.
-        let backend = GrpcResourcePoolBackend::new(endpoint.clone(), tls.clone())?;
-        backend
-            .stats(v1::StatsRequest {
-                pool: definition.pool,
-                eligibility_revision: definition.eligibility_revision,
-            })
-            .await
-    }
-    .await;
-    match stats {
-        Ok(response) => {
-            // The client validates all six counts and their partitions. Check
-            // total capacity too, since numeric consumers add used and free.
-            if let Some(stats) = response
-                .stats
-                .filter(|stats| stats.used.checked_add(stats.free).is_some())
-            {
-                pool.stats = Some(rpc::ResourcePoolStats {
-                    used: stats.used,
-                    free: stats.free,
-                    auto_assign_used: stats.auto_assign_used,
-                    auto_assign_free: stats.auto_assign_free,
-                    non_auto_assign_used: stats.non_auto_assign_used,
-                    non_auto_assign_free: stats.non_auto_assign_free,
-                });
-                pool.stats_status = rpc::ResourcePoolStatsStatus::Known as i32;
-                pool.observed_at = Some(Utc::now().into());
-            } else {
-                pool.stats_message =
-                    Some("provider capacity exceeds the supported numeric range".to_owned());
-            }
-        }
-        Err(error) => {
-            if matches!(&error, GrpcResourcePoolError::Rpc(status) if status.code() == tonic::Code::Unimplemented)
-            {
-                pool.stats_status = rpc::ResourcePoolStatsStatus::Unknown as i32;
-            }
-            // The client error's Display intentionally omits endpoint, credential,
-            // and provider-supplied text. Keep that redaction at the public API.
-            pool.stats_message = Some(error.to_string());
-            tracing::warn!(pool_name = %binding.pool_name, %error, "could not inspect resource pool statistics");
-        }
-    }
-    pool
+    let mut pools: Vec<_> = api
+        .resource_pool_monitor
+        .observe(&[])
+        .await?
+        .collect()
+        .await;
+    pools.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    Ok(Response::new(rpc::InspectResourcePoolsResponse { pools }))
 }

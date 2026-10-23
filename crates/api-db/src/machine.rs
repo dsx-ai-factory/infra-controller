@@ -4043,7 +4043,7 @@ mod test {
     use std::collections::{HashMap, HashSet};
     use std::net::{IpAddr, Ipv6Addr};
     use std::str::FromStr;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
     use carbide_uuid::machine::{
@@ -4064,7 +4064,6 @@ mod test {
     };
     use model::resource_pool::define::{Range, ResourcePoolDef, ResourcePoolType};
     use model::resource_pool::{ResourcePool, ValueType};
-    use tokio::sync::oneshot;
 
     fn machine_id(seed: u8, ty: MachineType) -> MachineId {
         MachineId::new(MachineIdSource::ProductBoardChassisSerial, [seed; 32], ty)
@@ -5041,7 +5040,6 @@ mod test {
     }
 
     fn common_pools_without_seeded_values() -> CommonPools {
-        let (stop_sender, _stop_receiver) = oneshot::channel();
         CommonPools {
             ethernet: EthernetPools {
                 pool_loopback_ip: Arc::new(ResourcePool::new(
@@ -5067,8 +5065,6 @@ mod test {
                 )),
             },
             infiniband: IbPools::default(),
-            pool_stats: Arc::new(Mutex::new(HashMap::new())),
-            _stop_sender: stop_sender,
         }
     }
 

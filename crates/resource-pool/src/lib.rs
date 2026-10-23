@@ -57,6 +57,7 @@ pub use registry::{
     PoolDefinitionSource, ResolvedResourcePool, ResourcePoolRegistry, ResourcePoolRegistryError,
 };
 use sqlx::PgConnection;
+pub use transaction::database_transaction;
 
 /// `ResourcePoolBackend` selects how a pool performs allocation and release.
 ///

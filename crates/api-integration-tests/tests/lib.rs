@@ -257,6 +257,24 @@ async fn run_integration() -> eyre::Result<()> {
         "the second server must reuse the first server's pool bindings"
     );
 
+    // Add an unregistered provider pool below startup validation so the running
+    // sampler exercises its unavailable path. The release gate still rejects
+    // remote selections in operator configuration.
+    let mut txn = test_env.db_pool.begin().await?;
+    db::resource_pool::binding::bind_or_verify(
+        &mut txn,
+        &model::resource_pool::ResourcePoolSelection {
+            pool_name: "metrics-unregistered-pool".into(),
+            value_domain: ResourcePoolValueDomain::Integer,
+            backend_name: Some("metrics-provider".into()),
+            backend_kind: ResourcePoolBackendKind::Grpc,
+            authority_id: "metrics-provider".into(),
+            remote_pool: "metrics-pool".into(),
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
     // Observable MQTT instruments export their initial zeros without a broker
     // connection. Register them on the server's meter for the catalogue scrape.
     let mqtt_client =
@@ -477,6 +495,45 @@ async fn run_integration() -> eyre::Result<()> {
     .await?;
 
     exercise_admin_address_reconcile_failures(&test_env).await?;
+
+    // The binding was added after startup, so allow a full sixty-second poll
+    // interval. Require all series in one scrape before checking missing counts.
+    let expected_pool_metrics = [
+        r#"carbide_resourcepool_used_count{pool="vpc-vni"}"#,
+        r#"carbide_resourcepool_free_count{pool="vpc-vni"}"#,
+        r#"carbide_resourcepool_stats_available{pool="vpc-vni"} 1"#,
+        r#"carbide_resourcepool_stats_fresh{pool="vpc-vni"} 1"#,
+        r#"carbide_resourcepool_stats_last_success_timestamp_seconds{pool="vpc-vni"}"#,
+        r#"carbide_resourcepool_stats_available{pool="metrics-unregistered-pool"} 0"#,
+        r#"carbide_resourcepool_stats_fresh{pool="metrics-unregistered-pool"} 0"#,
+        r#"carbide_resourcepool_stats_poll_failures_total{backend="grpc",failure="unavailable"}"#,
+    ];
+    let pool_metrics = tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            for endpoint in &test_env.carbide_metrics_addrs {
+                let scrape = metrics::metrics(endpoint)?;
+                if expected_pool_metrics
+                    .iter()
+                    .all(|expected| scrape.contains(expected))
+                {
+                    return Ok::<_, eyre::Report>(scrape);
+                }
+            }
+            sleep(Duration::from_millis(300)).await;
+        }
+    })
+    .await
+    .wrap_err("resource pool metrics did not appear after a complete poll interval")??;
+    for metric in [
+        "carbide_resourcepool_used_count",
+        "carbide_resourcepool_free_count",
+        "carbide_resourcepool_stats_last_success_timestamp_seconds",
+    ] {
+        assert!(
+            !pool_metrics.contains(&format!(r#"{metric}{{pool="metrics-unregistered-pool"}}"#)),
+            "a failed observation must not create counts or a success timestamp",
+        );
+    }
 
     let metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
     assert!(

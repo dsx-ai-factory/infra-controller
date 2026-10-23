@@ -325,6 +325,10 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_resource_pool_cleanup_pending</td><td>gauge</td><td>Number of remote allocations awaiting confirmed cancellation or release</td></tr>
 <tr><td>carbide_resource_pool_lifecycle_failures_total</td><td>counter</td><td>Number of resource pool lifecycle failures, by operation, failure, failure policy, allocation mode, and value type.</td></tr>
 <tr><td>carbide_resourcepool_free_count</td><td>gauge</td><td>Number of values in the resource pool currently available for allocation</td></tr>
+<tr><td>carbide_resourcepool_stats_available</td><td>gauge</td><td>Whether the last resource pool statistics poll returned known counts, regardless of age</td></tr>
+<tr><td>carbide_resourcepool_stats_fresh</td><td>gauge</td><td>Whether the last successful resource pool statistics poll is less than 120 seconds old; zero before any success. Used/free count series are absent before success, after a failed poll, or when this gauge is zero</td></tr>
+<tr><td>carbide_resourcepool_stats_last_success_timestamp_seconds</td><td>gauge</td><td>Unix timestamp of the last successful resource pool statistics poll, retained after failure and absent before any success</td></tr>
+<tr><td>carbide_resourcepool_stats_poll_failures_total</td><td>counter</td><td>Number of failed resource pool observations: one per unavailable or unsupported pool, or per failed database snapshot. Labels: backend (integrated for the local snapshot, grpc for a remote pool), failure (database or timeout for snapshots, unknown for unsupported statistics, unavailable for other pool failures)</td></tr>
 <tr><td>carbide_resourcepool_used_count</td><td>gauge</td><td>Number of currently allocated values in the resource pool</td></tr>
 <tr><td>carbide_rms_switch_certificate_unrecognized_job_states_total</td><td>counter</td><td>Number of unrecognized RMS switch certificate job states.</td></tr>
 <tr><td>carbide_running_dpu_updates_count</td><td>gauge</td><td>Number of machines in the system that are currently running a DPU/NIC firmware update</td></tr>
