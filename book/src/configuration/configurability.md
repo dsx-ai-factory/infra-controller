@@ -835,8 +835,8 @@ advertised. Both are documented field-by-field in
 
 `[ib_config]` toggles InfiniBand support fleet-wide; `[ib_fabrics.<name>]`
 defines a specific UFM-managed fabric. Currently exactly one fabric is
-supported. Required fields: UFM endpoint, credentials (username + password,
-or token), MGMT IB subnet, GUID prefix. See
+supported. Required fields: UFM endpoint, credentials (a token or a client
+certificate), MGMT IB subnet, GUID prefix. See
 [`crates/api-core/src/cfg/README.md` → NicoConfig](../../../crates/api-core/src/cfg/README.md#nicoconfig-top-level).
 
 ### Operator dev / debug knobs

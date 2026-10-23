@@ -2331,7 +2331,6 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "axum",
- "base64",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-client-cache",
