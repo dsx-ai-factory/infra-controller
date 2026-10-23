@@ -76,11 +76,11 @@ impl RackComponentCounts {
         })
     }
 
-    pub(crate) fn missing_critical_component_report(
+    pub(crate) fn missing_component_report(
         self,
         capabilities: &RackCapabilitiesSet,
     ) -> Option<HealthReport> {
-        let alerts = CriticalRackComponent::ALL
+        let alerts = RackComponent::ALL
             .into_iter()
             .filter_map(|component| {
                 let expected_count = component.expected_count(capabilities);
@@ -115,16 +115,18 @@ impl RackComponentCounts {
 }
 
 #[derive(Clone, Copy)]
-enum CriticalRackComponent {
+enum RackComponent {
+    Compute,
     Switch,
     PowerShelf,
 }
 
-impl CriticalRackComponent {
-    const ALL: [Self; 2] = [Self::Switch, Self::PowerShelf];
+impl RackComponent {
+    const ALL: [Self; 3] = [Self::Compute, Self::Switch, Self::PowerShelf];
 
     fn actual_count(self, counts: RackComponentCounts) -> u32 {
         match self {
+            Self::Compute => counts.compute,
             Self::Switch => counts.switch,
             Self::PowerShelf => counts.power_shelf,
         }
@@ -132,15 +134,17 @@ impl CriticalRackComponent {
 
     fn expected_count(self, capabilities: &RackCapabilitiesSet) -> u32 {
         match self {
+            Self::Compute => capabilities.compute.count,
             Self::Switch => capabilities.switch.count,
             Self::PowerShelf => capabilities.power_shelf.count,
         }
     }
 }
 
-impl fmt::Display for CriticalRackComponent {
+impl fmt::Display for RackComponent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Compute => write!(f, "compute"),
             Self::Switch => write!(f, "switch"),
             Self::PowerShelf => write!(f, "power_shelf"),
         }
@@ -178,10 +182,10 @@ mod tests {
     }
 
     #[test]
-    fn missing_critical_component_report_aggregates_by_component_type() {
+    fn missing_component_report_aggregates_by_component_type() {
         let summarize = |(counts, capabilities): (RackComponentCounts, RackCapabilitiesSet)| {
             counts
-                .missing_critical_component_report(&capabilities)
+                .missing_component_report(&capabilities)
                 .map(|report| {
                     report
                         .alerts
@@ -203,7 +207,7 @@ mod tests {
         check_values(
             [
                 Check {
-                    scenario: "all critical components present",
+                    scenario: "all expected components present",
                     input: (
                         RackComponentCounts {
                             switch: 9,
@@ -215,7 +219,7 @@ mod tests {
                     expect: None,
                 },
                 Check {
-                    scenario: "missing compute does not alert",
+                    scenario: "missing compute alerts",
                     input: (
                         RackComponentCounts {
                             compute: 17,
@@ -224,17 +228,20 @@ mod tests {
                         },
                         capabilities(18, 9, 2),
                     ),
-                    expect: None,
+                    expect: Some(vec![AlertSummary {
+                        target: "compute".to_string(),
+                        message: "Rack component count is below the rack profile: expected 18, found 17, missing 1".to_string(),
+                    }]),
                 },
                 Check {
                     scenario: "extra components do not alert",
                     input: (
                         RackComponentCounts {
+                            compute: 19,
                             switch: 10,
                             power_shelf: 3,
-                            ..Default::default()
                         },
-                        capabilities(0, 9, 2),
+                        capabilities(18, 9, 2),
                     ),
                     expect: None,
                 },
@@ -257,13 +264,17 @@ mod tests {
                     scenario: "multiple missing component types",
                     input: (
                         RackComponentCounts {
+                            compute: 17,
                             switch: 7,
                             power_shelf: 0,
-                            ..Default::default()
                         },
-                        capabilities(0, 9, 2),
+                        capabilities(18, 9, 2),
                     ),
                     expect: Some(vec![
+                        AlertSummary {
+                            target: "compute".to_string(),
+                            message: "Rack component count is below the rack profile: expected 18, found 17, missing 1".to_string(),
+                        },
                         AlertSummary {
                             target: "switch".to_string(),
                             message: "Rack component count is below the rack profile: expected 9, found 7, missing 2".to_string(),

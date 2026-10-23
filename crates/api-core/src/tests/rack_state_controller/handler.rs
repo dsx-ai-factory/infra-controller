@@ -210,10 +210,10 @@ pub(crate) fn config_with_rack_profiles() -> crate::cfg::file::CarbideConfig {
     config
 }
 
-fn config_with_critical_switch_profile() -> crate::cfg::file::CarbideConfig {
+fn config_with_switch_profile() -> crate::cfg::file::CarbideConfig {
     let mut config = config_with_rack_profiles();
     config.rack_profiles.rack_profiles.insert(
-        "CriticalSwitch".to_string(),
+        "SwitchOnly".to_string(),
         RackProfile {
             product_family: Some(RackProductFamily::Gb200),
             rack_hardware_topology: Some(RackHardwareTopology::Gb200Nvl72r1C2g4Topology),
@@ -962,19 +962,107 @@ async fn test_expected_incomplete_device_counts_stays(
 }
 
 #[crate::sqlx_test]
-async fn test_missing_critical_component_health_is_persisted_and_propagated(
+async fn test_missing_compute_component_health_tracks_host_inventory(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = config_with_rack_profiles();
+    config.rack_profiles.rack_profiles.insert(
+        "ComputeOnly".to_string(),
+        RackProfile {
+            product_family: Some(RackProductFamily::Gb200),
+            rack_hardware_topology: Some(RackHardwareTopology::Gb200Nvl72r1C2g4Topology),
+            rack_hardware_type: Some(RackHardwareType::any()),
+            rack_hardware_class: Some(RackHardwareClass::Prod),
+            rack_capabilities: RackCapabilitiesSet {
+                compute: RackCapabilityCompute {
+                    count: 2,
+                    vendor: Some("NVIDIA".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let env =
+        create_test_env_with_overrides(pool.clone(), TestEnvOverrides::with_config(config)).await;
+    let rack_id = new_rack_id();
+    db_rack::create(
+        pool.acquire().await?.as_mut(),
+        &rack_id,
+        Some(&RackProfileId::new("ComputeOnly")),
+        &RackConfig::default(),
+        None,
+    )
+    .await?;
+    for host_count in 1..=2 {
+        let host = new_host(
+            &env,
+            ManagedHostConfig::default().with_expected_machine_data(ExpectedMachineData {
+                rack_id: Some(rack_id.clone()),
+                ..Default::default()
+            }),
+        )
+        .await?;
+        assert!(!host.dpu_snapshots.is_empty());
+        env.run_rack_controller_iteration().await;
+        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        if host_count == 1 {
+            let report = &rack.health_reports.merges["rack-component-inventory"];
+            let [alert] = report.alerts.as_slice() else {
+                panic!("expected one compute shortage alert");
+            };
+            assert_eq!(alert.target.as_deref(), Some("compute"));
+            assert_eq!(
+                alert.message,
+                "Rack component count is below the rack profile: expected 2, found 1, missing 1"
+            );
+            assert!(matches!(rack.controller_state.value, RackState::Created));
+        } else {
+            assert!(
+                !rack
+                    .health_reports
+                    .merges
+                    .contains_key("rack-component-inventory")
+            );
+            assert!(matches!(
+                rack.controller_state.value,
+                RackState::Discovering
+            ));
+        }
+        let host = db::managed_host::load_snapshot(
+            &mut env.db_reader(),
+            &host.host_snapshot.id,
+            LoadSnapshotOptions::default(),
+        )
+        .await?
+        .expect("host snapshot should exist");
+        assert_eq!(
+            host.aggregate_health.alerts.iter().any(|alert| {
+                alert.id.as_str() == "MissingRackComponent"
+                    && alert.target.as_deref() == Some("compute")
+            }),
+            host_count == 1,
+        );
+        assert_eq!(host.is_usable_as_instance(false), Ok(()));
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_missing_component_health_is_persisted_and_propagated(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(
         pool.clone(),
-        TestEnvOverrides::with_config(config_with_critical_switch_profile()),
+        TestEnvOverrides::with_config(config_with_switch_profile()),
     )
     .await;
     let rack_id = new_rack_id();
     db_rack::create(
         pool.acquire().await?.as_mut(),
         &rack_id,
-        Some(&RackProfileId::new("CriticalSwitch")),
+        Some(&RackProfileId::new("SwitchOnly")),
         &RackConfig::default(),
         None,
     )
@@ -1053,19 +1141,19 @@ async fn test_missing_critical_component_health_is_persisted_and_propagated(
 }
 
 #[crate::sqlx_test]
-async fn test_missing_critical_component_health_clears_after_recovery(
+async fn test_missing_component_health_clears_after_recovery(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(
         pool.clone(),
-        TestEnvOverrides::with_config(config_with_critical_switch_profile()),
+        TestEnvOverrides::with_config(config_with_switch_profile()),
     )
     .await;
     let rack_id = new_rack_id();
     db_rack::create(
         pool.acquire().await?.as_mut(),
         &rack_id,
-        Some(&RackProfileId::new("CriticalSwitch")),
+        Some(&RackProfileId::new("SwitchOnly")),
         &RackConfig::default(),
         None,
     )
@@ -1100,19 +1188,19 @@ async fn test_missing_critical_component_health_clears_after_recovery(
 }
 
 #[crate::sqlx_test]
-async fn test_critical_component_health_preserves_unresolved_profile(
+async fn test_component_health_preserves_unresolved_profile(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(
         pool.clone(),
-        TestEnvOverrides::with_config(config_with_critical_switch_profile()),
+        TestEnvOverrides::with_config(config_with_switch_profile()),
     )
     .await;
     let rack_id = new_rack_id();
     db_rack::create(
         pool.acquire().await?.as_mut(),
         &rack_id,
-        Some(&RackProfileId::new("CriticalSwitch")),
+        Some(&RackProfileId::new("SwitchOnly")),
         &RackConfig::default(),
         None,
     )
@@ -1135,7 +1223,7 @@ async fn test_critical_component_health_preserves_unresolved_profile(
         );
     }
 
-    sqlx::query("UPDATE racks SET rack_profile_id = 'CriticalSwitch' WHERE id = $1")
+    sqlx::query("UPDATE racks SET rack_profile_id = 'SwitchOnly' WHERE id = $1")
         .bind(&rack_id)
         .execute(&pool)
         .await?;
@@ -1156,7 +1244,7 @@ async fn test_critical_component_health_preserves_unresolved_profile(
 }
 
 #[crate::sqlx_test]
-async fn test_critical_component_health_waits_for_successful_handler(
+async fn test_component_health_waits_for_successful_handler(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let fetcher = Arc::new(StaticFirmwareObjectFetcher {
@@ -1164,11 +1252,11 @@ async fn test_critical_component_health_waits_for_successful_handler(
         requested_urls: Mutex::new(Vec::new()),
         requested_timeouts: Mutex::new(Vec::new()),
     });
-    let mut config = config_with_critical_switch_profile();
+    let mut config = config_with_switch_profile();
     config
         .rack_profiles
         .rack_profiles
-        .get_mut("CriticalSwitch")
+        .get_mut("SwitchOnly")
         .unwrap()
         .firmware_object = Some(RackFirmwareObjectConfig {
         url: url::Url::parse("https://firmware.example.invalid/sot.json")?,
@@ -1188,7 +1276,7 @@ async fn test_critical_component_health_waits_for_successful_handler(
     db_rack::create(
         pool.acquire().await?.as_mut(),
         &rack_id,
-        Some(&RackProfileId::new("CriticalSwitch")),
+        Some(&RackProfileId::new("SwitchOnly")),
         &RackConfig::default(),
         None,
     )
@@ -1268,19 +1356,19 @@ async fn test_critical_component_health_waits_for_successful_handler(
 }
 
 #[crate::sqlx_test]
-async fn test_ready_rack_reports_deleted_critical_component(
+async fn test_ready_rack_reports_deleted_component(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env_with_overrides(
         pool.clone(),
-        TestEnvOverrides::with_config(config_with_critical_switch_profile()),
+        TestEnvOverrides::with_config(config_with_switch_profile()),
     )
     .await;
     let rack_id = new_rack_id();
     db_rack::create(
         pool.acquire().await?.as_mut(),
         &rack_id,
-        Some(&RackProfileId::new("CriticalSwitch")),
+        Some(&RackProfileId::new("SwitchOnly")),
         &RackConfig::default(),
         None,
     )

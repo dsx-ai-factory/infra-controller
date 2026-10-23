@@ -72,7 +72,7 @@ impl RackStateHandler {
             .health_reports
             .merges
             .get(COMPONENT_INVENTORY_HEALTH_SOURCE);
-        let mut desired = component_counts.missing_critical_component_report(capabilities);
+        let mut desired = component_counts.missing_component_report(capabilities);
 
         if let Some(desired) = desired.as_mut() {
             desired.update_in_alert_since(previous);

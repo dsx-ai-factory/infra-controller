@@ -47,7 +47,7 @@ impl WriteOp for PersistRackHealthHistory {
     }
 }
 
-/// Stores the rack controller's current critical-component health report.
+/// Stores the rack controller's current component health report.
 pub(crate) struct PersistRackComponentHealth {
     pub(crate) rack_id: RackId,
     pub(crate) health_report: HealthReport,
@@ -70,7 +70,7 @@ impl WriteOp for PersistRackComponentHealth {
     }
 }
 
-/// Removes the rack controller's critical-component health report.
+/// Removes the rack controller's component health report.
 pub(crate) struct RemoveRackComponentHealth {
     pub(crate) rack_id: RackId,
     pub(crate) source: &'static str,
