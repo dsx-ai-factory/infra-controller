@@ -17,18 +17,18 @@
 
 //! Handler for [`ManagedHostState::Maintenance`].
 
+use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
 };
 use carbide_uuid::machine::HostMachineId;
-use chrono::Utc;
 use component_manager::compute_tray_manager::{ComputeTrayEndpoint, ComputeTrayResult};
 use db::machine as db_machine;
 use mac_address::MacAddress;
 use model::component_manager::PowerAction;
 use model::machine::{
-    FailureCause, FailureDetails, FailureSource, HostMachine, MachineMaintenanceOperation,
-    MachineMaintenanceRequest, ManagedHostState, ManagedHostStateSnapshot, StateMachineArea,
+    HostMachine, MachineMaintenanceOperation, MachineMaintenanceRequest, ManagedHostState,
+    ManagedHostStateSnapshot,
 };
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -37,7 +37,8 @@ use state_controller::state_handler::{
 use crate::context::MachineStateHandlerContextObjects;
 
 /// Handles the Maintenance state for a host, dispatching on the requested
-/// operation (`PowerOn` / `PowerOff` / `Reset`).
+/// operation (`PowerOn` / `PowerOff` / `Reset` / `ChassisReset`). Failures return
+/// a handler error, retaining the state and request for normal reconciliation.
 pub(super) async fn handle_maintenance(
     host_machine_id: &HostMachineId,
     mh_snapshot: &ManagedHostStateSnapshot,
@@ -137,39 +138,15 @@ async fn handle_chassis_reset(
         "Machine maintenance: ChassisReset",
     );
 
-    let redfish_client = match ctx
+    let redfish_client = ctx
         .services
         .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-        .await
-    {
-        Ok(client) => client,
-        Err(error) => {
-            return finish_maintenance_with_error(
-                host_machine_id,
-                request,
-                ctx,
-                format!(
-                    "Machine {host_machine_id} maintenance (ChassisReset): failed to create Redfish client: {error}"
-                ),
-            )
-            .await;
-        }
-    };
+        .await?;
 
-    if let Err(error) = redfish_client
+    redfish_client
         .chassis_reset(chassis_id, libredfish::SystemPowerControl::ForceRestart)
         .await
-    {
-        return finish_maintenance_with_error(
-            host_machine_id,
-            request,
-            ctx,
-            format!(
-                "Machine {host_machine_id} maintenance (ChassisReset): chassis reset failed: {error}"
-            ),
-        )
-        .await;
-    }
+        .map_err(|error| redfish_error("chassis_reset", error))?;
 
     tracing::info!(
         machine_id = %host_machine_id,
@@ -190,36 +167,23 @@ async fn invoke_power_operation(
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let machine = &mh_snapshot.host_snapshot;
 
-    let Some(component_manager) = ctx.services.component_manager.as_ref() else {
-        return finish_maintenance_with_error(
-            host_machine_id,
-            request,
-            ctx,
-            format!(
-                "Machine {host_machine_id} maintenance ({operation_label}): component manager not configured"
-            ),
-        )
-        .await;
-    };
+    let component_manager = ctx.services.component_manager.as_ref().ok_or_else(|| {
+        StateHandlerError::GenericError(eyre::eyre!(
+            "Machine {host_machine_id} maintenance ({operation_label}): component manager not configured"
+        ))
+    })?;
 
-    let endpoint = match build_compute_tray_endpoint(
+    let endpoint = build_compute_tray_endpoint(
         host_machine_id,
         machine,
         ctx.services.credential_manager.as_ref(),
     )
     .await
-    {
-        Ok(endpoint) => endpoint,
-        Err(cause) => {
-            return finish_maintenance_with_error(
-                host_machine_id,
-                request,
-                ctx,
-                format!("Machine {host_machine_id} maintenance ({operation_label}): {cause}"),
-            )
-            .await;
-        }
-    };
+    .map_err(|cause| {
+        StateHandlerError::GenericError(eyre::eyre!(
+            "Machine {host_machine_id} maintenance ({operation_label}): {cause}"
+        ))
+    })?;
 
     match component_manager
         .compute_tray
@@ -256,15 +220,9 @@ async fn invoke_power_operation(
                 summary = %summary,
                 "Machine power control returned a non-success result",
             );
-            finish_maintenance_with_error(
-                host_machine_id,
-                request,
-                ctx,
-                format!(
-                    "Machine {host_machine_id} maintenance ({operation_label}): power control failed: {summary}"
-                ),
-            )
-            .await
+            Err(StateHandlerError::GenericError(eyre::eyre!(
+                "Machine {host_machine_id} maintenance ({operation_label}): power control failed: {summary}"
+            )))
         }
         Err(error) => {
             tracing::warn!(
@@ -274,15 +232,12 @@ async fn invoke_power_operation(
                 error = %error,
                 "Machine power control transport error",
             );
-            finish_maintenance_with_error(
-                host_machine_id,
-                request,
-                ctx,
-                format!(
-                    "Machine {host_machine_id} maintenance ({operation_label}): power control failed: {error}"
-                ),
-            )
-            .await
+            let context = format!(
+                "Machine {host_machine_id} maintenance ({operation_label}): power control failed: {error}"
+            );
+            Err(StateHandlerError::GenericError(
+                eyre::Report::new(error).wrap_err(context),
+            ))
         }
     }
 }
@@ -332,31 +287,6 @@ async fn lookup_bmc_credentials(
             "failed to read BMC credentials for {bmc_mac}: {error}"
         )),
     }
-}
-
-/// Acknowledge the failed request so it does not retry indefinitely. A newer
-/// request remains available to the `Failed` state's maintenance admission.
-async fn finish_maintenance_with_error(
-    host_machine_id: &HostMachineId,
-    request: Option<&MachineMaintenanceRequest>,
-    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
-    cause: String,
-) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    finish_maintenance(
-        host_machine_id,
-        request,
-        ctx,
-        ManagedHostState::Failed {
-            details: FailureDetails {
-                cause: FailureCause::UnhandledState { err: cause },
-                failed_at: Utc::now(),
-                source: FailureSource::StateMachineArea(StateMachineArea::MainFlow),
-            },
-            machine_id: (*host_machine_id).into(),
-            retry_count: 0,
-        },
-    )
-    .await
 }
 
 async fn finish_maintenance(
