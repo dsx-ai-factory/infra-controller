@@ -2,9 +2,89 @@
 
 This section provides instructions for building the containers for NVIDIA Infra Controller (NICo).
 
+## Build one local development service
+
+`make images-dev` builds one native Core development image using the same recipes
+as [Tilt](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/deployment/tilt/README.md#image-builds). Run it from the
+repository root with Git, Make and a Docker client connected to a Linux AMD64 or
+ARM64 daemon that supports BuildKit. The compiler and runtime dependencies are
+built in containers. Host VM, isolated gateway and target VM setup is separate
+from image builds and tracked in
+[#8124](https://github.com/dsx-ai-factory/infra-controller/issues/8124).
+
+For example, build the DHCP service image:
+
+```bash
+make images-dev DEV_TARGET=dhcp
+```
+
+This builds a compiler image, a common development runtime image and
+`nico-dev-dhcp:latest` in the selected Docker daemon. It does not push images,
+create a registry, load images into kind or deploy services. Repeated builds reuse
+Docker layers and Cargo caches. Cached Cargo dependencies and outputs are
+separated by architecture. Migrating from the former Tilt-only recipes starts
+with cold Cargo caches because their names changed. Old Tilt caches remain until
+the operator explicitly removes them; this workflow does not prune them.
+
+The target selects `linux/amd64` or `linux/arm64` from `docker info`, accepting
+the daemon's `amd64`/`x86_64` and `arm64`/`aarch64` architecture names. Other
+operating systems or architectures are rejected before building. Architecture
+selection does not use `NICO_ARCHES` or enable cross-architecture emulation.
+The recipe captures the active Docker context once and selects it through both
+`DOCKER_CONTEXT` and `BUILDX_BUILDER`. This keeps the architecture check and all
+builds on that context's built-in builder and image store, including when Docker
+aliases builds to Buildx. Custom Buildx builders are not used; intermediate images
+remain available to the following service build without a registry.
+
+Optional Make variables can be supplied as `NAME=value` arguments:
+
+| Variable | Default | Contract |
+| --- | --- | --- |
+| `DEV_TARGET` | `api` | Exactly one of `api`, `bmc-proxy`, `dhcp`, `machine-a-tron`, `ssh-console`, `mat-protocol-gateway`, or `nico-postgres-exporter`. Other values are rejected. |
+| `IMAGE_TAG` | `latest` | Docker tag used in the default image references below. |
+| `DEV_IMAGE` | `nico-dev-$(DEV_TARGET):$(IMAGE_TAG)` | Docker image reference for the selected service output. |
+| `DEV_BUILD_CONTAINER` | `nico-dev-build:$(IMAGE_TAG)` | Docker image reference built for the compiler stage and passed to the service build as `CONTAINER_BUILD`. |
+| `DEV_RUNTIME_CONTAINER` | `nico-dev-runtime:$(IMAGE_TAG)` | Docker image reference built for the common runtime and passed to the service build as `CONTAINER_RUNTIME`. |
+
+Explicit image references take precedence over their defaults; changing
+`IMAGE_TAG` does not rewrite an explicitly supplied reference. Docker validates
+image-reference syntax. `IMAGE_REGISTRY` does not affect this target.
+
+The shared recipes are `dev/docker/Dockerfile.dev-services` and
+`dev/docker/Dockerfile.dev-runtime`. DHCP packages both Kea DHCPv4 and DHCPv6
+servers with the compiler-compatible version selected by `KEA_VERSION`, which
+defaults to `dev/docker/kea.version`. Both architectures install the hook at
+`/usr/lib/kea/hooks/libdhcp.so`; configure that path when deploying the image
+outside Tilt. Building the DHCPv6 binary does not enable IPv6 in a deployment.
+The DHCP image also includes `iproute2` and `curl` for the chart's IPv6 address
+selection and startup/readiness checks.
+
+After building the DHCP image, check its packaged tools and hook loading:
+
+```bash
+dev/docker/tests/smoke_dhcp_image.sh nico-dev-dhcp:latest
+```
+
+The script requires exactly one image reference, available in the selected Docker
+daemon; use the value of `DEV_IMAGE` if overridden. Missing or extra arguments
+print usage and exit with status 2. It runs a temporary container with
+`--network none`, enables IPv6 loopback inside that container's network namespace,
+checks `ip`, `ss` and `curl`, and starts each real Kea server with the NICo hook.
+It verifies UDP listeners on IPv4 port 67 and IPv6 port 547, prints a success line
+for each family, and removes the container on exit. Tool, hook-loading or listener
+failures return a nonzero status; a server startup failure also prints its log.
+No cluster, credentials or external IPv6 connectivity is required. Lease
+allocation and instance connectivity need separate lifecycle validation.
+
+These development images are separate from the complete stack and boot-artifact
+builds described below. Run `make help` for the available targets.
+
 ## Installing Prerequisite Software
 
-An Ubuntu 24.04 host or VM with at least 150GB of free disk space is required, and git and make must also be installed (macOS is not supported).
+The complete stack and boot-artifact workflow below requires an Ubuntu 24.04
+host or VM with at least 150GB of free disk space, Git and Make. Its build-host
+bootstrap does not run on macOS; use the local development service workflow
+above for builds through a Linux Docker daemon.
 
 Clone the repo and run the build-host bootstrap. It installs everything needed to build
 the containers and boot artifacts -- system packages, rustup, the mkosi/ipxe git
