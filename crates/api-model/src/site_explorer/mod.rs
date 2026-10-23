@@ -458,28 +458,34 @@ impl ExploredEndpoint {
         )
     }
 
+    /// find_inventory returns the first inventory entry matching the component's
+    /// `current_version_reported_as`; the entry may carry no version.
+    pub fn find_inventory(
+        &self,
+        fw_info: &Firmware,
+        firmware_type: FirmwareComponentType,
+    ) -> Option<&Inventory> {
+        self.report
+            .service
+            .iter()
+            .flat_map(|service| service.inventories.iter())
+            .find(|inventory| fw_info.matching_version_id(&inventory.id, firmware_type))
+    }
+
     /// find_version will locate a version number within an ExploredEndpoint
     pub fn find_version(
         &self,
         fw_info: &Firmware,
         firmware_type: FirmwareComponentType,
     ) -> Option<&String> {
-        for service in self.report.service.iter() {
-            if let Some(matching_inventory) = service
-                .inventories
-                .iter()
-                .find(|&x| fw_info.matching_version_id(&x.id, firmware_type))
-            {
-                tracing::debug!(
-                    bmc_ip_address = %self.address,
-                    firmware_type = ?firmware_type,
-                    version = ?matching_inventory.version,
-                    "Found matching firmware version",
-                );
-                return matching_inventory.version.as_ref();
-            };
-        }
-        None
+        let matching_inventory = self.find_inventory(fw_info, firmware_type)?;
+        tracing::debug!(
+            bmc_ip_address = %self.address,
+            firmware_type = ?firmware_type,
+            version = ?matching_inventory.version,
+            "Found matching firmware version",
+        );
+        matching_inventory.version.as_ref()
     }
 
     pub fn find_all_versions(
@@ -656,6 +662,11 @@ pub enum PreingestionState {
         #[serde(default)]
         attempts: u32,
     },
+    /// The firmware check found the exploration report incomplete (no host
+    /// model, or a listed component without an inventory entry or version)
+    /// and asked the explorer for one refreshed report. The check runs again
+    /// on that report and decides on it whatever it says.
+    FirmwareCheckRefreshWait,
     TimeSyncReset {
         phase: TimeSyncResetPhase,
         last_time: DateTime<Utc>,
@@ -709,7 +720,8 @@ impl PreingestionState {
     /// Whether a `waiting_for_explorer_refresh` set in this state is a
     /// preingestion park that only a fresh exploration report can end. These
     /// are the states whose next step reads the report: the post-reset
-    /// inventory, the version check, and the two rechecks. Preingestion never
+    /// inventory, the firmware check's refresh wait, the version check, and
+    /// the two rechecks. Preingestion never
     /// sets the flag in `Initial` or the other in-progress states; a flag there
     /// came from a failed probe or an operator error clear, and the next
     /// successful exploration lifts it. `Complete` and `Failed` waits have no
@@ -719,7 +731,8 @@ impl PreingestionState {
             self,
             Self::InitialBMCReset {
                 phase: InitialBmcResetPhase::WaitForExplorerRefresh,
-            } | Self::RecheckVersions
+            } | Self::FirmwareCheckRefreshWait
+                | Self::RecheckVersions
                 | Self::NewFirmwareReportedWait { .. }
                 | Self::RecheckVersionsAfterFailure { .. }
         )
@@ -4249,6 +4262,44 @@ mod tests {
                     ("Other_Component", Some("7.8.9")),
                 ] => Fails,
             }
+        );
+    }
+
+    /// `find_inventory` tells an entry without a version apart from no entry at all.
+    #[test]
+    fn find_inventory_keeps_an_entry_that_reports_no_version() {
+        let fw_info = create_test_firmware(FirmwareComponentType::Bmc, r"^BMC_Firmware$");
+        let endpoint =
+            create_test_endpoint(vec![("BMC_Firmware", None), ("DPU_UEFI", Some("4.5.6"))]);
+
+        let inventory = endpoint
+            .find_inventory(&fw_info, FirmwareComponentType::Bmc)
+            .expect("the entry matches even without a version");
+        assert_eq!(inventory.id, "BMC_Firmware");
+        assert_eq!(inventory.version, None);
+        assert_eq!(
+            endpoint.find_version(&fw_info, FirmwareComponentType::Bmc),
+            None
+        );
+
+        let absent = create_test_endpoint(vec![("DPU_UEFI", Some("4.5.6"))]);
+        assert!(
+            absent
+                .find_inventory(&fw_info, FirmwareComponentType::Bmc)
+                .is_none()
+        );
+    }
+
+    /// The refresh wait is a park only a fresh report ends, and it is stored
+    /// as the bare state tag like the other field-less states.
+    #[test]
+    fn firmware_check_refresh_wait_parks_and_round_trips() {
+        assert!(PreingestionState::FirmwareCheckRefreshWait.parks_for_explorer_refresh());
+        let stored = serde_json::to_string(&PreingestionState::FirmwareCheckRefreshWait).unwrap();
+        assert_eq!(stored, r#"{"state":"firmwarecheckrefreshwait"}"#);
+        assert_eq!(
+            serde_json::from_str::<PreingestionState>(&stored).unwrap(),
+            PreingestionState::FirmwareCheckRefreshWait
         );
     }
 

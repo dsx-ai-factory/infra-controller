@@ -94,9 +94,17 @@ For example:
 ```mermaid
 flowchart TD
     A["Fresh BMC exploration report"] --> B["BMC reset and time checks"]
-    B --> C{"Any reported component below its minimum?"}
-    C -- No --> J["Complete pre-ingestion"]
+    B -- "unknown vendor, or DPU" --> J["Complete pre-ingestion"]
+    B -- "known vendor" --> B1{"Report has a model?"}
+    B1 -- No --> R1{"Report refreshed already?"}
+    R1 -- Yes --> J
+    R1 -- No --> R["Wait for one refreshed report"]
+    R --> B1
+    B1 -- Yes --> C{"Any reported component below its minimum?"}
     C -- Yes --> D{"Global autoupdate enabled?"}
+    C -- No --> C1{"Every listed component had an entry and a comparable version?"}
+    C1 -- Yes --> J
+    C1 -- No --> R1
     D -- No --> J
     D -- Yes --> E["Select next mismatched component in ordering"]
     E --> F["Run upgrade script or upload artifacts through Redfish"]
@@ -116,7 +124,12 @@ The state machine performs the following work:
    Firmware comparison uses the refreshed inventory.
 1. **Evaluate minimums.** NICo selects the effective catalog definition by BMC
    vendor and host model, then compares matched inventory versions with each
-   configured pre-ingestion threshold.
+   configured pre-ingestion threshold. A component below its minimum starts
+   firmware work at once. Only when no reported component requires an upgrade
+   does an incomplete report matter: if it has no host model for a known
+   vendor, or a listed component has no inventory entry or no version, NICo
+   requests one refreshed exploration report and decides again on that
+   report.
 1. **Select one component.** If a minimum is breached, NICo follows `ordering`
    and selects the first component whose reported version differs from its
    pre-ingestion target. Components are handled serially for each endpoint.
@@ -152,6 +165,7 @@ The states most relevant to host firmware are:
 | State | Meaning |
 |---|---|
 | `InitialBMCReset`, `SetNtpServers`, `TimeSyncReset` | NICo is preparing the BMC and obtaining reliable inventory before comparing versions. |
+| `FirmwareCheckRefreshWait` | The report lacked a host model or a component's inventory entry or version; NICo is waiting for one refreshed report before deciding. |
 | `UpgradeFirmwareWait` | The firmware was uploaded and NICo is polling the Redfish task. |
 | `ScriptRunning` | The configured firmware upgrade script is running. |
 | `ResetForNewFirmware` | Installation completed and NICo is performing activation resets or power drains. |
