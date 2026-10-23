@@ -180,15 +180,43 @@ class LabTests(unittest.TestCase):
         self.assertEqual(environment["VXLAB_VAR"], str(self.lab.root))
         self.assertEqual(environment["ALPINE_VERSION"], lab_manager.ALPINE_VERSION)
 
-    def test_gateway_ip_uses_current_boot_and_expected_interface(self):
+    def test_gateway_ip_uses_latest_wan_marker_from_current_boot(self):
         self.lab.directory.mkdir(parents=True)
         (self.lab.directory / "serial.log").write_text(
-            "OpenRC started\neth0: leased 192.0.2.1 for DHCP\nOpenRC started\n"
-            "eth1: leased 10.12.0.1 for DHCP\n")
+            "OpenRC started\nVFLAB_WAN_IPV4: leased 192.0.2.1 for DHCP\nOpenRC started\n")
         self.assertIsNone(self.lab.gateway_ip())
         with (self.lab.directory / "serial.log").open("a") as stream:
-            stream.write("eth0: leased 192.0.2.2 for DHCP\n")
+            stream.write("eth1: leased 192.0.2.2 for DHCP\nVFLAB_WAN_IPV4: leased 192.0.2.2 for DHCP\r\n"
+                         "eth0: leased 10.12.0.2 for DHCP\n")
         self.assertEqual(self.lab.gateway_ip(), "192.0.2.2")
+        with (self.lab.directory / "serial.log").open("a") as stream:
+            stream.write("gateway login: VFLAB_WAN_IPV4: leased 192.0.2.3 for DHCP\n")
+        self.assertEqual(self.lab.gateway_ip(), "192.0.2.3")
+
+    def test_failed_legacy_gateway_can_still_be_stopped_after_host_update(self):
+        self.lab.directory.mkdir(parents=True)
+        serial = self.lab.directory / "serial.log"
+        for address in ("192.0.2.2", "10.12.0.5"):
+            with self.subTest(address=address):
+                serial.write_text(f"OpenRC started\ngateway login: eth1: leased {address} for DHCP\n"
+                                  "VFLAB_GATEWAY_FAILED 1\n")
+                with patch.object(self.lab, "pid", side_effect=[123, None]), \
+                        patch.object(lab_manager, "run") as run:
+                    self.lab.stop_gateway()
+                self.assertIn("root@" + address, run.call_args.args[0])
+                self.assertIn("exec poweroff", run.call_args.args[0][-1])
+
+    def test_wan_overlap_fails_readiness_immediately(self):
+        self.lab.directory.mkdir(parents=True)
+        for source in ("VFLAB_WAN_IPV4", "eth1"):
+            with self.subTest(source=source):
+                (self.lab.directory / "serial.log").write_text(
+                    f"OpenRC started\n{source}: leased 10.12.0.5 for DHCP\n")
+                with patch.object(self.lab, "ssh") as ssh, \
+                        patch.object(lab_manager.time, "sleep", side_effect=AssertionError("must fail without polling")):
+                    with self.assertRaisesRegex(ValueError, "subnet overlaps the gateway WAN"):
+                        self.lab.ready()
+                ssh.assert_not_called()
 
     def test_delete_confirmation_is_required_before_accessing_state(self):
         with patch.object(vm.lab_manager, "Lab") as lab:
