@@ -6,9 +6,9 @@ default_to_workspace = false
 
 [env]
 DOCA_REPO_URL = "https://github.com/NVIDIA/doca-platform.git"
-DOCA_BRANCH = "v0.1.0-carbide-47c105e2-nightly"
+DOCA_BRANCH = "v26.8.0"
 # Comment out DOCA_COMMIT when a tag/branch exists.
-DOCA_COMMIT = "48411f90933347be14fb999ae8850070c494393a"                        # DOCA 26.8-rc3
+# DOCA_COMMIT = "48411f90933347be14fb999ae8850070c494393a"                        # DOCA 26.8-rc3
 DOCA_CLONE_DIR = "${CARGO_MAKE_WORKING_DIRECTORY}/doca-platform"
 CRD_SOURCE_PATH = "${DOCA_CLONE_DIR}/deploy/charts/dpf-operator/templates/crds"
 CRD_DEST_PATH = "${CARGO_MAKE_WORKING_DIRECTORY}/crds"
@@ -19,7 +19,7 @@ script = '''
 set -eu
 rm -rf "${DOCA_CLONE_DIR}"
 echo "Cloning NVIDIA doca-platform repository..."
-if [ -z "${DOCA_COMMIT}" ]; then
+if [ -z "${DOCA_COMMIT:-}" ]; then
     git clone --depth 1 --branch ${DOCA_BRANCH} ${DOCA_REPO_URL} "${DOCA_CLONE_DIR}"
 else
     # Fetch the commit directly: nightly commits often live on histories that
