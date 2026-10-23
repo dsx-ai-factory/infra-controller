@@ -23,6 +23,7 @@ class DevSpaceWorkflowTests(unittest.TestCase):
         self.assertNotIn("tags", events["push"])
         self.assertEqual(events["pull_request_target"]["paths"], events["push"]["paths"])
         for path in ("devspace.yaml", "dev/deployment/devspace/**",
+                     "pxe/scout-firmware-scripts/nvidia/dgxh100/cx7/metadata.toml",
                      ".github/workflows/devspace-tests.yml", ".github/ci/test_devspace_workflow.py"):
             self.assertIn(path, events["pull_request_target"]["paths"])
         self.assertEqual(workflow["permissions"], {"contents": "read"})
