@@ -679,6 +679,7 @@ _on_failure() {
     # Always remove the rendered DPF values tempfile (it holds the full site
     # config), regardless of success or failure.
     rm -f "${_DPF_VALUES:-}" 2>/dev/null || true
+    rm -rf "${_KAMAJI_BOOTSTRAP_DIR:-}" 2>/dev/null || true
     if [[ "${_LEGACY_DPF_BOOTSTRAP_CLEANED:-false}" != "true" ]]; then
         _cleanup_legacy_dpf_bootstrap_credentials >/dev/null 2>&1 || true
     fi
@@ -1359,11 +1360,19 @@ if "${INSTALL_DPF}"; then
         # apply order is nondeterministic), so we can't rely on its partial
         # state — create all three explicitly, matching the chart.
         echo "Creating the Kamaji Issuer, webhook Certificate, and default DataStore out-of-band..."
+        # Helm 4 writes OCI pull status to stdout, so piping its output to
+        # kubectl also submits non-resource YAML. Render to files instead and
+        # apply only the bootstrap resources after rendering succeeds.
+        _KAMAJI_BOOTSTRAP_DIR="$(mktemp -d)"
         helm template kamaji oci://ghcr.io/nvidia/charts/kamaji --version 1.2.0 \
             -n dpf-operator-system -f operators/values/kamaji.yaml \
-            --show-only templates/certmanager_issuer.yaml \
-            --show-only templates/certmanager_certificate.yaml \
-            --show-only charts/kamaji-etcd/templates/etcd_datastore.yaml | kubectl apply -f -
+            --output-dir "${_KAMAJI_BOOTSTRAP_DIR}"
+        kubectl apply \
+            -f "${_KAMAJI_BOOTSTRAP_DIR}/kamaji/templates/certmanager_issuer.yaml" \
+            -f "${_KAMAJI_BOOTSTRAP_DIR}/kamaji/templates/certmanager_certificate.yaml" \
+            -f "${_KAMAJI_BOOTSTRAP_DIR}/kamaji/charts/kamaji-etcd/templates/etcd_datastore.yaml"
+        rm -rf "${_KAMAJI_BOOTSTRAP_DIR}"
+        _KAMAJI_BOOTSTRAP_DIR=""
         echo "Waiting for the kamaji controller to come up (cert issued + DataStore present)..."
         kubectl rollout status deployment/kamaji -n dpf-operator-system --timeout=300s
         # Restore failurePolicy to Fail *before* the reconcile sync. helm's
