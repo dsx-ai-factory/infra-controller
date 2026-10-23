@@ -167,10 +167,10 @@ fn firmware_cli_preserves_receipts_and_does_not_replay_mutations() {
             expected_reset: Some(false),
             expected_calls: "query\napply\nburn\n",
         },
-        // A failed image comparison must retain the completed burn and reset,
+        // Exhausting verification must retain the completed burn and reset,
         // without running the final version query or retrying either mutation.
         Case {
-            name: "image verification failure retains completed activation",
+            name: "verification budget exhaustion retains completed activation",
             flash_config: true,
             failed_phase: "verify",
             expected_state: FirmwareOperationState::ManualIntervention,
@@ -181,6 +181,18 @@ fn firmware_cli_preserves_receipts_and_does_not_replay_mutations() {
     ] {
         let directory = fixture();
         let fixture = directory.path();
+        if case.failed_phase == "verify" {
+            // Keep the default ten-second retry interval, but exhaust this
+            // operation's budget before a second read. The independent CLI
+            // watchdog still catches a workflow that never reaches terminal.
+            let profile_path = fixture.join("profile.toml");
+            let profile = fs::read_to_string(&profile_path).unwrap();
+            fs::write(
+                profile_path,
+                format!("{profile}post_reset_verify_timeout_seconds = 2\n"),
+            )
+            .unwrap();
+        }
         let _supervisor = Supervisor::start(fixture, case.failed_phase);
         let command = || {
             let mut command = cli(fixture);
@@ -219,6 +231,18 @@ fn firmware_cli_preserves_receipts_and_does_not_replay_mutations() {
             case.name
         );
         assert_eq!(operation.report.reset, case.expected_reset, "{}", case.name);
+        if case.failed_phase == "verify" {
+            let diagnostic = operation
+                .diagnostic
+                .as_deref()
+                .expect("verification exhaustion retains its last failed read");
+            assert!(
+                diagnostic.contains("post-reset firmware verification exceeded its 2s budget"),
+                "{diagnostic}"
+            );
+            assert!(diagnostic.contains("ImageVerification"), "{diagnostic}");
+            assert!(diagnostic.contains("exit_code=Some(41)"), "{diagnostic}");
+        }
         assert_eq!(
             output.status.success(),
             operation.is_complete(),
@@ -267,6 +291,15 @@ fn firmware_cli_preserves_receipts_and_does_not_replay_mutations() {
             assert_eq!(fs::read(staged_config).unwrap(), b"device-config\n");
             assert_eq!(operation.report.verified_image, Some(false));
             assert_eq!(operation.report.verified_version, Some(false));
+            if case.failed_phase == "verify" {
+                // Completed activation does not release exclusion when the
+                // requested verification has exhausted its budget.
+                let claim: serde_json::Value =
+                    serde_json::from_slice(&fs::read(fixture.join("state/mutation.json")).unwrap())
+                        .unwrap();
+                assert_eq!(claim["operation_id"], OPERATION_ID);
+                assert_eq!(claim["device_identity"], "0000:ab:01");
+            }
         }
     }
 }

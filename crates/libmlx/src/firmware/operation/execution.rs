@@ -56,10 +56,19 @@ pub(super) async fn run_operation(
     // The admitted request stays immutable. Only this runtime copy selects the
     // helper's private staging directory for the existing preparation path.
     profile.flash_spec.cache_dir = Some(card_directory.clone());
+    let subscribing = journal.clone();
+    let reload_required = tokio::task::spawn_blocking(move || {
+        subscribing
+            .lock()
+            .expect("firmware journal mutex poisoned; saved state may be inconsistent")
+            .subscribe_reload_required()
+    })
+    .await?;
     let progress = Arc::new(JournalProgress {
         operation_id: operation_id.clone(),
         card_directory,
         journal,
+        reload_required,
         redactions: diagnostic_redactions(&profile.flash_spec),
         #[cfg(test)]
         proof_gate: None,
@@ -93,6 +102,7 @@ struct JournalProgress {
     operation_id: String,
     card_directory: PathBuf,
     journal: Arc<Mutex<OperationJournal>>,
+    reload_required: watch::Receiver<bool>,
     redactions: Vec<String>,
     #[cfg(test)]
     proof_gate: Option<Arc<ArtifactProofGate>>,
@@ -275,6 +285,27 @@ impl JournalProgress {
 
 #[async_trait::async_trait]
 impl FirmwareProgress for JournalProgress {
+    fn check(&self) -> FirmwareResult<()> {
+        if *self.reload_required.borrow() {
+            return Err(progress_error(JournalError::ReloadRequired));
+        }
+        Ok(())
+    }
+
+    async fn wait_for_failure(&self) -> FirmwareError {
+        let mut reload_required = self.reload_required.clone();
+        if reload_required
+            .wait_for(|required| *required)
+            .await
+            .is_err()
+        {
+            // The progress owner keeps the sender alive. Losing a notification
+            // channel alone is not evidence of a failed journal write.
+            std::future::pending::<()>().await;
+        }
+        progress_error(JournalError::ReloadRequired)
+    }
+
     /// `record` awaits the owned blocking task before apply can advance. RPCs
     /// and observer monitoring remain pollable while artifact evidence is read.
     async fn record(&self, event: FirmwareProgressEvent) -> FirmwareResult<()> {
@@ -546,6 +577,17 @@ fn failure_diagnostic(error: &FirmwareError, redactions: &[String]) -> String {
                 safe_diagnostic_text(message, redactions)
             )
         }
+        FirmwareError::PostResetVerificationTimeout { timeout, source } => {
+            let summary =
+                format!("post-reset firmware verification exceeded its {timeout:?} budget");
+            match source {
+                Some(source) => format!(
+                    "{summary}; last verification failure: {}",
+                    failure_diagnostic(source, redactions)
+                ),
+                None => summary,
+            }
+        }
         FirmwareError::SourceResolution { reason, .. } => {
             format!(
                 "firmware source resolution failed: {}",
@@ -608,6 +650,30 @@ mod tests {
             source: io::Error::from_raw_os_error(libc::ENOSPC),
         });
         assert!(failure_diagnostic(&persistence, &redactions).contains("errno=Some(28)"));
+
+        // The deadline explains why work stopped; the last failed read explains what
+        // the operator should investigate. It needs the same source redaction.
+        let expired = FirmwareError::PostResetVerificationTimeout {
+            timeout: std::time::Duration::from_secs(30),
+            source: Some(Box::new(FirmwareError::VerificationFailed(
+                "source-password\nobserved old firmware".into(),
+            ))),
+        };
+        let diagnostic = failure_diagnostic(&expired, &redactions);
+        assert!(diagnostic.contains("30s budget"));
+        assert!(diagnostic.contains("observed old firmware"));
+        assert!(!diagnostic.contains("source-password"));
+        // Expiry before any failed read has no cause to append or reconstruct.
+        assert_eq!(
+            failure_diagnostic(
+                &FirmwareError::PostResetVerificationTimeout {
+                    timeout: std::time::Duration::from_secs(30),
+                    source: None,
+                },
+                &redactions,
+            ),
+            "post-reset firmware verification exceeded its 30s budget",
+        );
     }
 
     /// `run_operation` must derive redactions from the submitted profile before
@@ -787,6 +853,7 @@ printf '{frame_prefix}%s' '{response}'
         JournalProgress {
             operation_id: "operation".to_string(),
             card_directory: directory.to_path_buf(),
+            reload_required: journal.subscribe_reload_required(),
             journal: Arc::new(Mutex::new(journal)),
             redactions: vec!["secret".to_string()],
             proof_gate: None,

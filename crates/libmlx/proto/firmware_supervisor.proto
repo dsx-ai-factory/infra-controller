@@ -19,6 +19,9 @@ import "mlx_device.proto";
 // progress and observer cancellation do not consume this quota. Transport limits
 // allow 32 connected sockets and eight active HTTP/2 streams per connection;
 // excess sockets are closed. Requests and responses are limited to 128 KiB.
+// Protocol 2 adds bounded post-reset verification retries. Version-2 clients
+// may read and cancel version-1 receipts, but must not submit work to version 1:
+// it cannot honor the retry policy, including its omitted defaults.
 service FirmwareSupervisor {
   // Record an immutable request, or return its existing receipt. Reusing an ID
   // with different work is rejected, as is new work while a predecessor still
@@ -116,7 +119,7 @@ message GetSupervisorStatusRequest {}
 
 // GetSupervisorStatusResponse supplies the identity checked before submission.
 message GetSupervisorStatusResponse {
-  // Private protocol version, exactly 1 for this service implementation.
+  // Private protocol version, exactly 2 for this service implementation.
   uint32 protocol_version = 1;
   // Normalized PCI slot dddd:bb:ss, not a certified physical card or an
   // independently isolated reset domain.

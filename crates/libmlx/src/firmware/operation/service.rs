@@ -265,7 +265,7 @@ impl FirmwareSupervisor for Supervisor {
             .profile
             .map(TryInto::try_into)
             .transpose()
-            .map_err(|_| Status::invalid_argument("invalid firmware profile"))?;
+            .map_err(Status::invalid_argument)?;
         if let Some(profile) = &profile {
             profile
                 .flash_spec
@@ -706,6 +706,52 @@ mod tests {
         }
     }
 
+    /// Omitted retry settings must preserve the exact predecessor request hash,
+    /// so upgrading the daemon does not turn an identical delivery into a conflict.
+    #[tokio::test]
+    async fn omitted_retry_settings_preserve_predecessor_request_identity() {
+        let (_root, supervisor, _receiver) = supervisor_fixture();
+        let mut request = firmware_submission(&supervisor, "legacy-request");
+        request
+            .profile
+            .as_mut()
+            .unwrap()
+            .flash_spec
+            .as_mut()
+            .unwrap()
+            .firmware_url = "/unused-image.bin".into();
+
+        supervisor
+            .submit_firmware_operation(peer_request(request.clone()))
+            .await
+            .expect("admit profile without retry fields");
+
+        // Freeze the old serialization, including struct field order. Building
+        // this expected value with today's types would hide identity changes.
+        let predecessor = concat!(
+            r#"[{"part_number":"part","psid":"psid","version":"version","#,
+            r#""firmware_url":"/unused-image.bin","firmware_credentials":null,"#,
+            r#""device_conf_url":null,"device_conf_credentials":null,"verify_from_cache":false,"cache_dir":null,"#,
+            r#""verify_image":false,"verify_version":false,"reset":false,"reset_level":3},"Continue"]"#,
+        );
+        let expected: [u8; 32] = Sha256::digest(predecessor.as_bytes()).into();
+        assert_eq!(
+            supervisor
+                .journal
+                .lock()
+                .unwrap()
+                .record("legacy-request")
+                .unwrap()
+                .unwrap()
+                .request_sha256,
+            expected,
+        );
+        supervisor
+            .submit_firmware_operation(peer_request(request))
+            .await
+            .expect("identical omitted policy returns the retained receipt");
+    }
+
     /// The file may already contain an admission or cancellation when its
     /// directory sync fails. Every receipt read must wait for a reopen.
     #[tokio::test]
@@ -1003,11 +1049,12 @@ mod tests {
         }
     }
 
-    /// Values outside `u8` cannot alias an admitted reset level after conversion.
+    /// Invalid options must identify the field before duplicate lookup, without
+    /// changing the accepted request, its exclusion, or the executor queue.
     #[tokio::test]
-    async fn oversized_reset_level_is_rejected_before_duplicate_lookup() {
-        let (_root, supervisor, mut receiver) = supervisor_fixture();
-        let mut request = firmware_submission(&supervisor, "operation");
+    async fn invalid_profile_options_are_rejected_before_duplicate_lookup() {
+        let (root, supervisor, mut receiver) = supervisor_fixture();
+        let request = firmware_submission(&supervisor, "operation");
         assert_eq!(
             request
                 .profile
@@ -1026,27 +1073,47 @@ mod tests {
         let work = receiver.recv().await.unwrap();
         let path = supervisor.directory.join("operations.json");
         let saved = fs::read(&path).unwrap();
-        request
-            .profile
-            .as_mut()
-            .unwrap()
-            .flash_options
-            .as_mut()
-            .unwrap()
-            .reset_level = 259;
-        assert_eq!(
-            supervisor
-                .submit_firmware_operation(peer_request(request))
+        let claim_path = root.path().join("mutation.json");
+        let saved_claim = fs::read(&claim_path).unwrap();
+        for (name, reset_level, retry_interval, message) in [
+            // Truncating 259 to u8 would alias the accepted reset level of 3.
+            (
+                "overflowing reset level",
+                259,
+                None,
+                "reset_level must be in 0..=255",
+            ),
+            // Timing validation also applies when the optional phases are off.
+            (
+                "zero retry interval",
+                3,
+                Some(0),
+                "configuration error: post_reset_verify_retry_interval_seconds must be in 1..=1800 seconds",
+            ),
+        ] {
+            let mut invalid = request.clone();
+            let options = invalid
+                .profile
+                .as_mut()
+                .unwrap()
+                .flash_options
+                .as_mut()
+                .unwrap();
+            options.reset_level = reset_level;
+            options.post_reset_verify_retry_interval_seconds = retry_interval;
+            let error = supervisor
+                .submit_firmware_operation(peer_request(invalid))
                 .await
-                .unwrap_err()
-                .code(),
-            tonic::Code::InvalidArgument
-        );
-        assert_eq!(fs::read(path).unwrap(), saved);
-        assert!(matches!(
-            receiver.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
+                .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument, "{name}");
+            assert_eq!(error.message(), message, "{name}");
+            assert_eq!(fs::read(&path).unwrap(), saved, "{name}");
+            assert_eq!(fs::read(&claim_path).unwrap(), saved_claim, "{name}");
+            assert!(
+                matches!(receiver.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                "{name}"
+            );
+        }
         drop(work);
     }
 

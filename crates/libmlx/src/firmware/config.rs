@@ -25,6 +25,7 @@
 // of specs + options to drive further operations/management.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub use carbide_libmlx_model::firmware::FirmwareSpec;
 use rpc::protos::mlx_device::{
@@ -260,26 +261,49 @@ fn default_reset_level() -> u8 {
     DEFAULT_RESET_LEVEL
 }
 
-// FlashOptions contains lifecycle flags for the apply() workflow
-// orchestrator, which takes a FirmwareFlasherProfile. This controls
-// which post-flash steps are executed, and their parameters.
+const DEFAULT_POST_RESET_VERIFY_RETRY_INTERVAL_SECONDS: u32 = 10;
+const DEFAULT_POST_RESET_VERIFY_TIMEOUT_SECONDS: u32 = 30 * 60;
+const MAX_POST_RESET_VERIFICATION_SECONDS: u32 = 30 * 60;
+
+/// `FlashOptions` selects post-burn phases and verification timing for `apply`.
+/// Timing applies after a successful reset when `reset` and either
+/// `verify_image` or `verify_version` are true; timing values never enable
+/// phases. Without reset, each requested verification runs once. Omitted
+/// timing fields remain absent in saved requests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlashOptions {
-    // verify_image controls whether the firmware image is verified
-    // against the source binary after flashing.
+    /// `verify_image` controls whether the firmware image is verified
+    /// against the source binary after flashing. Defaults to `false`.
     #[serde(default)]
     pub verify_image: bool,
-    // verify_version controls whether the firmware version on the
-    // device is checked after flashing.
+    /// `verify_version` controls whether the firmware version on the
+    /// device is checked after flashing. Defaults to `false`.
     #[serde(default)]
     pub verify_version: bool,
-    // reset controls whether the device is reset via mlxfwreset
-    // after flashing.
+    /// `reset` controls whether the device is reset via `mlxfwreset`
+    /// after flashing. Defaults to `false`.
     #[serde(default)]
     pub reset: bool,
-    // reset_level is the mlxfwreset level to use. Defaults to 3.
+    /// `reset_level` is the `mlxfwreset` level used when `reset` is true.
+    /// Accepts 0 through 255 and defaults to 3. Device support for the selected
+    /// level is not checked here.
     #[serde(default = "default_reset_level")]
     pub reset_level: u8,
+    /// `post_reset_verify_retry_interval_seconds` delays the next verification
+    /// read after a settled unsuccessful attempt. Omission uses 10 seconds.
+    /// It applies only when `reset` and at least one verification are enabled.
+    /// Explicit values must be in 1..=1800, even when those phases are disabled.
+    /// No retry starts if this delay does not fit within the remaining budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_reset_verify_retry_interval_seconds: Option<u32>,
+    /// `post_reset_verify_timeout_seconds` bounds all requested verification
+    /// after reset completion is recorded. Omission uses 1800 seconds.
+    /// It applies only when `reset` and at least one verification are enabled.
+    /// Explicit values must be in 1..=1800, even when those phases are disabled.
+    /// Tool discovery, read attempts, and retry delays share this budget;
+    /// bounded command cleanup and result delivery may finish after it expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_reset_verify_timeout_seconds: Option<u32>,
 }
 
 impl Default for FlashOptions {
@@ -289,7 +313,56 @@ impl Default for FlashOptions {
             verify_version: false,
             reset: false,
             reset_level: DEFAULT_RESET_LEVEL,
+            post_reset_verify_retry_interval_seconds: None,
+            post_reset_verify_timeout_seconds: None,
         }
+    }
+}
+
+/// `PostResetVerificationPolicy` contains validated timing for one apply call.
+pub(super) struct PostResetVerificationPolicy {
+    pub(super) retry_interval: Duration,
+    pub(super) timeout: Duration,
+}
+
+impl FlashOptions {
+    /// Resolve timing without changing the request used for operation identity.
+    /// Invalid explicit values are rejected even when no reset or verification
+    /// is requested; an inactive policy returns `None` after validation.
+    pub(super) fn post_reset_verification_policy(
+        &self,
+    ) -> FirmwareResult<Option<PostResetVerificationPolicy>> {
+        for (field, seconds) in [
+            (
+                "post_reset_verify_retry_interval_seconds",
+                self.post_reset_verify_retry_interval_seconds,
+            ),
+            (
+                "post_reset_verify_timeout_seconds",
+                self.post_reset_verify_timeout_seconds,
+            ),
+        ] {
+            if let Some(seconds) = seconds
+                && !(1..=MAX_POST_RESET_VERIFICATION_SECONDS).contains(&seconds)
+            {
+                return Err(FirmwareError::ConfigError(format!(
+                    "{field} must be in 1..={MAX_POST_RESET_VERIFICATION_SECONDS} seconds"
+                )));
+            }
+        }
+        if !self.reset || !(self.verify_image || self.verify_version) {
+            return Ok(None);
+        }
+        Ok(Some(PostResetVerificationPolicy {
+            retry_interval: Duration::from_secs(u64::from(
+                self.post_reset_verify_retry_interval_seconds
+                    .unwrap_or(DEFAULT_POST_RESET_VERIFY_RETRY_INTERVAL_SECONDS),
+            )),
+            timeout: Duration::from_secs(u64::from(
+                self.post_reset_verify_timeout_seconds
+                    .unwrap_or(DEFAULT_POST_RESET_VERIFY_TIMEOUT_SECONDS),
+            )),
+        }))
     }
 }
 
@@ -343,10 +416,14 @@ impl<'de> Deserialize<'de> for FirmwareFlasherProfile {
             reset: bool,
             #[serde(default = "default_reset_level")]
             reset_level: u8,
+            #[serde(default)]
+            post_reset_verify_retry_interval_seconds: Option<u32>,
+            #[serde(default)]
+            post_reset_verify_timeout_seconds: Option<u32>,
         }
 
         let profile = FlatFirmwareFlasherProfile::deserialize(deserializer)?;
-        Ok(Self {
+        let profile = Self {
             firmware_spec: FirmwareSpec {
                 part_number: profile.part_number,
                 psid: profile.psid,
@@ -365,8 +442,16 @@ impl<'de> Deserialize<'de> for FirmwareFlasherProfile {
                 verify_version: profile.verify_version,
                 reset: profile.reset,
                 reset_level: profile.reset_level,
+                post_reset_verify_retry_interval_seconds: profile
+                    .post_reset_verify_retry_interval_seconds,
+                post_reset_verify_timeout_seconds: profile.post_reset_verify_timeout_seconds,
             },
-        })
+        };
+        profile
+            .flash_options
+            .post_reset_verification_policy()
+            .map_err(serde::de::Error::custom)?;
+        Ok(profile)
     }
 }
 
@@ -430,6 +515,8 @@ impl From<FlashOptions> for FlashOptionsPb {
             verify_version: opts.verify_version,
             reset: opts.reset,
             reset_level: opts.reset_level as u32,
+            post_reset_verify_retry_interval_seconds: opts.post_reset_verify_retry_interval_seconds,
+            post_reset_verify_timeout_seconds: opts.post_reset_verify_timeout_seconds,
         }
     }
 }
@@ -438,13 +525,20 @@ impl TryFrom<FlashOptionsPb> for FlashOptions {
     type Error = String;
 
     fn try_from(proto: FlashOptionsPb) -> Result<Self, Self::Error> {
-        Ok(FlashOptions {
+        let options = FlashOptions {
             verify_image: proto.verify_image,
             verify_version: proto.verify_version,
             reset: proto.reset,
             reset_level: u8::try_from(proto.reset_level)
                 .map_err(|_| "reset_level must be in 0..=255".to_string())?,
-        })
+            post_reset_verify_retry_interval_seconds: proto
+                .post_reset_verify_retry_interval_seconds,
+            post_reset_verify_timeout_seconds: proto.post_reset_verify_timeout_seconds,
+        };
+        options
+            .post_reset_verification_policy()
+            .map_err(|error| error.to_string())?;
+        Ok(options)
     }
 }
 
@@ -684,6 +778,83 @@ mod tests {
         assert!(!opts.verify_version);
         assert!(!opts.reset);
         assert_eq!(opts.reset_level, 3);
+        assert_eq!(opts.post_reset_verify_retry_interval_seconds, None);
+        assert_eq!(opts.post_reset_verify_timeout_seconds, None);
+    }
+
+    /// Disabled phases must stay disabled, but cannot hide invalid timing that
+    /// would become active if a caller later selects reset and verification.
+    #[test]
+    fn post_reset_verification_policy_validates_timing_before_selecting_phases() {
+        use carbide_test_support::Outcome::{Fails, Yields};
+        use carbide_test_support::scenarios;
+
+        let resolve = |options: FlashOptions| {
+            options
+                .post_reset_verification_policy()
+                .map(|policy| {
+                    policy.map(|policy| (policy.retry_interval.as_secs(), policy.timeout.as_secs()))
+                })
+                .map_err(drop)
+        };
+        scenarios!(resolve:
+            "image verification after reset uses the timing defaults" {
+                FlashOptions {
+                    reset: true,
+                    verify_image: true,
+                    ..Default::default()
+                } => Yields(Some((10, 1800))),
+            }
+            "version verification alone also enables the policy" {
+                FlashOptions {
+                    reset: true,
+                    verify_version: true,
+                    ..Default::default()
+                } => Yields(Some((10, 1800))),
+            }
+            "verification without reset keeps its single attempt" {
+                FlashOptions {
+                    verify_image: true,
+                    ..Default::default()
+                } => Yields(None),
+            }
+            "reset without verification has no verification budget" {
+                FlashOptions {
+                    reset: true,
+                    ..Default::default()
+                } => Yields(None),
+            }
+            "valid explicit timing never enables disabled phases" {
+                FlashOptions {
+                    post_reset_verify_retry_interval_seconds: Some(10),
+                    post_reset_verify_timeout_seconds: Some(1800),
+                    ..Default::default()
+                } => Yields(None),
+            }
+            "accepted limits permit an interval longer than the budget" {
+                FlashOptions {
+                    reset: true,
+                    verify_image: true,
+                    post_reset_verify_retry_interval_seconds: Some(1800),
+                    post_reset_verify_timeout_seconds: Some(1),
+                    ..Default::default()
+                } => Yields(Some((1800, 1))),
+            }
+            "zero interval is invalid even when no verification is requested" {
+                FlashOptions {
+                    post_reset_verify_retry_interval_seconds: Some(0),
+                    ..Default::default()
+                } => Fails,
+            }
+            "verification cannot exceed the hard timeout limit" {
+                FlashOptions {
+                    reset: true,
+                    verify_image: true,
+                    post_reset_verify_timeout_seconds: Some(1801),
+                    ..Default::default()
+                } => Fails,
+            }
+        );
     }
 
     #[test]
@@ -693,6 +864,8 @@ mod tests {
             verify_version: true,
             reset: true,
             reset_level: 5,
+            post_reset_verify_retry_interval_seconds: Some(2),
+            post_reset_verify_timeout_seconds: Some(30),
         };
         let proto: FlashOptionsPb = original.clone().into();
         let converted: FlashOptions = proto.try_into().unwrap();
@@ -700,21 +873,26 @@ mod tests {
         assert_eq!(original.verify_version, converted.verify_version);
         assert_eq!(original.reset, converted.reset);
         assert_eq!(original.reset_level, converted.reset_level);
+        assert_eq!(
+            original.post_reset_verify_retry_interval_seconds,
+            converted.post_reset_verify_retry_interval_seconds
+        );
+        assert_eq!(
+            original.post_reset_verify_timeout_seconds,
+            converted.post_reset_verify_timeout_seconds
+        );
     }
 
     #[test]
-    fn profile_options_preserve_omission_and_reject_reset_level_overflow() {
+    fn profile_options_preserve_omission_and_reject_invalid_values() {
         use carbide_test_support::Outcome::{Fails, Yields};
         use carbide_test_support::scenarios;
 
-        let convert = |level: Option<u32>| {
+        let convert = |flash_options: Option<FlashOptionsPb>| {
             FirmwareFlasherProfile::try_from(FirmwareFlasherProfilePb {
                 firmware_spec: Some(Default::default()),
                 flash_spec: Some(FlashSpecPb::default()),
-                flash_options: level.map(|reset_level| FlashOptionsPb {
-                    reset_level,
-                    ..Default::default()
-                }),
+                flash_options,
             })
             .map(|profile| profile.flash_options.reset_level)
         };
@@ -723,11 +901,23 @@ mod tests {
                 None => Yields(3),
             }
             "a present options message preserves the wire value" {
-                Some(0) => Yields(0),
-                Some(255) => Yields(255),
+                Some(FlashOptionsPb::default()) => Yields(0),
+                Some(FlashOptionsPb {
+                    reset_level: 255,
+                    ..Default::default()
+                }) => Yields(255),
             }
             "out-of-range levels cannot alias accepted work" {
-                Some(256) => Fails,
+                Some(FlashOptionsPb {
+                    reset_level: 256,
+                    ..Default::default()
+                }) => Fails,
+            }
+            "wire decoding validates timing before admission" {
+                Some(FlashOptionsPb {
+                    post_reset_verify_retry_interval_seconds: Some(0),
+                    ..Default::default()
+                }) => Fails,
             }
         );
     }
@@ -753,6 +943,7 @@ mod tests {
                 verify_version: true,
                 reset: true,
                 reset_level: 3,
+                ..Default::default()
             },
         };
         let proto: FirmwareFlasherProfilePb = original.clone().into();
@@ -849,17 +1040,31 @@ verify_version = true
     }
 
     #[test]
-    fn profile_toml_rejects_unknown_fields() {
-        let toml_str = r#"
+    fn profile_toml_rejects_unknown_or_invalid_fields() {
+        use carbide_test_support::value_scenarios;
+
+        let rejects = |(field, value): (&str, &str)| {
+            let toml_str = format!(
+                r#"
 part_number = "900-9D3B4-00CV-TA0"
 psid = "MT_0000000884"
 version = "32.43.1014"
 firmware_url = "https://artifacts.nvidia.com/fw.bin"
-firmware_urll = "https://typo.example.com/fw.bin"
-"#;
+{field} = {value}
+"#
+            );
 
-        let error = FirmwareFlasherProfile::from_toml(toml_str).unwrap_err();
-        assert!(error.to_string().contains("firmware_urll"));
+            let error = FirmwareFlasherProfile::from_toml(&toml_str).unwrap_err();
+            error.to_string().contains(field)
+        };
+        value_scenarios!(rejects:
+            "unknown keys identify the misspelled field" {
+                ("firmware_urll", "\"https://typo.example.com/fw.bin\"") => true,
+            }
+            "timing is validated even when optional phases are disabled" {
+                ("post_reset_verify_timeout_seconds", "1801") => true,
+            }
+        );
     }
 
     #[test]
@@ -883,6 +1088,8 @@ firmware_urll = "https://typo.example.com/fw.bin"
                 verify_version: true,
                 reset: true,
                 reset_level: 5,
+                post_reset_verify_retry_interval_seconds: Some(5),
+                post_reset_verify_timeout_seconds: Some(90),
             },
         };
 
@@ -924,6 +1131,18 @@ firmware_urll = "https://typo.example.com/fw.bin"
         assert_eq!(
             decoded.flash_options.reset_level,
             original.flash_options.reset_level
+        );
+        assert_eq!(
+            decoded
+                .flash_options
+                .post_reset_verify_retry_interval_seconds,
+            original
+                .flash_options
+                .post_reset_verify_retry_interval_seconds
+        );
+        assert_eq!(
+            decoded.flash_options.post_reset_verify_timeout_seconds,
+            original.flash_options.post_reset_verify_timeout_seconds
         );
     }
 }

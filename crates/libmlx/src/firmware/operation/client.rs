@@ -36,7 +36,7 @@ use tower::service_fn;
 
 use crate::firmware::config::FirmwareFlasherProfile;
 
-pub(super) const PROTOCOL_VERSION: u32 = 1;
+pub(super) const PROTOCOL_VERSION: u32 = 2;
 pub(super) const MESSAGE_LIMIT: usize = 128 * 1024;
 // Local admission and receipt reads are short operations. This cumulative bound
 // includes channel readiness and reconnection, not the firmware job's lifetime.
@@ -45,7 +45,8 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 /// The protocol, PCI slot, execution target, and boot served by one supervisor socket.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SupervisorStatus {
-    /// Supported private protocol version, exactly 1.
+    /// Private protocol version: 2 supports post-reset verification retries;
+    /// version 1 permits receipt reads and cancellation, but not submission.
     pub protocol_version: u32,
     /// Normalized PCI slot `dddd:bb:ss`, not proof of physical-card
     /// identity or an independently isolated reset domain.
@@ -75,7 +76,8 @@ pub enum FirmwareSupervisorClientError {
     /// A successful response omitted or contradicted required receipt data.
     #[error("invalid firmware supervisor response: {0}")]
     InvalidResponse(String),
-    /// The supervisor reported a private protocol version this client cannot use.
+    /// The supervisor's private protocol cannot support this connection or request.
+    /// Protocol 1 permits receipt reads and cancellation, but not submission.
     #[error("unsupported firmware supervisor protocol version {0}")]
     UnsupportedProtocol(u32),
 }
@@ -147,12 +149,22 @@ impl FirmwareSupervisorClient {
     /// Explicit SSH-agent authentication
     /// uses the supervisor's `SSH_AUTH_SOCK`; host verification uses its
     /// default known-hosts file. Those environments are not forwarded per request.
+    /// A protocol-1 daemon cannot honor post-reset retry policy, so submission
+    /// is refused before sending an RPC. Use [`Self::get`] or [`Self::cancel`]
+    /// to reconcile its existing work before replacing that supervisor.
     pub async fn submit(
         &mut self,
         operation_id: &str,
         mut profile: Option<FirmwareFlasherProfile>,
         observer_exit_behavior: ObserverExitBehavior,
     ) -> Result<FirmwareOperation, FirmwareSupervisorClientError> {
+        // Protocol 1 ignores retry settings and performs each check once.
+        // Omitted timing also selects bounded retries, so Submit requires v2.
+        if self.identity.protocol_version != PROTOCOL_VERSION {
+            return Err(FirmwareSupervisorClientError::UnsupportedProtocol(
+                self.identity.protocol_version,
+            ));
+        }
         if let Some(profile) = &mut profile {
             // Absolute inputs and remote URLs remain usable after the caller's
             // working directory is removed. With no directory available, any
@@ -262,7 +274,7 @@ impl TryFrom<GetSupervisorStatusResponse> for SupervisorStatus {
     type Error = FirmwareSupervisorClientError;
 
     fn try_from(response: GetSupervisorStatusResponse) -> Result<Self, Self::Error> {
-        if response.protocol_version != PROTOCOL_VERSION {
+        if !matches!(response.protocol_version, 1 | PROTOCOL_VERSION) {
             return Err(FirmwareSupervisorClientError::UnsupportedProtocol(
                 response.protocol_version,
             ));
@@ -307,11 +319,171 @@ fn decode_operation(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use carbide_test_support::{Check, check_values};
-    use rpc::protos::mlx_device::{FirmwareFlashReport, FirmwareOperationState};
+    use rpc::protos::firmware_supervisor::firmware_supervisor_server::{
+        FirmwareSupervisor, FirmwareSupervisorServer,
+    };
+    use rpc::protos::firmware_supervisor::{
+        CancelFirmwareOperationResponse, GetFirmwareOperationResponse,
+        SubmitFirmwareOperationResponse,
+    };
+    use rpc::protos::mlx_device::{
+        FirmwareFlashReport, FirmwareOperationPhase, FirmwareOperationState,
+    };
     use tokio::net::UnixListener;
+    use tokio::sync::watch;
+    use tokio_stream::wrappers::UnixListenerStream;
+    use tonic::{Request, Response, Status};
 
     use super::*;
+
+    /// A protocol-1 peer exposes retained work and checks the cancellation
+    /// identity without running firmware tools or accepting new operations.
+    struct PredecessorSupervisor {
+        identity: SupervisorIdentity,
+        receipt: FirmwareOperationPb,
+        submissions: Arc<AtomicUsize>,
+    }
+
+    #[tonic::async_trait]
+    impl FirmwareSupervisor for PredecessorSupervisor {
+        async fn submit_firmware_operation(
+            &self,
+            _request: Request<SubmitFirmwareOperationRequest>,
+        ) -> Result<Response<SubmitFirmwareOperationResponse>, Status> {
+            self.submissions.fetch_add(1, Ordering::Relaxed);
+            Err(Status::unimplemented(
+                "the predecessor must not receive submissions",
+            ))
+        }
+
+        async fn get_firmware_operation(
+            &self,
+            request: Request<GetFirmwareOperationRequest>,
+        ) -> Result<Response<GetFirmwareOperationResponse>, Status> {
+            if request.into_inner().operation_id != self.receipt.operation_id {
+                return Err(Status::not_found("unknown fixture operation"));
+            }
+            Ok(Response::new(GetFirmwareOperationResponse {
+                operation: Some(self.receipt.clone()),
+            }))
+        }
+
+        async fn cancel_firmware_operation(
+            &self,
+            request: Request<CancelFirmwareOperationRequest>,
+        ) -> Result<Response<CancelFirmwareOperationResponse>, Status> {
+            let request = request.into_inner();
+            if request.expected_identity.as_ref() != Some(&self.identity) {
+                return Err(Status::failed_precondition("cancellation identity changed"));
+            }
+            if request.operation_id != self.receipt.operation_id {
+                return Err(Status::not_found("unknown fixture operation"));
+            }
+            Ok(Response::new(CancelFirmwareOperationResponse {
+                operation: Some(FirmwareOperationPb {
+                    state: FirmwareOperationState::CancelRequested.into(),
+                    ..self.receipt.clone()
+                }),
+            }))
+        }
+
+        async fn get_supervisor_status(
+            &self,
+            _request: Request<GetSupervisorStatusRequest>,
+        ) -> Result<Response<GetSupervisorStatusResponse>, Status> {
+            Ok(Response::new(GetSupervisorStatusResponse {
+                protocol_version: self.identity.protocol_version,
+                device_identity: self.identity.device_identity.clone(),
+                boot_id: self.identity.boot_id.clone(),
+                execution_device: self.identity.execution_device.clone(),
+            }))
+        }
+    }
+
+    /// Upgrading the client must preserve recovery access to protocol-1 work,
+    /// without sending it new requests whose retry policy it cannot honor.
+    #[tokio::test]
+    async fn predecessor_receipts_remain_accessible_without_new_admission() {
+        let directory = tempfile::tempdir().expect("create socket directory");
+        let socket = directory.path().join("supervisor.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fixture socket");
+        let identity = SupervisorIdentity {
+            protocol_version: 1,
+            device_identity: "0000:03:00".to_string(),
+            boot_id: "predecessor-boot".to_string(),
+            execution_device: "0000:03:00.1".to_string(),
+        };
+        let receipt = FirmwareOperationPb {
+            operation_id: "predecessor-operation".to_string(),
+            state: FirmwareOperationState::Running.into(),
+            phase: Some(FirmwareOperationPhase::VerifyImage.into()),
+            report: Some(FirmwareFlashReport {
+                flashed: true,
+                reset: Some(true),
+                verified_image: Some(false),
+                ..Default::default()
+            }),
+            diagnostic: None,
+        };
+        let submissions = Arc::new(AtomicUsize::new(0));
+        let predecessor = PredecessorSupervisor {
+            identity: identity.clone(),
+            receipt: receipt.clone(),
+            submissions: submissions.clone(),
+        };
+        let (shutdown, mut stopping) = watch::channel(false);
+        let server = tonic::transport::Server::builder()
+            .add_service(FirmwareSupervisorServer::new(predecessor))
+            .serve_with_incoming_shutdown(UnixListenerStream::new(listener), async move {
+                stopping.changed().await.expect("request fixture shutdown");
+            });
+
+        // Join both sides, with a fixture-wide bound in addition to each RPC's
+        // deadline, so transport or shutdown regressions cannot strand a task.
+        let (server_result, ()) = tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::join!(server, async {
+                let mut client = FirmwareSupervisorClient::connect(&socket)
+                    .await
+                    .expect("connect to protocol-1 supervisor");
+                assert_eq!(SupervisorIdentity::from(client.identity.clone()), identity);
+                let observed: FirmwareOperationPb = client
+                    .get(&receipt.operation_id)
+                    .await
+                    .expect("read predecessor receipt")
+                    .into();
+                assert_eq!(observed, receipt);
+
+                // The peer requires the complete v1 identity from the handshake.
+                let canceled: FirmwareOperationPb = client
+                    .cancel(&receipt.operation_id)
+                    .await
+                    .expect("cancel using predecessor identity")
+                    .into();
+                assert_eq!(
+                    canceled,
+                    FirmwareOperationPb {
+                        state: FirmwareOperationState::CancelRequested.into(),
+                        ..receipt
+                    }
+                );
+                assert!(matches!(
+                    client
+                        .submit("new-operation", None, ObserverExitBehavior::Continue)
+                        .await,
+                    Err(FirmwareSupervisorClientError::UnsupportedProtocol(1))
+                ));
+                assert_eq!(submissions.load(Ordering::Relaxed), 0);
+                shutdown.send(true).expect("stop predecessor fixture");
+            })
+        })
+        .await
+        .expect("predecessor fixture must stop within thirty seconds");
+        server_result.expect("serve predecessor fixture");
+    }
 
     /// An accepted socket alone is not readiness: a silent HTTP/2 peer must
     /// consume the same bounded deadline as connection establishment.
@@ -348,6 +520,14 @@ mod tests {
         };
         check_values(
             [
+                Check {
+                    scenario: "the predecessor identity remains usable for receipt recovery",
+                    input: (1, "0000:03:00", "boot", "0000:03:00.1"),
+                    expect: Some(SupervisorIdentity {
+                        protocol_version: 1,
+                        ..identity.clone()
+                    }),
+                },
                 Check {
                     scenario: "the full function is retained in mutation identity",
                     input: (PROTOCOL_VERSION, "0000:03:00", "boot", "0000:03:00.1"),

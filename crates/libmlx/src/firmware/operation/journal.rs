@@ -32,6 +32,7 @@ use carbide_libmlx_model::firmware::result::FirmwareFlashReport;
 use nix::libc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::sync::watch;
 
 use crate::firmware::config::FlashOptions;
 
@@ -245,7 +246,7 @@ pub(super) struct OperationJournal {
     directory: File,
     current_boot_id: String,
     ledger: Ledger,
-    reload_required: bool,
+    reload_required: watch::Sender<bool>,
     // Keep ownership for the journal's lifetime. Never unlink the
     // lock file: two helpers could otherwise lock different inodes by one name.
     _owner_lock: OwnerLock,
@@ -335,7 +336,7 @@ impl OperationJournal {
             directory: directory_file,
             current_boot_id: boot_id.to_string(),
             ledger,
-            reload_required: false,
+            reload_required: watch::channel(false).0,
             _owner_lock: owner_lock,
         };
         if created {
@@ -513,8 +514,14 @@ impl OperationJournal {
             .map(|record| record.operation.clone()))
     }
 
+    /// A failed save fences this handle until reopen and wakes execution that
+    /// is waiting without a command in flight. It is not accepted cancellation.
+    pub(super) fn subscribe_reload_required(&self) -> watch::Receiver<bool> {
+        self.reload_required.subscribe()
+    }
+
     fn ensure_readable(&self) -> Result<(), JournalError> {
-        if self.reload_required {
+        if *self.reload_required.borrow() {
             return Err(JournalError::ReloadRequired);
         }
         Ok(())
@@ -545,12 +552,13 @@ impl OperationJournal {
     /// an uncertain I/O failure disables further writes on this handle.
     fn save(&mut self, next: Ledger) -> Result<(), JournalError> {
         let encoded = next.encode_bounded()?;
-        // From this point, any I/O failure leaves the caller without a durable
-        // acceptance answer. Keep the in-memory view unusable until reload.
-        self.reload_required = true;
-        persist_ledger(&self.path, &self.directory, &encoded)?;
+        // An I/O failure leaves no durable acceptance answer. Publish the
+        // sticky fence only after failure, never while a successful save runs.
+        if let Err(error) = persist_ledger(&self.path, &self.directory, &encoded) {
+            self.reload_required.send_replace(true);
+            return Err(error);
+        }
         self.ledger = next;
-        self.reload_required = false;
         Ok(())
     }
 }

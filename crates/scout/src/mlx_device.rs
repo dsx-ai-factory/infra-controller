@@ -2241,6 +2241,7 @@ mod tests {
             lookups: Arc<AtomicUsize>,
             operation_id: String,
             boot_id: String,
+            protocol_version: u32,
         }
 
         #[tonic::async_trait]
@@ -2287,7 +2288,7 @@ mod tests {
                 _: Request<GetSupervisorStatusRequest>,
             ) -> Result<Response<GetSupervisorStatusResponse>, Status> {
                 Ok(Response::new(GetSupervisorStatusResponse {
-                    protocol_version: 1,
+                    protocol_version: self.protocol_version,
                     device_identity: "0000:03:00".to_string(),
                     boot_id: self.boot_id.clone(),
                     execution_device: "0000:03:00.0".to_string(),
@@ -2305,6 +2306,7 @@ mod tests {
 
         struct Case {
             name: &'static str,
+            protocol_version: u32,
             receipt: Result<Option<mlx_device_pb::FirmwareOperation>, Status>,
             profile: Option<FirmwareFlasherProfile>,
             admission_error: Option<Status>,
@@ -2326,9 +2328,11 @@ mod tests {
             .trim()
             .to_string();
         for (case_index, case) in [
-            // Losing a live profile must not erase an unresolved burn receipt.
+            // Upgrading Scout and losing a live profile must not erase an
+            // unresolved burn receipt still owned by a protocol-1 daemon.
             Case {
                 name: "existing work survives a missing profile",
+                protocol_version: 1,
                 receipt: Ok(Some(receipt.clone())),
                 profile: None,
                 admission_error: None,
@@ -2338,6 +2342,7 @@ mod tests {
             // A catalog edit is not permission to replace this state's request.
             Case {
                 name: "existing work ignores a changed live profile",
+                protocol_version: 2,
                 receipt: Ok(Some(receipt.clone())),
                 profile: Some(changed_profile.clone()),
                 admission_error: None,
@@ -2347,6 +2352,7 @@ mod tests {
             // New work is submitted once with the caller's original state ID.
             Case {
                 name: "missing receipt submits the profile",
+                protocol_version: 2,
                 receipt: Err(Status::not_found("unknown operation")),
                 profile: Some(changed_profile.clone()),
                 admission_error: None,
@@ -2356,16 +2362,29 @@ mod tests {
             // A no-work decision still goes through durable admission.
             Case {
                 name: "missing receipt submits the no-profile decision",
+                protocol_version: 2,
                 receipt: Err(Status::not_found("unknown operation")),
                 profile: None,
                 admission_error: None,
                 submits: true,
                 expected: Expected::Receipt,
             },
+            // A missing receipt does not permit admission to a daemon that
+            // cannot honor the retry policy, even for a no-profile decision.
+            Case {
+                name: "protocol-1 daemon refuses new work",
+                protocol_version: 1,
+                receipt: Err(Status::not_found("unknown operation")),
+                profile: None,
+                admission_error: None,
+                submits: false,
+                expected: Expected::RequestFailure,
+            },
             // Another card's operation defers this request without a failed
             // firmware observation or a failed-supervisor metric on each poll.
             Case {
                 name: "host capacity defers submission",
+                protocol_version: 2,
                 receipt: Err(Status::not_found("unknown operation")),
                 profile: None,
                 admission_error: Some(Status::resource_exhausted("host is owned")),
@@ -2375,6 +2394,7 @@ mod tests {
             // An inconclusive read cannot authorize resubmission or a skip.
             Case {
                 name: "failed lookup does not submit",
+                protocol_version: 2,
                 receipt: Err(Status::unavailable("journal unavailable")),
                 profile: None,
                 admission_error: None,
@@ -2384,6 +2404,7 @@ mod tests {
             // Transport success without a receipt is still inconclusive.
             Case {
                 name: "malformed successful lookup does not submit",
+                protocol_version: 2,
                 receipt: Ok(None),
                 profile: None,
                 admission_error: None,
@@ -2394,6 +2415,7 @@ mod tests {
             // Later polls must recover that receipt and count its failure once.
             Case {
                 name: "lost submit response is recovered without resubmission",
+                protocol_version: 2,
                 receipt: Err(Status::not_found("unknown operation")),
                 profile: Some(firmware_profile("/original-firmware.bin", None, None, None)),
                 admission_error: Some(Status::unavailable("submission response was lost")),
@@ -2453,6 +2475,7 @@ mod tests {
                 lookups: lookups.clone(),
                 operation_id: operation_id.clone(),
                 boot_id: boot_id.clone(),
+                protocol_version: case.protocol_version,
             };
             let stop = CancellationToken::new();
             let server = tokio::spawn(
@@ -2597,6 +2620,16 @@ mod tests {
                 "{}",
                 case.name,
             );
+            if case.protocol_version == 1 && request_failed {
+                assert!(
+                    logs.iter().any(|log| {
+                        log.field("error")
+                            == Some("unsupported firmware supervisor protocol version 1")
+                    }),
+                    "{}",
+                    case.name
+                );
+            }
             assert_eq!(
                 metrics.counter_delta(
                     MLX_FAILURE_METRIC,
@@ -2653,7 +2686,7 @@ mod tests {
                         observer_exit_behavior: 0,
                         expected_identity: Some(
                             rpc::protos::firmware_supervisor::SupervisorIdentity {
-                                protocol_version: 1,
+                                protocol_version: case.protocol_version,
                                 device_identity: "0000:03:00".to_string(),
                                 boot_id: boot_id.clone(),
                                 execution_device: "0000:03:00.0".to_string(),

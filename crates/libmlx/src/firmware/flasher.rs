@@ -23,9 +23,14 @@ use std::time::Duration;
 
 use carbide_libmlx_model::firmware::result::FirmwareFlashReport;
 use tokio::sync::watch;
+use tokio::time::Instant;
 
-use crate::device::discovery::{QUERY_TIMEOUT, discover_device_bounded_with_executor};
-use crate::firmware::config::{FirmwareFlasherProfile, FirmwareSpec, FlashSpec};
+use crate::device::discovery::{
+    QUERY_TIMEOUT, discover_device_bounded_with_executor, discover_device_with_program,
+};
+use crate::firmware::config::{
+    FirmwareFlasherProfile, FirmwareSpec, FlashSpec, PostResetVerificationPolicy,
+};
 use crate::firmware::error::{
     AttemptError, FirmwareApplyError, FirmwareError, FirmwarePhase, FirmwareResult,
 };
@@ -45,11 +50,47 @@ use crate::runner::command_builder::CommandSpec;
 const CONFIGURATION_TIMEOUT: Duration = Duration::from_secs(30);
 const FIRMWARE_COMMAND_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
+/// Both verification phases share this deadline, including probes and waits.
+/// Tool cleanup may outlast it; we must still await settlement before returning.
+struct VerificationBudget {
+    deadline: Instant,
+    timeout: Duration,
+}
+
+impl VerificationBudget {
+    fn remaining(&self, attempt_limit: Duration) -> FirmwareResult<Duration> {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(self.exhausted(None));
+        }
+        Ok(remaining.min(attempt_limit))
+    }
+
+    fn exhausted(&self, source: Option<FirmwareError>) -> FirmwareError {
+        FirmwareError::PostResetVerificationTimeout {
+            timeout: self.timeout,
+            source: source.map(Box::new),
+        }
+    }
+}
+
 /// `FirmwareProgress` records recovery points before execution can advance.
 /// Returning an error stops the workflow at that boundary, including when a
 /// command succeeded but its completion could not be recorded.
 #[async_trait::async_trait]
 pub(crate) trait FirmwareProgress: Send + Sync {
+    /// Reject further reads after the owner loses its persistence guarantee,
+    /// without changing the recorded phase for a tool-discovery probe.
+    fn check(&self) -> FirmwareResult<()> {
+        Ok(())
+    }
+
+    /// Wake idle work on an owner failure. Callers must not use this future to
+    /// abandon an executing command or its cleanup.
+    async fn wait_for_failure(&self) -> FirmwareError {
+        std::future::pending().await
+    }
+
     /// `record` must settle this boundary before apply advances; returning an
     /// error withholds later work even when the preceding command succeeded.
     async fn record(&self, event: FirmwareProgressEvent) -> FirmwareResult<()>;
@@ -113,11 +154,12 @@ impl Drop for PreparedFirmware {
     }
 }
 
-/// `FirmwareFlasher` validates one device and executes each requested phase once.
+/// `FirmwareFlasher` validates one device and executes requested firmware work.
 ///
-/// Tool execution requires Linux and `mlx-firmware-supervisor`. A command error
-/// stops the workflow; successful process cleanup does not prove that a
-/// device-internal operation stopped. This type does not own durable recovery.
+/// Mutations execute once. After a successful reset, settled verification
+/// failures can retry within the profile's budget. Tool execution requires Linux
+/// and `mlx-firmware-supervisor`; process cleanup does not prove that a
+/// device-internal mutation stopped. This type does not own durable recovery.
 pub struct FirmwareFlasher {
     device_id: String,
     firmware_spec: FirmwareSpec,
@@ -163,7 +205,8 @@ impl FirmwareFlasher {
         self
     }
 
-    /// `with_preparation_cancel` permits dropping only pre-mutation staging.
+    /// `with_preparation_cancel` permits dropping pre-mutation staging and
+    /// interrupting verification retry waits. In-flight tools remain awaited.
     /// The operation owner sends this signal after persisting cancellation.
     pub(crate) fn with_preparation_cancel(
         mut self,
@@ -215,24 +258,10 @@ impl FirmwareFlasher {
             }
             FirmwareResult::Ok(())
         };
-        let result = if let Some((operation_id, cancellation)) = &self.preparation_cancel {
-            let mut cancellation = cancellation.clone();
-            tokio::select! {
-                biased;
-                _ = async {
-                    if cancellation
-                        .wait_for(|requested| requested.as_deref() == Some(operation_id.as_str()))
-                        .await
-                        .is_err()
-                    {
-                        // Losing the sender is not a durable stop request.
-                        std::future::pending::<()>().await;
-                    }
-                } => return Err(FirmwareError::OperationCanceled),
-                result = staging => result,
-            }
-        } else {
-            staging.await
+        let result = tokio::select! {
+            biased;
+            error = self.wait_for_stop() => return Err(error),
+            result = staging => result,
         };
         if let Err(error) = result {
             prepared.retain = false;
@@ -253,7 +282,7 @@ impl FirmwareFlasher {
     /// A successful real burn retains its inputs until `PreparedFirmware::finish`,
     /// so callers can safely keep the owner through later activation/observation.
     pub async fn burn(&self, prepared: &mut PreparedFirmware) -> FirmwareResult<()> {
-        let flint = self.flint().await?;
+        let flint = self.flint(None).await?;
         let retained_before_burn = prepared.retain;
         let mut configuration_applied = false;
         // Keep the inputs if this future is dropped while a mutation runs.
@@ -267,6 +296,7 @@ impl FirmwareFlasher {
                     &command,
                     FirmwarePhase::Configuration,
                     CONFIGURATION_TIMEOUT,
+                    None,
                 )
                 .await?;
                 configuration_applied = !self.dry_run;
@@ -275,6 +305,7 @@ impl FirmwareFlasher {
                 &flint.burn_command(&self.device_id, &prepared.image),
                 FirmwarePhase::Burn,
                 FIRMWARE_COMMAND_TIMEOUT,
+                None,
             )
             .await?;
             FirmwareResult::Ok(())
@@ -306,7 +337,7 @@ impl FirmwareFlasher {
     /// enabled; otherwise the source is resolved into an owned preparation.
     pub async fn verify_image(&self, spec: &FlashSpec) -> FirmwareResult<String> {
         let mut prepared = self.prepare_verification(spec).await?;
-        self.verify_prepared_image(&mut prepared).await
+        self.verify_prepared_image(&mut prepared, None).await
     }
 
     async fn prepare_verification(&self, spec: &FlashSpec) -> FirmwareResult<PreparedFirmware> {
@@ -331,8 +362,9 @@ impl FirmwareFlasher {
     async fn verify_prepared_image(
         &self,
         prepared: &mut PreparedFirmware,
+        budget: Option<&VerificationBudget>,
     ) -> FirmwareResult<String> {
-        let flint = self.flint().await?;
+        let flint = self.flint(budget).await?;
         let retained_before_verification = prepared.retain;
         prepared.retain = true;
         let result = self
@@ -340,6 +372,7 @@ impl FirmwareFlasher {
                 &flint.verify_image_command(&self.device_id, &prepared.image),
                 FirmwarePhase::ImageVerification,
                 FIRMWARE_COMMAND_TIMEOUT,
+                budget,
             )
             .await;
         // Verification does not mutate the device. A settled read failure does
@@ -358,24 +391,30 @@ impl FirmwareFlasher {
         if self.dry_run {
             return Ok(None);
         }
-        let observation = self.observe_version().await?;
+        let observation = self.observe_version(None).await?;
         self.check_version(&observation)?;
         Ok(Some(observation))
     }
 
     /// `observe_version` records the query boundary and the returned version
     /// before comparison, preserving the evidence when verification fails.
-    async fn observe_version(&self) -> FirmwareResult<String> {
+    async fn observe_version(&self, budget: Option<&VerificationBudget>) -> FirmwareResult<String> {
         self.record_progress(FirmwareProgressEvent::ObservingVersion)
             .await?;
         // Keep the version actually returned by the final query. Admission
         // checked PN/PSID before mutation; this observation is not another
         // hardware-eligibility check or proof of physical device identity.
-        let observation = discover_device_bounded_with_executor(&self.device_id, &self.executor)
-            .await?
-            .fw_version_current
-            .filter(|version| is_usable_literal(version))
-            .ok_or(FirmwarePreflightError::UnknownFirmwareVersion)?;
+        let timeout = budget.map_or(Ok(QUERY_TIMEOUT), |budget| budget.remaining(QUERY_TIMEOUT))?;
+        let observation = discover_device_with_program(
+            Path::new("mlxfwmanager"),
+            &self.device_id,
+            timeout,
+            &self.executor,
+        )
+        .await?
+        .fw_version_current
+        .filter(|version| is_usable_literal(version))
+        .ok_or(FirmwarePreflightError::UnknownFirmwareVersion)?;
         self.record_progress(FirmwareProgressEvent::ObservedVersion(observation.clone()))
             .await?;
         Ok(observation)
@@ -399,19 +438,24 @@ impl FirmwareFlasher {
     /// `reset_with_level` invokes `mlxfwreset` once at the supplied level.
     /// The level is passed through; no new hardware support is implied.
     pub async fn reset_with_level(&self, level: u8) -> FirmwareResult<String> {
-        let program = self.find_tool(&MlxFwResetRunner::CANDIDATE_PATHS).await?;
+        let program = self
+            .find_tool(&MlxFwResetRunner::CANDIDATE_PATHS, None)
+            .await?;
         let command = MlxFwResetRunner::with_path(program).reset_command(&self.device_id, level);
         self.execute(
             &command,
             FirmwarePhase::Activation,
             FIRMWARE_COMMAND_TIMEOUT,
+            None,
         )
         .await
     }
 
     /// `apply` prepares, burns, activates, and verifies the requested phases.
     ///
-    /// The first error stops subsequent phases and returns its cause. Progress
+    /// After a successful reset checkpoint, enabled verification phases share
+    /// one budget and retry only settled read failures. Without reset, each
+    /// verification runs once. Other failures stop subsequent phases. Progress
     /// is available after `burn` succeeds, including its completion checkpoint;
     /// a failed checkpoint can leave a completed command unreported. Dry-run
     /// reports no completed mutations or observations. Progress alone does not
@@ -421,6 +465,7 @@ impl FirmwareFlasher {
         profile: &FirmwareFlasherProfile,
     ) -> Result<FirmwareFlashReport, FirmwareApplyError> {
         let options = &profile.flash_options;
+        let verification_policy = options.post_reset_verification_policy()?;
         let mut prepared = self.flash(&profile.flash_spec).await?;
         let mut report = FirmwareFlashReport {
             flashed: !self.dry_run,
@@ -435,16 +480,21 @@ impl FirmwareFlasher {
                 self.reset_with_level(options.reset_level).await?;
                 report.reset = Some(!self.dry_run);
             }
-            if options.verify_image {
-                self.verify_prepared_image(&mut prepared).await?;
-                report.verified_image = Some(!self.dry_run);
-            }
-            if options.verify_version && !self.dry_run {
-                let observation = self.observe_version().await?;
-                let checked = self.check_version(&observation);
-                report.observed_version = Some(observation);
-                checked?;
-                report.verified_version = Some(true);
+            if let Some(policy) = verification_policy.filter(|_| !self.dry_run) {
+                self.verify_after_reset(&mut prepared, &mut report, policy)
+                    .await?;
+            } else {
+                if options.verify_image {
+                    self.verify_prepared_image(&mut prepared, None).await?;
+                    report.verified_image = Some(!self.dry_run);
+                }
+                if options.verify_version && !self.dry_run {
+                    let observation = self.observe_version(None).await?;
+                    let checked = self.check_version(&observation);
+                    report.observed_version = Some(observation);
+                    checked?;
+                    report.verified_version = Some(true);
+                }
             }
             // Keep the staged inputs until the owner has recorded success.
             // Losing that write must leave the same inputs for reconciliation.
@@ -465,19 +515,134 @@ impl FirmwareFlasher {
         }
     }
 
-    async fn flint(&self) -> FirmwareResult<FlintRunner> {
-        let program = self.find_tool(&FlintRunner::CANDIDATE_PATHS).await?;
+    /// Verification advances only after a check succeeds; failed reads never
+    /// send execution back through burn or reset. Keep the last usable version
+    /// in `report` even if later queries cannot reach the device.
+    async fn verify_after_reset(
+        &self,
+        prepared: &mut PreparedFirmware,
+        report: &mut FirmwareFlashReport,
+        policy: PostResetVerificationPolicy,
+    ) -> FirmwareResult<()> {
+        let budget = VerificationBudget {
+            deadline: Instant::now() + policy.timeout,
+            timeout: policy.timeout,
+        };
+        let mut last_failure = None;
+        while report.verified_image == Some(false) || report.verified_version == Some(false) {
+            let result = if report.verified_image == Some(false) {
+                self.verify_prepared_image(prepared, Some(&budget))
+                    .await
+                    .map(|_| report.verified_image = Some(true))
+            } else {
+                match self.observe_version(Some(&budget)).await {
+                    Ok(observation) => {
+                        let checked = self.check_version(&observation);
+                        report.observed_version = Some(observation);
+                        checked.map(|()| report.verified_version = Some(true))
+                    }
+                    Err(error) => Err(error),
+                }
+            };
+            match result {
+                Ok(()) => {
+                    // A settled check stays successful even if recording it
+                    // takes longer. Any remaining phase checks the same deadline
+                    // before starting another tool.
+                    last_failure = None;
+                    continue;
+                }
+                Err(FirmwareError::PostResetVerificationTimeout { .. }) => {
+                    return Err(budget.exhausted(last_failure));
+                }
+                Err(error) if error.can_retry_verification() => {
+                    tracing::warn!(
+                        device = %self.device_id,
+                        phase = if report.verified_image == Some(false) { "verify_image" } else { "verify_version" },
+                        retry_interval_seconds = policy.retry_interval.as_secs(),
+                        remaining_seconds = budget.deadline.saturating_duration_since(Instant::now()).as_secs(),
+                        "retrying post-reset firmware verification",
+                    );
+                    last_failure = Some(error);
+                }
+                Err(error) => return Err(error),
+            }
+            self.wait_for_verification_retry(&budget, policy.retry_interval)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Only the delay can be interrupted here. The failed command has already
+    /// settled, so cancellation cannot abandon a helper that still owns inputs.
+    async fn wait_for_verification_retry(
+        &self,
+        budget: &VerificationBudget,
+        interval: Duration,
+    ) -> FirmwareResult<()> {
+        let wake = (Instant::now() + interval).min(budget.deadline);
+        tokio::select! {
+            biased;
+            error = self.wait_for_stop() => return Err(error),
+            () = tokio::time::sleep_until(wake) => {},
+        }
+        Ok(())
+    }
+
+    /// Only staging and retry delays may be dropped on these notifications.
+    /// A failed receipt write remains distinct from durable cancellation.
+    async fn wait_for_stop(&self) -> FirmwareError {
+        let failed = async {
+            if let Some(progress) = &self.progress {
+                return progress.wait_for_failure().await;
+            }
+            std::future::pending().await
+        };
+        let canceled = async {
+            if let Some((operation_id, cancellation)) = &self.preparation_cancel {
+                let mut cancellation = cancellation.clone();
+                if cancellation
+                    .wait_for(|requested| requested.as_deref() == Some(operation_id.as_str()))
+                    .await
+                    .is_ok()
+                {
+                    return FirmwareError::OperationCanceled;
+                }
+            }
+            // Losing the sender is not a durable stop request.
+            std::future::pending().await
+        };
+        tokio::select! {
+            biased;
+            error = failed => error,
+            error = canceled => error,
+        }
+    }
+
+    async fn flint(&self, budget: Option<&VerificationBudget>) -> FirmwareResult<FlintRunner> {
+        let program = self
+            .find_tool(&FlintRunner::CANDIDATE_PATHS, budget)
+            .await?;
         Ok(FlintRunner::with_path(program))
     }
 
-    async fn find_tool<'a>(&self, candidates: &[&'a str]) -> FirmwareResult<&'a str> {
+    async fn find_tool<'a>(
+        &self,
+        candidates: &[&'a str],
+        budget: Option<&VerificationBudget>,
+    ) -> FirmwareResult<&'a str> {
         for (index, program) in candidates.iter().enumerate() {
             if self.dry_run {
                 return Ok(program);
             }
             let command = CommandSpec::new(*program).arg("--version");
             match self
-                .execute(&command, FirmwarePhase::ToolDiscovery, QUERY_TIMEOUT)
+                .execute(
+                    &command,
+                    FirmwarePhase::ToolDiscovery,
+                    QUERY_TIMEOUT,
+                    budget,
+                )
                 .await
             {
                 Ok(_) => return Ok(program),
@@ -506,16 +671,22 @@ impl FirmwareFlasher {
         command: &CommandSpec,
         phase: FirmwarePhase,
         timeout: Duration,
+        budget: Option<&VerificationBudget>,
     ) -> FirmwareResult<String> {
         if self.dry_run {
             tracing::info!(%command, "dry run firmware command");
             return Ok(format!("[DRY RUN] {command}"));
         }
-        if phase != FirmwarePhase::ToolDiscovery {
+        if phase == FirmwarePhase::ToolDiscovery {
+            if let Some(progress) = &self.progress {
+                progress.check()?;
+            }
+        } else {
             self.record_progress(FirmwareProgressEvent::Starting(phase))
                 .await?;
         }
         tracing::info!(device = %self.device_id, ?phase, "starting firmware command");
+        let timeout = budget.map_or(Ok(timeout), |budget| budget.remaining(timeout))?;
         let output = self
             .executor
             .execute(command, timeout)
@@ -862,7 +1033,10 @@ mod tests {
         // Absence is the one proven pre-start condition that permits fallback.
         assert_eq!(
             flasher
-                .find_tool(&[missing.to_str().unwrap(), fallback.to_str().unwrap()])
+                .find_tool(
+                    &[missing.to_str().unwrap(), fallback.to_str().unwrap()],
+                    None
+                )
                 .await
                 .unwrap(),
             fallback.to_str().unwrap()
@@ -878,7 +1052,10 @@ mod tests {
             (&denied, false),
         ] {
             let error = flasher
-                .find_tool(&[program.to_str().unwrap(), fallback.to_str().unwrap()])
+                .find_tool(
+                    &[program.to_str().unwrap(), fallback.to_str().unwrap()],
+                    None,
+                )
                 .await
                 .unwrap_err();
             match error {
@@ -912,7 +1089,10 @@ mod tests {
         let missing_helper = directory.path().join("missing-supervisor");
         flasher.executor = FirmwareToolExecutor::with_supervisor_path(&missing_helper);
         let error = flasher
-            .find_tool(&[missing.to_str().unwrap(), fallback.to_str().unwrap()])
+            .find_tool(
+                &[missing.to_str().unwrap(), fallback.to_str().unwrap()],
+                None,
+            )
             .await
             .unwrap_err();
         assert!(matches!(error, FirmwareError::PhaseFailed {
@@ -963,7 +1143,10 @@ sys.stdout.buffer.flush()
         );
         let error = tokio::time::timeout(
             HTTP_TEST_TIMEOUT,
-            flasher.find_tool(&[failed.to_str().unwrap(), fallback.to_str().unwrap()]),
+            flasher.find_tool(
+                &[failed.to_str().unwrap(), fallback.to_str().unwrap()],
+                None,
+            ),
         )
         .await
         .expect("probe uncertainty returns within the fixture watchdog")
@@ -1033,6 +1216,8 @@ printf '{frame_prefix}%s' '{response}'
                 reset_level: 1,
                 verify_image: true,
                 verify_version: true,
+                post_reset_verify_timeout_seconds: Some(1200),
+                ..Default::default()
             },
         );
         let started = std::time::Instant::now();
@@ -1104,12 +1289,12 @@ printf '{frame_prefix}%s' '{response}'
                 argument: "--version",
                 timeout_seconds: 30,
             },
-            // Image comparison gets the long limit even though it is read-only.
+            // The requested shared budget caps the longer image command limit.
             ExpectedRequest {
                 phase: "image verification",
                 program: "flint",
                 argument: "verify",
-                timeout_seconds: 1800,
+                timeout_seconds: 1200,
             },
             // The final observation must return to the query deadline.
             ExpectedRequest {
@@ -1145,6 +1330,33 @@ printf '{frame_prefix}%s' '{response}'
         }
     }
 
+    /// Cancellation must interrupt an entered retry delay, not merely prevent
+    /// the next command after the configured interval has elapsed.
+    #[tokio::test]
+    async fn cancellation_interrupts_an_entered_verification_retry_delay() {
+        let (canceled, cancellation) = watch::channel(None);
+        let mut flasher = dry_run_flasher();
+        flasher.preparation_cancel = Some(("retrying-operation".into(), cancellation));
+        let budget = VerificationBudget {
+            deadline: Instant::now() + Duration::from_secs(1800),
+            timeout: Duration::from_secs(1800),
+        };
+        let mut delay =
+            Box::pin(flasher.wait_for_verification_retry(&budget, Duration::from_secs(1800)));
+        std::future::poll_fn(|context| {
+            assert!(delay.as_mut().poll(context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        canceled.send_replace(Some("retrying-operation".into()));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), delay)
+                .await
+                .expect("accepted cancellation wakes the entered retry delay"),
+            Err(FirmwareError::OperationCanceled)
+        ));
+    }
+
     /// Exercise actual return values and staged-file ownership without changing
     /// this test process's PATH while other firmware tests run concurrently.
     #[cfg(target_os = "linux")]
@@ -1166,6 +1378,16 @@ printf '{frame_prefix}%s' '{response}'
             "progress_terminal",
             // Persist the observed version even when it fails verification.
             "progress_version_mismatch",
+            // A later target version must finish without repeating mutations.
+            "progress_post_reset_version_recovers",
+            // A later unavailable query keeps the saved usable observation.
+            "progress_post_reset_preserves_observation",
+            // A failed verification checkpoint must not retry a settled tool.
+            "progress_post_reset_image_checkpoint_failure",
+            // Late persistence does not undo the final successful check.
+            "progress_post_reset_final_checkpoint_delay",
+            // The next phase cannot get a new budget after slow persistence.
+            "progress_post_reset_pending_phase_checkpoint_delay",
             // Successful configuration still matters when the burn cannot start.
             "after_configuration",
             // A later pre-start failure cannot erase an earlier uncertain attempt.
@@ -1191,6 +1413,8 @@ printf '{frame_prefix}%s' '{response}'
             fs::create_dir(&tools).unwrap();
             let tool = r#"#!/bin/sh
 set -eu
+for phase in "$@"; do :; done
+printf '%s:%s\n' "${0##*/}" "$phase" >> "$FIXTURE/commands"
 if [ "${1-}" = --version ]; then exit 0; fi
 case "${0##*/}" in
     mlxfwmanager)
@@ -1198,6 +1422,18 @@ case "${0##*/}" in
         version=32.43.1014
         if [ "$SCENARIO" = progress_version_mismatch ] && [ -f "$FIXTURE/burned" ]; then
             version=32.43.1015
+        fi
+        if [ -f "$FIXTURE/burned" ]; then
+            case "$SCENARIO" in
+                progress_post_reset_version_recovers|progress_post_reset_preserves_observation)
+                    if [ ! -f "$FIXTURE/observed-old-version" ]; then
+                        printf observed > "$FIXTURE/observed-old-version"
+                        version=32.43.1015
+                    elif [ "$SCENARIO" = progress_post_reset_preserves_observation ]; then
+                        printf 'device unavailable after reset' >&2
+                        exit 41
+                    fi ;;
+            esac
         fi
         if [ "$SCENARIO" = incompatible_psid ]; then psid=other-psid; fi
         printf '<Devices><Device pciName="test-device" type="BlueField3" partNumber="test-part-number" psid="%s"><Versions><FW current="%s"/></Versions></Device></Devices>' "$psid" "$version" ;;
@@ -1213,9 +1449,13 @@ case "${0##*/}" in
             /bin/mv "$FIXTURE/tools/flint" "$FIXTURE/removed-flint"
         fi ;;
     flint)
-        for phase in "$@"; do :; done
         if [ "$phase" = burn ]; then printf burned > "$FIXTURE/burned"; fi
         if [ "$phase" = verify ]; then
+            if [ "$SCENARIO" = progress_post_reset_preserves_observation ] && [ ! -f "$FIXTURE/image-read-failed" ]; then
+                printf failed > "$FIXTURE/image-read-failed"
+                printf 'image unavailable after reset' >&2
+                exit 41
+            fi
             if [ "$SCENARIO" = verification_failure ]; then exit 41; fi
             if [ "$SCENARIO" = lost_verification_helper ]; then
                 printf verified > "$FIXTURE/verification-ran"
@@ -1307,6 +1547,7 @@ esac
         /// reject one write to prove that no subsequent command starts.
         struct ProgressFixture {
             fixture: PathBuf,
+            scenario: String,
             reject: Option<Checkpoint>,
             recorded: std::sync::Mutex<Vec<Checkpoint>>,
         }
@@ -1379,6 +1620,46 @@ esac
                         "fixture progress failure",
                     )));
                 }
+                let delay = match (self.scenario.as_str(), &checkpoint) {
+                    // Reset completion persistence precedes the verification
+                    // budget, even when recording it takes longer than that budget.
+                    (
+                        "progress_post_reset_version_recovers",
+                        Checkpoint::Completed(FirmwarePhase::Activation),
+                    ) => 3600,
+                    // Each delay fits alone; together they exhaust the shared
+                    // budget. Giving version verification a fresh budget fails.
+                    (
+                        "progress_post_reset_preserves_observation",
+                        Checkpoint::Completed(FirmwarePhase::ImageVerification),
+                    ) => 1200,
+                    ("progress_post_reset_preserves_observation", Checkpoint::ObservingVersion)
+                        if self
+                            .recorded
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .filter(|recorded| **recorded == Checkpoint::ObservingVersion)
+                            .count()
+                            == 2 =>
+                    {
+                        1200
+                    }
+                    (
+                        "progress_post_reset_final_checkpoint_delay"
+                        | "progress_post_reset_pending_phase_checkpoint_delay",
+                        Checkpoint::Completed(FirmwarePhase::ImageVerification),
+                    ) => 3600,
+                    _ => 0,
+                };
+                if delay != 0 {
+                    // These callbacks run only after the preceding helper has
+                    // settled. Resume real time before any next helper starts;
+                    // the separate parent process keeps a wall-clock watchdog.
+                    tokio::time::pause();
+                    tokio::time::advance(Duration::from_secs(delay)).await;
+                    tokio::time::resume();
+                }
                 self.recorded.lock().unwrap().push(checkpoint);
                 Ok(())
             }
@@ -1412,6 +1693,7 @@ esac
         let flasher = flasher.unwrap();
         let progress = Arc::new(ProgressFixture {
             fixture: fixture.clone(),
+            scenario: scenario.clone(),
             reject: match scenario.as_str() {
                 "progress_before_configuration" => {
                     Some(Checkpoint::Starting(FirmwarePhase::Configuration))
@@ -1420,6 +1702,9 @@ esac
                     Some(Checkpoint::Completed(FirmwarePhase::Configuration))
                 }
                 "progress_terminal" => Some(Checkpoint::Complete),
+                "progress_post_reset_image_checkpoint_failure" => {
+                    Some(Checkpoint::Completed(FirmwarePhase::ImageVerification))
+                }
                 _ => None,
             },
             recorded: std::sync::Mutex::new(Vec::new()),
@@ -1431,6 +1716,162 @@ esac
         };
         let mut spec = flash_spec(&image, &cache, Some(&configuration), false);
         let retain = match scenario.as_str() {
+            "progress_post_reset_version_recovers"
+            | "progress_post_reset_preserves_observation"
+            | "progress_post_reset_image_checkpoint_failure"
+            | "progress_post_reset_final_checkpoint_delay"
+            | "progress_post_reset_pending_phase_checkpoint_delay" => {
+                let version_only = scenario == "progress_post_reset_version_recovers";
+                let image_only = scenario == "progress_post_reset_final_checkpoint_delay";
+                let profile = FirmwareFlasherProfile {
+                    firmware_spec: firmware_spec(),
+                    flash_spec: spec,
+                    flash_options: FlashOptions {
+                        reset: true,
+                        verify_image: !version_only,
+                        verify_version: !image_only,
+                        post_reset_verify_retry_interval_seconds: Some(1),
+                        post_reset_verify_timeout_seconds: Some(1800),
+                        ..Default::default()
+                    },
+                };
+                let result = flasher.apply(&profile).await;
+                let recorded = progress.recorded.lock().unwrap();
+                let retained = match scenario.as_str() {
+                    "progress_post_reset_version_recovers"
+                    | "progress_post_reset_final_checkpoint_delay" => {
+                        assert_eq!(
+                            Report::from(result.unwrap()),
+                            Report {
+                                flashed: true,
+                                reset: Some(true),
+                                verified_image: (!version_only).then_some(true),
+                                verified_version: (!image_only).then_some(true),
+                                observed_version: (!image_only).then(|| TARGET_VERSION.into()),
+                                expected_version: Some(TARGET_VERSION.into()),
+                            }
+                        );
+                        assert_eq!(recorded.last(), Some(&Checkpoint::Complete));
+                        if version_only {
+                            assert_eq!(
+                                recorded
+                                    .iter()
+                                    .filter(|checkpoint| matches!(
+                                        checkpoint,
+                                        Checkpoint::ObservingVersion
+                                            | Checkpoint::ObservedVersion(_)
+                                    ))
+                                    .collect::<Vec<_>>(),
+                                [
+                                    &Checkpoint::ObservingVersion,
+                                    &Checkpoint::ObservedVersion("32.43.1015".into()),
+                                    &Checkpoint::ObservingVersion,
+                                    &Checkpoint::ObservedVersion(TARGET_VERSION.into()),
+                                ]
+                            );
+                        }
+                        false
+                    }
+                    "progress_post_reset_image_checkpoint_failure" => {
+                        let error = result.unwrap_err();
+                        assert!(
+                            matches!(*error.source, FirmwareError::ProgressPersistence(source)
+                            if source.to_string() == "fixture progress failure")
+                        );
+                        assert_eq!(
+                            Report::from(error.report.unwrap()),
+                            Report {
+                                flashed: true,
+                                reset: Some(true),
+                                verified_image: Some(false),
+                                verified_version: Some(false),
+                                observed_version: None,
+                                expected_version: Some(TARGET_VERSION.into()),
+                            }
+                        );
+                        assert_eq!(
+                            recorded.last(),
+                            Some(&Checkpoint::Starting(FirmwarePhase::ImageVerification))
+                        );
+                        true
+                    }
+                    "progress_post_reset_preserves_observation"
+                    | "progress_post_reset_pending_phase_checkpoint_delay" => {
+                        let error = result.unwrap_err();
+                        let (timeout, source) = match *error.source {
+                            FirmwareError::PostResetVerificationTimeout { timeout, source } => {
+                                (timeout, source)
+                            }
+                            source => panic!("expected shared verification timeout: {source:?}"),
+                        };
+                        assert_eq!(timeout, Duration::from_secs(1800));
+                        let preserves_observation =
+                            scenario == "progress_post_reset_preserves_observation";
+                        if preserves_observation {
+                            assert!(matches!(source.as_deref(),
+                                Some(FirmwareError::Discovery(
+                                    crate::device::discovery::DeviceDiscoveryError::InvalidReport(message)))
+                                if message.contains("device unavailable after reset")));
+                            assert_eq!(
+                                recorded
+                                    .iter()
+                                    .filter(|checkpoint| matches!(
+                                        checkpoint,
+                                        Checkpoint::ObservingVersion
+                                            | Checkpoint::ObservedVersion(_)
+                                    ))
+                                    .collect::<Vec<_>>(),
+                                [
+                                    &Checkpoint::ObservingVersion,
+                                    &Checkpoint::ObservedVersion("32.43.1015".into()),
+                                    &Checkpoint::ObservingVersion,
+                                    &Checkpoint::ObservingVersion,
+                                ]
+                            );
+                        } else {
+                            assert!(source.is_none());
+                        }
+                        assert_eq!(
+                            Report::from(error.report.unwrap()),
+                            Report {
+                                flashed: true,
+                                reset: Some(true),
+                                verified_image: Some(true),
+                                verified_version: Some(false),
+                                observed_version: preserves_observation
+                                    .then(|| "32.43.1015".into()),
+                                expected_version: Some(TARGET_VERSION.into()),
+                            }
+                        );
+                        assert_eq!(recorded.last(), Some(&Checkpoint::ObservingVersion));
+                        true
+                    }
+                    _ => unreachable!(),
+                };
+                let commands = fs::read_to_string(fixture.join("commands")).unwrap();
+                let count = |command| commands.lines().filter(|line| *line == command).count();
+                assert_eq!(count("flint:burn"), 1);
+                assert_eq!(count("mlxfwreset:-y"), 1);
+                assert_eq!(
+                    count("flint:verify"),
+                    match scenario.as_str() {
+                        "progress_post_reset_version_recovers" => 0,
+                        "progress_post_reset_preserves_observation" => 2,
+                        _ => 1,
+                    }
+                );
+                // The constructor performs one identity query before staging.
+                // Only the two version scenarios may perform later reads.
+                assert_eq!(
+                    count("mlxfwmanager:xml"),
+                    match scenario.as_str() {
+                        "progress_post_reset_version_recovers"
+                        | "progress_post_reset_preserves_observation" => 3,
+                        _ => 1,
+                    }
+                );
+                retained
+            }
             "complete"
             | "progress_before_configuration"
             | "progress_after_configuration"
@@ -1440,10 +1881,13 @@ esac
                     firmware_spec: firmware_spec(),
                     flash_spec: spec,
                     flash_options: FlashOptions {
-                        reset: true,
+                        // This case protects immediate, no-reset mismatch
+                        // reporting; post-reset convergence has separate coverage.
+                        reset: scenario != "progress_version_mismatch",
                         verify_image: true,
                         verify_version: true,
                         reset_level: 7,
+                        ..Default::default()
                     },
                 };
                 let result = flasher.apply(&profile).await;
@@ -1796,6 +2240,28 @@ esac
         }
     }
 
+    /// Invalid retry timing must fail before preparation, even when no enabled
+    /// phase would use it and dry-run would otherwise stage the image.
+    #[tokio::test]
+    async fn apply_rejects_invalid_retry_timing_before_preparation() {
+        let fixture = tempfile::tempdir().unwrap();
+        let cache = fixture.path().join("staging");
+        let profile = profile(
+            &fixture.path().join("missing-image.bin"),
+            &cache,
+            None,
+            FlashOptions {
+                post_reset_verify_retry_interval_seconds: Some(0),
+                ..Default::default()
+            },
+        );
+        let error = dry_run_flasher().apply(&profile).await.unwrap_err();
+        assert!(matches!(*error.source, FirmwareError::ConfigError(message)
+            if message.contains("post_reset_verify_retry_interval_seconds")));
+        assert!(error.report.is_none());
+        assert!(!cache.exists());
+    }
+
     /// Dry-run preserves requested phases without claiming mutation or a live
     /// version observation, while input preparation still rejects missing files.
     #[tokio::test]
@@ -1870,6 +2336,7 @@ esac
                             verify_version: true,
                             reset: true,
                             reset_level: 7,
+                            ..Default::default()
                         },
                     ),
                     expect: Yields(expected_report(true, true, true)),

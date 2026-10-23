@@ -2723,8 +2723,10 @@ func (x *FlashSpec) GetCacheDir() string {
 	return ""
 }
 
-// FlashOptions contains lifecycle flags for the apply() orchestrator.
-// Controls which post-flash steps are executed.
+// FlashOptions selects post-burn phases and verification timing for apply().
+// Timing applies after a successful reset when reset and either verify_image
+// or verify_version are true; timing values never enable phases. Without
+// reset, each requested verification runs once.
 type FlashOptions struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// verify_image controls whether the firmware image on the device is
@@ -2741,9 +2743,24 @@ type FlashOptions struct {
 	// A present FlashOptions message uses proto3's default of 0 when this scalar
 	// is omitted. Omitting FirmwareFlasherProfile.flash_options instead selects
 	// the library default level of 3.
-	ResetLevel    uint32 `protobuf:"varint,4,opt,name=reset_level,json=resetLevel,proto3" json:"reset_level,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ResetLevel uint32 `protobuf:"varint,4,opt,name=reset_level,json=resetLevel,proto3" json:"reset_level,omitempty"`
+	// post_reset_verify_retry_interval_seconds is the delay before retrying a
+	// settled unsuccessful verification read. Omission uses 10 seconds.
+	// Applies only when reset and at least one verification are enabled.
+	// Explicit values must be in 1 through 1800, even when those phases are
+	// disabled. The first read starts immediately. No retry starts if this delay
+	// does not fit within the remaining post_reset_verify_timeout_seconds budget.
+	PostResetVerifyRetryIntervalSeconds *uint32 `protobuf:"varint,5,opt,name=post_reset_verify_retry_interval_seconds,json=postResetVerifyRetryIntervalSeconds,proto3,oneof" json:"post_reset_verify_retry_interval_seconds,omitempty"`
+	// post_reset_verify_timeout_seconds is the shared verification budget after
+	// reset completion is recorded. Omission uses 1800 seconds. Applies only when
+	// reset and at least one verification are enabled. Explicit values must be
+	// in 1 through 1800, even when those phases are disabled. Tool discovery,
+	// reads, and retry delays share this budget; bounded command cleanup and
+	// result delivery may outlast it.
+	// Expiration fails verification without repeating a completed burn or reset.
+	PostResetVerifyTimeoutSeconds *uint32 `protobuf:"varint,6,opt,name=post_reset_verify_timeout_seconds,json=postResetVerifyTimeoutSeconds,proto3,oneof" json:"post_reset_verify_timeout_seconds,omitempty"`
+	unknownFields                 protoimpl.UnknownFields
+	sizeCache                     protoimpl.SizeCache
 }
 
 func (x *FlashOptions) Reset() {
@@ -2800,6 +2817,20 @@ func (x *FlashOptions) GetReset_() bool {
 func (x *FlashOptions) GetResetLevel() uint32 {
 	if x != nil {
 		return x.ResetLevel
+	}
+	return 0
+}
+
+func (x *FlashOptions) GetPostResetVerifyRetryIntervalSeconds() uint32 {
+	if x != nil && x.PostResetVerifyRetryIntervalSeconds != nil {
+		return *x.PostResetVerifyRetryIntervalSeconds
+	}
+	return 0
+}
+
+func (x *FlashOptions) GetPostResetVerifyTimeoutSeconds() uint32 {
+	if x != nil && x.PostResetVerifyTimeoutSeconds != nil {
+		return *x.PostResetVerifyTimeoutSeconds
 	}
 	return 0
 }
@@ -2949,8 +2980,9 @@ type FirmwareFlashReport struct {
 	// Whether the observed version matches the exact target; absent when
 	// unrequested. This does not establish which firmware is running after reset.
 	VerifiedVersion *bool `protobuf:"varint,4,opt,name=verified_version,json=verifiedVersion,proto3,oneof" json:"verified_version,omitempty"`
-	// The version reported by mlxfwmanager, including a mismatched version.
-	// Absent for dry-run, a failed or unrequested query, or unavailable facts.
+	// The last usable version reported by mlxfwmanager during this operation,
+	// including a mismatched version, retained across subsequent failed queries.
+	// Absent when no usable version was observed, including dry-run or no query.
 	ObservedVersion *string `protobuf:"bytes,5,opt,name=observed_version,json=observedVersion,proto3,oneof" json:"observed_version,omitempty"`
 	// The literal target version from the configuration, when supplied.
 	ExpectedVersion *string `protobuf:"bytes,6,opt,name=expected_version,json=expectedVersion,proto3,oneof" json:"expected_version,omitempty"`
@@ -8110,13 +8142,17 @@ const file_mlx_device_nico_proto_rawDesc = "" +
 	"\x10_device_conf_urlB\x1a\n" +
 	"\x18_device_conf_credentialsB\f\n" +
 	"\n" +
-	"_cache_dir\"\x8f\x01\n" +
+	"_cache_dir\"\x8d\x03\n" +
 	"\fFlashOptions\x12!\n" +
 	"\fverify_image\x18\x01 \x01(\bR\vverifyImage\x12%\n" +
 	"\x0everify_version\x18\x02 \x01(\bR\rverifyVersion\x12\x14\n" +
 	"\x05reset\x18\x03 \x01(\bR\x05reset\x12\x1f\n" +
 	"\vreset_level\x18\x04 \x01(\rR\n" +
-	"resetLevel\"\xe3\x01\n" +
+	"resetLevel\x12Z\n" +
+	"(post_reset_verify_retry_interval_seconds\x18\x05 \x01(\rH\x00R#postResetVerifyRetryIntervalSeconds\x88\x01\x01\x12M\n" +
+	"!post_reset_verify_timeout_seconds\x18\x06 \x01(\rH\x01R\x1dpostResetVerifyTimeoutSeconds\x88\x01\x01B+\n" +
+	")_post_reset_verify_retry_interval_secondsB$\n" +
+	"\"_post_reset_verify_timeout_seconds\"\xe3\x01\n" +
 	"\x16FirmwareFlasherProfile\x12=\n" +
 	"\rfirmware_spec\x18\x01 \x01(\v2\x18.mlx_device.FirmwareSpecR\ffirmwareSpec\x124\n" +
 	"\n" +
@@ -8761,6 +8797,7 @@ func file_mlx_device_nico_proto_init() {
 	}
 	file_mlx_device_nico_proto_msgTypes[24].OneofWrappers = []any{}
 	file_mlx_device_nico_proto_msgTypes[27].OneofWrappers = []any{}
+	file_mlx_device_nico_proto_msgTypes[28].OneofWrappers = []any{}
 	file_mlx_device_nico_proto_msgTypes[29].OneofWrappers = []any{}
 	file_mlx_device_nico_proto_msgTypes[31].OneofWrappers = []any{}
 	file_mlx_device_nico_proto_msgTypes[32].OneofWrappers = []any{}
