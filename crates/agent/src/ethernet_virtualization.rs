@@ -1165,8 +1165,9 @@ fn build_dhcp_server_config(
 ///
 /// Matching configuration and interfaces do not restart a running server, so
 /// this is safe to call on every tick. Returns `Ok(true)` after the control
-/// update succeeds. With no interfaces, the server stages the configuration
-/// without applying it; success does not guarantee every listener has bound.
+/// update succeeds. With no interfaces, file-only changes remain staged while a
+/// changed service replacement applies on remembered listeners; success does not
+/// guarantee every listener has bound.
 async fn update_dhcp_via_grpc(
     grpc_addr: &str,
     network_config: &rpc::ManagedHostNetworkConfigResponse,

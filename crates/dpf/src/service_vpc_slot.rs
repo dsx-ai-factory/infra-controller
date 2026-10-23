@@ -40,7 +40,7 @@
 //!   bridge: br-svc-N
 //!   resourceType: sf
 //!   ipam: false
-//!   serviceMTU: 1500
+//!   serviceMTU: 9000
 //!
 //! DPUServiceInterface/service-vpc-slot-N
 //!   label: interface=service-vpc-slot-N
@@ -90,7 +90,7 @@ use crate::types::{
 pub(crate) const MAX_HBN_SERVICE_INTERFACES: usize = 32;
 
 /// MTU shared by fixed service-VPC listeners and their service-pod attachment networks.
-pub const SERVICE_VPC_MTU: i64 = 1500;
+pub const SERVICE_VPC_MTU: i64 = 9000;
 
 /// A validated collection of NICo-managed service-VPC slots.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -527,7 +527,7 @@ mod tests {
             }),
             // A different listener MTU would disagree with the qualified service-pod attachment.
             ("wrong MTU", |service| {
-                service.service_nads[0].mtu = Some(9000)
+                service.service_nads[0].mtu = Some(1500)
             }),
         ];
 
@@ -586,7 +586,7 @@ mod tests {
                         ..ServiceDefinition::new("other", "repo", "chart", "1")
                     })
                 },
-                "service-VPC slot d_iface_svc_0 requires exactly one DHCP interface and an IPAM-disabled SF NAD on its bridge with MTU 1500",
+                "service-VPC slot d_iface_svc_0 requires exactly one DHCP interface and an IPAM-disabled SF NAD on its bridge with MTU 9000",
             ),
         ];
 

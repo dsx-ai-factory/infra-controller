@@ -3324,11 +3324,13 @@ dependencies = [
  "eyre",
  "ipnetwork",
  "itertools 0.14.0",
+ "mac_address",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tonic",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
