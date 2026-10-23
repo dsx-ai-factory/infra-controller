@@ -758,6 +758,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewGetAllMachineLabelValueHandler(dbSession),
 		},
 		{
+			Path:    apiPathPrefix + "/machine/external-validation/hold",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllMachineExternalValidationHoldHandler(dbSession),
+		},
+		{
 			Path:    apiPathPrefix + "/machine/:id",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetMachineHandler(dbSession, tc, cfg),
@@ -837,6 +842,26 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/machine/:id/validation/result",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetMachineValidationResultsHandler(dbSession, tc, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/:id/external-validation/attempt",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewCreateMachineExternalValidationAttemptHandler(dbSession),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/:id/external-validation/attempt/:attemptId/complete",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewCompleteMachineExternalValidationAttemptHandler(dbSession),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/:id/external-validation/attempt/:attemptId/cancel",
+			Method:  http.MethodPost,
+			Handler: apiHandler.NewCancelMachineExternalValidationAttemptHandler(dbSession),
+		},
+		{
+			Path:    apiPathPrefix + "/machine/:id/external-validation/hold/:holdId",
+			Method:  http.MethodDelete,
+			Handler: apiHandler.NewDeleteMachineExternalValidationHoldHandler(dbSession),
 		},
 
 		// Machine GPU Stats endpoint
@@ -1068,7 +1093,8 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetAuditEntryHandler(dbSession),
 		},
-		// Machine Validation endpoints
+		// Legacy Machine Validation endpoints
+		// WARNING: These endpoints are unpublished (do not appear in OpenAPI schema). They will be cleaned up in a future PR
 		{
 			Path:    apiPathPrefix + "/site/:siteID/machine-validation/test",
 			Method:  http.MethodPost,

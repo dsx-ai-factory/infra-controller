@@ -209,11 +209,16 @@ var commandPathAliases = map[string][]string{
 // old top-level resource and the synthetic path under the new tag both need to
 // disappear.
 var commandPathReplacements = map[string][]string{
-	"get-all-machine-validation-results": {"machine", "validation", "results", "list"},
-	"get-all-machine-validation-runs":    {"machine", "validation", "runs", "list"},
-	"reprovision-machine-dpu":            {"machine", "dpu", "reprovision"},
-	"reset-machine-bmc":                  {"machine", "bmc", "reset"},
-	"start-machine-validation":           {"machine", "validation", "start"},
+	"cancel-machine-external-validation-attempt":   {"machine", "external-validation", "cancel"},
+	"complete-machine-external-validation-attempt": {"machine", "external-validation", "complete"},
+	"delete-machine-external-validation-hold":      {"machine", "external-validation", "holds", "delete"},
+	"get-all-machine-external-validation-hold":     {"machine", "external-validation", "holds", "list"},
+	"get-all-machine-validation-results":           {"machine", "validation", "results", "list"},
+	"get-all-machine-validation-runs":              {"machine", "validation", "runs", "list"},
+	"reprovision-machine-dpu":                      {"machine", "dpu", "reprovision"},
+	"reset-machine-bmc":                            {"machine", "bmc", "reset"},
+	"start-machine-external-validation-attempt":    {"machine", "external-validation", "start"},
+	"start-machine-validation":                     {"machine", "validation", "start"},
 }
 
 // additionalCommandPathAliases preserves established command paths when an

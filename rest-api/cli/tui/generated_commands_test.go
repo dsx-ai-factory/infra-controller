@@ -643,6 +643,9 @@ func TestGeneratedPathResourcePolicy_CoversEveryParameter(t *testing.T) {
 		"task cancel|id",
 		"task cancel cancel-task|id",
 		"task get|id",
+		"machine external-validation cancel|attemptId",
+		"machine external-validation complete|attemptId",
+		"machine external-validation holds delete|holdId",
 	}, freeForm)
 }
 

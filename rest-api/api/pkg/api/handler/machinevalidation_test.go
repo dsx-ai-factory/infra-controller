@@ -799,6 +799,15 @@ func TestGetMachineValidationResultsHandler(t *testing.T) {
 	otherSite := testMachineBuildSite(t, dbSession, otherIP, "test-site-2", cdbm.SiteStatusRegistered)
 	otherMachine := testMachineBuildMachine(t, dbSession, otherIP.ID, otherSite.ID, nil, nil, false, false, cdbm.MachineStatusReady)
 
+	tenantOrg := "test-tenant-org-1"
+	tnu := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{tenantOrg}, []string{authz.TenantAdminRole})
+	tenant := testMachineBuildTenant(t, dbSession, tenantOrg, "test-tenant-1")
+	common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tenant.ID, tenant.Org, cdbm.TenantAccountStatusReady, tnu)
+
+	unprivilegedTenantOrg := "test-tenant-org-2"
+	utnu := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{unprivilegedTenantOrg}, []string{authz.TenantAdminRole})
+	testMachineBuildTenant(t, dbSession, unprivilegedTenantOrg, "test-tenant-2")
+
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}
 
@@ -809,7 +818,9 @@ func TestGetMachineValidationResultsHandler(t *testing.T) {
 	var workflowResponse []*corev1.MachineValidationResult
 	for i := 0; i < 20; i++ {
 		workflowResponse = append(workflowResponse, &corev1.MachineValidationResult{
-			Name: fmt.Sprintf("test-result-%d", i),
+			Name:   fmt.Sprintf("test-result-%d", i),
+			StdOut: fmt.Sprintf("test-output-%d", i),
+			StdErr: fmt.Sprintf("test-error-%d", i),
 		})
 	}
 
@@ -861,6 +872,7 @@ func TestGetMachineValidationResultsHandler(t *testing.T) {
 		expectedStatus int
 		scpClient      *tmocks.Client
 		emptyResponse  bool
+		withoutOutput  bool
 	}{
 		{
 			name:           "error when user not found in request context",
@@ -907,6 +919,36 @@ func TestGetMachineValidationResultsHandler(t *testing.T) {
 			user:           pvu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
+			scpClient:      scpClient,
+		},
+		{
+			name:           "no error for privileged Tenant, validation output is left empty",
+			reqOrgName:     tenantOrg,
+			machineID:      machine.ID,
+			user:           tnu,
+			expectedErr:    false,
+			expectedStatus: http.StatusOK,
+			scpClient:      scpClient,
+			withoutOutput:  true,
+		},
+		{
+			name:           "error when Tenant does not have targeted Instance creation",
+			reqOrgName:     unprivilegedTenantOrg,
+			machineID:      machine.ID,
+			user:           utnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusForbidden,
+			scpClient:      scpClient,
+		},
+		{
+			name:           "error when privileged Tenant uses legacy route",
+			reqOrgName:     tenantOrg,
+			machineID:      machine.ID,
+			siteID:         site.ID.String(),
+			legacyRoute:    true,
+			user:           tnu,
+			expectedErr:    true,
+			expectedStatus: http.StatusForbidden,
 			scpClient:      scpClient,
 		},
 		{
@@ -1013,6 +1055,13 @@ func TestGetMachineValidationResultsHandler(t *testing.T) {
 				assert.Equal(t, len(workflowResponse), len(apiResponse))
 				for i, expected := range workflowResponse {
 					assert.Equal(t, expected.Name, apiResponse[i].Name)
+					if tc.withoutOutput {
+						assert.Empty(t, apiResponse[i].StdOut)
+						assert.Empty(t, apiResponse[i].StdErr)
+					} else {
+						assert.Equal(t, expected.StdOut, apiResponse[i].StdOut)
+						assert.Equal(t, expected.StdErr, apiResponse[i].StdErr)
+					}
 				}
 			}
 		})
@@ -1042,6 +1091,11 @@ func TestGetAllMachineValidationRunHandler(t *testing.T) {
 	otherIP := testMachineBuildInfrastructureProvider(t, dbSession, "test-ip-org-2", "infra-provider-2")
 	otherSite := testMachineBuildSite(t, dbSession, otherIP, "test-site-2", cdbm.SiteStatusRegistered)
 	otherMachine := testMachineBuildMachine(t, dbSession, otherIP.ID, otherSite.ID, nil, nil, false, false, cdbm.MachineStatusReady)
+
+	tenantOrg := "test-tenant-org-1"
+	tnu := testMachineBuildUser(t, dbSession, uuid.NewString(), []string{tenantOrg}, []string{authz.TenantAdminRole})
+	tenant := testMachineBuildTenant(t, dbSession, tenantOrg, "test-tenant-1")
+	common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tenant.ID, tenant.Org, cdbm.TenantAccountStatusReady, tnu)
 
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}
@@ -1106,6 +1160,15 @@ func TestGetAllMachineValidationRunHandler(t *testing.T) {
 		scpClient      *tmocks.Client
 		emptyResponse  bool
 	}{
+		{
+			name:           "no error for privileged Tenant",
+			reqOrgName:     tenantOrg,
+			machineID:      machine.ID,
+			user:           tnu,
+			expectedErr:    false,
+			expectedStatus: http.StatusOK,
+			scpClient:      scpClient,
+		},
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     ipOrg1,

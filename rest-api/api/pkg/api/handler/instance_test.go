@@ -2170,6 +2170,37 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "test Instance create API endpoint failure, externalValidationRequestId is not implemented",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceCreateRequest{
+					Name:                        "Test Instance for external validation",
+					TenantID:                    tn1.ID.String(),
+					MachineID:                   cutil.GetPtr(uuid.New().String()),
+					AllowUnhealthyMachine:       cutil.GetPtr(true),
+					ExternalValidationRequestID: cutil.GetPtr(uuid.New().String()),
+					VpcID:                       vpc1.ID.String(),
+					UserData:                    cutil.GetPtr(""),
+					IpxeScript:                  cutil.GetPtr(common.DefaultIpxeScript),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							SubnetID: cutil.GetPtr(subnet1.ID.String()),
+						},
+					},
+					PhoneHomeEnabled: cutil.GetPtr(false),
+				},
+				reqOrg:      tnOrg,
+				reqUser:     tnu1,
+				respCode:    http.StatusNotImplemented,
+				respMessage: machineExternalValidationNotImplementedMessage,
+			},
+			wantErr: false,
+		},
+		{
 			name: "test Instance create API endpoint success, specify a machine ID belonging to an instance type but tenant is not authorized",
 			fields: fields{
 				dbSession: dbSession,

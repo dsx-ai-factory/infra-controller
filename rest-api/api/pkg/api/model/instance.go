@@ -535,6 +535,8 @@ type APIInstanceCreateRequest struct {
 	AllowUnhealthyMachine *bool `json:"allowUnhealthyMachine"`
 	// PowerProfile is the external power provisioning profile for the Instance.
 	PowerProfile *string `json:"powerProfile"`
+	// ExternalValidationRequestID is the ID of the external validation attempt the Instance is created for
+	ExternalValidationRequestID *string `json:"externalValidationRequestId"`
 }
 
 // APIBatchInstanceCreateRequest is the data structure to capture request to create multiple instances in a single request
@@ -627,6 +629,8 @@ func (icr APIInstanceCreateRequest) Validate() error {
 		),
 		validation.Field(&icr.PowerProfile,
 			validation.When(icr.PowerProfile != nil, validation.Required.Error("`powerProfile` must not be empty"))),
+		validation.Field(&icr.ExternalValidationRequestID,
+			validationis.UUID.Error(validationErrorInvalidUUID)),
 		validation.Field(&icr.Interfaces,
 			// When AutoNetwork is true, the Instance has NICo auto-resolve interfaces
 			// from the host's HostInband segments, so the explicit list MUST
@@ -663,6 +667,16 @@ func (icr APIInstanceCreateRequest) Validate() error {
 		return validation.Errors{"machineId": errors.New("only one of `instanceTypeId` or `machineId` can be specified in request, not both")}
 	} else if icr.InstanceTypeID == nil && icr.MachineID == nil {
 		return validation.Errors{"instanceTypeId": errors.New("either `instanceTypeId` or `machineId` must be specified")}
+	}
+
+	// A held Machine fails the regular health checks, so a validation Instance has to target it directly.
+	if icr.ExternalValidationRequestID != nil {
+		if icr.MachineID == nil {
+			return validation.Errors{"externalValidationRequestId": errors.New("`machineId` must be specified when `externalValidationRequestId` is specified")}
+		}
+		if icr.AllowUnhealthyMachine == nil || !*icr.AllowUnhealthyMachine {
+			return validation.Errors{"externalValidationRequestId": errors.New("`allowUnhealthyMachine` must be `true` when `externalValidationRequestId` is specified")}
+		}
 	}
 
 	// make sure either of them provided
