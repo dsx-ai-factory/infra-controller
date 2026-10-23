@@ -295,6 +295,13 @@ class IPv6SetupTests(unittest.TestCase):
                 self.assertEqual(checks["cloud-init"]["stdout"], output)
                 self.assertEqual(checks["cloud-init"]["returncode"], code)
                 self.assertEqual(checks["cloud-init"]["passed"], complete)
+                if name in ("empty", "command failure", "wrong JSON shape"):
+                    self.assertEqual(
+                        checks["cloud-init"]["error"],
+                        "cloud-init status did not return a JSON object",
+                    )
+                else:
+                    self.assertNotIn("error", checks["cloud-init"])
                 self.assertEqual(checks["no-cloud-init-errors"]["passed"], no_errors)
                 self.assertEqual(
                     checks["no-unreviewed-cloud-init-warnings"]["passed"], no_warnings
