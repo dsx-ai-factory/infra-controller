@@ -15,8 +15,8 @@ reviews:
   in_progress_fortune: false
   poem: false
   review_status: true
-  review_details: true # Retain attribution during the quality pilot.
-  collapse_walkthrough: true
+  review_details: false
+  collapse_walkthrough: false
   slop_detection:
     enabled: true
   finishing_touches:
