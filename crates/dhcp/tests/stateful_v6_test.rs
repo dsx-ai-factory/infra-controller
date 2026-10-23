@@ -1472,12 +1472,16 @@ fn reclamation_recovers_from_memfile_write_failure() -> Result<(), eyre::Report>
         };
         let original = fs::read(&h.lease_file_path)?;
         h.kea.set_file_size_limit(Some(original.len() as u64))?;
-        for _ in 0..2 {
+        for attempt in 1..=2 {
             reclaim(&h)?;
-            assert!(
-                h.kea
-                    .wait_for_log("failed to write CSV row", MEMFILE_TIMEOUT),
-                "{case}"
+            assert_eq!(
+                h.kea.wait_for_log_count(
+                    "lease6_expire: could not retire 2001:db8::1: failed to write CSV row",
+                    attempt,
+                    MEMFILE_TIMEOUT,
+                ),
+                attempt,
+                "each attempt must reach the failed storage write: {case}",
             );
             assert_eq!(fs::read(&h.lease_file_path)?, original, "{case}");
             assert!(
