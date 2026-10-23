@@ -936,11 +936,10 @@ func (icr *APIInstanceCreateRequest) ValidateInfiniBandInterfaces(itIbCaps []cdb
 	return ValidateInfiniBandInterfaces(itIbCaps, icr.InfiniBandInterfaces)
 }
 
-// HasNewCrossTenantAttachment reports whether a requested Interface selects another Tenant's
+// HasNewCrossTenantInterface reports whether a requested Interface selects another Tenant's
 // VPC or VPC Prefix and has no persisted Interface, other than a Deleting one, with the same
-// identity to reuse. Unchanged cross-Tenant Interfaces stay allowed after the capability is
-// revoked, but moving one to a different selector or device is not.
-func HasNewCrossTenantAttachment(tenantID uuid.UUID, requested, existing []cdbm.Interface) (bool, error) {
+// identity to reuse.
+func HasNewCrossTenantInterface(tenantID uuid.UUID, requested, existing []cdbm.Interface) (bool, error) {
 	existingByKey := make(map[string]int, len(existing))
 	for _, ifc := range existing {
 		if ifc.Status == cdbm.InterfaceStatusDeleting {
@@ -978,33 +977,24 @@ func HasNewCrossTenantAttachment(tenantID uuid.UUID, requested, existing []cdbm.
 	return false, nil
 }
 
-// HasNewCrossTenantVpc reports whether a selected VPC or VPC Prefix belongs to another Tenant
-// and no persisted Interface, other than a Deleting one, already selects it. Pass a nil existing
-// on create. It works on the loaded selectors, so it can run before they are validated.
-// Selectors missing from the maps are left to the not-found checks that follow.
-func HasNewCrossTenantVpc(tenantID uuid.UUID, vpcs map[uuid.UUID]*cdbm.Vpc, vpcPrefixes map[uuid.UUID]*cdbm.VpcPrefix, existing []cdbm.Interface) bool {
-	attachedVpcIDs := make(map[uuid.UUID]struct{}, len(existing))
-	attachedVpcPrefixIDs := make(map[uuid.UUID]struct{}, len(existing))
-	for _, ifc := range existing {
-		if ifc.Status == cdbm.InterfaceStatusDeleting {
-			continue
-		}
+// HasCrossTenantInterface return `true` of the array of Interfaces argument includes at least
+// one non-Deleting Interface that attaches to a different Tenant's VPC or VPC Prefix
+// Returns `false` otherwise
+func HasCrossTenantInterface(interfaces []APIInterfaceCreateOrUpdateRequest, tenantID uuid.UUID, vpcMap map[uuid.UUID]*cdbm.Vpc, vpcPrefixMap map[uuid.UUID]*cdbm.VpcPrefix) bool {
+	for _, ifc := range interfaces {
 		if ifc.VpcID != nil {
-			attachedVpcIDs[*ifc.VpcID] = struct{}{}
+			if vpcID, err := uuid.Parse(*ifc.VpcID); err == nil {
+				if vpc, ok := vpcMap[vpcID]; ok && vpc.TenantID != tenantID {
+					return true
+				}
+			}
 		}
 		if ifc.VpcPrefixID != nil {
-			attachedVpcPrefixIDs[*ifc.VpcPrefixID] = struct{}{}
-		}
-	}
-
-	for vpcID, vpc := range vpcs {
-		if _, attached := attachedVpcIDs[vpcID]; vpc.TenantID != tenantID && !attached {
-			return true
-		}
-	}
-	for vpcPrefixID, vpcPrefix := range vpcPrefixes {
-		if _, attached := attachedVpcPrefixIDs[vpcPrefixID]; vpcPrefix.TenantID != tenantID && !attached {
-			return true
+			if vpcPrefixID, err := uuid.Parse(*ifc.VpcPrefixID); err == nil {
+				if vpcPrefix, ok := vpcPrefixMap[vpcPrefixID]; ok && vpcPrefix.TenantID != tenantID {
+					return true
+				}
+			}
 		}
 	}
 	return false

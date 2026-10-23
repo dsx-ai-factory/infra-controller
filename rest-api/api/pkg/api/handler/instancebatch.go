@@ -548,7 +548,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 	// Attaching an Interface to another Tenant's VPC or VPC Prefix needs targetedInstanceCreation
 	// at the Site. Check it before validating the selectors, so the errors can't reveal another
 	// Tenant's VPC state.
-	if model.HasNewCrossTenantVpc(tenant.ID, interfaceVpcIDMap, vpcPrefixIDMap, nil) {
+	if model.HasCrossTenantInterface(apiRequest.Interfaces, tenant.ID, interfaceVpcIDMap, vpcPrefixIDMap) {
 		hasTargetedInstanceCreation, capErr := common.TenantHasTargetedInstanceCreation(ctx, nil, bcih.dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &site.ID})
 		if capErr != nil {
 			logger.Error().Err(capErr).Msg("failed to resolve targetedInstanceCreation capability for cross-Tenant VPC attachment")

@@ -524,44 +524,38 @@ func TestAPIInstanceUpdateRequest_PowerProfileJSON(t *testing.T) {
 	}
 }
 
-func TestHasNewCrossTenantVpc(t *testing.T) {
+func TestHasCrossTenantInterface(t *testing.T) {
 	tenantID := uuid.New()
 	otherTenantID := uuid.New()
 	localVpcID := uuid.New()
 	otherVpcID := uuid.New()
 	otherPrefixID := uuid.New()
 
-	localVpcs := map[uuid.UUID]*cdbm.Vpc{localVpcID: {ID: localVpcID, TenantID: tenantID}}
-	otherVpcs := map[uuid.UUID]*cdbm.Vpc{otherVpcID: {ID: otherVpcID, TenantID: otherTenantID}}
-	otherPrefixes := map[uuid.UUID]*cdbm.VpcPrefix{otherPrefixID: {ID: otherPrefixID, TenantID: otherTenantID}}
-	attachedVpc := cdbm.Interface{VpcID: &otherVpcID, Status: cdbm.InterfaceStatusReady}
-	deletingVpc := cdbm.Interface{VpcID: &otherVpcID, Status: cdbm.InterfaceStatusDeleting}
-	attachedPrefix := cdbm.Interface{VpcPrefixID: &otherPrefixID, Status: cdbm.InterfaceStatusReady}
+	vpcs := map[uuid.UUID]*cdbm.Vpc{
+		localVpcID: {ID: localVpcID, TenantID: tenantID},
+		otherVpcID: {ID: otherVpcID, TenantID: otherTenantID},
+	}
+	vpcPrefixes := map[uuid.UUID]*cdbm.VpcPrefix{otherPrefixID: {ID: otherPrefixID, TenantID: otherTenantID}}
 
 	tests := []struct {
-		name        string
-		vpcs        map[uuid.UUID]*cdbm.Vpc
-		vpcPrefixes map[uuid.UUID]*cdbm.VpcPrefix
-		existing    []cdbm.Interface
-		want        bool
+		name       string
+		interfaces []APIInterfaceCreateOrUpdateRequest
+		want       bool
 	}{
-		{name: "same-Tenant selector", vpcs: localVpcs},
-		{name: "other Tenant's VPC", vpcs: otherVpcs, want: true},
-		{name: "other Tenant's VPC Prefix", vpcs: localVpcs, vpcPrefixes: otherPrefixes, want: true},
-		{name: "other Tenant's VPC already attached", vpcs: otherVpcs, existing: []cdbm.Interface{attachedVpc}},
-		{name: "other Tenant's VPC Prefix already attached", vpcPrefixes: otherPrefixes, existing: []cdbm.Interface{attachedPrefix}},
-		{name: "attached VPC Prefix does not cover a new VPC", vpcs: otherVpcs, existing: []cdbm.Interface{attachedPrefix}, want: true},
-		{name: "Deleting Interface does not count as attached", vpcs: otherVpcs, existing: []cdbm.Interface{deletingVpc}, want: true},
+		{name: "same-Tenant VPC", interfaces: []APIInterfaceCreateOrUpdateRequest{{VpcID: cutil.GetPtr(localVpcID.String())}}},
+		{name: "other Tenant's VPC", interfaces: []APIInterfaceCreateOrUpdateRequest{{VpcID: cutil.GetPtr(localVpcID.String())}, {VpcID: cutil.GetPtr(otherVpcID.String())}}, want: true},
+		{name: "other Tenant's VPC Prefix", interfaces: []APIInterfaceCreateOrUpdateRequest{{VpcPrefixID: cutil.GetPtr(otherPrefixID.String())}}, want: true},
+		{name: "selector missing from the maps is left to the not-found checks", interfaces: []APIInterfaceCreateOrUpdateRequest{{VpcID: cutil.GetPtr(uuid.NewString())}}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, HasNewCrossTenantVpc(tenantID, tc.vpcs, tc.vpcPrefixes, tc.existing))
+			assert.Equal(t, tc.want, HasCrossTenantInterface(tc.interfaces, tenantID, vpcs, vpcPrefixes))
 		})
 	}
 }
 
-func TestHasNewCrossTenantAttachment(t *testing.T) {
+func TestHasNewCrossTenantInterface(t *testing.T) {
 	tenantID := uuid.New()
 	crossTenantTenantID := uuid.New()
 	localVpcID := uuid.New()
@@ -607,7 +601,7 @@ func TestHasNewCrossTenantAttachment(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := HasNewCrossTenantAttachment(tenantID, tc.requested, tc.existing)
+			got, err := HasNewCrossTenantInterface(tenantID, tc.requested, tc.existing)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
 		})
