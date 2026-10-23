@@ -35,6 +35,14 @@ endpoint_discovery_interval = "5m"
 [endpoint_sources]
 # Required for static targets; see credentials.example.json.
 static_credentials_file = "crates/health/example/credentials.example.json"
+# Fields that identify an endpoint, in preference order. Default: ["mac", "ip"].
+# identity = ["hostname", "mac", "ip"]
+
+# PostgreSQL inventory query; see README.md for the column contract.
+# [endpoint_sources.sql]
+# database_url_file = "/run/secrets/inventory-db/url"
+# credentials_profile = "bmc"
+# query = "SELECT HOST(oob.address) AS bmc_ip, d.name AS hostname FROM dcim_device d JOIN ipam_ipaddress oob ON oob.id = d.oob_ip_id"
 
 [endpoint_sources.nico_api]
 root_ca = "/var/run/secrets/spiffe.io/ca.crt"

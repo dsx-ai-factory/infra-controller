@@ -66,6 +66,13 @@ serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true }
 sha2 = { workspace = true }
+sqlx = { workspace = true, features = [
+  "runtime-tokio",
+  "tls-rustls",
+  "postgres",
+  "mac_address",
+  "ipnetwork",
+] }
 tempfile = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }

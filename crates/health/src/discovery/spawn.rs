@@ -1803,6 +1803,8 @@ mod tests {
             .expect("constructor succeeds"),
         );
         let endpoint = Arc::new(BmcEndpoint {
+            hostname: None,
+            identity: None,
             addr,
             metadata: Some(switch_metadata_with_role(
                 SwitchEndpointRole::Host,

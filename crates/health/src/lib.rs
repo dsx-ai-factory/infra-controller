@@ -47,7 +47,8 @@ use crate::api_client::{ApiClientWrapper, ApiEndpointSource};
 use crate::collectors::BackoffConfig;
 use crate::config::Configurable;
 use crate::endpoint::{
-    ClusterEndpointSource, CompositeEndpointSource, EndpointSource, StaticEndpointSource,
+    ClusterEndpointSource, CompositeEndpointSource, EndpointSource, SqlEndpointSource,
+    StaticEndpointSource,
 };
 use crate::limiter::{BucketLimiter, NoopLimiter, RateLimiter};
 use crate::metrics::{BmcLatencyMetrics, MetricsManager, run_metrics_server};
@@ -105,6 +106,10 @@ pub enum HealthError {
 
     #[error("HTTP(S) error: {0}")]
     HttpError(String),
+
+    /// Failure connecting to or querying the SQL inventory database.
+    #[error("SQL inventory error: {0}")]
+    SqlInventory(#[source] sqlx::Error),
 
     #[error("redfish SSE not available: {0}")]
     SseNotAvailable(String),
@@ -232,12 +237,42 @@ async fn build_endpoint_wiring(
             config.bmc_proxy_url.as_ref(),
             config.cache_size,
             config.bmc_request_concurrency,
-            bmc_latency_metrics,
+            bmc_latency_metrics.clone(),
         );
         sources.push(Arc::new(cluster_source));
     }
 
-    let composite_source = CompositeEndpointSource::new(sources);
+    if let Configurable::Enabled(ref source_cfg) = config.endpoint_sources.sql {
+        let path = config
+            .endpoint_sources
+            .static_credentials_file
+            .clone()
+            .ok_or_else(|| {
+                HealthError::GenericError(
+                    "the SQL endpoint source requires endpoint_sources.static_credentials_file"
+                        .into(),
+                )
+            })?;
+        let credentials = Arc::new(
+            static_credentials::ProfileCredentialProvider::new(
+                path,
+                source_cfg.credentials_profile.clone(),
+            )
+            .await?,
+        );
+        sources.push(Arc::new(SqlEndpointSource::new(
+            source_cfg.clone(),
+            credentials,
+            &reqwest,
+            config.bmc_proxy_url.as_ref(),
+            config.cache_size,
+            config.bmc_request_concurrency,
+            bmc_latency_metrics,
+        )));
+    }
+
+    let composite_source =
+        CompositeEndpointSource::new(sources, config.endpoint_sources.identity.clone());
 
     if composite_source.is_empty() {
         return Err(HealthError::GenericError(

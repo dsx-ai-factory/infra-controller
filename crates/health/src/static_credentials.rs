@@ -112,11 +112,100 @@ impl CredentialProvider for StaticCredentialProvider {
     }
 }
 
+/// Resolves credentials for a runtime-changing inventory from one profile plus
+/// the file's per-MAC overrides. Unlike `StaticCredentialProvider`, it accepts
+/// any MAC, so endpoints may appear after startup.
+pub(crate) struct ProfileCredentialProvider {
+    reader: Reader,
+    profile: String,
+}
+
+impl ProfileCredentialProvider {
+    /// Fails when the file is invalid or the profile is unknown or has no username.
+    pub(crate) async fn new(path: PathBuf, profile: String) -> Result<Self, HealthError> {
+        let reader = Reader::new(FileCredentialsConfig {
+            path: Some(path.clone()), poll_interval: Some(Duration::from_secs(60)), ..Default::default()
+        }).await.map_err(|error| {
+            tracing::error!(path = %path.display(), %error, "failed to load credential file at startup");
+            HealthError::from(error)
+        })?;
+        // The all-zero MAC carries no override in practice, so this checks the profile alone.
+        reader
+            .snapshot()
+            .resolve(MacAddress::new([0; 6]), Some(&profile))
+            .map_err(|error| {
+                tracing::error!(path = %path.display(), %profile, %error, "invalid credential profile at startup");
+                HealthError::from(error)
+            })?;
+        Ok(Self { reader, profile })
+    }
+}
+
+impl CredentialProvider for ProfileCredentialProvider {
+    fn fetch_credentials<'a>(
+        &'a self,
+        endpoint: &'a BmcAddr,
+    ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>> {
+        Box::pin(async move {
+            // Without a MAC no per-MAC override can match, so only the profile applies.
+            let mac = endpoint.mac.unwrap_or(MacAddress::new([0; 6]));
+            self.reader
+                .snapshot()
+                .resolve(mac, Some(&self.profile))
+                .map_err(HealthError::from)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error as _;
 
     use super::*;
+
+    #[tokio::test]
+    async fn profile_provider_validates_profile_and_applies_mac_overrides() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            serde_json::json!({
+                "profiles": {"bmc": {"username": "admin", "password": "profile"}, "empty": {}},
+                "overrides": {"00:11:22:33:44:55": {"password": "override"}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        for profile in ["missing", "empty"] {
+            assert!(
+                ProfileCredentialProvider::new(file.path().into(), profile.into())
+                    .await
+                    .is_err(),
+                "{profile} profile must fail startup"
+            );
+        }
+
+        let provider = ProfileCredentialProvider::new(file.path().into(), "bmc".into())
+            .await
+            .unwrap();
+        for (mac, expected) in [
+            (Some("00:11:22:33:44:55"), "override"),
+            (Some("aa:bb:cc:dd:ee:ff"), "profile"),
+            (None, "profile"),
+        ] {
+            let addr = BmcAddr {
+                ip: "192.0.2.1".parse().unwrap(),
+                port: None,
+                mac: mac.map(|mac| mac.parse().unwrap()),
+            };
+            match provider.fetch_credentials(&addr).await.unwrap() {
+                BmcCredentials::UsernamePassword { username, password } => {
+                    assert_eq!(username, "admin");
+                    assert_eq!(password.as_deref(), Some(expected), "{mac:?}");
+                }
+                BmcCredentials::SessionToken { .. } => panic!("file credentials use passwords"),
+            }
+        }
+    }
 
     #[tokio::test]
     async fn fetch_preserves_resolution_error_sources() {

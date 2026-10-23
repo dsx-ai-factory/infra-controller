@@ -128,13 +128,17 @@ impl EventContext {
     }
 
     pub fn from_endpoint(endpoint: &BmcEndpoint, collector_type: &'static str) -> Self {
+        let mut labels = endpoint.labels.clone();
+        if let Some(hostname) = endpoint.hostname.as_ref() {
+            labels.insert("endpoint_hostname".to_string(), hostname.clone());
+        }
         Self {
             endpoint_key: endpoint.key(),
             addr: endpoint.addr.clone(),
             collector_type,
             metadata: endpoint.metadata.clone(),
             rack_id: endpoint.rack_id.clone(),
-            labels: endpoint.labels.clone(),
+            labels,
         }
     }
 
@@ -715,6 +719,25 @@ mod tests {
 
     use super::*;
     use crate::endpoint::{MachineData, PowerShelfData, SharedSystemUuid, SwitchData};
+
+    #[test]
+    fn context_labels_endpoint_hostname_and_identity_key() {
+        use crate::endpoint::EndpointIdentity;
+        use crate::endpoint::test_support::{mac, test_endpoint};
+
+        let mut endpoint = test_endpoint(mac("00:11:22:33:44:55"));
+        let unnamed = EventContext::from_endpoint(&endpoint, "sensor");
+        assert!(!unnamed.labels().contains_key("endpoint_hostname"));
+
+        endpoint.hostname = Some("bmc-01".to_string());
+        endpoint.identity = Some(EndpointIdentity::Hostname("bmc-01".to_string()));
+        let named = EventContext::from_endpoint(&endpoint, "sensor");
+        assert_eq!(
+            named.labels().get("endpoint_hostname").map(String::as_str),
+            Some("bmc-01")
+        );
+        assert_eq!(named.endpoint_key(), "host:bmc-01");
+    }
 
     #[derive(Clone, Copy)]
     enum ContextKind {
