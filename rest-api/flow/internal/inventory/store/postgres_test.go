@@ -130,6 +130,56 @@ func TestPostgresStore_GetRackByID(t *testing.T) {
 	assert.Equal(t, byID.OperationStatus, listed[0].OperationStatus)
 }
 
+// TestPostgresStore_GetRackByExternalID proves expanded membership omits persisted
+// soft-deleted components without losing a live sibling.
+func TestPostgresStore_GetRackByExternalID(t *testing.T) {
+	if os.Getenv("DB_PORT") == "" {
+		t.Skip("Skipping integration test: no DB environment specified")
+	}
+
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{
+			name: "excludes soft-deleted components",
+			run: func(t *testing.T) {
+				ctx := t.Context()
+				dbConf, err := cdb.ConfigFromEnv()
+				require.NoError(t, err)
+				pool, err := commonutils.UnitTestDB(ctx, t, dbConf)
+				require.NoError(t, err)
+				store := NewPostgres(pool)
+
+				rackDAO := model.Rack{Name: "aggregate-rack", ExternalID: stringPtr("rack-01")}
+				require.NoError(t, rackDAO.Create(ctx, pool.DB))
+				components := []model.Component{
+					{Name: "live", Type: devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute), RackID: rackDAO.ID},
+					{Name: "deleted", Type: devicetypes.ComponentTypeToString(devicetypes.ComponentTypeNVSwitch), RackID: rackDAO.ID},
+				}
+				for i := range components {
+					require.NoError(t, components[i].Create(ctx, pool.DB))
+				}
+
+				// Keep a live sibling so omitting the `Components` relation cannot
+				// satisfy the check that deleted members are absent.
+				require.NoError(t, components[1].Delete(ctx, pool.DB))
+				deleted, err := components[1].GetIncludingDeleted(ctx, pool.DB)
+				require.NoError(t, err)
+				require.NotNil(t, deleted.DeletedAt)
+
+				got, err := store.GetRackByExternalID(ctx, *rackDAO.ExternalID, true)
+				require.NoError(t, err)
+				require.Len(t, got.Components, 1)
+				assert.Equal(t, components[0].ID, got.Components[0].Info.ID)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, test.run)
+	}
+}
+
 func TestPostgresStore_GetListOfComponents(t *testing.T) {
 	if os.Getenv("DB_PORT") == "" {
 		t.Skip("Skipping integration test: no DB environment specified")
