@@ -346,51 +346,61 @@ jobs:
 
     steps:
       - name: Generate build summary
+        env:
+          SEMANTIC_VERSION: ${{ inputs.semantic_version }}
+          SHORT_SHA: ${{ inputs.short_sha }}
+          BRANCH_NAME: ${{ inputs.branch_name }}
+          BRANCH_SHA_TAG: ${{ inputs.branch_sha_tag }}
+          TARGET_REGISTRY: ${{ inputs.target_registry }}
+          PUSH_ENABLED: ${{ inputs.push_enabled }}
+          IS_MAIN_BRANCH: ${{ inputs.is_main_branch }}
+          REF_NAME: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           echo "# Docker Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "## Build Information" >> $GITHUB_STEP_SUMMARY
-          echo "- **Semantic Version**: \`${{ inputs.semantic_version }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Git SHA**: \`${{ inputs.short_sha }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Branch**: \`${{ inputs.branch_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Branch-SHA Tag**: \`${{ inputs.branch_sha_tag }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Registry**: \`${{ inputs.target_registry }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Push Enabled**: \`${{ inputs.push_enabled }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Is Main Branch**: \`${{ inputs.is_main_branch }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- **Ref Name**: \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Semantic Version**: \`${SEMANTIC_VERSION}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Git SHA**: \`${SHORT_SHA}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch**: \`${BRANCH_NAME}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch-SHA Tag**: \`${BRANCH_SHA_TAG}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Registry**: \`${TARGET_REGISTRY}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Push Enabled**: \`${PUSH_ENABLED}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Is Main Branch**: \`${IS_MAIN_BRANCH}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Ref Name**: \`${REF_NAME}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **Platforms**: \`linux/amd64, linux/arm64\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ inputs.push_enabled }}" = "false" ]; then
+          if [ "${PUSH_ENABLED}" = "false" ]; then
             echo "> **Note**: Images were built but NOT pushed to registry (build-only mode)" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
           fi
           echo "## Docker Image Tags" >> $GITHUB_STEP_SUMMARY
-          echo "All images tagged with: \`${{ inputs.branch_sha_tag }}\`" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ inputs.is_main_branch }}" = "true" ] || [ "${{ github.ref_name }}" = "main" ]; then
+          echo "All images tagged with: \`${BRANCH_SHA_TAG}\`" >> $GITHUB_STEP_SUMMARY
+          if [ "${IS_MAIN_BRANCH}" = "true" ] || [ "${REF_NAME}" = "main" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "**Main branch additional tags:**" >> $GITHUB_STEP_SUMMARY
-            echo "- \`${{ inputs.semantic_version }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`${SEMANTIC_VERSION}\`" >> $GITHUB_STEP_SUMMARY
             echo "- \`latest\`" >> $GITHUB_STEP_SUMMARY
           fi
-          if [ "${{ inputs.release_tag }}" != "" ]; then
+          if [ -n "${RELEASE_TAG}" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "**Release tag additional tags:**" >> $GITHUB_STEP_SUMMARY
-            echo "- \`${{ inputs.release_tag }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`${RELEASE_TAG}\`" >> $GITHUB_STEP_SUMMARY
           fi
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "## Images Built" >> $GITHUB_STEP_SUMMARY
-          echo "1. \`nico-rest-api:${{ inputs.branch_sha_tag }}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
-          echo "2. \`nico-rest-db:${{ inputs.branch_sha_tag }}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
-          echo "3. \`nico-rest-site-manager:${{ inputs.branch_sha_tag }}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
-          echo "4. \`nico-rest-workflow:${{ inputs.branch_sha_tag }}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
-          echo "5. \`nico-rest-site-agent:${{ inputs.branch_sha_tag }}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
-          echo "6. \`nico-rest-cert-manager:${{ inputs.branch_sha_tag }}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
-          echo "7. \`nico-flow:${{ inputs.branch_sha_tag }}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
-          echo "8. \`nico-psm:${{ inputs.branch_sha_tag }}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
-          echo "9. \`nico-nsm:${{ inputs.branch_sha_tag }}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
-          echo "10. \`nico-mcp:${{ inputs.branch_sha_tag }}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "1. \`nico-rest-api:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "2. \`nico-rest-db:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "3. \`nico-rest-site-manager:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "4. \`nico-rest-workflow:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "5. \`nico-rest-site-agent:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "6. \`nico-rest-cert-manager:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "7. \`nico-flow:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "8. \`nico-psm:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "9. \`nico-nsm:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "10. \`nico-mcp:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ inputs.push_enabled }}" = "true" ]; then
+          if [ "${PUSH_ENABLED}" = "true" ]; then
             echo "## Binary Artifacts Uploaded" >> $GITHUB_STEP_SUMMARY
             echo "Each binary uploaded for both amd64 and arm64 with the publish build version." >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY

@@ -942,20 +942,26 @@ jobs:
 
       - name: Create and push multi-arch manifest
         uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
+        env:
+          IMAGE_REGISTRY: ${{ needs.prepare.outputs.image_registry }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          MAJOR_MINOR_VERSION: ${{ needs.prepare.outputs.major_minor_version }}
+          X86_DIGEST: ${{ needs.build-release-container-x86_64.outputs.image_digest }}
+          ARM_DIGEST: ${{ needs.build-release-container-aarch64.outputs.image_digest }}
         with:
           max_attempts: 3
           timeout_minutes: 10
           retry_wait_seconds: 20
           command: |
             docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide@${{ needs.build-release-container-x86_64.outputs.image_digest }} \
-              ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide-aarch64@${{ needs.build-release-container-aarch64.outputs.image_digest }}
+              "${IMAGE_REGISTRY}/nvmetal-carbide:${VERSION}" \
+              "${IMAGE_REGISTRY}/nvmetal-carbide@${X86_DIGEST}" \
+              "${IMAGE_REGISTRY}/nvmetal-carbide-aarch64@${ARM_DIGEST}"
 
             docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide:${{ needs.prepare.outputs.major_minor_version }}-latest \
-              ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide@${{ needs.build-release-container-x86_64.outputs.image_digest }} \
-              ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide-aarch64@${{ needs.build-release-container-aarch64.outputs.image_digest }}
+              "${IMAGE_REGISTRY}/nvmetal-carbide:${MAJOR_MINOR_VERSION}-latest" \
+              "${IMAGE_REGISTRY}/nvmetal-carbide@${X86_DIGEST}" \
+              "${IMAGE_REGISTRY}/nvmetal-carbide-aarch64@${ARM_DIGEST}"
 
   build-machine-a-tron:
     if: >-
@@ -1279,25 +1285,29 @@ jobs:
 
       - name: Create and push multi-arch manifest
         uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
+        env:
+          IMAGE_REGISTRY: ${{ needs.prepare.outputs.image_registry }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          MAJOR_MINOR_VERSION: ${{ needs.prepare.outputs.major_minor_version }}
         with:
           max_attempts: 3
           timeout_minutes: 10
           retry_wait_seconds: 20
           command: |
             docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-x86_64:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-aarch64:${{ needs.prepare.outputs.version }}
+              "${IMAGE_REGISTRY}/forge-admin-cli:${VERSION}" \
+              "${IMAGE_REGISTRY}/forge-admin-cli-x86_64:${VERSION}" \
+              "${IMAGE_REGISTRY}/forge-admin-cli-aarch64:${VERSION}"
 
             docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli:latest \
-              ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-x86_64:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-aarch64:${{ needs.prepare.outputs.version }}
+              "${IMAGE_REGISTRY}/forge-admin-cli:latest" \
+              "${IMAGE_REGISTRY}/forge-admin-cli-x86_64:${VERSION}" \
+              "${IMAGE_REGISTRY}/forge-admin-cli-aarch64:${VERSION}"
 
             docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli:${{ needs.prepare.outputs.major_minor_version }}-latest \
-              ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-x86_64:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-aarch64:${{ needs.prepare.outputs.version }}
+              "${IMAGE_REGISTRY}/forge-admin-cli:${MAJOR_MINOR_VERSION}-latest" \
+              "${IMAGE_REGISTRY}/forge-admin-cli-x86_64:${VERSION}" \
+              "${IMAGE_REGISTRY}/forge-admin-cli-aarch64:${VERSION}"
 
   # ============================================================================
   # BUILD STAGE - Boot Artifacts
@@ -1685,6 +1695,12 @@ jobs:
           token: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
       - name: Create and push multi-arch manifest
         uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
+        env:
+          IMAGE_REGISTRY: ${{ needs.prepare.outputs.image_registry }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          MAJOR_MINOR_VERSION: ${{ needs.prepare.outputs.major_minor_version }}
+          X86_DIGEST: ${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_digest }}
+          ARM_DIGEST: ${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_digest }}
         with:
           max_attempts: 3
           timeout_minutes: 10
@@ -1693,14 +1709,14 @@ jobs:
             set -euo pipefail
 
             docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin@${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_digest }} \
-              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin-aarch64@${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_digest }}
+              "${IMAGE_REGISTRY}/machine-validation-basic-plugin:${VERSION}" \
+              "${IMAGE_REGISTRY}/machine-validation-basic-plugin@${X86_DIGEST}" \
+              "${IMAGE_REGISTRY}/machine-validation-basic-plugin-aarch64@${ARM_DIGEST}"
 
             docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin:${{ needs.prepare.outputs.major_minor_version }}-latest \
-              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin@${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_digest }} \
-              ${{ needs.prepare.outputs.image_registry }}/machine-validation-basic-plugin-aarch64@${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_digest }}
+              "${IMAGE_REGISTRY}/machine-validation-basic-plugin:${MAJOR_MINOR_VERSION}-latest" \
+              "${IMAGE_REGISTRY}/machine-validation-basic-plugin@${X86_DIGEST}" \
+              "${IMAGE_REGISTRY}/machine-validation-basic-plugin-aarch64@${ARM_DIGEST}"
 
   build-release-machine-validation-artifacts-x86-host:
     needs:
@@ -1785,20 +1801,26 @@ jobs:
 
       - name: Create and push multi-arch manifest
         uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
+        env:
+          IMAGE_REGISTRY: ${{ needs.prepare.outputs.image_registry }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          MAJOR_MINOR_VERSION: ${{ needs.prepare.outputs.major_minor_version }}
+          X86_DIGEST: ${{ needs.build-release-machine-validation-artifacts-x86-host.outputs.image_digest }}
+          ARM_DIGEST: ${{ needs.build-release-machine-validation-artifacts-arm-host.outputs.image_digest }}
         with:
           max_attempts: 3
           timeout_minutes: 10
           retry_wait_seconds: 20
           command: |
             docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/machine_validation:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/machine_validation@${{ needs.build-release-machine-validation-artifacts-x86-host.outputs.image_digest }} \
-              ${{ needs.prepare.outputs.image_registry }}/machine_validation-aarch64@${{ needs.build-release-machine-validation-artifacts-arm-host.outputs.image_digest }}
+              "${IMAGE_REGISTRY}/machine_validation:${VERSION}" \
+              "${IMAGE_REGISTRY}/machine_validation@${X86_DIGEST}" \
+              "${IMAGE_REGISTRY}/machine_validation-aarch64@${ARM_DIGEST}"
 
             docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/machine_validation:${{ needs.prepare.outputs.major_minor_version }}-latest \
-              ${{ needs.prepare.outputs.image_registry }}/machine_validation@${{ needs.build-release-machine-validation-artifacts-x86-host.outputs.image_digest }} \
-              ${{ needs.prepare.outputs.image_registry }}/machine_validation-aarch64@${{ needs.build-release-machine-validation-artifacts-arm-host.outputs.image_digest }}
+              "${IMAGE_REGISTRY}/machine_validation:${MAJOR_MINOR_VERSION}-latest" \
+              "${IMAGE_REGISTRY}/machine_validation@${X86_DIGEST}" \
+              "${IMAGE_REGISTRY}/machine_validation-aarch64@${ARM_DIGEST}"
 
   proto-police:
     needs:
@@ -2089,6 +2111,10 @@ jobs:
 
       - name: Create and push multi-arch manifest
         uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
+        env:
+          IMAGE_REGISTRY: ${{ needs.prepare.outputs.image_registry }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          MAJOR_MINOR_VERSION: ${{ needs.prepare.outputs.major_minor_version }}
         with:
           max_attempts: 3
           timeout_minutes: 10
@@ -2096,14 +2122,14 @@ jobs:
           command: |
             set -euo pipefail
             docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-x86_64:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-aarch64:${{ needs.prepare.outputs.version }}
+              "${IMAGE_REGISTRY}/machine-lifecycle-test:${VERSION}" \
+              "${IMAGE_REGISTRY}/machine-lifecycle-test-x86_64:${VERSION}" \
+              "${IMAGE_REGISTRY}/machine-lifecycle-test-aarch64:${VERSION}"
 
             docker buildx imagetools create -t \
-              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test:${{ needs.prepare.outputs.major_minor_version }}-latest \
-              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-x86_64:${{ needs.prepare.outputs.version }} \
-              ${{ needs.prepare.outputs.image_registry }}/machine-lifecycle-test-aarch64:${{ needs.prepare.outputs.version }}
+              "${IMAGE_REGISTRY}/machine-lifecycle-test:${MAJOR_MINOR_VERSION}-latest" \
+              "${IMAGE_REGISTRY}/machine-lifecycle-test-x86_64:${VERSION}" \
+              "${IMAGE_REGISTRY}/machine-lifecycle-test-aarch64:${VERSION}"
 
   # ============================================================================
   # BUILD STAGE - Helm Chart
@@ -2206,7 +2232,7 @@ jobs:
 
       - name: Package and push Helm chart to NGC
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@7de619729962a6bd5e8355b6fb3582a22517d7e5
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
         with:
           chart-path: helm
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2309,7 +2335,7 @@ jobs:
 
       - name: Package and push Helm prereqs chart to NGC
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@7de619729962a6bd5e8355b6fb3582a22517d7e5
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
         with:
           chart-path: helm-prereqs
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2353,9 +2379,13 @@ jobs:
           token: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
 
       - name: Pull build container
-        run: docker pull ${{ needs.prepare.outputs.build_artifacts_container_aarch64_ref }}
+        env:
+          BUILD_CONTAINER_REF: ${{ needs.prepare.outputs.build_artifacts_container_aarch64_ref }}
+        run: docker pull "${BUILD_CONTAINER_REF}"
 
       - name: Compile bluefield Rust binaries
+        env:
+          BUILD_CONTAINER_REF: ${{ needs.prepare.outputs.build_artifacts_container_aarch64_ref }}
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/workspace" \
@@ -2363,7 +2393,7 @@ jobs:
             -e CARGO_HOME=/workspace/cargo \
             -e CARGO_INCREMENTAL=0 \
             -e CARGO_BUILD_TARGET=aarch64-unknown-linux-gnu \
-            ${{ needs.prepare.outputs.build_artifacts_container_aarch64_ref }} \
+            "${BUILD_CONTAINER_REF}" \
             bash -c "git config --global --add safe.directory /workspace && \
               cargo make --cwd bluefield build-dpu-agent-and-dhcp-server-ci && \
               cargo make --cwd bluefield build-fmds-ci && \
@@ -2578,7 +2608,7 @@ jobs:
 
       - name: Package and push nico-otelcol chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@7de619729962a6bd5e8355b6fb3582a22517d7e5
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
         with:
           chart-path: bluefield/charts/nico-otelcol
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2590,7 +2620,7 @@ jobs:
 
       - name: Package and push nico-dpu-agent chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@7de619729962a6bd5e8355b6fb3582a22517d7e5
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
         with:
           chart-path: bluefield/charts/nico-dpu-agent
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2602,7 +2632,7 @@ jobs:
 
       - name: Package and push nico-dhcp-server chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@7de619729962a6bd5e8355b6fb3582a22517d7e5
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
         with:
           chart-path: bluefield/charts/nico-dhcp-server
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2614,7 +2644,7 @@ jobs:
 
       - name: Package and push nico-fmds chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@7de619729962a6bd5e8355b6fb3582a22517d7e5
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
         with:
           chart-path: bluefield/charts/nico-fmds
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2672,13 +2702,32 @@ jobs:
       - lint-police
     steps:
       - name: Generate summary
+        env:
+          NEEDS_JSON: ${{ toJson(needs) }}
+          BUILD_CONTAINER_X86_64_IMAGE_REF: ${{ needs.build-container-x86_64.outputs.image_ref }}
+          BUILD_CONTAINER_AARCH64_IMAGE_REF: ${{ needs.build-container-aarch64.outputs.image_ref }}
+          BUILD_RUNTIME_CONTAINER_X86_64_IMAGE_REF: ${{ needs.build-runtime-container-x86_64.outputs.image_ref }}
+          BUILD_RUNTIME_CONTAINER_AARCH64_IMAGE_REF: ${{ needs.build-runtime-container-aarch64.outputs.image_ref }}
+          BUILD_ARTIFACTS_CONTAINER_X86_64_IMAGE_REF: ${{ needs.build-artifacts-container-x86_64.outputs.image_ref }}
+          BUILD_ARTIFACTS_CONTAINER_AARCH64_IMAGE_REF: ${{ needs.build-artifacts-container-aarch64.outputs.image_ref }}
+          BUILD_RELEASE_CONTAINER_X86_64_IMAGE_REF: ${{ needs.build-release-container-x86_64.outputs.image_ref }}
+          BUILD_RELEASE_CONTAINER_AARCH64_IMAGE_REF: ${{ needs.build-release-container-aarch64.outputs.image_ref }}
+          BUILD_FORGE_CLI_X86_64_IMAGE_REF: ${{ needs.build-forge-cli-x86_64.outputs.image_ref }}
+          BUILD_FORGE_CLI_AARCH64_IMAGE_REF: ${{ needs.build-forge-cli-aarch64.outputs.image_ref }}
+          BUILD_RELEASE_MACHINE_VALIDATION_RUNNER_IMAGE_REF: ${{ needs.build-release-machine-validation-runner.outputs.image_ref }}
+          BUILD_RELEASE_MACHINE_VALIDATION_BASIC_PLUGIN_X86_IMAGE_REF: ${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_ref }}
+          BUILD_RELEASE_MACHINE_VALIDATION_BASIC_PLUGIN_ARM_IMAGE_REF: ${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_ref }}
+          BUILD_RELEASE_MACHINE_VALIDATION_ARTIFACTS_X86_HOST_IMAGE_REF: ${{ needs.build-release-machine-validation-artifacts-x86-host.outputs.image_ref }}
+          BUILD_RELEASE_ARTIFACTS_X86_HOST_IMAGE_REF: ${{ needs.build-release-artifacts-x86-host.outputs.image_ref }}
+          BUILD_RELEASE_ARTIFACTS_ARM_HOST_IMAGE_REF: ${{ needs.build-release-artifacts-arm-host.outputs.image_ref }}
+          BUILD_MAT_K8S_CONTROLLER_IMAGE_REF: ${{ needs.build-mat-k8s-controller.outputs.image_ref }}
+          BUILD_SITE_HEALTH_PROBE_IMAGE_REF: ${{ needs.build-site-health-probe.outputs.image_ref }}
         run: |
-          NEEDS='${{ toJson(needs) }}'
           echo "## Build Jobs Summary" >> "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
           echo "| Job | Status |" >> "$GITHUB_STEP_SUMMARY"
           echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "$NEEDS" | jq -r '
+          echo "$NEEDS_JSON" | jq -r '
             to_entries[]
             | select((.key | startswith("build-")) or (.key | startswith("test-")) or (.key | startswith("merge-manifests-")))
             | "| \(.key) | \(if .value.result == "failure" then "**\(.value.result)**" else .value.result end) |"
@@ -2692,24 +2741,24 @@ jobs:
 
           # Collect image_ref from docker-build jobs
           declare -A IMAGES
-          IMAGES["build-container-x86_64"]="${{ needs.build-container-x86_64.outputs.image_ref }}"
-          IMAGES["build-container-aarch64"]="${{ needs.build-container-aarch64.outputs.image_ref }}"
-          IMAGES["build-runtime-container-x86_64"]="${{ needs.build-runtime-container-x86_64.outputs.image_ref }}"
-          IMAGES["build-runtime-container-aarch64"]="${{ needs.build-runtime-container-aarch64.outputs.image_ref }}"
-          IMAGES["build-artifacts-container-x86_64"]="${{ needs.build-artifacts-container-x86_64.outputs.image_ref }}"
-          IMAGES["build-artifacts-container-aarch64"]="${{ needs.build-artifacts-container-aarch64.outputs.image_ref }}"
-          IMAGES["build-release-container-x86_64"]="${{ needs.build-release-container-x86_64.outputs.image_ref }}"
-          IMAGES["build-release-container-aarch64"]="${{ needs.build-release-container-aarch64.outputs.image_ref }}"
-          IMAGES["build-forge-cli-x86_64"]="${{ needs.build-forge-cli-x86_64.outputs.image_ref }}"
-          IMAGES["build-forge-cli-aarch64"]="${{ needs.build-forge-cli-aarch64.outputs.image_ref }}"
-          IMAGES["build-release-machine-validation-runner"]="${{ needs.build-release-machine-validation-runner.outputs.image_ref }}"
-          IMAGES["build-release-machine-validation-basic-plugin-x86"]="${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_ref }}"
-          IMAGES["build-release-machine-validation-basic-plugin-arm"]="${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_ref }}"
-          IMAGES["build-release-machine-validation-artifacts-x86-host"]="${{ needs.build-release-machine-validation-artifacts-x86-host.outputs.image_ref }}"
-          IMAGES["build-release-artifacts-x86-host"]="${{ needs.build-release-artifacts-x86-host.outputs.image_ref }}"
-          IMAGES["build-release-artifacts-arm-host"]="${{ needs.build-release-artifacts-arm-host.outputs.image_ref }}"
-          IMAGES["build-mat-k8s-controller"]="${{ needs.build-mat-k8s-controller.outputs.image_ref }}"
-          IMAGES["build-site-health-probe"]="${{ needs.build-site-health-probe.outputs.image_ref }}"
+          IMAGES["build-container-x86_64"]="${BUILD_CONTAINER_X86_64_IMAGE_REF}"
+          IMAGES["build-container-aarch64"]="${BUILD_CONTAINER_AARCH64_IMAGE_REF}"
+          IMAGES["build-runtime-container-x86_64"]="${BUILD_RUNTIME_CONTAINER_X86_64_IMAGE_REF}"
+          IMAGES["build-runtime-container-aarch64"]="${BUILD_RUNTIME_CONTAINER_AARCH64_IMAGE_REF}"
+          IMAGES["build-artifacts-container-x86_64"]="${BUILD_ARTIFACTS_CONTAINER_X86_64_IMAGE_REF}"
+          IMAGES["build-artifacts-container-aarch64"]="${BUILD_ARTIFACTS_CONTAINER_AARCH64_IMAGE_REF}"
+          IMAGES["build-release-container-x86_64"]="${BUILD_RELEASE_CONTAINER_X86_64_IMAGE_REF}"
+          IMAGES["build-release-container-aarch64"]="${BUILD_RELEASE_CONTAINER_AARCH64_IMAGE_REF}"
+          IMAGES["build-forge-cli-x86_64"]="${BUILD_FORGE_CLI_X86_64_IMAGE_REF}"
+          IMAGES["build-forge-cli-aarch64"]="${BUILD_FORGE_CLI_AARCH64_IMAGE_REF}"
+          IMAGES["build-release-machine-validation-runner"]="${BUILD_RELEASE_MACHINE_VALIDATION_RUNNER_IMAGE_REF}"
+          IMAGES["build-release-machine-validation-basic-plugin-x86"]="${BUILD_RELEASE_MACHINE_VALIDATION_BASIC_PLUGIN_X86_IMAGE_REF}"
+          IMAGES["build-release-machine-validation-basic-plugin-arm"]="${BUILD_RELEASE_MACHINE_VALIDATION_BASIC_PLUGIN_ARM_IMAGE_REF}"
+          IMAGES["build-release-machine-validation-artifacts-x86-host"]="${BUILD_RELEASE_MACHINE_VALIDATION_ARTIFACTS_X86_HOST_IMAGE_REF}"
+          IMAGES["build-release-artifacts-x86-host"]="${BUILD_RELEASE_ARTIFACTS_X86_HOST_IMAGE_REF}"
+          IMAGES["build-release-artifacts-arm-host"]="${BUILD_RELEASE_ARTIFACTS_ARM_HOST_IMAGE_REF}"
+          IMAGES["build-mat-k8s-controller"]="${BUILD_MAT_K8S_CONTROLLER_IMAGE_REF}"
+          IMAGES["build-site-health-probe"]="${BUILD_SITE_HEALTH_PROBE_IMAGE_REF}"
 
           for job in "${!IMAGES[@]}"; do
             image="${IMAGES[$job]}"
@@ -2724,7 +2773,7 @@ jobs:
     needs:
       - prepare
       - build-release-container-x86_64
-    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@760d2d7964b479fde431cd3e0b980bc6b6a26ccd
+    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
     with:
       source: ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide
       source_tag: ${{ needs.prepare.outputs.version }}
