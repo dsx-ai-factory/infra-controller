@@ -272,18 +272,21 @@ below should be repeatable as a checklist.
 1. **Per-machine GPU placement.**
 
    ```bash
-   nicocli machine nvlink-info --machine-id <machine-id>
+   nico-admin-cli --format json machine show <machine-id>
    ```
 
-   Returns the machine's NVLink GPU status observations, including the
-   Domain each GPU is currently assigned to. Use this to confirm that
-   two instances expected to share an NVLink Logical Partition have
+   The `status.nvlink.gpu_status` list holds the machine's NVLink GPU status
+   observations: the `domain_id` of each GPU and the `partition_id` and
+   `logical_partition_id` it is currently assigned to. Use this to confirm
+   that two instances expected to share an NVLink Logical Partition have
    actually landed in the same NVLink Domain — instances in different
    Domains cannot share GPU memory regardless of having the same
-   Logical Partition ID.
+   Logical Partition ID. To see the machine's stored Domain and GPU mapping,
+   run `nico-admin-cli machine nvlink-info show <machine-id>`.
 1. **Cleanup after release.** After releasing an instance, the same
-   `machine nvlink-info` output should show an empty Domain assignment
-   on the affected GPUs within one or two reconcile intervals. Failure
+   `status.nvlink.gpu_status` output should show no `partition_id` or
+   `logical_partition_id` on the affected GPUs within one or two reconcile
+   intervals. Failure
    to clear indicates the monitor could not remove the GPU from its NMX-C
    partition; investigate the corresponding connect-error and op-latency
    metrics.
