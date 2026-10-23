@@ -177,3 +177,8 @@ func (m *mockStore) GetRackRuleAssociation(_ context.Context, _ uuid.UUID, _ tas
 func (m *mockStore) ListRackRuleAssociations(_ context.Context, _ uuid.UUID) ([]*operationrules.RackRuleAssociation, error) {
 	panic("mockStore.ListRackRuleAssociations: not implemented")
 }
+
+// ListTaskContextForRack fails unexpected context reads in conflict tests.
+func (m *mockStore) ListTaskContextForRack(_ context.Context, _ uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
+	panic("unexpected task context read")
+}

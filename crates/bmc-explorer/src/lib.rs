@@ -143,8 +143,14 @@ fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Confi
         // of BlueField_ERoT. Because carbide doesn't need
         // BlueField_ERoT we just skip it.
         // BlueField-4: skip IRoT NIC (invalid STATIC UUID breaks parsing).
+        // GB200/GB300 host BMCs: the BMC's ERoT chassis intermittently
+        // times out the same way, and carbide doesn't need it either.
         lazy_fetch: if is_nvidia_vendor && is_bf4_product(root.product()) {
             Some(should_fetch_bf4_chassis_except_irot_nic)
+        } else if root.vendor() == Some(Vendor::new("NVIDIA"))
+            && root.product() == Some(Product::new("GB BMC"))
+        {
+            Some(|odata_id| odata_id.last_segment() != Some("ERoT_BMC_0"))
         } else {
             (root.vendor() == Some(Vendor::new("Nvidia"))
                 && root.product() == Some(Product::new("BlueField-3 DPU")))
@@ -233,17 +239,34 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     }
     let explored_system = &explored_systems[0];
 
-    let manager = root
+    let mut managers = root
         .managers()
         .await
         .map_err(Error::nv_redfish("managers"))?
         .ok_or_else(Error::bmc_not_provided("managers"))?
         .members()
         .await
-        .map_err(Error::nv_redfish("managers members"))?
-        .into_iter()
-        .next()
-        .ok_or_else(Error::bmc_not_provided("at least one manager"))?;
+        .map_err(Error::nv_redfish("managers members"))?;
+
+    // Prefer the manager whose ManagerForServers links the chosen system; fall
+    // back to the first manager for BMCs that don't populate the link.
+    let manager = match managers.iter().position(|m| {
+        m.raw()
+            .links
+            .as_ref()
+            .and_then(|l| l.manager_for_servers.as_ref())
+            .is_some_and(|servers| {
+                servers
+                    .iter()
+                    .any(|s| *s.id() == explored_system.system.raw().odata_id)
+            })
+    }) {
+        Some(i) => managers.swap_remove(i),
+        None => managers
+            .into_iter()
+            .next()
+            .ok_or_else(Error::bmc_not_provided("at least one manager"))?,
+    };
 
     let hw_type = hw_type(&root, explored_system, &explored_chassis);
     let linked_chassis_ids = explored_system.linked_chassis_ids();

@@ -57,6 +57,7 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 const UNDERLAY_DHCP_RELAY_ADDRESS: Ipv4Addr = Ipv4Addr::new(172, 20, 1, 1);
+const SSH_METRIC_CATALOGUE_OUTPUT: &str = "CARBIDE_SSH_METRIC_CATALOGUE_OUTPUT";
 
 #[ctor::ctor(unsafe)]
 fn setup() {
@@ -64,8 +65,21 @@ fn setup() {
 }
 
 /// Run multiple machine-a-tron integration tests in parallel against a shared carbide API instance.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_integration() -> eyre::Result<()> {
+#[test]
+fn test_integration() -> eyre::Result<()> {
+    if let Some(output_path) = std::env::var_os(SSH_METRIC_CATALOGUE_OUTPUT) {
+        return utils::api_server_runtime_builder()
+            .worker_threads(2)
+            .build()?
+            .block_on(write_ssh_console_metric_info(output_path.into()));
+    }
+    utils::api_server_runtime_builder()
+        .build()?
+        .block_on(run_integration())
+}
+
+/// Runs the shared API lifecycle and parallel machine-a-tron assertions.
+async fn run_integration() -> eyre::Result<()> {
     // NOTE: These tests run two carbide-api servers, and the clients are configured to randomly
     // switch between them on every API call. This helps prevent issues that arise when multiple API
     // severs may be running in production.
@@ -75,10 +89,20 @@ async fn test_integration() -> eyre::Result<()> {
         println!("test_integration: SKIPPED (set REPO_ROOT and DATABASE_URL to run)");
         return Ok(());
     };
+    // Enable SPDM so its controller metrics appear in the catalogue scrape.
+    test_env.spdm_enabled = true;
+
+    db::migrations::migrate(&test_env.db_pool).await?;
+    // An empty profile set is the precondition for skipping SPDM verification.
+    assert!(
+        db::attestation_profile::list(&test_env.db_pool)
+            .await?
+            .is_empty(),
+        "SPDM metrics coverage requires an empty attestation profile set at startup"
+    );
 
     // Persist a predecessor root without a protection request before either API
     // starts, then verify that the background controller makes it ready.
-    db::migrations::migrate(&test_env.db_pool).await?;
     let mut txn = test_env.db_pool.begin().await?;
     let recovery_tenant_id = "site-prefix-recovery";
     db::tenant::create_and_persist(
@@ -442,6 +466,13 @@ async fn test_integration() -> eyre::Result<()> {
     )
     .await?;
 
+    exercise_dpf_exploration_suppression(&test_env).await?;
+    metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        r#"carbide_site_explorer_dpf_explorations_deferred_total{request="refresh"}"#,
+    )
+    .await?;
+
     let metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
     assert!(
         metric_infos.iter().any(|metric| {
@@ -467,7 +498,31 @@ async fn test_integration() -> eyre::Result<()> {
             .await?;
         }
     }
-    generate_core_metric_docs(&test_env.carbide_metrics_addrs);
+    wait_for_count_metric_aliases(&test_env).await?;
+    // Exercise the library sampler on the server's meter without activating a
+    // remote backend. Stop its task before catalogue collection and generation,
+    // which can return early or panic on I/O errors.
+    let mut cleanup_metric_tasks = tokio::task::JoinSet::new();
+    let cleanup_metric_cancel = cancel_token.child_token();
+    carbide_resource_pool::remote::start_cleanup_metrics(
+        test_env.db_pool.clone(),
+        server_handle_2.ready.meter.clone(),
+        &mut cleanup_metric_tasks,
+        cleanup_metric_cancel.clone(),
+    )?;
+    let cleanup_metric_result = metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        r#"carbide_resource_pool_cleanup_pending{fresh="true"} 0"#,
+    )
+    .await;
+    cleanup_metric_cancel.cancel();
+    while let Some(result) = cleanup_metric_tasks.join_next().await {
+        result?;
+    }
+    cleanup_metric_result?;
+    let mut metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
+    metric_infos.push(collect_ssh_console_metric_info().await?);
+    generate_core_metric_docs(metric_infos);
     drop(mqtt_client);
 
     // MaT opens ScoutStream on its primary API address and shares ordinary RPCs across both.
@@ -506,8 +561,168 @@ async fn test_integration() -> eyre::Result<()> {
     Ok(())
 }
 
-fn generate_core_metric_docs(metrics_endpoints: &[SocketAddr]) {
-    let mut infos = metrics::collect_metric_infos(metrics_endpoints).unwrap();
+/// Waits for both count names before the catalogue scrape.
+async fn wait_for_count_metric_aliases(test_env: &IntegrationTestEnvironment) -> eyre::Result<()> {
+    for (legacy, alias) in [
+        ("carbide_preingestion_total", "carbide_preingestion_count"),
+        ("carbide_machines_total", "carbide_machines_count"),
+        (
+            "carbide_network_segments_total",
+            "carbide_network_segments_count",
+        ),
+        ("carbide_vpc_prefixes_total", "carbide_vpc_prefixes_count"),
+        (
+            "carbide_extension_services_total",
+            "carbide_extension_services_count",
+        ),
+        (
+            "carbide_spdm_attestation_total",
+            "carbide_spdm_attestation_count",
+        ),
+        ("carbide_ib_partitions_total", "carbide_ib_partitions_count"),
+        ("carbide_power_shelves_total", "carbide_power_shelves_count"),
+        ("carbide_racks_total", "carbide_racks_count"),
+        ("carbide_switches_total", "carbide_switches_count"),
+    ] {
+        for name in [legacy, alias] {
+            metrics::wait_for_metric_line(
+                &test_env.carbide_metrics_addrs,
+                &format!("# TYPE {name} gauge\n"),
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn exercise_dpf_exploration_suppression(
+    test_env: &IntegrationTestEnvironment,
+) -> eyre::Result<()> {
+    use model::bmc_suppression::{
+        BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression,
+    };
+    use rpc::forge_api_client::ForgeApiClient;
+    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+
+    let (address, mac): (std::net::IpAddr, MacAddress) = sqlx::query_as(
+        "SELECT e.address, mi.mac_address FROM explored_endpoints e
+         JOIN machine_interface_addresses mia ON mia.address = e.address
+         JOIN machine_interfaces mi ON mi.id = mia.interface_id
+         ORDER BY e.address LIMIT 1",
+    )
+    .fetch_one(&test_env.db_pool)
+    .await?;
+    let mut txn = test_env.db_pool.begin().await?;
+    db::bmc_suppression::upsert(
+        &mut txn,
+        &NewBmcSuppression {
+            bmc_mac_address: mac,
+            subsystem: BmcSuppressionSubsystem::SiteExplorer,
+            source: BmcSuppressionSource::DpfProvisioning,
+            reason: "DPF provisioning".to_string(),
+        },
+    )
+    .await?;
+    txn.commit().await?;
+    let certs = &api_test_helper::utils::LOCALHOST_CERTS;
+    let config = ForgeClientConfig::new(
+        certs.ca_cert.to_string_lossy().into_owned(),
+        Some(forge_tls::client_config::ClientCert {
+            cert_path: certs.client_cert.to_string_lossy().into_owned(),
+            key_path: certs.client_key.to_string_lossy().into_owned(),
+        }),
+    );
+    let client = ForgeApiClient::new(&ApiConfig::new(
+        &format!("https://{}", test_env.carbide_api_addrs[0]),
+        &config,
+    ));
+    let result = client
+        .refresh_endpoint_report(rpc::forge::RefreshEndpointReportRequest {
+            ip_address: address.to_string(),
+        })
+        .await;
+    let mut txn = test_env.db_pool.begin().await?;
+    db::bmc_suppression::delete(
+        &mut txn,
+        mac,
+        BmcSuppressionSubsystem::SiteExplorer,
+        BmcSuppressionSource::DpfProvisioning,
+    )
+    .await?;
+    txn.commit().await?;
+    let queued = result?;
+    eyre::ensure!(
+        queued.exploration_requested,
+        "provisioning must queue refresh"
+    );
+    Ok(())
+}
+
+async fn collect_ssh_console_metric_info() -> eyre::Result<metrics::MetricInfo> {
+    // A separate process prevents SSH Console from replacing the API server's
+    // global meter provider or binding its cached Events to that provider.
+    let output_dir = temp_dir::TempDir::with_prefix("ssh-metric-catalogue")?;
+    let output_path = output_dir.path().join("metric.json");
+    let mut child = tokio::process::Command::new(std::env::current_exe()?)
+        .args(["--exact", "test_integration", "--nocapture"])
+        .env(SSH_METRIC_CATALOGUE_OUTPUT, &output_path)
+        .kill_on_drop(true)
+        .spawn()?;
+    // This child only starts local listeners, scrapes once, and shuts down.
+    let status = match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
+        Ok(status) => status?,
+        Err(error) => {
+            child.kill().await?;
+            return Err(error).wrap_err("SSH metric catalogue subprocess timed out");
+        }
+    };
+    eyre::ensure!(
+        status.success(),
+        "SSH metric catalogue subprocess failed: {status}"
+    );
+    let (name, ty, help): (String, String, String) =
+        serde_json::from_slice(&std::fs::read(output_path)?)?;
+    Ok(metrics::MetricInfo { name, ty, help })
+}
+
+async fn write_ssh_console_metric_info(output_path: PathBuf) -> eyre::Result<()> {
+    use ssh_console::shutdown_handle::ShutdownHandle;
+
+    let certs = &utils::LOCALHOST_CERTS;
+    let config = ssh_console::config::Config {
+        listen_address: "127.0.0.1:0".parse()?,
+        metrics_address: "127.0.0.1:0".parse()?,
+        api_listen_address: "127.0.0.1:0".parse()?,
+        carbide_uri: "https://localhost:1".parse()?,
+        override_bmcs: Some(Vec::new()),
+        host_key_path: utils::REPO_ROOT
+            .join("crates/ssh-console/tests/fixtures/ssh_host_ed25519_key"),
+        forge_root_ca_path: certs.ca_cert.clone(),
+        client_cert_path: certs.client_cert.clone(),
+        client_key_path: certs.client_key.clone(),
+        console_logging_enabled: false,
+        ..Default::default()
+    };
+    let handle = ssh_console::spawn(config, None).await?;
+    let infos = metrics::collect_metric_infos(&[handle.metrics_address()]);
+    handle.shutdown_and_wait().await;
+    let info = infos?
+        .into_iter()
+        .find(|info| info.name == "carbide_ssh_console_bmc_recovery_attempts_total")
+        .context("SSH console did not export its BMC recovery counter")?;
+    assert_eq!(info.ty, "counter");
+    assert!(
+        !info.help.is_empty(),
+        "the SSH recovery counter needs HELP text"
+    );
+    std::fs::write(
+        output_path,
+        serde_json::to_vec(&(info.name, info.ty, info.help))?,
+    )?;
+    Ok(())
+}
+
+fn generate_core_metric_docs(mut infos: Vec<metrics::MetricInfo>) {
     retain_existing_core_metric_infos(&mut infos);
 
     // Delete everything with "alt_metric_" prefix
@@ -628,8 +843,16 @@ pub(crate) const METRIC_DOC_PATH: &str = concat!(
 
 /// Run integration tests with machine-a-tron, asserting on metrics. This has to run as its own
 /// test, to make the values in the metrics buckets predictable.
-#[tokio::test(flavor = "multi_thread", worker_threads = 10)]
-async fn test_metrics_integration() -> eyre::Result<()> {
+#[test]
+fn test_metrics_integration() -> eyre::Result<()> {
+    utils::api_server_runtime_builder()
+        .worker_threads(10)
+        .build()?
+        .block_on(run_metrics_integration())
+}
+
+/// Runs the isolated API lifecycle and machine-a-tron metric assertions.
+async fn run_metrics_integration() -> eyre::Result<()> {
     let Some(mut test_env) =
         IntegrationTestEnvironment::try_from_environment(1, "api_server_test_metrics_integration")
             .await?
@@ -684,6 +907,7 @@ async fn test_metrics_integration() -> eyre::Result<()> {
         metrics: _,
         db_url: _,
         credential_config: _,
+        spdm_enabled: _,
         _vault_handle,
     } = test_env.clone();
 
@@ -723,6 +947,9 @@ async fn test_metrics_integration() -> eyre::Result<()> {
                 )
                     .await?;
                 metrics::assert_metric_line(&metrics, r#"carbide_machines_total{fresh="true"} 1"#);
+                for name in ["carbide_spdm_attestation_total", "carbide_spdm_attestation_count"] {
+                    metrics::assert_not_metric_line(&metrics, name);
+                }
                 // Also check that metrics are emitted under the configured `alt_metric_prefix`
                 metrics::assert_metric_line(&metrics, r#"alt_metric_machines_total{fresh="true"} 1"#);
                 metrics::assert_not_metric_line(
@@ -1485,6 +1712,8 @@ async fn test_machine_a_tron_scout_stream(
         underlay_dhcp_relay_address,
         move |machine_handle| {
             let scout_stream_api_addrs = scout_stream_api_addrs.clone();
+            let carbide_metrics_addrs = test_env.carbide_metrics_addrs.clone();
+            let db_pool = test_env.db_pool.clone();
             async move {
                 machine_handle
                     .wait_until_machine_up_with_api_state("Ready", Duration::from_secs(90))
@@ -1516,7 +1745,20 @@ async fn test_machine_a_tron_scout_stream(
 
                 machine_handle.abort_and_wait().await?;
                 scout_stream::wait_for_connection_state(&scout_stream_api_addrs, machine_id, false)
-                    .await
+                    .await?;
+
+                // The aborted scout no longer reports, so the back-dated contact stays timed out.
+                sqlx::query(
+                    "UPDATE machines SET last_scout_contact_time = NOW() - INTERVAL '2 years' WHERE id = $1",
+                )
+                .bind(machine_id)
+                .execute(&db_pool)
+                .await?;
+                let expected_metric = format!(
+                    r#"carbide_hosts_with_scout_heartbeat_timeout{{fresh="true",host_machine_id="{machine_id}"}} 1"#
+                );
+                metrics::wait_for_metric_line(&carbide_metrics_addrs, &expected_metric).await?;
+                Ok(())
             }
         },
     )

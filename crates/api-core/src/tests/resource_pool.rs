@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use carbide_uuid::machine::MachineId;
 use common::api_fixtures::{TestEnv, create_test_env};
+use ipnetwork::Ipv6Network;
 use model::machine::ManagedHostState;
 use model::resource_pool::binding::{
     INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolBinding, ResourcePoolSelection,
@@ -335,10 +336,12 @@ async fn test_rollback(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     Ok(())
 }
 
+/// The database listing helper preserves integer, address, and prefix bounds
+/// while keeping automatic and manual inventory counts separate.
 #[crate::sqlx_test]
 async fn test_list(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     let mut txn = db_pool.begin().await?;
-    let names = &["a", "b", "c"];
+    let names = &["a", "b", "ib_fabrics.test.pkey"];
     let max = &[10, 100, 500];
 
     // Setup
@@ -354,12 +357,49 @@ async fn test_list(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
             .unwrap();
     }
 
-    // What we're testing
+    // Growing an address pool with the other family still leaves one logical
+    // pool. Its bounds are addresses, without `/32` or `/128` suffixes.
+    let address_pool = ResourcePool::<IpAddr>::new("mixed-address".to_owned(), ValueType::Ipv4);
+    db::resource_pool::populate(&address_pool, &mut txn, vec!["192.0.2.2".parse()?], true).await?;
+    let address_pool = ResourcePool::<IpAddr>::new("mixed-address".to_owned(), ValueType::Ipv6);
+    db::resource_pool::populate(&address_pool, &mut txn, vec!["2001:db8::2".parse()?], true)
+        .await?;
+
+    // Delegated prefixes need the length as part of their bounds. Include both
+    // assignment modes so the added SQL branch must preserve all six counts.
+    let prefix_pool = ResourcePool::<Ipv6Network>::new("prefix".to_owned(), ValueType::Ipv6Prefix);
+    db::resource_pool::populate(
+        &prefix_pool,
+        &mut txn,
+        vec!["2001:db8::/120".parse()?, "2001:db8::100/120".parse()?],
+        true,
+    )
+    .await?;
+    db::resource_pool::populate(
+        &prefix_pool,
+        &mut txn,
+        vec!["2001:db8::200/120".parse()?],
+        false,
+    )
+    .await?;
+    db::resource_pool::allocate(
+        &prefix_pool,
+        &mut txn,
+        OwnerType::Machine,
+        "prefix-owner",
+        None,
+    )
+    .await?;
+
     let all = db::resource_pool::all(&mut txn).await?;
 
-    // Verify
-    assert_eq!(all.len(), 3);
-    for (i, snapshot) in all.iter().enumerate() {
+    assert_eq!(
+        all.iter()
+            .map(|snapshot| snapshot.name.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b", "ib_fabrics.test.pkey", "mixed-address", "prefix"],
+    );
+    for (i, snapshot) in all.iter().take(names.len()).enumerate() {
         assert_eq!(names[i], snapshot.name);
         assert_eq!(1, snapshot.min.parse::<i32>()?);
         assert_eq!(max[i], snapshot.max.parse::<i32>()?);
@@ -370,6 +410,25 @@ async fn test_list(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
             assert_eq!(0, snapshot.stats.used);
         }
     }
+    let addresses = &all[3];
+    assert_eq!(addresses.min, "192.0.2.2");
+    assert_eq!(addresses.max, "2001:db8::2");
+    assert_eq!(addresses.stats.free, 2);
+
+    let prefixes = &all[4];
+    assert_eq!(prefixes.min, "2001:db8::/120");
+    assert_eq!(prefixes.max, "2001:db8::200/120");
+    assert_eq!(
+        prefixes.stats,
+        St {
+            used: 1,
+            free: 2,
+            auto_assign_used: 1,
+            auto_assign_free: 1,
+            non_auto_assign_used: 0,
+            non_auto_assign_free: 1,
+        },
+    );
 
     Ok(())
 }
@@ -1069,8 +1128,10 @@ ranges = [{ start = "5", end = "7" }]
     Ok(())
 }
 
+/// `PoolDatabaseSnapshot` compares stored pool values, definitions, and bindings
+/// before and after an API operation.
 #[derive(Debug, PartialEq)]
-struct PoolDatabaseSnapshot {
+pub(super) struct PoolDatabaseSnapshot {
     inventory: Vec<serde_json::Value>,
     definitions: Vec<serde_json::Value>,
     bindings: Vec<ResourcePoolBinding>,
@@ -1089,6 +1150,7 @@ fn pool_startup_config(env: &TestEnv) -> CarbideConfig {
     config.enable_admin_ui = true;
     config.auth = Some(AuthConfig {
         permissive_mode: false,
+        allow_machineatron_scout_stream: false,
         casbin_policy_file: None,
         cli_certs: None,
         trust: Some(carbide_authn::config::TrustConfig {
@@ -1147,7 +1209,10 @@ async fn remove_fixture_pkey_pool(db_pool: &sqlx::PgPool, name: &str) -> eyre::R
     Ok(())
 }
 
-async fn pool_database_snapshot(db_pool: &sqlx::PgPool) -> eyre::Result<PoolDatabaseSnapshot> {
+/// Reload the pool tables in a stable order so tests can detect unexpected writes.
+pub(super) async fn pool_database_snapshot(
+    db_pool: &sqlx::PgPool,
+) -> eyre::Result<PoolDatabaseSnapshot> {
     Ok(PoolDatabaseSnapshot {
         inventory: sqlx::query_scalar(
             "SELECT to_jsonb(resource_pool) FROM resource_pool ORDER BY name, value",

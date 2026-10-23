@@ -39,6 +39,7 @@ type mockScheduleStore struct {
 	listScopesFn             func(ctx context.Context, scheduleID uuid.UUID) ([]*dbmodel.TaskScheduleScope, error)
 	updateAfterFireFn        func(ctx context.Context, id uuid.UUID, u AfterFireUpdate) error
 	updateFn                 func(ctx context.Context, id uuid.UUID, fields UpdateFields) (*dbmodel.TaskSchedule, error)
+	disableFn                func(ctx context.Context, id uuid.UUID) error
 	updateScopeLastTaskIDsFn func(ctx context.Context, scopeTaskIDs map[uuid.UUID]uuid.UUID) error
 }
 
@@ -61,6 +62,13 @@ func (m *mockScheduleStore) Update(ctx context.Context, id uuid.UUID, f UpdateFi
 		return m.updateFn(ctx, id, f)
 	}
 	return &dbmodel.TaskSchedule{ID: id}, nil
+}
+
+func (m *mockScheduleStore) Disable(ctx context.Context, id uuid.UUID) error {
+	if m.disableFn != nil {
+		return m.disableFn(ctx, id)
+	}
+	return nil
 }
 
 func (m *mockScheduleStore) LockForFire(ctx context.Context, id uuid.UUID, now time.Time) (*dbmodel.TaskSchedule, error) {
@@ -474,6 +482,26 @@ func TestNextCronTime(t *testing.T) {
 			tz:      "UTC",
 			wantErr: true,
 		},
+		"February 31 has no possible run time": {
+			spec:    "0 0 31 2 *",
+			tz:      "UTC",
+			wantErr: true,
+		},
+		"February 30 has no possible run time": {
+			spec:    "0 0 30 2 *",
+			tz:      "UTC",
+			wantErr: true,
+		},
+		"month list containing only impossible dates has no possible run time": {
+			spec:    "0 0 31 2,4,6,9,11 *",
+			tz:      "UTC",
+			wantErr: true,
+		},
+		"leap day has a possible run time": {
+			spec: "0 0 29 2 *",
+			tz:   "UTC",
+			want: time.Date(2028, 2, 29, 0, 0, 0, 0, time.UTC),
+		},
 		"invalid timezone": {
 			spec:    "0 * * * *",
 			tz:      "Invalid/Zone",
@@ -596,9 +624,10 @@ func TestApplyAfterFire(t *testing.T) {
 	schedID := uuid.MustParse("dddddddd-0000-0000-0000-000000000001")
 
 	cases := map[string]struct {
-		ts         *dbmodel.TaskSchedule
-		wantErr    string
-		wantUpdate AfterFireUpdate
+		ts          *dbmodel.TaskSchedule
+		wantErr     string
+		wantUpdate  AfterFireUpdate
+		wantDisable bool
 	}{
 		"one-time — consumed, Enabled=false, NextRunAt=nil": {
 			ts: &dbmodel.TaskSchedule{
@@ -653,13 +682,47 @@ func TestApplyAfterFire(t *testing.T) {
 				NextRunAt: ptrTime(time.Date(2026, 1, 15, 11, 0, 0, 0, time.UTC)),
 			},
 		},
-		"cron — invalid spec": {
-			ts:      &dbmodel.TaskSchedule{ID: schedID, SpecType: dbmodel.SpecTypeCron, Spec: "bad cron", Timezone: "UTC"},
-			wantErr: "advance cron spec",
+		"cron — invalid spec disables schedule and clears NextRunAt": {
+			ts: &dbmodel.TaskSchedule{
+				ID:       schedID,
+				SpecType: dbmodel.SpecTypeCron,
+				Spec:     "bad cron",
+				Timezone: "UTC",
+				Enabled:  true,
+			},
+			wantUpdate: AfterFireUpdate{
+				LastRunAt: now,
+				Enabled:   false,
+				NextRunAt: nil,
+			},
 		},
-		"cron — invalid timezone": {
-			ts:      &dbmodel.TaskSchedule{ID: schedID, SpecType: dbmodel.SpecTypeCron, Spec: "0 * * * *", Timezone: "Invalid/Zone"},
-			wantErr: "advance cron spec",
+		"cron — no future run disables schedule and clears NextRunAt": {
+			ts: &dbmodel.TaskSchedule{
+				ID:       schedID,
+				SpecType: dbmodel.SpecTypeCron,
+				Spec:     "0 0 31 2 *",
+				Timezone: "UTC",
+				Enabled:  true,
+			},
+			wantUpdate: AfterFireUpdate{
+				LastRunAt: now,
+				Enabled:   false,
+				NextRunAt: nil,
+			},
+		},
+		"cron — invalid timezone disables schedule and clears NextRunAt": {
+			ts: &dbmodel.TaskSchedule{
+				ID:       schedID,
+				SpecType: dbmodel.SpecTypeCron,
+				Spec:     "0 * * * *",
+				Timezone: "Invalid/Zone",
+				Enabled:  true,
+			},
+			wantUpdate: AfterFireUpdate{
+				LastRunAt: now,
+				Enabled:   false,
+				NextRunAt: nil,
+			},
 		},
 		"unknown spec_type": {
 			ts:      &dbmodel.TaskSchedule{ID: schedID, SpecType: dbmodel.SpecType("unknown")},
@@ -670,9 +733,16 @@ func TestApplyAfterFire(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			var captured AfterFireUpdate
+			updateCalled := false
+			disableCalled := false
 			store := &mockScheduleStore{
 				updateAfterFireFn: func(_ context.Context, _ uuid.UUID, u AfterFireUpdate) error {
+					updateCalled = true
 					captured = u
+					return nil
+				},
+				disableFn: func(_ context.Context, _ uuid.UUID) error {
+					disableCalled = true
 					return nil
 				},
 			}
@@ -685,6 +755,12 @@ func TestApplyAfterFire(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
+			assert.Equal(t, tc.wantDisable, disableCalled)
+			if tc.wantDisable {
+				assert.False(t, updateCalled)
+				return
+			}
+			require.True(t, updateCalled)
 			assert.Equal(t, tc.wantUpdate.LastRunAt, captured.LastRunAt)
 			assert.Equal(t, tc.wantUpdate.Enabled, captured.Enabled)
 			if tc.wantUpdate.NextRunAt == nil {
@@ -708,6 +784,8 @@ func TestAdvanceOnly(t *testing.T) {
 		wantErr         string
 		wantAfterFire   *AfterFireUpdate // set when UpdateAfterFire should be called
 		wantUpdateField *time.Time       // expected NextRunAt passed to Update
+		wantDisable     bool
+		storeErr        error
 	}{
 		"one-time — calls UpdateAfterFire, consumed": {
 			ts: &dbmodel.TaskSchedule{ID: schedID, SpecType: dbmodel.SpecTypeOneTime},
@@ -716,6 +794,11 @@ func TestAdvanceOnly(t *testing.T) {
 				Enabled:   false,
 				NextRunAt: nil,
 			},
+		},
+		"one-time persistence error — wraps advance context": {
+			ts:       &dbmodel.TaskSchedule{ID: schedID, SpecType: dbmodel.SpecTypeOneTime},
+			storeErr: errors.New("database error"),
+			wantErr:  "advance schedule: database error",
 		},
 		"interval valid — calls Update with next run": {
 			ts:              &dbmodel.TaskSchedule{ID: schedID, SpecType: dbmodel.SpecTypeInterval, Spec: "6h"},
@@ -729,13 +812,53 @@ func TestAdvanceOnly(t *testing.T) {
 			ts:      &dbmodel.TaskSchedule{ID: schedID, SpecType: dbmodel.SpecTypeInterval, Spec: "0h"},
 			wantErr: "must be a positive duration",
 		},
+		"interval persistence error — wraps advance context": {
+			ts: &dbmodel.TaskSchedule{
+				ID: schedID, SpecType: dbmodel.SpecTypeInterval, Spec: "6h",
+			},
+			storeErr: errors.New("database error"),
+			wantErr:  "advance schedule: database error",
+		},
 		"cron valid — calls Update with next run": {
 			ts:              &dbmodel.TaskSchedule{ID: schedID, SpecType: dbmodel.SpecTypeCron, Spec: "0 * * * *", Timezone: "UTC"},
 			wantUpdateField: ptrTime(time.Date(2026, 1, 15, 11, 0, 0, 0, time.UTC)),
 		},
-		"cron invalid spec — error": {
-			ts:      &dbmodel.TaskSchedule{ID: schedID, SpecType: dbmodel.SpecTypeCron, Spec: "bad cron", Timezone: "UTC"},
-			wantErr: "advance cron spec",
+		"cron with invalid spec — disables schedule and clears NextRunAt": {
+			ts: &dbmodel.TaskSchedule{
+				ID:       schedID,
+				SpecType: dbmodel.SpecTypeCron,
+				Spec:     "bad cron",
+				Timezone: "UTC",
+				Enabled:  true,
+			},
+			wantDisable: true,
+		},
+		"cron with no future run — disables schedule and clears NextRunAt": {
+			ts: &dbmodel.TaskSchedule{
+				ID:       schedID,
+				SpecType: dbmodel.SpecTypeCron,
+				Spec:     "0 0 31 2 *",
+				Timezone: "UTC",
+				Enabled:  true,
+			},
+			wantDisable: true,
+		},
+		"cron with invalid timezone — disables schedule and clears NextRunAt": {
+			ts: &dbmodel.TaskSchedule{
+				ID:       schedID,
+				SpecType: dbmodel.SpecTypeCron,
+				Spec:     "0 * * * *",
+				Timezone: "Invalid/Zone",
+				Enabled:  true,
+			},
+			wantDisable: true,
+		},
+		"cron disable error — wraps disable context": {
+			ts: &dbmodel.TaskSchedule{
+				ID: schedID, SpecType: dbmodel.SpecTypeCron, Spec: "bad cron", Timezone: "UTC",
+			},
+			storeErr: errors.New("database error"),
+			wantErr:  "disable schedule: database error",
 		},
 	}
 
@@ -743,15 +866,20 @@ func TestAdvanceOnly(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var afterFireCapture *AfterFireUpdate
 			var updateCapture *time.Time
+			disableCalled := false
 
 			store := &mockScheduleStore{
 				updateAfterFireFn: func(_ context.Context, _ uuid.UUID, u AfterFireUpdate) error {
 					afterFireCapture = &u
-					return nil
+					return tc.storeErr
 				},
 				updateFn: func(_ context.Context, _ uuid.UUID, f UpdateFields) (*dbmodel.TaskSchedule, error) {
 					updateCapture = f.NextRunAt
-					return &dbmodel.TaskSchedule{ID: schedID}, nil
+					return &dbmodel.TaskSchedule{ID: schedID}, tc.storeErr
+				},
+				disableFn: func(_ context.Context, _ uuid.UUID) error {
+					disableCalled = true
+					return tc.storeErr
 				},
 			}
 			d := newDispatcher(store, nil, nil)
@@ -763,6 +891,12 @@ func TestAdvanceOnly(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
+			assert.Equal(t, tc.wantDisable, disableCalled)
+			if tc.wantDisable {
+				assert.Nil(t, afterFireCapture)
+				assert.Nil(t, updateCapture)
+				return
+			}
 
 			if tc.wantAfterFire != nil {
 				require.NotNil(t, afterFireCapture)
@@ -1196,4 +1330,9 @@ func TestFireNow(t *testing.T) {
 		_, err := d.FireNow(context.Background(), schedID)
 		require.ErrorContains(t, err, "db error")
 	})
+}
+
+// ListTaskContextForRack fails unexpected context reads in scheduling tests.
+func (m *mockTaskStore) ListTaskContextForRack(_ context.Context, _ uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
+	panic("unexpected task context read")
 }

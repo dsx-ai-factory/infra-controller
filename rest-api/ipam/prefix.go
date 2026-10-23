@@ -721,17 +721,6 @@ func retryOnOptimisticLock(retryableFunc retry.RetryableFunc) error {
 		retry.LastErrorOnly(true))
 }
 
-func namespaceFromContext(ctx context.Context) string {
-	raw := ctx.Value(namespaceContextKey{})
-	if raw == nil {
-		return defaultNamespace
-	}
-	if ns, ok := raw.(string); ok {
-		return ns
-	}
-	return defaultNamespace
-}
-
 func (i *ipamer) CreateNamespace(ctx context.Context, namespace string) error {
 	return i.storage.CreateNamespace(ctx, namespace)
 }

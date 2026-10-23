@@ -43,6 +43,7 @@ carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-web = { path = "../api-web" }
 carbide-http-connector = { path = "../http-connector" }
 carbide-instrument = { path = "../instrument" }
+carbide-kmip = { path = "../kmip" }
 carbide-kms-provider = { path = "../kms-provider" }
 carbide-machine-controller = { path = "../machine-controller" }
 carbide-metrics-utils = { path = "../metrics-utils" }

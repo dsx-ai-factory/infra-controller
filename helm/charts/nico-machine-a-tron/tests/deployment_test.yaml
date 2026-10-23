@@ -205,6 +205,48 @@ tests:
           value: nico-machine-a-tron-rack-sim
         template: deployment.yaml
 
+  - it: should render no topology spread constraint by default
+    template: deployment.yaml
+    asserts:
+      - notExists:
+          path: spec.template.spec.topologySpreadConstraints
+
+  - it: should spread every pod of the release across nodes when enabled
+    template: deployment.yaml
+    set:
+      topologySpread:
+        enabled: true
+      mat-k8s-controller:
+        enabled: true
+      pods:
+        mat-0:
+          machines:
+            compute:
+              hwType: supermicro_gb300_nvl
+              hostCount: 5
+        mat-1:
+          machines:
+            compute:
+              hwType: supermicro_gb300_nvl
+              hostCount: 5
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: spec.template.spec.topologySpreadConstraints
+          value:
+            - maxSkew: 1
+              topologyKey: kubernetes.io/hostname
+              whenUnsatisfiable: DoNotSchedule
+              nodeTaintsPolicy: Honor
+              # The shared labels only: a selector with the per-Deployment
+              # pod-name label would match one pod and spread nothing.
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: nico-machine-a-tron
+                  app.kubernetes.io/component: machine-a-tron
+        documentIndex: 1
+
   - it: should render startupProbe by default to prevent liveness killing during registration
     template: deployment.yaml
     asserts:

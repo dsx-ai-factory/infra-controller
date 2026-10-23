@@ -2023,6 +2023,7 @@ async fn initialize_and_start_controllers<'a>(
     StateController::<MachineStateControllerIO>::builder()
         .database(db_pool.clone(), work_lock_manager_handle.clone())
         .meter("carbide_machines", meter.clone())
+        .filter_metrics_by_existing_object_ids()
         .processor_id(state_controller_id.clone())
         .services(
             MachineStateHandlerServices {

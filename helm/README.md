@@ -23,6 +23,7 @@ The chart is designed for production environments where NICo manages the full li
 | 9  | **nico-pxe** | PXE boot server (HTTP-based) for OS provisioning workflows. |
 | 10 | **nico-ssh-console-rs** | SSH console proxy for remote access to managed machine BMCs and consoles. |
 | 11 | **unbound** | Recursive DNS resolver. Optional — used to serve the DPU compatibility `.forge` zone when no external DNS does. Disabled by default. |
+| 12 | **nico-postgres-exporter** | Optional PostgreSQL debugging exporter and separate Grafana dashboard. Disabled by default; uses an existing database and credentials Secret. |
 
 ## Prerequisites
 
@@ -224,17 +225,38 @@ nico-ntp:
   enabled: true        # chrony NTP servers (required for DPU pre-ingestion)
 unbound:
   enabled: false       # Recursive DNS resolver (disabled by default)
+nico-postgres-exporter:
+  enabled: false       # PostgreSQL debugging exporter and dashboard (disabled by default)
 nico-machine-a-tron:
   enabled: false       # Mock machine simulator for dev/test (disabled by default)
 ```
 
+### PostgreSQL debugging dashboard
+
+The optional `nico-postgres-exporter` dependency installs the exporter and a
+separate PostgreSQL-folder dashboard ConfigMap. It does not install Grafana or
+PostgreSQL. Enable it explicitly and configure its own image, existing database
+credentials Secret, and optional ServiceMonitor. An existing Grafana can discover
+its ConfigMap through a configured sidecar, or operators can import the packaged
+JSON manually. Dashboard-only installation is also supported. See the
+[subchart README](charts/nico-postgres-exporter/README.md) for values and examples.
+
 ### Image Configuration
 
-The `global.image.repository` and `global.image.tag` values **must** be set -- they default to empty strings. Most subcharts use the global image reference. The following subcharts use their own separate image references and do **not** inherit `global.image`:
+The `global.image.repository` and `global.image.tag` values **must** be set --
+they default to empty strings. Most subcharts use the global image reference.
+Build images from the same repository revision that supplies the Helm chart and
+setup script used to deploy them. Image tags may use your own naming convention,
+but deploying a chart with images built from another repository revision is
+unsupported.
+
+The following subcharts use their own separate image references and do **not**
+inherit `global.image`:
 
 | Subchart | Image Parameter | Default |
 |----------|----------------|---------|
 | `nico-ssh-console-rs` (log collector) | `nico-ssh-console-rs.lokiLogCollector.image.repository` / `.tag` | `""` — sidecar disabled by default (`lokiLogCollector.enabled: false`); reference image: `ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.81.0` |
+| `nico-postgres-exporter` | `nico-postgres-exporter.image.repository` / `.tag` | `""` (required when its exporter is enabled) |
 | `unbound` | `unbound.image.repository` / `.tag` | `""` (must be set) |
 | `unbound` (exporter) | `unbound.exporterImage.repository` / `.tag` | `""` (must be set) |
 
@@ -419,6 +441,7 @@ set `alternatePort: 0` to work around it.
 | nico-ntp | StatefulSet | 123/UDP | No | -- |
 | nico-pxe | Deployment | 8080 | Yes | ServiceMonitor |
 | nico-ssh-console-rs | Deployment | 22, 9009 (metrics) | Yes | ServiceMonitor |
+| nico-postgres-exporter | Deployment (optional) | 9090 (metrics) | Optional database CA mount | Optional ServiceMonitor |
 | unbound | Deployment | 53 | No | ServiceMonitor |
 
 ### Service Dependencies
@@ -446,6 +469,7 @@ For reference configurations, see:
 - [`examples/values-minimal.yaml`](./examples/values-minimal.yaml) -- Minimal deployment with only the core services
 - [`examples/values-full.yaml`](./examples/values-full.yaml) -- Full deployment with all services and production settings
 - [`examples/values-shared-external-ips.yaml`](./examples/values-shared-external-ips.yaml) -- Overlay that fits the external Services into eight LoadBalancer IPs
+- [`examples/nico-api-site-config.toml`](./examples/nico-api-site-config.toml) -- Annotated `nico-api` site configuration for `siteConfig.nicoApiSiteConfig`
 
 ## Migrating from Kustomize
 
@@ -601,6 +625,7 @@ helm unittest helm --with-subchart
 helm unittest helm/charts/nico-machine-a-tron
 helm unittest helm/charts/nico-machine-a-tron/charts/mat-k8s-controller
 helm unittest helm/charts/unbound
+helm unittest helm/charts/nico-postgres-exporter
 
 # nico-flow is a standalone chart (not an umbrella dependency) - test it separately too
 helm unittest helm/nico-flow
@@ -611,8 +636,8 @@ Test files live in `tests/` directories within each chart. CI runs these tests a
 ### PXE runtime regression (manual developer test)
 
 Run this regression after changing PXE packaging, artifact init containers, or
-chart serving paths. CI runs Helm unit tests and the PXE Kustomize render check;
-it does not run this kind-based HTTP test. The developer supplies the locally
+chart serving paths. CI runs Helm unit tests but does not run this kind-based
+HTTP test. The developer supplies the locally
 built PXE image and invokes the command below.
 
 The PXE runtime regression requires Docker, kind, kubectl, Helm, curl, jq, and a
@@ -623,9 +648,8 @@ serving as UID 10001 for `0600` artifacts copied with legacy commands and for
 artifacts bundled in the image. A later custom init creates a `0700` tree owned
 by another UID; the permissions init must preserve that owner while granting
 group 10001 access using only `CHOWN`, `FOWNER`, and `DAC_OVERRIDE`, with privilege
-escalation disabled. The test includes a custom serving path and exercises the
-Kustomize artifact-copy component without the optional legacy ConfigMap. It does
-not provision a host or call Core.
+escalation disabled. The test includes a custom serving path. It does not
+provision a host or call Core.
 
 ```bash
 PXE_TEST_IMAGE=nico-pxe:<local-tag> bash helm/tests/runtime/test-pxe-boot-artifacts.sh

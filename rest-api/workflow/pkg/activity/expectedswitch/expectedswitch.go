@@ -139,17 +139,18 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 		cur, found := existingByID[esID]
 		if !found {
 			_, cerr := esDAO.Create(ctx, nil, cdbm.ExpectedSwitchCreateInput{
-				ExpectedSwitchID:   esID,
-				SiteID:             siteID,
-				BmcMacAddress:      reported.BmcMacAddress,
-				SwitchSerialNumber: reported.SwitchSerialNumber,
-				BmcIpAddress:       reported.BmcIpAddress,
-				RackID:             reported.RackID,
-				Name:               reported.Name,
-				Description:        reported.Description,
-				NvosMacAddresses:   reported.NvosMacAddresses,
-				Labels:             reported.Labels,
-				CreatedBy:          siteID, /* This would normally be a user ID, but that isn't something NICo provides */
+				ExpectedSwitchID:      esID,
+				SiteID:                siteID,
+				BmcMacAddress:         reported.BmcMacAddress,
+				SwitchSerialNumber:    reported.SwitchSerialNumber,
+				BmcIpAddress:          reported.BmcIpAddress,
+				RackID:                reported.RackID,
+				Name:                  reported.Name,
+				Description:           reported.Description,
+				NvosMacAddresses:      reported.NvosMacAddresses,
+				NvosPrimaryMacAddress: reported.NvosPrimaryMacAddress,
+				Labels:                reported.Labels,
+				CreatedBy:             siteID, /* This would normally be a user ID, but that isn't something NICo provides */
 			})
 			if cerr != nil {
 				logger.Error().Err(cerr).Str("ID", esID.String()).Msg("failed to create ExpectedSwitch in DB")
@@ -183,6 +184,7 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 			(reported.Name != nil && !util.PtrsEqual(cur.Name, reported.Name)) ||
 			(reported.Description != nil && !util.PtrsEqual(cur.Description, reported.Description)) ||
 			!slices.Equal(cur.NvosMacAddresses, reported.NvosMacAddresses) ||
+			!util.PtrsEqual(cur.NvosPrimaryMacAddress, reported.NvosPrimaryMacAddress) ||
 			!maps.Equal(cur.Labels, reported.Labels) {
 			uerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
 				// Lock and re-read before writing so an API change after the
@@ -195,18 +197,34 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 					return nil
 				}
 
-				_, uerr := esDAO.Update(ctx, tx, cdbm.ExpectedSwitchUpdateInput{
-					ExpectedSwitchID:   cur.ID,
-					BmcMacAddress:      &reported.BmcMacAddress,
-					SwitchSerialNumber: &reported.SwitchSerialNumber,
-					BmcIpAddress:       reported.BmcIpAddress,
-					RackID:             reported.RackID,
-					Name:               reported.Name,
-					Description:        reported.Description,
-					NvosMacAddresses:   reported.NvosMacAddresses,
-					Labels:             reported.Labels,
-				})
-				return uerr
+				if _, uerr := esDAO.Update(ctx, tx, cdbm.ExpectedSwitchUpdateInput{
+					ExpectedSwitchID:      cur.ID,
+					BmcMacAddress:         &reported.BmcMacAddress,
+					SwitchSerialNumber:    &reported.SwitchSerialNumber,
+					BmcIpAddress:          reported.BmcIpAddress,
+					RackID:                reported.RackID,
+					Name:                  reported.Name,
+					Description:           reported.Description,
+					NvosMacAddresses:      reported.NvosMacAddresses,
+					NvosPrimaryMacAddress: reported.NvosPrimaryMacAddress,
+					Labels:                reported.Labels,
+				}); uerr != nil {
+					return uerr
+				}
+
+				// Update preserves the stored primary when the selector is nil,
+				// so a reconcile that reports no primary (a switch with no
+				// ports) must clear it explicitly instead of leaving the stale
+				// selector behind.
+				if reported.NvosPrimaryMacAddress == nil {
+					if _, cerr := esDAO.Clear(ctx, tx, cdbm.ExpectedSwitchClearInput{
+						ExpectedSwitchID:      cur.ID,
+						NvosPrimaryMacAddress: true,
+					}); cerr != nil {
+						return cerr
+					}
+				}
+				return nil
 			})
 			if uerr != nil {
 				logger.Error().Err(uerr).Str("ExpectedSwitchID", cur.ID.String()).Msg("failed to update ExpectedSwitch in DB")

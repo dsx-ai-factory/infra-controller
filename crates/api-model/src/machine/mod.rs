@@ -64,6 +64,7 @@ use crate::state_history::StateHistoryRecord;
 
 pub mod slas;
 
+pub mod astra;
 pub mod capabilities;
 pub mod config;
 pub mod health_override;
@@ -1886,6 +1887,28 @@ impl std::fmt::Display for ValidationState {
 pub const MAX_FIRMWARE_UPGRADE_RETRIES: u32 = 5;
 
 impl ManagedHostState {
+    /// Whether any DPU is waiting for DPF provisioning or handling its requested reboot.
+    /// Site Explorer must stay paused until every DPU leaves these states.
+    pub fn suppresses_exploration_for_dpf(&self) -> bool {
+        let active = |state: &DpfState| {
+            matches!(
+                state,
+                DpfState::WaitingForReady { .. } | DpfState::HandleReboot { .. }
+            )
+        };
+        match self {
+            Self::DPUInit { dpu_states } => dpu_states
+                .states
+                .values()
+                .any(|state| matches!(state, DpuInitState::DpfStates { state } if active(state))),
+            _ => self.dpu_reprovision_states().is_some_and(|states| {
+                states.states.values().any(|state| {
+                    matches!(state, ReprovisionState::DpfStates { substate } if active(substate))
+                })
+            }),
+        }
+    }
+
     /// Starts `Maintenance` with the requested operation and saves the full
     /// request so completion can check whether it is still pending.
     pub fn maintenance_for_request(request: MachineMaintenanceRequest) -> Self {
@@ -4071,6 +4094,7 @@ mod tests {
                 spxconfig: Default::default(),
                 power_profile: None,
             },
+            nic_firmware_snapshot: None,
             config_version: ConfigVersion::initial(),
             network_config_version: ConfigVersion::initial(),
             ib_config_version: ConfigVersion::initial(),
@@ -5409,7 +5433,7 @@ mod tests {
                         reprovision_state: HostReprovisionState::CheckingFirmware,
                         retry_count: 0,
                     }),
-                    expect: (seconds(2_400), true),
+                    expect: (seconds(5_400), true),
                 },
                 Check {
                     scenario: "pre-assignment measurement collection uses the measurement SLA",

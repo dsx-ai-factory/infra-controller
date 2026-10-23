@@ -69,15 +69,15 @@ impl NvidiaSwitchN5700Ld<'_> {
                 id: manager_id,
                 eth_interfaces: Some(vec![
                     eth_builder("eth0")
-                        .mac_address(self.bmc_mac_address_eth0)
+                        .mac_address((self.bmc_mac_address_eth0).to_string())
                         .interface_enabled(true)
                         .build(),
                     eth_builder("eth1")
-                        .mac_address(self.bmc_mac_address_eth1)
+                        .mac_address((self.bmc_mac_address_eth1).to_string())
                         .interface_enabled(true)
                         .build(),
                     eth_builder("usb0")
-                        .mac_address(self.bmc_mac_address_usb0)
+                        .mac_address((self.bmc_mac_address_usb0).to_string())
                         .interface_enabled(true)
                         .build(),
                 ]),
@@ -134,7 +134,7 @@ impl NvidiaSwitchN5700Ld<'_> {
             .map(
                 |(id, serial_number)| redfish::chassis::SingleChassisConfig {
                     id: id.into(),
-                    chassis_type: "Component".into(),
+                    chassis_type: redfish::schema::chassis::ChassisType::Component,
                     manufacturer: Some("NVIDIA".into()),
                     serial_number: Some(serial_number.into()),
                     sku: Some("0x4D35368B".into()),
@@ -145,8 +145,14 @@ impl NvidiaSwitchN5700Ld<'_> {
 
         chassis.extend((0..2).map(|index| self.nvswitch_chassis(index)));
         chassis.extend([
-            self.switch_identity_chassis("SYS_eeprom", "Module"),
-            self.switch_identity_chassis("System_0", "Component"),
+            self.switch_identity_chassis(
+                "SYS_eeprom",
+                redfish::schema::chassis::ChassisType::Module,
+            ),
+            self.switch_identity_chassis(
+                "System_0",
+                redfish::schema::chassis::ChassisType::Component,
+            ),
         ]);
 
         redfish::chassis::ChassisConfig { chassis }
@@ -218,7 +224,7 @@ impl NvidiaSwitchN5700Ld<'_> {
                 let mut builder = fw_inv_builder(id)
                     .name("Software Inventory")
                     .version(version)
-                    .status(redfish::resource::Status::Ok)
+                    .status(redfish::resource::Status::Ok.into())
                     .updateable(true)
                     .related_items(&related_item.into_iter().collect::<Vec<_>>());
                 if id != "CPLD_0" {
@@ -237,7 +243,7 @@ impl NvidiaSwitchN5700Ld<'_> {
     fn bmc_eeprom_chassis(&self) -> redfish::chassis::SingleChassisConfig {
         redfish::chassis::SingleChassisConfig {
             id: "BMC_eeprom".into(),
-            chassis_type: "Module".into(),
+            chassis_type: redfish::schema::chassis::ChassisType::Module,
             manufacturer: Some("NVIDIA".into()),
             part_number: Some(BMC_PART_NUMBER.into()),
             model: Some(BMC_MODEL.into()),
@@ -251,7 +257,7 @@ impl NvidiaSwitchN5700Ld<'_> {
     fn cpld_chassis(&self) -> redfish::chassis::SingleChassisConfig {
         redfish::chassis::SingleChassisConfig {
             id: "CPLD_0".into(),
-            chassis_type: "Module".into(),
+            chassis_type: redfish::schema::chassis::ChassisType::Module,
             manufacturer: Some("Lattice".into()),
             part_number: Some("".into()),
             model: Some("LCMXO3D-9400HC-5BG256C".into()),
@@ -263,20 +269,25 @@ impl NvidiaSwitchN5700Ld<'_> {
     }
 
     fn mgx_bmc_chassis(&self) -> redfish::chassis::SingleChassisConfig {
+        use redfish::schema::sensor::{Threshold, Thresholds};
+
         let sensor =
             redfish::sensor::builder(&redfish::sensor::chassis_resource("MGX_BMC_0", "BMC_TEMP"))
                 .name("BMC TEMP")
                 .reading_f64(33.875)
-                .reading_type("Temperature")
+                .reading_type(redfish::schema::sensor::ReadingType::Temperature)
                 .reading_units("Cel")
-                .threshold_lower_caution(5.0)
-                .threshold_upper_caution(105.0)
-                .threshold_upper_critical(108.0)
+                .thresholds(
+                    Thresholds::new()
+                        .lower_caution(Threshold::new().reading_f64(5.0))
+                        .upper_caution(Threshold::new().reading_f64(105.0))
+                        .upper_critical(Threshold::new().reading_f64(108.0)),
+                )
                 .build();
 
         redfish::chassis::SingleChassisConfig {
             id: "MGX_BMC_0".into(),
-            chassis_type: "Component".into(),
+            chassis_type: redfish::schema::chassis::ChassisType::Component,
             manufacturer: Some("NVIDIA".into()),
             part_number: Some(BMC_PART_NUMBER.into()),
             model: Some(BMC_MODEL.into()),
@@ -299,7 +310,7 @@ impl NvidiaSwitchN5700Ld<'_> {
         );
         redfish::chassis::SingleChassisConfig {
             id: chassis_id.into(),
-            chassis_type: "Component".into(),
+            chassis_type: redfish::schema::chassis::ChassisType::Component,
             manufacturer: Some("NVIDIA".into()),
             part_number: Some(SWITCH_PART_NUMBER.into()),
             model: Some(SWITCH_MODEL.into()),
@@ -314,11 +325,11 @@ impl NvidiaSwitchN5700Ld<'_> {
     fn switch_identity_chassis(
         &self,
         id: &'static str,
-        chassis_type: &'static str,
+        chassis_type: redfish::schema::chassis::ChassisType,
     ) -> redfish::chassis::SingleChassisConfig {
         redfish::chassis::SingleChassisConfig {
             id: id.into(),
-            chassis_type: chassis_type.into(),
+            chassis_type,
             manufacturer: Some("NVIDIA".into()),
             part_number: Some(SWITCH_PART_NUMBER.into()),
             model: Some(SWITCH_MODEL.into()),

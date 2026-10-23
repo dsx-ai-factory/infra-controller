@@ -36,8 +36,12 @@ pub enum OpCode<'a> {
     Lock {
         key: String,
     },
+    /// Apply a selected firmware profile as one identified operation.
     ApplyFirmware {
+        /// The selected target, or `None` when Core requests no firmware change.
         profile: Option<Box<Cow<'a, FirmwareFlasherProfile>>>,
+        /// Nonempty identifier for one persisted operation across repeated polls.
+        operation_id: String,
     },
 }
 
@@ -62,12 +66,24 @@ impl TryFrom<DpaCommandPb> for DpaCommand<'static> {
                         .transpose()
                         .map_err(|e: MlxProfileError| e.to_string())?,
                 },
-                Command::ApplyFirmware(apply_firmware) => OpCode::ApplyFirmware {
-                    profile: apply_firmware
-                        .profile
-                        .map(|p| Ok::<_, String>(Box::new(Cow::Owned(p.try_into()?))))
-                        .transpose()?,
-                },
+                Command::ApplyFirmware(_) => {
+                    return Err(
+                        "legacy ApplyFirmware command cannot identify a durable operation"
+                            .to_string(),
+                    );
+                }
+                Command::ApplyFirmwareOperation(apply_firmware) => {
+                    if apply_firmware.operation_id.is_empty() {
+                        return Err("firmware operation_id must not be empty".to_string());
+                    }
+                    OpCode::ApplyFirmware {
+                        operation_id: apply_firmware.operation_id,
+                        profile: apply_firmware
+                            .profile
+                            .map(|p| Ok::<_, String>(Box::new(Cow::Owned(p.try_into()?))))
+                            .transpose()?,
+                    }
+                }
             },
         })
     }
@@ -99,11 +115,20 @@ impl TryFrom<DpaDeviceCommand<'_>> for fac::MlxDeviceAction {
             OpCode::Lock { key } => {
                 fac::mlx_device_action::Command::Lock(fac::MlxDeviceLock { key })
             }
-            OpCode::ApplyFirmware { profile } => {
+            OpCode::ApplyFirmware {
+                profile,
+                operation_id,
+            } => {
+                if operation_id.is_empty() {
+                    return Err("firmware operation_id must not be empty".to_string());
+                }
                 let profile = profile.map(|profile| (*profile).into_owned().into());
-                fac::mlx_device_action::Command::ApplyFirmware(fac::MlxDeviceApplyFirmware {
-                    profile,
-                })
+                fac::mlx_device_action::Command::ApplyFirmwareOperation(
+                    fac::MlxDeviceApplyFirmwareOperation {
+                        profile,
+                        operation_id,
+                    },
+                )
             }
         };
 
@@ -118,35 +143,10 @@ impl TryFrom<&fac::MlxDeviceAction> for DpaCommand<'static> {
     type Error = String;
 
     fn try_from(device_action: &fac::MlxDeviceAction) -> Result<Self, Self::Error> {
-        let op = match device_action.command.as_ref() {
-            Some(fac::mlx_device_action::Command::Noop(_)) | None => OpCode::Noop,
-            Some(fac::mlx_device_action::Command::Lock(lock)) => OpCode::Lock {
-                key: lock.key.clone(),
-            },
-            Some(fac::mlx_device_action::Command::Unlock(unlock)) => OpCode::Unlock {
-                key: unlock.key.clone(),
-            },
-            Some(fac::mlx_device_action::Command::ApplyProfile(apply_profile)) => {
-                let serialized_profile = apply_profile
-                    .serialized_profile
-                    .clone()
-                    .map(TryInto::try_into)
-                    .transpose()
-                    .map_err(|e: libmlx::profile::error::MlxProfileError| e.to_string())?;
-                OpCode::ApplyProfile { serialized_profile }
-            }
-            Some(fac::mlx_device_action::Command::ApplyFirmware(apply_firmware)) => {
-                let profile = apply_firmware
-                    .profile
-                    .clone()
-                    .map(TryInto::try_into)
-                    .transpose()?
-                    .map(|profile| Box::new(Cow::Owned(profile)));
-                OpCode::ApplyFirmware { profile }
-            }
-        };
-
-        Ok(DpaCommand { op })
+        match &device_action.command {
+            Some(command) => command.clone().try_into(),
+            None => Ok(DpaCommand { op: OpCode::Noop }),
+        }
     }
 }
 
@@ -155,10 +155,11 @@ mod tests {
     use std::collections::HashMap;
 
     use carbide_test_support::Outcome::*;
-    use carbide_test_support::scenarios;
+    use carbide_test_support::{scenarios, value_scenarios};
     use rpc::protos::mlx_device::{
         FirmwareFlasherProfile as FirmwareProfilePb, FirmwareSpec as FirmwareSpecPb,
-        FlashSpec as FlashSpecPb, SerializableMlxConfigProfile as SerializableProfilePb,
+        FlashOptions as FlashOptionsPb, FlashSpec as FlashSpecPb,
+        SerializableMlxConfigProfile as SerializableProfilePb,
     };
 
     use super::*;
@@ -174,7 +175,7 @@ mod tests {
             OpCode::ApplyProfile { serialized_profile } => {
                 format!("apply_profile:{}", serialized_profile.is_some())
             }
-            OpCode::ApplyFirmware { profile } => {
+            OpCode::ApplyFirmware { profile, .. } => {
                 format!("apply_firmware:{}", profile.is_some())
             }
         }
@@ -191,7 +192,10 @@ mod tests {
             Some(C::ApplyProfile(p)) => {
                 format!("apply_profile:{}", p.serialized_profile.is_some())
             }
-            Some(C::ApplyFirmware(f)) => format!("apply_firmware:{}", f.profile.is_some()),
+            Some(C::ApplyFirmware(f)) => format!("legacy_apply_firmware:{}", f.profile.is_some()),
+            Some(C::ApplyFirmwareOperation(f)) => {
+                format!("apply_firmware_operation:{}", f.profile.is_some())
+            }
         }
     }
 
@@ -271,17 +275,22 @@ mod tests {
             }
 
             "apply_firmware with no profile stays None" {
-                Command::ApplyFirmware(fac::MlxDeviceApplyFirmware { profile: None }) => Yields("apply_firmware:false".to_string()),
+                Command::ApplyFirmwareOperation(fac::MlxDeviceApplyFirmwareOperation {
+                    profile: None,
+                    operation_id: "operation".to_string(),
+                }) => Yields("apply_firmware:false".to_string()),
             }
 
             "apply_firmware with a complete profile" {
-                Command::ApplyFirmware(fac::MlxDeviceApplyFirmware {
+                Command::ApplyFirmwareOperation(fac::MlxDeviceApplyFirmwareOperation {
                     profile: Some(valid_firmware_pb()),
+                    operation_id: "operation".to_string(),
                 }) => Yields("apply_firmware:true".to_string()),
             }
 
             "apply_firmware rejects a missing firmware_spec" {
-                Command::ApplyFirmware(fac::MlxDeviceApplyFirmware {
+                Command::ApplyFirmwareOperation(fac::MlxDeviceApplyFirmwareOperation {
+                    operation_id: "operation".to_string(),
                     profile: Some(FirmwareProfilePb {
                         firmware_spec: None,
                         flash_spec: Some(FlashSpecPb::default()),
@@ -291,7 +300,8 @@ mod tests {
             }
 
             "apply_firmware rejects a missing flash_spec" {
-                Command::ApplyFirmware(fac::MlxDeviceApplyFirmware {
+                Command::ApplyFirmwareOperation(fac::MlxDeviceApplyFirmwareOperation {
+                    operation_id: "operation".to_string(),
                     profile: Some(FirmwareProfilePb {
                         firmware_spec: Some(FirmwareSpecPb::default()),
                         flash_spec: None,
@@ -344,15 +354,26 @@ mod tests {
             }
 
             "apply_firmware with no profile stays None" {
-                OpCode::ApplyFirmware { profile: None } => Yields(("04:00.0".to_string(), "apply_firmware:false".to_string())),
+                OpCode::ApplyFirmware {
+                    profile: None,
+                    operation_id: "operation".to_string(),
+                } => Yields(("04:00.0".to_string(), "apply_firmware_operation:false".to_string())),
             }
 
             "apply_firmware with a profile" {
                 OpCode::ApplyFirmware {
+                    operation_id: "operation".to_string(),
                     profile: Some(Box::new(Cow::Owned(
                         valid_firmware_pb().try_into().unwrap(),
                     ))),
-                } => Yields(("04:00.0".to_string(), "apply_firmware:true".to_string())),
+                } => Yields(("04:00.0".to_string(), "apply_firmware_operation:true".to_string())),
+            }
+
+            "apply_firmware rejects an empty operation ID" {
+                OpCode::ApplyFirmware {
+                    profile: None,
+                    operation_id: String::new(),
+                } => FailsWith("firmware operation_id must not be empty".to_string()),
             }
         );
     }
@@ -409,19 +430,22 @@ mod tests {
             }
 
             "apply_firmware with no profile stays None" {
-                Some(C::ApplyFirmware(fac::MlxDeviceApplyFirmware {
+                Some(C::ApplyFirmwareOperation(fac::MlxDeviceApplyFirmwareOperation {
                     profile: None,
+                    operation_id: "operation".to_string(),
                 })) => Yields("apply_firmware:false".to_string()),
             }
 
             "apply_firmware with a complete profile" {
-                Some(C::ApplyFirmware(fac::MlxDeviceApplyFirmware {
+                Some(C::ApplyFirmwareOperation(fac::MlxDeviceApplyFirmwareOperation {
                     profile: Some(valid_firmware_pb()),
+                    operation_id: "operation".to_string(),
                 })) => Yields("apply_firmware:true".to_string()),
             }
 
             "apply_firmware rejects a missing firmware_spec" {
-                Some(C::ApplyFirmware(fac::MlxDeviceApplyFirmware {
+                Some(C::ApplyFirmwareOperation(fac::MlxDeviceApplyFirmwareOperation {
+                    operation_id: "operation".to_string(),
                     profile: Some(FirmwareProfilePb {
                         firmware_spec: None,
                         flash_spec: Some(FlashSpecPb::default()),
@@ -430,5 +454,69 @@ mod tests {
                 })) => FailsWith("missing firmware_spec".to_string()),
             }
         );
+    }
+
+    /// Neither decoder accepts firmware work without durable operation identity.
+    #[test]
+    fn firmware_command_decoders_reject_uncorrelated_work() {
+        value_scenarios!(
+            run = |command: Command| {
+                let action = fac::MlxDeviceAction {
+                    pci_name: "04:00.0".to_string(),
+                    command: Some(command.clone()),
+                };
+                [
+                    DpaCommand::try_from(command).is_err(),
+                    DpaCommand::try_from(&action).is_err(),
+                ]
+            };
+            "legacy firmware command" {
+                Command::ApplyFirmware(fac::MlxDeviceApplyFirmware {
+                    profile: Some(valid_firmware_pb()),
+                }) => [true, true],
+            }
+            "empty operation ID" {
+                Command::ApplyFirmwareOperation(fac::MlxDeviceApplyFirmwareOperation {
+                    profile: Some(valid_firmware_pb()),
+                    operation_id: String::new(),
+                }) => [true, true],
+            }
+        );
+    }
+
+    /// Both command decoders preserve identity so conversion cannot turn a retry
+    /// into new work.
+    #[test]
+    fn firmware_operation_identity_survives_command_conversions() {
+        let expected = fac::MlxDeviceAction {
+            pci_name: "04:00.0".to_string(),
+            command: Some(Command::ApplyFirmwareOperation(
+                fac::MlxDeviceApplyFirmwareOperation {
+                    // Omitted options are normalized by profile conversion;
+                    // explicit options keep this proof about operation identity.
+                    profile: Some(FirmwareProfilePb {
+                        flash_options: Some(FlashOptionsPb {
+                            reset_level: 3,
+                            ..Default::default()
+                        }),
+                        ..valid_firmware_pb()
+                    }),
+                    operation_id: "dpa-firmware:card:state-version".to_string(),
+                },
+            )),
+        };
+
+        for command in [
+            DpaCommand::try_from(expected.command.clone().unwrap()).unwrap(),
+            DpaCommand::try_from(&expected).unwrap(),
+        ] {
+            let actual: fac::MlxDeviceAction = DpaDeviceCommand {
+                pci_name: expected.pci_name.clone(),
+                command,
+            }
+            .try_into()
+            .unwrap();
+            assert_eq!(actual, expected);
+        }
     }
 }

@@ -52,7 +52,7 @@ func TestManageSku_UpdateSkusInDB(t *testing.T) {
 		run  func(*testing.T)
 	}{
 		{name: "reconcile create update delete", run: testManageSkuReconcileCreateUpdateDelete},
-		{name: "nil components clears existing", run: testManageSkuNilComponentsClearsExisting},
+		{name: "nil components and associations clear while omitted device type survives", run: testManageSkuNilCollectionsClearAndOmittedDeviceTypeSurvives},
 		{name: "failed inventory skips reconciliation", run: testManageSkuInventoryStatusFailedSkipsReconciliation},
 		{name: "paged deletion", run: testManageSkuPagedDeletion},
 		{name: "update respects freshness", run: testManageSkuUpdateRespectsStaleInventoryThreshold},
@@ -345,7 +345,7 @@ func testManageSkuReconcileCreateUpdateDelete(t *testing.T) {
 	assert.Equal(t, 0, total)
 }
 
-func testManageSkuNilComponentsClearsExisting(t *testing.T) {
+func testManageSkuNilCollectionsClearAndOmittedDeviceTypeSurvives(t *testing.T) {
 	ctx := context.Background()
 	_ = config.GetTestConfig()
 
@@ -359,36 +359,59 @@ func testManageSkuNilComponentsClearsExisting(t *testing.T) {
 	ip := cwu.TestBuildInfrastructureProvider(t, dbSession, "test-provider", ipOrg, ipu)
 	site := cwu.TestBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusRegistered, nil, ipu)
 
-	// Seed populated components so keeping the existing value cannot pass as a clear.
-	id := "sku-clear"
-	_, err := dbSession.DB.NewInsert().Model(&cdbm.SKU{
-		ID: id, SiteID: site.ID,
-		Components: &cdbm.SkuComponents{SkuComponents: &corev1.SkuComponents{
-			Chassis: &corev1.SkuComponentChassis{Model: "DGX"},
-		}},
-	}).Exec(ctx)
-	require.NoError(t, err)
-	ssd := cdbm.NewSkuDAO(dbSession)
-	beforeClear, err := ssd.Get(ctx, nil, id)
-	require.NoError(t, err)
-	require.NotNil(t, beforeClear.Components)
-	require.Equal(t, "DGX", beforeClear.Components.GetChassis().GetModel())
-	ageSku(ctx, t, dbSession, id)
-
-	ms := NewManageSku(dbSession, cwu.TestTemporalSiteClientPool(t))
-
-	// Send inventory with the same SKU but Components: nil. The activity should
-	// translate nil to a non-nil empty wrapper so the DAO actually writes the
-	// clear (the DAO skips nil Components fields).
-	inv := &corev1.SkuInventory{
-		Skus: []*corev1.Sku{{Id: id, Components: nil}},
+	// Each row differs in one collection, so either clear must trigger a write
+	// without relying on a change to another field.
+	rows := []*cdbm.SKU{
+		{
+			ID:                   "sku-clear-components",
+			SiteID:               site.ID,
+			DeviceType:           cutil.GetPtr("gpu-server"),
+			AssociatedMachineIds: []string{},
+			Components: &cdbm.SkuComponents{SkuComponents: &corev1.SkuComponents{
+				Chassis: &corev1.SkuComponentChassis{Model: "DGX"},
+			}},
+		},
+		{
+			ID:                   "sku-clear-associations",
+			SiteID:               site.ID,
+			DeviceType:           cutil.GetPtr("gpu-server"),
+			AssociatedMachineIds: []string{"machine-associated"},
+			Components:           &cdbm.SkuComponents{SkuComponents: &corev1.SkuComponents{}},
+		},
 	}
-	assert.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, inv))
+	ssd := cdbm.NewSkuDAO(dbSession)
+	inv := &corev1.SkuInventory{
+		InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+	}
+	for i, row := range rows {
+		_, err := dbSession.DB.NewInsert().Model(row).Exec(ctx)
+		require.NoError(t, err)
+		ageSku(ctx, t, dbSession, row.ID)
+		beforeClear, err := ssd.Get(ctx, nil, row.ID)
+		require.NoError(t, err)
+		require.NotNil(t, beforeClear.Components)
+		require.True(t, proto.Equal(row.Components.SkuComponents, beforeClear.Components.SkuComponents))
+		require.Equal(t, row.AssociatedMachineIds, beforeClear.AssociatedMachineIds)
+		require.Equal(t, row.DeviceType, beforeClear.DeviceType)
+		rows[i] = beforeClear
+		inv.Skus = append(inv.Skus, &corev1.Sku{Id: row.ID})
+	}
 
-	got, gerr := ssd.Get(ctx, nil, id)
-	require.NoError(t, gerr)
-	require.NotNil(t, got.Components)
-	assert.True(t, proto.Equal(&corev1.SkuComponents{}, got.Components.SkuComponents))
+	// Nil collections must clear through the DAO's non-nil empty inputs,
+	// while an omitted `DeviceType` preserves the stored type during that write.
+	ms := NewManageSku(dbSession, cwu.TestTemporalSiteClientPool(t))
+	require.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, inv))
+	for _, beforeClear := range rows {
+		t.Run(beforeClear.ID, func(t *testing.T) {
+			got, err := ssd.Get(ctx, nil, beforeClear.ID)
+			require.NoError(t, err)
+			require.NotNil(t, got.Components)
+			assert.True(t, proto.Equal(&corev1.SkuComponents{}, got.Components.SkuComponents))
+			assert.Equal(t, []string{}, got.AssociatedMachineIds)
+			assert.Equal(t, beforeClear.DeviceType, got.DeviceType)
+			assert.True(t, got.Updated.After(beforeClear.Updated))
+		})
+	}
 }
 
 func testManageSkuInventoryStatusFailedSkipsReconciliation(t *testing.T) {

@@ -415,7 +415,7 @@ async fn test_assign_remove_then_dhcp_reallocates(
             bmc_mac_address: "aa:bb:cc:dd:ef:16".into(),
             chassis_serial_number: "EXPLICIT-REMOVE-RETURNS-TO-DHCP".into(),
             host_nics: vec![rpc::forge::ExpectedInterface {
-                mac_address: mac.to_string(),
+                mac_address: Some(mac.to_string()),
                 ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Retained as i32),
                 ..Default::default()
             }],
@@ -1086,9 +1086,14 @@ async fn test_dhcp_does_not_move_interface_with_static_address(
 
     // The discover fails (external IP can't be in the DHCP records view),
     // but the important thing is the interface was NOT moved.
-    assert!(
-        result.is_err(),
-        "DHCP discover should fail for external static IP"
+    let status = result.expect_err("external static IP should not produce a DHCP record");
+    assert_eq!(status.code(), tonic::Code::NotFound);
+    assert_eq!(
+        status.message(),
+        format!(
+            "DHCP record not found: {mac} (segment {}, Ipv4)",
+            static_seg.id
+        )
     );
 
     // Verify the interface is still on static-assignments, untouched.

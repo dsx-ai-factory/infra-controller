@@ -67,11 +67,14 @@ pub struct SiteExplorerConfig {
     /// `exploration_requested` flag set are always attempted, regardless of this
     /// value, because operators rely on that flag for guaranteed next-tick attempts.
     /// Within the budget, three tiers share the slots: 70 percent for unexplored
-    /// endpoints (oldest interface first), 20 percent for endpoints preingestion
-    /// parked with `waiting_for_explorer_refresh` in a state that reads the next
-    /// report (oldest report first), and 10 percent for the routine refresh of
-    /// the oldest reports. Slots a tier cannot fill go to the other tiers in
-    /// that order, so no slot is left unused while any tier has candidates.
+    /// endpoints (oldest interface first), 20 percent for endpoints waiting on
+    /// their next report, those at an expected machine, switch or power shelf
+    /// BMC MAC never explored successfully and those preingestion parked with
+    /// `waiting_for_explorer_refresh` in a state that reads the next report
+    /// (oldest report first), and 10 percent for the routine refresh of the
+    /// oldest reports, among them every undeclared endpoint that never answered.
+    /// Slots a tier cannot fill go to the other tiers in that order, so no slot
+    /// is left unused while any tier has candidates.
     /// Below a budget of ten the smaller shares round to zero.
     /// Parallelism for every kind of exploration is still bounded by
     /// `concurrent_explorations`.
@@ -194,6 +197,21 @@ pub struct SiteExplorerConfig {
     /// CompareResult for side-by-side validation).
     #[serde(default = "SiteExplorerConfig::default_explore_mode")]
     pub explore_mode: SiteExplorerExploreMode,
+}
+
+impl From<&SiteExplorerConfig> for crate::inventory_creator::Config {
+    fn from(config: &SiteExplorerConfig) -> Self {
+        Self {
+            create_machines: config.create_machines.clone(),
+            machines_created_per_run: config.machines_created_per_run,
+            create_power_shelves: config.create_power_shelves.clone(),
+            power_shelves_created_per_run: config.power_shelves_created_per_run,
+            create_switches: config.create_switches.clone(),
+            switches_created_per_run: config.switches_created_per_run,
+            admin_fnn_enabled: config.admin_fnn_enabled,
+            retained_boot_interface_window: config.retained_boot_interface_window,
+        }
+    }
 }
 
 impl Default for SiteExplorerConfig {

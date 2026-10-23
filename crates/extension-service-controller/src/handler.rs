@@ -989,7 +989,12 @@ async fn load_desired_registration(
         )
         .map_err(|error| LoadDesiredRegistrationError::InvalidData(error.to_string()))?,
         None => ServiceVpcRegistrationResources {
-            service: project_dpu_service(service_id, carbide_dpf::NAMESPACE, &data),
+            service: project_dpu_service(
+                service_id,
+                carbide_dpf::NAMESPACE,
+                &data,
+                service.deployment_type,
+            ),
             interfaces: Vec::new(),
             chains: Vec::new(),
         },
@@ -1009,6 +1014,7 @@ async fn load_desired_registration(
             service_id,
             carbide_dpf::NAMESPACE,
             &data,
+            service.deployment_type,
         ));
     }
     if let Some(mac) = retained_mac {

@@ -18,12 +18,16 @@
 use std::ops::DerefMut;
 use std::time::SystemTime;
 
+use carbide_uuid::extension_service::ExtensionServiceId;
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::MachineId;
+use carbide_uuid::machine::{DpuMachineId, MachineId};
 use carbide_uuid::machine_validation::MachineValidationId;
-use carbide_uuid::network::NetworkSegmentId;
+use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::vpc::VpcPrefixId;
-use model::instance::config::network::DeviceLocator;
+use config_version::ConfigVersion;
+use mac_address::MacAddress;
+use model::instance::config::extension_services::InstanceExtensionServiceConfig;
+use model::instance::config::network::{DeviceLocator, InstanceServiceInterfaceConfig};
 use model::instance::config::nvlink::InstanceNvLinkConfig;
 use model::instance::snapshot::InstanceSnapshot;
 use model::instance::status::network::InstanceNetworkStatusObservation;
@@ -37,6 +41,7 @@ use rpc::forge::forge_server::Forge;
 use rpc::forge::instance_interface_config::NetworkDetails;
 use rpc::{InstanceReleaseRequest, Timestamp};
 
+use super::tenant::create_fixture_tenant;
 use super::{TestEnv, inject_machine_measurements, persist_machine_validation_result};
 use crate::tests::common::api_fixtures::{RpcInstance, TestManagedHost};
 
@@ -186,6 +191,147 @@ impl<'a, 'b> TestInstance<'a, 'b> {
     pub(in crate::tests) async fn delete(&self) {
         self.mh.delete_instance(self.env, self.id).await
     }
+}
+
+/// Persists a synthetic, attachment-correlated endpoint for lifecycle guard tests.
+///
+/// Public endpoint creation is not available until issue #6125. Matching IDs
+/// satisfy snapshot ownership validation, while writing both records in one
+/// transaction and reloading after commit prove durable correlated state.
+pub(in crate::tests) async fn seed_service_vpc_endpoint(
+    env: &TestEnv,
+    instance_id: InstanceId,
+    dpu_id: DpuMachineId,
+    network_segment_id: NetworkSegmentId,
+) -> InstanceServiceInterfaceConfig {
+    let vpc_id = db::vpc::find_by_segment(&env.pool, network_segment_id)
+        .await
+        .unwrap()
+        .expect("fixture segment belongs to a VPC")
+        .id;
+    let attachment_id = uuid::Uuid::new_v4();
+    let service_id = ExtensionServiceId::new();
+
+    // Register the fixture tenant before creating the synthetic service to satisfy
+    // the extension service's tenant foreign key.
+    let tenant_config = default_tenant_config();
+    create_fixture_tenant(env, tenant_config.tenant_organization_id.clone())
+        .await
+        .unwrap();
+
+    // Register the synthetic Pod service so managed-host snapshot loading can
+    // resolve the directly seeded attachment before public endpoint creation exists.
+    let registered_version: ConfigVersion = env
+        .api
+        .create_dpu_extension_service(tonic::Request::new(
+            rpc::forge::CreateDpuExtensionServiceRequest {
+                deployment_type: 0,
+                dpu_target: None,
+                service_vpc_interfaces: vec![],
+                service_id: Some(service_id.to_string()),
+                service_name: format!("service-vpc-guard-{attachment_id}"),
+                description: None,
+                tenant_organization_id: tenant_config.tenant_organization_id,
+                service_type: rpc::forge::DpuExtensionServiceType::KubernetesPod.into(),
+                data: "apiVersion: v1\nkind: Pod\nmetadata:\n  name: service-vpc-guard\nspec:\n  containers:\n    - name: app\n      image: nginx:1.27"
+                    .to_string(),
+                credential: None,
+                observability: None,
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .latest_version_info
+        .expect("created service has an initial version")
+        .version
+        .parse()
+        .expect("created service returned a valid config version");
+
+    // Attachment, DPU, and VPC identity drive the guard. The remaining fields
+    // make the synthetic row a valid fixed-slot endpoint for snapshot loading.
+    let endpoint = InstanceServiceInterfaceConfig {
+        attachment_id, // Correlates the endpoint with its durable attachment owner.
+        interface_ordinal: 0,
+        dpu_id, // Selects the exact DPU side of retained loopback ownership.
+        slot_index: 0,
+        vpc_id, // Selects the exact VPC side of retained loopback ownership.
+        vpc_prefix_id: VpcPrefixId::new(),
+        network_segment_id,
+        network_prefix_id: NetworkPrefixId::new(),
+        link_prefix: "192.0.2.0/31".parse().expect("valid service prefix"),
+        mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+        internal_uuid: uuid::Uuid::new_v4(),
+    };
+
+    // Keep the attachment identity and endpoint owner in one transaction so
+    // no persisted snapshot can observe only half of the relationship.
+    let mut txn = env.db_txn().await;
+    let stored = db::instance::find_by_id(txn.as_mut(), instance_id)
+        .await
+        .unwrap()
+        .expect("fixture instance remains stored");
+    let current_services = stored.config.extension_services.clone();
+    let attachment = InstanceExtensionServiceConfig {
+        id: Some(attachment_id),
+        service_id,
+        version: registered_version,
+        dpu_target: None, // Matches the registered Kubernetes Pod service.
+        removed: None,
+    };
+    let mut services_with_attachment = current_services.clone();
+    services_with_attachment
+        .service_configs
+        .push(attachment.clone());
+    let mut network_with_endpoint = stored.config.network.clone();
+    network_with_endpoint
+        .service_interfaces
+        .push(endpoint.clone());
+    assert_eq!(
+        db::instance::update_extension_services_config(
+            txn.as_mut(),
+            instance_id,
+            stored.extension_services_config_version,
+            &current_services,
+            &services_with_attachment,
+            false,
+        )
+        .await
+        .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
+    db::instance::update_network_config(
+        txn.as_mut(),
+        instance_id,
+        stored.network_config_version,
+        &network_with_endpoint,
+        false,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    // Reload committed state so an ineffective seed cannot make a guard test pass.
+    let persisted = db::instance::find_by_id(&env.pool, instance_id)
+        .await
+        .unwrap()
+        .expect("fixture instance remains stored");
+    assert!(
+        persisted
+            .config
+            .extension_services
+            .service_configs
+            .contains(&attachment)
+    );
+    assert!(
+        persisted
+            .config
+            .network
+            .service_interfaces
+            .contains(&endpoint)
+    );
+
+    endpoint
 }
 
 pub(in crate::tests) async fn create_instance_with_ib_config<'a, 'b>(

@@ -20,6 +20,7 @@ use std::fmt::Display;
 use std::net::IpAddr;
 
 use carbide_libmlx_model::device::info::MlxDeviceInfo;
+use carbide_libmlx_model::firmware::operation::FirmwareOperation;
 use carbide_libmlx_model::firmware::result::FirmwareFlashReport;
 use carbide_uuid::dpa_interface::DpaInterfaceId;
 use carbide_uuid::machine::HostMachineId;
@@ -158,17 +159,18 @@ pub struct CardState {
     pub profile: Option<String>,
     pub profile_synced: Option<bool>,
 
+    /// Firmware report for legacy readers. Correlated operations set `flashed`
+    /// only when complete, including a completed no-work request, so older Core
+    /// controllers cannot advance on a partial burn. Exact phase evidence stays
+    /// in `firmware_operation`; this field alone cannot complete a current attempt.
     #[serde(default)]
-    // firmware_report contains the latest FirmwareFlashReport as
-    // fed back from scout after receiving a FirmwareFlashProfile
-    // to apply as part of the ApplyFirmware state + OpCode
-    // workflow. This report will let us know if the firmware
-    // flash occurred, as well as a number of optional bits
-    // of feedback (e.g. if a reset was configured, did it happen,
-    // if a version verification was configured, did it happen,
-    // etc). This is useful for metrics, verification, and general
-    // transparency via logging or other mechanisms.
     pub firmware_report: Option<FirmwareFlashReport>,
+
+    /// Last accepted execution report for a firmware operation. Only a report
+    /// matching the current controller-state version may advance ApplyFirmware.
+    /// Missing values from older stored observations cannot establish completion.
+    #[serde(default)]
+    pub firmware_operation: Option<FirmwareOperation>,
 }
 
 impl Display for CardState {
@@ -299,6 +301,13 @@ impl NewDpaInterface {
 }
 
 impl DpaInterface {
+    /// Identifies the firmware attempt at this persisted controller-state
+    /// version. Polling or changing the live target does not allocate a new ID;
+    /// entering ApplyFirmware again advances the version and starts a new one.
+    pub fn firmware_operation_id(&self) -> String {
+        format!("dpa-firmware:{}:{}", self.id, self.controller_state.version)
+    }
+
     pub fn use_admin_network(&self) -> bool {
         self.network_config.use_admin_network.unwrap_or(true)
     }
@@ -499,6 +508,24 @@ mod tests {
     use crate::metadata::Metadata;
     use crate::os::{InlineIpxe, OperatingSystem, OperatingSystemVariant};
     use crate::tenant::TenantOrganizationId;
+
+    /// Stored card observations from before operation correlation still hydrate,
+    /// but their legacy success report does not supply an operation identity.
+    #[test]
+    fn card_state_without_operation_remains_readable() {
+        let state: CardState = serde_json::from_value(serde_json::json!({
+            "lockmode": "Unlocked",
+            "profile": "retained-profile",
+            "profile_synced": true,
+            "firmware_report": {"flashed": true}
+        }))
+        .unwrap();
+        assert_eq!(state.lockmode, Some(DpaLockMode::Unlocked));
+        assert_eq!(state.profile.as_deref(), Some("retained-profile"));
+        assert_eq!(state.profile_synced, Some(true));
+        assert!(state.firmware_report.unwrap().flashed);
+        assert!(state.firmware_operation.is_none());
+    }
 
     fn test_machine_id() -> MachineId {
         MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30").unwrap()
@@ -912,6 +939,7 @@ mod tests {
             instance_type_id: None,
             metadata: Metadata::default(),
             config,
+            nic_firmware_snapshot: None,
             config_version: ConfigVersion::initial(),
             network_config_version: ConfigVersion::initial(),
             ib_config_version: ConfigVersion::initial(),

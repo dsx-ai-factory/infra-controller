@@ -400,7 +400,8 @@ func TestGeneratedBodySiteSelection(t *testing.T) {
 	}
 }
 
-func TestRunGeneratedTUICommand_RegisteredSites(t *testing.T) {
+func testRunGeneratedTUICommand_RegisteredSites(t *testing.T) {
+	t.Helper()
 	for _, test := range []struct {
 		name      string
 		command   string

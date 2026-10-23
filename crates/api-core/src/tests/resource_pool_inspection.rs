@@ -1,0 +1,671 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use carbide_resource_pool_api::v1;
+use carbide_resource_pool_api::v1::resource_pool_server::{ResourcePool, ResourcePoolServer};
+use chrono::Utc;
+use ipnetwork::Ipv6Network;
+use model::resource_pool::binding::INTEGRATED_AUTHORITY_ID;
+use model::resource_pool::registration::ResourcePoolRegistration;
+use model::resource_pool::{
+    OwnerType, ResourcePool as TypedPool, ResourcePoolBackendKind, ResourcePoolSelection,
+    ResourcePoolValueDomain, ValueType,
+};
+use prost::Message;
+use rpc::forge;
+use rpc::forge::forge_server::Forge;
+use sqlx::PgPool;
+use tokio::net::TcpListener;
+use tokio::task::JoinSet;
+use tokio_stream::wrappers::TcpListenerStream;
+use tokio_util::sync::CancellationToken;
+use tonic::transport::Server;
+use tonic::{Code, Request, Response, Status};
+use uuid::Uuid;
+
+use crate::cfg::resource_pool::ResourcePoolBackendConfig;
+use crate::test_support::default_config;
+use crate::tests::common::api_fixtures::{
+    TestEnvOverrides, create_test_env, create_test_env_with_overrides,
+};
+use crate::tests::resource_pool::pool_database_snapshot;
+
+/// Pools added after startup remain inspectable without a binding, including
+/// dynamic PKey pools and IPv6 prefixes. Older clients keep their local counts.
+#[crate::sqlx_test]
+async fn inspection_preserves_local_inventory_and_numeric_list(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let env = create_test_env(database.clone()).await;
+    let pkey_name = model::resource_pool::common::ib_pkey_pool_name("after-startup");
+    let pkeys = TypedPool::<i64>::new(pkey_name.clone(), ValueType::Integer);
+    let prefixes = TypedPool::<Ipv6Network>::new("inspection-prefix".into(), ValueType::Ipv6Prefix);
+    let mut txn = database.begin().await?;
+    db::resource_pool::populate(&pkeys, &mut txn, vec![10, 11], true).await?;
+    // Distinct counts in both partitions catch swapped fields in the public RPC.
+    db::resource_pool::populate(
+        &prefixes,
+        &mut txn,
+        vec![
+            "2001:db8::/64".parse()?,
+            "2001:db8:1::/64".parse()?,
+            "2001:db8:2::/64".parse()?,
+        ],
+        true,
+    )
+    .await?;
+    let manual_prefixes = (0x10..=0x17)
+        .map(|subnet| format!("2001:db8:{subnet:x}::/64").parse::<Ipv6Network>())
+        .collect::<Result<Vec<_>, _>>()?;
+    db::resource_pool::populate(&prefixes, &mut txn, manual_prefixes.clone(), false).await?;
+    db::resource_pool::allocate(
+        &prefixes,
+        &mut txn,
+        OwnerType::Machine,
+        "automatic-owner",
+        None,
+    )
+    .await?;
+    for prefix in manual_prefixes.iter().take(3) {
+        db::resource_pool::allocate(
+            &prefixes,
+            &mut txn,
+            OwnerType::Machine,
+            &prefix.to_string(),
+            Some(*prefix),
+        )
+        .await?;
+    }
+    let existing =
+        db::resource_pool::binding::load(&mut *txn, model::resource_pool::common::VPC_VNI)
+            .await?
+            .expect("fixture VPC pool binding");
+    let empty = db::resource_pool::binding::bind_or_verify(
+        &mut txn,
+        &ResourcePoolSelection {
+            pool_name: "inspection-empty".into(),
+            value_domain: ResourcePoolValueDomain::Integer,
+            backend_name: Some("local-alias".into()),
+            backend_kind: ResourcePoolBackendKind::Integrated,
+            authority_id: INTEGRATED_AUTHORITY_ID.into(),
+            remote_pool: "inspection-empty".into(),
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
+    let pools = env
+        .api
+        .admin_inspect_resource_pools(Request::new(forge::InspectResourcePoolsRequest {}))
+        .await?
+        .into_inner()
+        .pools;
+    assert!(pools.windows(2).all(|pair| pair[0].name < pair[1].name));
+    let pkeys = pools
+        .iter()
+        .find(|pool| pool.name == pkey_name)
+        .expect("dynamic PKey pool");
+    assert_eq!(
+        pkeys.backend_kind(),
+        forge::ResourcePoolBackendKind::Integrated
+    );
+    assert_eq!(pkeys.binding_id, None);
+    assert_eq!(pkeys.authority_id, INTEGRATED_AUTHORITY_ID);
+    assert_eq!(pkeys.remote_pool, pkey_name);
+    assert_eq!(
+        (pkeys.min.as_deref(), pkeys.max.as_deref()),
+        (Some("10"), Some("11"))
+    );
+    assert_eq!(pkeys.stats_status(), forge::ResourcePoolStatsStatus::Known);
+    assert_eq!(pkeys.stats.as_ref().expect("local counts").free, 2);
+    assert!(pkeys.observed_at.is_some());
+
+    let prefixes = pools
+        .iter()
+        .find(|pool| pool.name == "inspection-prefix")
+        .expect("prefix pool");
+    assert_eq!(prefixes.binding_id, None);
+    assert_eq!(prefixes.min.as_deref(), Some("2001:db8::/64"));
+    assert_eq!(prefixes.max.as_deref(), Some("2001:db8:17::/64"));
+    assert_eq!(
+        prefixes.stats_status(),
+        forge::ResourcePoolStatsStatus::Known
+    );
+    assert!(prefixes.observed_at.is_some());
+    assert_eq!(
+        prefixes.stats,
+        Some(forge::ResourcePoolStats {
+            used: 4,
+            free: 7,
+            auto_assign_used: 1,
+            auto_assign_free: 2,
+            non_auto_assign_used: 3,
+            non_auto_assign_free: 5,
+        })
+    );
+
+    let existing_pool = pools
+        .iter()
+        .find(|pool| pool.name == existing.pool_name)
+        .expect("bound VPC pool");
+    assert_eq!(
+        existing_pool.backend_kind(),
+        forge::ResourcePoolBackendKind::Integrated
+    );
+    assert_eq!(
+        existing_pool.binding_id,
+        Some(existing.binding_id.to_string())
+    );
+    assert_eq!(existing_pool.backend_name, existing.backend_name);
+    assert_eq!(existing_pool.authority_id, existing.authority_id);
+    assert_eq!(existing_pool.remote_pool, existing.remote_pool);
+    assert_eq!(existing_pool.provider_pool_id, None);
+    assert_eq!(existing_pool.accepted_revision, None);
+    assert_eq!(existing_pool.stats_message, None);
+    assert!(
+        existing_pool
+            .stats
+            .as_ref()
+            .expect("bound pool counts")
+            .free
+            > 0
+    );
+    assert!(existing_pool.observed_at.is_some());
+
+    // A saved local binding with no inventory is empty, rather than unknown.
+    let empty_pool = pools
+        .iter()
+        .find(|pool| pool.name == empty.pool_name)
+        .expect("empty bound pool");
+    assert_eq!(empty_pool.binding_id, Some(empty.binding_id.to_string()));
+    assert_eq!(empty_pool.backend_name.as_deref(), Some("local-alias"));
+    assert_eq!(
+        empty_pool.stats_status(),
+        forge::ResourcePoolStatsStatus::Known
+    );
+    assert_eq!(empty_pool.stats, Some(forge::ResourcePoolStats::default()));
+    assert!(empty_pool.observed_at.is_some());
+    assert_eq!(empty_pool.provider_pool_id, None);
+    assert_eq!(empty_pool.accepted_revision, None);
+    assert_eq!(
+        (empty_pool.min.as_ref(), empty_pool.max.as_ref()),
+        (None, None)
+    );
+
+    let old = env
+        .api
+        .admin_list_resource_pools(Request::new(forge::ListResourcePoolsRequest::default()))
+        .await?
+        .into_inner();
+    assert_eq!(
+        old.pools.iter().find(|pool| pool.name == pkey_name),
+        Some(&forge::ResourcePool {
+            name: pkey_name,
+            min: "10".into(),
+            max: "11".into(),
+            total: 2,
+            allocated: 0,
+        })
+    );
+    assert_eq!(
+        old.pools
+            .iter()
+            .find(|pool| pool.name == "inspection-prefix"),
+        Some(&forge::ResourcePool {
+            name: "inspection-prefix".into(),
+            min: "2001:db8::/64".into(),
+            max: "2001:db8:17::/64".into(),
+            total: 11,
+            allocated: 4,
+        })
+    );
+    Ok(())
+}
+
+/// Provider errors stay on their own rows, and unknown or overflowing capacity
+/// cannot become zero in either inspection or the older numeric-only RPC.
+#[crate::sqlx_test]
+async fn inspection_keeps_remote_status_and_saved_identity(database: PgPool) -> eyre::Result<()> {
+    let healthy = v1::PoolStats {
+        used: 7,
+        free: 11,
+        auto_assign_used: 3,
+        auto_assign_free: 5,
+        non_auto_assign_used: 4,
+        non_auto_assign_free: 6,
+    };
+    let cases = [
+        // A successful response preserves all six counts, not just capacity.
+        (
+            "remote-healthy",
+            Ok(healthy),
+            forge::ResourcePoolStatsStatus::Known,
+        ),
+        // Unsupported statistics are different from an empty provider pool.
+        (
+            "remote-unknown",
+            Err(Code::Unimplemented),
+            forge::ResourcePoolStatsStatus::Unknown,
+        ),
+        // A failed observation does not hide healthy pools from the same response.
+        (
+            "remote-unavailable",
+            Err(Code::Unavailable),
+            forge::ResourcePoolStatsStatus::Unavailable,
+        ),
+        // Valid individual counts can still overflow when a client adds capacity.
+        (
+            "remote-overflow",
+            Ok(v1::PoolStats {
+                used: u64::MAX,
+                free: 1,
+                auto_assign_used: u64::MAX,
+                auto_assign_free: 1,
+                non_auto_assign_used: 0,
+                non_auto_assign_free: 0,
+            }),
+            forge::ResourcePoolStatsStatus::Unavailable,
+        ),
+    ];
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let provider = StatsProvider {
+        replies: cases
+            .iter()
+            .map(|(name, reply, _)| ((*name).to_owned(), *reply))
+            .collect(),
+        requests: requests.clone(),
+        calls: calls.clone(),
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("http://{}", listener.local_addr()?).parse()?;
+    let shutdown = CancellationToken::new();
+    let _shutdown_guard = shutdown.clone().drop_guard();
+    let mut tasks = JoinSet::new();
+    tasks.spawn(
+        Server::builder()
+            .add_service(ResourcePoolServer::new(provider))
+            .serve_with_incoming_shutdown(
+                TcpListenerStream::new(listener),
+                shutdown.clone().cancelled_owned(),
+            ),
+    );
+
+    // The fixture starts with only Integrated selections. Saved remote bindings
+    // are injected afterward; production startup still rejects such selections.
+    let mut config = default_config::get();
+    config.resource_pool_backends.insert(
+        "inspection-provider".into(),
+        ResourcePoolBackendConfig::Grpc {
+            endpoint,
+            tls: None,
+        },
+    );
+    let env =
+        create_test_env_with_overrides(database.clone(), TestEnvOverrides::with_config(config))
+            .await;
+    let mut expected_requests = Vec::new();
+    for (name, _, _) in &cases {
+        expected_requests
+            .push(save_remote_definition(&database, name, "inspection-provider").await?);
+    }
+    // A bad saved definition must not be replayed or queried at the provider.
+    let corrupt =
+        save_remote_definition(&database, "remote-corrupt", "inspection-provider").await?;
+    sqlx::query("UPDATE resource_pool_registration SET request = $1 WHERE binding_id = $2")
+        .bind(vec![0xff_u8])
+        .bind(
+            corrupt
+                .pool
+                .as_ref()
+                .expect("corrupt row identity")
+                .binding_id
+                .parse::<Uuid>()?,
+        )
+        .execute(&database)
+        .await?;
+    // Removing backend configuration keeps readable identity visible but cannot
+    // cause a connection to a different configured provider.
+    let missing =
+        save_remote_definition(&database, "remote-unconfigured", "removed-provider").await?;
+    let original_pools = pool_database_snapshot(&database).await?;
+    let registration_query = "SELECT to_jsonb(resource_pool_registration) FROM resource_pool_registration ORDER BY binding_id, revision";
+    let original_registrations: Vec<serde_json::Value> = sqlx::query_scalar(registration_query)
+        .fetch_all(&database)
+        .await?;
+    let requested_at = Utc::now();
+    let pools = env
+        .api
+        .admin_inspect_resource_pools(Request::new(forge::InspectResourcePoolsRequest {}))
+        .await?
+        .into_inner()
+        .pools;
+    assert!(pools.windows(2).all(|pair| pair[0].name < pair[1].name));
+    for (name, _, status) in cases {
+        let pool = pools.iter().find(|pool| pool.name == name).expect(name);
+        let request = expected_requests
+            .iter()
+            .find(|request| request.pool.as_ref().expect("pool").logical_pool == name)
+            .expect("saved request");
+        let identity = request.pool.as_ref().expect("saved pool identity");
+        assert_eq!(
+            pool.backend_kind(),
+            forge::ResourcePoolBackendKind::Grpc,
+            "{name}"
+        );
+        assert_eq!(
+            pool.backend_name.as_deref(),
+            Some("inspection-provider"),
+            "{name}"
+        );
+        assert_eq!(
+            pool.binding_id.as_deref(),
+            Some(identity.binding_id.as_str()),
+            "{name}"
+        );
+        assert_eq!(pool.authority_id, identity.authority_id, "{name}");
+        assert_eq!(pool.remote_pool, format!("alias/{name}"), "{name}");
+        assert_eq!(
+            pool.provider_pool_id.as_deref(),
+            Some(identity.pool_id.as_str()),
+            "{name}"
+        );
+        assert_eq!(pool.accepted_revision.as_deref(), Some("1"), "{name}");
+        assert_eq!(
+            (pool.min.as_ref(), pool.max.as_ref()),
+            (None, None),
+            "{name}"
+        );
+        assert_eq!(pool.stats_status(), status, "{name}");
+        if status == forge::ResourcePoolStatsStatus::Known {
+            assert_eq!(
+                pool.stats,
+                Some(forge::ResourcePoolStats {
+                    used: healthy.used,
+                    free: healthy.free,
+                    auto_assign_used: healthy.auto_assign_used,
+                    auto_assign_free: healthy.auto_assign_free,
+                    non_auto_assign_used: healthy.non_auto_assign_used,
+                    non_auto_assign_free: healthy.non_auto_assign_free,
+                })
+            );
+            assert_eq!(pool.stats_message, None);
+            let observed_at = pool
+                .observed_at
+                .as_ref()
+                .expect("successful observation time");
+            assert!(observed_at.seconds >= requested_at.timestamp());
+            assert!(observed_at.seconds <= Utc::now().timestamp());
+        } else {
+            assert_eq!(pool.stats, None, "{name}");
+            assert_eq!(pool.observed_at, None, "{name}");
+            let message = pool.stats_message.as_ref().expect("failure explanation");
+            assert!(!message.is_empty(), "{name}");
+            assert!(!message.contains("provider-private-diagnostic"), "{name}");
+        }
+    }
+    for (request, backend_name, readable) in [
+        // The saved binding stays visible even when registration bytes cannot decode.
+        (&corrupt, "inspection-provider", false),
+        // Missing connection settings do not erase a readable provider identity.
+        (&missing, "removed-provider", true),
+    ] {
+        let identity = request.pool.as_ref().expect("saved identity");
+        let pool = pools
+            .iter()
+            .find(|pool| pool.name == identity.logical_pool)
+            .expect("unavailable remote pool");
+        assert_eq!(pool.backend_kind(), forge::ResourcePoolBackendKind::Grpc);
+        assert_eq!(
+            pool.stats_status(),
+            forge::ResourcePoolStatsStatus::Unavailable
+        );
+        assert_eq!(pool.stats, None);
+        assert_eq!(pool.observed_at, None);
+        assert_eq!(pool.backend_name.as_deref(), Some(backend_name));
+        assert_eq!(
+            pool.binding_id.as_deref(),
+            Some(identity.binding_id.as_str())
+        );
+        assert_eq!(pool.authority_id, identity.authority_id);
+        assert_eq!(pool.remote_pool, format!("alias/{}", identity.logical_pool));
+        assert_eq!(
+            pool.provider_pool_id.as_deref(),
+            readable.then_some(identity.pool_id.as_str())
+        );
+        assert_eq!(
+            pool.accepted_revision.as_deref(),
+            readable.then_some(request.eligibility_revision.as_str())
+        );
+        assert!(
+            pool.stats_message
+                .as_ref()
+                .is_some_and(|message| !message.is_empty())
+        );
+    }
+    let mut actual_requests = requests.lock().expect("recorded requests").clone();
+    actual_requests
+        .sort_by_key(|request| request.pool.as_ref().expect("pool").logical_pool.clone());
+    expected_requests
+        .sort_by_key(|request| request.pool.as_ref().expect("pool").logical_pool.clone());
+    assert_eq!(actual_requests, expected_requests);
+
+    let error = env
+        .api
+        .admin_list_resource_pools(Request::new(forge::ListResourcePoolsRequest::default()))
+        .await
+        .expect_err("numeric-only listing cannot describe remote pools");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert_eq!(
+        error
+            .metadata()
+            .get("nico-error-code")
+            .expect("API error code"),
+        "NICO-API-412"
+    );
+    assert!(error.message().contains("AdminInspectResourcePools"));
+    assert_eq!(
+        *calls.lock().expect("recorded RPC calls"),
+        vec!["Stats"; expected_requests.len()]
+    );
+    assert_eq!(pool_database_snapshot(&database).await?, original_pools);
+    let registrations: Vec<serde_json::Value> = sqlx::query_scalar(registration_query)
+        .fetch_all(&database)
+        .await?;
+    assert_eq!(registrations, original_registrations);
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), tasks.join_next())
+        .await?
+        .expect("provider task")??;
+    Ok(())
+}
+
+/// Save an accepted registration without local inventory so inspection must use
+/// its provider identity, rather than resolving the configured alias again.
+async fn save_remote_definition(
+    database: &PgPool,
+    name: &str,
+    backend_name: &str,
+) -> eyre::Result<v1::StatsRequest> {
+    let mut txn = database.begin().await?;
+    let binding = db::resource_pool::binding::bind_or_verify(
+        &mut txn,
+        &ResourcePoolSelection {
+            pool_name: name.into(),
+            value_domain: ResourcePoolValueDomain::Integer,
+            backend_name: Some(backend_name.into()),
+            backend_kind: ResourcePoolBackendKind::Grpc,
+            authority_id: "inspection-authority".into(),
+            remote_pool: format!("alias/{name}"),
+        },
+    )
+    .await?;
+    let definition = v1::DefineRequest {
+        pool: Some(v1::PoolBinding {
+            authority_id: binding.authority_id,
+            pool_id: format!("canonical/{name}"),
+            binding_id: binding.binding_id.to_string(),
+            logical_pool: name.into(),
+        }),
+        eligibility_revision: "1".into(),
+        previous_revision: None,
+        value_domain: v1::ValueDomain::Integer as i32,
+        eligibility: vec![v1::Eligibility {
+            assignment_mode: v1::AssignmentMode::Automatic as i32,
+            entries: Some(v1::eligibility::Entries::Range(v1::ValueRange {
+                start: Some(1_i64.into()),
+                end: Some(1000_i64.into()),
+            })),
+        }],
+    };
+    db::resource_pool::registration::insert(
+        &mut txn,
+        &ResourcePoolRegistration {
+            binding_id: binding.binding_id,
+            revision: 1,
+            request: definition.encode_to_vec(),
+            accepted: true,
+        },
+    )
+    .await?;
+    txn.commit().await?;
+    Ok(v1::StatsRequest {
+        pool: definition.pool,
+        eligibility_revision: definition.eligibility_revision,
+    })
+}
+
+/// `StatsProvider` records real gRPC requests and supplies each pool's observation.
+/// Other operations fail so inspection cannot silently register or allocate values.
+struct StatsProvider {
+    replies: HashMap<String, Result<v1::PoolStats, Code>>,
+    requests: Arc<Mutex<Vec<v1::StatsRequest>>>,
+    calls: Arc<Mutex<Vec<&'static str>>>,
+}
+
+#[tonic::async_trait]
+impl ResourcePool for StatsProvider {
+    async fn describe(
+        &self,
+        _: Request<v1::DescribeRequest>,
+    ) -> Result<Response<v1::DescribeResponse>, Status> {
+        self.calls
+            .lock()
+            .expect("recorded RPC calls")
+            .push("Describe");
+        Err(Status::unimplemented(
+            "inspection must only request statistics",
+        ))
+    }
+    async fn define(
+        &self,
+        _: Request<v1::DefineRequest>,
+    ) -> Result<Response<v1::DefineResponse>, Status> {
+        self.calls
+            .lock()
+            .expect("recorded RPC calls")
+            .push("Define");
+        Err(Status::unimplemented(
+            "inspection must only request statistics",
+        ))
+    }
+    async fn allocate(
+        &self,
+        _: Request<v1::AllocateRequest>,
+    ) -> Result<Response<v1::AllocateResponse>, Status> {
+        self.calls
+            .lock()
+            .expect("recorded RPC calls")
+            .push("Allocate");
+        Err(Status::unimplemented(
+            "inspection must only request statistics",
+        ))
+    }
+    async fn allocate_exact(
+        &self,
+        _: Request<v1::AllocateExactRequest>,
+    ) -> Result<Response<v1::AllocateExactResponse>, Status> {
+        self.calls
+            .lock()
+            .expect("recorded RPC calls")
+            .push("AllocateExact");
+        Err(Status::unimplemented(
+            "inspection must only request statistics",
+        ))
+    }
+    async fn recover(
+        &self,
+        _: Request<v1::RecoverRequest>,
+    ) -> Result<Response<v1::RecoverResponse>, Status> {
+        self.calls
+            .lock()
+            .expect("recorded RPC calls")
+            .push("Recover");
+        Err(Status::unimplemented(
+            "inspection must only request statistics",
+        ))
+    }
+    async fn cancel(
+        &self,
+        _: Request<v1::CancelRequest>,
+    ) -> Result<Response<v1::CancelResponse>, Status> {
+        self.calls
+            .lock()
+            .expect("recorded RPC calls")
+            .push("Cancel");
+        Err(Status::unimplemented(
+            "inspection must only request statistics",
+        ))
+    }
+    async fn lookup(
+        &self,
+        _: Request<v1::LookupRequest>,
+    ) -> Result<Response<v1::LookupResponse>, Status> {
+        self.calls
+            .lock()
+            .expect("recorded RPC calls")
+            .push("Lookup");
+        Err(Status::unimplemented(
+            "inspection must only request statistics",
+        ))
+    }
+    async fn release(
+        &self,
+        _: Request<v1::ReleaseRequest>,
+    ) -> Result<Response<v1::ReleaseResponse>, Status> {
+        self.calls
+            .lock()
+            .expect("recorded RPC calls")
+            .push("Release");
+        Err(Status::unimplemented(
+            "inspection must only request statistics",
+        ))
+    }
+    async fn stats(
+        &self,
+        request: Request<v1::StatsRequest>,
+    ) -> Result<Response<v1::StatsResponse>, Status> {
+        let request = request.into_inner();
+        self.calls.lock().expect("recorded RPC calls").push("Stats");
+        self.requests
+            .lock()
+            .expect("recorded requests")
+            .push(request.clone());
+        let name = &request
+            .pool
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("missing pool"))?
+            .logical_pool;
+        match self.replies.get(name) {
+            Some(Ok(stats)) => Ok(Response::new(v1::StatsResponse {
+                stats: Some(*stats),
+            })),
+            Some(Err(code)) => Err(Status::new(*code, "provider-private-diagnostic")),
+            None => Err(Status::not_found("unconfigured test pool")),
+        }
+    }
+}

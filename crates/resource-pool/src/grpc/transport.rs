@@ -37,7 +37,7 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 // Match tonic's normal receive limit in both directions. Definitions stay
 // compact; neither credential files nor a provider reply can grow without bound.
-const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PEM_BYTES: u64 = 256 * 1024;
 
 // Share 32 slots across clones to bound memory and provider concurrency. Excess

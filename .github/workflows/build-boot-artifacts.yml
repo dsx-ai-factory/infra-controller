@@ -525,6 +525,28 @@ jobs:
         run: |
           bash .github/ci/verify_scout_network.sh "pxe/static/blobs/internal/${ARCH}"
 
+      - name: Verify firmware supervisor in built Scout image
+        if: inputs.build_type == 'ephemeral'
+        env:
+          ARCH: ${{ inputs.arch }}
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+
+          SCOUT_IMAGE="pxe/static/blobs/internal/${ARCH}/scout.squashfs"
+          SUPERVISOR="opt/forge/mlx-firmware-supervisor"
+          VALIDATION_ROOT="$(mktemp -d)"
+          trap 'rm -rf -- "${VALIDATION_ROOT}"' EXIT
+
+          unsquashfs -no-progress -d "${VALIDATION_ROOT}/root" "${SCOUT_IMAGE}" "${SUPERVISOR}"
+          if [[ ! -f "${VALIDATION_ROOT}/root/${SUPERVISOR}" ||
+                -L "${VALIDATION_ROOT}/root/${SUPERVISOR}" ||
+                ! -x "${VALIDATION_ROOT}/root/${SUPERVISOR}" ]]; then
+            echo "ERROR: /${SUPERVISOR} must be an executable regular file in ${SCOUT_IMAGE}"
+            exit 1
+          fi
+          echo "OK: /${SUPERVISOR} is executable in ${SCOUT_IMAGE}"
+
       - name: Verify mnv_cli exists in built scout image
         if: inputs.build_type == 'ephemeral' && inputs.inject_extras == true
         run: |
@@ -556,8 +578,9 @@ jobs:
       # into mkosi staging. `Dockerfile.release-artifacts-*` consumes
       # `pxe/static/blobs/internal/`. Excluding the rest of the cargo target tree
       # and `mkosi.profiles` staging inputs removes ~14 GB of upload/download
-      # from the critical path. Keep the unstripped aarch64 forge-scout binary
-      # so crashes from the shipped image can still be symbolicated.
+      # from the critical path. Keep the unstripped aarch64 Scout and firmware
+      # supervisor binaries so crashes from the shipped image can still be
+      # symbolicated.
       #
       # `compression-level: 0` avoids re-deflating squashfs, BFB, and EFI files
       # that are already compressed. `if-no-files-found` checks the path list as
@@ -571,6 +594,7 @@ jobs:
             pxe/static/blobs/
             target/debs/
             target/aarch64-unknown-linux-gnu/release/forge-scout
+            target/aarch64-unknown-linux-gnu/release/mlx-firmware-supervisor
           if-no-files-found: error
           compression-level: 0
           retention-days: 1

@@ -399,4 +399,4 @@ openapi-breaking:
 		echo "oasdiff is not installed. Please install oasdiff: https://github.com/oasdiff/oasdiff"; \
 		exit 1; \
 	fi
-	oasdiff breaking <(git show origin/main:rest-api/openapi/spec.yaml) rest-api/openapi/spec.yaml --fail-on ERR
+	oasdiff breaking <(git show origin/main:rest-api/openapi/spec.yaml) rest-api/openapi/spec.yaml --err-ignore=rest-api/openapi/oasdiff-breaking-changes-ignore.txt --fail-on ERR

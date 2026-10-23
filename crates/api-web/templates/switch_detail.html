@@ -122,11 +122,15 @@
 <p class="text-muted">No NVOS management port information available.</p>
 {% else %}
 {% for nvos_port in nvos_ports %}
-<h3>NVOS Management Endpoint {{ loop.index }}</h3>
+<h3>NVOS Management Endpoint {{ loop.index }}{% if nvos_port.is_primary %} (primary){% endif %}</h3>
 <table class="detailsview">
 	<tr>
 		<th>MAC Address</th>
 		<td>{{ nvos_port.mac }}</td>
+	</tr>
+	<tr>
+		<th>Primary</th>
+		<td>{% if nvos_port.is_primary %}Yes{% else %}No{% endif %}</td>
 	</tr>
 	{% if let Some(service_port) = nvos_port.service_port %}
 	<tr>

@@ -1,0 +1,129 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package firmware_supervisor;
+
+import "mlx_device.proto";
+
+// FirmwareSupervisor is a private Unix-socket service for one PCI-device slot.
+// The slot identity does not prove physical-card identity or reset isolation;
+// the executor separately owns the host-wide claim before admitting work.
+// Receipts survive client disconnection. RPC cancellation never cancels a
+// firmware operation, and callers must resolve an uncertain submission by its
+// original operation ID. This service is not part of the Core API.
+// Each daemon admits at most eight journal RPC tasks across all connections;
+// excess requests return RESOURCE_EXHAUSTED without waiting for capacity.
+// Detached tasks retain their quota until journal access finishes. Execution
+// progress and observer cancellation do not consume this quota. Transport limits
+// allow 32 connected sockets and eight active HTTP/2 streams per connection;
+// excess sockets are closed. Requests and responses are limited to 128 KiB.
+service FirmwareSupervisor {
+  // Record an immutable request, or return its existing receipt. Reusing an ID
+  // with different work is rejected, as is new work while a predecessor still
+  // requires execution or reconciliation. Complete permits a new ID, as do
+  // Failed or Canceled before any mutation intent. The original receipt never
+  // restarts. An occupied host mutation claim returns RESOURCE_EXHAUSTED without
+  // admitting the request.
+  rpc SubmitFirmwareOperation(SubmitFirmwareOperationRequest) returns (SubmitFirmwareOperationResponse);
+  // Return a recorded operation; an unknown ID returns NOT_FOUND.
+  rpc GetFirmwareOperation(GetFirmwareOperationRequest) returns (GetFirmwareOperationResponse);
+  // Request cancellation at a safe phase boundary. This never kills an active
+  // hardware mutation and does not undo effects that have already completed.
+  rpc CancelFirmwareOperation(CancelFirmwareOperationRequest) returns (CancelFirmwareOperationResponse);
+  // Identify the serving protocol, card, and boot before submitting work.
+  rpc GetSupervisorStatus(GetSupervisorStatusRequest) returns (GetSupervisorStatusResponse);
+}
+
+// ObserverExitBehavior controls what happens when the submitting process exits.
+// The server derives the process identity from its Unix-socket peer. Closing a
+// connection, dropping an RPC, or reaching an RPC deadline is not process exit.
+enum ObserverExitBehavior {
+  // Continue execution when the submitting process exits; also the omitted default.
+  OBSERVER_EXIT_BEHAVIOR_CONTINUE = 0;
+  // Request cancellation at the next safe boundary when that process exits.
+  OBSERVER_EXIT_BEHAVIOR_TERMINATE = 1;
+}
+
+// SupervisorIdentity pins mutation requests to the peer identified at connection.
+// It remains required when an HTTP/2 channel reconnects to a replacement process.
+message SupervisorIdentity {
+  // Private protocol version accepted during the client's status handshake.
+  uint32 protocol_version = 1;
+  // Normalized PCI slot dddd:bb:ss, not physical-card identity.
+  string device_identity = 2;
+  // Linux boot ID observed during that handshake.
+  string boot_id = 3;
+  // Exact normalized full PCI BDF dddd:bb:ss.f used for firmware tool execution.
+  // Other functions of the same slot share exclusion, not execution targets.
+  string execution_device = 4;
+}
+
+// SubmitFirmwareOperationRequest identifies one immutable operation on this card.
+message SubmitFirmwareOperationRequest {
+  // Stable ID containing 1-256 printable nonspace ASCII bytes. Other values
+  // return INVALID_ARGUMENT. Reuse it to resolve a lost response without dispatching again.
+  string operation_id = 1;
+  // Omission requests a durable no-work completion with flashed=false. Admission
+  // still rejects unresolved predecessors or an unavailable host mutation claim.
+  mlx_device.FirmwareFlasherProfile profile = 2;
+  // Defaults to Continue. Unknown values are rejected, including for no-work
+  // requests. The original observer and policy remain fixed after admission.
+  ObserverExitBehavior observer_exit_behavior = 3;
+  // Required identity from the client's handshake. Omission or any mismatch
+  // returns FAILED_PRECONDITION before admitting work.
+  SupervisorIdentity expected_identity = 4;
+}
+
+// SubmitFirmwareOperationResponse contains the durably recorded receipt.
+message SubmitFirmwareOperationResponse {
+  // Always present on success; acknowledgement does not mean execution completed.
+  mlx_device.FirmwareOperation operation = 1;
+}
+
+// GetFirmwareOperationRequest selects an operation without changing it.
+message GetFirmwareOperationRequest {
+  // ID containing 1-256 printable nonspace ASCII bytes. Other values return
+  // INVALID_ARGUMENT; a valid unknown ID returns NOT_FOUND.
+  string operation_id = 1;
+}
+
+// GetFirmwareOperationResponse contains the latest recorded execution state.
+message GetFirmwareOperationResponse {
+  // Always present on success, including when execution needs manual intervention.
+  mlx_device.FirmwareOperation operation = 1;
+}
+
+// CancelFirmwareOperationRequest asks an existing operation to stop safely.
+message CancelFirmwareOperationRequest {
+  // ID containing 1-256 printable nonspace ASCII bytes. Other values return
+  // INVALID_ARGUMENT; a valid unknown ID returns NOT_FOUND.
+  string operation_id = 1;
+  // Required identity from the client's handshake. Omission or any mismatch
+  // returns FAILED_PRECONDITION without recording cancellation.
+  SupervisorIdentity expected_identity = 2;
+}
+
+// CancelFirmwareOperationResponse describes the recorded cancellation outcome.
+message CancelFirmwareOperationResponse {
+  // Always present on success; CancelRequested is not confirmation of a safe stop.
+  mlx_device.FirmwareOperation operation = 1;
+}
+
+// GetSupervisorStatusRequest reads the identity of this per-card service.
+message GetSupervisorStatusRequest {}
+
+// GetSupervisorStatusResponse supplies the identity checked before submission.
+message GetSupervisorStatusResponse {
+  // Private protocol version, exactly 1 for this service implementation.
+  uint32 protocol_version = 1;
+  // Normalized PCI slot dddd:bb:ss, not a certified physical card or an
+  // independently isolated reset domain.
+  string device_identity = 2;
+  // Nonempty Linux boot ID for the serving process.
+  string boot_id = 3;
+  // Exact normalized full PCI BDF dddd:bb:ss.f used for firmware tool execution.
+  // Clients targeting another function must reject this supervisor.
+  string execution_device = 4;
+}

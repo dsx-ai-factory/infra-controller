@@ -220,11 +220,6 @@ reviews:
         Review OpenAPI docs and examples for accuracy, deprecation clarity,
         client-facing compatibility, spelling, and consistency with
         `spec.yaml`.
-    - path: "deploy/**"
-      instructions: >-
-        Review Kubernetes kustomize manifests for namespace/name consistency,
-        RBAC scope, probes, resource requests, secret/config references, and
-        upgrade-safe changes.
     - path: "helm/**"
       instructions: >-
         Review Helm charts for template correctness, values compatibility,
@@ -371,7 +366,7 @@ reviews:
         keys, environment-specific assumptions, and secret-safe defaults.
   auto_review:
     enabled: true
-    ignore_usernames: [] # Add usernames here to opt-out of auto-review
+    ignore_usernames: ["rwthompsonii"] # Add usernames here to opt-out of auto-review
 knowledge_base:
   code_guidelines:
     enabled: true

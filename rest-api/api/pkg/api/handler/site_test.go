@@ -1527,6 +1527,12 @@ func TestGetAllSiteHandler_Handle(t *testing.T) {
 	dbSession := testSiteInitDB(t)
 	defer dbSession.Close()
 	testSiteSetupSchema(t, dbSession)
+	require.NoError(t, dbSession.DB.ResetModel(ctx,
+		(*cdbm.Machine)(nil),
+		(*cdbm.MachineCapability)(nil),
+		(*cdbm.AllocationConstraint)(nil),
+		(*cdbm.TenantAccount)(nil),
+	))
 
 	ipOrg := "test-provider-org"
 	ipOrg2 := "test-provider-org-2"
@@ -1626,14 +1632,20 @@ func TestGetAllSiteHandler_Handle(t *testing.T) {
 
 	// Update Sites with feature flags
 	stDAO := cdbm.NewSiteDAO(dbSession)
-	stDAO.Update(ctx, nil, cdbm.SiteUpdateInput{Config: &cdbm.SiteConfigUpdateInput{NativeNetworking: cutil.GetPtr(true)}, SiteID: sts[0].ID})
-	stDAO.Update(ctx, nil, cdbm.SiteUpdateInput{Config: &cdbm.SiteConfigUpdateInput{NativeNetworking: cutil.GetPtr(true)}, SiteID: sts[1].ID})
+	_, updateErr := stDAO.Update(ctx, nil, cdbm.SiteUpdateInput{Config: &cdbm.SiteConfigUpdateInput{NativeNetworking: cutil.GetPtr(true)}, SiteID: sts[0].ID})
+	require.NoError(t, updateErr)
+	_, updateErr = stDAO.Update(ctx, nil, cdbm.SiteUpdateInput{Config: &cdbm.SiteConfigUpdateInput{NativeNetworking: cutil.GetPtr(true)}, SiteID: sts[1].ID})
+	require.NoError(t, updateErr)
 
-	stDAO.Update(ctx, nil, cdbm.SiteUpdateInput{Config: &cdbm.SiteConfigUpdateInput{NetworkSecurityGroup: cutil.GetPtr(true)}, SiteID: sts[2].ID})
-	stDAO.Update(ctx, nil, cdbm.SiteUpdateInput{Config: &cdbm.SiteConfigUpdateInput{NetworkSecurityGroup: cutil.GetPtr(true)}, SiteID: sts[3].ID})
+	_, updateErr = stDAO.Update(ctx, nil, cdbm.SiteUpdateInput{Config: &cdbm.SiteConfigUpdateInput{NetworkSecurityGroup: cutil.GetPtr(true)}, SiteID: sts[2].ID})
+	require.NoError(t, updateErr)
+	_, updateErr = stDAO.Update(ctx, nil, cdbm.SiteUpdateInput{Config: &cdbm.SiteConfigUpdateInput{NetworkSecurityGroup: cutil.GetPtr(true)}, SiteID: sts[3].ID})
+	require.NoError(t, updateErr)
 
-	stDAO.Update(ctx, nil, cdbm.SiteUpdateInput{Config: &cdbm.SiteConfigUpdateInput{NativeNetworking: cutil.GetPtr(true), NetworkSecurityGroup: cutil.GetPtr(true), NVLinkPartition: cutil.GetPtr(true), Flow: cutil.GetPtr(true)}, SiteID: sts[4].ID})
-	stDAO.Update(ctx, nil, cdbm.SiteUpdateInput{Config: &cdbm.SiteConfigUpdateInput{NativeNetworking: cutil.GetPtr(true), NetworkSecurityGroup: cutil.GetPtr(true), NVLinkPartition: cutil.GetPtr(true), Flow: cutil.GetPtr(true)}, SiteID: sts[5].ID})
+	_, updateErr = stDAO.Update(ctx, nil, cdbm.SiteUpdateInput{Config: &cdbm.SiteConfigUpdateInput{NativeNetworking: cutil.GetPtr(true), NetworkSecurityGroup: cutil.GetPtr(true), NVLinkPartition: cutil.GetPtr(true), Flow: cutil.GetPtr(true)}, SiteID: sts[4].ID})
+	require.NoError(t, updateErr)
+	_, updateErr = stDAO.Update(ctx, nil, cdbm.SiteUpdateInput{Config: &cdbm.SiteConfigUpdateInput{NativeNetworking: cutil.GetPtr(true), NetworkSecurityGroup: cutil.GetPtr(true), NVLinkPartition: cutil.GetPtr(true), Flow: cutil.GetPtr(true)}, SiteID: sts[5].ID})
+	require.NoError(t, updateErr)
 
 	// Setup echo server/context
 	e := echo.New()
@@ -1667,6 +1679,7 @@ func TestGetAllSiteHandler_Handle(t *testing.T) {
 		wantRespCode           int
 		wantFirstEntry         *cdbm.Site
 		wantMachineStats       map[string]int
+		wantEmptyMachineStats  bool
 		wantGpuStatsRequested  bool
 		wantGpuStatsForSite    string
 		wantGpuStats           map[string]int
@@ -1992,9 +2005,10 @@ func TestGetAllSiteHandler_Handle(t *testing.T) {
 				user:             su,
 				isServiceAccount: true,
 			},
-			wantCount:      1,
-			wantTotalCount: 1,
-			wantRespCode:   http.StatusOK,
+			wantCount:             1,
+			wantTotalCount:        1,
+			wantRespCode:          http.StatusOK,
+			wantEmptyMachineStats: true,
 		},
 		{
 			name: "get all Sites by Tenant with machine status, failure",
@@ -2280,7 +2294,7 @@ func TestGetAllSiteHandler_Handle(t *testing.T) {
 
 				if tt.wantMachineStats != nil {
 					statsLen := len(tt.wantMachineStats)
-					assert.NotNil(t, apist.MachineStats)
+					require.NotNil(t, apist.MachineStats)
 					assert.GreaterOrEqual(t, apist.MachineStats.Total, 1)
 					assert.GreaterOrEqual(t, len(apist.MachineStats.TotalByStatus), statsLen)
 
@@ -2290,6 +2304,22 @@ func TestGetAllSiteHandler_Handle(t *testing.T) {
 					}
 
 					assert.NotNil(t, apist.MachineStats.TotalByAllocation)
+				}
+
+				if tt.wantEmptyMachineStats {
+					assert.Equal(t, &model.APISiteMachineStats{
+						TotalByStatus:          map[string]int{},
+						TotalByHealth:          map[string]int{},
+						TotalByStatusAndHealth: map[string]map[string]int{},
+						TotalByAllocation: map[string]int{
+							model.MachineStatsAllocatedInUse:    0,
+							model.MachineStatsAllocatedNotInUse: 0,
+							model.MachineStatsUnallocated:       0,
+						},
+					}, apist.MachineStats)
+				}
+				if tt.args.query.Get("includeMachineStats") == "" {
+					assert.Nil(t, apist.MachineStats)
 				}
 
 				if tt.wantGpuStatsRequested {

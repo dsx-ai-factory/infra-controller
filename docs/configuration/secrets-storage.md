@@ -4,9 +4,11 @@ NICo keeps the credentials it manages (BMC logins, switch and UFM accounts, fact
 
 This page covers the `[secrets]` section of the `nico-api` config, how to supply it and its key material through Helm, the setup of a new site, the Vault-to-Postgres migration walk for an existing site, and key rotation. If `[secrets]` is absent, nothing here applies: credentials flow through the classic environment, file, and Vault chain.
 
-Vault/OpenBao Transit is the available server-side KMS backend. The Integrated
-backend loads KEK material into the NICo process from an environment variable,
-file, or inline value. Inline Integrated keys are for development and test.
+Two server-side KMS backends are available: Vault/OpenBao Transit, and a KMIP
+1.4 server such as a hardware security module or an enterprise key manager,
+described in [KMIP KEK Provider](kmip-kek-provider.md). The Integrated backend
+loads KEK material into the NICo process from an environment variable, file,
+or inline value. Inline Integrated keys are for development and test.
 Operators using mounted `env` or `file` key sources own key custody, startup
 availability, controlled-restart rotation, backup, and recovery.
 
@@ -57,10 +59,10 @@ nico-api:
           key: site-kek-1
 ```
 
-The chart has no value for mounting a file, so use the `env` form; the `{ file = "/path" }` key source needs a chart change.
+To mount the key as a file instead, add the Secret through the chart's `extraVolumes` and `extraVolumeMounts` values and point a `{ file = "/path" }` key source at the mount; the [KMIP KEK Provider](kmip-kek-provider.md) page shows the pattern.
 
 <Warning>
-Back up the KEK separately from the database. A database dump without every KEK its rows reference is unreadable, and losing an Integrated KEK loses every credential wrapped by it. Add the KEK Secret to the same pre-upgrade backup as the Vault unseal keys in [Upgrading NICo](../manuals/upgrade.md). With a Transit provider, the KEK lives in the Transit engine's storage, so back up Vault's storage, as well as its unseal keys.
+Back up the KEK separately from the database. A database dump without every KEK its rows reference is unreadable, and losing an Integrated KEK loses every credential wrapped by it. Add the KEK Secret to the same pre-upgrade backup as the Vault unseal keys in [Upgrading NICo](../manuals/upgrade.md). With a Transit provider, the KEK lives in the Transit engine's storage, so back up Vault's storage, as well as its unseal keys. With a KMIP provider, the KEK lives only in the KMIP server; back it up through that product's key backup procedure and never destroy a key that live rows or retained dumps still reference.
 </Warning>
 
 ## Configuration Reference
@@ -99,10 +101,11 @@ keys = { "site-kek-1" = { env = "NICO_SECRETS_KEK" } }
 
 ### KMS Providers
 
-Providers are named. The `active` provider wraps DEKs for new writes; every configured provider answers unwraps for the `kek_id`s it holds, which is what keeps old entries readable while keys move. Two provider types exist:
+Providers are named. The `active` provider wraps DEKs for new writes; every configured provider answers unwraps for the `kek_id`s it holds, which is what keeps old entries readable while keys move. Three provider types exist:
 
 - `integrated`: local key material. `keys` maps each `kek_id` to where its base64-encoded 256-bit key loads from: `{ env = "NAME" }`, `{ file = "/path" }`, or `{ value = "..." }`. With `env` or `file`, the config contains only the locator, and operators are responsible for custody, startup availability, controlled-restart rotation, backup, and recovery. Inline `value` is development/test-only because the config is debug-logged at startup and served on the web debug page.
 - `transit`: Vault or OpenBao Transit, which wraps and unwraps DEKs server-side, so KEK material never leaves the KMS. `keys` lists the Transit key names this provider answers for, and `transit_mount` overrides the secrets-engine mount (default `"transit"`). Transit requires a static Vault token; the Kubernetes service-account login flow is not supported for Transit yet.
+- `kmip`: a KMIP 1.4 server holding a non-exportable AES-256 key for each `kek_id`, which wraps and unwraps DEKs with the KMIP Encrypt and Decrypt operations so KEK material never leaves the server. `keys` maps each `kek_id` to the KMIP Unique Identifier of an existing, Active key with Encrypt and Decrypt usage; `endpoint`, `ca_bundle`, `client_cert`, and `client_key` configure mutually authenticated TLS; `server_name`, `connect_timeout` (default `5s`, at most `60s`), and `request_timeout` (default `10s`, at most `120s`) are optional. Setup, startup validation, and the qualification status of server products are described in [KMIP KEK Provider](kmip-kek-provider.md).
 
 Transit needs setup that `helm-prereqs` does not perform: its Vault policy covers only the KV and PKI paths. Before enabling a Transit provider, enable the engine at the mount, create each key named in `keys`, and grant the token `update` on the three paths NICo calls:
 
@@ -126,6 +129,7 @@ NICo validates all of the following at startup, before any writes or imports, an
 - Every routed `kek_id` exists in the active provider (new writes all wrap there), and a `kek_id` cannot appear in two providers.
 - `routing` has the `"/"` catch-all; prefixes and `kek_id`s are non-empty; no other prefix starts with `/`; and prefixes that differ only by a trailing slash are a collision. Prefixes match whole path segments, so `machines/bmc` does not cover `machines/bmc-archive`.
 - Each Integrated key decodes to exactly 32 bytes, its environment variable is set or its file is readable, and a key file readable by group or others logs a warning.
+- A KMIP provider connects to its server and verifies that the server lists KMIP 1.4 and the Encrypt and Decrypt operations, that every configured key is an Active AES-256 key permitted to encrypt and decrypt, and that a probe wrap and unwrap round-trips. An unreachable server or an unqualified key fails the boot.
 
 The boot log line `Postgres secrets backend configured` confirms the section was accepted and shows the active provider, backends, and writer.
 
@@ -193,7 +197,7 @@ Rolling back writes is not symmetric. There is no export from Postgres to Vault.
 
 Rotation moves new writes immediately and existing entries on your schedule:
 
-1. **Route to the new key.** Add the new KEK to the active provider (every routed KEK must live there) and point the relevant `[secrets.routing]` entries at it. New writes wrap with it from the next boot; existing entries stay readable under the KEKs they recorded.
+1. **Add the new key, then route to it.** Add the new KEK to the active provider (every routed KEK must live there), restart, and wait for every old pod to terminate, so that each replica can unwrap under the new KEK before any replica writes with it: a pod from the previous rollout cannot read a row wrapped by a `kek_id` it does not know. Then point the relevant `[secrets.routing]` entries at the new KEK and restart again. New writes wrap with it from that boot; existing entries stay readable under the KEKs they recorded.
 2. **Re-wrap existing entries.** Run the walk after rotating:
 
    ```bash

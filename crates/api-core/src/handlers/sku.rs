@@ -332,8 +332,15 @@ pub(crate) async fn replace_sku(
     let mut txn = api.txn_begin().await?;
 
     let sku = db::sku::replace(&mut txn, &request).await?;
+    let mut rpc_sku: rpc::forge::Sku = sku.into();
+    let mut machine_ids_by_sku_ids =
+        db::machine::find_machine_ids_by_sku_ids(&mut txn, std::slice::from_ref(&rpc_sku.id))
+            .await?;
+    if let Some(associated_machine_ids) = machine_ids_by_sku_ids.remove(&rpc_sku.id) {
+        rpc_sku.associated_machine_ids = associated_machine_ids;
+    }
 
     txn.commit().await?;
 
-    Ok(Response::new(sku.into()))
+    Ok(Response::new(rpc_sku))
 }

@@ -141,11 +141,18 @@ async fn stale_supernic_unlock_rolls_back_before_a_fresh_iteration(pool: sqlx::P
     )
     .await
     .unwrap();
+    // Multi-card writers lock by ID. Make the stale card the later write so
+    // this still proves rollback of an earlier successful state update.
+    let (first, second) = if first.id < second.id {
+        (first, second)
+    } else {
+        (second, first)
+    };
     let first_version = first.controller_state.version;
     let second_version = second.controller_state.version.increment();
     let card_ids = [first.id, second.id];
     let mut snapshot = managed_host.snapshot(&mut txn).await;
-    // Preserve this order so the first unlock applies before the second rejects.
+    // Match the controller's ID order: the first unlock precedes the stale one.
     snapshot.dpa_interface_snapshots = vec![first, second];
     txn.commit().await.unwrap();
 

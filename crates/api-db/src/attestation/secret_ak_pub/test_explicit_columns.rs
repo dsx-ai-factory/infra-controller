@@ -45,9 +45,7 @@ async fn exercise_queries(connection: &mut PgConnection) -> Result<(), Box<dyn s
     let mut txn = connection.begin().await?;
     let secret = vec![0x00, 0x80, 0xff];
     let ak_pub = vec![0x30, 0x81, 0xfe];
-    let inserted = insert(txn.as_mut(), &secret, &ak_pub)
-        .await?
-        .expect("the attestation secret was inserted");
+    let inserted = insert(txn.as_mut(), &secret, &ak_pub).await?;
     assert_eq!(inserted.secret, secret);
     assert_eq!(inserted.ak_pub, ak_pub);
     let found = get_by_secret(txn.as_mut(), &secret)
@@ -55,12 +53,24 @@ async fn exercise_queries(connection: &mut PgConnection) -> Result<(), Box<dyn s
         .expect("the attestation secret is persisted");
     assert_eq!(found.secret, secret);
     assert_eq!(found.ak_pub, ak_pub);
-    let deleted = delete(txn.as_mut(), &secret)
-        .await?
-        .expect("the attestation secret was deleted");
+    let unrelated_secret = vec![0x01, 0x80, 0xff];
+    insert(txn.as_mut(), &unrelated_secret, &ak_pub).await?;
+    let deleted = delete(txn.as_mut(), &secret).await?;
     assert_eq!(deleted.secret, secret);
     assert_eq!(deleted.ak_pub, ak_pub);
     assert!(get_by_secret(txn.as_mut(), &secret).await?.is_none());
+    let error = delete(txn.as_mut(), &secret)
+        .await
+        .expect_err("deleting a missing attestation secret must fail");
+    assert!(
+        matches!(&error, DatabaseError::Sqlx(error) if matches!(error.source, sqlx::Error::RowNotFound)),
+        "expected RowNotFound for a missing attestation secret, got {error:?}"
+    );
+    let unrelated = get_by_secret(txn.as_mut(), &unrelated_secret)
+        .await?
+        .expect("the unrelated attestation secret remains persisted");
+    assert_eq!(unrelated.secret, unrelated_secret);
+    assert_eq!(unrelated.ak_pub, ak_pub);
     txn.rollback().await?;
     Ok(())
 }

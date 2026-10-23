@@ -877,7 +877,10 @@ async fn create_pre_ingestion_firmware_fixture(
         txn.as_mut(),
         ExpectedSwitch {
             bmc_mac_address: switch_mac,
-            nvos_mac_addresses: vec![nvos_mac],
+            nvos_interfaces: vec![model::expected_switch::ExpectedNvosInterface {
+                mac_address: nvos_mac,
+                is_primary: true,
+            }],
             serial_number: "pre-ingestion-switch".to_owned(),
             rack_id: Some(rack_id.clone()),
             ..Default::default()

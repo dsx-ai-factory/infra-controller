@@ -38,7 +38,8 @@ use model::component_manager::ConfigureSwitchCertificateState;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::rack::{RackConfig, RackErrorRecoveryPolicy, RackState};
 use model::switch::{
-    ConfigureCertificateState, ConfiguringState, SwitchControllerState, SwitchDecommissioningState,
+    ConfigureCertificateState, ConfiguringState, InitializingState, SwitchControllerState,
+    SwitchDecommissioningState,
 };
 use model::test_support::rms_rack_profiles;
 use rpc::forge::forge_server::Forge;
@@ -50,8 +51,8 @@ use tonic::Request;
 
 use crate::common::{
     ControllerEnv, configure_certificate_start_state, configure_certificate_wait_state,
-    default_switch_mtls_services, mark_switch_as_deleted, new_switch, set_switch_rack_id,
-    transition_switch_controller_state,
+    default_switch_mtls_services, mark_switch_as_deleted, new_switch, set_switch_controller_state,
+    set_switch_rack_id, transition_switch_controller_state,
 };
 
 fn firmware_only_activities() -> Vec<model::rack::MaintenanceActivity> {
@@ -74,6 +75,130 @@ fn nvos_and_nmxc_activities() -> Vec<model::rack::MaintenanceActivity> {
         },
         model::rack::MaintenanceActivity::ConfigureNmxCluster,
     ]
+}
+
+#[sqlx_test]
+async fn initializing_requires_only_the_primary_nvos_port_to_be_associated(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = ControllerEnv::new(pool.clone()).await;
+    let switch_id = new_switch(&env, Some("primary-wait".to_string()), None).await?;
+
+    let mut txn = pool.begin().await?;
+    let switch = db_switch::find_by_id(txn.as_mut(), &switch_id)
+        .await?
+        .expect("switch exists");
+    let bmc_mac = switch.bmc_mac_address.expect("switch has a BMC MAC");
+    let mut expected = db::expected_switch::find_by_bmc_mac_address(txn.as_mut(), bmc_mac)
+        .await?
+        .expect("expected switch exists");
+    let non_primary = expected.nvos_interfaces[0].mac_address;
+    let primary = "02:00:00:ff:00:01".parse()?;
+    expected.nvos_interfaces = vec![
+        model::expected_switch::ExpectedNvosInterface {
+            mac_address: primary,
+            is_primary: true,
+        },
+        model::expected_switch::ExpectedNvosInterface {
+            mac_address: non_primary,
+            is_primary: false,
+        },
+    ];
+    db::expected_switch::update(txn.as_mut(), &expected).await?;
+    set_switch_controller_state(
+        txn.as_mut(),
+        &switch_id,
+        SwitchControllerState::Initializing {
+            initializing_state: InitializingState::WaitForOsMachineInterface,
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
+    env.run_switch_controller_iteration().await;
+
+    let mut txn = pool.begin().await?;
+    let switch = db_switch::find_by_id(txn.as_mut(), &switch_id)
+        .await?
+        .expect("switch exists");
+    assert!(matches!(
+        switch.controller_state.value,
+        SwitchControllerState::Initializing {
+            initializing_state: InitializingState::WaitForOsMachineInterface
+        }
+    ));
+    let interfaces = db::machine_interface::find_by_mac_address(txn.as_mut(), non_primary).await?;
+    assert_eq!(interfaces[0].switch_id, Some(switch_id));
+
+    // Make the discovered port primary; the still-unknown secondary must not
+    // prevent initialization from advancing.
+    for interface in &mut expected.nvos_interfaces {
+        interface.is_primary = interface.mac_address == non_primary;
+    }
+    db::expected_switch::update(txn.as_mut(), &expected).await?;
+    txn.commit().await?;
+    env.run_switch_controller_iteration().await;
+
+    let switch = db_switch::find_by_id(pool.acquire().await?.as_mut(), &switch_id)
+        .await?
+        .expect("switch exists");
+    assert!(matches!(
+        switch.controller_state.value,
+        SwitchControllerState::Configuring {
+            config_state: ConfiguringState::DisableMtls {
+                disable_mtls: model::switch::DisableMtlsState::Start,
+            },
+        }
+    ));
+    Ok(())
+}
+
+#[sqlx_test]
+async fn initializing_enters_error_when_a_multi_port_switch_has_no_primary(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = ControllerEnv::new(pool.clone()).await;
+    let switch_id = new_switch(&env, Some("missing-primary".to_string()), None).await?;
+
+    let mut txn = pool.begin().await?;
+    let switch = db_switch::find_by_id(txn.as_mut(), &switch_id)
+        .await?
+        .expect("switch exists");
+    let bmc_mac = switch.bmc_mac_address.expect("switch has a BMC MAC");
+    let mut expected = db::expected_switch::find_by_bmc_mac_address(txn.as_mut(), bmc_mac)
+        .await?
+        .expect("expected switch exists");
+    expected.nvos_interfaces[0].is_primary = false;
+    expected
+        .nvos_interfaces
+        .push(model::expected_switch::ExpectedNvosInterface {
+            mac_address: "02:00:00:ff:00:02".parse()?,
+            is_primary: false,
+        });
+    db::expected_switch::update(txn.as_mut(), &expected).await?;
+    set_switch_controller_state(
+        txn.as_mut(),
+        &switch_id,
+        SwitchControllerState::Initializing {
+            initializing_state: InitializingState::WaitForOsMachineInterface,
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
+    env.run_switch_controller_iteration().await;
+
+    let mut txn = pool.begin().await?;
+    let switch = db_switch::find_by_id(txn.as_mut(), &switch_id)
+        .await?
+        .expect("switch exists");
+    assert!(matches!(
+        switch.controller_state.value,
+        SwitchControllerState::Error { ref cause }
+            if cause.contains("No primary NVOS port")
+    ));
+    txn.rollback().await?;
+    Ok(())
 }
 
 /// Empty activities means all phases, matching rack `MaintenanceScope::should_run`.
@@ -246,7 +371,9 @@ pub(super) async fn run_switch_controller_with_services(
         .state_handler(Arc::new(SwitchStateHandler::default()))
         .build_for_manual_iterations(cancel_token)
         .unwrap();
-    controller.run_single_iteration().await;
+    // Keep intermediate-state assertions independent of task completion order.
+    // Follow-up transitions run on the next explicit iteration.
+    controller.run_single_iteration_ext(false).await;
 }
 
 /// Builds a component manager around the provided NVSwitch manager.
@@ -839,7 +966,9 @@ async fn test_configure_certificate_wait_for_complete_transitions_to_error_on_fa
         .expect("switch should exist");
     assert!(matches!(
         switch.controller_state.value,
-        SwitchControllerState::Error { ref cause } if cause == "cert install failed"
+        SwitchControllerState::Error { ref cause }
+            if cause.contains("cert install failed")
+                && cause.contains("mTLS restoration is incomplete")
     ));
 
     Ok(())
@@ -965,7 +1094,7 @@ async fn test_switch_deletion_with_state_controller(
 }
 
 /// Tests the entire Switch ControllerState transition flow: Initializing -> Configuring
-/// (ConfigureCertificate) -> Configuring (RotateOsPassword) -> FetchInfo
+/// (DisableMtls) -> Configuring (ConfigureCertificate) -> Configuring (RotateOsPassword) -> FetchInfo
 /// -> Validating (ValidationComplete) -> BomValidating (BomValidationComplete) -> Ready.
 /// state handler performs its transition.
 #[sqlx_test]
@@ -1031,6 +1160,7 @@ async fn test_switch_entire_state_transition_flow(
         .unwrap();
 
     // iterate a few times
+    controller.run_single_iteration().await;
     controller.run_single_iteration().await;
     controller.run_single_iteration().await;
     controller.run_single_iteration().await;

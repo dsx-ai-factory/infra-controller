@@ -62,6 +62,7 @@ tests:
         enabled: true
         port: 9443
         existingAuthSecret: test-ufm-auth
+        image: null
       config:
         logLevel: debug
     template: templates/deployment.yaml
@@ -294,3 +295,39 @@ tests:
       - equal:
           path: spec.secretName
           value: RELEASE-NAME-mat-k8s-controller-gateway-tls
+
+  - it: should allow a separate gateway image without changing the controller
+    set:
+      enabled: true
+      image:
+        repository: test-registry/controller
+        tag: controller-tag
+      gateway:
+        enabled: true
+        image:
+          repository: test-registry/gateway
+          tag: gateway-tag
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name=="controller")].image
+          value: test-registry/controller:controller-tag
+      - equal:
+          path: spec.template.spec.containers[?(@.name=="gateway")].image
+          value: test-registry/gateway:gateway-tag
+
+  - it: should inherit the controller tag when only the gateway repository is set
+    set:
+      enabled: true
+      image:
+        repository: test-registry/controller
+        tag: inherited-tag
+      gateway:
+        enabled: true
+        image:
+          repository: test-registry/gateway
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[?(@.name=="gateway")].image
+          value: test-registry/gateway:inherited-tag

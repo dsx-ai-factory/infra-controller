@@ -245,11 +245,15 @@ async fn migration_and_bootstrap_preserve_legacy_resources_and_snapshots(
     pool: PgPool,
 ) -> eyre::Result<()> {
     let mut txn = pool.begin().await?;
-    // The harness migrates an empty database. Remove only the new table to
-    // exercise this migration against populated predecessor tables.
-    sqlx::query("DROP TABLE resource_pool_binding")
-        .execute(&mut *txn)
-        .await?;
+    // Remove both newer tables that reference the binding before exercising
+    // its migration against the predecessor schema.
+    sqlx::raw_sql(
+        "DROP TABLE resource_pool_registration;
+         DROP TABLE resource_pool_allocations;
+         DROP TABLE resource_pool_binding;",
+    )
+    .execute(&mut *txn)
+    .await?;
     sqlx::raw_sql(
         r#"INSERT INTO resource_pool
             (name, value, value_type, state, state_version, allocated, auto_assign)

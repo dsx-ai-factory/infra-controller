@@ -38,35 +38,104 @@ use crate::firmware::error::{FirmwareError, FirmwareResult};
 use crate::firmware::reset::DEFAULT_RESET_LEVEL;
 use crate::firmware::source::FirmwareSource;
 
-// FlashSpec specifies source locations and caching options for
-// flash and verify_image operations. Contains everything needed
-// to download and apply firmware and device config.
+/// `FlashSpec` identifies the image and optional configuration sources used by
+/// preparation and standalone image verification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlashSpec {
-    // firmware_url is the location of the firmware binary. Supports
-    // local paths, file://, https://, and ssh:// URLs.
+    /// `firmware_url` locates the image using a local path or a `file://`,
+    /// `http://`, `https://`, or `ssh://` URL.
     pub firmware_url: String,
-    // firmware_credentials is the optional authentication for
-    // downloading the firmware binary.
+    /// `firmware_credentials` selects authentication for the image source.
+    /// Omission uses the source's default authentication.
     pub firmware_credentials: Option<Credentials>,
-    // device_conf_url is the optional location of the device config
-    // to apply before flashing. When present, the config is applied
-    // via `mlxconfig apply` before burning the firmware.
-    // Supports the same URL formats as firmware_url.
+    /// `device_conf_url` locates optional configuration applied with
+    /// `mlxconfig apply` before burn. It accepts the same formats as
+    /// `firmware_url`; omission skips configuration apply.
     pub device_conf_url: Option<String>,
-    // device_conf_credentials is the optional authentication for
-    // downloading the device config.
+    /// `device_conf_credentials` selects authentication for the optional config
+    /// source. Omission uses that source's default authentication.
     pub device_conf_credentials: Option<Credentials>,
-    // verify_from_cache controls whether verify_image() uses the
-    // cached firmware from cache_dir instead of re-pulling.
+    /// `verify_from_cache` makes standalone `verify_image` prefer an existing
+    /// file named after the source basename in `cache_dir`. A miss resolves the
+    /// source. Only callers or older library versions populate that basename
+    /// cache; preparation does not write it. Defaults to `false`. `apply` always
+    /// verifies the image it prepared for that burn.
     #[serde(default)]
     pub verify_from_cache: bool,
-    // cache_dir is the directory for staging downloaded firmware.
-    // Defaults to a temporary directory if not specified.
+    /// `cache_dir` contains unique preparation directories with separate image
+    /// and configuration files. Defaults to `std::env::temp_dir()` joined with
+    /// `mlxconfig-firmware`. Successful workflows remove their inputs.
+    /// Interrupted preparation, uncertain execution, and every failure after
+    /// burn retain inputs for reconciliation, including version mismatches.
+    /// Retained copies have no automatic expiry or count limit.
+    /// Supervised operations override this parent with the private slot directory.
     pub cache_dir: Option<PathBuf>,
 }
 
 impl FlashSpec {
+    /// Resolve caller-local inputs before a long-lived supervisor receives them.
+    /// Remote SSH paths remain relative to the remote account, and resolving a
+    /// local path does not require that it still exists when rereading a receipt.
+    /// SSH usernames and default key paths are captured from this caller;
+    /// agent sockets and known-hosts policy remain owned by the supervisor.
+    #[cfg(target_os = "linux")]
+    pub(in crate::firmware) fn normalize_submission_paths(
+        &mut self,
+        directory: &Path,
+    ) -> FirmwareResult<()> {
+        normalize_submission_source(
+            &mut self.firmware_url,
+            &mut self.firmware_credentials,
+            directory,
+            "firmware_url",
+        )?;
+        if let Some(source) = &mut self.device_conf_url {
+            normalize_submission_source(
+                source,
+                &mut self.device_conf_credentials,
+                directory,
+                "device_conf_url",
+            )?;
+        }
+        for (credentials, field) in [
+            (&mut self.firmware_credentials, "firmware_credentials.path"),
+            (
+                &mut self.device_conf_credentials,
+                "device_conf_credentials.path",
+            ),
+        ] {
+            if let Some(Credentials::SshKey { path, .. }) = credentials {
+                *path = absolute_submission_path(path, directory, field)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reject wire inputs that would depend on the supervisor's working directory.
+    #[cfg(target_os = "linux")]
+    pub(in crate::firmware) fn validate_submission_paths(&self) -> FirmwareResult<()> {
+        for (source, field) in [
+            (Some(self.firmware_url.as_str()), "firmware_url"),
+            (self.device_conf_url.as_deref(), "device_conf_url"),
+        ] {
+            if let Some(path) = source.and_then(local_submission_path) {
+                require_absolute_submission_path(path, field)?;
+            }
+        }
+        for (credentials, field) in [
+            (&self.firmware_credentials, "firmware_credentials.path"),
+            (
+                &self.device_conf_credentials,
+                "device_conf_credentials.path",
+            ),
+        ] {
+            if let Some(Credentials::SshKey { path, .. }) = credentials {
+                require_absolute_submission_path(path, field)?;
+            }
+        }
+        Ok(())
+    }
+
     // build_firmware_source constructs a FirmwareSource from the
     // firmware_url and firmware_credentials fields.
     pub fn build_firmware_source(&self) -> FirmwareResult<FirmwareSource> {
@@ -98,6 +167,92 @@ impl FlashSpec {
         self.cache_dir
             .clone()
             .unwrap_or_else(|| std::env::temp_dir().join("mlxconfig-firmware"))
+    }
+}
+
+// Match FirmwareSource::from_url: file:// is a local-path prefix, while an
+// unrecognized prefix is part of a local filename, not another URL scheme.
+#[cfg(target_os = "linux")]
+fn local_submission_path(source: &str) -> Option<&str> {
+    if source.starts_with("http://")
+        || source.starts_with("https://")
+        || source.starts_with("ssh://")
+    {
+        None
+    } else {
+        Some(source.strip_prefix("file://").unwrap_or(source))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn normalize_submission_source(
+    source: &mut String,
+    credentials: &mut Option<Credentials>,
+    directory: &Path,
+    field: &str,
+) -> FirmwareResult<()> {
+    if let Some(path) = local_submission_path(source) {
+        let path = absolute_submission_path(path, directory, field)?;
+        *source = if source.starts_with("file://") {
+            format!("file://{path}")
+        } else {
+            path
+        };
+    } else if source.starts_with("ssh://") {
+        let FirmwareSource::Ssh(ssh) = FirmwareSource::from_url(source).map_err(|_| {
+            FirmwareError::ConfigError(format!("{field} is not a valid SSH source"))
+        })?
+        else {
+            return Err(FirmwareError::ConfigError(format!(
+                "{field} is not an SSH source"
+            )));
+        };
+        if ssh.username.contains('@') || ssh.username.contains(':') {
+            return Err(FirmwareError::ConfigError(format!(
+                "{field} SSH username cannot contain @ or :"
+            )));
+        }
+        let host = if ssh.host.contains(':') {
+            format!("[{}]", ssh.host)
+        } else {
+            ssh.host
+        };
+        *source = format!("ssh://{}@{host}:{}", ssh.username, ssh.remote_path);
+        if credentials.is_none() {
+            // Match forge_ssh's default authentication, not an agent fallback.
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+            let key = Path::new(&home).join(".ssh/id_rsa");
+            *credentials = Some(Credentials::ssh_key(key.to_string_lossy()));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn absolute_submission_path(path: &str, directory: &Path, field: &str) -> FirmwareResult<String> {
+    if path.is_empty() {
+        return Err(FirmwareError::ConfigError(format!(
+            "{field} must not be empty"
+        )));
+    }
+    // Do not canonicalize: a retry must still identify accepted work after its
+    // original source has been removed, and symlinks retain their path semantics.
+    let absolute = directory.join(path);
+    require_absolute_submission_path(&absolute, field)?;
+    absolute
+        .into_os_string()
+        .into_string()
+        .map_err(|_| FirmwareError::ConfigError(format!("{field} must resolve to a UTF-8 path")))
+}
+
+#[cfg(target_os = "linux")]
+fn require_absolute_submission_path(path: impl AsRef<Path>, field: &str) -> FirmwareResult<()> {
+    if path.as_ref().is_absolute() {
+        Ok(())
+    } else {
+        Err(FirmwareError::ConfigError(format!(
+            "{field} must be absolute for firmware supervisor submission"
+        )))
     }
 }
 
@@ -279,14 +434,17 @@ impl From<FlashOptions> for FlashOptionsPb {
     }
 }
 
-impl From<FlashOptionsPb> for FlashOptions {
-    fn from(proto: FlashOptionsPb) -> Self {
-        FlashOptions {
+impl TryFrom<FlashOptionsPb> for FlashOptions {
+    type Error = String;
+
+    fn try_from(proto: FlashOptionsPb) -> Result<Self, Self::Error> {
+        Ok(FlashOptions {
             verify_image: proto.verify_image,
             verify_version: proto.verify_version,
             reset: proto.reset,
-            reset_level: proto.reset_level as u8,
-        }
+            reset_level: u8::try_from(proto.reset_level)
+                .map_err(|_| "reset_level must be in 0..=255".to_string())?,
+        })
     }
 }
 
@@ -308,7 +466,11 @@ impl TryFrom<FirmwareFlasherProfilePb> for FirmwareFlasherProfile {
     fn try_from(proto: FirmwareFlasherProfilePb) -> Result<Self, Self::Error> {
         let firmware_spec = proto.firmware_spec.ok_or("missing firmware_spec")?.into();
         let flash_spec: FlashSpec = proto.flash_spec.ok_or("missing flash_spec")?.try_into()?;
-        let flash_options = proto.flash_options.map(Into::into).unwrap_or_default();
+        let flash_options = proto
+            .flash_options
+            .map(TryInto::try_into)
+            .transpose()?
+            .unwrap_or_default();
 
         Ok(FirmwareFlasherProfile {
             firmware_spec,
@@ -321,6 +483,199 @@ impl TryFrom<FirmwareFlasherProfilePb> for FirmwareFlasherProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Resolve caller-local references without reading files, so retries still
+    /// identify accepted work after the original inputs have been removed.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn submission_source_paths_preserve_source_semantics() {
+        use carbide_test_support::Outcome::{Fails, Yields};
+        use carbide_test_support::scenarios;
+
+        let normalize = |(source, directory): (&str, &str)| -> Result<String, String> {
+            let mut source = source.to_string();
+            normalize_submission_source(
+                &mut source,
+                &mut None,
+                Path::new(directory),
+                "firmware_url",
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(source)
+        };
+        scenarios!(normalize:
+            "caller-local references become absolute without reading files" {
+                ("image.bin", "/submitter") => Yields("/submitter/image.bin".to_string()),
+                ("file://config.bin", "/submitter") => Yields("file:///submitter/config.bin".to_string()),
+            }
+            "already independent references remain unchanged" {
+                ("/missing/image.bin", "") => Yields("/missing/image.bin".to_string()),
+                ("https://host/image.bin?token=secret", "") => Yields("https://host/image.bin?token=secret".to_string()),
+            }
+            "a relative input needs the submitting directory" {
+                ("image.bin", "") => Fails,
+            }
+        );
+    }
+
+    /// SSH keys belong to the submitter's filesystem; remote paths and their
+    /// punctuation must not be reinterpreted as local paths.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn submission_ssh_keys_are_local_and_remote_paths_remain_remote() {
+        let mut spec = FlashSpec {
+            firmware_url: "ssh://deploy@[2001:db8::1]:images/fw@version:1.bin".into(),
+            firmware_credentials: Some(Credentials::ssh_key_with_passphrase(
+                "keys/image",
+                "secret",
+            )),
+            device_conf_url: Some("ssh://deploy@host:config/shared.bin".into()),
+            device_conf_credentials: Some(Credentials::ssh_key("keys/config")),
+            verify_from_cache: false,
+            cache_dir: None,
+        };
+        spec.normalize_submission_paths(Path::new("/submitter"))
+            .unwrap();
+        spec.validate_submission_paths().unwrap();
+        assert_eq!(
+            spec.firmware_url,
+            "ssh://deploy@[2001:db8::1]:images/fw@version:1.bin"
+        );
+        assert_eq!(
+            spec.device_conf_url.as_deref(),
+            Some("ssh://deploy@host:config/shared.bin")
+        );
+        assert!(matches!(
+            spec.firmware_credentials,
+            Some(Credentials::SshKey { path, passphrase })
+                if path == "/submitter/keys/image" && passphrase.as_deref() == Some("secret")
+        ));
+        assert!(matches!(
+            spec.device_conf_credentials,
+            Some(Credentials::SshKey { path, passphrase: None })
+                if path == "/submitter/keys/config"
+        ));
+    }
+
+    /// Capture implicit account/key choices before a reused daemon can apply
+    /// its own environment, while retaining explicitly requested agent auth.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn submission_captures_ssh_defaults() {
+        const CHILD: &str = "LIBMLX_TEST_SUBMISSION_CONTEXT";
+        if std::env::var_os(CHILD).is_none() {
+            // Only this subprocess changes authentication-related environment;
+            // parallel tests in the parent keep their original environment.
+            let output = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::process::Command::new(std::env::current_exe().unwrap())
+                    .env_clear()
+                    .env(CHILD, "1")
+                    .env("USER", "submitter")
+                    .env("LOGNAME", "other-account")
+                    .env("HOME", "relative-home")
+                    .args([
+                        "--exact",
+                        "firmware::config::tests::submission_captures_ssh_defaults",
+                        "--nocapture",
+                    ])
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .expect("submission environment fixture exceeded its watchdog")
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+
+        let mut spec = FlashSpec {
+            firmware_url: "ssh://[2001:db8::1]:images/fw@version:1.bin".into(),
+            firmware_credentials: None,
+            device_conf_url: Some("ssh://host:config/shared.bin".into()),
+            device_conf_credentials: Some(Credentials::ssh_agent()),
+            verify_from_cache: false,
+            cache_dir: None,
+        };
+        spec.normalize_submission_paths(Path::new("/submission-directory"))
+            .unwrap();
+        assert_eq!(
+            spec.firmware_url,
+            "ssh://submitter@[2001:db8::1]:images/fw@version:1.bin"
+        );
+        assert_eq!(
+            spec.device_conf_url.as_deref(),
+            Some("ssh://submitter@host:config/shared.bin")
+        );
+        assert!(matches!(
+            spec.firmware_credentials,
+            Some(Credentials::SshKey { path, passphrase: None })
+                if path == "/submission-directory/relative-home/.ssh/id_rsa"
+        ));
+        assert!(matches!(
+            spec.device_conf_credentials,
+            Some(Credentials::SshAgent {})
+        ));
+    }
+
+    /// Raw submissions cannot rely on the daemon's working directory, and
+    /// rejection identifies the field without disclosing source or key paths.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn submission_validation_rejects_unresolved_local_fields() {
+        struct Case {
+            source: &'static str,
+            configuration: Option<&'static str>,
+            key: Option<&'static str>,
+            invalid_field: &'static str,
+        }
+        for case in [
+            // Image paths are resolved even when no configuration is requested.
+            Case {
+                source: "private-image.bin",
+                configuration: None,
+                key: None,
+                invalid_field: "firmware_url",
+            },
+            // An absolute image cannot hide an unresolved configuration path.
+            Case {
+                source: "/image.bin",
+                configuration: Some("file://private-config.bin"),
+                key: None,
+                invalid_field: "device_conf_url",
+            },
+            // Remote input still needs an absolute local authentication key.
+            Case {
+                source: "ssh://deploy@host:remote-image.bin",
+                configuration: None,
+                key: Some("private-key"),
+                invalid_field: "firmware_credentials.path",
+            },
+        ] {
+            let mut spec = FlashSpec {
+                firmware_url: case.source.into(),
+                firmware_credentials: case.key.map(Credentials::ssh_key),
+                device_conf_url: case.configuration.map(str::to_string),
+                device_conf_credentials: None,
+                verify_from_cache: false,
+                cache_dir: None,
+            };
+            let error = spec.validate_submission_paths().unwrap_err().to_string();
+            assert!(error.contains(case.invalid_field), "{error}");
+            assert!(
+                !error.contains("private-"),
+                "source and key paths stay out of diagnostics"
+            );
+            spec.normalize_submission_paths(Path::new("/submitter"))
+                .unwrap();
+            spec.validate_submission_paths().unwrap();
+        }
+    }
 
     #[test]
     fn test_flash_options_default() {
@@ -340,11 +695,41 @@ mod tests {
             reset_level: 5,
         };
         let proto: FlashOptionsPb = original.clone().into();
-        let converted: FlashOptions = proto.into();
+        let converted: FlashOptions = proto.try_into().unwrap();
         assert_eq!(original.verify_image, converted.verify_image);
         assert_eq!(original.verify_version, converted.verify_version);
         assert_eq!(original.reset, converted.reset);
         assert_eq!(original.reset_level, converted.reset_level);
+    }
+
+    #[test]
+    fn profile_options_preserve_omission_and_reject_reset_level_overflow() {
+        use carbide_test_support::Outcome::{Fails, Yields};
+        use carbide_test_support::scenarios;
+
+        let convert = |level: Option<u32>| {
+            FirmwareFlasherProfile::try_from(FirmwareFlasherProfilePb {
+                firmware_spec: Some(Default::default()),
+                flash_spec: Some(FlashSpecPb::default()),
+                flash_options: level.map(|reset_level| FlashOptionsPb {
+                    reset_level,
+                    ..Default::default()
+                }),
+            })
+            .map(|profile| profile.flash_options.reset_level)
+        };
+        scenarios!(convert:
+            "an absent options message uses the library default" {
+                None => Yields(3),
+            }
+            "a present options message preserves the wire value" {
+                Some(0) => Yields(0),
+                Some(255) => Yields(255),
+            }
+            "out-of-range levels cannot alias accepted work" {
+                Some(256) => Fails,
+            }
+        );
     }
 
     #[test]

@@ -57,7 +57,6 @@ use model::machine::{
 use model::metadata::Metadata;
 use model::network_segment::{NetworkSegmentSearchConfig, NetworkSegmentType};
 use model::os::OperatingSystem;
-use model::tenant::TenantOrganizationId;
 use model::vpc::{FabricInterfaceType, VpcVirtualizationTypeCapabilities};
 use serde_json::json;
 use sqlx::PgConnection;
@@ -74,7 +73,7 @@ use crate::instance::{
     load_extension_services, load_ib_partition_pkeys, requests_implicit_vf_allocation,
     validate_ib_partition_ownership, validate_instance_extension_services,
     validate_instance_vfs_against_effective_dpu_inventory, validate_os_definition_usable,
-    validate_spx_partition_ownership,
+    validate_spx_partition_ownership, validate_tenant_nic_firmware_preparation,
 };
 use crate::{CarbideError, CarbideResult};
 
@@ -1570,7 +1569,10 @@ pub(crate) async fn update_instance_config(
         }
     }
 
-    update_instance_extension_services_config(
+    // Resolve and lock service/version rows before network allocation, matching
+    // initial allocation and extension-only updates. Network allocation then
+    // locks the address table before either path mutates the Instance.
+    let prepared_extension_services_config = prepare_instance_extension_services_config(
         &mh_snapshot,
         initial_instance,
         &config.extension_services,
@@ -1589,6 +1591,30 @@ pub(crate) async fn update_instance_config(
         needs_overlap_check,
     )
     .await?;
+
+    // Every required resource lock is now held. Persist against the original
+    // attachment version so any concurrent cleanup defeats the entire update.
+    if let Some(new_extension_services_config) = prepared_extension_services_config {
+        match db::instance::update_extension_services_config(
+            &mut txn,
+            initial_instance.id,
+            initial_instance.extension_services_config_version,
+            &initial_instance.config.extension_services,
+            &new_extension_services_config,
+            true,
+        )
+        .await?
+        {
+            ConditionalWrite::Applied(()) => {}
+            ConditionalWrite::NotApplied(InstanceExtensionServicesNotCurrent) => {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "extension-service attachments for instance {} changed or the instance no longer exists; read the instance again before updating",
+                    initial_instance.id,
+                ))
+                .into());
+            }
+        }
+    }
 
     // Complete config requests acquire shared resource locks and perform any
     // network change above. An IB change then locks and rereads the Instance
@@ -1653,6 +1679,22 @@ pub(crate) async fn update_instance_config(
             id: instance_id.to_string(),
         })?;
 
+    // Legacy instances have no frozen input, so retain their live-selection
+    // guard and error precedence. Captured inputs are checked after binding.
+    if instance.nic_firmware_snapshot.is_none()
+        && !config.spxconfig.spx_attachments.is_empty()
+        && instance
+            .config
+            .spxconfig
+            .is_spx_config_update_requested(&config.spxconfig)
+    {
+        validate_tenant_nic_firmware_preparation(
+            txn.as_mut(),
+            &instance.config.tenant.tenant_organization_id,
+        )
+        .await?;
+    }
+
     // Checks if the instance IB configuration was updated
     // If yes - assign devices (GUIDs) to the new configuration, update
     // the database and increment the IB version number
@@ -1675,6 +1717,8 @@ pub(crate) async fn update_instance_config(
 
     db::instance::update_config(&mut txn, instance.id, expected_version, config, metadata).await?;
 
+    // Reload the managed-host snapshot before committing so the response matches
+    // the Instance state published by this transaction.
     let mh_snapshot = db::managed_host::load_snapshot(
         &mut txn,
         &instance.machine_id,
@@ -1801,12 +1845,7 @@ async fn update_instance_network_config(
     // Preserve caller intent long enough to enforce prefix family and VPC allocation policy.
     // Resource reuse below deliberately restores stored requested addresses for matching explicit
     // prefixes, which must not erase a newly requested address before validation.
-    validate_primary_address_update_intent_before_resource_reuse(
-        network,
-        &instance.config.tenant.tenant_organization_id,
-        txn,
-    )
-    .await?;
+    validate_primary_address_update_intent_before_resource_reuse(network, txn).await?;
 
     // This is the use case of adding/removing new VF.
     // Copy the resources if same interface and network are mentioned.
@@ -1814,7 +1853,7 @@ async fn update_instance_network_config(
 
     // Resolve resources associated with network prefixes before validating the generated
     // segment IDs.
-    allocate_network(network, &instance.config.tenant.tenant_organization_id, txn).await?;
+    allocate_network(network, txn).await?;
     network
         .validate(
             runtime_config
@@ -1865,7 +1904,6 @@ async fn update_instance_network_config(
 /// allocation validator without this earlier check.
 async fn validate_primary_address_update_intent_before_resource_reuse(
     network: &InstanceNetworkConfig,
-    tenant_organization_id: &TenantOrganizationId,
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), CarbideError> {
     let requested_prefixes: Vec<(VpcPrefixId, IpAddr)> = network
@@ -1931,12 +1969,6 @@ async fn validate_primary_address_update_intent_before_resource_reuse(
         let Some(vpc) = vpcs.get(&prefix.vpc_id) else {
             continue;
         };
-        if vpc.config.tenant_organization_id != tenant_organization_id.to_string() {
-            return Err(CarbideError::FailedPrecondition(format!(
-                "VPC prefix `{vpc_prefix_id}` belongs to VPC `{}`, which is not owned by tenant `{tenant_organization_id}`",
-                vpc.id,
-            )));
-        }
         if prefix.config.prefix.is_ipv6() != requested_ip_addr.is_ipv6() {
             return Err(CarbideError::InvalidArgument(format!(
                 "requested IP address `{requested_ip_addr}` does not match VPC prefix `{vpc_prefix_id}`",
@@ -2056,19 +2088,20 @@ async fn update_instance_infiniband_config(
     Ok(())
 }
 
-/// Applies a requested extension-service attachment change.
+/// Prepares and validates a requested extension-service attachment change.
 ///
 /// `extension_services` is the caller-visible view: the services the instance
 /// should be running. It is merged with the durable config, which additionally
 /// carries attachments that are still terminating, and the merged result is
-/// what gets validated and persisted.
-async fn update_instance_extension_services_config(
+/// validated while service/version rows are locked. Persistence is deferred so
+/// network allocation can take its address lock before the Instance is mutated.
+async fn prepare_instance_extension_services_config(
     mh_snapshot: &ManagedHostStateSnapshot,
     instance: &InstanceSnapshot,
     extension_services: &InstanceExtensionServicesConfig,
     requested_extension_services: &RequestedInstanceExtensionServicesConfig,
     txn: &mut db::Transaction<'_>,
-) -> Result<(), CarbideError> {
+) -> Result<Option<InstanceExtensionServicesConfig>, CarbideError> {
     let current = &instance.config.extension_services;
 
     // A client may repeat the current VPC selection, but creating service-interface
@@ -2121,7 +2154,7 @@ async fn update_instance_extension_services_config(
     }
 
     if !current.is_extension_services_config_update_requested(extension_services) {
-        return Ok(());
+        return Ok(None);
     }
 
     if !matches!(
@@ -2180,24 +2213,7 @@ async fn update_instance_extension_services_config(
         &existing_active_service_ids,
     )?;
 
-    match db::instance::update_extension_services_config(
-        txn,
-        instance.id,
-        instance.extension_services_config_version,
-        current,
-        &new_extension_services_config,
-        true,
-    )
-    .await?
-    {
-        ConditionalWrite::Applied(()) => Ok(()),
-        ConditionalWrite::NotApplied(InstanceExtensionServicesNotCurrent) => {
-            Err(CarbideError::FailedPrecondition(format!(
-                "extension-service attachments for instance {} changed or the instance no longer exists; read the instance again before updating",
-                instance.id,
-            )))
-        }
-    }
+    Ok(Some(new_extension_services_config))
 }
 
 /// Extracts the RPC representation of Instances from a ManagedHost snapshot
@@ -2257,6 +2273,7 @@ pub(super) async fn force_delete_instance(
     instance_id: InstanceId,
     api: &Api,
     response: &mut AdminForceDeleteMachineResponse,
+    allow_delete_with_orphaned_dpf_crds: bool,
 ) -> CarbideResult<()> {
     // The caller has already committed the Machine ForceDeletion state. Lock
     // and reread the Instance in a separate transaction; IB updates lock the
@@ -2270,6 +2287,18 @@ pub(super) async fn force_delete_instance(
         txn.commit().await?;
         return Ok(());
     };
+
+    // Without explicit orphan consent, retain service-owned addresses and
+    // DPU/VPC loopbacks until observed cleanup removes every endpoint.
+    if !allow_delete_with_orphaned_dpf_crds
+        && !db::instance::find_service_vpc_memberships(&mut txn, instance_id)
+            .await?
+            .is_empty()
+    {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "instance {instance_id} retains service VPC endpoints; wait for observed service-network cleanup before force deletion",
+        )));
+    }
 
     if locked_instance.deleted.is_none() {
         db::instance::mark_as_deleted(instance_id, txn.as_mut()).await?;
@@ -2297,7 +2326,11 @@ pub(super) async fn force_delete_instance(
     }
     // Preserve the cleanup order: addresses, Instance, then Machine. An unmet
     // acknowledgement requirement rolls back these deletions together.
-    db::instance::delete(instance_id, &mut txn).await?;
+    if allow_delete_with_orphaned_dpf_crds {
+        db::instance::force_delete(instance_id, &mut txn).await?;
+    } else {
+        db::instance::delete(instance_id, &mut txn).await?;
+    }
     db::machine::find_one(
         &mut txn,
         &instance.machine_id,
@@ -2360,6 +2393,15 @@ pub(super) async fn force_delete_instance(
             .interfaces
             .iter()
             .filter_map(|x| x.generated_network_segment_id()),
+    );
+
+    network_segment_ids_with_vpc.extend(
+        instance
+            .config
+            .network
+            .service_interfaces
+            .iter()
+            .map(|interface| interface.network_segment_id),
     );
 
     let network_segments_set: std::collections::HashSet<::carbide_uuid::network::NetworkSegmentId> =
@@ -2473,7 +2515,12 @@ async fn update_instance_spx_config(
     validate_spx_partition_ownership(txn, &instance.config.tenant.tenant_organization_id, spxcfg)
         .await?;
 
-    let spx_config_with_ports = allocate_spx_port_mac(spxcfg, &mh_snapshot)?;
+    let (spx_config_with_ports, targets) = allocate_spx_port_mac(spxcfg, &mh_snapshot)?;
+    if let Some(snapshot) = &instance.nic_firmware_snapshot {
+        snapshot
+            .validate_bindings(&targets)
+            .map_err(|error| CarbideError::FailedPrecondition(error.to_string()))?;
+    }
     *spxcfg = spx_config_with_ports;
 
     // Update config in db.

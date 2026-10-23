@@ -184,7 +184,8 @@ impl IBFabricManager for IBFabricManagerImpl {
     /// differently, than the cached client was built from. Credentials that
     /// select certificate authentication name TLS material on disk rather
     /// than containing it, so a rebuild also happens once any of those files
-    /// is newer than the cached client (certificate rotation).
+    /// is newer than the cached client (certificate rotation), unless another
+    /// is unreadable, such as one missing mid-rotation.
     /// [`ClientCache::get_or_build`] owns that lifecycle. Between rebuilds all
     /// callers share one client, whose HTTP pool keeps connections warm across
     /// monitor passes. (`Disable` and `Mock` hand out process-wide shared

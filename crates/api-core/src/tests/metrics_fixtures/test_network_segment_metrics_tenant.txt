@@ -1,3 +1,6 @@
+# HELP carbide_machines_count Number of carbide_machines in the system
+# TYPE carbide_machines_count gauge
+carbide_machines_count{fresh="true"} 1
 # HELP carbide_machines_enqueuer_iteration_latency_milliseconds The overall time it took to enqueue state handling tasks for all carbide_machines in the system
 # TYPE carbide_machines_enqueuer_iteration_latency_milliseconds histogram
 carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="0"} 0

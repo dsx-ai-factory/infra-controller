@@ -334,7 +334,7 @@ func TestManageDpuExtensionService_GetDpuExtensionServiceVersionsInfoOnSite(t *t
 				CoreGrpcAtomicClient: coreGrpcAtomicClient,
 			},
 			args: args{
-				ctx: context.WithValue(context.Background(), "wantCount", 20),
+				ctx: context.WithValue(context.Background(), cClient.MockWantCount, 20),
 				request: &corev1.GetDpuExtensionServiceVersionsInfoRequest{
 					ServiceId: serviceID,
 				},
@@ -452,7 +452,7 @@ func TestManageDpuExtensionServiceInventory_DiscoverDpuExtensionServiceInventory
 			})
 
 			ctx := context.Background()
-			ctx = context.WithValue(ctx, "wantCount", tt.args.wantTotalItems)
+			ctx = context.WithValue(ctx, cClient.MockWantCount, tt.args.wantTotalItems)
 
 			totalPages := tt.args.wantTotalItems / tt.fields.cloudPageSize
 			if tt.args.wantTotalItems%tt.fields.cloudPageSize > 0 {

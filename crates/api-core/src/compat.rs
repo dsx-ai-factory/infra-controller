@@ -91,6 +91,14 @@ impl BuildAndFillLegacyFields for ForgeAgentControlResponse {
                         .device_actions
                         .iter()
                         .filter_map(|action| Some((action, action.command.as_ref()?)))
+                        // Older JSON clients execute ApplyFirmware without operation
+                        // identity, so durable work must stay on the typed interface.
+                        .filter(|(_, command)| {
+                            !matches!(
+                                command,
+                                fac::mlx_device_action::Command::ApplyFirmwareOperation(_)
+                            )
+                        })
                         .map(|(action, command)| {
                             Ok::<_, CarbideError>(KeyValuePair {
                                 key: action.pci_name.clone(),
@@ -297,15 +305,27 @@ mod tests {
     }
 
     #[test]
-    fn response_from_mlx_action_sets_typed_payload_and_legacy_pairs() {
+    fn response_from_mlx_action_omits_durable_firmware_from_legacy_pairs() {
+        let firmware_action = fac::MlxDeviceAction {
+            pci_name: "05:00.0".to_string(),
+            command: Some(fac::mlx_device_action::Command::ApplyFirmwareOperation(
+                fac::MlxDeviceApplyFirmwareOperation {
+                    profile: None,
+                    operation_id: "dpa-firmware:card:state-version".to_string(),
+                },
+            )),
+        };
         let response = ForgeAgentControlResponse::build_and_fill_legacy_fields(
             fac::Action::MlxAction(fac::MlxAction {
-                device_actions: vec![fac::MlxDeviceAction {
-                    pci_name: "04:00.0".to_string(),
-                    command: Some(fac::mlx_device_action::Command::Lock(fac::MlxDeviceLock {
-                        key: "secret".to_string(),
-                    })),
-                }],
+                device_actions: vec![
+                    fac::MlxDeviceAction {
+                        pci_name: "04:00.0".to_string(),
+                        command: Some(fac::mlx_device_action::Command::Lock(fac::MlxDeviceLock {
+                            key: "secret".to_string(),
+                        })),
+                    },
+                    firmware_action.clone(),
+                ],
             }),
         )
         .unwrap();
@@ -313,9 +333,13 @@ mod tests {
         let Some(fac::Action::MlxAction(mlx_action)) = response.action.as_ref() else {
             panic!("expected typed mlx action");
         };
-        let legacy_pair = &response.data.as_ref().expect("legacy data").pair[0];
+        let legacy_pairs = &response.data.as_ref().expect("legacy data").pair;
+        assert_eq!(legacy_pairs.len(), 1);
+        let legacy_pair = &legacy_pairs[0];
 
         assert_eq!(response.legacy_action(), fac::LegacyAction::MlxAction);
+        assert_eq!(mlx_action.device_actions.len(), 2);
+        assert_eq!(mlx_action.device_actions[1], firmware_action);
         assert_eq!(mlx_action.device_actions[0].pci_name, "04:00.0");
         assert!(matches!(
             mlx_action.device_actions[0].command.as_ref(),
@@ -333,6 +357,44 @@ mod tests {
                 },
             })
         );
+    }
+
+    #[test]
+    fn durable_firmware_is_not_decoded_as_a_legacy_wire_command() {
+        use carbide_host_support::dpa_cmds::{DpaDeviceCommand, OpCode};
+        use prost::Message;
+
+        // Freeze the old command tag independently of the current oneof so a
+        // durable operation cannot become executable by an older Scout.
+        #[derive(Clone, PartialEq, prost::Message)]
+        struct LegacyMlxDeviceAction {
+            #[prost(string, tag = "1")]
+            pci_name: String,
+            #[prost(oneof = "LegacyCommand", tags = "6")]
+            command: Option<LegacyCommand>,
+        }
+
+        #[derive(Clone, PartialEq, prost::Oneof)]
+        enum LegacyCommand {
+            #[prost(message, tag = "6")]
+            ApplyFirmware(fac::MlxDeviceApplyFirmware),
+        }
+
+        let action: fac::MlxDeviceAction = DpaDeviceCommand {
+            pci_name: "04:00.0".to_string(),
+            command: DpaCommand {
+                op: OpCode::ApplyFirmware {
+                    profile: None,
+                    operation_id: "dpa-firmware:card:state-version".to_string(),
+                },
+            },
+        }
+        .try_into()
+        .unwrap();
+        let legacy = LegacyMlxDeviceAction::decode(action.encode_to_vec().as_slice()).unwrap();
+
+        assert_eq!(legacy.pci_name, "04:00.0");
+        assert_eq!(legacy.command, None);
     }
 
     #[test]

@@ -19,6 +19,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod operation;
 pub mod result;
 
 /// Identifies a firmware target by hardware identity and firmware version.

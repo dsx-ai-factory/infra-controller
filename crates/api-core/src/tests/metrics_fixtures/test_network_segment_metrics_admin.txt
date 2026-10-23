@@ -1,6 +1,9 @@
 # HELP carbide_available_ips_count Number of available IPs per network segment
 # TYPE carbide_available_ips_count gauge
 carbide_available_ips_count{fresh="true",name="TEST_SEGMENT",prefix="192.0.2.0/24",type="admin"} 253
+# HELP carbide_machines_count Number of carbide_machines in the system
+# TYPE carbide_machines_count gauge
+carbide_machines_count{fresh="true"} 1
 # HELP carbide_machines_enqueuer_iteration_latency_milliseconds The overall time it took to enqueue state handling tasks for all carbide_machines in the system
 # TYPE carbide_machines_enqueuer_iteration_latency_milliseconds histogram
 carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="0"} 0

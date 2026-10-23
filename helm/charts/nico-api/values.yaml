@@ -417,6 +417,21 @@ rms:
 
 extraEnv: []
 
+## Additional volumes appended verbatim to the pod spec, and their mounts in
+## the nico-api container. Use them for files the binary reads from disk, such
+## as a KMIP KEK provider's CA bundle, client certificate, and key, or an
+## Integrated KEK supplied with `{ file = "/path" }`.
+extraVolumes: []
+# extraVolumes:
+#   - name: kmip-client
+#     secret:
+#       secretName: nico-kmip-client
+extraVolumeMounts: []
+# extraVolumeMounts:
+#   - name: kmip-client
+#     mountPath: /etc/nico/kmip
+#     readOnly: true
+
 ## Authentication for the /admin WebUI. CARBIDE_WEB_AUTH_TYPE in extraEnv
 ## takes precedence for compatibility with existing installations.
 webAuth:
@@ -544,7 +559,7 @@ configFiles:
 ## nicoApiSiteConfig is REQUIRED: nico-api exits at startup if the four
 ## resource pool definitions (lo-ip, vlan-id, vni, vpc-vni) are absent.
 ## See PREREQUISITES.md § "Site Configuration" and
-## deploy/files/nico-api/nico-api-site-config.toml for a full example.
+## helm/examples/nico-api-site-config.toml for a full example.
 siteConfig:
   enabled: true
   nicoApiSiteConfig: ""  # Must include [pools.lo-ip], [pools.vlan-id], [pools.vni], [pools.vpc-vni]

@@ -34,6 +34,10 @@ path = "src/bin/mlxconfig-device.rs"
 name = "mlxconfig-embedded"
 path = "src/bin/mlxconfig-embedded.rs"
 
+[[bin]]
+name = "mlx-firmware-supervisor"
+path = "src/bin/mlx-firmware-supervisor.rs"
+
 [dependencies]
 # Serialization
 serde = { features = ["derive"], workspace = true }
@@ -49,6 +53,10 @@ prettytable-rs = { workspace = true }
 
 # Async / networking
 tokio = { features = ["full"], workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+hyper-util = { features = ["tokio"], workspace = true }
+tower = { features = ["util"], workspace = true }
 reqwest = { features = ["rustls"], workspace = true }
 reqwest-middleware = { workspace = true }
 reqwest-tracing = { workspace = true }
@@ -57,6 +65,7 @@ reqwest-tracing = { workspace = true }
 thiserror = { workspace = true }
 
 # Logging
+logfmt = { path = "../logfmt" }
 tracing = { workspace = true }
 tracing-subscriber = { features = ["env-filter"], workspace = true }
 
@@ -74,7 +83,16 @@ once_cell = { workspace = true }
 uuid = { features = ["v4"], workspace = true }
 backon = { workspace = true }
 wait-timeout = { workspace = true }
+nix = { features = [
+  "fs",
+  "poll",
+  "process",
+  "signal",
+  "socket",
+  "user",
+], workspace = true }
 tempfile = { workspace = true }
+sha2 = { workspace = true }
 url = { workspace = true }
 
 # Internal

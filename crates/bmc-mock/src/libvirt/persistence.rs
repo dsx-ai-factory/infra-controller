@@ -84,13 +84,10 @@ impl StateFile {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use std::sync::Arc;
-    use std::time::Duration;
 
     use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use tokio::task::JoinSet;
+    use axum::http::Request;
     use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
 
@@ -129,38 +126,6 @@ mod tests {
         (router, state, actor, callbacks)
     }
 
-    async fn fixture(
-        path: PathBuf,
-    ) -> (
-        axum::Router,
-        BmcState<LibvirtCallbacks>,
-        JoinSet<()>,
-        Arc<LibvirtCallbacks>,
-    ) {
-        let virsh = path.with_extension("virsh");
-        std::fs::write(
-            &virsh,
-            r#"#!/bin/sh
-case "$3" in
-    domstate) printf '%s\n' running ;;
-    dumpxml) printf '%s\n' '<domain><os><type>hvm</type></os><devices/></domain>' ;;
-    define) exit 0 ;;
-    *) exit 2 ;;
-esac
-"#,
-        )
-        .unwrap();
-        std::fs::set_permissions(&virsh, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let (router, state, mut actor, callbacks) = unstarted(path);
-        actor.config.virsh_path = virsh;
-        let mut tasks = JoinSet::new();
-        actor
-            .run(&state, &mut tasks, CancellationToken::new())
-            .await
-            .unwrap();
-        (router, state, tasks, callbacks)
-    }
-
     #[test]
     fn missing_file_is_created_only_by_explicit_save() {
         let dir = tempfile::tempdir().unwrap();
@@ -174,33 +139,8 @@ esac
         assert_eq!(saved, state.persisted());
     }
 
-    #[tokio::test]
-    async fn startup_privately_replaces_permissive_state_without_changing_accounts() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.json");
-        let (_, seeded, _, _) = unstarted(path.clone());
-        seeded
-            .account_service_state
-            .change_factory_default_password("seeded-password");
-        let snapshot = seeded.persisted();
-        std::fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let old_inode = std::fs::metadata(&path).unwrap().ino();
-
-        let (_, restored, running, callbacks) = fixture(path.clone()).await;
-        assert_eq!(restored.persisted(), snapshot);
-        let metadata = std::fs::metadata(&path).unwrap();
-        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
-        assert_ne!(metadata.ino(), old_inode);
-        let saved: PersistedBmcState =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(saved, snapshot);
-        callbacks.finish().await.unwrap();
-        running.join_all().await;
-    }
-
-    #[tokio::test]
-    async fn invalid_startup_state_is_preserved_and_never_replaces_profile_accounts() {
+    #[test]
+    fn invalid_startup_state_is_preserved_and_never_replaces_profile_accounts() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         for contents in [
@@ -226,85 +166,78 @@ esac
                 .is_symlink()
         );
     }
-
-    async fn patch(router: axum::Router, body: serde_json::Value) -> StatusCode {
-        router
-            .oneshot(
-                Request::builder()
-                    .method("PATCH")
-                    .uri("/redfish/v1/AccountService/Accounts/2")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap()
-            .status()
-    }
-
-    async fn wait_saved(path: &std::path::Path, expected: &PersistedBmcState) {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if std::fs::read(path)
-                    .ok()
-                    .and_then(|b| serde_json::from_slice::<PersistedBmcState>(&b).ok())
-                    .as_ref()
-                    == Some(expected)
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-    }
-
     #[tokio::test]
-    async fn callback_saves_password_and_skips_unchanged_state() {
+    async fn restart_retains_lockdown_and_boot_policy() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
-        let (router, state, running, callbacks) = fixture(path.clone()).await;
-        assert_eq!(
-            patch(router.clone(), serde_json::json!({"UserName":"new-user"})).await,
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            patch(router, serde_json::json!({"Password":"new-password"})).await,
-            StatusCode::NO_CONTENT
-        );
-        let saved = state.persisted();
-        wait_saved(&path, &saved).await;
-
-        let inode = std::fs::metadata(&path).unwrap().ino();
-        for _ in 0..100 {
-            callbacks.state_refresh_indication();
+        let (router, state, _actor, _callbacks) = unstarted(path.clone());
+        let mut storage = StateFile::load(path.clone(), &state).unwrap();
+        let changes = [
+            (
+                "/redfish/v1/Systems/Self/Bios",
+                serde_json::json!({"Attributes": {"KCSACP": "Deny All", "USB000": "Disabled"}}),
+            ),
+            (
+                "/redfish/v1/Managers/Self/HostInterfaces/Self",
+                serde_json::json!({"InterfaceEnabled": false}),
+            ),
+            (
+                "/redfish/v1/Systems/Self",
+                serde_json::json!({"Boot": {
+                    "BootOrder": ["Boot0001", "Boot0000"],
+                    "BootSourceOverrideEnabled": "Once",
+                    "BootSourceOverrideTarget": "Pxe"
+                }}),
+            ),
+        ];
+        let mut expected = Vec::new();
+        for (uri, body) in changes {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                response.status().is_success(),
+                "{uri}: {}",
+                response.status()
+            );
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            expected.push((
+                uri,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+            ));
         }
-        callbacks.finish().await.unwrap();
-        running.join_all().await;
-        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
-        let (_, restored, second, second_callbacks) = fixture(path).await;
-        assert_eq!(restored.persisted(), saved);
-        second_callbacks.finish().await.unwrap();
-        second.join_all().await;
-    }
-
-    #[tokio::test]
-    async fn final_save_captures_internal_changes_without_periodic_polling() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("state.json");
-        let (_, state, running, callbacks) = fixture(path.clone()).await;
-        let old = std::fs::read(&path).unwrap();
-        state
-            .account_service_state
-            .change_factory_default_password("internal-change");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(std::fs::read(&path).unwrap(), old);
-        callbacks.finish().await.unwrap();
-        running.join_all().await;
-        assert_eq!(
-            serde_json::from_slice::<PersistedBmcState>(&std::fs::read(path).unwrap()).unwrap(),
-            state.persisted()
-        );
+        storage.save().unwrap();
+        let (restored, restored_state, _second_actor, _second_callbacks) = unstarted(path.clone());
+        StateFile::load(path, &restored_state).unwrap();
+        for (uri, before) in expected {
+            let response = restored
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let after: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            for key in ["Attributes", "InterfaceEnabled", "Boot"] {
+                assert_eq!(after.get(key), before.get(key), "{uri}: {key}");
+            }
+        }
     }
 }

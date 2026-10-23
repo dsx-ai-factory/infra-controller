@@ -753,6 +753,72 @@ The DPU agent's generated `dhcp_server.service_name`, `fmds.service_name`, and
 `hbn.nvue_https_address` are deployment-specific and take precedence over these
 template overlays.
 
+#### IPv6 Metadata Transport
+
+Enable IPv6 metadata transport through both the DPU agent and FMDS service
+overlays. Deploy agent and FMDS images and charts that include
+[IPv6 metadata transport support](https://github.com/dsx-ai-factory/infra-controller/issues/7176)
+before setting these values. The following site configuration retains IPv4 and
+the standalone FMDS port 80:
+
+```toml
+[dpf.services.dpu_agent.extra_helm_values.fmds]
+networkingAddresses = ["169.254.169.254/30", "fd00:76b9::254/127"]
+
+[dpf.services.fmds.extra_helm_values]
+interfaceCidrV6 = "fd00:76b9::254/127"
+restAddress = "[::]:80"
+```
+
+Merge these keys into any existing overlays instead of replacing unrelated
+settings. The DPU agent chart writes `networkingAddresses` into its configuration
+file and supplies `--config-path` automatically. The agent configures HBN's
+IPv6 peer at `fd00:76b9::255/127`; the FMDS chart configures the endpoint address
+and HTTP listener in the separate FMDS pod. Neither setting substitutes for
+the other.
+
+If a deployment defines `[dpf.deployments.<name>.services]`, add both overlays
+under that deployment's services instead. The deployment replaces the inherited
+service set; omitted fields use built-in defaults, not the site-wide overlays.
+Preserve its other service settings when adding these values.
+
+The chart values have the following omission and override behavior:
+
+| Value | Default | Behavior When Supplied |
+|---|---|---|
+| Agent `fmds.networkingAddresses` | `null`, using the agent's IPv4-only default | Replaces the complete configured list. `[]` writes an empty list instead of using defaults. It does not configure addresses in the FMDS pod or change HBN's existing IPv4 peer. |
+| FMDS `interfaceCidrV6` | `null`, omitting the CLI flag | Adds only `fd00:76b9::254/127`. A non-null value overrides `FMDS_INTERFACE_CIDR_V6`; null leaves that environment fallback available. The chart does not set that environment variable. |
+| FMDS `restAddress` | `null`, using `0.0.0.0:80` | Overrides the primary listener. `[::]:80` accepts both families on port 80. |
+| FMDS `compatibilityRestAddress` | `null`, no additional listener | Adds a separate listener without changing the primary one. Overlapping binds, such as `[::]:80` and `0.0.0.0:80`, prevent startup. |
+
+In DPF, the agent's address list selects the HBN IPv6 peer; it does not assign
+addresses inside the FMDS pod. The fixed endpoint requires `/127`. Other IPv6
+entries do not select a metadata peer or provide automatic reply routing.
+Retain any unrelated settings in the list, but configure the FMDS pod's IPv4
+address through its own chart values rather than this agent list. Refer to
+[IPv6 Metadata Transport](../dpu-management/dpu-lifecycle-management.md#ipv6-metadata-transport)
+for the packet path, listener, and network prerequisites.
+
+Restart Core after changing the site configuration, following
+[Start carbide-api to Create the DPF Initialization Objects](#4-start-carbide-api-to-create-the-dpf-initialization-objects).
+Apply both service updates through the normal
+[DPUService Rollout Gating](#dpuservice-rollout-gating) procedure and confirm that
+the affected pods restart. If you selected an `OnDelete` update strategy,
+replace the affected pods through that rollout procedure. The services do not
+activate atomically: confirm that HBN has applied the peer and FMDS is serving
+before directing guest requests to IPv6. A listener, address, or duplicate address
+detection failure prevents standalone FMDS startup. Investigate startup errors
+and repair persistent failures, including duplicate addresses.
+Removing values does not remove addresses already assigned to an existing
+interface. From the attached guest, query the standalone endpoint after application:
+
+```bash
+curl --noproxy '*' -fsS 'http://[fd00:76b9::254]:80/latest/meta-data/hostname'
+```
+
+The response must contain the instance's hostname. Pod readiness alone does not
+prove that the guest-to-HBN-to-FMDS path works.
+
 #### DPU LLDP sidecar
 
 The DPU agent chart also runs `nico-lldp-sidecar` from the resolved DPU agent

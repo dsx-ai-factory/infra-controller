@@ -1,261 +1,268 @@
 # Protocol Documentation
+
 <a name="top"></a>
 
 ## Table of Contents
 
 - [flow.proto](#flow-proto)
-    - [ACPowerCycleRackRequest](#v1-ACPowerCycleRackRequest)
-    - [AddComponentRequest](#v1-AddComponentRequest)
-    - [AddComponentResponse](#v1-AddComponentResponse)
-    - [AddTaskScheduleScopeRequest](#v1-AddTaskScheduleScopeRequest)
-    - [AddTaskScheduleScopeResponse](#v1-AddTaskScheduleScopeResponse)
-    - [AdvanceOperationRunPhaseRequest](#v1-AdvanceOperationRunPhaseRequest)
-    - [AssociateRuleWithRackRequest](#v1-AssociateRuleWithRackRequest)
-    - [AttachRacksToNVLDomainRequest](#v1-AttachRacksToNVLDomainRequest)
-    - [BMCInfo](#v1-BMCInfo)
-    - [BringUpRackRequest](#v1-BringUpRackRequest)
-    - [BuildInfo](#v1-BuildInfo)
-    - [CancelOperationRunRequest](#v1-CancelOperationRunRequest)
-    - [CancelTaskRequest](#v1-CancelTaskRequest)
-    - [CancelTaskResponse](#v1-CancelTaskResponse)
-    - [CheckScheduleConflictsRequest](#v1-CheckScheduleConflictsRequest)
-    - [CheckScheduleConflictsResponse](#v1-CheckScheduleConflictsResponse)
-    - [Component](#v1-Component)
-    - [ComponentDiff](#v1-ComponentDiff)
-    - [ComponentFilter](#v1-ComponentFilter)
-    - [ComponentOperationStatus](#v1-ComponentOperationStatus)
-    - [ComponentTarget](#v1-ComponentTarget)
-    - [ComponentTargets](#v1-ComponentTargets)
-    - [ComponentTypes](#v1-ComponentTypes)
-    - [ComponentsByType](#v1-ComponentsByType)
-    - [ComponentsForType](#v1-ComponentsForType)
-    - [CountOperationRunPhases](#v1-CountOperationRunPhases)
-    - [CreateEventRuleBindingRequest](#v1-CreateEventRuleBindingRequest)
-    - [CreateEventRuleRequest](#v1-CreateEventRuleRequest)
-    - [CreateExpectedRackRequest](#v1-CreateExpectedRackRequest)
-    - [CreateExpectedRackResponse](#v1-CreateExpectedRackResponse)
-    - [CreateNVLDomainRequest](#v1-CreateNVLDomainRequest)
-    - [CreateNVLDomainResponse](#v1-CreateNVLDomainResponse)
-    - [CreateOperationRuleRequest](#v1-CreateOperationRuleRequest)
-    - [CreateOperationRuleResponse](#v1-CreateOperationRuleResponse)
-    - [CreateOperationRunRequest](#v1-CreateOperationRunRequest)
-    - [CreateOperationRunResponse](#v1-CreateOperationRunResponse)
-    - [CreateTaskScheduleRequest](#v1-CreateTaskScheduleRequest)
-    - [DecommissionRackRequest](#v1-DecommissionRackRequest)
-    - [DeleteComponentRequest](#v1-DeleteComponentRequest)
-    - [DeleteComponentResponse](#v1-DeleteComponentResponse)
-    - [DeleteEventRuleBindingRequest](#v1-DeleteEventRuleBindingRequest)
-    - [DeleteEventRuleRequest](#v1-DeleteEventRuleRequest)
-    - [DeleteOperationRuleRequest](#v1-DeleteOperationRuleRequest)
-    - [DeleteRackRequest](#v1-DeleteRackRequest)
-    - [DeleteRackResponse](#v1-DeleteRackResponse)
-    - [DeleteTaskScheduleRequest](#v1-DeleteTaskScheduleRequest)
-    - [DetachRacksFromNVLDomainRequest](#v1-DetachRacksFromNVLDomainRequest)
-    - [DeviceInfo](#v1-DeviceInfo)
-    - [DeviceSerialInfo](#v1-DeviceSerialInfo)
-    - [DisableEventRuleRequest](#v1-DisableEventRuleRequest)
-    - [DisassociateRuleFromRackRequest](#v1-DisassociateRuleFromRackRequest)
-    - [EnableEventRuleRequest](#v1-EnableEventRuleRequest)
-    - [EqualOperationRunPhases](#v1-EqualOperationRunPhases)
-    - [EventRule](#v1-EventRule)
-    - [EventRuleAction](#v1-EventRuleAction)
-    - [EventRuleActionCondition](#v1-EventRuleActionCondition)
-    - [EventRuleActionsUpdate](#v1-EventRuleActionsUpdate)
-    - [EventRuleBinding](#v1-EventRuleBinding)
-    - [EventRuleMetadataUpdate](#v1-EventRuleMetadataUpdate)
-    - [EventRuleNoopAction](#v1-EventRuleNoopAction)
-    - [EventRuleScope](#v1-EventRuleScope)
-    - [EventRuleSendAlertAction](#v1-EventRuleSendAlertAction)
-    - [EventRuleSubmitTaskAction](#v1-EventRuleSubmitTaskAction)
-    - [ExternalRef](#v1-ExternalRef)
-    - [FieldDiff](#v1-FieldDiff)
-    - [Filter](#v1-Filter)
-    - [FirmwareAuthenticationData](#v1-FirmwareAuthenticationData)
-    - [FirmwareControlTaskOperation](#v1-FirmwareControlTaskOperation)
-    - [GetComponentInfoByIDRequest](#v1-GetComponentInfoByIDRequest)
-    - [GetComponentInfoBySerialRequest](#v1-GetComponentInfoBySerialRequest)
-    - [GetComponentInfoResponse](#v1-GetComponentInfoResponse)
-    - [GetComponentsRequest](#v1-GetComponentsRequest)
-    - [GetComponentsResponse](#v1-GetComponentsResponse)
-    - [GetEffectiveEventRuleRequest](#v1-GetEffectiveEventRuleRequest)
-    - [GetEventRuleBindingRequest](#v1-GetEventRuleBindingRequest)
-    - [GetEventRuleRequest](#v1-GetEventRuleRequest)
-    - [GetListOfNVLDomainsRequest](#v1-GetListOfNVLDomainsRequest)
-    - [GetListOfNVLDomainsResponse](#v1-GetListOfNVLDomainsResponse)
-    - [GetListOfNVLinkDomainsRequest](#v1-GetListOfNVLinkDomainsRequest)
-    - [GetListOfNVLinkDomainsResponse](#v1-GetListOfNVLinkDomainsResponse)
-    - [GetListOfRacksRequest](#v1-GetListOfRacksRequest)
-    - [GetListOfRacksResponse](#v1-GetListOfRacksResponse)
-    - [GetNVLinkDomainRequest](#v1-GetNVLinkDomainRequest)
-    - [GetNVLinkDomainResponse](#v1-GetNVLinkDomainResponse)
-    - [GetOperationRuleRequest](#v1-GetOperationRuleRequest)
-    - [GetOperationRunRequest](#v1-GetOperationRunRequest)
-    - [GetOperationRunResponse](#v1-GetOperationRunResponse)
-    - [GetRackInfoByIDRequest](#v1-GetRackInfoByIDRequest)
-    - [GetRackInfoBySerialRequest](#v1-GetRackInfoBySerialRequest)
-    - [GetRackInfoResponse](#v1-GetRackInfoResponse)
-    - [GetRackRuleAssociationRequest](#v1-GetRackRuleAssociationRequest)
-    - [GetRackRuleAssociationResponse](#v1-GetRackRuleAssociationResponse)
-    - [GetRacksForNVLDomainRequest](#v1-GetRacksForNVLDomainRequest)
-    - [GetRacksForNVLDomainResponse](#v1-GetRacksForNVLDomainResponse)
-    - [GetTaskScheduleRequest](#v1-GetTaskScheduleRequest)
-    - [GetTasksByIDsRequest](#v1-GetTasksByIDsRequest)
-    - [GetTasksByIDsResponse](#v1-GetTasksByIDsResponse)
-    - [HealthProbeAlert](#v1-HealthProbeAlert)
-    - [HealthProbeSuccess](#v1-HealthProbeSuccess)
-    - [HealthReport](#v1-HealthReport)
-    - [Identifier](#v1-Identifier)
-    - [IngestRackRequest](#v1-IngestRackRequest)
-    - [ListEventRulesRequest](#v1-ListEventRulesRequest)
-    - [ListEventRulesResponse](#v1-ListEventRulesResponse)
-    - [ListOperationRulesRequest](#v1-ListOperationRulesRequest)
-    - [ListOperationRulesResponse](#v1-ListOperationRulesResponse)
-    - [ListOperationRunTargetsRequest](#v1-ListOperationRunTargetsRequest)
-    - [ListOperationRunTargetsResponse](#v1-ListOperationRunTargetsResponse)
-    - [ListOperationRunsRequest](#v1-ListOperationRunsRequest)
-    - [ListOperationRunsResponse](#v1-ListOperationRunsResponse)
-    - [ListRackRuleAssociationsRequest](#v1-ListRackRuleAssociationsRequest)
-    - [ListRackRuleAssociationsResponse](#v1-ListRackRuleAssociationsResponse)
-    - [ListTaskScheduleScopesRequest](#v1-ListTaskScheduleScopesRequest)
-    - [ListTaskScheduleScopesResponse](#v1-ListTaskScheduleScopesResponse)
-    - [ListTaskSchedulesRequest](#v1-ListTaskSchedulesRequest)
-    - [ListTaskSchedulesResponse](#v1-ListTaskSchedulesResponse)
-    - [ListTasksRequest](#v1-ListTasksRequest)
-    - [ListTasksResponse](#v1-ListTasksResponse)
-    - [Location](#v1-Location)
-    - [NVLDomain](#v1-NVLDomain)
-    - [NVLDomainTarget](#v1-NVLDomainTarget)
-    - [NVLDomainTargets](#v1-NVLDomainTargets)
-    - [NVLinkDomain](#v1-NVLinkDomain)
-    - [OperationKind](#v1-OperationKind)
-    - [OperationRule](#v1-OperationRule)
-    - [OperationRun](#v1-OperationRun)
-    - [OperationRunConfiguration](#v1-OperationRunConfiguration)
-    - [OperationRunConflictPolicy](#v1-OperationRunConflictPolicy)
-    - [OperationRunConflictRetryPolicy](#v1-OperationRunConflictRetryPolicy)
-    - [OperationRunCountPhase](#v1-OperationRunCountPhase)
-    - [OperationRunFailureCountGate](#v1-OperationRunFailureCountGate)
-    - [OperationRunFailureRateGate](#v1-OperationRunFailureRateGate)
-    - [OperationRunFilter](#v1-OperationRunFilter)
-    - [OperationRunOperation](#v1-OperationRunOperation)
-    - [OperationRunOptions](#v1-OperationRunOptions)
-    - [OperationRunOrderingPolicy](#v1-OperationRunOrderingPolicy)
-    - [OperationRunPercentagePhase](#v1-OperationRunPercentagePhase)
-    - [OperationRunPhaseAdvancePolicy](#v1-OperationRunPhaseAdvancePolicy)
-    - [OperationRunPhasePolicy](#v1-OperationRunPhasePolicy)
-    - [OperationRunPhaseStats](#v1-OperationRunPhaseStats)
-    - [OperationRunPhysicalLocationOrdering](#v1-OperationRunPhysicalLocationOrdering)
-    - [OperationRunRandomOrdering](#v1-OperationRunRandomOrdering)
-    - [OperationRunSafetyGate](#v1-OperationRunSafetyGate)
-    - [OperationRunSafetyPolicy](#v1-OperationRunSafetyPolicy)
-    - [OperationRunSelector](#v1-OperationRunSelector)
-    - [OperationRunState](#v1-OperationRunState)
-    - [OperationRunStateFilter](#v1-OperationRunStateFilter)
-    - [OperationRunStats](#v1-OperationRunStats)
-    - [OperationRunSummary](#v1-OperationRunSummary)
-    - [OperationRunTarget](#v1-OperationRunTarget)
-    - [OperationRunTargetOutcomeCounts](#v1-OperationRunTargetOutcomeCounts)
-    - [OperationRunTargetScope](#v1-OperationRunTargetScope)
-    - [OperationTargetSpec](#v1-OperationTargetSpec)
-    - [OrderBy](#v1-OrderBy)
-    - [Pagination](#v1-Pagination)
-    - [PatchComponentRequest](#v1-PatchComponentRequest)
-    - [PatchComponentResponse](#v1-PatchComponentResponse)
-    - [PatchRackRequest](#v1-PatchRackRequest)
-    - [PatchRackResponse](#v1-PatchRackResponse)
-    - [PauseOperationRunRequest](#v1-PauseOperationRunRequest)
-    - [PauseTaskScheduleRequest](#v1-PauseTaskScheduleRequest)
-    - [PerComponentFirmwareAuthenticationData](#v1-PerComponentFirmwareAuthenticationData)
-    - [PercentageOperationRunPhases](#v1-PercentageOperationRunPhases)
-    - [PercentageSelector](#v1-PercentageSelector)
-    - [PowerControlTaskOperation](#v1-PowerControlTaskOperation)
-    - [PowerOffRackRequest](#v1-PowerOffRackRequest)
-    - [PowerOnRackRequest](#v1-PowerOnRackRequest)
-    - [PowerResetRackRequest](#v1-PowerResetRackRequest)
-    - [PurgeComponentRequest](#v1-PurgeComponentRequest)
-    - [PurgeComponentResponse](#v1-PurgeComponentResponse)
-    - [PurgeRackRequest](#v1-PurgeRackRequest)
-    - [PurgeRackResponse](#v1-PurgeRackResponse)
-    - [QueueOptions](#v1-QueueOptions)
-    - [Rack](#v1-Rack)
-    - [RackPosition](#v1-RackPosition)
-    - [RackRuleAssociation](#v1-RackRuleAssociation)
-    - [RackTarget](#v1-RackTarget)
-    - [RackTargets](#v1-RackTargets)
-    - [RemoveTaskScheduleScopeRequest](#v1-RemoveTaskScheduleScopeRequest)
-    - [ResumeOperationRunRequest](#v1-ResumeOperationRunRequest)
-    - [ResumeTaskScheduleRequest](#v1-ResumeTaskScheduleRequest)
-    - [ScheduleConfig](#v1-ScheduleConfig)
-    - [ScheduleSpec](#v1-ScheduleSpec)
-    - [ScheduledOperation](#v1-ScheduledOperation)
-    - [SetRuleAsDefaultRequest](#v1-SetRuleAsDefaultRequest)
-    - [StringQueryInfo](#v1-StringQueryInfo)
-    - [SubmitTaskResponse](#v1-SubmitTaskResponse)
-    - [Task](#v1-Task)
-    - [TaskOperation](#v1-TaskOperation)
-    - [TaskSchedule](#v1-TaskSchedule)
-    - [TaskScheduleScope](#v1-TaskScheduleScope)
-    - [TaskStats](#v1-TaskStats)
-    - [TriggerTaskScheduleRequest](#v1-TriggerTaskScheduleRequest)
-    - [UUID](#v1-UUID)
-    - [UpdateEventRuleRequest](#v1-UpdateEventRuleRequest)
-    - [UpdateOperationRuleRequest](#v1-UpdateOperationRuleRequest)
-    - [UpdateTaskScheduleRequest](#v1-UpdateTaskScheduleRequest)
-    - [UpdateTaskScheduleScopeRequest](#v1-UpdateTaskScheduleScopeRequest)
-    - [UpdateTaskScheduleScopeResponse](#v1-UpdateTaskScheduleScopeResponse)
-    - [UpgradeFirmwareRequest](#v1-UpgradeFirmwareRequest)
-    - [ValidateComponentsRequest](#v1-ValidateComponentsRequest)
-    - [ValidateComponentsResponse](#v1-ValidateComponentsResponse)
-    - [VersionRequest](#v1-VersionRequest)
-
-    - [BMCType](#v1-BMCType)
-    - [ComponentFilterField](#v1-ComponentFilterField)
-    - [ComponentOrderByField](#v1-ComponentOrderByField)
-    - [ComponentType](#v1-ComponentType)
-    - [ConflictStrategy](#v1-ConflictStrategy)
-    - [DiffType](#v1-DiffType)
-    - [EventRuleConflictStrategy](#v1-EventRuleConflictStrategy)
-    - [EventRuleScopeType](#v1-EventRuleScopeType)
-    - [EventRuleSeverity](#v1-EventRuleSeverity)
-    - [EventRuleTargetStrategy](#v1-EventRuleTargetStrategy)
-    - [FirmwareControlOperation](#v1-FirmwareControlOperation)
-    - [LeakHandlingStatus](#v1-LeakHandlingStatus)
-    - [LeakStatus](#v1-LeakStatus)
-    - [OperationRunPhysicalLocationOrdering.Strategy](#v1-OperationRunPhysicalLocationOrdering-Strategy)
-    - [OperationRunSafetyGateScope](#v1-OperationRunSafetyGateScope)
-    - [OperationRunStatus](#v1-OperationRunStatus)
-    - [OperationRunStatusReason](#v1-OperationRunStatusReason)
-    - [OperationRunTargetPhaseScope](#v1-OperationRunTargetPhaseScope)
-    - [OperationRunTargetStatus](#v1-OperationRunTargetStatus)
-    - [OperationType](#v1-OperationType)
-    - [OverlapPolicy](#v1-OverlapPolicy)
-    - [Phase](#v1-Phase)
-    - [PowerControlOp](#v1-PowerControlOp)
-    - [PowerControlOperation](#v1-PowerControlOperation)
-    - [RackFilterField](#v1-RackFilterField)
-    - [RackOrderByField](#v1-RackOrderByField)
-    - [ScheduleSpecType](#v1-ScheduleSpecType)
-    - [TaskExecutorType](#v1-TaskExecutorType)
-    - [TaskStatus](#v1-TaskStatus)
-
-    - [Flow](#v1-Flow)
-
+  - [ACPowerCycleRackRequest](#v1-ACPowerCycleRackRequest)
+  - [AddComponentRequest](#v1-AddComponentRequest)
+  - [AddComponentResponse](#v1-AddComponentResponse)
+  - [AddTaskScheduleScopeRequest](#v1-AddTaskScheduleScopeRequest)
+  - [AddTaskScheduleScopeResponse](#v1-AddTaskScheduleScopeResponse)
+  - [AdvanceOperationRunPhaseRequest](#v1-AdvanceOperationRunPhaseRequest)
+  - [AssociateRuleWithRackRequest](#v1-AssociateRuleWithRackRequest)
+  - [AttachRacksToNVLDomainRequest](#v1-AttachRacksToNVLDomainRequest)
+  - [BMCInfo](#v1-BMCInfo)
+  - [BringUpRackRequest](#v1-BringUpRackRequest)
+  - [BuildInfo](#v1-BuildInfo)
+  - [CancelOperationRunRequest](#v1-CancelOperationRunRequest)
+  - [CancelTaskRequest](#v1-CancelTaskRequest)
+  - [CancelTaskResponse](#v1-CancelTaskResponse)
+  - [CheckScheduleConflictsRequest](#v1-CheckScheduleConflictsRequest)
+  - [CheckScheduleConflictsResponse](#v1-CheckScheduleConflictsResponse)
+  - [Component](#v1-Component)
+  - [ComponentDiff](#v1-ComponentDiff)
+  - [ComponentFilter](#v1-ComponentFilter)
+  - [ComponentOperationStatus](#v1-ComponentOperationStatus)
+  - [ComponentTarget](#v1-ComponentTarget)
+  - [ComponentTargets](#v1-ComponentTargets)
+  - [ComponentTypes](#v1-ComponentTypes)
+  - [ComponentsByType](#v1-ComponentsByType)
+  - [ComponentsForType](#v1-ComponentsForType)
+  - [CountOperationRunPhases](#v1-CountOperationRunPhases)
+  - [CreateEventRuleBindingRequest](#v1-CreateEventRuleBindingRequest)
+  - [CreateEventRuleRequest](#v1-CreateEventRuleRequest)
+  - [CreateExpectedRackRequest](#v1-CreateExpectedRackRequest)
+  - [CreateExpectedRackResponse](#v1-CreateExpectedRackResponse)
+  - [CreateNVLDomainRequest](#v1-CreateNVLDomainRequest)
+  - [CreateNVLDomainResponse](#v1-CreateNVLDomainResponse)
+  - [CreateOperationRuleRequest](#v1-CreateOperationRuleRequest)
+  - [CreateOperationRuleResponse](#v1-CreateOperationRuleResponse)
+  - [CreateOperationRunRequest](#v1-CreateOperationRunRequest)
+  - [CreateOperationRunResponse](#v1-CreateOperationRunResponse)
+  - [CreateTaskScheduleRequest](#v1-CreateTaskScheduleRequest)
+  - [DecommissionRackRequest](#v1-DecommissionRackRequest)
+  - [DeleteComponentRequest](#v1-DeleteComponentRequest)
+  - [DeleteComponentResponse](#v1-DeleteComponentResponse)
+  - [DeleteEventRuleBindingRequest](#v1-DeleteEventRuleBindingRequest)
+  - [DeleteEventRuleRequest](#v1-DeleteEventRuleRequest)
+  - [DeleteOperationRuleRequest](#v1-DeleteOperationRuleRequest)
+  - [DeleteRackRequest](#v1-DeleteRackRequest)
+  - [DeleteRackResponse](#v1-DeleteRackResponse)
+  - [DeleteTaskScheduleRequest](#v1-DeleteTaskScheduleRequest)
+  - [DetachRacksFromNVLDomainRequest](#v1-DetachRacksFromNVLDomainRequest)
+  - [DeviceInfo](#v1-DeviceInfo)
+  - [DeviceSerialInfo](#v1-DeviceSerialInfo)
+  - [DisableEventRuleRequest](#v1-DisableEventRuleRequest)
+  - [DisassociateRuleFromRackRequest](#v1-DisassociateRuleFromRackRequest)
+  - [EnableEventRuleRequest](#v1-EnableEventRuleRequest)
+  - [EqualOperationRunPhases](#v1-EqualOperationRunPhases)
+  - [EventRule](#v1-EventRule)
+  - [EventRuleAction](#v1-EventRuleAction)
+  - [EventRuleActionCondition](#v1-EventRuleActionCondition)
+  - [EventRuleActionsUpdate](#v1-EventRuleActionsUpdate)
+  - [EventRuleBinding](#v1-EventRuleBinding)
+  - [EventRuleMetadataUpdate](#v1-EventRuleMetadataUpdate)
+  - [EventRuleNoopAction](#v1-EventRuleNoopAction)
+  - [EventRuleScope](#v1-EventRuleScope)
+  - [EventRuleSendAlertAction](#v1-EventRuleSendAlertAction)
+  - [EventRuleSubmitTaskAction](#v1-EventRuleSubmitTaskAction)
+  - [ExternalRef](#v1-ExternalRef)
+  - [FieldDiff](#v1-FieldDiff)
+  - [Filter](#v1-Filter)
+  - [FirmwareAuthenticationData](#v1-FirmwareAuthenticationData)
+  - [FirmwareControlTaskOperation](#v1-FirmwareControlTaskOperation)
+  - [GetComponentInfoByIDRequest](#v1-GetComponentInfoByIDRequest)
+  - [GetComponentInfoBySerialRequest](#v1-GetComponentInfoBySerialRequest)
+  - [GetComponentInfoResponse](#v1-GetComponentInfoResponse)
+  - [GetComponentsRequest](#v1-GetComponentsRequest)
+  - [GetComponentsResponse](#v1-GetComponentsResponse)
+  - [GetEffectiveEventRuleRequest](#v1-GetEffectiveEventRuleRequest)
+  - [GetEventRuleBindingRequest](#v1-GetEventRuleBindingRequest)
+  - [GetEventRuleRequest](#v1-GetEventRuleRequest)
+  - [GetListOfNVLDomainsRequest](#v1-GetListOfNVLDomainsRequest)
+  - [GetListOfNVLDomainsResponse](#v1-GetListOfNVLDomainsResponse)
+  - [GetListOfNVLinkDomainsRequest](#v1-GetListOfNVLinkDomainsRequest)
+  - [GetListOfNVLinkDomainsResponse](#v1-GetListOfNVLinkDomainsResponse)
+  - [GetListOfRacksRequest](#v1-GetListOfRacksRequest)
+  - [GetListOfRacksResponse](#v1-GetListOfRacksResponse)
+  - [GetNVLinkDomainRequest](#v1-GetNVLinkDomainRequest)
+  - [GetNVLinkDomainResponse](#v1-GetNVLinkDomainResponse)
+  - [GetOperationRuleRequest](#v1-GetOperationRuleRequest)
+  - [GetOperationRunRequest](#v1-GetOperationRunRequest)
+  - [GetOperationRunResponse](#v1-GetOperationRunResponse)
+  - [GetRackInfoByIDRequest](#v1-GetRackInfoByIDRequest)
+  - [GetRackInfoBySerialRequest](#v1-GetRackInfoBySerialRequest)
+  - [GetRackInfoResponse](#v1-GetRackInfoResponse)
+  - [GetRackRuleAssociationRequest](#v1-GetRackRuleAssociationRequest)
+  - [GetRackRuleAssociationResponse](#v1-GetRackRuleAssociationResponse)
+  - [GetRacksForNVLDomainRequest](#v1-GetRacksForNVLDomainRequest)
+  - [GetRacksForNVLDomainResponse](#v1-GetRacksForNVLDomainResponse)
+  - [GetTaskScheduleRequest](#v1-GetTaskScheduleRequest)
+  - [GetTasksByIDsRequest](#v1-GetTasksByIDsRequest)
+  - [GetTasksByIDsResponse](#v1-GetTasksByIDsResponse)
+  - [GetTrayPowerDetailsRequest](#v1-GetTrayPowerDetailsRequest)
+  - [GetTrayPowerDetailsResponse](#v1-GetTrayPowerDetailsResponse)
+  - [HealthProbeAlert](#v1-HealthProbeAlert)
+  - [HealthProbeSuccess](#v1-HealthProbeSuccess)
+  - [HealthReport](#v1-HealthReport)
+  - [Identifier](#v1-Identifier)
+  - [IngestRackRequest](#v1-IngestRackRequest)
+  - [ListEventRulesRequest](#v1-ListEventRulesRequest)
+  - [ListEventRulesResponse](#v1-ListEventRulesResponse)
+  - [ListOperationRulesRequest](#v1-ListOperationRulesRequest)
+  - [ListOperationRulesResponse](#v1-ListOperationRulesResponse)
+  - [ListOperationRunTargetsRequest](#v1-ListOperationRunTargetsRequest)
+  - [ListOperationRunTargetsResponse](#v1-ListOperationRunTargetsResponse)
+  - [ListOperationRunsRequest](#v1-ListOperationRunsRequest)
+  - [ListOperationRunsResponse](#v1-ListOperationRunsResponse)
+  - [ListRackRuleAssociationsRequest](#v1-ListRackRuleAssociationsRequest)
+  - [ListRackRuleAssociationsResponse](#v1-ListRackRuleAssociationsResponse)
+  - [ListTaskScheduleScopesRequest](#v1-ListTaskScheduleScopesRequest)
+  - [ListTaskScheduleScopesResponse](#v1-ListTaskScheduleScopesResponse)
+  - [ListTaskSchedulesRequest](#v1-ListTaskSchedulesRequest)
+  - [ListTaskSchedulesResponse](#v1-ListTaskSchedulesResponse)
+  - [ListTasksRequest](#v1-ListTasksRequest)
+  - [ListTasksResponse](#v1-ListTasksResponse)
+  - [Location](#v1-Location)
+  - [NVLDomain](#v1-NVLDomain)
+  - [NVLDomainTarget](#v1-NVLDomainTarget)
+  - [NVLDomainTargets](#v1-NVLDomainTargets)
+  - [NVLinkDomain](#v1-NVLinkDomain)
+  - [OperationKind](#v1-OperationKind)
+  - [OperationRule](#v1-OperationRule)
+  - [OperationRun](#v1-OperationRun)
+  - [OperationRunConfiguration](#v1-OperationRunConfiguration)
+  - [OperationRunConflictPolicy](#v1-OperationRunConflictPolicy)
+  - [OperationRunConflictRetryPolicy](#v1-OperationRunConflictRetryPolicy)
+  - [OperationRunCountPhase](#v1-OperationRunCountPhase)
+  - [OperationRunFailureCountGate](#v1-OperationRunFailureCountGate)
+  - [OperationRunFailureRateGate](#v1-OperationRunFailureRateGate)
+  - [OperationRunFilter](#v1-OperationRunFilter)
+  - [OperationRunOperation](#v1-OperationRunOperation)
+  - [OperationRunOptions](#v1-OperationRunOptions)
+  - [OperationRunOrderingPolicy](#v1-OperationRunOrderingPolicy)
+  - [OperationRunPercentagePhase](#v1-OperationRunPercentagePhase)
+  - [OperationRunPhaseAdvancePolicy](#v1-OperationRunPhaseAdvancePolicy)
+  - [OperationRunPhasePolicy](#v1-OperationRunPhasePolicy)
+  - [OperationRunPhaseStats](#v1-OperationRunPhaseStats)
+  - [OperationRunPhysicalLocationOrdering](#v1-OperationRunPhysicalLocationOrdering)
+  - [OperationRunRandomOrdering](#v1-OperationRunRandomOrdering)
+  - [OperationRunSafetyGate](#v1-OperationRunSafetyGate)
+  - [OperationRunSafetyPolicy](#v1-OperationRunSafetyPolicy)
+  - [OperationRunSelector](#v1-OperationRunSelector)
+  - [OperationRunState](#v1-OperationRunState)
+  - [OperationRunStateFilter](#v1-OperationRunStateFilter)
+  - [OperationRunStats](#v1-OperationRunStats)
+  - [OperationRunSummary](#v1-OperationRunSummary)
+  - [OperationRunTarget](#v1-OperationRunTarget)
+  - [OperationRunTargetOutcomeCounts](#v1-OperationRunTargetOutcomeCounts)
+  - [OperationRunTargetScope](#v1-OperationRunTargetScope)
+  - [OperationTargetSpec](#v1-OperationTargetSpec)
+  - [OrderBy](#v1-OrderBy)
+  - [Pagination](#v1-Pagination)
+  - [PatchComponentRequest](#v1-PatchComponentRequest)
+  - [PatchComponentResponse](#v1-PatchComponentResponse)
+  - [PatchRackRequest](#v1-PatchRackRequest)
+  - [PatchRackResponse](#v1-PatchRackResponse)
+  - [PauseOperationRunRequest](#v1-PauseOperationRunRequest)
+  - [PauseTaskScheduleRequest](#v1-PauseTaskScheduleRequest)
+  - [PerComponentFirmwareAuthenticationData](#v1-PerComponentFirmwareAuthenticationData)
+  - [PercentageOperationRunPhases](#v1-PercentageOperationRunPhases)
+  - [PercentageSelector](#v1-PercentageSelector)
+  - [PowerActionDetails](#v1-PowerActionDetails)
+  - [PowerActualDetails](#v1-PowerActualDetails)
+  - [PowerControlTaskOperation](#v1-PowerControlTaskOperation)
+  - [PowerDesiredDetails](#v1-PowerDesiredDetails)
+  - [PowerOffRackRequest](#v1-PowerOffRackRequest)
+  - [PowerOnRackRequest](#v1-PowerOnRackRequest)
+  - [PowerOperations](#v1-PowerOperations)
+  - [PowerResetRackRequest](#v1-PowerResetRackRequest)
+  - [PowerTaskDetails](#v1-PowerTaskDetails)
+  - [PowerTaskDetailsList](#v1-PowerTaskDetailsList)
+  - [PowerTaskWaitingContext](#v1-PowerTaskWaitingContext)
+  - [PurgeComponentRequest](#v1-PurgeComponentRequest)
+  - [PurgeComponentResponse](#v1-PurgeComponentResponse)
+  - [PurgeRackRequest](#v1-PurgeRackRequest)
+  - [PurgeRackResponse](#v1-PurgeRackResponse)
+  - [QueueOptions](#v1-QueueOptions)
+  - [Rack](#v1-Rack)
+  - [RackPosition](#v1-RackPosition)
+  - [RackRuleAssociation](#v1-RackRuleAssociation)
+  - [RackTarget](#v1-RackTarget)
+  - [RackTargets](#v1-RackTargets)
+  - [RemoveTaskScheduleScopeRequest](#v1-RemoveTaskScheduleScopeRequest)
+  - [ResumeOperationRunRequest](#v1-ResumeOperationRunRequest)
+  - [ResumeTaskScheduleRequest](#v1-ResumeTaskScheduleRequest)
+  - [ScheduleConfig](#v1-ScheduleConfig)
+  - [ScheduleSpec](#v1-ScheduleSpec)
+  - [ScheduledOperation](#v1-ScheduledOperation)
+  - [SetRuleAsDefaultRequest](#v1-SetRuleAsDefaultRequest)
+  - [StringQueryInfo](#v1-StringQueryInfo)
+  - [SubmitTaskResponse](#v1-SubmitTaskResponse)
+  - [Task](#v1-Task)
+  - [TaskBrief](#v1-TaskBrief)
+  - [TaskOperation](#v1-TaskOperation)
+  - [TaskSchedule](#v1-TaskSchedule)
+  - [TaskScheduleScope](#v1-TaskScheduleScope)
+  - [TaskStats](#v1-TaskStats)
+  - [TrayPowerDetails](#v1-TrayPowerDetails)
+  - [TriggerTaskScheduleRequest](#v1-TriggerTaskScheduleRequest)
+  - [UUID](#v1-UUID)
+  - [UpdateEventRuleRequest](#v1-UpdateEventRuleRequest)
+  - [UpdateOperationRuleRequest](#v1-UpdateOperationRuleRequest)
+  - [UpdateTaskScheduleRequest](#v1-UpdateTaskScheduleRequest)
+  - [UpdateTaskScheduleScopeRequest](#v1-UpdateTaskScheduleScopeRequest)
+  - [UpdateTaskScheduleScopeResponse](#v1-UpdateTaskScheduleScopeResponse)
+  - [UpgradeFirmwareRequest](#v1-UpgradeFirmwareRequest)
+  - [ValidateComponentsRequest](#v1-ValidateComponentsRequest)
+  - [ValidateComponentsResponse](#v1-ValidateComponentsResponse)
+  - [VersionRequest](#v1-VersionRequest)
+  - [BMCType](#v1-BMCType)
+  - [ComponentFilterField](#v1-ComponentFilterField)
+  - [ComponentOrderByField](#v1-ComponentOrderByField)
+  - [ComponentType](#v1-ComponentType)
+  - [ConflictStrategy](#v1-ConflictStrategy)
+  - [DiffType](#v1-DiffType)
+  - [EventRuleConflictStrategy](#v1-EventRuleConflictStrategy)
+  - [EventRuleScopeType](#v1-EventRuleScopeType)
+  - [EventRuleSeverity](#v1-EventRuleSeverity)
+  - [EventRuleTargetStrategy](#v1-EventRuleTargetStrategy)
+  - [FirmwareControlOperation](#v1-FirmwareControlOperation)
+  - [LeakHandlingStatus](#v1-LeakHandlingStatus)
+  - [LeakStatus](#v1-LeakStatus)
+  - [OperationRunPhysicalLocationOrdering.Strategy](#v1-OperationRunPhysicalLocationOrdering-Strategy)
+  - [OperationRunSafetyGateScope](#v1-OperationRunSafetyGateScope)
+  - [OperationRunStatus](#v1-OperationRunStatus)
+  - [OperationRunStatusReason](#v1-OperationRunStatusReason)
+  - [OperationRunTargetPhaseScope](#v1-OperationRunTargetPhaseScope)
+  - [OperationRunTargetStatus](#v1-OperationRunTargetStatus)
+  - [OperationType](#v1-OperationType)
+  - [OverlapPolicy](#v1-OverlapPolicy)
+  - [Phase](#v1-Phase)
+  - [PowerControlOp](#v1-PowerControlOp)
+  - [PowerControlOperation](#v1-PowerControlOperation)
+  - [PowerDetailsReadError](#v1-PowerDetailsReadError)
+  - [PowerTaskRelevance](#v1-PowerTaskRelevance)
+  - [RackFilterField](#v1-RackFilterField)
+  - [RackOrderByField](#v1-RackOrderByField)
+  - [ScheduleSpecType](#v1-ScheduleSpecType)
+  - [TaskExecutorType](#v1-TaskExecutorType)
+  - [TaskKind](#v1-TaskKind)
+  - [TaskStatus](#v1-TaskStatus)
+  - [Flow](#v1-Flow)
 - [Scalar Value Types](#scalar-value-types)
 
-
-
 <a name="flow-proto"></a>
+
 <p align="right"><a href="#top">Top</a></p>
 
 ## flow.proto
 
-
-
 <a name="v1-ACPowerCycleRackRequest"></a>
 
 ### ACPowerCycleRackRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -265,47 +272,31 @@
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
 | override_readiness_check | [bool](#bool) |  | When true, proceed with the AC power cycle even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
 
-
-
-
-
-
 <a name="v1-AddComponentRequest"></a>
 
 ### AddComponentRequest
+
 AddComponent - ingest a single component into the inventory. The component
 may optionally be attached to an existing rack via component.rack_id; when
 rack_id is omitted the component is stored without a rack assignment and
 can be moved into a rack later via PatchComponent.
 
-
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | component | [Component](#v1-Component) |  | Required: the component to add. component.rack_id is optional. |
-
-
-
-
-
 
 <a name="v1-AddComponentResponse"></a>
 
 ### AddComponentResponse
 
-
-
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | component | [Component](#v1-Component) |  | The created component |
 
-
-
-
-
-
 <a name="v1-AddTaskScheduleScopeRequest"></a>
 
 ### AddTaskScheduleScopeRequest
+
 AddTaskScheduleScopeRequest adds one or more scope entries to a schedule.
 Supports rack or NVLink domain targeting (with an optional component-type
 filter) and component targeting (specific components by UUID or external reference).
@@ -316,85 +307,51 @@ Racks already present in the scope have their component filter merged with the
 incoming filter rather than erroring; racks not yet present are added.
 Existing racks are never removed — use UpdateTaskScheduleScope for replace semantics.
 
-
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | schedule_id | [UUID](#v1-UUID) |  |  |
 | target_spec | [OperationTargetSpec](#v1-OperationTargetSpec) |  |  |
 
-
-
-
-
-
 <a name="v1-AddTaskScheduleScopeResponse"></a>
 
 ### AddTaskScheduleScopeResponse
-AddTaskScheduleScopeResponse returns the newly created scope entries.
 
+AddTaskScheduleScopeResponse returns the newly created scope entries.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | scopes | [TaskScheduleScope](#v1-TaskScheduleScope) | repeated |  |
 
-
-
-
-
-
 <a name="v1-AdvanceOperationRunPhaseRequest"></a>
 
 ### AdvanceOperationRunPhaseRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  |  |
 | expected_phase_index | [int32](#int32) | optional | Optional guard. When set, the phase that would be opened must match. |
 
-
-
-
-
-
 <a name="v1-AssociateRuleWithRackRequest"></a>
 
 ### AssociateRuleWithRackRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | rack_id | [UUID](#v1-UUID) |  |  |
 | rule_id | [UUID](#v1-UUID) |  |  |
 
-
-
-
-
-
 <a name="v1-AttachRacksToNVLDomainRequest"></a>
 
 ### AttachRacksToNVLDomainRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | nvl_domain_identifier | [Identifier](#v1-Identifier) |  |  |
 | rack_identifiers | [Identifier](#v1-Identifier) | repeated |  |
 
-
-
-
-
-
 <a name="v1-BMCInfo"></a>
 
 ### BMCInfo
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -402,16 +359,9 @@ AddTaskScheduleScopeResponse returns the newly created scope entries.
 | mac_address | [string](#string) |  |  |
 | ip_address | [string](#string) | optional |  |
 
-
-
-
-
-
 <a name="v1-BringUpRackRequest"></a>
 
 ### BringUpRackRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -420,16 +370,9 @@ AddTaskScheduleScopeResponse returns the newly created scope entries.
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
 | override_readiness_check | [bool](#bool) |  | When true, allow the bring-up sequence (which may power-cycle hosts and reset rack-scoped components) to proceed even if any host in scope is reported as not ready for the operation by its persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
 
-
-
-
-
-
 <a name="v1-BuildInfo"></a>
 
 ### BuildInfo
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -437,60 +380,35 @@ AddTaskScheduleScopeResponse returns the newly created scope entries.
 | build_time | [string](#string) |  | e.g., 2025-01-27T10:30:00Z |
 | git_commit | [string](#string) |  | e.g., abc1234 |
 
-
-
-
-
-
 <a name="v1-CancelOperationRunRequest"></a>
 
 ### CancelOperationRunRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  |  |
 | reason | [string](#string) |  |  |
 
-
-
-
-
-
 <a name="v1-CancelTaskRequest"></a>
 
 ### CancelTaskRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | task_id | [UUID](#v1-UUID) |  |  |
 
-
-
-
-
-
 <a name="v1-CancelTaskResponse"></a>
 
 ### CancelTaskResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | task | [Task](#v1-Task) |  |  |
 
-
-
-
-
-
 <a name="v1-CheckScheduleConflictsRequest"></a>
 
 ### CheckScheduleConflictsRequest
+
 CheckScheduleConflictsRequest checks whether a proposed scheduled operation
 would conflict with any existing enabled schedules.
 The operation oneof mirrors CreateTaskScheduleRequest: the target_spec
@@ -505,39 +423,26 @@ Execution-time conflict detection (the task manager&#39;s conflict rules) remain
 the authoritative backstop. The caller may proceed even when conflicts are
 returned.
 
-
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | operation | [ScheduledOperation](#v1-ScheduledOperation) |  |  |
 | exclude_schedule_id | [UUID](#v1-UUID) | optional | exclude_schedule_id omits a schedule from the conflict check results. Pass the ID of the schedule being updated so its current definition is not returned as a conflict against the proposed replacement operation. |
 
-
-
-
-
-
 <a name="v1-CheckScheduleConflictsResponse"></a>
 
 ### CheckScheduleConflictsResponse
+
 CheckScheduleConflictsResponse lists the existing enabled schedules whose
 operations may conflict with the proposed operation at execution time.
 An empty list means no conflicts were detected.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | conflicts | [TaskSchedule](#v1-TaskSchedule) | repeated |  |
 
-
-
-
-
-
 <a name="v1-Component"></a>
 
 ### Component
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -558,16 +463,9 @@ An empty list means no conflicts were detected.
 | health | [HealthReport](#v1-HealthReport) |  | Latest Core aggregate health snapshot mirrored by inventory sync. |
 | nvl_domain_external_id | [string](#string) | optional | Owning rack&#39;s domain external ID (rack group ID). |
 
-
-
-
-
-
 <a name="v1-ComponentDiff"></a>
 
 ### ComponentDiff
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -579,33 +477,23 @@ An empty list means no conflicts were detected.
 | id | [UUID](#v1-UUID) |  | Flow internal component UUID |
 | component_mac_address | [string](#string) |  | BMC MAC address identifying a missing expected component |
 
-
-
-
-
-
 <a name="v1-ComponentFilter"></a>
 
 ### ComponentFilter
+
 ComponentFilter is a reusable unresolved component filter. It describes
 selection criteria, not the concrete components selected after planning.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | types | [ComponentTypes](#v1-ComponentTypes) |  |  |
 | components | [ComponentTargets](#v1-ComponentTargets) |  |  |
 
-
-
-
-
-
 <a name="v1-ComponentOperationStatus"></a>
 
 ### ComponentOperationStatus
-ComponentOperationStatus is Flow&#39;s view of a component&#39;s operability.
 
+ComponentOperationStatus is Flow&#39;s view of a component&#39;s operability.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -613,124 +501,78 @@ ComponentOperationStatus is Flow&#39;s view of a component&#39;s operability.
 | reason | [string](#string) |  | Human-readable source status detail. |
 | blocked_operations | [OperationType](#v1-OperationType) | repeated | Operations Flow will reject while the component is in this status. Empty when phase is READY. |
 
-
-
-
-
-
 <a name="v1-ComponentTarget"></a>
 
 ### ComponentTarget
-ComponentTarget identifies a specific component
 
+ComponentTarget identifies a specific component
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  | Component UUID |
 | external | [ExternalRef](#v1-ExternalRef) |  |  |
 
-
-
-
-
-
 <a name="v1-ComponentTargets"></a>
 
 ### ComponentTargets
-ComponentTargets contains one or more component targets
 
+ComponentTargets contains one or more component targets
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | targets | [ComponentTarget](#v1-ComponentTarget) | repeated |  |
 
-
-
-
-
-
 <a name="v1-ComponentTypes"></a>
 
 ### ComponentTypes
-ComponentTypes contains one or more component type filters
 
+ComponentTypes contains one or more component type filters
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | types | [ComponentType](#v1-ComponentType) | repeated |  |
 
-
-
-
-
-
 <a name="v1-ComponentsByType"></a>
 
 ### ComponentsByType
-ComponentsByType is the resolved component set selected for execution.
 
+ComponentsByType is the resolved component set selected for execution.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | groups | [ComponentsForType](#v1-ComponentsForType) | repeated |  |
 
-
-
-
-
-
 <a name="v1-ComponentsForType"></a>
 
 ### ComponentsForType
-ComponentsForType contains resolved component UUIDs of one component type.
 
+ComponentsForType contains resolved component UUIDs of one component type.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | type | [ComponentType](#v1-ComponentType) |  |  |
 | component_ids | [UUID](#v1-UUID) | repeated |  |
 
-
-
-
-
-
 <a name="v1-CountOperationRunPhases"></a>
 
 ### CountOperationRunPhases
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | phases | [OperationRunCountPhase](#v1-OperationRunCountPhase) | repeated | Counts for phases before the generated final phase. The generated final phase covers the remaining candidate scope after all targets assigned by these defined count phases. |
 
-
-
-
-
-
 <a name="v1-CreateEventRuleBindingRequest"></a>
 
 ### CreateEventRuleBindingRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | rule_id | [UUID](#v1-UUID) |  |  |
 | scope | [EventRuleScope](#v1-EventRuleScope) |  | Required. A rack scope ID must identify an existing inventory rack. |
 
-
-
-
-
-
 <a name="v1-CreateEventRuleRequest"></a>
 
 ### CreateEventRuleRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -739,76 +581,41 @@ ComponentsForType contains resolved component UUIDs of one component type.
 | event_type | [string](#string) |  | Required. Must be registered by Flow. Supported value: &#34;hardware.leak.detected&#34;. |
 | actions | [EventRuleAction](#v1-EventRuleAction) | repeated |  |
 
-
-
-
-
-
 <a name="v1-CreateExpectedRackRequest"></a>
 
 ### CreateExpectedRackRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | rack | [Rack](#v1-Rack) |  |  |
 
-
-
-
-
-
 <a name="v1-CreateExpectedRackResponse"></a>
 
 ### CreateExpectedRackResponse
 
-
-
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  |  |
-
-
-
-
-
 
 <a name="v1-CreateNVLDomainRequest"></a>
 
 ### CreateNVLDomainRequest
 
-
-
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | nvl_domain | [NVLDomain](#v1-NVLDomain) |  |  |
-
-
-
-
-
 
 <a name="v1-CreateNVLDomainResponse"></a>
 
 ### CreateNVLDomainResponse
 
-
-
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  |  |
 
-
-
-
-
-
 <a name="v1-CreateOperationRuleRequest"></a>
 
 ### CreateOperationRuleRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -819,35 +626,23 @@ ComponentsForType contains resolved component UUIDs of one component type.
 | rule_definition_json | [string](#string) |  | JSON-encoded RuleDefinition |
 | is_default | [bool](#bool) |  |  |
 
-
-
-
-
-
 <a name="v1-CreateOperationRuleResponse"></a>
 
 ### CreateOperationRuleResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  |  |
 
-
-
-
-
-
 <a name="v1-CreateOperationRunRequest"></a>
 
 ### CreateOperationRunRequest
+
 CreateOperationRunRequest creates a durable rollout over a selected set of
 rack execution targets. The operation request&#39;s target_spec and target_scope,
 when present, define the candidate scope that selector is applied to. When
 omitted, the service builds the candidate scope from all qualified racks that
 are applicable to the operation.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -855,50 +650,31 @@ are applicable to the operation.
 | description | [string](#string) |  |  |
 | configuration | [OperationRunConfiguration](#v1-OperationRunConfiguration) |  | Required. Reusable rollout configuration for target selection, execution policy, and operation template. |
 
-
-
-
-
-
 <a name="v1-CreateOperationRunResponse"></a>
 
 ### CreateOperationRunResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  |  |
 
-
-
-
-
-
 <a name="v1-CreateTaskScheduleRequest"></a>
 
 ### CreateTaskScheduleRequest
+
 CreateTaskScheduleRequest creates a new TaskSchedule.
 The target_spec on the operation message defines the initial scope; it follows
 the same targeting rules as AddTaskScheduleScope.
 Use AddTaskScheduleScope / RemoveTaskScheduleScope to modify the scope after creation.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | schedule | [ScheduleConfig](#v1-ScheduleConfig) |  |  |
 | operation | [ScheduledOperation](#v1-ScheduledOperation) |  |  |
 
-
-
-
-
-
 <a name="v1-DecommissionRackRequest"></a>
 
 ### DecommissionRackRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -907,143 +683,81 @@ Use AddTaskScheduleScope / RemoveTaskScheduleScope to modify the scope after cre
 | queue_options | [QueueOptions](#v1-QueueOptions) | optional | optional queue policy overrides |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
 
-
-
-
-
-
 <a name="v1-DeleteComponentRequest"></a>
 
 ### DeleteComponentRequest
-DeleteComponent - soft-delete a single component by UUID
 
+DeleteComponent - soft-delete a single component by UUID
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  | Required: component UUID to delete |
 
-
-
-
-
-
 <a name="v1-DeleteComponentResponse"></a>
 
 ### DeleteComponentResponse
 
-
-
-
-
-
-
 <a name="v1-DeleteEventRuleBindingRequest"></a>
 
 ### DeleteEventRuleBindingRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | event_type | [string](#string) |  | Required. Identifies the event-family resolution slot to clear. Must be registered by Flow. Supported value: &#34;hardware.leak.detected&#34;. |
 | scope | [EventRuleScope](#v1-EventRuleScope) |  | Required. Must exactly match the site or rack scope of the binding. |
 
-
-
-
-
-
 <a name="v1-DeleteEventRuleRequest"></a>
 
 ### DeleteEventRuleRequest
 
-
-
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | rule_id | [UUID](#v1-UUID) |  |  |
-
-
-
-
-
 
 <a name="v1-DeleteOperationRuleRequest"></a>
 
 ### DeleteOperationRuleRequest
 
-
-
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | rule_id | [UUID](#v1-UUID) |  |  |
 
-
-
-
-
-
 <a name="v1-DeleteRackRequest"></a>
 
 ### DeleteRackRequest
-DeleteRack - soft-delete a rack and cascade to its components
 
+DeleteRack - soft-delete a rack and cascade to its components
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  | Required: rack UUID to soft-delete |
 
-
-
-
-
-
 <a name="v1-DeleteRackResponse"></a>
 
 ### DeleteRackResponse
 
-
-
-
-
-
-
 <a name="v1-DeleteTaskScheduleRequest"></a>
 
 ### DeleteTaskScheduleRequest
+
 DeleteTaskScheduleRequest permanently deletes a TaskSchedule and all its
 scope entries. In-flight tasks are not cancelled.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  |  |
 
-
-
-
-
-
 <a name="v1-DetachRacksFromNVLDomainRequest"></a>
 
 ### DetachRacksFromNVLDomainRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | rack_identifiers | [Identifier](#v1-Identifier) | repeated |  |
 
-
-
-
-
-
 <a name="v1-DeviceInfo"></a>
 
 ### DeviceInfo
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1054,47 +768,26 @@ scope entries. In-flight tasks are not cancelled.
 | serial_number | [string](#string) |  |  |
 | description | [string](#string) | optional |  |
 
-
-
-
-
-
 <a name="v1-DeviceSerialInfo"></a>
 
 ### DeviceSerialInfo
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | manufacturer | [string](#string) |  |  |
 | serial_number | [string](#string) |  |  |
 
-
-
-
-
-
 <a name="v1-DisableEventRuleRequest"></a>
 
 ### DisableEventRuleRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | rule_id | [UUID](#v1-UUID) |  |  |
 
-
-
-
-
-
 <a name="v1-DisassociateRuleFromRackRequest"></a>
 
 ### DisassociateRuleFromRackRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1102,46 +795,25 @@ scope entries. In-flight tasks are not cancelled.
 | operation_type | [OperationType](#v1-OperationType) |  |  |
 | operation_code | [string](#string) |  | Specific operation code |
 
-
-
-
-
-
 <a name="v1-EnableEventRuleRequest"></a>
 
 ### EnableEventRuleRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | rule_id | [UUID](#v1-UUID) |  |  |
 
-
-
-
-
-
 <a name="v1-EqualOperationRunPhases"></a>
 
 ### EqualOperationRunPhases
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | phase_count | [int32](#int32) |  | Required. Example: 10 means ten roughly equal phases. |
 
-
-
-
-
-
 <a name="v1-EventRule"></a>
 
 ### EventRule
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1155,16 +827,9 @@ scope entries. In-flight tasks are not cancelled.
 | created_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |  |
 | updated_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |  |
 
-
-
-
-
-
 <a name="v1-EventRuleAction"></a>
 
 ### EventRuleAction
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1174,47 +839,26 @@ scope entries. In-flight tasks are not cancelled.
 | send_alert | [EventRuleSendAlertAction](#v1-EventRuleSendAlertAction) |  |  |
 | noop | [EventRuleNoopAction](#v1-EventRuleNoopAction) |  |  |
 
-
-
-
-
-
 <a name="v1-EventRuleActionCondition"></a>
 
 ### EventRuleActionCondition
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | severities | [EventRuleSeverity](#v1-EventRuleSeverity) | repeated | Optional. Matches when the event severity equals any listed value (OR). Omitted or empty imposes no severity constraint. When component_types is also non-empty, both field conditions must match (AND). |
 | component_types | [ComponentType](#v1-ComponentType) | repeated | Optional. Matches a component resource whose type equals any listed value (OR). Omitted or empty imposes no component-type constraint. When severities is also non-empty, both field conditions must match (AND). |
 
-
-
-
-
-
 <a name="v1-EventRuleActionsUpdate"></a>
 
 ### EventRuleActionsUpdate
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | actions | [EventRuleAction](#v1-EventRuleAction) | repeated |  |
 
-
-
-
-
-
 <a name="v1-EventRuleBinding"></a>
 
 ### EventRuleBinding
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1223,79 +867,44 @@ scope entries. In-flight tasks are not cancelled.
 | event_type | [string](#string) |  |  |
 | scope | [EventRuleScope](#v1-EventRuleScope) |  |  |
 
-
-
-
-
-
 <a name="v1-EventRuleMetadataUpdate"></a>
 
 ### EventRuleMetadataUpdate
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | name | [string](#string) |  |  |
 | description | [string](#string) |  |  |
 
-
-
-
-
-
 <a name="v1-EventRuleNoopAction"></a>
 
 ### EventRuleNoopAction
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | reason | [string](#string) |  |  |
 
-
-
-
-
-
 <a name="v1-EventRuleScope"></a>
 
 ### EventRuleScope
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | type | [EventRuleScopeType](#v1-EventRuleScopeType) |  |  |
 | id | [UUID](#v1-UUID) |  | Required for rack scope and omitted for site scope. |
 
-
-
-
-
-
 <a name="v1-EventRuleSendAlertAction"></a>
 
 ### EventRuleSendAlertAction
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | severity | [EventRuleSeverity](#v1-EventRuleSeverity) |  |  |
 | message | [string](#string) |  |  |
 
-
-
-
-
-
 <a name="v1-EventRuleSubmitTaskAction"></a>
 
 ### EventRuleSubmitTaskAction
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1304,32 +913,20 @@ scope entries. In-flight tasks are not cancelled.
 | description | [string](#string) |  |  |
 | operation | [TaskOperation](#v1-TaskOperation) |  | Required. The action must specify exactly one typed operation. Targets are derived from the event and target_strategy rather than embedded in this operation. |
 
-
-
-
-
-
 <a name="v1-ExternalRef"></a>
 
 ### ExternalRef
-ExternalRef identifies a component by its external identifier and optional type.
 
+ExternalRef identifies a component by its external identifier and optional type.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | type | [ComponentType](#v1-ComponentType) |  | UNKNOWN requires an unambiguous ID. |
 | id | [string](#string) |  |  |
 
-
-
-
-
-
 <a name="v1-FieldDiff"></a>
 
 ### FieldDiff
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1337,16 +934,11 @@ ExternalRef identifies a component by its external identifier and optional type.
 | expected_value | [string](#string) |  |  |
 | actual_value | [string](#string) |  |  |
 
-
-
-
-
-
 <a name="v1-Filter"></a>
 
 ### Filter
-Filter represents a single filter condition
 
+Filter represents a single filter condition
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1354,33 +946,21 @@ Filter represents a single filter condition
 | component_field | [ComponentFilterField](#v1-ComponentFilterField) |  | For component queries |
 | query_info | [StringQueryInfo](#v1-StringQueryInfo) |  |  |
 
-
-
-
-
-
 <a name="v1-FirmwareAuthenticationData"></a>
 
 ### FirmwareAuthenticationData
+
 FirmwareAuthenticationData selects either one value shared by every target
 or values scoped to supported firmware tray types.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | shared | [string](#string) |  |  |
 | per_component | [PerComponentFirmwareAuthenticationData](#v1-PerComponentFirmwareAuthenticationData) |  |  |
 
-
-
-
-
-
 <a name="v1-FirmwareControlTaskOperation"></a>
 
 ### FirmwareControlTaskOperation
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1392,64 +972,38 @@ or values scoped to supported firmware tray types.
 | override_readiness_check | [bool](#bool) |  | Bypasses the component readiness gate when the task executes. |
 | override_version_check | [bool](#bool) |  | Overrides firmware version-based checks when the selected component backend applies the update. |
 
-
-
-
-
-
 <a name="v1-GetComponentInfoByIDRequest"></a>
 
 ### GetComponentInfoByIDRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  |  |
 | with_rack | [bool](#bool) |  |  |
 
-
-
-
-
-
 <a name="v1-GetComponentInfoBySerialRequest"></a>
 
 ### GetComponentInfoBySerialRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | serial_info | [DeviceSerialInfo](#v1-DeviceSerialInfo) |  |  |
 | with_rack | [bool](#bool) |  |  |
 
-
-
-
-
-
 <a name="v1-GetComponentInfoResponse"></a>
 
 ### GetComponentInfoResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | component | [Component](#v1-Component) |  |  |
 | rack | [Rack](#v1-Rack) |  |  |
 
-
-
-
-
-
 <a name="v1-GetComponentsRequest"></a>
 
 ### GetComponentsRequest
-GetComponents - retrieves components from local database
 
+GetComponents - retrieves components from local database
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1458,32 +1012,18 @@ GetComponents - retrieves components from local database
 | pagination | [Pagination](#v1-Pagination) | optional |  |
 | order_by | [OrderBy](#v1-OrderBy) | optional | Defaults to name ascending. Component UUID ascending breaks equal-field ties. |
 
-
-
-
-
-
 <a name="v1-GetComponentsResponse"></a>
 
 ### GetComponentsResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | components | [Component](#v1-Component) | repeated |  |
 | total | [int32](#int32) |  |  |
 
-
-
-
-
-
 <a name="v1-GetEffectiveEventRuleRequest"></a>
 
 ### GetEffectiveEventRuleRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1491,79 +1031,44 @@ GetComponents - retrieves components from local database
 | rack_id | [UUID](#v1-UUID) |  |  |
 | component_id | [UUID](#v1-UUID) |  |  |
 
-
-
-
-
-
 <a name="v1-GetEventRuleBindingRequest"></a>
 
 ### GetEventRuleBindingRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | event_type | [string](#string) |  | Required. Must be registered by Flow. Supported value: &#34;hardware.leak.detected&#34;. |
 | scope | [EventRuleScope](#v1-EventRuleScope) |  |  |
 
-
-
-
-
-
 <a name="v1-GetEventRuleRequest"></a>
 
 ### GetEventRuleRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | rule_id | [UUID](#v1-UUID) |  |  |
 
-
-
-
-
-
 <a name="v1-GetListOfNVLDomainsRequest"></a>
 
 ### GetListOfNVLDomainsRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | info | [StringQueryInfo](#v1-StringQueryInfo) |  |  |
 | pagination | [Pagination](#v1-Pagination) | optional | Results are ordered by name ascending, then UUID ascending. |
 
-
-
-
-
-
 <a name="v1-GetListOfNVLDomainsResponse"></a>
 
 ### GetListOfNVLDomainsResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | nvl_domains | [NVLDomain](#v1-NVLDomain) | repeated |  |
 | total | [int32](#int32) |  |  |
 
-
-
-
-
-
 <a name="v1-GetListOfNVLinkDomainsRequest"></a>
 
 ### GetListOfNVLinkDomainsRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1572,32 +1077,18 @@ GetComponents - retrieves components from local database
 | pagination | [Pagination](#v1-Pagination) | optional |  |
 | order_by | [string](#string) |  | NAME_ASC (default) or NAME_DESC. Equal names retain a stable inventory order. |
 
-
-
-
-
-
 <a name="v1-GetListOfNVLinkDomainsResponse"></a>
 
 ### GetListOfNVLinkDomainsResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | domains | [NVLinkDomain](#v1-NVLinkDomain) | repeated |  |
 | total | [int32](#int32) |  |  |
 
-
-
-
-
-
 <a name="v1-GetListOfRacksRequest"></a>
 
 ### GetListOfRacksRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1607,156 +1098,86 @@ GetComponents - retrieves components from local database
 | order_by | [OrderBy](#v1-OrderBy) | optional | Defaults to name ascending. Rack UUID ascending breaks equal-field ties. |
 | with_external_id_only | [bool](#bool) |  |  |
 
-
-
-
-
-
 <a name="v1-GetListOfRacksResponse"></a>
 
 ### GetListOfRacksResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | racks | [Rack](#v1-Rack) | repeated |  |
 | total | [int32](#int32) |  |  |
 
-
-
-
-
-
 <a name="v1-GetNVLinkDomainRequest"></a>
 
 ### GetNVLinkDomainRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [string](#string) |  |  |
 | with_components | [bool](#bool) |  |  |
 
-
-
-
-
-
 <a name="v1-GetNVLinkDomainResponse"></a>
 
 ### GetNVLinkDomainResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | domain | [NVLinkDomain](#v1-NVLinkDomain) |  |  |
 
-
-
-
-
-
 <a name="v1-GetOperationRuleRequest"></a>
 
 ### GetOperationRuleRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | rule_id | [UUID](#v1-UUID) |  |  |
 
-
-
-
-
-
 <a name="v1-GetOperationRunRequest"></a>
 
 ### GetOperationRunRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  |  |
 | include_stats | [bool](#bool) |  | When true, Flow computes derived stats from operation_run_target rows and returns OperationRun.stats. |
 
-
-
-
-
-
 <a name="v1-GetOperationRunResponse"></a>
 
 ### GetOperationRunResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | operation_run | [OperationRun](#v1-OperationRun) |  |  |
 
-
-
-
-
-
 <a name="v1-GetRackInfoByIDRequest"></a>
 
 ### GetRackInfoByIDRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  |  |
 | with_components | [bool](#bool) |  |  |
 
-
-
-
-
-
 <a name="v1-GetRackInfoBySerialRequest"></a>
 
 ### GetRackInfoBySerialRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | serial_info | [DeviceSerialInfo](#v1-DeviceSerialInfo) |  |  |
 | with_components | [bool](#bool) |  |  |
 
-
-
-
-
-
 <a name="v1-GetRackInfoResponse"></a>
 
 ### GetRackInfoResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | rack | [Rack](#v1-Rack) |  |  |
 
-
-
-
-
-
 <a name="v1-GetRackRuleAssociationRequest"></a>
 
 ### GetRackRuleAssociationRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1764,106 +1185,80 @@ GetComponents - retrieves components from local database
 | operation_type | [OperationType](#v1-OperationType) |  |  |
 | operation_code | [string](#string) |  | Specific operation code |
 
-
-
-
-
-
 <a name="v1-GetRackRuleAssociationResponse"></a>
 
 ### GetRackRuleAssociationResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | rule_id | [UUID](#v1-UUID) |  | Empty if no association exists |
 
-
-
-
-
-
 <a name="v1-GetRacksForNVLDomainRequest"></a>
 
 ### GetRacksForNVLDomainRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | nvl_domain_identifier | [Identifier](#v1-Identifier) |  |  |
 
-
-
-
-
-
 <a name="v1-GetRacksForNVLDomainResponse"></a>
 
 ### GetRacksForNVLDomainResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | racks | [Rack](#v1-Rack) | repeated |  |
 
-
-
-
-
-
 <a name="v1-GetTaskScheduleRequest"></a>
 
 ### GetTaskScheduleRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  |  |
 
-
-
-
-
-
 <a name="v1-GetTasksByIDsRequest"></a>
 
 ### GetTasksByIDsRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | task_ids | [UUID](#v1-UUID) | repeated |  |
 
-
-
-
-
-
 <a name="v1-GetTasksByIDsResponse"></a>
 
 ### GetTasksByIDsResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | tasks | [Task](#v1-Task) | repeated |  |
 
+<a name="v1-GetTrayPowerDetailsRequest"></a>
 
+### GetTrayPowerDetailsRequest
 
+Uses the same external component ID or BMC/PMC MAC selector as tray inventory.
+Empty identifiers return InvalidArgument, missing identifiers NotFound, and
+ambiguous identifiers FailedPrecondition. Only compute, NVLink switch, and
+power shelf components are supported; other types return InvalidArgument.
 
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [string](#string) |  |  |
 
+<a name="v1-GetTrayPowerDetailsResponse"></a>
+
+### GetTrayPowerDetailsResponse
+
+Contains independently available power facts for the resolved inventory member.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| details | [TrayPowerDetails](#v1-TrayPowerDetails) |  |  |
 
 <a name="v1-HealthProbeAlert"></a>
 
 ### HealthProbeAlert
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1874,32 +1269,20 @@ GetComponents - retrieves components from local database
 | tenant_message | [string](#string) | optional |  |
 | classifications | [string](#string) | repeated |  |
 
-
-
-
-
-
 <a name="v1-HealthProbeSuccess"></a>
 
 ### HealthProbeSuccess
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [string](#string) |  |  |
 | target | [string](#string) | optional |  |
 
-
-
-
-
-
 <a name="v1-HealthReport"></a>
 
 ### HealthReport
-HealthReport is Flow&#39;s latest synchronized snapshot of Core aggregate health.
 
+HealthReport is Flow&#39;s latest synchronized snapshot of Core aggregate health.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1909,32 +1292,18 @@ HealthReport is Flow&#39;s latest synchronized snapshot of Core aggregate health
 | successes | [HealthProbeSuccess](#v1-HealthProbeSuccess) | repeated |  |
 | alerts | [HealthProbeAlert](#v1-HealthProbeAlert) | repeated |  |
 
-
-
-
-
-
 <a name="v1-Identifier"></a>
 
 ### Identifier
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  |  |
 | name | [string](#string) |  |  |
 
-
-
-
-
-
 <a name="v1-IngestRackRequest"></a>
 
 ### IngestRackRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1943,16 +1312,9 @@ HealthReport is Flow&#39;s latest synchronized snapshot of Core aggregate health
 | description | [string](#string) |  | optional task description |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
 
-
-
-
-
-
 <a name="v1-ListEventRulesRequest"></a>
 
 ### ListEventRulesRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1960,32 +1322,20 @@ HealthReport is Flow&#39;s latest synchronized snapshot of Core aggregate health
 | enabled | [bool](#bool) | optional |  |
 | pagination | [Pagination](#v1-Pagination) | optional | Optional. Omit for offset 0 and limit 100. When present, offset must be non-negative and limit must be greater than zero. Results are ordered by UUID ascending. |
 
-
-
-
-
-
 <a name="v1-ListEventRulesResponse"></a>
 
 ### ListEventRulesResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | rules | [EventRule](#v1-EventRule) | repeated |  |
 | total | [int64](#int64) |  | Number of rules matching the filters before pagination. |
 
-
-
-
-
-
 <a name="v1-ListOperationRulesRequest"></a>
 
 ### ListOperationRulesRequest
-Results are ordered by creation time descending, then UUID descending.
 
+Results are ordered by creation time descending, then UUID descending.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -1994,35 +1344,23 @@ Results are ordered by creation time descending, then UUID descending.
 | offset | [int32](#int32) | optional |  |
 | limit | [int32](#int32) | optional |  |
 
-
-
-
-
-
 <a name="v1-ListOperationRulesResponse"></a>
 
 ### ListOperationRulesResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | rules | [OperationRule](#v1-OperationRule) | repeated |  |
 | total_count | [int32](#int32) |  |  |
 
-
-
-
-
-
 <a name="v1-ListOperationRunTargetsRequest"></a>
 
 ### ListOperationRunTargetsRequest
+
 ListOperationRunTargetsRequest lists materialized rack execution targets for
 one operation run. status UNKNOWN means no target-status filter is applied.
 phase_scope UNKNOWN defaults to CURRENT_PHASE.
 Results are ordered by phase index, then the unique sequence index.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2031,126 +1369,76 @@ Results are ordered by phase index, then the unique sequence index.
 | pagination | [Pagination](#v1-Pagination) | optional |  |
 | phase_scope | [OperationRunTargetPhaseScope](#v1-OperationRunTargetPhaseScope) |  |  |
 
-
-
-
-
-
 <a name="v1-ListOperationRunTargetsResponse"></a>
 
 ### ListOperationRunTargetsResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | targets | [OperationRunTarget](#v1-OperationRunTarget) | repeated |  |
 | total | [int32](#int32) |  |  |
 
-
-
-
-
-
 <a name="v1-ListOperationRunsRequest"></a>
 
 ### ListOperationRunsRequest
+
 ListOperationRunsRequest lists operation runs by creation time descending,
 then UUID descending.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | filter | [OperationRunFilter](#v1-OperationRunFilter) |  |  |
 | pagination | [Pagination](#v1-Pagination) | optional |  |
 
-
-
-
-
-
 <a name="v1-ListOperationRunsResponse"></a>
 
 ### ListOperationRunsResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | operation_runs | [OperationRunSummary](#v1-OperationRunSummary) | repeated |  |
 | total | [int32](#int32) |  |  |
 
-
-
-
-
-
 <a name="v1-ListRackRuleAssociationsRequest"></a>
 
 ### ListRackRuleAssociationsRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | rack_id | [UUID](#v1-UUID) |  |  |
 
-
-
-
-
-
 <a name="v1-ListRackRuleAssociationsResponse"></a>
 
 ### ListRackRuleAssociationsResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | associations | [RackRuleAssociation](#v1-RackRuleAssociation) | repeated |  |
 
-
-
-
-
-
 <a name="v1-ListTaskScheduleScopesRequest"></a>
 
 ### ListTaskScheduleScopesRequest
-ListTaskScheduleScopesRequest returns all scope entries for a given schedule.
 
+ListTaskScheduleScopesRequest returns all scope entries for a given schedule.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | schedule_id | [UUID](#v1-UUID) |  |  |
 
-
-
-
-
-
 <a name="v1-ListTaskScheduleScopesResponse"></a>
 
 ### ListTaskScheduleScopesResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | scopes | [TaskScheduleScope](#v1-TaskScheduleScope) | repeated |  |
 
-
-
-
-
-
 <a name="v1-ListTaskSchedulesRequest"></a>
 
 ### ListTaskSchedulesRequest
+
 ListTaskSchedulesRequest lists TaskSchedules with optional filters.
 Results are ordered by creation time ascending, then UUID ascending.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2158,36 +1446,24 @@ Results are ordered by creation time ascending, then UUID ascending.
 | pagination | [Pagination](#v1-Pagination) | optional |  |
 | enabled_only | [bool](#bool) | optional | if true, return only enabled (non-paused) schedules |
 
-
-
-
-
-
 <a name="v1-ListTaskSchedulesResponse"></a>
 
 ### ListTaskSchedulesResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | task_schedules | [TaskSchedule](#v1-TaskSchedule) | repeated |  |
 | total | [int32](#int32) |  | total matching count before pagination |
 
-
-
-
-
-
 <a name="v1-ListTasksRequest"></a>
 
 ### ListTasksRequest
+
 ListTasks - list Tasks with optional filters.
 
 Filters compose with AND: a Task is returned only if it satisfies every
 set filter. Unset optional fields are not applied; with no filter set
 every Task is returned subject to pagination.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2197,32 +1473,18 @@ every Task is returned subject to pagination.
 | component_id | [UUID](#v1-UUID) | optional | Restrict to Tasks that target this component identifier, regardless of component type. A rack_id plus component_id combination that references a component not on the given rack is not an error; it yields an empty result. |
 | with_report | [bool](#bool) |  | When true, populate Task.report on each returned task. Defaults to false because report bodies can be several KB and would otherwise be persisted in every Temporal activity / workflow result payload along the caller&#39;s path even when the caller never reads them. GetTasksByIDs and CancelTask always return the report and do not accept this flag. |
 
-
-
-
-
-
 <a name="v1-ListTasksResponse"></a>
 
 ### ListTasksResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | tasks | [Task](#v1-Task) | repeated |  |
 | total | [int32](#int32) |  |  |
 
-
-
-
-
-
 <a name="v1-Location"></a>
 
 ### Location
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2231,16 +1493,9 @@ every Task is returned subject to pagination.
 | room | [string](#string) |  |  |
 | position | [string](#string) |  |  |
 
-
-
-
-
-
 <a name="v1-NVLDomain"></a>
 
 ### NVLDomain
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2248,17 +1503,12 @@ every Task is returned subject to pagination.
 | external_id | [string](#string) | optional |  |
 | nmxc_cluster_id | [string](#string) | optional |  |
 
-
-
-
-
-
 <a name="v1-NVLDomainTarget"></a>
 
 ### NVLDomainTarget
+
 NVLDomainTarget identifies an NVLink domain and optionally filters the
 components selected from every rack currently belonging to that domain.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2267,31 +1517,19 @@ components selected from every rack currently belonging to that domain.
 | external_id | [string](#string) |  |  |
 | component_types | [ComponentType](#v1-ComponentType) | repeated | Optional: filter by component type. Omit (or send an empty list) to include all component types in the domain. |
 
-
-
-
-
-
 <a name="v1-NVLDomainTargets"></a>
 
 ### NVLDomainTargets
-NVLDomainTargets contains one or more NVLink domain targets.
 
+NVLDomainTargets contains one or more NVLink domain targets.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | targets | [NVLDomainTarget](#v1-NVLDomainTarget) | repeated |  |
 
-
-
-
-
-
 <a name="v1-NVLinkDomain"></a>
 
 ### NVLinkDomain
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2303,32 +1541,18 @@ NVLDomainTargets contains one or more NVLink domain targets.
 | nmxc_cluster_id | [string](#string) | optional |  |
 | rack_group_id | [string](#string) |  | Same value as id: the domain&#39;s external ID. |
 
-
-
-
-
-
 <a name="v1-OperationKind"></a>
 
 ### OperationKind
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | type | [OperationType](#v1-OperationType) |  |  |
 | code | [string](#string) | optional |  |
 
-
-
-
-
-
 <a name="v1-OperationRule"></a>
 
 ### OperationRule
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2342,16 +1566,9 @@ NVLDomainTargets contains one or more NVLink domain targets.
 | created_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |  |
 | updated_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |  |
 
-
-
-
-
-
 <a name="v1-OperationRun"></a>
 
 ### OperationRun
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2359,17 +1576,12 @@ NVLDomainTargets contains one or more NVLink domain targets.
 | configuration | [OperationRunConfiguration](#v1-OperationRunConfiguration) |  |  |
 | stats | [OperationRunStats](#v1-OperationRunStats) |  | Present only when the request asks Flow to compute derived stats. |
 
-
-
-
-
-
 <a name="v1-OperationRunConfiguration"></a>
 
 ### OperationRunConfiguration
+
 OperationRunConfiguration is the create-time configuration that can be
 returned on detailed OperationRun responses.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2377,31 +1589,17 @@ returned on detailed OperationRun responses.
 | options | [OperationRunOptions](#v1-OperationRunOptions) |  |  |
 | operation | [OperationRunOperation](#v1-OperationRunOperation) |  |  |
 
-
-
-
-
-
 <a name="v1-OperationRunConflictPolicy"></a>
 
 ### OperationRunConflictPolicy
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | retry | [OperationRunConflictRetryPolicy](#v1-OperationRunConflictRetryPolicy) |  |  |
 
-
-
-
-
-
 <a name="v1-OperationRunConflictRetryPolicy"></a>
 
 ### OperationRunConflictRetryPolicy
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2409,63 +1607,35 @@ returned on detailed OperationRun responses.
 | initial_retry_delay | [google.protobuf.Duration](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |  |
 | max_retry_delay | [google.protobuf.Duration](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |  |
 
-
-
-
-
-
 <a name="v1-OperationRunCountPhase"></a>
 
 ### OperationRunCountPhase
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | count | [int32](#int32) |  | Required. Must be greater than 0. |
 
-
-
-
-
-
 <a name="v1-OperationRunFailureCountGate"></a>
 
 ### OperationRunFailureCountGate
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | scope | [OperationRunSafetyGateScope](#v1-OperationRunSafetyGateScope) |  | Optional. Default: CURRENT_PHASE. |
 | failure_threshold_count | [int32](#int32) |  | Required. The dispatcher pauses when failed_targets reaches this count for the scope. |
 
-
-
-
-
-
 <a name="v1-OperationRunFailureRateGate"></a>
 
 ### OperationRunFailureRateGate
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | scope | [OperationRunSafetyGateScope](#v1-OperationRunSafetyGateScope) |  | Optional. Default: CURRENT_PHASE. |
 | failure_threshold_percent | [int32](#int32) |  | Required. Valid range: 1..100. The dispatcher pauses when failed_targets / planned_targets reaches this threshold for the scope. |
 
-
-
-
-
-
 <a name="v1-OperationRunFilter"></a>
 
 ### OperationRunFilter
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2473,32 +1643,18 @@ returned on detailed OperationRun responses.
 | states | [OperationRunStateFilter](#v1-OperationRunStateFilter) | repeated | Empty means all states. Each entry matches by AND-ing the fields set on that entry; the entries compose with OR. |
 | operation_kinds | [OperationKind](#v1-OperationKind) | repeated | Empty means all operation kinds. A kind with no code matches all codes for the operation type. |
 
-
-
-
-
-
 <a name="v1-OperationRunOperation"></a>
 
 ### OperationRunOperation
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | upgrade_firmware | [UpgradeFirmwareRequest](#v1-UpgradeFirmwareRequest) |  | In CreateOperationRun, target_spec is optional and defines candidate scope before selector is applied. In the existing UpgradeFirmware RPC, target_spec remains required and means &#34;run exactly on these targets&#34;. |
 | target_scope | [OperationRunTargetScope](#v1-OperationRunTargetScope) |  | Optional exclusions applied after the embedded operation target_spec (or default qualified scope) is resolved. |
 
-
-
-
-
-
 <a name="v1-OperationRunOptions"></a>
 
 ### OperationRunOptions
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2508,62 +1664,34 @@ returned on detailed OperationRun responses.
 | ordering_policy | [OperationRunOrderingPolicy](#v1-OperationRunOrderingPolicy) |  | Optional. If omitted, the service stores and returns the default random ordering policy with a generated seed. |
 | phase_policy | [OperationRunPhasePolicy](#v1-OperationRunPhasePolicy) |  | Optional. If omitted, the run has one phase containing all selected rack execution targets. |
 
-
-
-
-
-
 <a name="v1-OperationRunOrderingPolicy"></a>
 
 ### OperationRunOrderingPolicy
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | random | [OperationRunRandomOrdering](#v1-OperationRunRandomOrdering) |  |  |
 | physical_location | [OperationRunPhysicalLocationOrdering](#v1-OperationRunPhysicalLocationOrdering) |  | Reserved for a later implementation. The first implementation keeps this API branch but rejects it as unsupported. |
 
-
-
-
-
-
 <a name="v1-OperationRunPercentagePhase"></a>
 
 ### OperationRunPercentagePhase
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | percentage | [int32](#int32) |  | Required. Valid range: 1..100. Percentage phase values must sum to 100. |
 
-
-
-
-
-
 <a name="v1-OperationRunPhaseAdvancePolicy"></a>
 
 ### OperationRunPhaseAdvancePolicy
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | auto_advance | [bool](#bool) |  | When false, a completed phase pauses with PHASE_GATE and waits for AdvanceOperationRunPhase. When true, the dispatcher advances to the next phase automatically as long as global safety gates are not tripped. |
 
-
-
-
-
-
 <a name="v1-OperationRunPhasePolicy"></a>
 
 ### OperationRunPhasePolicy
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2572,16 +1700,9 @@ returned on detailed OperationRun responses.
 | count | [CountOperationRunPhases](#v1-CountOperationRunPhases) |  |  |
 | advance_policy | [OperationRunPhaseAdvancePolicy](#v1-OperationRunPhaseAdvancePolicy) |  | Optional. Default: manual phase advancement. |
 
-
-
-
-
-
 <a name="v1-OperationRunPhaseStats"></a>
 
 ### OperationRunPhaseStats
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2589,142 +1710,81 @@ returned on detailed OperationRun responses.
 | selected_targets | [int32](#int32) |  |  |
 | outcome_counts | [OperationRunTargetOutcomeCounts](#v1-OperationRunTargetOutcomeCounts) |  |  |
 
-
-
-
-
-
 <a name="v1-OperationRunPhysicalLocationOrdering"></a>
 
 ### OperationRunPhysicalLocationOrdering
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | strategy | [OperationRunPhysicalLocationOrdering.Strategy](#v1-OperationRunPhysicalLocationOrdering-Strategy) |  |  |
 
-
-
-
-
-
 <a name="v1-OperationRunRandomOrdering"></a>
 
 ### OperationRunRandomOrdering
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | seed | [string](#string) |  | Optional. If omitted, the service generates one and stores it. |
 
-
-
-
-
-
 <a name="v1-OperationRunSafetyGate"></a>
 
 ### OperationRunSafetyGate
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | failure_rate | [OperationRunFailureRateGate](#v1-OperationRunFailureRateGate) |  |  |
 | failure_count | [OperationRunFailureCountGate](#v1-OperationRunFailureCountGate) |  |  |
 
-
-
-
-
-
 <a name="v1-OperationRunSafetyPolicy"></a>
 
 ### OperationRunSafetyPolicy
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | gates | [OperationRunSafetyGate](#v1-OperationRunSafetyGate) | repeated | Gates compose with OR: the dispatcher pauses the run when any gate crosses its configured threshold. |
 
-
-
-
-
-
 <a name="v1-OperationRunSelector"></a>
 
 ### OperationRunSelector
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | percentage | [PercentageSelector](#v1-PercentageSelector) |  |  |
 
-
-
-
-
-
 <a name="v1-OperationRunState"></a>
 
 ### OperationRunState
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | status | [OperationRunStatus](#v1-OperationRunStatus) |  |  |
 | reason | [OperationRunStatusReason](#v1-OperationRunStatusReason) |  |  |
 
-
-
-
-
-
 <a name="v1-OperationRunStateFilter"></a>
 
 ### OperationRunStateFilter
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | status | [OperationRunStatus](#v1-OperationRunStatus) | optional |  |
 | reason | [OperationRunStatusReason](#v1-OperationRunStatusReason) | optional |  |
 
-
-
-
-
-
 <a name="v1-OperationRunStats"></a>
 
 ### OperationRunStats
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | current_phase_stats | [OperationRunPhaseStats](#v1-OperationRunPhaseStats) |  |  |
 | cumulative_phase_stats | [OperationRunPhaseStats](#v1-OperationRunPhaseStats) |  |  |
 
-
-
-
-
-
 <a name="v1-OperationRunSummary"></a>
 
 ### OperationRunSummary
+
 OperationRunSummary is the lightweight representation returned by
 ListOperationRuns. It intentionally omits the full configuration and
 target-derived phase stats; callers can use GetOperationRun for those details.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2740,16 +1800,9 @@ target-derived phase stats; callers can use GetOperationRun for those details.
 | started_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) | optional |  |
 | finished_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) | optional |  |
 
-
-
-
-
-
 <a name="v1-OperationRunTarget"></a>
 
 ### OperationRunTarget
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2766,16 +1819,9 @@ target-derived phase stats; callers can use GetOperationRun for those details.
 | updated_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |  |
 | rack_external_id | [string](#string) |  |  |
 
-
-
-
-
-
 <a name="v1-OperationRunTargetOutcomeCounts"></a>
 
 ### OperationRunTargetOutcomeCounts
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2784,35 +1830,23 @@ target-derived phase stats; callers can use GetOperationRun for those details.
 | terminated | [int32](#int32) |  |  |
 | skipped | [int32](#int32) |  |  |
 
-
-
-
-
-
 <a name="v1-OperationRunTargetScope"></a>
 
 ### OperationRunTargetScope
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | exclude_operation_run_ids | [UUID](#v1-UUID) | repeated | Prior operation runs whose materialized rack execution targets should be excluded from this run&#39;s candidate scope. The base scope is the embedded operation target_spec when present; otherwise it is the default qualified/applicable scope. |
 | default_scope_component_filter | [ComponentFilter](#v1-ComponentFilter) |  | Restricts components when the embedded operation target_spec is omitted and the planner uses the default qualified/applicable rack scope. Omit to target all applicable components in the default scope. This must not be set together with an explicit operation target_spec. |
 
-
-
-
-
-
 <a name="v1-OperationTargetSpec"></a>
 
 ### OperationTargetSpec
+
 OperationTargetSpec contains targets for an operation.
 Supports rack-level or NVLink-domain targeting (with optional type filtering),
 or component-level targeting (by UUID or external reference), but not more
 than one target kind at a time.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2820,16 +1854,11 @@ than one target kind at a time.
 | components | [ComponentTargets](#v1-ComponentTargets) |  |  |
 | nvl_domains | [NVLDomainTargets](#v1-NVLDomainTargets) |  |  |
 
-
-
-
-
-
 <a name="v1-OrderBy"></a>
 
 ### OrderBy
-OrderBy represents ordering specification
 
+OrderBy represents ordering specification
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2837,32 +1866,20 @@ OrderBy represents ordering specification
 | component_field | [ComponentOrderByField](#v1-ComponentOrderByField) |  | For component queries |
 | direction | [string](#string) |  | ASC or DESC |
 
-
-
-
-
-
 <a name="v1-Pagination"></a>
 
 ### Pagination
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | offset | [int32](#int32) |  |  |
 | limit | [int32](#int32) |  |  |
 
-
-
-
-
-
 <a name="v1-PatchComponentRequest"></a>
 
 ### PatchComponentRequest
-PatchComponent - update a single component&#39;s fields
 
+PatchComponent - update a single component&#39;s fields
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2874,95 +1891,57 @@ PatchComponent - update a single component&#39;s fields
 | bmcs | [BMCInfo](#v1-BMCInfo) | repeated | Update BMCs (matched by MAC address; create if new) |
 | update_mask | [google.protobuf.FieldMask](https://protobuf.dev/reference/protobuf/google.protobuf/) |  | Optional for backward compatibility. When omitted, position replaces all three coordinates. When set, supported paths are position.slot_id, position.tray_idx, and position.host_id; only those coordinates change. |
 
-
-
-
-
-
 <a name="v1-PatchComponentResponse"></a>
 
 ### PatchComponentResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | component | [Component](#v1-Component) |  | The updated component |
 
-
-
-
-
-
 <a name="v1-PatchRackRequest"></a>
 
 ### PatchRackRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | rack | [Rack](#v1-Rack) |  |  |
 
-
-
-
-
-
 <a name="v1-PatchRackResponse"></a>
 
 ### PatchRackResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | report | [string](#string) |  |  |
 
-
-
-
-
-
 <a name="v1-PauseOperationRunRequest"></a>
 
 ### PauseOperationRunRequest
 
-
-
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  |  |
-
-
-
-
-
 
 <a name="v1-PauseTaskScheduleRequest"></a>
 
 ### PauseTaskScheduleRequest
+
 PauseTaskScheduleRequest disables a TaskSchedule without deleting it.
 The schedule will not fire until resumed. Has no effect if already paused.
 Returns an error for a one-time schedule that has already fired.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  |  |
 
-
-
-
-
-
 <a name="v1-PerComponentFirmwareAuthenticationData"></a>
 
 ### PerComponentFirmwareAuthenticationData
+
 PerComponentFirmwareAuthenticationData carries independent authentication
 data for each supported firmware tray type. An omitted field means that tray
 type receives no authentication data.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -2970,63 +1949,71 @@ type receives no authentication data.
 | nvswitch | [string](#string) | optional |  |
 | powershelf | [string](#string) | optional |  |
 
-
-
-
-
-
 <a name="v1-PercentageOperationRunPhases"></a>
 
 ### PercentageOperationRunPhases
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | phases | [OperationRunPercentagePhase](#v1-OperationRunPercentagePhase) | repeated |  |
 
-
-
-
-
-
 <a name="v1-PercentageSelector"></a>
 
 ### PercentageSelector
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | percentage | [int32](#int32) |  | Required. Valid range: 1..100. |
 | seed | [string](#string) |  | Optional. If omitted, the service generates one and stores it so the selected cohort is deterministic and auditable. |
 
+<a name="v1-PowerActionDetails"></a>
 
+### PowerActionDetails
 
+A present Core value with no actions and no nested error means no tracked
+maintenance was found. A nested error still makes that Core value unavailable.
+Unsupported means the Core server did not provide action details; it must not
+be interpreted as a successful empty action list.
 
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| value | [forge.ComponentPowerActionDetails](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/rpc/proto/forge.proto) |  |  |
+| error | [PowerDetailsReadError](#v1-PowerDetailsReadError) |  |  |
 
+<a name="v1-PowerActualDetails"></a>
+
+### PowerActualDetails
+
+A Core observation, including its per-device failure, or a Flow read failure.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| value | [forge.ComponentPowerObservation](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/rpc/proto/forge.proto) |  |  |
+| error | [PowerDetailsReadError](#v1-PowerDetailsReadError) |  |  |
 
 <a name="v1-PowerControlTaskOperation"></a>
 
 ### PowerControlTaskOperation
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | operation | [PowerControlOperation](#v1-PowerControlOperation) |  | Required. UNSPECIFIED and unknown values are rejected. |
 | override_readiness_check | [bool](#bool) |  | Bypasses the component readiness gate when the task executes. |
 
+<a name="v1-PowerDesiredDetails"></a>
 
+### PowerDesiredDetails
 
+Stored Core policy, including NotApplicable/Unavailable, or a Flow read failure.
 
-
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| value | [forge.ComponentPowerPolicy](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/rpc/proto/forge.proto) |  |  |
+| error | [PowerDetailsReadError](#v1-PowerDetailsReadError) |  |  |
 
 <a name="v1-PowerOffRackRequest"></a>
 
 ### PowerOffRackRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3037,16 +2024,9 @@ type receives no authentication data.
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
 | override_readiness_check | [bool](#bool) |  | When true, proceed with the power-off even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
 
-
-
-
-
-
 <a name="v1-PowerOnRackRequest"></a>
 
 ### PowerOnRackRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3056,16 +2036,20 @@ type receives no authentication data.
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
 | override_readiness_check | [bool](#bool) |  | When true, proceed with the power-on even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
 
+<a name="v1-PowerOperations"></a>
 
+### PowerOperations
 
+Core maintenance and Flow tasks are separate records without a correlation ID.
 
-
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| actions | [PowerActionDetails](#v1-PowerActionDetails) |  |  |
+| tasks | [PowerTaskDetailsList](#v1-PowerTaskDetailsList) |  |  |
 
 <a name="v1-PowerResetRackRequest"></a>
 
 ### PowerResetRackRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3076,82 +2060,104 @@ type receives no authentication data.
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
 | override_readiness_check | [bool](#bool) |  | When true, proceed with the reset even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
 
+<a name="v1-PowerTaskDetails"></a>
 
+### PowerTaskDetails
 
+Informational task details with recorded identities, not inferred live targets.
 
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [UUID](#v1-UUID) |  |  |
+| rack_id | [UUID](#v1-UUID) |  |  |
+| operation | [TaskOperation](#v1-TaskOperation) |  |  |
+| targets | [ComponentsByType](#v1-ComponentsByType) |  | Recorded Flow UUIDs grouped by type, including IDs no longer in inventory. Absent when no targets were recorded. |
+| status | [TaskStatus](#v1-TaskStatus) |  | Waiting, Pending, or Running. Running does not prove hardware dispatch. |
+| created_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |  |
+| updated_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |  |
+| started_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  | Present only if the task store recorded an execution start. |
+| relevance | [PowerTaskRelevance](#v1-PowerTaskRelevance) |  |  |
+| waiting_context | [PowerTaskWaitingContext](#v1-PowerTaskWaitingContext) |  | Populated for Waiting tasks; absent for Pending/Running (not applicable). On a Waiting task, absence means the service did not provide context. |
 
+<a name="v1-PowerTaskDetailsList"></a>
+
+### PowerTaskDetailsList
+
+Outstanding power tasks for the tray&#39;s current Flow rack, ordered by created_at,
+then task ID, ascending. Missing rack assignment returns NotLinked. Tasks from
+a former rack are excluded. Only recorded selections or power-shelf tasks
+affecting this rack are included; tasks with no recorded targets are excluded.
+More than 256 outstanding rack power tasks makes this entire section unavailable,
+even if fewer target this tray. Error is absent on success, including empty;
+entries is empty on failure. Entries contain only power tasks; other task kinds
+can appear as brief waiting-context references. Execution reports are excluded.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| entries | [PowerTaskDetails](#v1-PowerTaskDetails) | repeated |  |
+| error | [PowerDetailsReadError](#v1-PowerDetailsReadError) | optional |  |
+
+<a name="v1-PowerTaskWaitingContext"></a>
+
+### PowerTaskWaitingContext
+
+Nearby work observed for a Waiting power task, not a saved reason for waiting.
+Tasks can change between the power-task read and this metadata read. Both lists
+are ordered by creation time, then ID, ascending. Error is absent on success,
+including empty lists; lists are empty on failure. More than 256 nonterminal
+tasks in the rack makes context unavailable without discarding power tasks.
+If a tray response exceeds its byte limit, populated context lists are replaced
+with LimitExceeded before the complete task section can be discarded.
+A task can also wait for linked inventory; this context is not a readiness check.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| active_conflicts | [TaskBrief](#v1-TaskBrief) | repeated | Pending or Running tasks that match Flow&#39;s current conflict rules. |
+| earlier_waiting | [TaskBrief](#v1-TaskBrief) | repeated | Waiting tasks of any kind in the same rack with strictly earlier creation times. Equal timestamps are excluded. These references do not establish exact blockers, queue position, historical causes, or execution order. |
+| error | [PowerDetailsReadError](#v1-PowerDetailsReadError) | optional | Absent on success. LimitExceeded means the metadata row limit was exceeded or context references were removed to fit the response byte limit. DeadlineExceeded or ReadFailed means the metadata could not be read. |
 
 <a name="v1-PurgeComponentRequest"></a>
 
 ### PurgeComponentRequest
-PurgeComponent - permanently remove a soft-deleted component
 
+PurgeComponent - permanently remove a soft-deleted component
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  | Required: component UUID to purge (must already be soft-deleted) |
 
-
-
-
-
-
 <a name="v1-PurgeComponentResponse"></a>
 
 ### PurgeComponentResponse
 
-
-
-
-
-
-
 <a name="v1-PurgeRackRequest"></a>
 
 ### PurgeRackRequest
-PurgeRack - permanently remove a soft-deleted rack and its components
 
+PurgeRack - permanently remove a soft-deleted rack and its components
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  | Required: rack UUID to purge (must already be soft-deleted) |
 
-
-
-
-
-
 <a name="v1-PurgeRackResponse"></a>
 
 ### PurgeRackResponse
 
-
-
-
-
-
-
 <a name="v1-QueueOptions"></a>
 
 ### QueueOptions
-QueueOptions controls how a task behaves when a conflict is detected.
 
+QueueOptions controls how a task behaves when a conflict is detected.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | conflict_strategy | [ConflictStrategy](#v1-ConflictStrategy) |  | How to handle the task when a conflict is detected. Defaults to CONFLICT_STRATEGY_REJECT (wire value 0). |
 | queue_timeout_seconds | [int32](#int32) |  | How long (seconds) to wait in queue before expiring. 0 means use the server default (~1h). Only relevant when conflict_strategy is CONFLICT_STRATEGY_QUEUE. |
 
-
-
-
-
-
 <a name="v1-Rack"></a>
 
 ### Rack
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3166,16 +2172,9 @@ QueueOptions controls how a task behaves when a conflict is detected.
 | rack_profile_id | [string](#string) | optional | Core rack profile mirrored by expected inventory sync. |
 | nvl_domain_external_ids | [string](#string) | repeated | Public rack-group domain identities. |
 
-
-
-
-
-
 <a name="v1-RackPosition"></a>
 
 ### RackPosition
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3183,16 +2182,9 @@ QueueOptions controls how a task behaves when a conflict is detected.
 | tray_idx | [int32](#int32) |  |  |
 | host_id | [int32](#int32) |  |  |
 
-
-
-
-
-
 <a name="v1-RackRuleAssociation"></a>
 
 ### RackRuleAssociation
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3203,17 +2195,12 @@ QueueOptions controls how a task behaves when a conflict is detected.
 | created_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |  |
 | updated_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |  |
 
-
-
-
-
-
 <a name="v1-RackTarget"></a>
 
 ### RackTarget
+
 RackTarget identifies a rack and optionally filters by component type.
 To target specific components, use the component-level APIs instead.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3222,79 +2209,52 @@ To target specific components, use the component-level APIs instead.
 | external_id | [string](#string) |  |  |
 | component_types | [ComponentType](#v1-ComponentType) | repeated | Optional: filter by component type. Omit (or send empty list) to include all components in the rack. |
 
-
-
-
-
-
 <a name="v1-RackTargets"></a>
 
 ### RackTargets
-RackTargets contains one or more rack targets
 
+RackTargets contains one or more rack targets
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | targets | [RackTarget](#v1-RackTarget) | repeated |  |
 
-
-
-
-
-
 <a name="v1-RemoveTaskScheduleScopeRequest"></a>
 
 ### RemoveTaskScheduleScopeRequest
+
 RemoveTaskScheduleScopeRequest removes a single rack scope entry by its scope ID.
 In-flight tasks for that rack are not cancelled.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | scope_id | [UUID](#v1-UUID) |  |  |
 
-
-
-
-
-
 <a name="v1-ResumeOperationRunRequest"></a>
 
 ### ResumeOperationRunRequest
 
-
-
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  |  |
-
-
-
-
-
 
 <a name="v1-ResumeTaskScheduleRequest"></a>
 
 ### ResumeTaskScheduleRequest
+
 ResumeTaskScheduleRequest re-enables a paused TaskSchedule. For interval
 and cron schedules, next_run_at is recomputed from the current time so the
 schedule does not fire immediately. Has no effect if already enabled.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  |  |
 
-
-
-
-
-
 <a name="v1-ScheduleConfig"></a>
 
 ### ScheduleConfig
-ScheduleConfig groups the scheduling fields shared by multiple request types.
 
+ScheduleConfig groups the scheduling fields shared by multiple request types.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3302,16 +2262,9 @@ ScheduleConfig groups the scheduling fields shared by multiple request types.
 | spec | [ScheduleSpec](#v1-ScheduleSpec) |  |  |
 | overlap_policy | [OverlapPolicy](#v1-OverlapPolicy) |  |  |
 
-
-
-
-
-
 <a name="v1-ScheduleSpec"></a>
 
 ### ScheduleSpec
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3319,14 +2272,10 @@ ScheduleConfig groups the scheduling fields shared by multiple request types.
 | spec | [string](#string) |  |  |
 | timezone | [string](#string) |  | IANA timezone for interpreting cron specs (e.g. &#34;America/New_York&#34;). Defaults to &#34;UTC&#34;. Ignored for interval and one-time specs. |
 
-
-
-
-
-
 <a name="v1-ScheduledOperation"></a>
 
 ### ScheduledOperation
+
 ScheduledOperation is the shared operation oneof used by
 CreateTaskScheduleRequest and CheckScheduleConflictsRequest.
 Centralising it here means a single proto change adds support for a new
@@ -3337,7 +2286,6 @@ description field, but it is ignored when used inside a ScheduledOperation.
 The dispatcher generates task descriptions automatically at fire time in the
 form &#34;&lt;schedule name&gt; — &lt;RFC3339 timestamp&gt;&#34;.
 
-
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | power_on | [PowerOnRackRequest](#v1-PowerOnRackRequest) |  |  |
@@ -3347,31 +2295,17 @@ form &#34;&lt;schedule name&gt; — &lt;RFC3339 timestamp&gt;&#34;.
 | upgrade_firmware | [UpgradeFirmwareRequest](#v1-UpgradeFirmwareRequest) |  |  |
 | ingest | [IngestRackRequest](#v1-IngestRackRequest) |  |  |
 
-
-
-
-
-
 <a name="v1-SetRuleAsDefaultRequest"></a>
 
 ### SetRuleAsDefaultRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | rule_id | [UUID](#v1-UUID) |  |  |
 
-
-
-
-
-
 <a name="v1-StringQueryInfo"></a>
 
 ### StringQueryInfo
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3379,31 +2313,17 @@ form &#34;&lt;schedule name&gt; — &lt;RFC3339 timestamp&gt;&#34;.
 | is_wildcard | [bool](#bool) |  |  |
 | use_or | [bool](#bool) |  |  |
 
-
-
-
-
-
 <a name="v1-SubmitTaskResponse"></a>
 
 ### SubmitTaskResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | task_ids | [UUID](#v1-UUID) | repeated | Multiple task IDs (1 task per rack) |
 
-
-
-
-
-
 <a name="v1-Task"></a>
 
 ### Task
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3424,35 +2344,37 @@ form &#34;&lt;schedule name&gt; — &lt;RFC3339 timestamp&gt;&#34;.
 | started_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) | optional |  |
 | report | [string](#string) |  | report is a versioned JSON document with structured execution progress. |
 
+<a name="v1-TaskBrief"></a>
 
+### TaskBrief
 
+A task reference without its operation payload, report, or description.
 
-
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [UUID](#v1-UUID) |  | The stored Flow task UUID, not a Core action or component identity. |
+| kind | [TaskKind](#v1-TaskKind) |  | Unspecified when the stored task type has no known API kind. |
+| status | [TaskStatus](#v1-TaskStatus) |  | Pending or Running in active_conflicts; Waiting in earlier_waiting. |
 
 <a name="v1-TaskOperation"></a>
 
 ### TaskOperation
+
 TaskOperation is the typed, target-independent operation definition used by
 new APIs. Existing operation APIs retain their established request messages.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | power_control | [PowerControlTaskOperation](#v1-PowerControlTaskOperation) |  |  |
 | firmware_control | [FirmwareControlTaskOperation](#v1-FirmwareControlTaskOperation) |  |  |
 
-
-
-
-
-
 <a name="v1-TaskSchedule"></a>
 
 ### TaskSchedule
+
 TaskSchedule defines when (spec) and what (operation) should run automatically.
 Which racks to target is tracked separately in TaskScheduleScope rows and
 managed via AddTaskScheduleScope / RemoveTaskScheduleScope / ListTaskScheduleScopes.
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3468,20 +2390,15 @@ managed via AddTaskScheduleScope / RemoveTaskScheduleScope / ListTaskScheduleSco
 | operation_type | [string](#string) |  | operation_type identifies the kind of operation this schedule runs. Values: &#34;POWER_ON&#34;, &#34;POWER_OFF&#34;, &#34;POWER_RESET&#34;, &#34;BRING_UP&#34;, &#34;INGEST&#34;, &#34;UPGRADE_FIRMWARE&#34;, &#34;DOWNGRADE_FIRMWARE&#34;, &#34;ROLLBACK_FIRMWARE&#34;. |
 | description | [string](#string) |  | description is a human-readable summary of the operation and its key parameters, e.g. &#34;Power Reset (forced)&#34; or &#34;Upgrade Firmware to v2.3.1&#34;. |
 
-
-
-
-
-
 <a name="v1-TaskScheduleScope"></a>
 
 ### TaskScheduleScope
+
 TaskScheduleScope represents one rack target in a schedule&#39;s scope.
 Each scope entry causes one task to be submitted per schedule firing.
 last_task_id tracks the task produced for this rack by the most recent firing;
 the dispatcher uses it for the overlap check. Absent if no task has fired yet
 for this scope (e.g. a newly added rack).
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3493,16 +2410,11 @@ for this scope (e.g. a newly added rack).
 | last_task_id | [UUID](#v1-UUID) |  | absent until the first firing for this scope |
 | created_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |  |
 
-
-
-
-
-
 <a name="v1-TaskStats"></a>
 
 ### TaskStats
-TaskStats counts non-terminal Tasks currently associated with an inventory resource.
 
+TaskStats counts non-terminal Tasks currently associated with an inventory resource.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3510,49 +2422,56 @@ TaskStats counts non-terminal Tasks currently associated with an inventory resou
 | pending_task_count | [uint32](#uint32) |  |  |
 | running_task_count | [uint32](#uint32) |  |  |
 
+<a name="v1-TrayPowerDetails"></a>
 
+### TrayPowerDetails
 
+Flow inventory identity remains usable before a managed Core ID exists.
+Every section is populated with either its value or a categorized error.
+Inventory and both child reads share at most 30 seconds from RPC entry, capped
+at one second before a caller deadline. Completed sections survive another
+section&#39;s failure. Core hardware, policy, and actions may describe different
+instants from Flow tasks; Running tasks do not imply active Core actions.
+The encoded proxy response is limited to 1,991,680 bytes (1945 KiB).
+If the response is oversized, populated waiting-context lists are replaced
+with context-level LimitExceeded first. If it still exceeds the limit, the
+entire task section is replaced with LimitExceeded. If the rest still exceeds
+the limit, the RPC returns ResourceExhausted. No task targets are truncated.
 
-
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| flow_component_id | [UUID](#v1-UUID) |  |  |
+| core_component_id | [string](#string) | optional | Absent until the inventory member has a managed Core identity. |
+| component_type | [ComponentType](#v1-ComponentType) |  |  |
+| rack_id | [UUID](#v1-UUID) |  | Absent when this member has no Flow rack assignment. |
+| actual | [PowerActualDetails](#v1-PowerActualDetails) |  |  |
+| desired | [PowerDesiredDetails](#v1-PowerDesiredDetails) |  |  |
+| operations | [PowerOperations](#v1-PowerOperations) |  |  |
 
 <a name="v1-TriggerTaskScheduleRequest"></a>
 
 ### TriggerTaskScheduleRequest
+
 TriggerTaskScheduleRequest fires a TaskSchedule immediately, regardless of
 next_run_at or enabled state. The overlap policy is not consulted — all
 scopes are submitted unconditionally. Returns an error for a one-time
 schedule that has already fired.
 
-
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [UUID](#v1-UUID) |  |  |
-
-
-
-
-
 
 <a name="v1-UUID"></a>
 
 ### UUID
 
-
-
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | id | [string](#string) |  |  |
 
-
-
-
-
-
 <a name="v1-UpdateEventRuleRequest"></a>
 
 ### UpdateEventRuleRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3560,16 +2479,9 @@ schedule that has already fired.
 | metadata | [EventRuleMetadataUpdate](#v1-EventRuleMetadataUpdate) |  |  |
 | actions | [EventRuleActionsUpdate](#v1-EventRuleActionsUpdate) |  |  |
 
-
-
-
-
-
 <a name="v1-UpdateOperationRuleRequest"></a>
 
 ### UpdateOperationRuleRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3578,24 +2490,20 @@ schedule that has already fired.
 | description | [string](#string) | optional |  |
 | rule_definition_json | [string](#string) | optional | JSON-encoded RuleDefinition |
 
-
-
-
-
-
 <a name="v1-UpdateTaskScheduleRequest"></a>
 
 ### UpdateTaskScheduleRequest
+
 UpdateTaskScheduleRequest updates the scheduling config of an existing
 TaskSchedule. To modify which racks are targeted, use
 AddTaskScheduleScope / RemoveTaskScheduleScope instead.
 
 update_mask is required and controls which fields are written. Supported paths:
-  &#34;schedule.name&#34;           – display name
-  &#34;schedule.overlap_policy&#34; – overlap behaviour
-  &#34;schedule.spec&#34;           – full spec block (type &#43; spec string &#43; next_run_at recomputed)
-  &#34;schedule.spec.timezone&#34;  – timezone only (spec type/string unchanged)
 
+- `schedule.name` – display name
+- `schedule.overlap_policy` – overlap behaviour
+- `schedule.spec` – full spec block (type &#43; spec string &#43; next_run_at recomputed)
+- `schedule.spec.timezone` – timezone only (spec type/string unchanged)
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3603,36 +2511,26 @@ update_mask is required and controls which fields are written. Supported paths:
 | schedule | [ScheduleConfig](#v1-ScheduleConfig) |  |  |
 | update_mask | [google.protobuf.FieldMask](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |  |
 
-
-
-
-
-
 <a name="v1-UpdateTaskScheduleScopeRequest"></a>
 
 ### UpdateTaskScheduleScopeRequest
+
 UpdateTaskScheduleScopeRequest reconciles the schedule&#39;s scope against the
 desired target_spec: racks present in desired_scope but not in the current scope
 are added; racks present in the current scope but absent from desired_scope are
 removed; racks present in both have their component_filter updated if changed.
 For NVLink domain and component targets the server resolves rack membership automatically.
 
-
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | schedule_id | [UUID](#v1-UUID) |  |  |
 | desired_scope | [OperationTargetSpec](#v1-OperationTargetSpec) |  |  |
 
-
-
-
-
-
 <a name="v1-UpdateTaskScheduleScopeResponse"></a>
 
 ### UpdateTaskScheduleScopeResponse
-UpdateTaskScheduleScopeResponse returns the complete scope after reconciliation.
 
+UpdateTaskScheduleScopeResponse returns the complete scope after reconciliation.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3641,16 +2539,9 @@ UpdateTaskScheduleScopeResponse returns the complete scope after reconciliation.
 | removed | [int32](#int32) |  | number of scope entries removed |
 | updated | [int32](#int32) |  | number of scope entries with updated component_filter |
 
-
-
-
-
-
 <a name="v1-UpgradeFirmwareRequest"></a>
 
 ### UpgradeFirmwareRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3666,16 +2557,9 @@ UpdateTaskScheduleScopeResponse returns the complete scope after reconciliation.
 | authentication_data | [FirmwareAuthenticationData](#v1-FirmwareAuthenticationData) |  | Optional, write-only authentication data for firmware downloads. It is not supported for DPU-only updates or by the legacy NICo compute firmware controller. |
 | override_version_check | [bool](#bool) |  | Overrides firmware version-based checks when deciding whether to apply the update. This allows same-version reapplication and downgrade when the selected component backend supports those operations. It does not bypass readiness checks or state-controller routing. |
 
-
-
-
-
-
 <a name="v1-ValidateComponentsRequest"></a>
 
 ### ValidateComponentsRequest
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
@@ -3684,49 +2568,28 @@ UpdateTaskScheduleScopeResponse returns the complete scope after reconciliation.
 | pagination | [Pagination](#v1-Pagination) | optional |  |
 | order_by | [OrderBy](#v1-OrderBy) | optional | Defaults to name ascending for targeted components. Stable component and drift identities break equal-field ties before drift pagination. |
 
-
-
-
-
-
 <a name="v1-ValidateComponentsResponse"></a>
 
 ### ValidateComponentsResponse
-
-
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | diffs | [ComponentDiff](#v1-ComponentDiff) | repeated |  |
 | total_diffs | [int32](#int32) |  |  |
-| missing_count | [int32](#int32) |  | Summary counts
-
-Expected by Flow but not found in the component manager service |
+| missing_count | [int32](#int32) |  | Summary counts Expected by Flow but not found in the component manager service |
 | unexpected_count | [int32](#int32) |  | Found in the component manager service but not expected by Flow |
 | mismatch_count | [int32](#int32) |  | In both but with field differences |
 | match_count | [int32](#int32) |  |  |
 
-
-
-
-
-
 <a name="v1-VersionRequest"></a>
 
 ### VersionRequest
+
 Version API messages
-
-
-
-
-
-
-
 
 <a name="v1-BMCType"></a>
 
 ### BMCType
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -3734,11 +2597,10 @@ Version API messages
 | BMC_TYPE_HOST | 1 |  |
 | BMC_TYPE_DPU | 2 |  |
 
-
-
 <a name="v1-ComponentFilterField"></a>
 
 ### ComponentFilterField
+
 ComponentFilterField represents the supported filter field types for component queries
 
 | Name | Number | Description |
@@ -3749,11 +2611,10 @@ ComponentFilterField represents the supported filter field types for component q
 | COMPONENT_FILTER_FIELD_MODEL | 3 | Filter by model (stored in description JSONB) |
 | COMPONENT_FILTER_FIELD_TYPE | 4 | Filter by component type (use ComponentType enum string values in StringQueryInfo) |
 
-
-
 <a name="v1-ComponentOrderByField"></a>
 
 ### ComponentOrderByField
+
 ComponentOrderByField represents the supported order by field types for component queries
 
 | Name | Number | Description |
@@ -3764,12 +2625,9 @@ ComponentOrderByField represents the supported order by field types for componen
 | COMPONENT_ORDER_BY_FIELD_MODEL | 3 | Order by model |
 | COMPONENT_ORDER_BY_FIELD_TYPE | 4 | Order by component type |
 
-
-
 <a name="v1-ComponentType"></a>
 
 ### ComponentType
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -3781,11 +2639,10 @@ ComponentOrderByField represents the supported order by field types for componen
 | COMPONENT_TYPE_UMS | 5 |  |
 | COMPONENT_TYPE_CDU | 6 |  |
 
-
-
 <a name="v1-ConflictStrategy"></a>
 
 ### ConflictStrategy
+
 ConflictStrategy controls how a task behaves when a conflict is detected.
 
 | Name | Number | Description |
@@ -3794,12 +2651,9 @@ ConflictStrategy controls how a task behaves when a conflict is detected.
 | CONFLICT_STRATEGY_QUEUE | 1 | CONFLICT_STRATEGY_QUEUE queues the task until the conflicting task completes. Wire value 1 preserves backward compatibility with the former bool true (queue). |
 | CONFLICT_STRATEGY_REJECT | 2 | CONFLICT_STRATEGY_REJECT immediately rejects the task when a conflict is detected. |
 
-
-
 <a name="v1-DiffType"></a>
 
 ### DiffType
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -3808,12 +2662,9 @@ ConflictStrategy controls how a task behaves when a conflict is detected.
 | DIFF_TYPE_UNEXPECTED | 2 | Found in the component manager service but not expected by Flow |
 | DIFF_TYPE_MISMATCH | 3 | In both but with field differences |
 
-
-
 <a name="v1-EventRuleConflictStrategy"></a>
 
 ### EventRuleConflictStrategy
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -3821,12 +2672,9 @@ ConflictStrategy controls how a task behaves when a conflict is detected.
 | EVENT_RULE_CONFLICT_STRATEGY_QUEUE | 1 |  |
 | EVENT_RULE_CONFLICT_STRATEGY_REJECT | 2 |  |
 
-
-
 <a name="v1-EventRuleScopeType"></a>
 
 ### EventRuleScopeType
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -3834,12 +2682,9 @@ ConflictStrategy controls how a task behaves when a conflict is detected.
 | EVENT_RULE_SCOPE_TYPE_SITE | 1 |  |
 | EVENT_RULE_SCOPE_TYPE_RACK | 2 |  |
 
-
-
 <a name="v1-EventRuleSeverity"></a>
 
 ### EventRuleSeverity
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -3848,12 +2693,9 @@ ConflictStrategy controls how a task behaves when a conflict is detected.
 | EVENT_RULE_SEVERITY_WARNING | 2 |  |
 | EVENT_RULE_SEVERITY_CRITICAL | 3 |  |
 
-
-
 <a name="v1-EventRuleTargetStrategy"></a>
 
 ### EventRuleTargetStrategy
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -3862,12 +2704,9 @@ ConflictStrategy controls how a task behaves when a conflict is detected.
 | EVENT_RULE_TARGET_STRATEGY_RACK | 2 |  |
 | EVENT_RULE_TARGET_STRATEGY_AFFECTED_COMPONENTS | 3 |  |
 
-
-
 <a name="v1-FirmwareControlOperation"></a>
 
 ### FirmwareControlOperation
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -3876,11 +2715,10 @@ ConflictStrategy controls how a task behaves when a conflict is detected.
 | FIRMWARE_CONTROL_OPERATION_DOWNGRADE | 2 |  |
 | FIRMWARE_CONTROL_OPERATION_ROLLBACK | 3 |  |
 
-
-
 <a name="v1-LeakHandlingStatus"></a>
 
 ### LeakHandlingStatus
+
 LeakHandlingStatus describes Flow&#39;s handling of a leakage event for a
 component. It describes handling progress, not the component&#39;s current leak
 or power state.
@@ -3893,11 +2731,10 @@ or power state.
 | LEAK_HANDLING_STATUS_DOWN | 3 | A forced-shutdown Task completed. This is not current power state. |
 | LEAK_HANDLING_STATUS_FAILED | 4 | The latest supported leakage-handling Task failed or was terminated. |
 
-
-
 <a name="v1-LeakStatus"></a>
 
 ### LeakStatus
+
 LeakStatus is Flow&#39;s view of whether coolant leak detection has fired for
 a component. The leak-detection loop sets it from core&#39;s tray-leak-detection
 health alert; LEAK_STATUS_UNKNOWN is the resting value for components the
@@ -3909,12 +2746,9 @@ loop has not yet evaluated.
 | LEAK_STATUS_DETECTED | 1 |  |
 | LEAK_STATUS_NOT_DETECTED | 2 |  |
 
-
-
 <a name="v1-OperationRunPhysicalLocationOrdering-Strategy"></a>
 
 ### OperationRunPhysicalLocationOrdering.Strategy
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -3922,12 +2756,9 @@ loop has not yet evaluated.
 | STRATEGY_ROW_BY_ROW | 1 |  |
 | STRATEGY_ONE_PER_ROW_ROUND_ROBIN | 2 |  |
 
-
-
 <a name="v1-OperationRunSafetyGateScope"></a>
 
 ### OperationRunSafetyGateScope
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -3935,12 +2766,9 @@ loop has not yet evaluated.
 | OPERATION_RUN_SAFETY_GATE_SCOPE_CURRENT_PHASE | 1 |  |
 | OPERATION_RUN_SAFETY_GATE_SCOPE_CUMULATIVE_RUN | 2 |  |
 
-
-
 <a name="v1-OperationRunStatus"></a>
 
 ### OperationRunStatus
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -3953,12 +2781,9 @@ loop has not yet evaluated.
 | OPERATION_RUN_STATUS_FAILED | 6 |  |
 | OPERATION_RUN_STATUS_COMPLETED_WITH_FAILURES | 7 |  |
 
-
-
 <a name="v1-OperationRunStatusReason"></a>
 
 ### OperationRunStatusReason
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -3969,12 +2794,9 @@ loop has not yet evaluated.
 | OPERATION_RUN_STATUS_REASON_SAFETY_GATE | 4 |  |
 | OPERATION_RUN_STATUS_REASON_CONFLICT_RETRY_TIMEOUT | 5 |  |
 
-
-
 <a name="v1-OperationRunTargetPhaseScope"></a>
 
 ### OperationRunTargetPhaseScope
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -3983,12 +2805,9 @@ loop has not yet evaluated.
 | OPERATION_RUN_TARGET_PHASE_SCOPE_COMPLETED_PHASES | 2 | Targets in materialized phases before the current phase. If no current phase exists, every materialized phase is completed. |
 | OPERATION_RUN_TARGET_PHASE_SCOPE_CURRENT_AND_COMPLETED_PHASES | 3 | All materialized targets through the current phase. If no current phase exists, this includes every materialized phase. |
 
-
-
 <a name="v1-OperationRunTargetStatus"></a>
 
 ### OperationRunTargetStatus
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -4002,12 +2821,9 @@ loop has not yet evaluated.
 | OPERATION_RUN_TARGET_STATUS_SKIPPED | 7 |  |
 | OPERATION_RUN_TARGET_STATUS_CLAIMED | 8 |  |
 
-
-
 <a name="v1-OperationType"></a>
 
 ### OperationType
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -4015,11 +2831,10 @@ loop has not yet evaluated.
 | OPERATION_TYPE_POWER_CONTROL | 1 |  |
 | OPERATION_TYPE_FIRMWARE_CONTROL | 2 |  |
 
-
-
 <a name="v1-OverlapPolicy"></a>
 
 ### OverlapPolicy
+
 OverlapPolicy controls what happens when a schedule fires while the previous
 execution for the same scope is still active.
 
@@ -4029,11 +2844,10 @@ execution for the same scope is still active.
 | OVERLAP_POLICY_SKIP | 1 | skip this firing cycle for any scope whose last task is still active |
 | OVERLAP_POLICY_QUEUE | 2 | submit unconditionally; the task manager queues behind the active task |
 
-
-
 <a name="v1-Phase"></a>
 
 ### Phase
+
 Phase is Flow&#39;s coarse operability bucket. Component phases are derived from
 Core&#39;s type-specific state machines; Rack.operation_status aggregates those
 component phases.
@@ -4047,35 +2861,25 @@ component phases.
 | PHASE_ERROR | 4 |  |
 | PHASE_DELETING | 5 |  |
 
-
-
 <a name="v1-PowerControlOp"></a>
 
 ### PowerControlOp
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
 | POWER_CONTROL_OP_UNKNOWN | 0 |  |
 | POWER_CONTROL_OP_ON | 1 | Power On |
 | POWER_CONTROL_OP_FORCE_ON | 2 |  |
-| POWER_CONTROL_OP_OFF | 3 | Power Off
-
-graceful shutdown |
+| POWER_CONTROL_OP_OFF | 3 | Power Off graceful shutdown |
 | POWER_CONTROL_OP_FORCE_OFF | 4 |  |
-| POWER_CONTROL_OP_RESTART | 5 | Restart (OS level reboot)
-
-graceful restart |
+| POWER_CONTROL_OP_RESTART | 5 | Restart (OS level reboot) graceful restart |
 | POWER_CONTROL_OP_FORCE_RESTART | 6 |  |
 | POWER_CONTROL_OP_WARM_RESET | 7 | Reset (hardware level) |
 | POWER_CONTROL_OP_COLD_RESET | 8 |  |
 
-
-
 <a name="v1-PowerControlOperation"></a>
 
 ### PowerControlOperation
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -4089,11 +2893,40 @@ graceful restart |
 | POWER_CONTROL_OPERATION_WARM_RESET | 7 |  |
 | POWER_CONTROL_OPERATION_COLD_RESET | 8 |  |
 
+<a name="v1-PowerDetailsReadError"></a>
 
+### PowerDetailsReadError
+
+Flow lookup failures are distinct from errors returned inside Core values.
+Dependency error strings and credentials are never included.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| POWER_DETAILS_READ_ERROR_UNSPECIFIED | 0 | Not emitted as an error by this RPC. |
+| POWER_DETAILS_READ_ERROR_NOT_LINKED | 1 | The section lacks its required identity: a managed Core ID for Core sections, or a Flow rack assignment for tasks. |
+| POWER_DETAILS_READ_ERROR_NOT_CONFIGURED | 2 | Flow has no NICo provider client. |
+| POWER_DETAILS_READ_ERROR_UNSUPPORTED | 3 | Core lacks the RPC or did not provide this section. |
+| POWER_DETAILS_READ_ERROR_DEADLINE_EXCEEDED | 4 | A child read exceeded its caller or provider deadline. |
+| POWER_DETAILS_READ_ERROR_READ_FAILED | 5 | The dependency returned an error other than unsupported/deadline. |
+| POWER_DETAILS_READ_ERROR_INVALID_RESPONSE | 6 | A dependency returned the wrong identity/cardinality, an absent required value, or task data that cannot be converted to the declared operation. |
+| POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED | 7 | The rack power-task count, waiting-context task count, or encoded response exceeded its documented bound. |
+
+<a name="v1-PowerTaskRelevance"></a>
+
+### PowerTaskRelevance
+
+Why this task is included for the requested tray.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| POWER_TASK_RELEVANCE_UNSPECIFIED | 0 |  |
+| POWER_TASK_RELEVANCE_SELECTED | 1 | The task&#39;s recorded UUID/type selection explicitly includes this tray. |
+| POWER_TASK_RELEVANCE_RACK_AFFECTED | 2 | The task selects a power shelf on this rack; the tray is not a selected target. |
 
 <a name="v1-RackFilterField"></a>
 
 ### RackFilterField
+
 RackFilterField represents the supported filter field types for rack queries
 
 | Name | Number | Description |
@@ -4103,11 +2936,10 @@ RackFilterField represents the supported filter field types for rack queries
 | RACK_FILTER_FIELD_MANUFACTURER | 2 | Filter by manufacturer |
 | RACK_FILTER_FIELD_MODEL | 3 | Filter by model (stored in description JSONB) |
 
-
-
 <a name="v1-RackOrderByField"></a>
 
 ### RackOrderByField
+
 RackOrderByField represents the supported order by field types for rack queries
 
 | Name | Number | Description |
@@ -4117,12 +2949,9 @@ RackOrderByField represents the supported order by field types for rack queries
 | RACK_ORDER_BY_FIELD_MANUFACTURER | 2 | Order by manufacturer |
 | RACK_ORDER_BY_FIELD_MODEL | 3 | Order by model |
 
-
-
 <a name="v1-ScheduleSpecType"></a>
 
 ### ScheduleSpecType
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -4131,24 +2960,33 @@ RackOrderByField represents the supported order by field types for rack queries
 | SCHEDULE_SPEC_TYPE_CRON | 2 | spec is a 5-field cron expression |
 | SCHEDULE_SPEC_TYPE_ONE_TIME | 3 | spec is an RFC3339 timestamp |
 
-
-
 <a name="v1-TaskExecutorType"></a>
 
 ### TaskExecutorType
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
 | TASK_EXECUTOR_TYPE_UNKNOWN | 0 |  |
 | TASK_EXECUTOR_TYPE_TEMPORAL | 1 |  |
 
+<a name="v1-TaskKind"></a>
 
+### TaskKind
+
+Task kinds include rack lifecycle work not represented by OperationType.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| TASK_KIND_UNSPECIFIED | 0 | The stored task type has no known API kind. |
+| TASK_KIND_POWER_CONTROL | 1 | Power control for selected rack components. |
+| TASK_KIND_FIRMWARE_CONTROL | 2 | Firmware control for selected rack components. |
+| TASK_KIND_BRING_UP | 3 | Rack bring-up work. |
+| TASK_KIND_DECOMMISSION | 4 | Rack decommissioning work. |
+| TASK_KIND_INJECT_EXPECTATION | 5 | Installing expected inventory for a rack. |
 
 <a name="v1-TaskStatus"></a>
 
 ### TaskStatus
-
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -4160,19 +2998,12 @@ RackOrderByField represents the supported order by field types for rack queries
 | TASK_STATUS_TERMINATED | 5 |  |
 | TASK_STATUS_WAITING | 6 | TASK_STATUS_WAITING means the task was queued because a conflicting task is active on the rack. It will be promoted automatically when the rack becomes available, or can be cancelled explicitly via CancelTask. |
 
-
-
-
-
-
-
 <a name="v1-Flow"></a>
 
 ### Flow
 
-
 | Method Name | Request Type | Response Type | Description |
-| ----------- | ------------ | ------------- | ------------|
+| ----------- | ------------ | ------------- | ----------- |
 | Version | [VersionRequest](#v1-VersionRequest) | [BuildInfo](#v1-BuildInfo) | Version |
 | CreateTaskSchedule | [CreateTaskScheduleRequest](#v1-CreateTaskScheduleRequest) | [TaskSchedule](#v1-TaskSchedule) | Task schedules |
 | GetTaskSchedule | [GetTaskScheduleRequest](#v1-GetTaskScheduleRequest) | [TaskSchedule](#v1-TaskSchedule) |  |
@@ -4249,10 +3080,7 @@ RackOrderByField represents the supported order by field types for rack queries
 | ResumeOperationRun | [ResumeOperationRunRequest](#v1-ResumeOperationRunRequest) | [OperationRun](#v1-OperationRun) |  |
 | AdvanceOperationRunPhase | [AdvanceOperationRunPhaseRequest](#v1-AdvanceOperationRunPhaseRequest) | [OperationRun](#v1-OperationRun) |  |
 | CancelOperationRun | [CancelOperationRunRequest](#v1-CancelOperationRunRequest) | [OperationRun](#v1-OperationRun) |  |
-
-
-
-
+| GetTrayPowerDetails | [GetTrayPowerDetailsRequest](#v1-GetTrayPowerDetailsRequest) | [GetTrayPowerDetailsResponse](#v1-GetTrayPowerDetailsResponse) | Reads live Core power details and outstanding Flow power tasks independently. This is not an atomic snapshot and does not change power or task state. Caller cancellation fails the RPC; child read failures remain section errors. |
 
 ## Scalar Value Types
 
@@ -4273,4 +3101,3 @@ RackOrderByField represents the supported order by field types for rack queries
 | <a name="bool" /> bool |  | bool | boolean | boolean | bool | bool | boolean | TrueClass/FalseClass |
 | <a name="string" /> string | A string must always contain UTF-8 encoded or 7-bit ASCII text. | string | String | str/unicode | string | string | string | String (UTF-8) |
 | <a name="bytes" /> bytes | May contain any arbitrary sequence of bytes. | string | ByteString | str | []byte | ByteString | string | String (ASCII-8BIT) |
-

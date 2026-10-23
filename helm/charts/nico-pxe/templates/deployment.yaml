@@ -134,9 +134,6 @@ spec:
             runAsNonRoot: true
             runAsUser: 10001
             runAsGroup: 10001
-            capabilities:
-              add:
-                - SYS_PTRACE
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           ports:

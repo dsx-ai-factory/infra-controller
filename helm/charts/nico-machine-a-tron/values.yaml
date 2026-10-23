@@ -10,7 +10,9 @@
 ##    - INCOMPATIBLE with real hardware
 ##
 ## 2. CONTROLLER MODE (Large-Scale Testing) - mat-k8s-controller.enabled: true
-##    - Controller dynamically creates a Service per BMC (BMC IP as externalIP)
+##    - Controller dynamically creates a Service per BMC (BMC IP as externalIP),
+##      or two Services per pod carrying every BMC and NVOS address with
+##      mat-k8s-controller.config.serviceGranularity: pod
 ##    - Supports multi-pod deployments via `pods` configuration
 ##    - Compatible with real hardware
 ##
@@ -72,6 +74,19 @@ resources:
   requests:
     cpu: 500m
     memory: 1Gi
+
+## Spread the machine-a-tron pods across nodes. Each pod is its own
+## single-replica Deployment, so the rendered constraint selects every pod of
+## this release by the shared name and component labels, not by pod name.
+## Disabled renders no topologySpreadConstraints.
+topologySpread:
+  enabled: false
+  maxSkew: 1
+  topologyKey: kubernetes.io/hostname
+  ## DoNotSchedule keeps a pod Pending rather than exceed maxSkew.
+  whenUnsatisfiable: DoNotSchedule
+  ## Honor leaves tainted nodes, a cordoned one included, out of the skew.
+  nodeTaintsPolicy: Honor
 
 service:
   bmcMock:
@@ -214,6 +229,11 @@ machineATron:
     name: nico-site-credentials
     key: credentials.yaml
   apiRefreshInterval: "2s"
+  ## Delay before a simulated Scout reopens its ScoutStream after the stream
+  ## closes or fails. A stream nico-api denies is not reopened. A duration
+  ## string such as "30s" or "24h". Empty keeps the machine-a-tron default of
+  ## 10s.
+  scoutStreamReconnectInterval: ""
 
 ## =============================================================================
 ## Machine Defaults - Shared settings for all machine groups
@@ -300,8 +320,8 @@ hwMacAddressRanges:
   ## Bits per allocated range (8 = 256 MACs per range allocation)
   rangeHostBits: 8
 
-##   - N BMC Services, one per BMC (when mat-k8s-controller.enabled)
-##
+##   - N BMC Services, one per BMC, or two per pod at serviceGranularity pod
+##     (when mat-k8s-controller.enabled)
 ##
 ## BMC count per GB200 NVL72 rack: 71
 ##   - Compute trays: 18 × 3 = 54
@@ -440,7 +460,7 @@ configFiles:
 ## =============================================================================
 ## Machine-a-tron Kubernetes Controller
 ## =============================================================================
-## Discovers machine-a-tron pods and creates K8s Services for each mock BMC.
+## Discovers machine-a-tron pods and creates K8s Services for the mock BMCs.
 ## Enable for multi-pod deployments to dynamically manage BMC Services.
 ##
 ## Auto-discovered:
@@ -449,6 +469,9 @@ configFiles:
 ##
 ## BMC IPs are published as Service externalIPs; the BMC network must not
 ## overlap the cluster ServiceCIDR or pod CIDR. See README Requirements.
+## Every Service takes a clusterIP from the ServiceCIDR: one per BMC and per
+## switch NVOS endpoint at config.serviceGranularity device, two per pod at
+## pod. See README Service Structure.
 ##
 mat-k8s-controller:
   enabled: false
@@ -463,6 +486,8 @@ mat-k8s-controller:
     syncInterval: "30s"
     insecureSkipVerify: false
     logLevel: "info"
+    ## "device" or "pod"; see the subchart values.
+    serviceGranularity: device
 
 ## nico-site-health-probe — synthetic monitoring for NICo APIs (#5360).
 ## Disabled by default because it needs site-specific configuration to run:

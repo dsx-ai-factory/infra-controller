@@ -19,6 +19,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::lockdown::error::{MlxError, MlxResult};
+use crate::runner::command_builder::CommandSpec;
 
 // FlintRunner is a wrapper for executing flint commands.
 pub struct FlintRunner {
@@ -29,6 +30,14 @@ pub struct FlintRunner {
 }
 
 impl FlintRunner {
+    /// Shared lookup order; each execution path keeps its own probe policy.
+    pub(crate) const CANDIDATE_PATHS: [&'static str; 4] = [
+        "flint",
+        "/usr/bin/flint",
+        "/usr/local/bin/flint",
+        "/opt/mellanox/mft/bin/flint",
+    ];
+
     // new creates a new FlintRunner instance.
     pub fn new() -> MlxResult<Self> {
         let flint_path = Self::find_flint()?;
@@ -54,14 +63,7 @@ impl FlintRunner {
 
     // find_flint attempts to find the flint executable in common locations.
     fn find_flint() -> MlxResult<String> {
-        let common_paths = [
-            "flint",
-            "/usr/bin/flint",
-            "/usr/local/bin/flint",
-            "/opt/mellanox/mft/bin/flint",
-        ];
-
-        for path in &common_paths {
+        for path in &Self::CANDIDATE_PATHS {
             if let Ok(output) = Command::new(path)
                 .arg("--version")
                 .stdout(Stdio::null())
@@ -261,15 +263,14 @@ impl FlintRunner {
             )));
         }
 
-        let image_str = image_path.to_string_lossy();
-        let args = ["-d", device_id, "-y", "-i", &image_str, "burn"];
+        let command = self.burn_command(device_id, image_path);
 
         if self.dry_run {
-            return Err(MlxError::DryRun(self.build_command(&args)));
+            return Err(MlxError::DryRun(command.to_string()));
         }
 
-        let output = Command::new(&self.flint_path)
-            .args(args)
+        let output = command
+            .to_command()
             .output()
             .map_err(|e| MlxError::CommandFailed(format!("Failed to execute burn: {e}")))?;
 
@@ -305,19 +306,15 @@ impl FlintRunner {
             )));
         }
 
-        let image_str = image_path.to_string_lossy();
-        let args = ["-d", device_id, "-i", &image_str, "verify"];
+        let command = self.verify_image_command(device_id, image_path);
 
         if self.dry_run {
-            return Err(MlxError::DryRun(self.build_command(&args)));
+            return Err(MlxError::DryRun(command.to_string()));
         }
 
-        let output = Command::new(&self.flint_path)
-            .args(args)
-            .output()
-            .map_err(|e| {
-                MlxError::CommandFailed(format!("Failed to execute verify with image: {e}"))
-            })?;
+        let output = command.to_command().output().map_err(|e| {
+            MlxError::CommandFailed(format!("Failed to execute verify with image: {e}"))
+        })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -334,6 +331,20 @@ impl FlintRunner {
         }
 
         Ok(stdout)
+    }
+
+    pub(crate) fn burn_command(&self, device: &str, image: &Path) -> CommandSpec {
+        CommandSpec::new(&self.flint_path)
+            .args(["-d", device, "-y", "-i"])
+            .arg(image.to_string_lossy())
+            .arg("burn")
+    }
+
+    pub(crate) fn verify_image_command(&self, device: &str, image: &Path) -> CommandSpec {
+        CommandSpec::new(&self.flint_path)
+            .args(["-d", device, "-i"])
+            .arg(image.to_string_lossy())
+            .arg("verify")
     }
 
     // Keep the library's bare-hex rule, allowing unpadded values up to 64 bits.

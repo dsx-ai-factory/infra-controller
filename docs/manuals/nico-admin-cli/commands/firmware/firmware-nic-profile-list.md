@@ -15,12 +15,23 @@ nico-admin-cli firmware nic profile list [OPTIONS]
 
 ## DESCRIPTION
 
-List all NIC firmware profile definitions from Core in database
-collation order by ID. The CLI fetches details in bounded batches;
-profiles deleted during the listing are omitted. Entries retain their
-registered order. This is not an atomic catalog snapshot and does not
-select or update firmware. If a returned definition cannot be decoded,
-the listing fails before writing results.
+List NIC firmware profile definitions from Core in database collation
+order by ID. Omit both hardware options to list every profile, or supply
+both --part-number and --psid to list profiles containing that exact
+hardware pair. Core requires each identifier to contain 1–256 UTF-8
+bytes without surrounding whitespace or controls; matching is literal
+and case-sensitive. The filter checks compatibility, not whether a
+profile is selected for any device. An unknown valid hardware pair
+returns an empty list. Finish upgrading every Core replica before using
+the hardware filter; older replicas ignore it and return the unfiltered
+list.
+
+The CLI fetches details in bounded batches; profiles deleted during the
+listing are omitted. A profile edited after ID enumeration can return
+details that no longer match the hardware filter. Entries within each
+profile retain their registered order. This is not an atomic catalog
+snapshot and does not select or update firmware. If a returned
+definition cannot be decoded, the listing fails before writing results.
 
 Use --format ascii-table (default), csv, json, or yaml and --output PATH
 before the firmware subcommand. JSON and YAML output is an array of
@@ -33,6 +44,15 @@ the file is created before the operation, even if the operation later
 fails. --sort-by and --extended have no effect.
 
 ## OPTIONS
+
+`--part-number <PN>`
+
+Literal, case-sensitive manufacturer part number; requires --psid
+
+`--psid <PSID>`
+
+Literal, case-sensitive firmware parameter-set identifier; requires
+--part-number
 
 `--extended`
 
@@ -60,6 +80,7 @@ Print help (see a summary with -h)
 
 ```sh
 nico-admin-cli firmware nic profile list
+nico-admin-cli firmware nic profile list --part-number MCX75310AAS-NEAT --psid MT_0000000838
 nico-admin-cli --format yaml --output ./nic-profiles.yaml firmware nic profile list
 ```
 

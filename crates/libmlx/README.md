@@ -21,10 +21,15 @@ The library is organized into these modules:
 
 ## Binary Targets
 
+The package provides the following binaries:
+
+**Binary Targets**
+
 | Binary | Description |
 |---|---|
 | `mlxconfig-device` | Device discovery and information CLI |
 | `mlxconfig-embedded` | Registry management, device compatibility, and configuration generation CLI |
+| `mlx-firmware-supervisor` | Linux per-PCI-slot firmware daemon and per-command subprocess supervisor; both roles use the same binary |
 
 ---
 
@@ -158,10 +163,10 @@ databases/     Validation    src/registry/          Static access
 ```
 
 1. `build.rs` scans `databases/*.yaml` for configuration files
-2. Each file is parsed and validated using self-contained deserialization types
-3. Static Rust code is generated using builder patterns
-4. Data becomes a static `REGISTRIES` constant via `once_cell::sync::Lazy`
-5. Applications access pre-validated, zero-cost static data at runtime
+1. Each file is parsed and validated using self-contained deserialization types
+1. Static Rust code is generated using builder patterns
+1. Data becomes a static `REGISTRIES` constant via `once_cell::sync::Lazy`
+1. Applications access pre-validated, zero-cost static data at runtime
 
 ### Usage
 
@@ -188,8 +193,8 @@ let matching = registries::get_registries_for_device(&device_info);
 ### Adding New Registries
 
 1. Create `databases/my-new-registry.yaml` following the YAML format above
-2. Run `cargo build` — the build script validates and generates code
-3. Access via `registries::get("my-new-registry")`
+1. Run `cargo build` — the build script validates and generates code
+1. Access via `registries::get("my-new-registry")`
 
 ### Device Filters
 
@@ -415,28 +420,32 @@ match profile.sync("01:00.0", None) {
 
 Firmware management for Mellanox NICs, including flash, verify, and reset operations. Supports sourcing firmware from local files, HTTPS URLs, and SSH/SCP, with optional authentication.
 
-For read-only inspection, [`firmware::preflight`](src/firmware/preflight.rs)
-accepts caller-owned, digest-checked local files and compares a selected PCI
-device with an exact firmware target. It does not download artifacts, interpret
-binary configuration, change the device, or certify that flashing is safe. The
-module documents input requirements, query limits, and comparison errors.
+For read-only inspection, [`firmware::preflight`](src/firmware/preflight.rs) accepts caller-owned, digest-checked local files and compares a selected PCI device with an exact firmware target. It does not download artifacts, interpret binary configuration, change the device, or certify that flashing is safe. The module documents input requirements, query limits, and comparison errors.
 
 ### Lifecycle
 
-1. **Flash** — burn new firmware onto the device via `flint`
-2. **Verify version** — confirm expected firmware version is staged (works pre-reset)
-3. **Reset** — activate new firmware via `mlxfwreset`
-4. **Verify image** — compare running firmware against a known-good image (works post-reset)
+The workflow executes the selected phases in this order:
+
+1. Prepare both inputs, apply any device configuration, and burn through `flint`.
+1. Request activation through `mlxfwreset`, when selected.
+1. Compare the device image with the prepared image through `flint`, when selected.
+1. Compare the queried version with the target, when selected.
 
 ### Firmware Sources
 
-`FirmwareSource` supports three source types, all resolved via `from_url()`:
+`FirmwareSource` supports three source types, all resolved through `from_url`:
+
+**Firmware Sources**
 
 | Prefix | Source | Example |
 |---|---|---|
-| `https://` | HTTP download | `https://artifacts.example.com/fw/prod.bin` |
-| `ssh://` | SCP transfer | `ssh://deploy@host:path/to/firmware.bin` |
+| `https://` or `http://` | HTTP download | `https://artifacts.example.com/fw/prod.bin` |
+| `ssh://` | SSH transfer | `ssh://deploy@host:path/to/firmware.bin` |
 | `file://` or bare path | Local file | `/opt/firmware/prod.bin` |
+
+Each HTTP or SSH artifact transfer has one 30-minute network deadline, including connection, authentication, and the complete response. The deadline does not restart between response headers and body, and the library does not retry the transfer. Local disk writes finish outside that deadline because canceling a filesystem future does not necessarily stop its underlying write.
+
+The following example selects remote sources and credentials:
 
 ```rust
 use libmlx::firmware::source::FirmwareSource;
@@ -464,74 +473,164 @@ let key = Credentials::ssh_key("/home/deploy/.ssh/id_ed25519");
 let agent = Credentials::ssh_agent();
 ```
 
+### Supervised Firmware Operations
+
+[`firmware::operation`](src/firmware/operation/mod.rs) owns accepted firmware work independently of Scout, a CLI invocation, or an RPC connection. Core-driven Scout firmware updates and non-dry-run `firmware flash` / `firmware flash-config` use this path. A long-lived `mlx-firmware-supervisor` daemon serves each PCI slot over private Tonic gRPC on a Unix-domain socket. Clients supply a PCI address such as `0000:4b:00.0`; `4b:00.0` means domain `0000`. The supervisor client does not resolve MST aliases; Scout resolves them when publishing its [startup inventory](../scout/README.md#supervised-nic-firmware-updates). All functions of `0000:4b:00` share ownership and a socket, but clients must use the daemon's exact execution address; another function is rejected rather than silently substituted. The protocol checks the daemon's version, slot, execution address, and boot identity, and admits only clients with the daemon's effective UID.
+
+The daemon persists acceptance before starting work and records intent before each hardware phase. It runs the existing `FirmwareFlasher` pipeline: `Inspect`, `Prepare`, optional `Configure`, `Burn`, optional `Activate`, optional `VerifyImage`, and optional `VerifyVersion`. The receipt includes the operation ID, state, last recorded phase, partial report, and a nonsecret diagnostic. Durably recorded phase results remain available when a later phase fails, including a recorded mismatching version. A burn can succeed before its completion checkpoint is saved. If that write fails, the receipt can still show `flashed=false`; the operator must reconcile the device before another mutation. `Complete` is saved before removing prepared inputs.
+
+An operation ID must contain 1–256 printable, non-space ASCII characters. Reuse the same ID to resolve a lost response: retrieving a receipt never restarts work, and resubmitting the identical profile and observer-exit policy returns the existing receipt. Reusing an ID with different work is rejected. After an uncertain result, read the original ID rather than inventing a replacement. Scout reads first and submits only after `NotFound`, preserving the accepted request even when Core's live profile changes or disappears. A new request with no profile records a no-work `Complete` receipt with `flashed=false`; it still passes predecessor and host-claim checks.
+
+The typed client resolves local image, configuration, and SSH-key paths against the submitting process's working directory before submission. Remote SSH paths retain their remote-account meaning. Omitted SSH usernames use the submitter's `USER`, then `LOGNAME`, then `root`; usernames containing `@` or `:` are rejected. Omitted SSH credentials select the submitter's `$HOME/.ssh/id_rsa`, with `/root` used when `HOME` is unavailable. Explicit SSH-agent authentication and known-hosts checks use the supervisor's environment and home directory, not per-request environment forwarding. Configure that environment before launching the daemon.
+
+Connecting and each RPC have a five-second total deadline, including channel readiness. Launch/readiness has a separate ten-second bound. Requests and responses are limited to 128 KiB. These bounds do not limit the firmware operation's lifetime; a timeout, dropped client, or closed socket does not cancel accepted work. The client does not automatically retry RPCs.
+
+Each daemon permits eight journal RPC tasks across all connections, including tasks whose callers have disconnected. Excess requests return `RESOURCE_EXHAUSTED` without waiting for capacity. Execution progress and observer cancellation do not consume this quota. Transport limits separately allow 32 connected sockets and eight active HTTP/2 streams per connection; excess sockets are closed.
+
+The supervisor exposes the following receipt states:
+
+**Firmware Receipt States**
+
+| State | Meaning |
+|---|---|
+| `Accepted` | The immutable request is recorded; execution has not necessarily started |
+| `Running` | The daemon is inspecting, preparing, or executing a phase |
+| `CancelRequested` | A durable stop request awaits the next safe phase boundary |
+| `Complete` | Every requested phase succeeded, or the request explicitly contained no firmware work |
+| `Canceled` | Execution stopped at a safe boundary; completed effects were not undone |
+| `Interrupted` | A previous daemon disappeared before any mutation intent was recorded; reconciliation is required |
+| `ManualIntervention` | A mutation could have started, or later execution failed; automatic continuation is not justified |
+| `Failed` | A known failure stopped execution; this is not permission to replay it |
+
+`ObserverExitBehavior::Continue` is the default, used by Scout and the CLI. `Terminate` instead requests cancellation when the actual submitting process exits, using the kernel's Unix peer pidfd (`SO_PEERPIDFD`, Linux 6.5 or a supporting backport). It never treats socket closure as process death and never kills an in-flight mutation solely because the observer exited. Kernels without peer pidfds reject `Terminate` before admission but can use `Continue`. Library callers selecting `Terminate` must connect from the submitting process, not inherit another process's connection.
+
+Explicit `cancel` also stops only at a safe phase boundary. It returns the receipt without waiting, so `CancelRequested` is not proof that a tool stopped. Pending file preparation can be canceled; an active hardware command settles before the next phase is withheld. Cancellation does not undo configuration, a burn, or a reset. A request arriving during the final successful phase can still finish as `Complete`. Terminal receipts are returned unchanged; unknown IDs return an error. Per-tool deadlines and output limits remain enforced independently.
+
+A durable host-wide mutation claim serializes cooperating supervised operations because PCI slots do not establish independent physical-card or reset domains. All callers must share the same state root. An occupied claim rejects new admission with `RESOURCE_EXHAUSTED`; Scout defers that request to a later poll without reporting a firmware failure. The claim is released after persisted `Complete`, or `Failed`/`Canceled` before any mutation intent. The terminal receipt remains immutable: its ID returns the same result, while a new ID can request new work. Interruption, uncertain persistence, and failure or cancellation after mutation retain exclusion. This does not protect direct `FirmwareFlasher` callers, standalone reset/configuration/lockdown commands, legacy firmware paths, or externally launched tools; do not run those concurrently with supervised updates.
+
+### Launch and State
+
+Scout and the firmware CLI read these environment variables through `SupervisorConfig::from_env`; library callers can override the resulting fields before connecting. There are no corresponding firmware CLI flags. A running daemon retains its original launch placement. The following table lists the accepted settings:
+
+**Supervisor Environment Settings**
+
+| Environment Variable | Default and Accepted Values |
+|---|---|
+| `MLX_FIRMWARE_STATE_DIRECTORY` | `/run/forge/mlx-firmware`; an absolute, nonempty shared state root other than `/`, with no `..` components |
+| `MLX_FIRMWARE_SUPERVISOR_LAUNCH` | `standalone`; accepts exactly `standalone` or `systemd-scope`, with empty or unknown values rejected |
+
+`standalone` starts the daemon in a new session without requiring systemd. A service manager's cleanup of Scout's cgroup, including after Scout exits, can still kill a standalone daemon. Optional `systemd-scope` uses `systemd-run --system --scope` in `system.slice`, outside Scout's service cgroup, and requires permission to create system scopes. Each launch gets a fresh scope name so a surviving worker cannot occupy its replacement daemon's scope. Failure never falls back to standalone. The separate scope protects against Scout's service cleanup, not system shutdown, stopping the helper scope, or external SIGKILL; it supplies no automatic restart. A readiness timeout leaves a launched daemon alive. SIGINT or SIGTERM to the daemon stops admission and drains accepted work; it does not interrupt an active burn.
+
+The packaged [Scout service](../scout/misc/forge-scout.service) explicitly selects `systemd-scope`; its optional `/opt/forge/forge-scout.env` can override that setting. In Scout PXE images, `forge-scout-pre.sh` regenerates that file from `/opt/forge/forge-scout.env.template` before each start. Put persistent launch overrides in the template, for example `MLX_FIRMWARE_SUPERVISOR_LAUNCH=standalone`; edits to the generated `.env` file are discarded. This service configuration does not change the standalone binary's default.
+
+The state root and per-slot directories require ownership by the effective UID, mode `0700`, and no symlink components. Ancestors must belong to root or that UID; shared writable ancestors must have the sticky bit. The socket is `<root>/<dddd:bb:ss>/control.sock`, mode `0600`, with a maximum full path length of 107 bytes. Launcher diagnostics are written to `<root>/<dddd:bb:ss>.supervisor.log`, mode `0600`. The default helper is the matching `mlx-firmware-supervisor` beside the caller executable, not a `PATH` lookup; library callers can set the absolute `SupervisorConfig.supervisor_path`.
+
+Each slot retains its receipt ledger and exclusive ownership lock. The ledger pins the full execution address across daemon restarts; reopening it for another function is rejected even after successful work. Staged files live in that slot's private directory, overriding the profile's `cache_dir`; their relative paths and SHA-256 digests are recorded before mutation. Those digests identify the staged bytes, not their authenticity. Source URLs and credentials are not stored in receipts. Failed or uncertain work can retain prepared inputs. There is no automatic receipt eviction, staged-file expiry, replay, resume, or repair command. Each slot permits at most 128 receipts and a 1 MiB ledger; reaching either limit rejects new admission.
+
+After daemon loss, reopening same-boot unfinished work records `Interrupted` or, once mutation intent exists, `ManualIntervention`. A free process lock does not prove a vendor tool stopped: its per-command helper can continue under the original deadline even after the daemon dies. The new daemon does not reattach or replay. Existing receipts remain readable, but unresolved work and a retained host claim block further admission. Do not delete state to bypass that protection; hardware and process effects require reconciliation first.
+
+This state supports process recovery, not reboot or reinstall recovery. The default `/run` location and a PXE/tmpfs root can disappear on reboot. A surviving journal from another boot remains readable but rejects further mutation. Loss of the journal is not evidence that earlier device work completed safely.
+
+For failed or uncertain work, inspect the receipt with [`firmware status`](#firmware-cli) and retain the journal, prepared inputs, and supervisor log. There is no supported repair or retry command for an uncertain operation. Deleting state or rebooting does not reconcile its hardware effects. Recovery across reboot is tracked in [the firmware recovery follow-up](https://github.com/dsx-ai-factory/infra-controller/issues/6677).
+
 ### FirmwareFlasher
 
-Builder-pattern orchestrator for firmware operations:
+Firmware execution and read-only preflight require Linux and the `mlx-firmware-supervisor` helper. Scout packages include it beside `forge-scout`. For the standalone CLI, build both binaries and keep them in the same directory:
+
+```bash
+cargo build -p carbide-libmlx --bin mlxconfig-embedded --bin mlx-firmware-supervisor
+```
+
+Library callers use that same sibling lookup by default. Applications that install the per-command helper elsewhere can pass `FirmwareToolExecutor::with_supervisor_path(path)` to `FirmwareFlasher::new_with_executor`, `discover_device_bounded_with_executor`, or `inspect_prepared_firmware_with_executor`. The helper is not searched for on `PATH`; a missing or non-executable helper fails before any firmware tool starts. The daemon and per-command helper are two modes of this one executable, not separate packaged binaries. A running daemon starts its workers through `/proc/self/exe`, preserving its loaded executable and worker protocol if the installed binary is replaced. New daemons and direct library callers still require a matching helper.
+
+The kernel must enable `CONFIG_PROC_CHILDREN=y`, and `/proc` must be readable and mounted for the helper's PID namespace. The helper checks that it can open `/proc/thread-self/children` before accepting a tool request. Run this read-only check in the same runtime environment as Scout or the CLI:
+
+```bash
+cat /proc/thread-self/children
+```
+
+The output can be empty. If the entry cannot be opened, the helper reports that prerequisite and starts no firmware tool.
+
+`FirmwareFlasher` queries the selected device and checks its part number and PSID with `mlxfwmanager`. Its device locator may be a PCI address or an MST path; the separate Scout preflight command requires a PCI address. Preparation resolves the image and optional configuration into separate owned directories and checks that both are readable, nonempty files. Legacy `FlashSpec` does not include digests; these checks do not verify image authenticity or grant permission to update hardware.
+
+The full workflow prepares both files, applies the optional configuration, burns the image, and then runs the requested reset and verification steps. It reuses the prepared image for verification. The first failed step returns an error and prevents later steps. The library does not retry commands within an `apply` call. Direct use of `FirmwareFlasher` is a caller-owned primitive: it does not provide the durable receipts or admission protection described above.
+
+`apply` returns a `FirmwareApplyError` containing the original cause and an optional progress report. A failure after the burn completion callback succeeds retains that report; an earlier failure has no report. For supervised work, that callback saves the burn checkpoint. A successful physical burn followed by a failed checkpoint write therefore does not guarantee a report with `flashed=true`. Requested optional steps are `Some(true)` only after successful completion and `Some(false)` when failed or unreached; unrequested steps are `None`. Version mismatches retain the actual queried version. The supervised operation layer exposes durably saved progress through its receipt; Core completion requires a matching operation ID and successful completion of the requested phases.
+
+Load a profile and execute its requested phases as follows.
 
 ```rust
+use libmlx::firmware::config::FirmwareFlasherProfile;
 use libmlx::firmware::flasher::FirmwareFlasher;
-use libmlx::firmware::source::FirmwareSource;
 
-// Flash local firmware
-let flasher = FirmwareFlasher::new("4b:00.0")
-    .with_firmware(FirmwareSource::local("/path/to/prod.signed.bin"))
-    .with_expected_version("32.43.1014");
-
-let result = flasher.flash().await?;
-
-// Verify version (works pre-reset)
-flasher.verify_version()?;
-
-// Reset to activate
-flasher.reset()?;
-
-// Verify image (works post-reset)
-flasher.verify_image("/path/to/prod.signed.bin".as_ref())?;
+let profile = FirmwareFlasherProfile::from_file("/etc/nico/firmware.toml")?;
+let flasher = FirmwareFlasher::new("4b:00.0", &profile.firmware_spec).await?;
+let report = flasher.apply(&profile).await?;
 ```
 
-#### Debug firmware with device config
+For separate preparation and burn steps, call `prepare(&profile.flash_spec).await` and then `burn(&mut prepared).await`. Keep `PreparedFirmware` through every requested reset and verification step. After all steps succeed, call `prepared.finish()` to consume it and remove its inputs; removal failures are logged. Dropping it after a real burn without calling `finish` retains the inputs, including after a failed or cancelled reset. Call `finish` after a failure only when reconciliation is complete and no command or cleanup still needs the files. `apply` handles this lifetime itself. `reset`, `reset_with_level`, and `verify_version` are also asynchronous.
 
-Debug firmware requires a device configuration (e.g., debug token) to be applied before burning:
+Preparations live in unique `firmware-*` directories under `FlashSpec.cache_dir`, or `std::env::temp_dir()/mlxconfig-firmware` when omitted. Image and configuration files have separate subdirectories, even when their source basenames match. Standalone `verify_image` can use a legacy basename cache file when `verify_from_cache` is true; otherwise it resolves the source. Only callers or older library versions populate that cache: preparation does not write `<cache_dir>/<basename>`. A cache miss resolves the source. `apply` always verifies its own prepared image, regardless of that flag.
 
-```rust
-let flasher = FirmwareFlasher::new("4b:00.0")
-    .with_firmware(
-        FirmwareSource::from_url("https://artifacts.example.com/fw/debug.signed.bin")?
-            .with_credentials(Credentials::bearer_token("my-token")),
-    )
-    .with_device_conf(
-        FirmwareSource::from_url("ssh://deploy@build-server:builds/tokens/debug.conf.bin")?
-            .with_credentials(Credentials::ssh_agent()),
-    );
+Each query, tool discovery probe, and configuration command has a 30-second deadline. Each burn, reset, and image verification command has a 30-minute deadline. These deadlines include all descendants and output collection. Each attempt has its own helper process, which adopts orphaned descendants and waits until the kernel reports that it has no children left. Failure cleanup has a separate shared 5-second limit. The caller allows up to 5 more seconds to receive the cleanup result; that does not extend cleanup itself. Each output stream is capped at 1 MiB; exceeding it requests termination and returns an uncertain failure. These are software operating limits, not measured hardware timings or guarantees that interrupting a burn is safe. They do not bound the entire workflow. Remote transfers have the separate per-artifact network deadline described in [Firmware Sources](#firmware-sources), and local staging writes are outside that deadline.
 
-let result = flasher.flash().await?;
-assert!(result.device_conf_applied);
-```
+An error distinguishes a proven failure before tool launch from a result that is uncertain after dispatch, including a lost or malformed helper response. It preserves command diagnostics and cleanup failures. Reconcile any mutation that started or may have started before retrying. Interrupted preparation, uncertain execution, and any failure after a real burn retain staged inputs and log their directory. This includes a completed verification that finds a version mismatch. Direct callers can accumulate retained copies without automatic expiry. Successful workflows and settled failures before any mutation remove their inputs. Supervised failures retain their receipt; whether they also retain the host claim follows the mutation-intent rules in [supervised firmware operations](#supervised-firmware-operations).
+
+Direct CLI dry-run, verification, and reset actions catch SIGINT, SIGTERM, SIGHUP, and SIGQUIT, drop the operation, and close its per-command control channel. The helper requests bounded cleanup independently, including if that direct caller crashes or is killed; cancellation does not wait for confirmed cleanup. Supervised flash commands instead stop observing and leave the accepted operation running under `Continue`. The synchronous `config-reset` command keeps its existing signal behavior. Killing a per-command helper, losing power, or terminating its entire service cgroup can prevent cleanup. No process cleanup proves that work inside the device has stopped. Cancellation uses the required proc entry to locate the helper's adopted children.
+
+These limits apply to `FirmwareFlasher` and `discover_device_bounded`. The existing synchronous `FlintRunner` and `MlxFwResetRunner` methods, and `discover_device`/`discover_devices`, retain blocking execution without these deadlines or helper supervision.
+
+Dry-run still checks identity and prepares inputs, but starts no mutation or verification commands. Its report contains no observed version and does not claim completed phases: `flashed` is `false`, requested optional steps are `Some(false)`, and unrequested optional steps are `None`.
 
 ### TOML Configuration
 
-For integration with NICo API config or standalone use:
+A profile identifies the target and explicitly selects optional phases. Reset and both verification options default to `false`; `reset_level` defaults to `3` and is passed unchanged to `mlxfwreset` when reset is requested. Unknown profile keys are rejected. The following example selects reset and both verification phases:
 
 ```toml
-firmware_url = "https://artifacts.example.com/fw/prod-32.43.1014.signed.bin"
-expected_version = "32.43.1014"
-
-[firmware_credentials]
-type = "bearer_token"
-token = "eyJhbGciOi..."
-
-device_conf_url = "ssh://deploy@build-server:builds/configs/debug.conf.bin"
-
-[device_conf_credentials]
-type = "ssh_agent"
+part_number = "target-part-number"
+psid = "target-psid"
+version = "32.43.1014"
+firmware_url = "/path/to/firmware.bin"
+device_conf_url = "/path/to/device.conf"
+reset = true
+verify_image = true
+verify_version = true
 ```
 
-```rust
-let flasher = FirmwareFlasher::from_config_file("4b:00.0", "/etc/nico/firmware.toml")?;
-let result = flasher.flash().await?;
-```
+The profile accepts these keys:
+
+**Firmware Profile Keys**
+
+| Key | Meaning and Default |
+|---|---|
+| `part_number`, `psid`, `version` | Required strings identifying the hardware and exact target version |
+| `firmware_url` | Required image source, using the formats in [Firmware Sources](#firmware-sources) |
+| `device_conf_url` | Optional source applied before burning; omission skips configuration apply |
+| `firmware_credentials`, `device_conf_credentials` | Optional credential tables for the corresponding source; omission uses that source's default authentication |
+| `cache_dir` | Optional staging parent for direct `FirmwareFlasher` use; defaults to `std::env::temp_dir()/mlxconfig-firmware`. Supervised execution uses its private slot directory instead |
+| `verify_from_cache` | Defaults to `false`; only standalone image verification reads an existing legacy basename cache entry |
+| `reset`, `verify_image`, `verify_version` | Optional booleans, each defaulting to `false`; select phases in that order after burn |
+| `reset_level` | Integer from 0 through 255, defaulting to `3`; passed to `mlxfwreset` only when `reset` is `true`, without checking device support |
+
+Each credential table selects one `type` and its associated fields:
+
+**Firmware Credential Types**
+
+| Type | Fields | Source |
+|---|---|---|
+| `bearer_token` | Required `token` string | HTTP or HTTPS |
+| `basic_auth` | Required `username` and `password` strings | HTTP or HTTPS |
+| `header` | Required `name` and `value` strings | HTTP or HTTPS |
+| `ssh_key` | Required `path` string; optional `passphrase` string | SSH |
+| `ssh_agent` | No additional fields; uses `SSH_AUTH_SOCK` | SSH |
+
+For example, use `[firmware_credentials]` for the image source and `[device_conf_credentials]` for the optional configuration source. Without an explicit credential table, HTTP adds no explicit credentials and SSH uses `$HOME/.ssh/id_rsa` (`/root/.ssh/id_rsa` when `HOME` is unavailable). Local sources ignore credentials. HTTP and SSH reject credentials for the other protocol when resolving the source. Unknown credential fields are rejected. `device_conf_credentials` has no effect when `device_conf_url` is omitted.
 
 ### Underlying Tools
+
+Firmware operations use the following tools:
+
+**Firmware Tools**
 
 | Tool | Purpose |
 |---|---|
@@ -542,10 +641,12 @@ let result = flasher.flash().await?;
 
 ### Known Limitations
 
-- All firmware operations require root (`flint`, `mlxconfig`, `mlxfwreset` all need root)
-- SSH binary transfer uses base64 encoding (remote host must have `base64` installed)
-- SSH host key verification uses `~/.ssh/known_hosts` — use `sudo -E` to preserve `HOME` and `SSH_AUTH_SOCK`
-- `verify-image` requires a device reset first; use `verify-version` for pre-reset validation
+The firmware workflow has the following limitations:
+
+- All firmware operations require root (`flint`, `mlxconfig`, and `mlxfwreset` all need root).
+- SSH binary transfer uses base64 encoding; the remote host must have `base64` installed.
+- SSH host key verification uses `~/.ssh/known_hosts`; use `sudo -E` to preserve `HOME` and `SSH_AUTH_SOCK`.
+- Reset scope and the meaning of the reported firmware version need hardware qualification for each cohort, as tracked in [NIC Firmware Design](https://github.com/dsx-ai-factory/infra-controller/issues/6664).
 
 ---
 
@@ -628,14 +729,30 @@ variables:
 
 ### Firmware CLI
 
+Non-dry-run `flash` and `flash-config` require `--operation-id` and a PCI address; an omitted domain means `0000`. They submit with `Continue`, poll the receipt once per second, and print the terminal receipt as JSON. Only `Complete` returns success. Reuse the same operation ID and unchanged request after a lost response; use `status` to read the receipt without resubmitting. `cancel` records a safe-boundary stop and prints the returned receipt without waiting for completion. Both receipt commands can launch a daemon to reopen its journal, but neither resumes work.
+
+The following examples use the standalone `mlxconfig-embedded` executable. Its recovery diagnostic prints the executable path and shell-quotes the device and operation ID. Keep the same supervisor environment settings when copying that command:
+
 ```bash
-mlxconfig-embedded firmware flash 4b:00.0 /path/to/firmware.signed.bin
-mlxconfig-embedded firmware flash 4b:00.0 https://url/fw.bin --firmware-bearer-token "token"
-mlxconfig-embedded firmware verify-version 4b:00.0 32.43.1014
-mlxconfig-embedded firmware reset 4b:00.0
-mlxconfig-embedded firmware verify-image 4b:00.0 /path/to/firmware.signed.bin
+mlxconfig-embedded firmware flash 0000:4b:00.0 /path/to/firmware.signed.bin \
+    --part-number target-part-number --psid target-psid --version 32.43.1014 \
+    --operation-id maintenance-2026-10-21
+mlxconfig-embedded firmware flash-config 0000:4b:00.0 /etc/nico/firmware.toml \
+    --operation-id maintenance-2026-10-22
+mlxconfig-embedded firmware status -- '0000:4b:00.0' 'maintenance-2026-10-21'
+mlxconfig-embedded firmware cancel -- '0000:4b:00.0' 'maintenance-2026-10-21'
+```
+
+The parent `firmware --dry-run` option keeps flash preparation local and does not admit a durable operation; an operation ID is not required. `--work-dir` controls staging for dry-run and standalone image verification and is rejected for supervised flash. `status` and `cancel` reject both parent options. Direct verification, reset, and configuration reset remain outside durable admission and host-wide exclusion:
+
+```bash
+mlxconfig-embedded firmware verify-version 4b:00.0 32.43.1014 \
+    --part-number target-part-number --psid target-psid
+mlxconfig-embedded firmware reset 4b:00.0 \
+    --part-number target-part-number --psid target-psid --version 32.43.1014
+mlxconfig-embedded firmware verify-image 4b:00.0 /path/to/firmware.signed.bin \
+    --part-number target-part-number --psid target-psid --version 32.43.1014
 mlxconfig-embedded firmware config-reset 4b:00.0
-mlxconfig-embedded firmware flash-config 4b:00.0 /etc/nico/firmware.toml
 ```
 
 ---
@@ -685,6 +802,20 @@ databases/   Compile     registries.rs       Type-safe API    sudo commands    H
 - **mlxconfig**, **flint**, **mlxfwreset**, **mlxfwmanager** CLI tools installed and on `PATH`
 - **sudo privileges** for hardware access
 - **Rust 2021 edition** or later
+
+## Firmware Tests
+
+Firmware tests use fake tools but still run the compiled Linux supervisor. Build that helper before running scoped library or Scout unit tests:
+
+```bash
+cargo make build-nic-firmware-test-helper
+cargo test -p carbide-libmlx --lib
+cargo test -p carbide-scout --bin forge-scout firmware
+```
+
+Use the same `CARGO_TARGET_DIR` for the helper and tests. These commands use the default debug profile; custom profiles also require a helper built with the same profile. `cargo make correctly-execute-tests` builds the helper automatically through its debug test prerequisites.
+
+Unix-socket tests need a short, private temporary path. If `TMPDIR` is too long or has untrusted ancestors, set `LIBMLX_TEST_STATE_DIRECTORY` to an existing short directory owned by the test user with mode `0700`. Its ancestors must satisfy the [state-directory trust requirements](#launch-and-state). This fixture-only setting does not change the production state root.
 
 ## Internal Dependencies
 

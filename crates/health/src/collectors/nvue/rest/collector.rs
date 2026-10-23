@@ -2315,6 +2315,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rest_file_rotation_refreshes_after_authentication_failure() {
+        use base64::Engine;
+
+        use crate::static_credentials::test_support::{
+            provider_for_credentials_file, wait_for_password, write_credentials,
+        };
+
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let headers = captured.clone();
+        let router = axum::Router::new().route(
+            "/nvue_v1/system/health",
+            axum::routing::get(move |request: http::HeaderMap| {
+                let headers = headers.clone();
+                async move {
+                    let mut headers = headers.lock().unwrap();
+                    headers.push(
+                        request[http::header::AUTHORIZATION]
+                            .to_str()
+                            .unwrap()
+                            .to_owned(),
+                    );
+                    let status = if headers.len() == 2 {
+                        axum::http::StatusCode::UNAUTHORIZED
+                    } else {
+                        axum::http::StatusCode::OK
+                    };
+                    (status, axum::Json(serde_json::json!({"status": "OK"})))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url =
+            url::Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let file = tempfile::NamedTempFile::new().unwrap();
+        write_credentials(file.path(), "first");
+        let provider = provider_for_credentials_file(test_addr(), file.path().to_owned()).await;
+        let mut collector = collector_with_provider(provider.clone());
+        collector.client = RestClient::new_with_base_url_for_test(
+            "test-switch".into(),
+            base_url,
+            Duration::from_secs(1),
+            IterationEndpoint::SystemHealth.paths(),
+        )
+        .unwrap();
+        assert_eq!(collector.run_iteration().await.unwrap().fetch_failures, 0);
+        write_credentials(file.path(), "second");
+        wait_for_password(&*provider, &test_addr(), "second").await;
+        assert_eq!(collector.run_iteration().await.unwrap().fetch_failures, 1);
+        assert_eq!(collector.run_iteration().await.unwrap().fetch_failures, 0);
+        assert_eq!(
+            *captured.lock().unwrap(),
+            ["admin:first", "admin:first", "admin:second"].map(|value| {
+                format!(
+                    "Basic {}",
+                    base64::engine::general_purpose::STANDARD.encode(value)
+                )
+            })
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn first_iteration_lazy_fetches_credentials_then_runs() {
         let provider = ScriptedProvider::new(vec![Ok(BmcCredentials::UsernamePassword {
             username: "admin".to_string(),

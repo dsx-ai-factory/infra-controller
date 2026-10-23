@@ -2,6 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Bounded calls to the resource pool provider API with validated responses.
+//!
+//! [`crate::remote::RemoteResourcePool`] uses this client for allocation and
+//! recovery; [`crate::registration`] uses it to register pool definitions.
+//! Production wiring follows in
+//! [P11](https://github.com/dsx-ai-factory/infra-controller/issues/7140).
 
 mod config;
 mod response;
@@ -14,7 +19,10 @@ mod tls_tests;
 
 use carbide_resource_pool_api::v1;
 pub use config::{GrpcResourcePoolConfigError, ResourcePoolTlsConfig, validate_endpoint};
+#[cfg(test)]
+pub(crate) use tests::server as test_server;
 use thiserror::Error;
+pub(crate) use transport::MAX_MESSAGE_BYTES;
 use transport::Transport;
 use url::Url;
 
@@ -24,8 +32,10 @@ use url::Url;
 /// client neither generates identities nor retries requests. Dropping a call
 /// stops local waiting; it cannot undo work already received by the provider.
 /// The caller must reconcile uncertain requests using its saved operation
-/// identity. If recovery keeps returning malformed responses, use Cancel with
-/// that original identity and require a valid terminal reply before cleanup.
+/// identity. For an unattached attempt, a malformed recovery response requires
+/// `Cancel` with that original identity and a valid terminal reply before cleanup
+/// is confirmed. If release has already been requested, preserve that intent and
+/// retry recovery; an invalid reply cannot confirm release.
 ///
 /// Successful responses are checked for required fields, valid wire values,
 /// and agreement with the request. The caller must separately check the saved
@@ -386,7 +396,11 @@ impl GrpcResourcePoolBackend {
     }
 
     #[cfg(test)]
-    fn with_timeouts(mut self, connect: std::time::Duration, call: std::time::Duration) -> Self {
+    pub(crate) fn with_timeouts(
+        mut self,
+        connect: std::time::Duration,
+        call: std::time::Duration,
+    ) -> Self {
         self.transport = self.transport.with_timeouts(connect, call);
         self
     }

@@ -132,6 +132,8 @@ pub enum MachineValidationState {
     #[default]
     Started,
     InProgress,
+    /// Successful validation, including legacy rows stored as `Completed`.
+    #[strum(serialize = "Success", serialize = "Completed")]
     Success,
     Skipped,
     Failed,
@@ -231,13 +233,11 @@ pub struct MachineValidation {
 }
 
 impl<'r> FromRow<'r, PgRow> for MachineValidation {
+    /// Returns `sqlx::Error::Decode` for an unrecognized persisted validation state.
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         let filter: Option<sqlx::types::Json<MachineValidationFilter>> = row.try_get("filter")?;
         let status = MachineValidationStatus {
-            state: match MachineValidationState::from_str(row.try_get("state")?) {
-                Ok(status) => status,
-                Err(_) => MachineValidationState::Success,
-            },
+            state: decode_state(row.try_get("state")?, "machine_validation.state")?,
             total: row.try_get("total")?,
             completed: row.try_get("completed")?,
         };
@@ -547,6 +547,10 @@ mod tests {
 
             "Success" {
                 "Success" => Yields(MachineValidationState::Success),
+            }
+
+            "legacy successful state" {
+                "Completed" => Yields(MachineValidationState::Success),
             }
 
             "Skipped" {

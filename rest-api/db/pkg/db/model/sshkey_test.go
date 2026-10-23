@@ -218,7 +218,6 @@ func TestSSHKeySQLDAO_GetAll(t *testing.T) {
 	assert.NotNil(t, skgsa2)
 
 	skg1Sshkeys := []SSHKey{}
-	skg2Sshkeys := []SSHKey{}
 
 	totalSshkeys := 25
 
@@ -248,7 +247,6 @@ func TestSSHKeySQLDAO_GetAll(t *testing.T) {
 			// Build SSHKeyAssociation
 			ska2 := testBuildSSHKeyAssociation(t, dbSession, sk1.ID, skg2.ID, tn.ID)
 			assert.NotNil(t, ska2)
-			skg2Sshkeys = append(skg2Sshkeys, *sk1)
 		}
 	}
 

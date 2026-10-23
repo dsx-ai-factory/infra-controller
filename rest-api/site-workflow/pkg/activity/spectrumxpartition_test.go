@@ -90,7 +90,7 @@ func TestManageSpectrumXPartitionInventory_DiscoverSpectrumXPartitionInventory(t
 			})
 
 			ctx := context.Background()
-			ctx = context.WithValue(ctx, "wantCount", tt.args.wantTotalItems)
+			ctx = context.WithValue(ctx, cClient.MockWantCount, tt.args.wantTotalItems)
 
 			totalPages := tt.args.wantTotalItems / tt.fields.cloudPageSize
 			if tt.args.wantTotalItems%tt.fields.cloudPageSize > 0 {
@@ -158,7 +158,7 @@ func TestManageSpectrumXPartitionInventory_CollectionFailure(t *testing.T) {
 		CloudPageSize:         25,
 	})
 
-	ctx := context.WithValue(context.Background(), "wantError", assert.AnError)
+	ctx := context.WithValue(context.Background(), cClient.MockWantError, assert.AnError)
 
 	err := manageInventory.DiscoverSpectrumXPartitionInventory(ctx)
 	assert.Error(t, err)

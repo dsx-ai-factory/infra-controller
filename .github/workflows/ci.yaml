@@ -175,7 +175,6 @@ jobs:
       proto_files_changed: ${{ steps.base-container-gate.outputs.proto_files_changed }}
       core_rpc_proto_files_changed: ${{ steps.base-container-gate.outputs.core_rpc_proto_files_changed }}
       source_files_changed: ${{ steps.base-container-gate.outputs.source_files_changed }}
-      pxe_kustomize_changed: ${{ steps.base-container-gate.outputs.pxe_kustomize_changed }}
       machine_lifecycle_changed: ${{ steps.base-container-gate.outputs.machine_lifecycle_changed }}
       control_plane_dpu_changed: ${{ steps.base-container-gate.outputs.control_plane_dpu_changed }}
       kea_version: ${{ steps.kea-version.outputs.version }}
@@ -200,6 +199,9 @@ jobs:
 
       - name: Check boot output contracts
         run: python3 -m unittest discover -s .github/ci -p 'test_validate_boot_outputs.py'
+
+      - name: Test Scout firmware supervisor packaging
+        run: python3 -B pxe/tests/test_firmware_supervisor_packaging.py
 
       - name: Detect build-container-x86_64 changes
         id: build-container-changes
@@ -235,13 +237,6 @@ jobs:
               - 'rust-toolchain.toml'
               - '.github/workflows/ci.yaml'
               - 'dev/k8s/machine-a-tron-controller/**'
-            pxe_kustomize:
-              - '.github/workflows/ci.yaml'
-              - 'deploy/components/boot-artifacts-containers/**'
-              - 'deploy/nico-base/api/**'
-              - 'deploy/nico-base/pxe/**'
-              - 'deploy/tests/pxe-with-boot-artifacts/**'
-              - 'deploy/tests/test-pxe-non-root.sh'
             machine_lifecycle:
               - 'tests/machine-lifecycle/**'
               - '.github/workflows/ci.yaml'
@@ -441,7 +436,6 @@ jobs:
           PROTO_FILES_CHANGED: ${{ steps.build-container-changes.outputs.proto_files }}
           CORE_RPC_PROTO_FILES_CHANGED: ${{ steps.build-container-changes.outputs.core_rpc_proto_files }}
           SOURCE_FILES_CHANGED: ${{ steps.build-container-changes.outputs.source_files }}
-          PXE_KUSTOMIZE_CHANGED: ${{ steps.build-container-changes.outputs.pxe_kustomize }}
           MACHINE_LIFECYCLE_CHANGED: ${{ steps.build-container-changes.outputs.machine_lifecycle }}
           CONTROL_PLANE_DPU_CHANGED: ${{ steps.build-container-changes.outputs.control_plane_dpu }}
         run: |
@@ -454,7 +448,6 @@ jobs:
           proto_files_changed=false
           core_rpc_proto_files_changed=false
           source_files_changed=false
-          pxe_kustomize_changed=false
           machine_lifecycle_changed=false
           control_plane_dpu_changed=false
 
@@ -481,10 +474,10 @@ jobs:
              source_files_changed=true
           fi
 
-          if [[ "${PXE_KUSTOMIZE_CHANGED}" == "true" ]]; then
-             pxe_kustomize_changed=true
-          fi
-          if [[ "${MACHINE_LIFECYCLE_CHANGED}" == "true" ]]; then
+          # Release tags change no paths, so build the lifecycle image for every
+          # tag like the other images; a tag-matched image runs against the
+          # NICo images cut from the same commit.
+          if [[ "${MACHINE_LIFECYCLE_CHANGED}" == "true" ]] || [[ "${GITHUB_REF}" == refs/tags/* ]]; then
              machine_lifecycle_changed=true
           fi
 
@@ -521,7 +514,6 @@ jobs:
           echo "proto_files_changed=${proto_files_changed}" >> "$GITHUB_OUTPUT"
           echo "core_rpc_proto_files_changed=${core_rpc_proto_files_changed}" >> "$GITHUB_OUTPUT"
           echo "source_files_changed=${source_files_changed}" >> "$GITHUB_OUTPUT"
-          echo "pxe_kustomize_changed=${pxe_kustomize_changed}" >> "$GITHUB_OUTPUT"
           echo "machine_lifecycle_changed=${machine_lifecycle_changed}" >> "$GITHUB_OUTPUT"
           echo "control_plane_dpu_changed=${control_plane_dpu_changed}" >> "$GITHUB_OUTPUT"
 
@@ -1620,6 +1612,11 @@ jobs:
       push: ${{ needs.prepare.outputs.publish_images == 'true' }}
       load: true
       scan: true
+      # Bundled into both machine_validation carriers, which serve every image
+      # named in crates/machine-validation/images/list.json. The ref is the one
+      # scout's import reports (crates/machine-validation/src/lib.rs).
+      export_image_archive: crates/machine-validation/images/machine-validation-runner.tar
+      export_image_archive_ref: nvcr.io/nvidian/nvforge/machine-validation-runner:latest
     secrets: inherit
 
   build-release-machine-validation-basic-plugin-x86:
@@ -1719,6 +1716,8 @@ jobs:
       image_tag: ${{ needs.prepare.outputs.version }}
       additional_tags: ${{ needs.prepare.outputs.image_registry }}/machine_validation:${{ needs.prepare.outputs.major_minor_version }}-latest
       build_args: '{"CI_COMMIT_SHORT_SHA":"${{ needs.prepare.outputs.short_sha }}","CONTAINER_RUNTIME_X86_64":"${{ needs.prepare.outputs.runtime_container_x86_64_ref }}"}'
+      download_artifacts: true
+      artifact_pattern: machine-validation-runner-${{ github.run_id }}
       platforms: linux/amd64
       runner: linux-amd64-cpu4
       push: ${{ needs.prepare.outputs.publish_images == 'true' }}
@@ -1729,14 +1728,17 @@ jobs:
   # arm64 container build of the machine-validation config carrier, so it can run
   # as an init container on arm64 control-plane nodes. FROM the aarch64 runtime
   # base; pushed as machine_validation-aarch64 and merged into the bare
-  # machine_validation tag below. (The bundled validation runner payload staying
+  # machine_validation tag below. It bundles the same amd64 runner archive as the
+  # amd64 carrier, so the served payload does not depend on the control-plane
+  # node's architecture. (The bundled validation runner payload staying
   # arm64-capable is tracked separately — this only makes the carrier runnable on
   # arm64 nodes.)
   build-release-machine-validation-artifacts-arm-host:
     needs:
       - prepare
       - build-runtime-container-aarch64
-    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && contains('success,skipped', needs.build-runtime-container-aarch64.result) }}
+      - build-release-machine-validation-runner
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && contains('success,skipped', needs.build-runtime-container-aarch64.result) && needs.build-release-machine-validation-runner.result == 'success' }}
     uses: ./.github/workflows/docker-build.yml
     with:
       source_registry_host: ${{ needs.prepare.outputs.source_registry_host }}
@@ -1746,6 +1748,8 @@ jobs:
       image_tag: ${{ needs.prepare.outputs.version }}
       additional_tags: ${{ needs.prepare.outputs.image_registry }}/machine_validation-aarch64:${{ needs.prepare.outputs.major_minor_version }}-latest
       build_args: '{"CI_COMMIT_SHORT_SHA":"${{ needs.prepare.outputs.short_sha }}","CONTAINER_RUNTIME_AARCH64":"${{ needs.prepare.outputs.runtime_container_aarch64_ref }}"}'
+      download_artifacts: true
+      artifact_pattern: machine-validation-runner-${{ github.run_id }}
       platforms: linux/arm64
       runner: linux-arm64-cpu4
       push: ${{ needs.prepare.outputs.publish_images == 'true' }}
@@ -1890,25 +1894,6 @@ jobs:
         run: >-
           bash scripts/check-repo-clean.sh "REST Core protobuf sync"
           "make sync-protobuf (from the repository root)"
-
-  pxe-kustomize-render:
-    needs: prepare
-    if: ${{ !failure() && !cancelled() && needs.prepare.outputs.pxe_kustomize_changed == 'true' }}
-    runs-on: linux-amd64-cpu32
-    container:
-      image: ${{ needs.prepare.outputs.lint_container_ref }}
-      credentials:
-        username: ${{ secrets.NICO_SOURCE_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
-        password: ${{ secrets.NICO_SOURCE_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - name: Trust the workspace in this container
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-      - name: Test PXE Kustomize renders
-        run: deploy/tests/test-pxe-non-root.sh
 
   lint-police:
     needs:
@@ -2194,6 +2179,7 @@ jobs:
             helm/charts/nico-machine-a-tron/charts/mat-k8s-controller
             helm/charts/nico-machine-a-tron/charts/nico-site-health-probe
             helm/charts/nico-ntp
+            helm/charts/nico-postgres-exporter
             helm/charts/nico-pxe
             helm/charts/nico-ssh-console-rs
             helm/charts/unbound
@@ -2267,11 +2253,20 @@ jobs:
       - name: Test Flow cleanup order
         run: bash helm-prereqs/tests/setup-flow-cleanup-order_test.sh
 
+      - name: Test Flow values option
+        run: bash helm-prereqs/tests/setup-flow-values_test.sh
+
       - name: Test legacy Flow manager cleanup
         run: bash helm-prereqs/tests/cleanup-legacy-flow-managers_test.sh
 
       - name: Test REST postgres StatefulSet recreation
         run: bash helm-prereqs/tests/setup-rest-postgres-statefulset-recreate_test.sh
+
+      - name: Test Temporal/Keycloak HA Postgres resolution
+        run: bash helm-prereqs/tests/preflight-ha-postgres-resolution_test.sh
+
+      - name: Test Temporal/Keycloak migration receipt
+        run: bash helm-prereqs/tests/migrate-temporal-keycloak-db-receipt_test.sh
 
       - name: Test Vault Kubernetes URLs
         run: bash helm-prereqs/tests/vault-kubernetes-url_test.sh
@@ -2675,7 +2670,6 @@ jobs:
       - build-validate-bluefield-helm-charts
       - build-push-bluefield-helm-charts
       - lint-police
-      - pxe-kustomize-render
     steps:
       - name: Generate summary
         run: |
@@ -2884,7 +2878,6 @@ jobs:
       # Source and repository policy checks
       - proto-police
       - lint-police
-      - pxe-kustomize-render
       - migration-police
       - proto-breaking-changes
       - check-rest-core-proto-sync

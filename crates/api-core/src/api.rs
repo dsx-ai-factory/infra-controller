@@ -886,6 +886,20 @@ impl Forge for Api {
         crate::handlers::tenant::update(self, request).await
     }
 
+    async fn get_tenant_nic_firmware_config(
+        &self,
+        request: Request<rpc::GetTenantNicFirmwareConfigRequest>,
+    ) -> Result<Response<rpc::GetTenantNicFirmwareConfigResponse>, Status> {
+        crate::handlers::tenant::get_nic_firmware_config(self, request).await
+    }
+
+    async fn set_tenant_nic_firmware_config(
+        &self,
+        request: Request<rpc::SetTenantNicFirmwareConfigRequest>,
+    ) -> Result<Response<rpc::SetTenantNicFirmwareConfigResponse>, Status> {
+        crate::handlers::tenant::set_nic_firmware_config(self, request).await
+    }
+
     async fn find_tenants_by_organization_ids(
         &self,
         request: Request<rpc::TenantByOrganizationIdsRequest>,
@@ -1368,6 +1382,13 @@ impl Forge for Api {
         request: Request<rpc::GrowResourcePoolRequest>,
     ) -> Result<Response<rpc::GrowResourcePoolResponse>, Status> {
         crate::handlers::resource_pool::grow(self, request).await
+    }
+
+    async fn admin_inspect_resource_pools(
+        &self,
+        request: Request<rpc::InspectResourcePoolsRequest>,
+    ) -> Result<Response<rpc::InspectResourcePoolsResponse>, Status> {
+        crate::handlers::resource_pool::inspect(self, request).await
     }
 
     async fn admin_list_resource_pools(
@@ -2093,6 +2114,41 @@ impl Forge for Api {
         request: Request<()>,
     ) -> Result<Response<()>, Status> {
         crate::handlers::expected_rack::delete_all_expected_racks(self, request).await
+    }
+
+    async fn create_expected_nv_link_domain(
+        &self,
+        request: Request<rpc::CreateExpectedNvLinkDomainRequest>,
+    ) -> Result<Response<rpc::ExpectedNvLinkDomain>, Status> {
+        crate::handlers::expected_nvlink_domain::create(self, request).await
+    }
+
+    async fn delete_expected_nv_link_domain(
+        &self,
+        request: Request<rpc::ExpectedNvLinkDomainRequest>,
+    ) -> Result<Response<()>, Status> {
+        crate::handlers::expected_nvlink_domain::delete(self, request).await
+    }
+
+    async fn get_expected_nv_link_domain(
+        &self,
+        request: Request<rpc::ExpectedNvLinkDomainRequest>,
+    ) -> Result<Response<rpc::ExpectedNvLinkDomain>, Status> {
+        crate::handlers::expected_nvlink_domain::get(self, request).await
+    }
+
+    async fn find_expected_nv_link_domain_ids(
+        &self,
+        request: Request<rpc::ExpectedNvLinkDomainSearchFilter>,
+    ) -> Result<Response<rpc::ExpectedNvLinkDomainIdList>, Status> {
+        crate::handlers::expected_nvlink_domain::find_ids(self, request).await
+    }
+
+    async fn find_expected_nv_link_domains_by_ids(
+        &self,
+        request: Request<rpc::ExpectedNvLinkDomainsByIdsRequest>,
+    ) -> Result<Response<rpc::ExpectedNvLinkDomainList>, Status> {
+        crate::handlers::expected_nvlink_domain::find_by_ids(self, request).await
     }
 
     async fn add_expected_rack_group(
@@ -4235,9 +4291,7 @@ impl Api {
             let machine = match db::machine::find_one(&mut txn, &machine_id, search_config).await {
                 Err(err) => {
                     tracing::warn!(%machine_id, error = %err, "failed loading machine");
-                    return Err(CarbideError::InvalidArgument(
-                        "err loading machine".to_string(),
-                    ));
+                    return Err(err.into());
                 }
                 Ok(None) => {
                     tracing::info!(%machine_id, "machine not found");

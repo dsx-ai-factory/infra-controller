@@ -45,7 +45,8 @@ use model::ConfigValidationError;
 use model::dpa_interface::{DpaInterface, DpaSearchConfig};
 use model::expected_machine::ExpectedMachine;
 use model::extension_service::{
-    DpuTarget, ExtensionService, ExtensionServiceLifecycleState, ExtensionServiceType,
+    DpuTarget, ExtensionService, ExtensionServiceDeploymentType, ExtensionServiceLifecycleState,
+    ExtensionServiceType,
 };
 use model::hardware_info::InfinibandInterface;
 use model::ib::{DEFAULT_IB_FABRIC_NAME, IbMembership};
@@ -61,6 +62,7 @@ use model::instance::config::network::{
     NetworkDetails,
 };
 use model::instance::config::spx::{InstanceSpxConfig, SpxAttachmentType};
+use model::instance::nic_firmware::NicFirmwareAllocationTarget;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
     HostHealthConfig, LoadSnapshotOptions, ManagedHostStateSnapshot, NotAllocatableReason,
@@ -674,11 +676,9 @@ struct PrefixAllocationWork {
     automatic: bool,
 }
 
-/// Per-request mutable network config and tenant organization used for VPC
-/// ownership checks.
+/// Per-request mutable network config.
 struct NetworkAllocationTarget<'a> {
     network_config: &'a mut InstanceNetworkConfig,
-    tenant_organization_id: &'a TenantOrganizationId,
 }
 
 /// Owned discovery results used by synchronous allocation planning.
@@ -691,7 +691,7 @@ struct PrefixAllocationContext {
     explicit_prefixes: HashMap<VpcPrefixId, VpcPrefix>,
     // Active-at-discovery candidates frozen by VPC/family in ascending ID order.
     automatic_candidates: BTreeMap<(VpcId, AllocationAddressFamily), Arc<[VpcPrefixId]>>,
-    // Referenced VPCs verified to exist for ownership and capability checks.
+    // Referenced VPCs verified to exist for capability checks.
     vpcs: HashMap<VpcId, model::vpc::Vpc>,
 }
 
@@ -1072,7 +1072,7 @@ async fn load_prefix_allocation_context(
         db::vpc_prefix::find_allocation_candidates(txn, &automatic_candidate_vpc_ids).await?
     };
 
-    // Load every referenced VPC once for ownership and capability validation.
+    // Load every referenced VPC once for capability validation.
     let mut referenced_vpc_ids = automatic_vpc_ids.clone();
     referenced_vpc_ids.extend(explicit_prefixes.values().map(|prefix| prefix.vpc_id));
     let referenced_vpc_ids = referenced_vpc_ids.into_iter().collect_vec();
@@ -1163,12 +1163,6 @@ fn plan_prefix_allocations(
                 })?;
                 target_vpc_ids.insert(vpc.id);
 
-                if vpc.config.tenant_organization_id != target.tenant_organization_id.to_string() {
-                    return Err(CarbideError::FailedPrecondition(format!(
-                        "VPC `{}` is not owned by tenant `{}`",
-                        vpc.id, target.tenant_organization_id,
-                    )));
-                }
                 if vpc.config.network_virtualization_type != VpcVirtualizationType::Fnn {
                     return Err(CarbideError::FailedPrecondition(format!(
                         "automatic VPC-prefix selection requires an FNN VPC; VPC `{}` uses {}",
@@ -1268,15 +1262,6 @@ fn plan_prefix_allocations(
                 ))
             })?;
             target_vpc_ids.insert(primary_vpc.id);
-            if primary_vpc.config.tenant_organization_id
-                != target.tenant_organization_id.to_string()
-            {
-                return Err(CarbideError::FailedPrecondition(format!(
-                    "VPC prefix `{primary_prefix_id}` belongs to VPC `{}`, which is not owned by tenant `{}`",
-                    primary_vpc.id, target.tenant_organization_id,
-                )));
-            }
-
             let primary_family =
                 AllocationAddressFamily::from_network(primary_prefix.config.prefix);
             let primary_allocation_prefix_len = instance_prefix_len(
@@ -1599,17 +1584,9 @@ async fn allocate_networks(
 /// Allocates generated network resources for one instance network config.
 pub(crate) async fn allocate_network(
     network_config: &mut InstanceNetworkConfig,
-    tenant_organization_id: &TenantOrganizationId,
     txn: &mut PgConnection,
 ) -> CarbideResult<()> {
-    allocate_networks(
-        &mut [NetworkAllocationTarget {
-            network_config,
-            tenant_organization_id,
-        }],
-        txn,
-    )
-    .await
+    allocate_networks(&mut [NetworkAllocationTarget { network_config }], txn).await
 }
 
 pub(crate) fn allocate_ib_port_guid(
@@ -1795,6 +1772,25 @@ pub(crate) async fn allocate_instance(
         .ok_or_else(|| CarbideError::internal("instance allocation returned no result".to_string()))
 }
 
+/// Rejects SPX allocation and legacy attachment edits when a tenant profile is selected.
+/// Remove this guard when tenant firmware preparation is implemented by
+/// https://github.com/dsx-ai-factory/infra-controller/issues/6686.
+///
+/// Missing tenant rows and unset profiles are allowed. Snapshot-backed edits
+/// use their frozen requirement and bindings instead of this live lookup.
+pub(crate) async fn validate_tenant_nic_firmware_preparation(
+    txn: &mut PgConnection,
+    tenant_organization_id: &TenantOrganizationId,
+) -> CarbideResult<()> {
+    let config = db::tenant::find_nic_firmware_config(txn, tenant_organization_id).await?;
+    if config.is_some_and(|config| config.profile_id.is_some()) {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "tenant {tenant_organization_id} requires NIC firmware preparation for SPX attachments, which is not supported"
+        )));
+    }
+    Ok(())
+}
+
 /// Loads and locks the extension-service rows and their live versions for
 /// `service_ids`, keyed by service ID. Soft-deleted services and versions are
 /// left out, so a missing entry reads as "does not exist" to callers.
@@ -1855,6 +1851,15 @@ pub(crate) fn validate_instance_extension_services(
                 config.service_id,
             ))
         })?;
+
+        // Baseline services are deployed to all DPUs at creation time
+        // and never participate in instance attachment.
+        if service.deployment_type == ExtensionServiceDeploymentType::Baseline {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "baseline extension service {} is deployed independently of instance attachment",
+                config.service_id,
+            )));
+        }
 
         // Issue #6125 adds service-interface reconciliation. Until then, an existing
         // attachment may be retained or removed but a networked service cannot be attached.
@@ -1978,11 +1983,13 @@ fn not_allocatable_error(
 ///
 /// ## Flow:
 /// 1. Validate machine types and metadata (in-memory)
-/// 2. Batch query machines (FOR UPDATE), load snapshots, validate usability
-/// 3. Validate shared resources: NSG, extension services, OS images, IB partitions, DPA
-/// 4. Network allocation + config validation (sequential)
-/// 5. Batch persist instances, process configs (IPs, IB GUIDs), batch update
-/// 6. Load final instances, assemble snapshots, commit
+/// 2. Reject applicable tenant NIC firmware requirements and check allocation limits
+/// 3. Batch query machines (FOR UPDATE), load snapshots, validate usability
+/// 4. Validate shared resources: NSG, extension services, OS images, IB partitions, DPA
+/// 5. Network allocation + config validation (sequential)
+/// 6. Batch persist instances, process configs (IPs, IB GUIDs), batch update
+/// 7. Capture batch firmware inputs, reject unsupported preparation, persist snapshots
+/// 8. Load final instances, assemble snapshots, commit
 pub(crate) async fn batch_allocate_instances(
     api: &Api,
     mut requests: Vec<InstanceAllocationRequest>,
@@ -2024,6 +2031,18 @@ pub(crate) async fn batch_allocate_instances(
         // Take the overlap lock before Machine, NSG, or prefix locks so a
         // waiting allocation reads the policy committed by the prior writer.
         db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    }
+
+    // Preserve unsupported-preparation error precedence before allocation work.
+    // The final capture rechecks tenant input after every attachment is bound.
+    let spx_tenants: Vec<_> = requests
+        .iter()
+        .filter(|request| !request.config.spxconfig.spx_attachments.is_empty())
+        .map(|request| request.config.tenant.tenant_organization_id.clone())
+        .unique()
+        .collect();
+    for tenant_organization_id in spx_tenants {
+        validate_tenant_nic_firmware_preparation(txn.as_mut(), &tenant_organization_id).await?;
     }
 
     // ==== Phase 2: Check against allocations for tenants in requests ====
@@ -2359,14 +2378,8 @@ pub(crate) async fn batch_allocate_instances(
     {
         let mut network_allocation_targets = requests
             .iter_mut()
-            .map(|request| {
-                let InstanceConfig {
-                    network, tenant, ..
-                } = &mut request.config;
-                NetworkAllocationTarget {
-                    network_config: network,
-                    tenant_organization_id: &tenant.tenant_organization_id,
-                }
+            .map(|request| NetworkAllocationTarget {
+                network_config: &mut request.config.network,
             })
             .collect_vec();
         allocate_networks(&mut network_allocation_targets, &mut txn).await?;
@@ -2625,6 +2638,7 @@ pub(crate) async fn batch_allocate_instances(
         ConfigVersion,
         model::instance::config::spx::InstanceSpxConfig,
     )> = Vec::with_capacity(request_count);
+    let mut firmware_targets = HashMap::with_capacity(request_count);
 
     for (request, mh_snapshot) in &processed_requests {
         let instance_id = request.instance_id;
@@ -2671,8 +2685,10 @@ pub(crate) async fn batch_allocate_instances(
             request.config.nvlink.clone(),
         ));
 
-        let updated_spx_config = allocate_spx_port_mac(&request.config.spxconfig, mh_snapshot)?;
+        let (updated_spx_config, targets) =
+            allocate_spx_port_mac(&request.config.spxconfig, mh_snapshot)?;
         spx_config_updates.push((instance_id, spx_config_version, updated_spx_config));
+        firmware_targets.insert(instance_id, targets);
     }
 
     // ==== Phase 8: Batch update configs ====
@@ -2715,6 +2731,35 @@ pub(crate) async fn batch_allocate_instances(
         .collect();
     db::instance::batch_update_spx_config(&mut txn, &spx_refs, false).await?;
 
+    // Finish Phase 8 by freezing firmware inputs after every attachment is bound.
+    // Retain Machine locks through commit as required by
+    // db::instance::nic_firmware::capture.
+    let instance_ids: Vec<_> = processed_requests
+        .iter()
+        .map(|(request, _)| request.instance_id)
+        .collect();
+    let firmware_snapshots =
+        db::instance::nic_firmware::capture(txn.as_mut(), &instance_ids).await?;
+    for (instance_id, mut snapshot) in firmware_snapshots {
+        snapshot.targets = firmware_targets.remove(&instance_id).ok_or_else(|| {
+            CarbideError::internal(format!(
+                "NIC firmware bindings for instance {instance_id} were not found"
+            ))
+        })?;
+        if !snapshot.targets.is_empty()
+            && snapshot
+                .tenant
+                .as_ref()
+                .is_some_and(|tenant| tenant.profile_id.is_some())
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "tenant {} requires NIC firmware preparation for SPX attachments, which is not supported",
+                snapshot.tenant_organization_id
+            )));
+        }
+        db::instance::nic_firmware::persist(txn.as_mut(), instance_id, &snapshot).await?;
+    }
+
     // ==== Phase 9: Load final instances ====
     let machine_id_refs: Vec<&HostMachineId> = processed_requests
         .iter()
@@ -2749,7 +2794,9 @@ pub(crate) async fn batch_allocate_instances(
     Ok(snapshots)
 }
 
-/// Batch validate SPX partition ownership for multiple (partition_id, tenant_id) pairs
+/// Validates SPX ownership and locks the partitions for attachment admission.
+/// Keep the transaction open through the instance writes, as required by
+/// `db::spx_partition::find_active_for_share`.
 pub(crate) async fn batch_validate_spx_partition_ownership(
     txn: &mut PgConnection,
     validations: &[(SpxPartitionId, &TenantOrganizationId)],
@@ -2759,19 +2806,10 @@ pub(crate) async fn batch_validate_spx_partition_ownership(
         return Ok(());
     }
 
-    // Batch query all unique partitions
-    let unique_partition_ids: Vec<_> = validations
-        .iter()
-        .map(|(id, _)| *id)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
+    let partition_ids: Vec<_> = validations.iter().map(|(id, _)| *id).collect();
 
-    let partitions = db::spx_partition::find_by(
-        txn,
-        ObjectColumnFilter::List(db::spx_partition::IdColumn, &unique_partition_ids),
-    )
-    .await?;
+    // Lock the complete batch before persisting any instance attachments.
+    let partitions = db::spx_partition::find_active_for_share(txn, &partition_ids).await?;
 
     let partition_map: HashMap<_, _> = partitions.into_iter().map(|p| (p.id, p)).collect();
 
@@ -2856,25 +2894,33 @@ pub(crate) async fn validate_ib_partition_ownership(
     batch_validate_ib_partition_ownership(txn, &validations).await
 }
 
+/// Validates SPX ownership while holding admission locks through this transaction.
+/// The caller must persist the instance configuration before committing it.
+/// Update validation keeps its existing errors, which differ from batch allocation.
 pub(crate) async fn validate_spx_partition_ownership(
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     instance_tenant: &TenantOrganizationId,
     spxcfg: &InstanceSpxConfig,
 ) -> Result<(), CarbideError> {
+    let partition_ids: Vec<_> = spxcfg
+        .spx_attachments
+        .iter()
+        .map(|attachment| attachment.spx_partition_id)
+        .collect();
+    let partitions: HashMap<_, _> =
+        db::spx_partition::find_active_for_share(txn.as_mut(), &partition_ids)
+            .await?
+            .into_iter()
+            .map(|partition| (partition.id, partition))
+            .collect();
+
     for attachment in &spxcfg.spx_attachments {
         let partition_id = attachment.spx_partition_id;
-
-        let partition = db::spx_partition::find_by(
-            txn.as_mut(),
-            ObjectColumnFilter::List(db::spx_partition::IdColumn, &[partition_id]),
-        )
-        .await?;
-        if partition.len() != 1 {
+        let Some(spx_partition) = partitions.get(&partition_id) else {
             return Err(CarbideError::InvalidArgument(format!(
                 "SPX partition {partition_id} is not found",
             )));
-        }
-        let spx_partition = &partition[0];
+        };
         if spx_partition.tenant_organization_id != *instance_tenant {
             return Err(CarbideError::InvalidArgument(format!(
                 "SPX partition {partition_id} is not owned by the tenant {instance_tenant}",
@@ -2913,12 +2959,13 @@ pub(crate) fn sort_spx_by_slot(
     spx_hw_map
 }
 
-/// Allocate SPX port MAC addresses
+/// Binds SPX attachments to DPA rows and returns the selected rows' firmware evidence.
 pub(crate) fn allocate_spx_port_mac(
     spx_config: &InstanceSpxConfig,
     mh_snapshot: &ManagedHostStateSnapshot,
-) -> CarbideResult<InstanceSpxConfig> {
+) -> CarbideResult<(InstanceSpxConfig, Vec<NicFirmwareAllocationTarget>)> {
     let mut updated_spx_config = spx_config.clone();
+    let mut targets = Vec::with_capacity(spx_config.spx_attachments.len());
 
     tracing::debug!(
         dpa_interface_snapshot_count = mh_snapshot.dpa_interface_snapshots.len(),
@@ -2961,6 +3008,10 @@ pub(crate) fn allocate_spx_port_mac(
         if let Some(sorted_spxs) = spx_hw_map.get_mut(&spx_attachment.device) {
             if let Some(spx_interface) = sorted_spxs.get(spx_attachment.device_instance as usize) {
                 spx_attachment.mac_address = Some(spx_interface.mac_address.to_string());
+                targets.push(NicFirmwareAllocationTarget::from_binding(
+                    spx_attachment.clone(),
+                    spx_interface,
+                ));
                 sorted_spxs.remove(spx_attachment.device_instance as usize);
             } else {
                 tracing::error!(
@@ -2986,16 +3037,185 @@ pub(crate) fn allocate_spx_port_mac(
         }
     }
 
-    Ok(updated_spx_config)
+    Ok((updated_spx_config, targets))
 }
 
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, Check, check_cases, check_values, value_scenarios};
+    use carbide_uuid::dpa_interface::DpaInterfaceId;
+    use config_version::Versioned;
+    use model::dpa_interface::{
+        DpaInterfaceControllerState, DpaInterfaceNetworkConfig, DpaInterfaceType,
+    };
+    use model::instance::config::extension_services::InstanceExtensionServiceConfig;
     use model::instance::config::infiniband::InstanceIbInterfaceConfig;
+    use model::instance::config::spx::InstanceSpxAttachment;
+    use model::test_support::machine_snapshot::managed_host_state_snapshot;
 
     use super::*;
+
+    /// Builds physical attachment intent without a MAC; the mapper owns binding.
+    fn spx_attachment(device: &str, device_instance: u32) -> InstanceSpxAttachment {
+        InstanceSpxAttachment {
+            device: device.to_string(),
+            device_instance,
+            mac_address: None,
+            spx_partition_id: SpxPartitionId::new(),
+            attachment_type: SpxAttachmentType::Physical,
+            attachment_vf: None,
+            attachment_ovs: None,
+        }
+    }
+
+    /// Builds distinct DPA rows grouped by device label and ordered by PCI locator.
+    fn spx_interface(
+        machine_id: HostMachineId,
+        device: &str,
+        pci_name: &str,
+        mac_address: &str,
+    ) -> DpaInterface {
+        let now = chrono::Utc::now();
+        DpaInterface {
+            id: DpaInterfaceId::new(),
+            machine_id,
+            mac_address: mac_address.parse().unwrap(),
+            pci_name: pci_name.to_string(),
+            underlay_ip: None,
+            overlay_ip: None,
+            created: now,
+            updated: now,
+            deleted: None,
+            controller_state: Versioned::new(
+                DpaInterfaceControllerState::Ready,
+                ConfigVersion::initial(),
+            ),
+            last_hb_time: now,
+            controller_state_outcome: None,
+            network_config: Versioned::new(
+                DpaInterfaceNetworkConfig::default(),
+                ConfigVersion::initial(),
+            ),
+            card_state: None,
+            device_info: None,
+            device_info_ts: None,
+            mlxconfig_profile: None,
+            history: Vec::new(),
+            device_description: Some(device.to_string()),
+            interface_type: DpaInterfaceType::Svpc,
+        }
+    }
+
+    /// An error after a successful binding must reject the entire mapper result,
+    /// not expose the evidence accumulated before the failing attachment.
+    #[test]
+    fn spx_binding_rejects_errors_after_a_valid_attachment() {
+        let mut snapshot = managed_host_state_snapshot();
+        let machine_id = snapshot.host_snapshot.id;
+        snapshot.dpa_interface_snapshots = vec![
+            spx_interface(
+                machine_id,
+                "NVIDIA ConnectX-7",
+                "0000:cc:00.0",
+                "02:11:22:33:44:55",
+            ),
+            spx_interface(
+                machine_id,
+                "NVIDIA ConnectX-8",
+                "0000:dd:00.0",
+                "02:11:22:33:44:66",
+            ),
+        ];
+
+        check_cases(
+            [
+                // An absent hardware group must not be skipped after earlier success.
+                Case {
+                    scenario: "unknown device after a successful binding",
+                    input: ("unknown-device", 0),
+                    expect: FailsWith(format!(
+                        "no SPX device with name unknown-device in machine {machine_id}"
+                    )),
+                },
+                // A known group with no requested index must not yield partial bindings.
+                Case {
+                    scenario: "missing index after a successful binding",
+                    input: ("NVIDIA ConnectX-8", 1),
+                    expect: FailsWith("SPX device NVIDIA ConnectX-8 has no instance 1".to_string()),
+                },
+            ],
+            |(device, device_instance)| {
+                let config = InstanceSpxConfig {
+                    spx_attachments: vec![
+                        spx_attachment("NVIDIA ConnectX-7", 0),
+                        spx_attachment(device, device_instance),
+                    ],
+                };
+                allocate_spx_port_mac(&config, &snapshot)
+                    .map(|_| ())
+                    .map_err(|error| match error {
+                        CarbideError::InvalidArgument(message) => message,
+                        error => panic!("unexpected mapper error: {error}"),
+                    })
+            },
+        );
+    }
+
+    /// Sorting and consuming rows must preserve each returned attachment's pairing
+    /// with its exact selected row, including when hardware input order differs.
+    #[test]
+    fn spx_binding_targets_follow_mapper_order_and_selected_rows() {
+        let mut snapshot = managed_host_state_snapshot();
+        let machine_id = snapshot.host_snapshot.id;
+        snapshot.dpa_interface_snapshots = vec![
+            spx_interface(
+                machine_id,
+                "NVIDIA ConnectX-7",
+                "0000:dd:00.0",
+                "02:11:22:33:44:66",
+            ),
+            spx_interface(
+                machine_id,
+                "NVIDIA ConnectX-7",
+                "0000:cc:00.0",
+                "02:11:22:33:44:55",
+            ),
+        ];
+        let config = InstanceSpxConfig {
+            spx_attachments: vec![
+                spx_attachment("NVIDIA ConnectX-7", 0),
+                spx_attachment("NVIDIA ConnectX-7", 1),
+            ],
+        };
+
+        let (bound, targets) = allocate_spx_port_mac(&config, &snapshot).unwrap();
+        let expected = InstanceSpxConfig {
+            spx_attachments: vec![
+                InstanceSpxAttachment {
+                    mac_address: Some("02:11:22:33:44:66".to_string()),
+                    ..config.spx_attachments[1].clone()
+                },
+                InstanceSpxAttachment {
+                    mac_address: Some("02:11:22:33:44:55".to_string()),
+                    ..config.spx_attachments[0].clone()
+                },
+            ],
+        };
+        assert_eq!(bound, expected);
+        assert_eq!(targets.len(), bound.spx_attachments.len());
+        for ((target, attachment), interface) in targets
+            .iter()
+            .zip(&bound.spx_attachments)
+            .zip(&snapshot.dpa_interface_snapshots)
+        {
+            assert_eq!(&target.attachment, attachment);
+            assert_eq!(target.dpa_interface_id, interface.id);
+            assert_eq!(target.machine_id, interface.machine_id);
+            assert_eq!(target.mac_address, interface.mac_address);
+            assert_eq!(target.pci_name, interface.pci_name);
+        }
+    }
 
     /// Verifies request conversion rejects service-VPC activation before database
     /// work, so allocation cannot persist attachment identity without the required
@@ -3595,6 +3815,63 @@ mod tests {
                     == format!(
                         "machine {machine_id} has a pending boot configuration; retry after it has been applied"
                     )
+        ));
+    }
+
+    /// Verifies instance attachment rejects baseline services before checking
+    /// targets or versions, because these services already deploy to all DPUs.
+    #[test]
+    fn baseline_extension_service_cannot_be_attached_to_an_instance() {
+        // Build a valid baseline registration and a matching active attachment request.
+        let service_id = ExtensionServiceId::new();
+        let version = ConfigVersion::initial();
+        let extension_services = InstanceExtensionServicesConfig {
+            service_configs: vec![InstanceExtensionServiceConfig {
+                id: Some(uuid::Uuid::new_v4()),
+                service_id,
+                version,
+                dpu_target: None,
+                removed: None,
+            }],
+        };
+        let now = chrono::Utc::now();
+        let services = HashMap::from([(
+            service_id,
+            ExtensionService {
+                id: service_id,
+                service_type: ExtensionServiceType::DpfHelmChart,
+                deployment_type: ExtensionServiceDeploymentType::Baseline,
+                dpu_target: None,
+                name: "baseline-service".to_string(),
+                tenant_organization_id: "best_org".parse().unwrap(),
+                description: String::new(),
+                service_vpc_interfaces: vec![],
+                version_ctr: 1,
+                status: Default::default(),
+                created: now,
+                updated: now,
+                deleted: None,
+            },
+        )]);
+        let machine_id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"
+            .parse()
+            .expect("valid host machine ID");
+
+        // Baseline rejection must take precedence over missing version and target data.
+        let error = validate_instance_extension_services(
+            machine_id,
+            true,
+            true,
+            &extension_services,
+            &services,
+            &HashMap::new(),
+            &HashSet::new(),
+        )
+        .expect_err("baseline services must remain independent of instance attachment");
+        assert!(matches!(
+            error,
+            CarbideError::FailedPrecondition(message)
+                if message.contains("deployed independently of instance attachment")
         ));
     }
 }

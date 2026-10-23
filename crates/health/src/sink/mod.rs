@@ -56,6 +56,15 @@ pub(crate) use self::otlp::OtlpSink;
 pub use self::otlp::OtlpSink;
 use crate::HealthError;
 
+/// An immutable observation and metric identity shared within one composite fanout.
+///
+/// Each target retains its own queue entry. The identity excludes observation
+/// metadata and labels so replacements can release obsolete payloads.
+pub struct SharedMetric {
+    payload: Arc<(EventContext, MetricSample)>,
+    key: Arc<otlp::OtlpMetricQueueKey>,
+}
+
 pub trait DataSink: Send + Sync {
     fn sink_type(&self) -> &'static str;
 
@@ -123,6 +132,19 @@ pub trait DataSink: Send + Sync {
         _shared: &Arc<(EventContext, MetricSample)>,
     ) -> Result<(), HealthError> {
         self.try_handle_event(context, event)
+    }
+
+    /// Handles a shared observation with an identity prepared once for the fanout.
+    ///
+    /// The default forwards to `try_handle_shared_metric`, preserving that hook's
+    /// behavior for sinks that do not use the prepared identity.
+    fn try_handle_shared_metric_with_identity(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+        shared: &SharedMetric,
+    ) -> Result<(), HealthError> {
+        self.try_handle_shared_metric(context, event, &shared.payload)
     }
 
     /// Fire-and-forget entry point for callers that do not track outcomes.

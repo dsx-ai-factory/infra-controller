@@ -71,7 +71,6 @@ var (
 		SubnetStatusDeleted:      true,
 		SubnetStatusError:        true,
 	}
-	errSubnetNoIPv4Prefix = errors.New("subnet has no IPv4 prefix")
 )
 
 // Subnet is a network construct for bare-metal machines

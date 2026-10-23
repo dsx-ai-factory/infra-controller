@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use model::metadata::Metadata;
 use model::spx_partition::{NewSpxPartition, SpxPartition, SpxPartitionSearchFilter};
 
 use crate::errors::RpcDataConversionError;
@@ -40,15 +41,23 @@ impl TryFrom<rpc::SpxPartitionCreationRequest> for NewSpxPartition {
 
         let id = req.id.unwrap_or_else(|| uuid::Uuid::new_v4().into());
 
-        let (name, description) = req
+        let metadata = req
             .metadata
-            .map(|m| (m.name, m.description))
+            .map(Metadata::try_from)
+            .transpose()?
             .unwrap_or_default();
+
+        metadata.validate(true).map_err(|error| {
+            RpcDataConversionError::InvalidArgument(format!(
+                "SPX partition metadata is not valid: {error}"
+            ))
+        })?;
 
         Ok(NewSpxPartition {
             id,
-            name,
-            description,
+            name: metadata.name,
+            description: metadata.description,
+            labels: metadata.labels,
             tenant_organization_id: req.tenant_organization_id,
             vni: req.vni.map(|v| v.try_into()).transpose().map_err(
                 |e: std::num::TryFromIntError| {
@@ -77,11 +86,14 @@ impl TryFrom<SpxPartition> for rpc::SpxPartition {
         let vni = src.vni.unwrap();
         Ok(rpc::SpxPartition {
             id: Some(src.id),
-            metadata: Some(rpc::Metadata {
-                name: src.name,
-                description: src.description,
-                ..Default::default()
-            }),
+            metadata: Some(
+                Metadata {
+                    name: src.name,
+                    description: src.description,
+                    labels: src.labels,
+                }
+                .into(),
+            ),
             tenant_organization_id: src.tenant_organization_id.to_string(),
             vni: vni as u32,
         })

@@ -48,8 +48,10 @@ carbide-ib-fabric = { path = "../ib-fabric" }
 carbide-ib-partition-controller = { path = "../ib-partition-controller" }
 carbide-ipmi = { path = "../ipmi" }
 carbide-ipxe-renderer = { path = "../ipxe-renderer" }
+carbide-kmip = { path = "../kmip" }
 carbide-kms-provider = { path = "../kms-provider" }
 carbide-libmlx = { path = "../libmlx" }
+carbide-libmlx-model = { path = "../libmlx-model" }
 carbide-machine-controller = { path = "../machine-controller" }
 carbide-measured-boot = { path = "../measured-boot", features = ["sqlx"] }
 carbide-metrics-utils = { path = "../metrics-utils" }
@@ -63,6 +65,7 @@ carbide-rack = { path = "../rack" }
 carbide-rack-controller = { path = "../rack-controller" }
 carbide-redfish = { path = "../redfish" }
 carbide-resource-pool = { path = "../resource-pool" }
+carbide-resource-pool-api = { path = "../resource-pool-api" }
 carbide-rpc = { path = "../rpc", features = ["sqlx", "model"] }
 carbide-secrets = { path = "../secrets" }
 carbide-site-explorer = { path = "../site-explorer" }

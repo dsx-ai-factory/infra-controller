@@ -206,12 +206,13 @@ pub(crate) async fn handle_machine_validation_state(
             if !host_handler_params.machine_validation_config.enabled {
                 return skip_machine_validation(ctx, validation_id, mh_snapshot).await;
             }
-            // Handle reboot host case
-            handler_host_power_control(mh_snapshot, ctx, SystemPowerControl::ForceRestart).await?;
+            // A failed read leaves us in `RebootHost`, so load the run before rebooting.
             let machine_validation =
                 db::machine_validation::find_by_id(&mut ctx.services.db_reader, validation_id)
                     .await
                     .map_err(|err| StateHandlerError::GenericError(err.into()))?;
+
+            handler_host_power_control(mh_snapshot, ctx, SystemPowerControl::ForceRestart).await?;
 
             let next_state = ManagedHostState::Validation {
                 validation_state: ValidationState::MachineValidation {
@@ -620,30 +621,40 @@ pub(crate) async fn handle_machine_validation_requested(
             // Clear the error so that state machine doesnt get into loop
             db::machine::clear_failure_details(&mh_snapshot.host_snapshot.id, txn.as_mut()).await?;
         }
-        let machine_validation =
-            match db::machine_validation::find_active_machine_validation_by_machine_id(
-                txn.as_mut(),
-                &mh_snapshot.host_snapshot.id,
-            )
-            .await
-            {
-                Ok(data) => data,
-                Err(e) => {
-                    tracing::info!(
-                        error = %e,
-                        "find_active_machine_validation_by_machine_id"
-                    );
-                    db::machine::set_machine_validation_request(
-                        txn.as_mut(),
-                        &mh_snapshot.host_snapshot.id,
-                        true,
-                    )
-                    .await?;
-                    // Health Alert ?
-                    // Rare screnario, if something googfed up in DB
-                    return Ok(Some(StateHandlerOutcome::do_nothing().with_txn(txn)));
-                }
-            };
+        let validation_id = mh_snapshot.host_snapshot.on_demand_machine_validation_id;
+        let machine_validation = match validation_id.as_ref() {
+            Some(validation_id) => {
+                db::machine_validation::find_active_on_demand_machine_validation_by_id_and_machine_id(
+                    txn.as_mut(),
+                    validation_id,
+                    &mh_snapshot.host_snapshot.id,
+                )
+                .await
+            }
+            None => Err(db::DatabaseError::InvalidArgument(
+                "on-demand validation request has no current run ID".to_owned(),
+            )),
+        };
+        let machine_validation = match machine_validation {
+            Ok(data) => data,
+            Err(e) => {
+                tracing::warn!(
+                    machine_id = %mh_snapshot.host_snapshot.id,
+                    validation_id = ?validation_id,
+                    error = %e,
+                    "failed to retrieve current active on-demand machine validation; retaining request for retry"
+                );
+                db::machine::set_machine_validation_request(
+                    txn.as_mut(),
+                    &mh_snapshot.host_snapshot.id,
+                    true,
+                )
+                .await?;
+                // Health Alert ?
+                // Rare screnario, if something googfed up in DB
+                return Ok(Some(StateHandlerOutcome::do_nothing().with_txn(txn)));
+            }
+        };
 
         let next_state = ManagedHostState::Validation {
             validation_state: ValidationState::MachineValidation {

@@ -1979,7 +1979,7 @@ func TestUpdateMachineValidationExternalConfigHandler(t *testing.T) {
 	}
 }
 
-func TestDeleteMachineValidationExternalConfigHandler(t *testing.T) {
+func TestDeleteMachineValidationExternalConfigHandler_Handle(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testMachineInitDB(t)
 	defer dbSession.Close()
@@ -2011,38 +2011,14 @@ func TestDeleteMachineValidationExternalConfigHandler(t *testing.T) {
 	tcfg, _ := cfg.GetTemporalConfig()
 	scp := sc.NewClientPool(tcfg)
 
-	// init scp client
-	scpClient := &tmocks.Client{}
-
-	// set-up delete workflow
-	deleteWorkflowRun := &tmocks.WorkflowRun{}
-	deleteWorkflowRun.On("GetID").Return("delete-workflow-id")
-
-	deleteWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
-
-	scpClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
-		"RemoveMachineValidationExternalConfig", mock.Anything).Return(deleteWorkflowRun, nil)
-
-	// scp client with timeout
-	scpClientWithTimeout := &tmocks.Client{}
-
-	timeoutWorkflowRun := &tmocks.WorkflowRun{}
-	timeoutWorkflowRun.On("GetID").Return("delete-workflow-id")
-
-	timeoutWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(tp.NewTimeoutError(enums.TIMEOUT_TYPE_UNSPECIFIED, nil, nil))
-
-	scpClientWithTimeout.Mock.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
-		"RemoveMachineValidationExternalConfig", mock.Anything).Return(timeoutWorkflowRun, nil)
-
-	scpClientWithTimeout.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-
 	tests := []struct {
 		name           string
 		reqOrgName     string
 		user           *cdbm.User
 		expectedErr    bool
 		expectedStatus int
-		scpClient      *tmocks.Client
+		expectWorkflow bool
+		workflowErr    error
 	}{
 		{
 			name:           "error when user not found in request context",
@@ -2050,7 +2026,7 @@ func TestDeleteMachineValidationExternalConfigHandler(t *testing.T) {
 			user:           nil,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
-			scpClient:      scpClient,
+			expectWorkflow: false,
 		},
 		{
 			name:           "error when user not found in org",
@@ -2058,7 +2034,7 @@ func TestDeleteMachineValidationExternalConfigHandler(t *testing.T) {
 			user:           pvu,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
-			scpClient:      scpClient,
+			expectWorkflow: false,
 		},
 		{
 			name:           "error when workflow times out",
@@ -2066,7 +2042,8 @@ func TestDeleteMachineValidationExternalConfigHandler(t *testing.T) {
 			user:           pvu,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
-			scpClient:      scpClientWithTimeout,
+			expectWorkflow: true,
+			workflowErr:    tp.NewTimeoutError(enums.TIMEOUT_TYPE_UNSPECIFIED, nil, nil),
 		},
 		{
 			name:           "no error",
@@ -2074,14 +2051,35 @@ func TestDeleteMachineValidationExternalConfigHandler(t *testing.T) {
 			user:           pvu,
 			expectedErr:    false,
 			expectedStatus: http.StatusAccepted,
-			scpClient:      scpClient,
+			expectWorkflow: true,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
 			// init temporal client
-			scp.IDClientMap[site.ID.String()] = tc.scpClient
+			scpClient := &tmocks.Client{}
+			scpClient.Test(t)
+			t.Cleanup(func() {
+				scpClient.AssertExpectations(t)
+			})
+			if tc.expectWorkflow {
+				deleteWorkflowRun := &tmocks.WorkflowRun{}
+				deleteWorkflowRun.Test(t)
+				t.Cleanup(func() {
+					deleteWorkflowRun.AssertExpectations(t)
+				})
+				deleteWorkflowRun.On("GetID").Return("delete-workflow-id").Once()
+				deleteWorkflowRun.On("Get", mock.Anything, mock.Anything).Return(tc.workflowErr).Once()
+				scpClient.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
+					"RemoveMachineValidationExternalConfig", mock.MatchedBy(func(request *corev1.RemoveMachineValidationExternalConfigRequest) bool {
+						return request != nil && request.Name == extCfgName
+					})).Return(deleteWorkflowRun, nil).Once()
+				if tc.workflowErr != nil {
+					scpClient.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
+				}
+			}
+			scp.IDClientMap[site.ID.String()] = scpClient
 			// Setup echo server/context
 			e := echo.New()
 			req := httptest.NewRequest(http.MethodDelete, "/", nil)
@@ -2108,6 +2106,9 @@ func TestDeleteMachineValidationExternalConfigHandler(t *testing.T) {
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusAccepted)
 			assert.Equal(t, tc.expectedStatus, rec.Code)
+			if !tc.expectedErr {
+				assertDeletionAcceptedResponse(t, rec.Body.Bytes())
+			}
 		})
 	}
 }

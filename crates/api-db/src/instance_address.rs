@@ -129,7 +129,7 @@ pub async fn find_by_segment_id(
 /// deletion consequently retains the existing address-before-instance order.
 /// Allocation holds an `ACCESS EXCLUSIVE` table lock before inserting, so no
 /// new address row can appear between this prelock and the following delete.
-async fn lock_addresses_for_instance(
+pub(super) async fn lock_addresses_for_instance(
     txn: &mut PgConnection,
     instance_id: InstanceId,
 ) -> Result<(), DatabaseError> {

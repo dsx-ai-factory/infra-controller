@@ -191,7 +191,7 @@ impl<'r> FromRow<'r, PgRow> for PowerOptions {
             desired_state_version
                 .parse()
                 .map_err(|e| sqlx::error::Error::ColumnDecode {
-                    index: "version".to_string(),
+                    index: "desired_power_state_version".to_string(),
                     source: Box::new(e),
                 })?;
         let desired_power_state = row.try_get("desired_power_state")?;
@@ -221,14 +221,16 @@ mod tests {
     use super::*;
 
     #[crate::sqlx_test]
-    async fn power_on_timestamp_decoding_preserves_errors(pool: sqlx::PgPool) {
+    async fn power_options_decoding_preserves_errors(pool: sqlx::PgPool) {
         struct Case {
+            version: &'static str,
             timestamp_projection: &'static str,
             check: fn(Result<PowerOptions, sqlx::Error>),
         }
 
         let cases = [
             Case {
+                version: "V1-T0",
                 timestamp_projection: "NULL::timestamptz AS another_column",
                 check: |result| {
                     assert!(
@@ -239,12 +241,32 @@ mod tests {
                 },
             },
             Case {
+                version: "V1-T0",
                 timestamp_projection: "'not a timestamp'::text AS tried_triggering_on_at",
                 check: |result| {
                     assert!(
                         matches!(&result, Err(sqlx::Error::ColumnDecode { index, .. })
                         if index == "\"tried_triggering_on_at\""),
                         "{result:?}"
+                    );
+                },
+            },
+            Case {
+                version: "not a version",
+                timestamp_projection: "NULL::timestamptz AS tried_triggering_on_at",
+                check: |result| {
+                    let error = result.expect_err("malformed power state version must fail");
+                    let sqlx::Error::ColumnDecode { index, source } = error else {
+                        panic!("expected ColumnDecode, got {error:?}");
+                    };
+                    assert_eq!(index, "desired_power_state_version");
+                    assert!(
+                        matches!(
+                            source.downcast_ref::<config_version::ConfigVersionParseError>(),
+                            Some(config_version::ConfigVersionParseError::VersionFormat(value))
+                                if value == "not a version"
+                        ),
+                        "{source:?}"
                     );
                 },
             },
@@ -266,7 +288,7 @@ mod tests {
                 case.timestamp_projection
             );
             let row = sqlx::query(sqlx::AssertSqlSafe(query))
-                .bind(ConfigVersion::initial().to_string())
+                .bind(case.version)
                 .fetch_one(&pool)
                 .await
                 .unwrap();

@@ -2284,7 +2284,10 @@ async fn seed_switch_endpoint_records(
         ExpectedSwitch {
             expected_switch_id: None,
             bmc_mac_address: bmc_mac,
-            nvos_mac_addresses: vec![nvos_mac],
+            nvos_interfaces: vec![model::expected_switch::ExpectedNvosInterface {
+                mac_address: nvos_mac,
+                is_primary: true,
+            }],
             serial_number: serial_number.to_string(),
             bmc_username: "ADMIN".into(),
             bmc_password: "Pwd2023x0x0x0x7".into(),

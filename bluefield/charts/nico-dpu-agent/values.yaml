@@ -78,6 +78,16 @@ fmds:
   service_name: ""
   # Empty keeps NICo's Forge signer.
   sign_proxy_url: ""
+  # Optional complete FMDS address list written to the agent config. Null
+  # preserves its IPv4-only default; [] writes an empty list instead.
+  # For IPv6, include the fixed metadata endpoint:
+  # networkingAddresses: ["169.254.169.254/30", "fd00:76b9::254/127"]
+  # In DPF, only that endpoint enables an HBN peer. Other entries do not
+  # configure addresses in the external FMDS pod or change HBN's IPv4 peer.
+  # Also set nico-fmds interfaceCidrV6 to fd00:76b9::254/127 and restAddress
+  # to "[::]:80". Apply both services together; the ConfigMap checksum rolls
+  # the agent pod when this value changes.
+  networkingAddresses: null
 
 ### Serves the agent's Prometheus /metrics and /ready on metricsPort
 ### (default 8888). /ready is bound to this endpoint and backs the

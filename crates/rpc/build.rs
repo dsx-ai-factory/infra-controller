@@ -38,6 +38,7 @@ const INCLUDE_PATHS: &[&str] = &["proto"];
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=proto");
     println!("cargo:rerun-if-changed=../agent/proto");
+    println!("cargo:rerun-if-changed=../libmlx/proto");
 
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
     // Write generated code to OUT_DIR rather than back into the source tree.
@@ -59,6 +60,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(true)
         .build_client(true)
         .compile_protos(&["../agent/proto/agent_local.proto"], &["../agent/proto"])?;
+
+    // The per-card supervisor is another local service outside Core reflection.
+    // Reuse the shared messages generated below instead of emitting duplicates.
+    tonic_prost_build::configure()
+        .build_server(true)
+        .build_client(true)
+        .extern_path(".mlx_device", "crate::protos::mlx_device")
+        .extern_path(".common", "crate::protos::common")
+        .compile_protos(
+            &["../libmlx/proto/firmware_supervisor.proto"],
+            &["../libmlx/proto", "proto"],
+        )?;
 
     // Run protoc once as the schema frontend. The resulting Schema fans out to
     // every code-generation backend and to runtime reflection.
@@ -116,6 +129,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .type_attribute(".dns", "#[derive(serde::Serialize)]")
         .type_attribute("forge.DhcpDiscovery", derive_prost_builder)
+        .field_attribute(
+            "ExpectedHostNic.mac_address",
+            "#[serde(default)]",
+        )
+        .field_attribute(
+            "ExpectedHostNic.physical_ifname",
+            "#[serde(default, skip_serializing_if = \"Option::is_none\")]",
+        )
+        .field_attribute(
+            "ExpectedHostNic.logical_ifname",
+            "#[serde(default, skip_serializing_if = \"Option::is_none\")]",
+        )
         .field_attribute(
             "ExpectedHostNic.role",
             "#[serde(default, skip_serializing_if = \"Option::is_none\", deserialize_with = \"ExpectedInterfaceRole::deserialize_optional\", serialize_with = \"ExpectedInterfaceRole::serialize_optional\")]",

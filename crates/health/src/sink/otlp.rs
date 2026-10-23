@@ -18,19 +18,22 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use carbide_instrument::emit;
+use carbide_instrument::{emit, initialize_counter_series};
 use opentelemetry::KeyValue;
 use prometheus::{Counter, CounterVec, Opts};
 
 use super::dedup_queue::{DedupQueue, SaveOutcome};
 use super::event_mapper::RedfishEventMapper;
-use super::{CollectorEvent, DataSink, EventContext, LogRecord, MetricSample};
+use super::{CollectorEvent, DataSink, EventContext, LogRecord, MetricSample, SharedMetric};
 use crate::HealthError;
 use crate::config::OtlpTargetConfig;
 use crate::metrics::MetricsManager;
 use crate::otlp::drain::OtlpDrainTask;
 use crate::otlp::metrics_drain::OtlpMetricsDrainTask;
-use crate::otlp::{ConfiguredOtlpTarget, OtlpQueueEntryDropped, OtlpSignal};
+use crate::otlp::{
+    ConfiguredOtlpTarget, OtlpQueueEntryDropped, OtlpRecordAccepted, OtlpRecordsExported,
+    OtlpSignal,
+};
 
 pub(crate) type OtlpQueue = DedupQueue<String, (EventContext, CollectorEvent)>;
 /// Queue backing arrays retain small entries after metric bursts drain.
@@ -95,7 +98,10 @@ pub(crate) fn is_otlp_log_relevant(event: &CollectorEvent) -> bool {
     )
 }
 
-fn metric_queue_key(context: &EventContext, sample: &MetricSample) -> OtlpMetricQueueKey {
+pub(super) fn metric_queue_key(
+    context: &EventContext,
+    sample: &MetricSample,
+) -> OtlpMetricQueueKey {
     OtlpMetricQueueKey {
         endpoint_key: context.endpoint_key.clone(),
         collector_type: context.collector_type,
@@ -162,6 +168,22 @@ impl OtlpSink {
 
             let target = ConfiguredOtlpTarget(config.endpoint.clone());
 
+            for signal in [OtlpSignal::Logs, OtlpSignal::Metrics] {
+                let initialized = initialize_counter_series(&OtlpRecordAccepted {
+                    target: target.clone(),
+                    signal,
+                });
+
+                debug_assert!(initialized, "OTLP ingress Event must be a counter");
+
+                let initialized = initialize_counter_series(&OtlpRecordsExported {
+                    target: target.clone(),
+                    signal,
+                });
+
+                debug_assert!(initialized, "OTLP egress Event must be a counter");
+            }
+
             let replaced_total =
                 replaced_total.get_metric_with_label_values(&[&config.endpoint])?;
 
@@ -199,6 +221,11 @@ impl OtlpSink {
 
     /// Records the observable result of one log or metric queue insertion.
     fn record_save_outcome(&self, outcome: SaveOutcome, signal: OtlpSignal) {
+        emit(OtlpRecordAccepted {
+            target: self.target.clone(),
+            signal,
+        });
+
         match outcome {
             SaveOutcome::Inserted => {}
             SaveOutcome::Replaced => match signal {
@@ -296,6 +323,26 @@ impl DataSink for OtlpSink {
         let outcome = self
             .metrics_queue
             .save_latest(key, QueuedMetric::Shared(Arc::clone(shared)));
+
+        self.record_save_outcome(outcome, OtlpSignal::Metrics);
+
+        Ok(())
+    }
+
+    fn try_handle_shared_metric_with_identity(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+        shared: &SharedMetric,
+    ) -> Result<(), HealthError> {
+        if !matches!(event, CollectorEvent::Metric(_)) {
+            return self.try_handle_event(context, event);
+        }
+
+        let outcome = self.metrics_queue.save_latest(
+            Arc::clone(&shared.key),
+            QueuedMetric::Shared(Arc::clone(&shared.payload)),
+        );
 
         self.record_save_outcome(outcome, OtlpSignal::Metrics);
 
@@ -408,12 +455,14 @@ mod tests {
 
     use super::*;
     use crate::otlp::collector_logs::logs_service_server::{LogsService, LogsServiceServer};
-    use crate::otlp::collector_logs::{ExportLogsServiceRequest, ExportLogsServiceResponse};
+    use crate::otlp::collector_logs::{
+        ExportLogsPartialSuccess, ExportLogsServiceRequest, ExportLogsServiceResponse,
+    };
     use crate::otlp::collector_metrics::metrics_service_server::{
         MetricsService, MetricsServiceServer,
     };
     use crate::otlp::collector_metrics::{
-        ExportMetricsServiceRequest, ExportMetricsServiceResponse,
+        ExportMetricsPartialSuccess, ExportMetricsServiceRequest, ExportMetricsServiceResponse,
     };
     use crate::otlp::convert::{build_metrics_export_request, build_queued_metrics_export_request};
     use crate::sink::event_mapper::OpenBmcEventMapper;
@@ -721,6 +770,8 @@ mod tests {
 
         sink.handle_event(&context, &log_event("OpenBMC.0.1.First", "[]"));
         sink.handle_event(&context, &log_event("OpenBMC.0.1.Second", "[]"));
+        sink.handle_event(&context, &log_event("OpenBMC.0.1.Second", "[]"));
+        sink.handle_event(&context, &CollectorEvent::MetricCollectionEnd);
 
         sink.handle_event(
             &context,
@@ -732,9 +783,23 @@ mod tests {
             &metric_event_with_name("second", "b", "gauge", "state"),
         );
 
+        sink.handle_event(
+            &context,
+            &metric_event_with_name("second", "b", "gauge", "state"),
+        );
+
         let target = "http://bounded.example:4317";
 
         for signal in ["logs", "metrics"] {
+            assert_eq!(
+                metrics.counter_delta(
+                    "carbide_health_otlp_ingress_records_total",
+                    &[("target", target), ("signal", signal)],
+                ),
+                3.0,
+                "{signal} ingress counts insertion, eviction and replacement",
+            );
+
             assert_eq!(
                 metrics.counter_delta(
                     "carbide_health_otlp_queue_dropped_total",
@@ -799,16 +864,19 @@ mod tests {
         for event in events {
             composite.handle_event(&context, &event);
 
-            let (_, QueuedMetric::Shared(first_value)) = first.metrics_queue.pop().unwrap() else {
+            let (first_key, QueuedMetric::Shared(first_value)) = first.metrics_queue.pop().unwrap()
+            else {
                 panic!("first target must retain a shared metric");
             };
 
-            let (_, QueuedMetric::Shared(second_value)) = second.metrics_queue.pop().unwrap()
+            let (second_key, QueuedMetric::Shared(second_value)) =
+                second.metrics_queue.pop().unwrap()
             else {
                 panic!("second target must retain a shared metric");
             };
 
             assert!(Arc::ptr_eq(&first_value, &second_value));
+            assert!(Arc::ptr_eq(&first_key, &second_key));
 
             let CollectorEvent::Metric(sample) = event else {
                 panic!("fixture must contain a metric");
@@ -1007,6 +1075,112 @@ mod tests {
     }
 
     #[test]
+    fn shared_metric_identity_preserves_existing_hook_and_releases_replaced_payloads() {
+        struct SharedHookSink {
+            payload: std::sync::Mutex<Option<std::sync::Weak<(EventContext, MetricSample)>>>,
+        }
+
+        impl DataSink for SharedHookSink {
+            fn sink_type(&self) -> &'static str {
+                "shared_hook_sink"
+            }
+
+            fn accepts_shared_metric(&self) -> bool {
+                true
+            }
+
+            fn try_handle_event(
+                &self,
+                _context: &EventContext,
+                _event: &CollectorEvent,
+            ) -> Result<(), HealthError> {
+                panic!("shared fanout must call the existing shared hook");
+            }
+
+            fn try_handle_shared_metric(
+                &self,
+                _context: &EventContext,
+                _event: &CollectorEvent,
+                shared: &Arc<(EventContext, MetricSample)>,
+            ) -> Result<(), HealthError> {
+                *self.payload.lock().unwrap() = Some(Arc::downgrade(shared));
+                Ok(())
+            }
+        }
+
+        let first = Arc::new(test_sink());
+        let second = Arc::new(test_sink());
+
+        let hook = Arc::new(SharedHookSink {
+            payload: Default::default(),
+        });
+
+        let metrics_manager = Arc::new(MetricsManager::new("otlp_identity_lifetime_test").unwrap());
+
+        let composite = CompositeDataSink::new(
+            vec![first.clone(), second.clone(), hook.clone()],
+            metrics_manager,
+        );
+
+        let context = test_context();
+        let event = metric_event();
+
+        composite.handle_event(&context, &event);
+
+        let initial = hook.payload.lock().unwrap().take().unwrap();
+
+        assert!(initial.upgrade().is_some());
+
+        composite.handle_event(&context, &event);
+
+        assert!(initial.upgrade().is_none());
+
+        let replacement = hook.payload.lock().unwrap().take().unwrap();
+        let (_, first_value) = first.metrics_queue.pop().unwrap();
+        let (_, second_value) = second.metrics_queue.pop().unwrap();
+
+        let QueuedMetric::Shared(first_value) = first_value else {
+            panic!("first target must retain a shared metric");
+        };
+
+        let QueuedMetric::Shared(second_value) = second_value else {
+            panic!("second target must retain a shared metric");
+        };
+
+        assert!(std::sync::Weak::ptr_eq(
+            &replacement,
+            &Arc::downgrade(&first_value)
+        ));
+
+        assert!(Arc::ptr_eq(&first_value, &second_value));
+        assert_eq!(first.metrics_replaced_total.get() as u64, 1);
+        assert_eq!(second.metrics_replaced_total.get() as u64, 1);
+    }
+
+    #[test]
+    fn shared_metric_identity_preserves_nonmetric_dispatch() {
+        let sink = test_sink();
+        let context = test_context();
+
+        let CollectorEvent::Metric(sample) = metric_event() else {
+            panic!("fixture must contain a metric");
+        };
+
+        let shared = SharedMetric {
+            key: Arc::new(metric_queue_key(&context, &sample)),
+            payload: Arc::new((context.clone(), *sample)),
+        };
+
+        let event = log_event("OpenBMC.0.1.Test", r#"["sensor1"]"#);
+
+        sink.try_handle_shared_metric_with_identity(&context, &event, &shared)
+            .unwrap();
+
+        assert!(sink.metrics_queue.pop().is_none());
+        assert!(sink.queue.pop().is_some());
+    }
+
+    #[test]
     fn composite_single_otlp_target_retains_owned_metric() {
         let sink = Arc::new(test_sink());
         let sinks: Vec<Arc<dyn DataSink>> = vec![sink.clone()];
@@ -1023,6 +1197,8 @@ mod tests {
 
     #[tokio::test]
     async fn new_many_labels_replacement_counters_by_target() {
+        let capture = MetricsCapture::start();
+
         let configs = vec![
             OtlpTargetConfig {
                 endpoint: "http://first.example:4317".to_string(),
@@ -1059,6 +1235,42 @@ mod tests {
         )
         .expect("OTLP sinks should initialize");
 
+        let exposition = capture.render();
+
+        for (name, help) in [
+            (
+                "carbide_health_otlp_ingress_records_total",
+                "Number of log records or metric samples accepted into OTLP queues, including replacements and insertions that evict an older entry, by target and signal.",
+            ),
+            (
+                "carbide_health_otlp_egress_records_total",
+                "Number of OTLP log records or metric data points acknowledged by the receiver, excluding explicit partial-success rejections, by target and signal.",
+            ),
+        ] {
+            assert!(exposition.contains(&format!("# TYPE {name} counter\n")));
+            assert!(exposition.contains(&format!("# HELP {name} {help}\n")));
+        }
+
+        for config in &configs {
+            for signal in ["logs", "metrics"] {
+                for name in [
+                    "carbide_health_otlp_ingress_records_total",
+                    "carbide_health_otlp_egress_records_total",
+                ] {
+                    assert!(
+                        exposition.lines().any(|line| {
+                            line.starts_with(name)
+                                && line.contains(&format!("target=\"{}\"", config.endpoint))
+                                && line.contains(&format!("signal=\"{signal}\""))
+                                && line.ends_with(" 0")
+                        }),
+                        "missing zero series: {name}, {}, {signal}",
+                        config.endpoint
+                    );
+                }
+            }
+        }
+
         sinks[0].replaced_total.inc();
         sinks[1].metrics_replaced_total.inc();
 
@@ -1082,6 +1294,30 @@ mod tests {
         assert!(metrics.contains(
             "otlp_replacement_test_otlp_sink_metrics_replaced_total{target=\"http://second.example:4317\"} 1"
         ));
+
+        let sinks: Vec<Arc<dyn DataSink>> = sinks
+            .into_iter()
+            .map(|sink| Arc::new(sink) as Arc<dyn DataSink>)
+            .collect();
+
+        let composite = CompositeDataSink::new(sinks, Arc::new(metrics_manager));
+        let context = test_context();
+
+        composite.handle_event(&context, &log_event("OpenBMC.0.1.Test", "[]"));
+        composite.handle_event(&context, &metric_event());
+
+        for config in &configs {
+            for signal in ["logs", "metrics"] {
+                assert_eq!(
+                    capture.counter_delta(
+                        "carbide_health_otlp_ingress_records_total",
+                        &[("target", &config.endpoint), ("signal", signal)],
+                    ),
+                    1.0,
+                    "fan-out must count ingress once per target and signal",
+                );
+            }
+        }
     }
 
     /// Verifies OTLP logs omit diagnostic payloads by default.
@@ -1279,6 +1515,7 @@ mod tests {
     /// a retryable status.
     #[derive(Default)]
     struct FlakyCollector {
+        partial_rejections: Option<i64>,
         logs: std::sync::Mutex<Vec<ExportLogsServiceRequest>>,
         metrics: std::sync::Mutex<Vec<ExportMetricsServiceRequest>>,
     }
@@ -1294,7 +1531,15 @@ mod tests {
             if logs.len() == 1 {
                 return Err(tonic::Status::unavailable("first export fails"));
             }
-            Ok(tonic::Response::new(ExportLogsServiceResponse::default()))
+
+            Ok(tonic::Response::new(ExportLogsServiceResponse {
+                partial_success: self.partial_rejections.map(|rejected_log_records| {
+                    ExportLogsPartialSuccess {
+                        rejected_log_records,
+                        error_message: "one record rejected".to_string(),
+                    }
+                }),
+            }))
         }
     }
 
@@ -1309,7 +1554,15 @@ mod tests {
             if metrics.len() == 1 {
                 return Err(tonic::Status::unavailable("first export fails"));
             }
-            Ok(tonic::Response::new(ExportMetricsServiceResponse::default()))
+
+            Ok(tonic::Response::new(ExportMetricsServiceResponse {
+                partial_success: self.partial_rejections.map(|rejected_data_points| {
+                    ExportMetricsPartialSuccess {
+                        rejected_data_points,
+                        error_message: "one point rejected".to_string(),
+                    }
+                }),
+            }))
         }
     }
 
@@ -1367,37 +1620,63 @@ mod tests {
 
     #[tokio::test]
     async fn export_retry_resends_the_same_request() {
-        let collector = Arc::new(FlakyCollector::default());
-        let endpoint = serve_collector(
-            tonic::transport::Server::builder()
-                .add_service(LogsServiceServer::from_arc(collector.clone()))
-                .add_service(MetricsServiceServer::from_arc(collector.clone())),
-        )
-        .await;
-        let sink = sink_exporting_to(
-            endpoint,
-            1,
-            OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
-            std::time::Duration::from_secs(1),
-            "otlp_retry_test",
-        );
+        let capture = MetricsCapture::start();
 
-        let context = test_context();
-        sink.handle_event(&context, &log_event("OpenBMC.0.1.Test", "[]"));
-        sink.handle_event(&context, &metric_event());
-        wait_until(
-            || {
-                collector.logs.lock().unwrap().len() >= 2
-                    && collector.metrics.lock().unwrap().len() >= 2
-            },
-            "each signal is exported twice",
-        )
-        .await;
+        for partial_rejections in [None, Some(1)] {
+            let collector = Arc::new(FlakyCollector {
+                partial_rejections,
+                ..Default::default()
+            });
 
-        let logs = collector.logs.lock().unwrap();
-        assert_eq!(logs[1], logs[0], "retried logs export");
-        let metrics = collector.metrics.lock().unwrap();
-        assert_eq!(metrics[1], metrics[0], "retried metrics export");
+            let endpoint = serve_collector(
+                tonic::transport::Server::builder()
+                    .add_service(LogsServiceServer::from_arc(collector.clone()))
+                    .add_service(MetricsServiceServer::from_arc(collector.clone())),
+            )
+            .await;
+
+            let sink = sink_exporting_to(
+                endpoint.clone(),
+                2,
+                OtlpTargetConfig::DEFAULT_MAX_CONCURRENT_EXPORTS,
+                std::time::Duration::from_secs(3600),
+                "otlp_retry_test",
+            );
+
+            let context = test_context();
+
+            let expected = if partial_rejections.is_some() {
+                1.0
+            } else {
+                2.0
+            };
+
+            for key in ["first", "second"] {
+                sink.handle_event(&context, &log_event(key, "[]"));
+                sink.handle_event(&context, &metric_event_with(key, "gauge", "celsius"));
+            }
+
+            wait_until(
+                || {
+                    ["logs", "metrics"].into_iter().all(|signal| {
+                        capture.counter_delta(
+                            "carbide_health_otlp_egress_records_total",
+                            &[("target", &endpoint), ("signal", signal)],
+                        ) == expected
+                    })
+                },
+                "both signals count only acknowledged records",
+            )
+            .await;
+
+            let logs = collector.logs.lock().unwrap();
+            assert_eq!(logs.len(), 2);
+            assert_eq!(logs[1], logs[0], "retried logs export");
+
+            let metrics = collector.metrics.lock().unwrap();
+            assert_eq!(metrics.len(), 2);
+            assert_eq!(metrics[1], metrics[0], "retried metrics export");
+        }
     }
 
     /// Holds each metrics export until the gate hands out a permit, and

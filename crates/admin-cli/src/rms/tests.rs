@@ -55,11 +55,6 @@ fn valid_invocations_route_to_their_subcommand() {
             Cmd::try_parse_from(argv.iter().copied())
                 .map(|cmd| match cmd {
                     Cmd::Inventory => ("inventory", String::new(), String::new()),
-                    Cmd::PowerOnSequence(args) => {
-                        let request =
-                            librms::protos::rack_manager::GetRackPowerOnSequenceRequest::from(args);
-                        ("power-on-sequence", request.rack_id, String::new())
-                    }
                     Cmd::PowerState(args) => {
                         let request = librms::protos::rack_manager::GetPowerStateRequest::from(args);
                         ("power-state", request.rack_id, request.node_id)
@@ -74,10 +69,6 @@ fn valid_invocations_route_to_their_subcommand() {
         };
         "inventory takes no args" {
             &["rms", "inventory"][..] => Yields(("inventory", String::new(), String::new())),
-        }
-
-        "power-on-sequence carries rack_id" {
-            &["rms", "power-on-sequence", "rack-123"][..] => Yields(("power-on-sequence", "rack-123".to_string(), String::new())),
         }
 
         "power-state carries rack_id and node_id" {

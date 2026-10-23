@@ -55,18 +55,22 @@ type ExpectedSwitch struct {
 	SwitchSerialNumber string    `bun:"switch_serial_number,notnull"`
 	BmcIpAddress       *string   `bun:"bmc_ip_address"`
 	NvosMacAddresses   []string  `bun:"nvos_mac_addresses,array"`
-	RackID             *string   `bun:"rack_id"`
-	Name               *string   `bun:"name"`
-	Manufacturer       *string   `bun:"manufacturer"`
-	Model              *string   `bun:"model"`
-	Description        *string   `bun:"description"`
-	SlotID             *int32    `bun:"slot_id"`
-	TrayIdx            *int32    `bun:"tray_idx"`
-	HostID             *int32    `bun:"host_id"`
-	Labels             Labels    `bun:"labels,type:jsonb"`
-	Created            time.Time `bun:"created,nullzero,notnull,default:current_timestamp"`
-	Updated            time.Time `bun:"updated,nullzero,notnull,default:current_timestamp"`
-	CreatedBy          uuid.UUID `bun:"type:uuid,notnull"`
+	// NvosPrimaryMacAddress is the NVOS MAC the operator designates as the primary
+	// (eth0) management port. Nil makes the first stored port the REST/Core wire
+	// default.
+	NvosPrimaryMacAddress *string   `bun:"nvos_primary_mac_address"`
+	RackID                *string   `bun:"rack_id"`
+	Name                  *string   `bun:"name"`
+	Manufacturer          *string   `bun:"manufacturer"`
+	Model                 *string   `bun:"model"`
+	Description           *string   `bun:"description"`
+	SlotID                *int32    `bun:"slot_id"`
+	TrayIdx               *int32    `bun:"tray_idx"`
+	HostID                *int32    `bun:"host_id"`
+	Labels                Labels    `bun:"labels,type:jsonb"`
+	Created               time.Time `bun:"created,nullzero,notnull,default:current_timestamp"`
+	Updated               time.Time `bun:"updated,nullzero,notnull,default:current_timestamp"`
+	CreatedBy             uuid.UUID `bun:"type:uuid,notnull"`
 }
 
 // NormalizeMacAddress lowercases a MAC address and converts hyphen separators
@@ -75,6 +79,82 @@ type ExpectedSwitch struct {
 // NvosMacAddresses conflict filter.
 func NormalizeMacAddress(mac string) string {
 	return strings.ToLower(strings.ReplaceAll(mac, "-", ":"))
+}
+
+// NvosInterface is the structured view of one NVOS ethernet port derived from
+// the stored MAC list and primary selector, with the first-of-many primary
+// default applied. It is the single source both the workflow proto and the REST
+// API response convert from, so the two always agree on which port is primary.
+type NvosInterface struct {
+	MacAddress string
+	IsPrimary  bool
+}
+
+// effectiveNvosPrimary returns the normalized MAC that should be treated as the
+// primary (eth0) port. An explicit selector wins; otherwise the first stored
+// port defaults to primary for the REST/Core wire representation. An
+// empty MAC list has no primary.
+func effectiveNvosPrimary(macs []string, primary *string) string {
+	if primary != nil && *primary != "" {
+		return NormalizeMacAddress(*primary)
+	}
+	if len(macs) > 0 {
+		return NormalizeMacAddress(macs[0])
+	}
+	return ""
+}
+
+// NvosInterfaces returns the switch's NVOS ports in stored order with the
+// effective primary flagged. A nil stored MAC list yields a nil slice so the
+// "field absent" case stays distinguishable from an empty set.
+func (es *ExpectedSwitch) NvosInterfaces() []NvosInterface {
+	if es.NvosMacAddresses == nil {
+		return nil
+	}
+	primary := effectiveNvosPrimary(es.NvosMacAddresses, es.NvosPrimaryMacAddress)
+	interfaces := make([]NvosInterface, 0, len(es.NvosMacAddresses))
+	for _, mac := range es.NvosMacAddresses {
+		interfaces = append(interfaces, NvosInterface{
+			MacAddress: mac,
+			IsPrimary:  NormalizeMacAddress(mac) == primary,
+		})
+	}
+	return interfaces
+}
+
+// nvosInterfacesProto builds the structured NVOS port list for the workflow
+// proto from the canonical NvosInterfaces view so the proto and REST response
+// flag the same primary.
+func (es *ExpectedSwitch) nvosInterfacesProto() []*corev1.ExpectedNvosInterface {
+	views := es.NvosInterfaces()
+	interfaces := make([]*corev1.ExpectedNvosInterface, 0, len(views))
+	for _, view := range views {
+		interfaces = append(interfaces, &corev1.ExpectedNvosInterface{
+			MacAddress: view.MacAddress,
+			IsPrimary:  view.IsPrimary,
+		})
+	}
+	return interfaces
+}
+
+// setNvosInterfacesFromProto decomposes the structured NVOS port list reported
+// by Core back into the stored MAC list plus the scalar primary selector. The
+// primary is the flagged port, if any.
+func (es *ExpectedSwitch) setNvosInterfacesFromProto(interfaces []*corev1.ExpectedNvosInterface) {
+	macs := make([]string, 0, len(interfaces))
+	var primary *string
+	for _, iface := range interfaces {
+		macs = append(macs, iface.GetMacAddress())
+		if iface.GetIsPrimary() {
+			mac := iface.GetMacAddress()
+			primary = &mac
+		}
+	}
+	if len(macs) == 0 {
+		macs = nil
+	}
+	es.NvosMacAddresses = macs
+	es.NvosPrimaryMacAddress = primary
 }
 
 // ExpectedSwitchCredentials carries the BMC and NVOS credentials for one
@@ -95,7 +175,7 @@ func (es *ExpectedSwitch) ToProto(creds ExpectedSwitchCredentials) *corev1.Expec
 		ExpectedSwitchId:   &corev1.UUID{Value: es.ID.String()},
 		BmcMacAddress:      es.BmcMacAddress,
 		SwitchSerialNumber: es.SwitchSerialNumber,
-		NvosMacAddresses:   es.NvosMacAddresses,
+		NvosInterfaces:     es.nvosInterfacesProto(),
 	}
 
 	if es.BmcIpAddress != nil {
@@ -176,7 +256,7 @@ func (es *ExpectedSwitch) FromProto(proto *corev1.ExpectedSwitch) {
 	}
 	es.BmcMacAddress = proto.BmcMacAddress
 	es.SwitchSerialNumber = proto.SwitchSerialNumber
-	es.NvosMacAddresses = proto.NvosMacAddresses
+	es.setNvosInterfacesFromProto(proto.NvosInterfaces)
 	if proto.BmcIpAddress != "" {
 		addr := proto.BmcIpAddress
 		es.BmcIpAddress = &addr
@@ -201,56 +281,59 @@ func (es *ExpectedSwitch) FromProto(proto *corev1.ExpectedSwitch) {
 
 // ExpectedSwitchCreateInput input parameters for Create method
 type ExpectedSwitchCreateInput struct {
-	ExpectedSwitchID   uuid.UUID
-	SiteID             uuid.UUID
-	BmcMacAddress      string
-	SwitchSerialNumber string
-	BmcIpAddress       *string
-	NvosMacAddresses   []string
-	RackID             *string
-	Name               *string
-	Manufacturer       *string
-	Model              *string
-	Description        *string
-	SlotID             *int32
-	TrayIdx            *int32
-	HostID             *int32
-	Labels             map[string]string
-	CreatedBy          uuid.UUID
+	ExpectedSwitchID      uuid.UUID
+	SiteID                uuid.UUID
+	BmcMacAddress         string
+	SwitchSerialNumber    string
+	BmcIpAddress          *string
+	NvosMacAddresses      []string
+	NvosPrimaryMacAddress *string
+	RackID                *string
+	Name                  *string
+	Manufacturer          *string
+	Model                 *string
+	Description           *string
+	SlotID                *int32
+	TrayIdx               *int32
+	HostID                *int32
+	Labels                map[string]string
+	CreatedBy             uuid.UUID
 }
 
 // ExpectedSwitchUpdateInput input parameters for Update method
 type ExpectedSwitchUpdateInput struct {
-	ExpectedSwitchID   uuid.UUID
-	BmcMacAddress      *string
-	SwitchSerialNumber *string
-	BmcIpAddress       *string
-	NvosMacAddresses   []string
-	RackID             *string
-	Name               *string
-	Manufacturer       *string
-	Model              *string
-	Description        *string
-	SlotID             *int32
-	TrayIdx            *int32
-	HostID             *int32
-	Labels             map[string]string
+	ExpectedSwitchID      uuid.UUID
+	BmcMacAddress         *string
+	SwitchSerialNumber    *string
+	BmcIpAddress          *string
+	NvosMacAddresses      []string
+	NvosPrimaryMacAddress *string
+	RackID                *string
+	Name                  *string
+	Manufacturer          *string
+	Model                 *string
+	Description           *string
+	SlotID                *int32
+	TrayIdx               *int32
+	HostID                *int32
+	Labels                map[string]string
 }
 
 // ExpectedSwitchClearInput input parameters for Clear method
 type ExpectedSwitchClearInput struct {
-	ExpectedSwitchID uuid.UUID
-	BmcIpAddress     bool
-	NvosMacAddresses bool
-	RackID           bool
-	Name             bool
-	Manufacturer     bool
-	Model            bool
-	Description      bool
-	SlotID           bool
-	TrayIdx          bool
-	HostID           bool
-	Labels           bool
+	ExpectedSwitchID      uuid.UUID
+	BmcIpAddress          bool
+	NvosMacAddresses      bool
+	NvosPrimaryMacAddress bool
+	RackID                bool
+	Name                  bool
+	Manufacturer          bool
+	Model                 bool
+	Description           bool
+	SlotID                bool
+	TrayIdx               bool
+	HostID                bool
+	Labels                bool
 }
 
 // ExpectedSwitchFilterInput filtering options for GetAll method
@@ -333,22 +416,23 @@ func (essd ExpectedSwitchSQLDAO) Create(ctx context.Context, tx *db.Tx, input Ex
 	defer func() { cotel.EndSpan(expectedSwitchDAOSpan, retErr) }()
 
 	es := ExpectedSwitch{
-		ID:                 input.ExpectedSwitchID,
-		SiteID:             input.SiteID,
-		BmcMacAddress:      input.BmcMacAddress,
-		SwitchSerialNumber: input.SwitchSerialNumber,
-		BmcIpAddress:       input.BmcIpAddress,
-		NvosMacAddresses:   input.NvosMacAddresses,
-		RackID:             input.RackID,
-		Name:               input.Name,
-		Manufacturer:       input.Manufacturer,
-		Model:              input.Model,
-		Description:        input.Description,
-		SlotID:             input.SlotID,
-		TrayIdx:            input.TrayIdx,
-		HostID:             input.HostID,
-		Labels:             input.Labels,
-		CreatedBy:          input.CreatedBy,
+		ID:                    input.ExpectedSwitchID,
+		SiteID:                input.SiteID,
+		BmcMacAddress:         input.BmcMacAddress,
+		SwitchSerialNumber:    input.SwitchSerialNumber,
+		BmcIpAddress:          input.BmcIpAddress,
+		NvosMacAddresses:      input.NvosMacAddresses,
+		NvosPrimaryMacAddress: input.NvosPrimaryMacAddress,
+		RackID:                input.RackID,
+		Name:                  input.Name,
+		Manufacturer:          input.Manufacturer,
+		Model:                 input.Model,
+		Description:           input.Description,
+		SlotID:                input.SlotID,
+		TrayIdx:               input.TrayIdx,
+		HostID:                input.HostID,
+		Labels:                input.Labels,
+		CreatedBy:             input.CreatedBy,
 	}
 	// Add tracing attributes
 	cotel.SetAttribute(expectedSwitchDAOSpan, attribute.String("id", es.ID.String()))
@@ -385,7 +469,8 @@ func (essd ExpectedSwitchSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, 
 		expectedSwitches = append(expectedSwitches, ExpectedSwitch{
 			ID: input.ExpectedSwitchID, SiteID: input.SiteID, BmcMacAddress: input.BmcMacAddress,
 			SwitchSerialNumber: input.SwitchSerialNumber, BmcIpAddress: input.BmcIpAddress,
-			NvosMacAddresses: input.NvosMacAddresses, RackID: input.RackID, Name: input.Name,
+			NvosMacAddresses: input.NvosMacAddresses, NvosPrimaryMacAddress: input.NvosPrimaryMacAddress,
+			RackID: input.RackID, Name: input.Name,
 			Manufacturer: input.Manufacturer, Model: input.Model, Description: input.Description,
 			SlotID: input.SlotID, TrayIdx: input.TrayIdx, HostID: input.HostID,
 			Labels: input.Labels, CreatedBy: input.CreatedBy,
@@ -576,6 +661,10 @@ func (essd ExpectedSwitchSQLDAO) Update(ctx context.Context, tx *db.Tx, input Ex
 		es.NvosMacAddresses = input.NvosMacAddresses
 		columnsSet["nvos_mac_addresses"] = true
 	}
+	if input.NvosPrimaryMacAddress != nil {
+		es.NvosPrimaryMacAddress = input.NvosPrimaryMacAddress
+		columnsSet["nvos_primary_mac_address"] = true
+	}
 	if input.RackID != nil {
 		es.RackID = input.RackID
 		columnsSet["rack_id"] = true
@@ -660,6 +749,10 @@ func (essd ExpectedSwitchSQLDAO) Clear(ctx context.Context, tx *db.Tx, input Exp
 	if input.NvosMacAddresses {
 		es.NvosMacAddresses = nil
 		updatedFields = append(updatedFields, "nvos_mac_addresses")
+	}
+	if input.NvosPrimaryMacAddress {
+		es.NvosPrimaryMacAddress = nil
+		updatedFields = append(updatedFields, "nvos_primary_mac_address")
 	}
 	if input.RackID {
 		es.RackID = nil

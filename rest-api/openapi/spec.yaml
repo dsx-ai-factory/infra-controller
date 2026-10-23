@@ -194,6 +194,10 @@ tags:
     description: |-
       Expected Switch identifies an NVLink Switch that is expected to be discovered at a Site. Infrastructure Providers can pre-register Expected Switches using BMC, NVOS credentials
       and serial numbers to help with NVLink Switch discovery and ingestion.
+
+      Deprecation history:
+
+      - `nvosMacAddresses` is deprecated in favor of `nvosInterfaces`. Its request value is accepted but ignored on create, replace-all, and PATCH, including empty arrays. PATCH preserves stored ports and primary selection unless `nvosInterfaces` is supplied. Responses continue returning the flat MAC list derived from stored interfaces.
   - name: SKU
     x-displayName: SKU
     description: |-
@@ -4495,6 +4499,26 @@ paths:
         '409':
           description: An Expected Machine with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
+        '422':
+          description: The supplied `skuId` does not identify a SKU at this Expected Machine's Site. REST checks your access to the Site before looking up the SKU.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              example:
+                source: nico
+                message: SKU ID specified in request does not exist
+                data: null
+        '500':
+          description: Unexpected server error, including a database error while looking up the supplied `skuId`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              example:
+                source: nico
+                message: Failed to validate SKU ID in request data due to DB error
+                data: null
       tags:
         - Expected Machine
     get:
@@ -4518,6 +4542,7 @@ paths:
             enum:
               - Site
               - Sku
+              - Machine
           in: query
           name: includeRelation
           description: Related entity to expand
@@ -4823,6 +4848,7 @@ paths:
             enum:
               - Site
               - Sku
+              - Machine
           in: query
           name: includeRelation
           description: Related entity to expand
@@ -4888,6 +4914,26 @@ paths:
         '409':
           description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Machine update is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
+        '422':
+          description: The supplied `skuId` does not identify a SKU at this Expected Machine's Site. REST checks your access to the Site before looking up the SKU.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              example:
+                source: nico
+                message: SKU ID specified in request does not exist
+                data: null
+        '500':
+          description: Unexpected server error, including a database error while looking up the supplied `skuId`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              example:
+                source: nico
+                message: Failed to validate SKU ID in request data due to DB error
+                data: null
       tags:
         - Expected Machine
     delete:
@@ -6220,9 +6266,11 @@ paths:
                   switchSerialNumber: SWITCH-12345
                   nvOsUsername: nvadmin
                   nvOsPassword: nvpassword123
-                  nvosMacAddresses:
-                    - '00:1A:2B:3C:4D:60'
-                    - '00:1A:2B:3C:4D:61'
+                  nvosInterfaces:
+                    - macAddress: '00:1A:2B:3C:4D:60'
+                      isPrimary: true
+                    - macAddress: '00:1A:2B:3C:4D:61'
+                      isPrimary: false
                   labels:
                     environment: production
                     rack: A1
@@ -6460,9 +6508,11 @@ paths:
                   switchSerialNumber: SWITCH-54321
                   nvOsUsername: newnvadmin
                   nvOsPassword: newnvpassword123
-                  nvosMacAddresses:
-                    - '00:1A:2B:3C:4D:62'
-                    - '00:1A:2B:3C:4D:63'
+                  nvosInterfaces:
+                    - macAddress: '00:1A:2B:3C:4D:62'
+                      isPrimary: true
+                    - macAddress: '00:1A:2B:3C:4D:63'
+                      isPrimary: false
                   labels:
                     environment: staging
                     rack: B2
@@ -7369,12 +7419,20 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Site still has Instance attachments, including attachments on terminating Instances. The Partition and its status history remain unchanged. Retry after removing active attachments and waiting for terminating Instances to finish deleting.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
       description: |-
         Delete a specific SpectrumX Partition by ID.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
-        Tenant must own the Partition. The request is rejected while any Instance is still attached to the Partition. The Partition moves to `Deleting` and its record is removed once the Site stops reporting it.
+        Tenant must own the Partition. The request is rejected with `400` while the API lists an attached Instance and `412` when the Site reports remaining attachments, including on terminating Instances. A rejected deletion leaves the Partition and its status history unchanged. Retry after removing active attachments and waiting for terminating Instances to finish deleting.
+
+        Once deletion is accepted, the Partition moves to `Deleting` and its record is removed once the Site stops reporting it.
       tags:
         - SpectrumX Partition
   '/v2/org/{org}/nico/nvlink-logical-partition':
@@ -7698,8 +7756,7 @@ paths:
                           vendor: Mellanox Technologies
                           count: 2
                       machineInstanceTypes:
-                        - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
-                          machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
+                        - machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
                           instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
                           created: '2019-08-24T14:15:22Z'
                           updated: '2019-08-24T14:15:22Z'
@@ -7725,8 +7782,7 @@ paths:
                           count: 2
                           deviceType: DPU
                       machineInstanceTypes:
-                        - id: 0327339b-f3b7-4de3-9468-7dc29f9f6914
-                          machineId: fm100dsg23d2f4tq4tt5m2hgib5pcldrm3gvefbduau7gj3itgc3iqg3lpg
+                        - machineId: fm100dsg23d2f4tq4tt5m2hgib5pcldrm3gvefbduau7gj3itgc3iqg3lpg
                           instanceTypeId: 771b066a-f2ff-4550-a65d-baef8551167d
                           created: '2025-05-24T14:15:22Z'
                           updated: '2025-05-24T14:15:22Z'
@@ -8133,13 +8189,11 @@ paths:
               examples:
                 example-1:
                   value:
-                    - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
-                      machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
+                    - machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
                       instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
-                    - id: f690ffcd-06b7-430c-9c2a-b9afd18d77c3
-                      machineId: fm100htrh18t1lrjg2pqagkh3sfigr9m65dejvkq168ako07sc0uibpp5q0
+                    - machineId: fm100htrh18t1lrjg2pqagkh3sfigr9m65dejvkq168ako07sc0uibpp5q0
                       instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
@@ -8197,18 +8251,15 @@ paths:
               examples:
                 example-1:
                   value:
-                    - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
-                      machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
+                    - machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
                       instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
-                    - id: f690ffcd-06b7-430c-9c2a-b9afd18d77c3
-                      machineId: fm100ht68sf2m52idrpslcjkpdj5r3tb3j5o0bkfubhoglbq47u18nknfog
+                    - machineId: fm100ht68sf2m52idrpslcjkpdj5r3tb3j5o0bkfubhoglbq47u18nknfog
                       instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
-                    - id: f690ffcd-06b7-430c-9c2a-b9afd18d77c3
-                      machineId: fm100htrh18t1lrjg2pqagkh3sfigr9m65dejvkq168ako07sc0uibpp5q0
+                    - machineId: fm100htrh18t1lrjg2pqagkh3sfigr9m65dejvkq168ako07sc0uibpp5q0
                       instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
@@ -8720,6 +8771,7 @@ paths:
                 With iPXE override and Ethernet/InfiniBand Interfaces:
                   value:
                     id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                    networkSecurityGroupPropagationDetails: null
                     name: spark-monitor-1
                     description: Node for monitoring Spark
                     tenantId: f97df110-f4de-492e-8849-4a6af68026b0
@@ -8807,6 +8859,7 @@ paths:
                 With DPU Extension Service Deployments:
                   value:
                     id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                    networkSecurityGroupPropagationDetails: null
                     name: spark-monitor-1
                     description: Node for monitoring Spark
                     tenantId: f97df110-f4de-492e-8849-4a6af68026b0
@@ -9091,6 +9144,7 @@ paths:
                 Batch created Instances:
                   value:
                     - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                      networkSecurityGroupPropagationDetails: null
                       name: worker-abc123
                       description: Worker node for distributed training
                       tenantId: f97df110-f4de-492e-8849-4a6af68026b0
@@ -9105,6 +9159,7 @@ paths:
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
                     - id: 85c5e7b2-89f1-4e32-9d3a-8e1f5a2c7d90
+                      networkSecurityGroupPropagationDetails: null
                       name: worker-def456
                       description: Worker node for distributed training
                       tenantId: f97df110-f4de-492e-8849-4a6af68026b0
@@ -9414,6 +9469,7 @@ paths:
                 example-1:
                   value:
                     id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                    networkSecurityGroupPropagationDetails: null
                     name: spark-monitor-2
                     description: Spark Monitor Node 1
                     tenantId: f97df110-f4de-492e-8849-4a6af68026b0
@@ -11421,6 +11477,11 @@ paths:
                           numaNode: 1
                           description: 'MT28908 Family [ConnectX-6]'
                           slot: '0000:ca:00.0'
+                      lifecycleState:
+                        value: Ready
+                        isAboveSLA: false
+                        updated: '2026-01-15T12:00:00Z'
+                        slaSeconds: 300
                       lldpNeighbors:
                         - macAddress: '02:00:00:00:01:b0'
                           localPort: enp1s0np0
@@ -17902,6 +17963,11 @@ paths:
         call, `200 OK` on subsequent updates. See the Tenant Identity tag
         description for upsert semantics and the `enabled` vs DELETE
         distinction.
+
+        Concurrent creation can return `409 Conflict`, leaving the stored
+        configuration and tenant version unchanged. Read it before retrying,
+        since a retry can update it. An explicit `rotateKey: true` request can
+        instead rotate a concurrently created configuration found during the write.
       requestBody:
         required: true
         content:
@@ -17927,6 +17993,16 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: The configuration was created concurrently. The stored configuration and tenant version are unchanged; read it before retrying an update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              example:
+                source: nico
+                message: Failed to create or update Tenant Identity Config
+                data: null
         '500':
           description: Internal server error while loading the Tenant or Site, contacting the Core gRPC API, starting the configuration workflow, or after the workflow timed out and was terminated.
           $ref: '#/components/responses/GenericHttpError'
@@ -19746,7 +19822,7 @@ components:
           type: string
           description: Redfish power control action to apply to the Machine. ACPowercycle is not supported on Viking systems.
           enum:
-            - On
+            - 'On'
             - GracefulShutdown
             - ForceOff
             - GracefulRestart
@@ -19990,11 +20066,13 @@ components:
         - machine:
             total: 27
             initializing: 8
-            assigned: 12
+            reset: 0
             ready: 5
+            inUse: 12
             error: 2
             decommissioning: 0
             decommissioned: 0
+            maintenance: 0
             unknown: 0
           ipBlock:
             total: 4
@@ -20023,14 +20101,27 @@ components:
       title: MachineCountByStatus
       type: object
       description: Describes count of Machines in various statuses
+      required:
+        - total
+        - initializing
+        - reset
+        - inUse
+        - ready
+        - error
+        - decommissioning
+        - decommissioned
+        - maintenance
+        - unknown
       examples:
         - total: 27
           initializing: 8
-          assigned: 12
+          reset: 0
           ready: 5
+          inUse: 12
           error: 2
           decommissioning: 0
           decommissioned: 0
+          maintenance: 0
           unknown: 0
       properties:
         total:
@@ -20042,9 +20133,9 @@ components:
         reset:
           type: integer
           description: 'Number of Machines in Reset status'
-        assigned:
+        inUse:
           type: integer
-          description: 'Number of Machines in Assigned status'
+          description: 'Number of Machines in use by Tenant Instances'
         ready:
           type: integer
           description: 'Number of Machines in Ready status'
@@ -20057,6 +20148,9 @@ components:
         decommissioned:
           type: integer
           description: 'Number of Machines in Decommissioned status'
+        maintenance:
+          type: integer
+          description: 'Number of Machines in Maintenance status'
         unknown:
           type: integer
           description: 'Number of Machines in Unknown status'
@@ -20730,22 +20824,30 @@ components:
           description: 'Date/time when the Site was last updated'
           format: date-time
         location:
-          $ref: '#/components/schemas/SiteLocation'
-          description: 'Site location information'
+          oneOf:
+            - $ref: '#/components/schemas/SiteLocation'
+            - type: 'null'
+          description: 'Site location information. Null when unset'
         contact:
-          $ref: '#/components/schemas/SiteContact'
-          description: 'Site contact information'
+          oneOf:
+            - $ref: '#/components/schemas/SiteContact'
+            - type: 'null'
+          description: 'Site contact information. Null when unset'
         capabilities:
           $ref: '#/components/schemas/SiteCapabilities'
           description: 'Site capabilities used for feature availability and configuration'
         machineStats:
-          $ref: '#/components/schemas/SiteMachineStats'
-          description: 'Machine counts by status for the Site'
+          oneOf:
+            - $ref: '#/components/schemas/SiteMachineStats'
+            - type: 'null'
+          description: 'Machine counts by status for the Site. Populated on Site list requests when includeMachineStats is true; null otherwise. Sites with no Machines or Allocations return zeroed statistics when requested'
         gpuStats:
-          type: array
+          type:
+            - array
+            - 'null'
           items:
             $ref: '#/components/schemas/MachineGPUStats'
-          description: 'GPU counts grouped by GPU type for the Site. Populated when includeGpuStats is set'
+          description: 'GPU counts grouped by GPU type for the Site. Populated on Site list requests when includeGpuStats is true; null otherwise. Sites without GPUs return an empty array when requested'
     SiteSummary:
       title: SiteSummary
       type: object
@@ -21672,7 +21774,6 @@ components:
         - Pending
         - Provisioning
         - Ready
-        - Configuring
         - Deleting
         - Error
     VpcCreateRequest:
@@ -22288,7 +22389,6 @@ components:
         - Provisioning
         - Ready
         - Deleting
-        - Deleted
         - Error
     VpcPrefixCreateRequest:
       title: VpcPrefixCreateRequest
@@ -23432,7 +23532,12 @@ components:
           type:
             - string
             - 'null'
-          description: Authentication type for image URL, e.g., 'Basic' or 'Bearer'
+          enum:
+            - Basic
+            - Bearer
+            - ''
+            - null
+          description: Authentication type for image URL. An empty string means the credentials were cleared through an update.
         imageAuthToken:
           type:
             - string
@@ -23456,7 +23561,8 @@ components:
             whole disk, preferring one with an EFI partition to break a size tie.
             Partition aliases ending in `-part<digits>` are rejected.
             An empty stored value means the Site prefers a disk with an EFI partition,
-            then falls back to `/dev/nvme0n1` or `/dev/sda`.
+            then falls back to the first `/dev/nvme<controller>n<namespace>`,
+            `/dev/sd<letters>`, or `/dev/vd<letters>` whole disk in device-name order.
         rootFsId:
           type:
             - string
@@ -23581,12 +23687,18 @@ components:
           type:
             - string
             - 'null'
-          description: 'Optional auth type: Basic or Bearer'
+          enum:
+            - Basic
+            - Bearer
+            - ''
+            - null
+          description: 'Optional auth type: Basic or Bearer. An empty string is treated as no auth type.'
         authToken:
           type:
             - string
             - 'null'
-          description: 'Optional auth token. Redacted in API responses.'
+          writeOnly: true
+          description: 'Optional auth token. Accepted in create/update requests and never returned in API responses.'
         cacheStrategy:
           type: string
           enum:
@@ -23811,7 +23923,12 @@ components:
           type:
             - string
             - 'null'
-          description: 'Authentication type for image URL, if needed, e.g., basic/bearer/token; required if imageAuthToken is specified'
+          enum:
+            - Basic
+            - Bearer
+            - ''
+            - null
+          description: 'Authentication type for image URL, if needed; required if imageAuthToken is specified. An empty string is treated as not specified.'
         imageAuthToken:
           type:
             - string
@@ -23835,8 +23952,9 @@ components:
             selects the smallest enumerated whole disk, preferring one with an EFI
             partition to break a size tie. Partition aliases ending in
             `-part<digits>` are rejected. When omitted, null, or empty on creation,
-            the Site prefers a disk with an EFI partition, then falls back to
-            `/dev/nvme0n1` or `/dev/sda`.
+            the Site prefers a disk with an EFI partition, then falls back to the first
+            `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, or
+            `/dev/vd<letters>` whole disk in device-name order.
         rootFsId:
           type:
             - string
@@ -23933,12 +24051,17 @@ components:
           type:
             - string
             - 'null'
-          description: 'Authentication type for image URL, if needed, e.g., basic/bearer/token; required if imageAuthToken is specified. Can be updated independently without re-sending imageUrl/imageSha.'
+          enum:
+            - Basic
+            - Bearer
+            - ''
+            - null
+          description: 'Authentication type for image URL, if needed; required if imageAuthToken is specified. Can be updated independently without re-sending imageUrl/imageSha. Set to an empty string to clear the stored value, null leaves it unchanged.'
         imageAuthToken:
           type:
             - string
             - 'null'
-          description: 'Auth token to retrieve the image from image URL, required if imageAuthType is specified. Can be updated independently without re-sending imageUrl/imageSha.'
+          description: 'Auth token to retrieve the image from image URL, required if imageAuthType is specified. Can be updated independently without re-sending imageUrl/imageSha. Set to an empty string to clear the stored value, null leaves it unchanged.'
         imageDisk:
           type:
             - string
@@ -23959,7 +24082,8 @@ components:
             `-part<digits>` are rejected. Omitting this field or sending null preserves
             the current value. Sending an explicit empty string clears the value and
             restores automatic selection: prefer a disk with an EFI partition, then
-            fall back to `/dev/nvme0n1` or `/dev/sda`.
+            fall back to the first `/dev/nvme<controller>n<namespace>`,
+            `/dev/sd<letters>`, or `/dev/vd<letters>` whole disk in device-name order.
         rootFsId:
           type:
             - string
@@ -24037,8 +24161,7 @@ components:
               threads: 36
               count: 2
           machineInstanceTypes:
-            - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
-              machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
+            - machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
               instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
               created: '2019-08-24T14:15:22Z'
               updated: '2019-08-24T14:15:22Z'
@@ -24357,6 +24480,9 @@ components:
     Instance:
       title: Instance
       type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - networkSecurityGroupPropagationDetails
       description: Instance is a baremetal Machine that has been provisioned for a Tenant
       examples:
         - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
@@ -24480,6 +24606,7 @@ components:
           controllerInstanceId: null
           ipxeScript: null
           alwaysBootWithCustomIpxe: false
+          networkSecurityGroupPropagationDetails: null
           userData: null
           labels:
             region: portland
@@ -24606,8 +24733,10 @@ components:
             - 'null'
           description: External power provisioning profile associated with the Instance.
         networkSecurityGroupPropagationDetails:
-          $ref: '#/components/schemas/NetworkSecurityGroupPropagationDetails'
-          description: Propagation details for the attached Network Security Group
+          oneOf:
+            - $ref: '#/components/schemas/NetworkSecurityGroupPropagationDetails'
+            - type: 'null'
+          description: Network Security Group propagation details. Null when no details are available, including when no Network Security Group is attached or inherited.
         networkSecurityGroupInherited:
           type: boolean
           description: Indicates if the Network Security Group is inherited from VPC
@@ -24680,9 +24809,9 @@ components:
             format: uuid
         sshKeyGroups:
           type: array
-          description: IDs of SSH Key Groups associated with this Instance
+          description: SSH Key Groups associated with this Instance, in summary form
           items:
-            $ref: '#/components/schemas/SshKeyGroup'
+            $ref: '#/components/schemas/SshKeyGroupSummary'
         tpmEkCertificate:
           type:
             - string
@@ -24712,6 +24841,8 @@ components:
           description: 'Date/time when the Instance was last updated'
           format: date-time
           readOnly: true
+      required:
+        - networkSecurityGroupPropagationDetails
     InstanceStatus:
       title: InstanceStatus
       type: string
@@ -24726,6 +24857,7 @@ components:
         - Rebooting
         - Terminating
         - Error
+        - Unknown
     InstanceCreateRequest:
       title: InstanceCreateRequest
       type: object
@@ -25350,6 +25482,37 @@ components:
           description: Updated set of DPU Extension Services to deploy to the DPUs of this Instance
           items:
             $ref: '#/components/schemas/DpuExtensionServiceDeploymentRequest'
+    InstanceDeleteHealthIssue:
+      title: InstanceDeleteHealthIssue
+      type: object
+      examples:
+        - category: Network
+          summary: Machine has DPU connectivity error
+          details: Tenant observed repeated link flaps on the DPU uplink.
+      description: Tenant-reported Machine issue that necessitates Instance deletion. Categories match the Core `IssueCategory` values.
+      required:
+        - category
+        - summary
+      properties:
+        category:
+          type: string
+          enum:
+            - Hardware
+            - Network
+            - Performance
+            - Other
+          description: High-level category for the tenant-reported issue.
+        summary:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: Brief description of the issue for operators.
+        details:
+          type:
+            - string
+            - 'null'
+          maxLength: 8192
+          description: Diagnostic information, logs, ticket numbers, etc.
     InstanceDeleteRequest:
       title: InstanceDeleteRequest
       type: object
@@ -25362,7 +25525,7 @@ components:
       description: Request data to delete Instance
       properties:
         machineHealthIssue:
-          $ref: '#/components/schemas/MachineHealthIssue'
+          $ref: '#/components/schemas/InstanceDeleteHealthIssue'
           description: Information regarding issue with the underlying Machine experienced by Tenant
         isRepairTenant:
           type:
@@ -26374,7 +26537,8 @@ components:
             - Compute
             - NVSwitch
             - PowerShelf
-          description: Type of the tray
+            - Unknown
+          description: Type of the tray. `Unknown` is reported when the component type is not recognized.
         name:
           type: string
           description: Name of the tray
@@ -28722,6 +28886,7 @@ components:
     MachineHealthIssue:
       title: MachineHealthIssue
       type: object
+      description: Tenant-reported Machine issue attached to a Machine online repair request. The category is serialized as `issue_category` in the Core `HealthProbeAlert` payload.
       required:
         - category
         - summary
@@ -28738,15 +28903,13 @@ components:
             - Other
           description: High-level category for the tenant-reported issue.
         summary:
-          type:
-            - string
-            - 'null'
-          maxLength: 512
+          type: string
+          minLength: 1
+          maxLength: 1024
           description: Brief description of the issue for operators.
         details:
-          type:
-            - string
-            - 'null'
+          type: string
+          minLength: 1
           maxLength: 8192
           description: Diagnostic information, logs, ticket numbers, etc.
     MachineOnlineRepairPolicy:
@@ -28820,7 +28983,7 @@ components:
               acceptRepairTeamAccess: true
               acceptInstanceDeletionRisk: true
         - healthIssue:
-            category: Storage
+            category: Hardware
             summary: Disk errors on OSD
             details: 'Ticket FORGE-12345; smartctl logs attached'
       description: 'Request data to update Machine. Instance Type attribute updates, maintenance attribute updates, labels updates, and in-pool online repair (enter or exit) must be specified in separate requests. They cannot be processed at the same time.'
@@ -28942,7 +29105,20 @@ components:
     MachineMetadata:
       title: MachineMetadata
       type: object
-      description: Describes metadata for various Machine components
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - dmiData
+        - bmcInfo
+        - lifecycleState
+      description: Describes metadata for various Machine components. Every field is present; unavailable DMI, BMC, and lifecycle data is null, while unavailable inventory and LLDP collections are empty arrays.
+      required:
+        - dmiData
+        - bmcInfo
+        - gpus
+        - networkInterfaces
+        - infinibandInterfaces
+        - lifecycleState
+        - lldpNeighbors
       examples:
         - dmiData:
             boardName: 7Z23CTOLWB
@@ -29004,10 +29180,14 @@ components:
                 model: BlueField-3 DPU
       properties:
         dmiData:
-          $ref: '#/components/schemas/MachineDMIData'
+          oneOf:
+            - $ref: '#/components/schemas/MachineDMIData'
+            - type: 'null'
           description: 'DMI data of the machine'
         bmcInfo:
-          $ref: '#/components/schemas/MachineBMCInfo'
+          oneOf:
+            - $ref: '#/components/schemas/MachineBMCInfo'
+            - type: 'null'
           description: 'BMC Info of the machine'
         gpus:
           type: array
@@ -29631,18 +29811,11 @@ components:
       type: object
       description: Associates a machine with an Instance Type
       examples:
-        - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
-          machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
+        - machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
           instanceTypeId: 41e36058-8403-4086-a9b8-39cb5bc9cb98
           created: '2019-08-24T14:15:22Z'
           updated: '2019-08-24T14:15:22Z'
       properties:
-        id:
-          type: string
-          format: uuid
-          readOnly: true
-          description: 'Deprecated: Use `machineId` when identifying a Machine/Instance Type association. This field will be removed on July 9th, 2026 0:00 UTC.'
-          deprecated: true
         machineId:
           type: string
           description: 'ID of the associated Machine'
@@ -29700,16 +29873,31 @@ components:
       type: object
       description: Expected interface declaration. Each supplied list entry replaces the corresponding declaration, so preserve all returned attributes when editing it. Core validates role, primary selection, and allocation against the Site configuration.
       examples:
-        - macAddress: '02:00:00:00:00:10'
+        - identifier:
+            macAddress: '02:00:00:00:00:10'
           nicType: CX9
           fixedIp: '192.0.2.10'
           primary: true
           role: Host
+        - identifier:
+            astra:
+              physicalName: C1-1-L1
+              logicalName: eth_r0_p0
+          nicType: CX9
+          fixedIp: '192.0.2.11'
       properties:
+        identifier:
+          oneOf:
+            - $ref: '#/components/schemas/ExpectedMachineInterfaceIdentifier'
+            - type: 'null'
+          description: Identifies the interface by MAC address or by its Astra names. Required unless the deprecated `macAddress` is supplied.
         macAddress:
-          type: string
+          type:
+            - string
+            - 'null'
           pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
-          description: MAC address of the expected interface. Accepts six colon- or hyphen-separated octets in either case; stored and returned in uppercase colon-separated form, for example AA:BB:CC:DD:EE:FF. The same MAC may have separate IPv4 and IPv6 declarations.
+          deprecated: true
+          description: Deprecated in favor of `identifier.macAddress`. Identifies the interface by MAC address when `identifier` is omitted. When supplied alongside `identifier.macAddress`, both must name the same MAC address. This field may also accompany `identifier.astra` to preserve a MAC address alongside the Astra names. Responses return the interface's MAC address here when it has one, in uppercase colon-separated form.
         nicType:
           type:
             - string
@@ -29743,8 +29931,50 @@ components:
           type: [string, 'null']
           enum: [Unspecified, Dynamic, Fixed, Retained, null]
           description: On create, omission, null, or Unspecified infers Fixed from fixedIp, otherwise Retained for HostBmc and Dynamic for other roles. On update, omission or null preserves a matching stored policy while fixedIp presence is unchanged; Unspecified resets inference. Fixed requires fixedIp; Dynamic and Retained forbid it. Explicit Fixed, inferred DPU Fixed, and inferred HostBmc Fixed with a segment constraint require a containing managed prefix; legacy Host or inferred HostBmc Fixed without a constraint may use static assignments. Retained keeps a DHCP-allocated address for the interface row lifetime.
+    ExpectedMachineInterfaceIdentifier:
+      title: ExpectedMachineInterfaceIdentifier
+      type: object
+      description: Identifies an Expected Machine interface. Exactly one of `macAddress` or `astra` must be set.
+      examples:
+        - macAddress: '02:00:00:00:00:10'
+        - astra:
+            physicalName: C1-1-L1
+            logicalName: eth_r0_p0
+      properties:
+        macAddress:
+          type:
+            - string
+            - 'null'
+          pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
+          description: MAC address of the interface. Accepts six colon- or hyphen-separated octets in either case; stored and returned in uppercase colon-separated form, for example AA:BB:CC:DD:EE:FF. The same MAC may have separate IPv4 and IPv6 declarations.
+        astra:
+          oneOf:
+            - $ref: '#/components/schemas/ExpectedMachineInterfaceAstraIdentifier'
+            - type: 'null'
+          description: Cerebro names of an interface on an Astra host.
+    ExpectedMachineInterfaceAstraIdentifier:
+      title: ExpectedMachineInterfaceAstraIdentifier
+      type: object
+      description: Names that Cerebro assigns to an interface on an Astra host.
+      examples:
+        - physicalName: C1-1-L1
+          logicalName: eth_r0_p0
+      properties:
+        physicalName:
+          type: string
+          minLength: 1
+          pattern: '^[A-Za-z0-9_.:-]+$'
+          description: Physical interface name as recorded in Cerebro, for example `C1-1-L1`. May contain only ASCII letters, digits, `_`, `.`, `:`, and `-`.
+        logicalName:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 127
+          pattern: '^[A-Za-z0-9_.-]+$'
+          description: Optional logical interface name, for example `eth_r0_p0`. May contain only ASCII letters, digits, `_`, `.`, and `-`. Omission or null clears it when replacing the declaration.
       required:
-        - macAddress
+        - physicalName
     ExpectedMachine:
       title: ExpectedMachine
       type: object
@@ -29762,9 +29992,20 @@ components:
             - DPU-001
             - DPU-002
           interfaces:
-            - macAddress: '02:00:00:00:00:10'
+            - identifier:
+                macAddress: '02:00:00:00:00:10'
+                astra: null
+              macAddress: '02:00:00:00:00:10'
               nicType: CX9
               fixedIp: '192.0.2.10'
+            - identifier:
+                macAddress: null
+                astra:
+                  physicalName: C1-1-L1
+                  logicalName: eth_r0_p0
+              macAddress: null
+              nicType: CX9
+              fixedIp: '192.0.2.11'
           skuId: lenovo.sr650v2.cpu.1
           machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
           rackId: rack-01
@@ -29807,18 +30048,20 @@ components:
           type:
             - string
             - 'null'
-          description: Optional ID of the SKU associated with this Expected Machine
+          description: Stored SKU ID for this Expected Machine, or null when no association is stored. The ID can belong to another Site, including when inventory synchronization imports an entry configured directly in Core.
         sku:
           $ref: '#/components/schemas/Sku'
-          description: SKU information for this Expected Machine (populated when includeRelation=Sku is specified)
+          description: |-
+            SKU information included when `includeRelation=Sku` is specified and the associated SKU belongs to this Expected Machine's Site. For an association to another Site's SKU, REST omits `sku` and returns the stored `skuId`.
         machineId:
           type:
             - string
             - 'null'
-          description: Optional ID of the Machine associated with this Expected Machine
+          description: Stored Machine ID for this Expected Machine, or null when no association is stored. The ID can belong to another Site.
         machine:
           $ref: '#/components/schemas/MachineSummary'
-          description: Machine information for this Expected Machine (populated when includeRelation=Machine is specified)
+          description: |-
+            Machine information included when `includeRelation=Machine` is specified and the associated Machine is found at this Expected Machine's Site. For an association to another Site's Machine, REST omits `machine` and returns the stored `machineId`.
         rackId:
           type:
             - string
@@ -29849,6 +30092,11 @@ components:
             - string
             - 'null'
           description: Description of this component
+        serverName:
+          type:
+            - string
+            - 'null'
+          description: Optional server name advertised to connected switches in LLDP responses and used for cable validation.
         slotId:
           type:
             - integer
@@ -29907,9 +30155,16 @@ components:
             - DPU-001
             - DPU-002
           interfaces:
-            - macAddress: '02:00:00:00:00:10'
+            - identifier:
+                macAddress: '02:00:00:00:00:10'
               nicType: CX9
               fixedIp: '192.0.2.10'
+            - identifier:
+                astra:
+                  physicalName: C1-1-L1
+                  logicalName: eth_r0_p0
+              nicType: CX9
+              fixedIp: '192.0.2.11'
           skuId: lenovo.sr650v2.cpu.1
           rackId: rack-01
           isDpfEnabled: true
@@ -29961,7 +30216,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional ID of the SKU to associate with this Expected Machine
+          description: Optional ID of an existing SKU at this Expected Machine's Site. Omission or null leaves the SKU association unset. REST rejects an empty string with HTTP 400.
         rackId:
           type:
             - string
@@ -29992,6 +30247,12 @@ components:
             - string
             - 'null'
           description: Description of this component
+        serverName:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Optional server name advertised to connected switches in LLDP responses and used for cable validation.
         slotId:
           type:
             - integer
@@ -30075,7 +30336,8 @@ components:
           rackId: rack-02
           isDpfEnabled: false
           interfaces:
-            - macAddress: '02:00:00:00:00:10'
+            - identifier:
+                macAddress: '02:00:00:00:00:10'
               nicType: CX9
               fixedIp: '192.0.2.10'
           manufacturer: Lenovo
@@ -30142,7 +30404,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional ID of the SKU to associate with this Expected Machine
+          description: Optional ID of an existing SKU at this Expected Machine's Site. Omission or null preserves the current SKU association in single and batch PATCH requests. REST rejects an empty string with HTTP 400. PATCH cannot remove the SKU association.
         rackId:
           type:
             - string
@@ -30174,6 +30436,11 @@ components:
             - string
             - 'null'
           description: Description of this component
+        serverName:
+          type:
+            - string
+            - 'null'
+          description: Optional server name advertised to connected switches in LLDP responses and used for cable validation. An empty string clears the current value. Omission or null preserves it.
         slotId:
           type:
             - integer
@@ -31139,6 +31406,21 @@ components:
           type: string
           minLength: 1
           description: Non-blank opaque external device inventory identifier.
+    NvosInterface:
+      title: NvosInterface
+      type: object
+      additionalProperties: false
+      description: One NVOS ethernet port of an Expected Switch.
+      required:
+        - macAddress
+      properties:
+        macAddress:
+          type: string
+          pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
+          description: MAC address of this NVOS ethernet port.
+        isPrimary:
+          type: boolean
+          description: Whether this port is the primary (eth0) NVOS port that NICo manages through RMS. At most one port per switch can be primary; when no port is marked, the first port on a multi-port switch defaults to primary and a single-port switch is always its own primary.
     ExpectedSwitch:
       title: ExpectedSwitch
       type: object
@@ -31152,6 +31434,11 @@ components:
           bmcMacAddress: '00:1A:2B:3C:4D:5E'
           bmcIpAddress: '192.168.1.100'
           switchSerialNumber: SWITCH-12345
+          nvosInterfaces:
+            - macAddress: '00:1A:2B:3C:4D:60'
+              isPrimary: true
+            - macAddress: '00:1A:2B:3C:4D:61'
+              isPrimary: false
           nvosMacAddresses:
             - '00:1A:2B:3C:4D:60'
             - '00:1A:2B:3C:4D:61'
@@ -31180,10 +31467,16 @@ components:
         switchSerialNumber:
           type: string
           description: Serial number of the Expected Switch
+        nvosInterfaces:
+          type: array
+          description: NVOS ethernet ports of the Expected Switch, with the primary (eth0) port flagged. Array order is not stable across inventory synchronization; identify ports by MAC and use isPrimary for selection.
+          items:
+            $ref: '#/components/schemas/NvosInterface'
         nvosMacAddresses:
           type: array
           uniqueItems: true
-          description: MAC addresses of the Expected Switch's NvOS management interfaces
+          deprecated: true
+          description: Deprecated flat NVOS MAC list retained for v2 compatibility. Use `nvosInterfaces`. Responses emit both fields, and this array contains the same MACs in the same order as `nvosInterfaces`.
           items:
             type: string
             pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
@@ -31264,9 +31557,11 @@ components:
           switchSerialNumber: SWITCH-12345
           nvOsUsername: nvadmin
           nvOsPassword: nvpassword123
-          nvosMacAddresses:
-            - '00:1A:2B:3C:4D:60'
-            - '00:1A:2B:3C:4D:61'
+          nvosInterfaces:
+            - macAddress: '00:1A:2B:3C:4D:60'
+              isPrimary: true
+            - macAddress: '00:1A:2B:3C:4D:61'
+              isPrimary: false
           rackId: rack-01
           manufacturer: NVIDIA
           labels:
@@ -31307,10 +31602,17 @@ components:
             - string
             - 'null'
           description: NvOS password for the Expected Switch
+        nvosInterfaces:
+          type: array
+          minItems: 1
+          description: Required NVOS ethernet ports of the Expected Switch. Mark one entry primary to choose eth0; when none is marked, the first entry on a multi-port switch defaults to primary and a single-port switch is always its own primary. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
+          items:
+            $ref: '#/components/schemas/NvosInterface'
         nvosMacAddresses:
           type: array
           uniqueItems: true
-          description: MAC addresses of the Expected Switch's NvOS management interfaces
+          deprecated: true
+          description: Deprecated and ignored. This field never configures NVOS ports or primary selection, regardless of its contents. Use `nvosInterfaces`, including in replace-all entries. Supplying both fields is allowed; only `nvosInterfaces` takes effect.
           items:
             type: string
             pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
@@ -31369,6 +31671,7 @@ components:
         - siteId
         - bmcMacAddress
         - switchSerialNumber
+        - nvosInterfaces
     ExpectedSwitchList:
       title: ExpectedSwitchList
       type: object
@@ -31379,8 +31682,9 @@ components:
             - siteId: f97df110-f4de-492e-8849-4a6af68026b0
               bmcMacAddress: '00:1A:2B:3C:4D:60'
               switchSerialNumber: SWITCH-12345
-              nvosMacAddresses:
-                - '00:1A:2B:3C:4D:61'
+              nvosInterfaces:
+                - macAddress: '00:1A:2B:3C:4D:61'
+                  isPrimary: true
               defaultBmcUsername: admin
               defaultBmcPassword: password123
               labels:
@@ -31412,9 +31716,11 @@ components:
           switchSerialNumber: SWITCH-54321
           nvOsUsername: newnvadmin
           nvOsPassword: newnvpassword123
-          nvosMacAddresses:
-            - '00:1A:2B:3C:4D:62'
-            - '00:1A:2B:3C:4D:63'
+          nvosInterfaces:
+            - macAddress: '00:1A:2B:3C:4D:62'
+              isPrimary: true
+            - macAddress: '00:1A:2B:3C:4D:63'
+              isPrimary: false
           rackId: rack-02
           manufacturer: NVIDIA
           labels:
@@ -31475,10 +31781,17 @@ components:
           minLength: 1
           writeOnly: true
           description: NvOS password for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsUsername. Provide both fields when setting NVOS credentials for the first time.
+        nvosInterfaces:
+          type: array
+          minItems: 1
+          description: Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array is rejected because a switch must keep at least one NVOS port. Mark one entry primary to choose eth0. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
+          items:
+            $ref: '#/components/schemas/NvosInterface'
         nvosMacAddresses:
           type: array
           uniqueItems: true
-          description: MAC addresses of the Expected Switch's NvOS management interfaces
+          deprecated: true
+          description: Deprecated and ignored. Omitted, null, empty, and nonempty values all leave stored ports and primary selection unchanged. Use `nvosInterfaces` to replace ports. Supplying both fields is allowed; only `nvosInterfaces` takes effect.
           items:
             type: string
             pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
@@ -31714,10 +32027,10 @@ components:
           items:
             $ref: '#/components/schemas/SkuInfinibandDevice'
         tpm:
-          type: array
-          description: TPM components
-          items:
-            $ref: '#/components/schemas/SkuTpm'
+          oneOf:
+            - $ref: '#/components/schemas/SkuTpm'
+            - type: 'null'
+          description: TPM component, null when the SKU has none
     SkuCpu:
       title: SkuCpu
       type: object
@@ -32096,7 +32409,6 @@ components:
           readOnly: true
         availablePrefixes:
           type: array
-          format: uuid
           description: |
             Example prefixes available to acquire
           items:
@@ -32649,6 +32961,60 @@ components:
         - Synced
         - Error
         - Deleting
+    SshKeyGroupSummary:
+      title: SshKeyGroupSummary
+      type: object
+      description: Summarizes an SSH Key Group
+      required:
+        - id
+        - name
+        - status
+        - created
+        - updated
+      examples:
+        - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+          name: reno-integration-sre
+          description: SRE access SSH keys for Reno Integration
+          version: fbc692b61ffef6fbfc38a3833f6b7e7ae508da75
+          status: Syncing
+          created: '2019-08-24T14:15:22Z'
+          updated: '2019-08-24T14:15:22Z'
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+          description: Unique UUID v4 identifier for the SSH Key Group
+        name:
+          type: string
+          readOnly: true
+          description: Name of the SSH Key Group
+        description:
+          type:
+            - string
+            - 'null'
+          readOnly: true
+          description: Description of the SSH Key Group
+        version:
+          type:
+            - string
+            - 'null'
+          readOnly: true
+          description: Keyset version of the SSH Key Group
+        status:
+          $ref: '#/components/schemas/SshKeyGroupStatus'
+          readOnly: true
+          description: Status of the SSH Key Group
+        created:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Date/time when the SSH Key Group was created
+        updated:
+          type: string
+          format: date-time
+          readOnly: true
+          description: Date/time when the SSH Key Group was last updated
     SshKeyGroupSiteAssociation:
       title: SshKeyGroupSiteAssociation
       type: object
@@ -33825,8 +34191,75 @@ components:
         tenants:
           type: array
           items:
-            $ref: '#/components/schemas/InstanceTypeStats'
+            $ref: '#/components/schemas/MachineInstanceTypeTenantStats'
           description: 'Per-tenant breakdown for this instance type'
+    MachineInstanceTypeTenantStats:
+      title: MachineInstanceTypeTenantStats
+      description: Per-tenant allocation stats for one Instance Type
+      type: object
+      required:
+        - id
+        - name
+        - allocated
+        - usedMachineStats
+      examples:
+        - id: f97df110-f4de-492e-8849-4a6af68026b0
+          name: qygdmg8oqik8
+          allocated: 4
+          usedMachineStats:
+            total: 4
+            initializing: 0
+            ready: 1
+            inUse: 3
+            error: 0
+            maintenance: 0
+            unknown: 0
+          allocations:
+            - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+              name: Echo Studios Allocations
+              allocated: 4
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: 'Unique UUID v4 identifier for the Tenant'
+        name:
+          type: string
+          description: 'Name of the Tenant'
+        allocated:
+          type: integer
+          description: 'Number of Machines allocated to this Tenant for this Instance Type'
+        usedMachineStats:
+          $ref: '#/components/schemas/MachineStatusBreakdown'
+          description: 'Usage status of Machines for this Tenant and Instance Type'
+        allocations:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineInstanceTypeTenantAllocationStats'
+          description: 'Individual Allocations for this Tenant and Instance Type'
+    MachineInstanceTypeTenantAllocationStats:
+      title: MachineInstanceTypeTenantAllocationStats
+      description: Stats for a single Allocation within a Tenant's Instance Type stats
+      type: object
+      required:
+        - id
+        - name
+        - allocated
+      examples:
+        - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+          name: Echo Studios Allocations
+          allocated: 4
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: 'Unique UUID v4 identifier for the Allocation'
+        name:
+          type: string
+          description: 'Name of the Allocation'
+        allocated:
+          type: integer
+          description: 'Number of Machines in this Allocation for the Instance Type'
     InstanceTypeStats:
       title: InstanceTypeStats
       description: Stats for an instance type including allocation details

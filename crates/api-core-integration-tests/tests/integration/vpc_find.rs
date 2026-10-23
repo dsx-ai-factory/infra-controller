@@ -84,7 +84,12 @@ async fn harness_preserves_custom_resource_pool_registry(pool: PgPool) -> Result
         .await
         .expect_err("the custom registry must load the binding");
     assert_eq!(error.code(), tonic::Code::Internal);
-    assert!(error.message().contains("resource_pool_binding"));
+    assert_eq!(error.message(), "internal database error");
+    let source = std::error::Error::source(&error).expect("database status source");
+    assert!(
+        source.to_string().contains("resource_pool_binding"),
+        "{source}"
+    );
 
     sqlx::query("ALTER TABLE unavailable_resource_pool_binding RENAME TO resource_pool_binding")
         .execute(&pool)

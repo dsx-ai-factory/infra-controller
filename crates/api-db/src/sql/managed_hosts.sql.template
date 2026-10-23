@@ -7,6 +7,8 @@
 -- being produced. Theoretically we should be able to have an ON condition in each JOIN LATERAL that
 -- links in only the data we need, but postgres seems to want to read (and build JSON for) the whole
 -- table(s) when we do that. This is one thing that CTE's won't allow.
+-- The host snapshot subquery also requires its OFFSET 0 fence to prevent PostgreSQL from
+-- flattening it and building snapshots for unrequested machines.
 
 SELECT m.* FROM (
     -- Put the whole thing in a subselect so that we can pack the GROUP BY in here and allow callers
@@ -140,6 +142,9 @@ SELECT m.* FROM (
             ) x
         ) AS p ON true
         WHERE m2.id = m.id
+        -- Prevent PostgreSQL from flattening this subquery and enriching
+        -- unrequested machines before applying the outer ID filter.
+        OFFSET 0
     ) AS host_snapshot ON true
 
     -- (2) Join in all DPU snapshots

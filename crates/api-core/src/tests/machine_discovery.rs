@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use carbide_authn::middleware::ConnectionAttributes;
-use carbide_uuid::machine::{MachineInterfaceId, StableHostMachineId};
+use carbide_uuid::machine::{HostMachineId, MachineInterfaceId, StableHostMachineId};
 use carbide_uuid::network::NetworkSegmentId;
 use common::api_fixtures::dpu::create_dpu_machine;
 use common::api_fixtures::host::{host_discover_dhcp, host_discover_machine_with_reporter};
@@ -1344,23 +1344,48 @@ async fn test_secure_discovery_does_not_fall_back_to_interface_id(
     Ok(())
 }
 
+/// Verifies that discovery replaces the predicted machine ID in the database
+/// and that the machine controller reads the replacement ID and counts one machine.
 #[crate::sqlx_test]
 async fn test_secure_discovery_promotes_predicted_host_by_remote_ip(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let env = create_test_env_with_overrides(
-        pool,
-        TestEnvOverrides::with_config(secure_discovery_config()),
-    )
-    .await;
+    const MACHINE_TOTAL_METRIC: &str = "test_discovery_promoted_machines_total{fresh=\"true\"}";
+
+    // Setup: opt this fixture into filtering machine metrics by IDs read from
+    // the database, isolate its aggregate metric, and create one predicted host.
+    let mut overrides = TestEnvOverrides::with_config(secure_discovery_config());
+    overrides.machine_filter_metrics_by_existing_object_ids_enabled = Some(true);
+    overrides.machine_metric_prefix = Some("test_discovery_promoted_machines");
+    let env = create_test_env_with_overrides(pool, overrides).await;
     let host_config = env.managed_host_config();
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
     let host_interface_id = host_discover_dhcp(&env, &host_config, &dpu_machine_id).await;
     let mut txn = env.pool.begin().await?;
     let host_interface = db::machine_interface::find_one(&mut *txn, host_interface_id).await?;
     txn.commit().await?;
+    let predicted_machine_id = HostMachineId::try_from(
+        host_interface
+            .machine_id
+            .expect("DHCP discovery should create a predicted host"),
+    )?;
     let remote_ip = host_interface.addresses[0];
     let expected_machine_id = from_hardware_info(&HardwareInfo::from(&host_config))?;
+    let stable_machine_id = HostMachineId::try_from(expected_machine_id)?;
+
+    // Setup assertion: the database and isolated aggregate both contain only
+    // the predicted identity before discovery promotes the row.
+    let database_host_ids = db::managed_host::load_host_ids(&env.pool).await?;
+    assert_eq!(database_host_ids.len(), 1);
+    assert!(database_host_ids.contains(&predicted_machine_id));
+    env.run_machine_state_controller_iteration().await;
+    assert_eq!(
+        env.test_meter.formatted_metric(MACHINE_TOTAL_METRIC),
+        Some("1".to_string())
+    );
+
+    // Action: report stable hardware identity through the real secure
+    // discovery handler, promoting the existing predicted row.
     let mut request = Request::new(rpc::MachineDiscoveryInfo {
         machine_interface_id: Some(uuid::Uuid::new_v4().into()),
         discovery_data: Some(rpc::DiscoveryData::Info(
@@ -1379,8 +1404,39 @@ async fn test_secure_discovery_promotes_predicted_host_by_remote_ip(
 
     let response = env.api.discover_machine(request).await?.into_inner();
 
+    // Assertion: discovery returns the stable identity selected from hardware.
     assert_eq!(response.machine_id, Some(expected_machine_id));
     assert_eq!(response.machine_interface_id, Some(host_interface_id));
+
+    // Assertion: promotion replaced predicted A with stable B in the database
+    // before the controller reads the next complete database ID list.
+    let database_host_ids = db::managed_host::load_host_ids(&env.pool).await?;
+    assert_eq!(database_host_ids.len(), 1);
+    assert!(database_host_ids.contains(&stable_machine_id));
+    assert!(!database_host_ids.contains(&predicted_machine_id));
+
+    // Action: run the public manual controller helper so the promoted row is
+    // observed and aggregate metrics are emitted through production paths.
+    env.run_machine_state_controller_iteration().await;
+
+    // Assertion: the ID list published after commit contains stable B, excludes
+    // predicted A, and emits one machine. The helper clears retained metrics,
+    // so the generic processor regression separately proves A/B cache filtering.
+    assert_eq!(
+        env.machine_object_ids_from_database_contains(&stable_machine_id)
+            .await,
+        Some(true)
+    );
+    assert_eq!(
+        env.machine_object_ids_from_database_contains(&predicted_machine_id)
+            .await,
+        Some(false)
+    );
+    assert_eq!(
+        env.test_meter.formatted_metric(MACHINE_TOTAL_METRIC),
+        Some("1".to_string())
+    );
+
     Ok(())
 }
 

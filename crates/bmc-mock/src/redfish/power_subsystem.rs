@@ -17,9 +17,7 @@
 
 use std::borrow::Cow;
 
-use crate::json::{JsonExt, JsonPatch};
 use crate::redfish;
-use crate::redfish::Builder;
 
 pub(super) fn resource(chassis_id: &str) -> redfish::Resource<'static> {
     let odata_id = format!(
@@ -28,36 +26,18 @@ pub(super) fn resource(chassis_id: &str) -> redfish::Resource<'static> {
     );
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
-        odata_type: Cow::Borrowed("#PowerSubsystem.v1_1_3.PowerSubsystem"),
+        odata_type: Cow::Borrowed(redfish::schema::power_subsystem::PowerSubsystem::ODATA_TYPE),
         id: Cow::Borrowed("PowerSubsystem"),
         name: Cow::Borrowed("Power Subsystem"),
     }
 }
 
-pub(super) fn builder(resource: &redfish::Resource) -> PowerSubsystemBuilder {
-    PowerSubsystemBuilder {
-        value: resource.json_patch(),
-    }
-}
-
-pub(super) struct PowerSubsystemBuilder {
-    value: serde_json::Value,
-}
-
-impl Builder for PowerSubsystemBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-        }
-    }
-}
-
-impl PowerSubsystemBuilder {
-    pub(super) fn power_supplies(self, v: redfish::Collection) -> Self {
-        self.apply_patch(v.nav_property("PowerSupplies"))
-    }
-
-    pub(super) fn build(self) -> serde_json::Value {
-        self.value
-    }
+pub(super) fn builder(
+    resource: &redfish::Resource,
+) -> redfish::schema::power_subsystem::PowerSubsystem {
+    redfish::schema::power_subsystem::PowerSubsystem::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        resource.name.as_ref(),
+    )
 }

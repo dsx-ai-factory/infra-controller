@@ -31,7 +31,7 @@ The purpose of this document is to articulate the design of the secret-storage s
 | KEK | Key Encryption Key: the key used to wrap (encrypt) a DEK; never applied to the value directly |
 | Envelope encryption | Encrypt the value with a DEK, then wrap the DEK with a KEK; store both |
 | AAD | Additional Authenticated Data: data bound into the AES-GCM authentication tag but not encrypted; here, the secret's path |
-| KMS | Key Management Service; here, the KEK provider layer: the Integrated, Transit, and Multi providers (section 2.2) |
+| KMS | Key Management Service; here, the KEK provider layer: the Integrated, Transit, KMIP, and Multi providers (section 2.2) |
 | `kek_id` | Opaque string naming a KEK; recorded on every stored row so a read can find the KEK used to wrap its DEK |
 | Backend | A credential store answering reads and (for the writer) accepting writes: Postgres or Vault |
 | Credential chain | The ordered readers (local overrides + backends) consulted first-match-wins, plus a single writer |
@@ -97,7 +97,7 @@ At run time:
 | :---- | :---- |
 | `carbide-secrets` (`crates/secrets`) | The vendor-neutral credential abstraction: the reader/writer/manager traits, the chained reader (first non-`None` wins), and the Vault/OpenBao KV v2 client |
 | `carbide-api-core` secrets module (`crates/api-core/src/secrets/`) | The Postgres backend: envelope encryption (per-write DEK, AES-256-GCM, AAD = path), the append-only journal, path → KEK routing, re-wrap, and the one-time Vault import |
-| `carbide-kms-provider` (`crates/kms-provider`) | The KEK layer: the `KmsBackend` trait and the Integrated (local key material), Transit (Vault/OpenBao server-side), and Multi (active writer + owner-routed reads) providers |
+| `carbide-kms-provider` (`crates/kms-provider`) | The KEK layer: the `KmsBackend` trait and the Integrated (local key material), Transit (Vault/OpenBao server-side), KMIP (a KMIP 1.4 server holding a non-exportable AES-256 key, via `crates/kmip`), and Multi (active writer + owner-routed reads) providers |
 | Database (Postgres) | Hosts the append-only `secrets` table and provides the advisory locks and renewable work-lock leases that coordinate create, import, and re-wrap across replicas |
 | Vault/OpenBao | KV v2 secret store (legacy backend, import source, and optional read fallback) and, optionally, the Transit engine used as a KEK provider |
 | `nico-admin-cli` | Operator surface for the management RPC: `secrets re-wrap [--batch-size N]` |
@@ -132,7 +132,7 @@ The write path turns a plaintext credential into a self-describing encrypted row
 
 ### 3.3 KEK Routing and Rotation (Re-Wrap)
 
-Routing selects the KEK for new writes only: a prefix → `kek_id` map matched longest-prefix-first, with a required "/" catch-all. Rotation is therefore a two-step operation: point routing at the new `kek_id`, then run `secrets re-wrap` to re-align existing rows. The re-wrap walk holds a renewable lease in the `work_locks` table and rejects another start while keepalives retain that lease. If keepalives fail until the lease expires, another run can start before the first exits. The walk scans the journal in `seq` order in batches and, for each row whose `kek_id` differs from the routed target, unwraps the DEK with the old KEK and re-wraps it under the active one, updating only the DEK-wrapping columns (`encrypted_dek`, `dek_nonce`, `kek_id`). The value ciphertext is untouched, so the sweep is cheap, idempotent, and resumable. `stale_remaining` counts live rows still wrapped by a KEK that no route references; it does not inspect backups. After it reaches zero, retain the old KEK through the backup-retention and rollback windows. Restoring a pre-re-wrap backup requires that KEK. The rollback procedure is defined in [Secrets Storage](../../configuration/secrets-storage.md).
+Routing selects the KEK for new writes only: a prefix → `kek_id` map matched longest-prefix-first, with a required "/" catch-all. Rotation therefore adds the new `kek_id` to the active provider, points routing at it, and runs `secrets re-wrap` to re-align existing rows. Each of the two configuration changes must reach every replica before the next, because a pod from the previous rollout cannot unwrap a row wrapped by a `kek_id` it does not know; [Secrets Storage](../../configuration/secrets-storage.md#rotating-and-retiring-keys) gives the operator order. The re-wrap walk holds a renewable lease in the `work_locks` table and rejects another start while keepalives retain that lease. If keepalives fail until the lease expires, another run can start before the first exits. The walk scans the journal in `seq` order in batches and, for each row whose `kek_id` differs from the routed target, unwraps the DEK with the old KEK and re-wraps it under the active one, updating only the DEK-wrapping columns (`encrypted_dek`, `dek_nonce`, `kek_id`). The value ciphertext is untouched, so the sweep is cheap, idempotent, and resumable. `stale_remaining` counts live rows still wrapped by a KEK that no route references; it does not inspect backups. After it reaches zero, retain the old KEK through the backup-retention and rollback windows. Restoring a pre-re-wrap backup requires that KEK. The rollback procedure is defined in [Secrets Storage](../../configuration/secrets-storage.md).
 
 ![Path-to-KEK routing for writes and the re-wrap walk rotating existing rows](kek-routing-rewrap-flow.png)
 
@@ -181,7 +181,7 @@ Indexes: `(path, seq DESC)` for newest-per-path lookups; `(kek_id)` for re-wrap 
 
 #### 3.6.2 KEK Providers and Routing
 
-* Providers are a name → provider map. Integrated takes a `kek_id` → key-source map, where a key source is `{ env = ... }`, `{ file = ... }`, or `{ value = ... }` (a base64 256-bit key). Transit takes a list of Transit key names plus an optional `transit_mount` (default `"transit"`).
+* Providers are a name → provider map. Integrated takes a `kek_id` → key-source map, where a key source is `{ env = ... }`, `{ file = ... }`, or `{ value = ... }` (a base64 256-bit key). Transit takes a list of Transit key names plus an optional `transit_mount` (default `"transit"`). KMIP takes the server `endpoint`, the paths of the CA bundle, client certificate, and client key for mutual TLS, optional `server_name` and deadlines, and a `kek_id` → KMIP Unique Identifier map; startup verifies the server and every key before any DEK is wrapped (see [KMIP KEK Provider](../../configuration/kmip-kek-provider.md)).
 * Routing is a prefix → `kek_id` map matched longest-prefix-first; a "/" catch-all is required. It selects the KEK only for new writes.
 * Startup invariants: every routed `kek_id` must be owned by the active provider, and no `kek_id` is owned by two providers, so an unwrap is never ambiguous.
 

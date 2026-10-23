@@ -27,7 +27,7 @@ use serde::Serialize;
 
 use super::collector_logs::ExportLogsServiceRequest;
 use super::collector_metrics::ExportMetricsServiceRequest;
-use super::common::KeyValue as OtlpKeyValue;
+use super::common::{AnyValue as OtlpAnyValue, KeyValue as OtlpKeyValue, any_value};
 use super::logs::{LogRecord as OtlpLogRecord, ResourceLogs, ScopeLogs, SeverityNumber};
 use super::metrics::{
     Gauge as OtlpGauge, Metric as OtlpMetric, NumberDataPoint, ResourceMetrics, ScopeMetrics,
@@ -538,15 +538,24 @@ fn build_metrics_export_request_from_pairs<'a>(
         let attributes = sample
             .labels
             .iter()
+            .map(|(name, value)| (name.clone(), Cow::Borrowed(value.as_str())))
             .chain(
                 identity
-                    .iter()
-                    .filter(|(name, _)| !own_names.contains(name)),
+                    .into_iter()
+                    .filter(|(name, _)| !own_names.contains(name))
+                    .map(|(name, value)| (name, Cow::Owned(value))),
             )
-            .map(|(k, v)| KeyValue::new(k.to_string(), v.clone()));
+            .map(|(name, value)| OtlpKeyValue {
+                key: name.into_owned(),
+                value: Some(OtlpAnyValue {
+                    value: Some(any_value::Value::StringValue(value.into_owned())),
+                }),
+                ..Default::default()
+            })
+            .collect();
 
         let data_point = NumberDataPoint {
-            attributes: otlp_attributes(attributes),
+            attributes,
             time_unix_nano: observed_nanos,
             value: Some(number_data_point::Value::AsDouble(sample.value)),
             ..Default::default()
@@ -1919,6 +1928,69 @@ mod tests {
             .map(|point| attr_value(&point.attributes, "team"))
             .collect();
         assert_eq!(teams, [Some("a"), Some("b")]);
+    }
+
+    #[test]
+    fn metric_point_preserves_label_order_duplicates_and_empty_values() {
+        let mut context = test_context();
+
+        context.labels = std::collections::BTreeMap::from([
+            ("sensor".to_string(), "context".to_string()),
+            ("team".to_string(), "operations".to_string()),
+        ]);
+
+        let sample = MetricSample {
+            key: "temperature".to_string(),
+            name: "hw".to_string(),
+            metric_type: "temperature".to_string(),
+            unit: "celsius".to_string(),
+            value: 20.0,
+            labels: vec![
+                (Cow::Borrowed("sensor"), "first".to_string()),
+                (Cow::Owned("sensor".to_string()), "second".to_string()),
+                (Cow::Owned("empty.owned".to_string()), String::new()),
+            ],
+            context: None,
+        };
+
+        let request = build_metrics_export_request(&[(context, sample)], EXPORT_NANOS, "health");
+
+        let Some(metric::Data::Gauge(gauge)) =
+            &request.resource_metrics[0].scope_metrics[0].metrics[0].data
+        else {
+            panic!("expected gauge data");
+        };
+
+        let attributes = gauge.data_points[0]
+            .attributes
+            .iter()
+            .map(|attribute| {
+                let value = attribute
+                    .value
+                    .as_ref()
+                    .and_then(|value| value.value.as_ref());
+
+                let Some(any_value::Value::StringValue(value)) = value else {
+                    panic!("expected string attribute");
+                };
+
+                (attribute.key.as_str(), value.as_str())
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            attributes,
+            [
+                ("sensor", "first"),
+                ("sensor", "second"),
+                ("empty.owned", ""),
+                ("endpoint_key", "42:9e:b1:bd:9d:dd"),
+                ("endpoint_mac", "42:9E:B1:BD:9D:DD"),
+                ("endpoint_ip", "10.0.0.1"),
+                ("collector_type", "test"),
+                ("team", "operations"),
+            ]
+        );
     }
 
     /// Switch identity and placement, and custom endpoint labels, ride on

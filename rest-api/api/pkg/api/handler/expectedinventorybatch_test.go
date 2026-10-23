@@ -265,7 +265,7 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 		},
 		{
 			name: "switch", path: "/v2/org/test-org/nico/expected-switch/all",
-			body:    fmt.Sprintf(`{"siteId":%q,"expectedSwitches":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:02","switchSerialNumber":"switch-1","defaultBmcUsername":"switch-user","defaultBmcPassword":"switch-pass","nvOsUsername":"nvos-user","nvOsPassword":"nvos-pass"}]}`, site.ID.String(), site.ID.String()),
+			body:    fmt.Sprintf(`{"siteId":%q,"expectedSwitches":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:02","switchSerialNumber":"switch-1","defaultBmcUsername":"switch-user","defaultBmcPassword":"switch-pass","nvOsUsername":"nvos-user","nvOsPassword":"nvos-pass","nvosInterfaces":[{"macAddress":"02:00:00:00:00:20"},{"macAddress":"02:00:00:00:00:21","isPrimary":true}]}]}`, site.ID.String(), site.ID.String()),
 			handle:  NewReplaceAllExpectedSwitchesHandler(dbSession, pool, cfg).Handle,
 			method:  corev1.Forge_ReplaceAllExpectedSwitches_FullMethodName,
 			secrets: []string{"switch-user", "switch-pass", "nvos-user", "nvos-pass"},
@@ -304,6 +304,12 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 	testDecodeExpectedComponentPatch(t, captured[1], site.ID.String(), &switchList)
 	require.Len(t, switchList.ExpectedSwitches, 1)
 	require.Equal(t, "nvos-pass", switchList.ExpectedSwitches[0].GetNvosPassword())
+	interfaces := switchList.ExpectedSwitches[0].NvosInterfaces
+	require.Len(t, interfaces, 2)
+	require.Equal(t, "02:00:00:00:00:20", interfaces[0].MacAddress)
+	require.False(t, interfaces[0].IsPrimary)
+	require.Equal(t, "02:00:00:00:00:21", interfaces[1].MacAddress)
+	require.True(t, interfaces[1].IsPrimary)
 	var shelfList corev1.ExpectedPowerShelfList
 	testDecodeExpectedComponentPatch(t, captured[2], site.ID.String(), &shelfList)
 	require.Len(t, shelfList.ExpectedPowerShelves, 1)

@@ -47,7 +47,7 @@ const TEST_DATA_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/cfg/test_d
 struct TestUpdateModule {
     pub(in crate::tests) updates_in_progress: Vec<HostMachineId>,
     pub(in crate::tests) updates_started: HashSet<HostMachineId>,
-    start_updates_called: Arc<Mutex<i32>>,
+    start_update_budgets: Arc<Mutex<Vec<i32>>>,
     clear_completed_updates_called: Arc<Mutex<i32>>,
 }
 
@@ -63,13 +63,14 @@ impl MachineUpdateModule for TestUpdateModule {
     async fn start_updates(
         &self,
         _pool: &sqlx::Pool<sqlx::Postgres>,
-        _available_updates: i32,
+        available_updates: i32,
         _updating_machines: &HashSet<HostMachineId>,
         _snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     ) -> CarbideResult<HashSet<HostMachineId>> {
-        if let Ok(mut guard) = self.start_updates_called.lock() {
-            (*guard) += 1;
-        }
+        self.start_update_budgets
+            .lock()
+            .unwrap()
+            .push(available_updates);
         Ok(self.updates_started.clone())
     }
 
@@ -98,12 +99,12 @@ impl TestUpdateModule {
         TestUpdateModule {
             updates_in_progress,
             updates_started,
-            start_updates_called: Arc::new(Mutex::new(0)),
+            start_update_budgets: Arc::new(Mutex::new(Vec::new())),
             clear_completed_updates_called: Arc::new(Mutex::new(0)),
         }
     }
-    pub(in crate::tests) fn get_start_updates_called(&self) -> i32 {
-        *self.start_updates_called.lock().unwrap()
+    pub(in crate::tests) fn get_start_updates_called(&self) -> usize {
+        self.start_update_budgets.lock().unwrap().len()
     }
 
     pub(in crate::tests) fn get_clear_completed_updates_called(&self) -> i32 {
@@ -152,6 +153,64 @@ async fn test_max_outstanding_updates(
 
     assert_eq!(module1.get_clear_completed_updates_called(), 1);
     assert_eq!(module2.get_clear_completed_updates_called(), 1);
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_percentage_update_budget_accounts_for_unhealthy_and_updating_hosts(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let (updating_host_id, _) = create_managed_host(&env).await.into();
+    let (unhealthy_host_id, _) = create_managed_host(&env).await.into();
+    create_managed_host(&env).await;
+    create_managed_host(&env).await;
+
+    let health_report = health_report::HealthReport {
+        alerts: vec![health_report::HealthProbeAlert {
+            id: "FanFailure".parse()?,
+            target: None,
+            in_alert_since: None,
+            message: "Fan failure".to_string(),
+            tenant_message: None,
+            classifications: vec![health_report::HealthAlertClassification::prevent_allocations()],
+        }],
+        ..health_report::HealthReport::empty("test-host-failure".to_string())
+    };
+    let mut txn = env.pool.begin().await?;
+    db::machine::insert_health_report(
+        &mut txn,
+        &unhealthy_host_id,
+        health_report::HealthReportApplyMode::Merge,
+        &health_report,
+        false,
+    )
+    .await?;
+    txn.commit().await?;
+
+    let mut config = (*env.config).clone();
+    config
+        .machine_updater
+        .max_concurrent_machine_updates_absolute = None;
+    config
+        .machine_updater
+        .max_concurrent_machine_updates_percent = Some(75);
+    let module = Box::new(TestUpdateModule::new(
+        vec![updating_host_id.into()],
+        HashSet::default(),
+    ));
+    let manager = MachineUpdateManager::new_with_modules(
+        env.pool.clone(),
+        Arc::new(config),
+        vec![module.clone()],
+        env.api.work_lock_manager_handle.clone(),
+    );
+
+    manager.run_single_iteration().await?;
+
+    // Three slots (75% of four hosts), minus one unhealthy host and one ongoing update.
+    assert_eq!(*module.start_update_budgets.lock().unwrap(), vec![1]);
 
     Ok(())
 }

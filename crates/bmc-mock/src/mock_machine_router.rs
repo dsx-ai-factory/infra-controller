@@ -261,8 +261,6 @@ fn machine_router_inner<C: Callbacks>(
 mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use carbide_test_support::Outcome::Yields;
-    use carbide_test_support::{Case, check_cases_async};
     use tower::ServiceExt;
 
     use super::*;
@@ -312,52 +310,51 @@ mod tests {
                 .unwrap();
             let root: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert!(root.get("EventService").is_none(), "{scenario}");
-            check_cases_async(
-                [
-                    Case {
-                        scenario: "service absent",
-                        input: ("GET", "/redfish/v1/EventService"),
-                        expect: Yields(StatusCode::NOT_FOUND),
-                    },
-                    Case {
-                        scenario: "stream absent",
-                        input: ("GET", "/redfish/v1/EventService/SSE"),
-                        expect: Yields(StatusCode::NOT_FOUND),
-                    },
-                    Case {
-                        scenario: "HEAD absent",
-                        input: ("HEAD", "/redfish/v1/EventService/SSE"),
-                        expect: Yields(StatusCode::NOT_FOUND),
-                    },
-                    Case {
-                        scenario: "subscriptions absent",
-                        input: ("GET", "/redfish/v1/EventService/Subscriptions"),
-                        expect: Yields(StatusCode::NOT_FOUND),
-                    },
-                    Case {
-                        scenario: "stats absent",
-                        input: ("GET", "/Mock/EventService/stats"),
-                        expect: Yields(StatusCode::NOT_FOUND),
-                    },
-                    Case {
-                        scenario: "untyped publication absent",
-                        input: ("POST", "/Mock/EventService/events"),
-                        expect: Yields(StatusCode::NOT_FOUND),
-                    },
-                    Case {
-                        scenario: "untyped script absent",
-                        input: ("POST", "/Mock/EventService/scripts"),
-                        expect: Yields(StatusCode::NOT_FOUND),
-                    },
-                    Case {
-                        scenario: "unknown member absent",
-                        input: ("DELETE", "/redfish/v1/EventService/Subscriptions/garbage"),
-                        expect: Yields(StatusCode::NOT_FOUND),
-                    },
-                ],
-                |(method, path)| {
+            for (scenario, (method, path), expected) in [
+                (
+                    "service absent",
+                    ("GET", "/redfish/v1/EventService"),
+                    StatusCode::NOT_FOUND,
+                ),
+                (
+                    "stream absent",
+                    ("GET", "/redfish/v1/EventService/SSE"),
+                    StatusCode::NOT_FOUND,
+                ),
+                (
+                    "HEAD absent",
+                    ("HEAD", "/redfish/v1/EventService/SSE"),
+                    StatusCode::NOT_FOUND,
+                ),
+                (
+                    "subscriptions absent",
+                    ("GET", "/redfish/v1/EventService/Subscriptions"),
+                    StatusCode::NOT_FOUND,
+                ),
+                (
+                    "stats absent",
+                    ("GET", "/Mock/EventService/stats"),
+                    StatusCode::NOT_FOUND,
+                ),
+                (
+                    "untyped publication absent",
+                    ("POST", "/Mock/EventService/events"),
+                    StatusCode::NOT_FOUND,
+                ),
+                (
+                    "untyped script absent",
+                    ("POST", "/Mock/EventService/scripts"),
+                    StatusCode::NOT_FOUND,
+                ),
+                (
+                    "unknown member absent",
+                    ("DELETE", "/redfish/v1/EventService/Subscriptions/garbage"),
+                    StatusCode::NOT_FOUND,
+                ),
+            ] {
+                let actual = {
                     let router = router.clone();
-                    async move {
+                    {
                         let response = router
                             .oneshot(
                                 Request::builder()
@@ -368,11 +365,11 @@ mod tests {
                             )
                             .await
                             .unwrap();
-                        Ok::<_, std::convert::Infallible>(response.status())
+                        response.status()
                     }
-                },
-            )
-            .await;
+                };
+                assert_eq!(actual, expected, "{scenario}");
+            }
         }
     }
 }

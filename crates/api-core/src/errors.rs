@@ -180,10 +180,10 @@ pub enum CarbideError {
     },
 
     #[error("resource pool error: {0}")]
-    ResourcePoolError(#[from] resource_pool::ResourcePoolError),
+    ResourcePoolError(#[source] resource_pool::ResourcePoolError),
 
     #[error("resource pool database error: {0}")]
-    ResourcePoolDatabaseError(#[from] ResourcePoolDatabaseError),
+    ResourcePoolDatabaseError(#[source] ResourcePoolDatabaseError),
 
     #[error("hardware info error: {0}")]
     HardwareInfoError(#[from] HardwareInfoError),
@@ -331,6 +331,29 @@ impl From<ResourcePoolRegistryError> for CarbideError {
     }
 }
 
+impl From<resource_pool::ResourcePoolError> for CarbideError {
+    fn from(error: resource_pool::ResourcePoolError) -> Self {
+        match error {
+            resource_pool::ResourcePoolError::MissingAllocationRange { .. } => {
+                Self::FailedPrecondition(error.to_string())
+            }
+            error => Self::ResourcePoolError(error),
+        }
+    }
+}
+
+impl From<ResourcePoolDatabaseError> for CarbideError {
+    fn from(error: ResourcePoolDatabaseError) -> Self {
+        match error {
+            ResourcePoolDatabaseError::ResourcePool(
+                error @ resource_pool::ResourcePoolError::MissingAllocationRange { .. },
+            ) => error.into(),
+            ResourcePoolDatabaseError::Database(error) => (*error).into(),
+            error => Self::ResourcePoolDatabaseError(error),
+        }
+    }
+}
+
 impl From<DatabaseError> for CarbideError {
     fn from(e: DatabaseError) -> Self {
         use CarbideError::*;
@@ -383,7 +406,7 @@ impl From<DatabaseError> for CarbideError {
             DatabaseError::TenantSitePrefixQuotaExceeded { used, limit } => {
                 TenantSitePrefixQuotaExceeded { used, limit }
             }
-            DatabaseError::ResourcePoolError(e) => ResourcePoolError(e),
+            DatabaseError::ResourcePoolError(e) => e.into(),
             DatabaseError::RpcUuidConversionError(e) => RpcUuidConversionError(e),
             DatabaseError::Sqlx(e) => DBError(e),
             DatabaseError::TenantError(e) => TenantError(e),
@@ -408,7 +431,8 @@ impl From<EndpointExplorationServiceError> for CarbideError {
                     "endpoint exploration already in progress for {bmc_ip}"
                 ))
             }
-            suppressed_error @ EndpointExplorationServiceError::Suppressed { .. } => {
+            suppressed_error @ (EndpointExplorationServiceError::Suppressed { .. }
+            | EndpointExplorationServiceError::DpfProvisioning { .. }) => {
                 CarbideError::FailedPrecondition(suppressed_error.to_string())
             }
             EndpointExplorationServiceError::ConcurrentModification { kind, version } => {
@@ -551,13 +575,23 @@ impl From<::measured_boot::Error> for CarbideError {
 }
 
 impl From<CarbideError> for tonic::Status {
+    /// Maps errors to gRPC responses and operator metadata.
+    /// `DBError` uses fixed `Internal` text and `nico-error-text`; the original
+    /// diagnostic is logged and available in the in-process status source.
     #[track_caller] // get the source Location from the caller, not this function
     fn from(error: CarbideError) -> Self {
-        let schema = error.operator_error_schema();
+        let mut schema = error.operator_error_schema();
 
         // TODO: There's many more mapped to `Status::internal` which are likely
         // user errors instead
         let mut status = match &error {
+            CarbideError::DBError(database_error) => {
+                // `batch_release` can put this message in an `Ok` response, so
+                // request middleware cannot log every per-instance failure.
+                tracing::error!(error = %database_error, "database error conversion");
+                schema.text = database_error.status_message().to_string();
+                Status::internal(&schema.text)
+            }
             e @ CarbideError::Internal { .. } => Status::internal(e.to_string()),
             CarbideError::InvalidArgument(msg) => Status::invalid_argument(msg),
             error @ CarbideError::VpcCapability(_) => Status::invalid_argument(error.to_string()),
@@ -672,6 +706,121 @@ fn test_carbide_result() {
     assert!(matches!(do_something(), Err(CarbideError::Internal { .. })));
 }
 
+#[tokio::test]
+async fn sqlx_status_hides_message_and_metadata_diagnostics() {
+    use std::error::Error;
+
+    let error = CarbideError::from(DatabaseError::query(
+        "SELECT private_column FROM private_table",
+        sqlx::Error::protocol("private database diagnostic"),
+    ));
+    let diagnostic = error.to_string();
+    let ((status, conversion_line), logs) =
+        carbide_instrument::testing::capture_logs_async(async {
+            (tonic::Status::from(error), line!())
+        })
+        .await;
+
+    assert_eq!(status.code(), tonic::Code::Internal);
+    assert_eq!(status.message(), "internal database error");
+    assert_eq!(
+        status.metadata().get("nico-error-code").unwrap(),
+        "NICO-API-500"
+    );
+    assert_eq!(
+        status.metadata().get("nico-error-text").unwrap(),
+        "internal database error"
+    );
+    assert!(logs.iter().any(|log| {
+        log.level == tracing::Level::ERROR
+            && log.message == "database error conversion"
+            && log.field("error") == Some(diagnostic.as_str())
+    }));
+
+    let source = status
+        .source()
+        .unwrap()
+        .downcast_ref::<CarbideErrorWithLocation>()
+        .unwrap();
+    assert_eq!(source.error.to_string(), diagnostic);
+    assert_eq!(source.error.operator_error_schema().text, diagnostic);
+    assert!(
+        source
+            .location
+            .starts_with(&format!("{}:{conversion_line}:", file!()))
+    );
+    let CarbideError::DBError(annotated) = &source.error else {
+        panic!("expected the original database error: {source:?}");
+    };
+    assert!(matches!(
+        &annotated.source,
+        sqlx::Error::Protocol(message) if message == "private database diagnostic"
+    ));
+    assert!(diagnostic.contains("SELECT private_column FROM private_table"));
+    assert!(diagnostic.contains(file!()));
+    assert!(diagnostic.contains("line="));
+}
+
+#[test]
+fn database_domain_status_messages_are_preserved() {
+    use carbide_test_support::{Check, check_values};
+
+    check_values(
+        [
+            Check {
+                scenario: "missing resource",
+                input: DatabaseError::NotFoundError {
+                    kind: "machine",
+                    id: "missing-machine".to_string(),
+                },
+                expect: (tonic::Code::NotFound, "NICO-API-404".to_string()),
+            },
+            Check {
+                scenario: "concurrent modification",
+                input: DatabaseError::ConcurrentModificationError(
+                    "machine",
+                    "old-version".to_string(),
+                ),
+                expect: (tonic::Code::FailedPrecondition, "NICO-API-412".to_string()),
+            },
+            Check {
+                scenario: "non-SQLx internal error",
+                input: DatabaseError::internal("domain diagnostic".to_string()),
+                expect: (tonic::Code::Internal, "NICO-API-500".to_string()),
+            },
+            Check {
+                scenario: "non-SQLx fallback",
+                input: DatabaseError::NetworkSegmentNotAllocated,
+                expect: (tonic::Code::Internal, "NICO-API-500".to_string()),
+            },
+        ],
+        |error| {
+            let message = error.to_string();
+            let status = tonic::Status::from(CarbideError::from(error));
+            assert_eq!(status.message(), message);
+            assert_eq!(
+                status
+                    .metadata()
+                    .get("nico-error-text")
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                message
+            );
+            (
+                status.code(),
+                status
+                    .metadata()
+                    .get("nico-error-code")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+            )
+        },
+    );
+}
+
 #[test]
 fn test_dhcp_error_maps_to_resource_exhausted_status() {
     let err = CarbideError::DhcpError(DhcpError::PrefixExhausted(
@@ -722,6 +871,77 @@ fn tenant_site_prefix_quota_error_is_actionable() {
 }
 
 #[test]
+fn missing_allocation_range_preserves_status_through_wrappers() {
+    use resource_pool::ResourcePoolError;
+
+    #[derive(Debug)]
+    enum Wrapper {
+        Pool,
+        PoolDatabase,
+        Database,
+        NestedDatabase,
+    }
+    for wrapper in [
+        Wrapper::Pool,
+        Wrapper::PoolDatabase,
+        Wrapper::Database,
+        Wrapper::NestedDatabase,
+    ] {
+        let error = ResourcePoolError::MissingAllocationRange {
+            pool_name: "test-pool".to_string(),
+            auto_assign: false,
+        };
+        let error = match wrapper {
+            Wrapper::Pool => CarbideError::from(error),
+            Wrapper::PoolDatabase => CarbideError::from(ResourcePoolDatabaseError::from(error)),
+            Wrapper::Database => CarbideError::from(DatabaseError::from(error)),
+            Wrapper::NestedDatabase => {
+                CarbideError::from(ResourcePoolDatabaseError::from(DatabaseError::from(error)))
+            }
+        };
+        let status = tonic::Status::from(error);
+        assert_eq!(
+            status.code(),
+            tonic::Code::FailedPrecondition,
+            "{wrapper:?}"
+        );
+        assert_eq!(
+            status.message(),
+            "resource-pool `test-pool` has no explicit allocation range",
+            "{wrapper:?}"
+        );
+        assert_eq!(
+            status
+                .metadata()
+                .get("nico-error-code")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "NICO-API-412",
+            "{wrapper:?}"
+        );
+    }
+}
+
+#[test]
+fn resource_pool_database_errors_preserve_status() {
+    for (error, expected_code) in [
+        (
+            DatabaseError::FailedPrecondition("no allocation range".to_string()),
+            tonic::Code::FailedPrecondition,
+        ),
+        (
+            DatabaseError::query("allocate", sqlx::Error::RowNotFound),
+            tonic::Code::Internal,
+        ),
+    ] {
+        let error = ResourcePoolDatabaseError::from(error);
+        let status = tonic::Status::from(CarbideError::from(error));
+        assert_eq!(status.code(), expected_code);
+    }
+}
+
+#[test]
 fn test_unavailable_error_maps_to_unavailable_status() {
     let err = CarbideError::UnavailableError("service down".into());
     let status: tonic::Status = err.into();
@@ -743,6 +963,7 @@ fn invalid_argument_status_includes_operator_schema_metadata() {
     let status: tonic::Status = err.into();
 
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert_eq!(status.message(), "bad input");
     assert_eq!(
         status
             .metadata()

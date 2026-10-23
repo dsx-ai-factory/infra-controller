@@ -444,11 +444,20 @@ message FlashSpec {
   // device_conf_credentials is the optional authentication for
   // downloading the device config.
   optional FirmwareCredentials device_conf_credentials = 4;
-  // verify_from_cache controls whether verify_image() uses the
-  // cached firmware from cache_dir instead of re-pulling from source.
+  // verify_from_cache makes standalone verify_image prefer an existing file
+  // named after the source basename in cache_dir. A miss resolves the source.
+  // Only callers or older library versions populate that basename cache;
+  // preparation does not write it. Defaults to false. apply always verifies
+  // the image it prepared for that burn.
   bool verify_from_cache = 5;
-  // cache_dir is the directory for staging downloaded firmware files.
-  // Defaults to a temporary directory if not specified.
+  // cache_dir contains unique preparation directories with separate image and
+  // configuration files. Defaults to the executor's temporary directory joined
+  // with mlxconfig-firmware for direct library calls. Supervised execution
+  // overrides this parent with its private slot directory.
+  // Successful workflows remove their inputs. Interrupted preparation, uncertain
+  // execution, and every failure after burn retain inputs for reconciliation,
+  // including version mismatches. Direct library calls have no retained-copy
+  // expiry or count limit.
   optional string cache_dir = 6;
 }
 
@@ -464,7 +473,11 @@ message FlashOptions {
   // reset controls whether the device is reset via mlxfwreset after
   // flashing. Default is false.
   bool reset = 3;
-  // reset_level is the mlxfwreset level to use. Default is 3.
+  // reset_level is the mlxfwreset level to use when reset is true.
+  // Accepted values are 0 through 255; device support is not validated here.
+  // A present FlashOptions message uses proto3's default of 0 when this scalar
+  // is omitted. Omitting FirmwareFlasherProfile.flash_options instead selects
+  // the library default level of 3.
   uint32 reset_level = 4;
 }
 
@@ -474,6 +487,8 @@ message FlashOptions {
 message FirmwareFlasherProfile {
   FirmwareSpec firmware_spec = 1;
   FlashSpec flash_spec = 2;
+  // Omission disables reset and verification and selects reset_level 3.
+  // A present message preserves its scalar values, including reset_level 0.
   optional FlashOptions flash_options = 3;
 }
 
@@ -483,44 +498,111 @@ message MlxObservationReport {
   repeated MlxObservation observations = 3;
 }
 
-// FirmwareFlashReport captures the outcome of each step in the
-// firmware flash lifecycle: flash, reset, image verification, and
-// version verification. Each optional step (reset, verify_image,
-// verify_version) is controlled by the corresponding flag in
-// SupernicFirmwareConfig. A None value means the step was not
-// requested; Some(true/false) means it was attempted and the result.
-// Sent from scout to the API as part of an MlxObservation after an
-// ApplyFirmware operation.
+// FirmwareFlashReport carries firmware progress from libmlx through Scout
+// to Core. It is not a durable attempt record or approval to retry a mutation.
+// For libmlx execution, absent optional phases were not requested; true means
+// completed, and false means failed or not reached after an earlier failure.
+// Dry-run leaves requested phases false. Older Scout senders may report success
+// without a new burn when no profile was supplied. Correlated operations instead
+// report flashed=false for that completed request.
 message FirmwareFlashReport {
-  // Whether the firmware was successfully flashed via flint.
+  // Whether the burn completed. Older Scout senders also set this when no profile
+  // was supplied; it is not proof of a new flash attempt.
   bool flashed = 1;
-  // Whether the device was successfully reset via mlxfwreset.
-  // None if config.reset was false (not requested).
+  // Whether the requested reset completed; absent when unrequested.
   optional bool reset = 2;
-  // Whether the firmware image on the device was verified against
-  // the source image via flint verify.
-  // None if config.verify_image was false (not requested).
+  // Whether verification against the source image completed successfully;
+  // absent when unrequested.
   optional bool verified_image = 3;
-  // Whether the firmware version on the device matches the expected
-  // version. None if config.verify_version was false (not requested).
+  // Whether the observed version matches the exact target; absent when
+  // unrequested. This does not establish which firmware is running after reset.
   optional bool verified_version = 4;
-  // The firmware version observed on the device after flashing,
-  // queried via mlxfwmanager. None if the device could not be queried
-  // or if the step was not performed.
+  // The version reported by mlxfwmanager, including a mismatched version.
+  // Absent for dry-run, a failed or unrequested query, or unavailable facts.
   optional string observed_version = 5;
-  // The expected firmware version from the config, if one was set.
+  // The literal target version from the configuration, when supplied.
   optional string expected_version = 6;
 }
 
+// Execution state of one submitted firmware operation. No state authorizes
+// replay of an uncertain mutation under a different operation ID.
+enum FirmwareOperationState {
+  // Invalid for a reported operation; receivers reject omission.
+  FIRMWARE_OPERATION_STATE_UNSPECIFIED = 0;
+  // The request was recorded before device work started.
+  FIRMWARE_OPERATION_STATE_ACCEPTED = 1;
+  // Inspection, preparation, or device work is in progress.
+  FIRMWARE_OPERATION_STATE_RUNNING = 2;
+  // The executor will stop at the next safe phase boundary.
+  FIRMWARE_OPERATION_STATE_CANCEL_REQUESTED = 3;
+  // Every requested phase completed successfully.
+  FIRMWARE_OPERATION_STATE_COMPLETE = 4;
+  // Execution stopped at a safe boundary without undoing completed changes.
+  FIRMWARE_OPERATION_STATE_CANCELED = 5;
+  // Execution was lost; recorded effects require reconciliation.
+  FIRMWARE_OPERATION_STATE_INTERRUPTED = 6;
+  // Available evidence does not establish a safe automatic next step.
+  FIRMWARE_OPERATION_STATE_MANUAL_INTERVENTION = 7;
+  // A known failure stopped execution; this does not authorize replay.
+  FIRMWARE_OPERATION_STATE_FAILED = 8;
+}
+
+// The last step selected by a firmware operation.
+enum FirmwareOperationPhase {
+  // Invalid when a phase is present; omit the field before selecting a phase.
+  FIRMWARE_OPERATION_PHASE_UNSPECIFIED = 0;
+  // Inspect the live card and its firmware identity.
+  FIRMWARE_OPERATION_PHASE_INSPECT = 1;
+  // Stage and check the image and optional configuration.
+  FIRMWARE_OPERATION_PHASE_PREPARE = 2;
+  // Apply the optional device configuration.
+  FIRMWARE_OPERATION_PHASE_CONFIGURE = 3;
+  // Burn the staged firmware image.
+  FIRMWARE_OPERATION_PHASE_BURN = 4;
+  // Perform the requested activation/reset step.
+  FIRMWARE_OPERATION_PHASE_ACTIVATE = 5;
+  // Compare the card with the staged image.
+  FIRMWARE_OPERATION_PHASE_VERIFY_IMAGE = 6;
+  // Compare the observed firmware version with the target.
+  FIRMWARE_OPERATION_PHASE_VERIFY_VERSION = 7;
+}
+
+// Receipt for one immutable firmware request. Core accepts it only for the
+// matching ApplyFirmware operation ID; a report from another state entry cannot
+// advance the card. ManualIntervention remains visible while Core waits in
+// ApplyFirmware for operator reconciliation.
+message FirmwareOperation {
+  // Nonempty opaque ID from
+  // nico.ForgeAgentControlResponse.MlxDeviceApplyFirmwareOperation.operation_id.
+  string operation_id = 1;
+  // Required execution state; UNSPECIFIED and unknown values are invalid.
+  FirmwareOperationState state = 2;
+  // Absent before selecting a phase; present UNSPECIFIED is invalid.
+  optional FirmwareOperationPhase phase = 3;
+  // Required progress report. Complete requires no requested reset or
+  // verification field set to false. A completed no-work request has
+  // flashed=false because no burn ran.
+  FirmwareFlashReport report = 4;
+  // Nonsecret diagnostic text, at most 2048 UTF-8 bytes from the executor.
+  optional string diagnostic = 5;
+}
+
 message MlxObservation {
+  // Required to identify legacy/non-firmware observations by MAC. Correlated
+  // firmware_operation reports may omit this: their ID identifies the card
+  // within the reporting host without querying a device during a live burn.
   MlxDeviceInfo device_info = 1;
   optional LockStatus lock_status = 2;
   optional string profile_name = 3;
   optional bool profile_synced = 4;
-  // firmware_report captures the outcome of the firmware flash lifecycle
-  // during the ApplyFirmware state. Each step's report reflects whether
-  // it was requested (via config flags) and whether it succeeded.
+  // firmware_report records progress during ApplyFirmware. FirmwareFlashReport
+  // defines phase presence and completion: false can mean failed or not reached,
+  // so false alone does not prove that the phase ran.
   optional FirmwareFlashReport firmware_report = 5;
+  // Correlated firmware execution state. Absence preserves a matching stored
+  // operation but never makes a legacy, uncorrelated report sufficient to
+  // complete ApplyFirmware. Reports for other state entries are ignored.
+  optional FirmwareOperation firmware_operation = 6;
 }
 
 // PublishMlxObservationReportRequest is sent by scout or the agent

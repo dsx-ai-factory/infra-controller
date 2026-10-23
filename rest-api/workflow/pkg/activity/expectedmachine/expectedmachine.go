@@ -111,8 +111,8 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 		}
 	}
 
-	// Collect the linked Machine IDs reported by Core so they can be checked
-	// against REST inventory before Expected Machine reconciliation.
+	// Only accept linked Machines recorded in REST for this Site. Unknown or
+	// foreign IDs cannot create a link or replace the stored `MachineID`.
 	linkedMachineCandidatesByBmcMac := map[string]string{}
 	linkedMachineIDs := []string{}
 	for _, lm := range expectedMachineInventory.GetLinkedMachines() {
@@ -133,6 +133,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 		mDAO := cdbm.NewMachineDAO(mei.dbSession)
 		machines, _, merr := mDAO.GetAll(ctx, nil, cdbm.MachineFilterInput{
 			MachineIDs:      linkedMachineIDs,
+			SiteIDs:         []uuid.UUID{siteID},
 			ExcludeMetadata: true,
 		}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 		if merr != nil {

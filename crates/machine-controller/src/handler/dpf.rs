@@ -27,6 +27,7 @@ use carbide_dpf::{DpfError, DpuDeploymentType, DpuPhase, dpu_node_cr_name};
 use carbide_libmlx_model::nvconfig::DpuNvConfigProfile;
 use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
 use libredfish::SystemPowerControl;
+use model::expected_machine::ExpectedMachine;
 use model::hardware_info::HardwareInfo;
 use model::machine::{
     DpfState, DpuInitState, DpuMachine, DpuReprovisionStates, FailureCause, FailureDetails,
@@ -42,6 +43,49 @@ use super::helpers::{DpuInitStateHelper, ManagedHostStateHelper, ReprovisionStat
 use super::{handler_host_power_control, host_power_state};
 use crate::context::MachineStateHandlerContextObjects;
 use crate::dpf::DpfOperations;
+
+/// Keep suppression and the controller transition in the same transaction, including
+/// exits through reset, restart, and failure handling outside the DPF handlers.
+pub(super) async fn update_exploration_suppression(
+    outcome: StateHandlerOutcome<ManagedHostState>,
+    state: &ManagedHostStateSnapshot,
+    suppress: bool,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    use futures_util::FutureExt;
+    use model::bmc_suppression::{
+        BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression,
+    };
+
+    // Provisioning does not wait for acknowledgement or cancel in-flight Redfish
+    // exploration requests. Site Explorer skips these BMCs from its next cycle.
+    // This behavior is agreed with the DPF team.
+    let mut macs = state
+        .dpu_snapshots
+        .iter()
+        .filter_map(|dpu| dpu.status.bmc_info.mac)
+        .chain(state.host_snapshot.status.bmc_info.mac)
+        .collect::<Vec<_>>();
+    macs.sort_unstable();
+    macs.dedup();
+    outcome.in_transaction(&ctx.services.db_pool, move |txn| async move {
+        for mac in macs {
+            if suppress {
+                db::bmc_suppression::upsert(txn, &NewBmcSuppression {
+                    bmc_mac_address: mac,
+                    subsystem: BmcSuppressionSubsystem::SiteExplorer,
+                    source: BmcSuppressionSource::DpfProvisioning,
+                    reason: "DPU provisioning in progress; exploration resumes automatically when all Site Explorer suppressions are cleared".to_string(),
+                }).await?;
+            } else {
+                db::bmc_suppression::delete(txn, mac,
+                    BmcSuppressionSubsystem::SiteExplorer,
+                    BmcSuppressionSource::DpfProvisioning).await?;
+            }
+        }
+        Ok::<(), StateHandlerError>(())
+    }.boxed()).await?
+}
 
 // `deployment_type_for_dpu_profile` currently refines exactly one deployment:
 // generic BF3 becomes GB200 BF3. Only that forward migration is supported.
@@ -415,6 +459,7 @@ async fn create_and_register_dpudevices_and_dpunode(
     state: &ManagedHostStateSnapshot,
     dpf_sdk: &dyn DpfOperations,
     deployment_type: DpuDeploymentType,
+    expected_machine: Option<&ExpectedMachine>,
 ) -> Result<(), DpfResourceRegistrationError> {
     let primary_dpu_id = state
         .host_snapshot
@@ -428,20 +473,14 @@ async fn create_and_register_dpudevices_and_dpunode(
             missing: "primary_dpu",
         })?;
 
-    // Currently, we don't have dual DPU systems with Astra NICs
-    // attached to them.
-    let astra_nics = state.astra_nics();
-    let astra_underlay_nics =
-        (deployment_type == DpuDeploymentType::Bf4Astra).then(|| astra_nics.clone());
-    if state.dpu_snapshots.len() > 1 && !astra_nics.is_empty() {
+    // Astra underlay configuration currently supports a single DPU per host.
+    if state.dpu_snapshots.len() > 1 && deployment_type == DpuDeploymentType::Bf4Astra {
         return Err(StateHandlerError::InvalidState(format!(
             "dual DPU systems with Astra NICs are not supported (host {})",
             state.host_snapshot.id
         ))
         .into());
     }
-
-    tracing::info!(host = %state.host_snapshot.id, num_astra_nics = %astra_nics.len(), "Astra NICs");
 
     if !state
         .dpu_snapshots
@@ -479,7 +518,7 @@ async fn create_and_register_dpudevices_and_dpunode(
             is_primary: dpu.id == primary_dpu_id,
         };
         dpf_sdk
-            .register_dpu_device(device_info, astra_underlay_nics.clone())
+            .register_dpu_device(device_info, expected_machine.cloned(), deployment_type)
             .await
             .map_err(classify_dpf_registration_error)?;
     }
@@ -595,8 +634,16 @@ async fn handle_dpf_provisioning(
     state: &ManagedHostStateSnapshot,
     dpf_sdk: &dyn DpfOperations,
     deployment_type: DpuDeploymentType,
+    expected_machine: Option<&ExpectedMachine>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    match create_and_register_dpudevices_and_dpunode(state, dpf_sdk, deployment_type).await {
+    match create_and_register_dpudevices_and_dpunode(
+        state,
+        dpf_sdk,
+        deployment_type,
+        expected_machine,
+    )
+    .await
+    {
         Ok(()) => {}
         Err(DpfResourceRegistrationError::CredentialUnavailable(error)) => {
             return Ok(StateHandlerOutcome::wait(format!(
@@ -911,7 +958,16 @@ pub(super) async fn handle_dpf_deployment_migration(
         ));
     }
 
-    let astra_nics = machine_has_astra_nics(state, ctx).await?;
+    let expected_machine = super::get_expected_machine_for_mh(state, ctx).await?;
+    // This boolean tells deployment selection whether expected inventory has CX9 NICs,
+    // so migration checks use the appropriate Astra or generic deployment type.
+    let astra_nics = expected_machine.as_ref().is_some_and(|machine| {
+        machine
+            .data
+            .interfaces
+            .iter()
+            .any(|nic| nic.nic_type.as_deref() == Some("CX9"))
+    });
     let deployment_types = deployment_types_for_host(state, ctx, dpf_sdk, astra_nics).await?;
     let desired_deployment = match consistent_deployment_type(&deployment_types) {
         Ok(deployment_type) => deployment_type,
@@ -985,6 +1041,7 @@ async fn handle_dpf_reprovisioning(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     dpf_sdk: &dyn DpfOperations,
     deployment_type: DpuDeploymentType,
+    expected_machine: Option<&ExpectedMachine>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let dpu_machine_id = dpu_snapshot.id;
     let node_name = dpu_node_cr_name(&dpf_id(&state.host_snapshot)?);
@@ -997,7 +1054,14 @@ async fn handle_dpf_reprovisioning(
             machine_id = %state.host_snapshot.id,
             "DPUDevice/DPUNode CRs do not exist, creating them before reprovisioning"
         );
-        match create_and_register_dpudevices_and_dpunode(state, dpf_sdk, deployment_type).await {
+        match create_and_register_dpudevices_and_dpunode(
+            state,
+            dpf_sdk,
+            deployment_type,
+            expected_machine,
+        )
+        .await
+        {
             Ok(()) => {}
             Err(DpfResourceRegistrationError::CredentialUnavailable(error)) => {
                 return Ok(StateHandlerOutcome::wait(format!(
@@ -1033,73 +1097,6 @@ async fn handle_dpf_reprovisioning(
     Ok(StateHandlerOutcome::transition(next))
 }
 
-// Early in machine ingestion, the dpa_intetrfaces objects for the host are not populated.
-// So we will have to check the expected_machine table for the given host to see if it has
-// any NICs of type CX9. If so, return true. Otherwise, return false.
-async fn machine_has_astra_nics(
-    state: &ManagedHostStateSnapshot,
-    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
-) -> Result<bool, StateHandlerError> {
-    // its unlikely we got here without a bmc mac
-    let Some(bmc_mac_address) = state.host_snapshot.status.bmc_info.mac else {
-        tracing::error!(
-            machine_id = %state.host_snapshot.id,
-            "machine_has_astra_nics: No BMC MAC address configured"
-        );
-        return Err(StateHandlerError::MissingData {
-            object_id: state.host_snapshot.id.to_string(),
-            missing: "bmc_mac_address",
-        });
-    };
-
-    let mut txn = ctx.services.db_pool.begin().await?;
-
-    // Retrieve the expected_machines table entry for this managed host.
-    let expected_machine = db::expected_machine::find_by_bmc_mac_address(
-        txn.as_mut(),
-        bmc_mac_address,
-    )
-    .await
-    .map_err(|err| {
-        tracing::error!(
-            machine_id = %state.host_snapshot.id,
-            %bmc_mac_address,
-            error = %err,
-            "machine_has_astra_nics: Failed to look up expected machine for Astra enablement"
-        );
-        StateHandlerError::DBError(Box::new(err))
-    })?;
-
-    txn.commit().await?;
-
-    // No expected-machine entry means there are no declared host NICs to act on.
-    let Some(expected_machine) = expected_machine else {
-        tracing::info!(
-            machine_id = %state.host_snapshot.id,
-            "machine_has_astra_nics: No expected-machine entry found"
-        );
-        return Ok(false);
-    };
-
-    let host_nics = expected_machine.data.interfaces;
-    if host_nics.is_empty() {
-        tracing::info!(
-            machine_id = %state.host_snapshot.id,
-            "machine_has_astra_nics: No host NICs found"
-        );
-        return Ok(false);
-    }
-
-    // At this point, we need to use Redfish to get all the CX cards in the host.
-    // The end point to explore is /redfish/v1/Chassis/CX_$i
-
-    let has_cx9 = host_nics
-        .iter()
-        .any(|nic| nic.nic_type.as_deref() == Some("CX9"));
-
-    Ok(has_cx9)
-}
-
 /// Handle DPF state transitions.
 ///
 /// Provisioning registers all DPUs at once and moves them to WaitingForReady
@@ -1117,7 +1114,16 @@ pub(super) async fn handle_dpf_state(
     let dpu_machine_id = dpu_snapshot.id;
     let node_name = dpu_node_cr_name(&dpf_id(&state.host_snapshot)?);
 
-    let astra_nics = machine_has_astra_nics(state, ctx).await?;
+    // Use expected inventory before discovered DPA interfaces are populated.
+    // Keep this credential-bearing entry out of tracing and Debug-derived structs.
+    let expected_machine = super::get_expected_machine_for_mh(state, ctx).await?;
+    let astra_nics = expected_machine.as_ref().is_some_and(|machine| {
+        machine
+            .data
+            .interfaces
+            .iter()
+            .any(|nic| nic.nic_type.as_deref() == Some("CX9"))
+    });
 
     let deployment_types = deployment_types_for_host(state, ctx, dpf_sdk, astra_nics).await?;
     let mut deployment_type = match consistent_deployment_type(&deployment_types) {
@@ -1208,7 +1214,10 @@ pub(super) async fn handle_dpf_state(
     }
 
     match dpf_state {
-        DpfState::Provisioning => handle_dpf_provisioning(state, dpf_sdk, deployment_type).await,
+        DpfState::Provisioning => {
+            handle_dpf_provisioning(state, dpf_sdk, deployment_type, expected_machine.as_ref())
+                .await
+        }
         DpfState::WaitingForReady { phase_detail } => {
             handle_dpf_waiting_for_ready(
                 state,
@@ -1234,7 +1243,15 @@ pub(super) async fn handle_dpf_state(
         }
         DpfState::DeviceReady => handle_dpf_device_ready(state),
         DpfState::Reprovisioning => {
-            handle_dpf_reprovisioning(state, dpu_snapshot, ctx, dpf_sdk, deployment_type).await
+            handle_dpf_reprovisioning(
+                state,
+                dpu_snapshot,
+                ctx,
+                dpf_sdk,
+                deployment_type,
+                expected_machine.as_ref(),
+            )
+            .await
         }
         DpfState::Unknown => {
             tracing::warn!(dpu_machine_id = %dpu_snapshot.id, "unknown DPF state in DB, transitioning to provisioning");
@@ -1252,6 +1269,83 @@ mod tests {
     use model::test_support::machine_snapshot::managed_host_state_snapshot;
 
     use super::*;
+
+    #[test]
+    fn exploration_pause_tracks_all_dpus_and_allocation_modes() {
+        use model::machine::{DpuInitStates, DpuReprovisionStates};
+        use model::test_support::machine_snapshot::dpu_machine_id;
+        let waiting = DpfState::WaitingForReady { phase_detail: None };
+        let init = |second: DpfState| ManagedHostState::DPUInit {
+            dpu_states: DpuInitStates {
+                states: [
+                    (
+                        dpu_machine_id(0),
+                        DpuInitState::DpfStates {
+                            state: DpfState::DeviceReady,
+                        },
+                    ),
+                    (dpu_machine_id(1), DpuInitState::DpfStates { state: second }),
+                ]
+                .into(),
+            },
+        };
+        let reprovision = DpuReprovisionStates {
+            states: [
+                (dpu_machine_id(0), ReprovisionState::NotUnderReprovision),
+                (
+                    dpu_machine_id(1),
+                    ReprovisionState::DpfStates {
+                        substate: waiting.clone(),
+                    },
+                ),
+            ]
+            .into(),
+        };
+        check_values(
+            [
+                Check {
+                    scenario: "one ready DPU does not release another waiting DPU",
+                    input: init(waiting),
+                    expect: true,
+                },
+                Check {
+                    scenario: "host reboot stays protected",
+                    input: init(DpfState::HandleReboot {
+                        op: PerformPowerOperation::Off,
+                        retry_count: 0,
+                    }),
+                    expect: true,
+                },
+                Check {
+                    scenario: "every DPU ready releases suppression",
+                    input: init(DpfState::DeviceReady),
+                    expect: false,
+                },
+                Check {
+                    scenario: "unassigned reprovision",
+                    input: ManagedHostState::DPUReprovision {
+                        dpu_states: reprovision.clone(),
+                    },
+                    expect: true,
+                },
+                Check {
+                    scenario: "assigned reprovision",
+                    input: ManagedHostState::Assigned {
+                        instance_state: InstanceState::DPUReprovision {
+                            dpu_states: reprovision,
+                        },
+                    },
+                    expect: true,
+                },
+                Check {
+                    scenario: "outside DPF provisioning",
+                    input: ManagedHostState::Ready,
+                    expect: false,
+                },
+            ],
+            |state| state.suppresses_exploration_for_dpf(),
+        );
+    }
 
     fn hardware_info(part_number: &str) -> HardwareInfo {
         HardwareInfo {

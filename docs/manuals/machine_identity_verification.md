@@ -11,7 +11,7 @@ Use this after [Day 0](../getting-started/installation-options/day0-machine-iden
 - Site `[machine_identity].enabled = true` and valid encryption keys ([Day 0](../getting-started/installation-options/day0-machine-identity.md)).
 - Per-org `tenant-identity/config` exists with `enabled: true` ([Day 1](../configuration/machine_identity.md)).
 - At least one instance in **`READY`** assigned to the org under test.
-- Network access from a workload on that instance to `169.254.169.254` (IMDS).
+- Network access from a workload on that instance to its configured Instance Metadata Service (IMDS) endpoint. The default IPv4 address is `169.254.169.254`; refer to [NICo Metadata Service](../dpu-management/dpu-lifecycle-management.md#nico-metadata-service) for deployment-specific ports and optional IPv6 transport.
 
 Collect `{org}`, `{site-id}`, and an allowed audience (for example `tenant-api`) from your identity config:
 
@@ -24,7 +24,6 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 
 ## Verification Checklist
 
-
 | Step               | What it proves                          | Section                                 |
 | ------------------ | --------------------------------------- | --------------------------------------- |
 | OIDC discovery     | Issuer URL and JWKS URI are published   | [§1](#1-oidc-discovery)                 |
@@ -32,7 +31,6 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 | Config vs JWKS     | Published keys match stored org config  | [§3](#3-align-config-with-jwks)         |
 | IMDS identity      | End-to-end issuance for the instance    | [§4](#4-imds-workload-path)             |
 | JWT claims         | Token content matches policy            | [§5](#5-decode-and-validate-jwt-claims) |
-
 
 IMDS is the operator-facing check. The DPU agent calls Core gRPC `SignMachineIdentity` internally on that path — you do not need to invoke that RPC directly for routine verification. See [DPU-side debugging](#dpu-side-debugging-optional) when isolating agent vs Core failures.
 
@@ -87,13 +85,11 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
   "https://<nico-rest>/v2/org/{org}/nico/site/{site-id}/tenant-identity/config" | jq '.signingKeys'
 ```
 
-
 | Config field                     | JWKS expectation                                              |
 | -------------------------------- | ------------------------------------------------------------- |
 | Entry with `currentSigner: true` | Must appear in JWKS                                           |
 | Entry with `expireAt` set        | Previous key; must still appear in JWKS until overlap expires |
 | Single entry, no `expireAt`      | JWKS should contain one signing key                           |
-
 
 Mismatch between config and JWKS usually indicates a stale cache, incomplete rotation, or REST/Core sync delay — re-fetch after a short wait; if persistent, check Core logs and repeat GET/JWKS.
 
@@ -101,15 +97,19 @@ Mismatch between config and JWKS usually indicates a stale cache, incomplete rot
 
 ## 4. IMDS (Workload Path)
 
-From a workload network namespace on the instance:
+From a workload network namespace on the instance, use its configured metadata
+address and port. These examples use the standalone IPv4 default on port 80.
+For embedded port 7777 or IPv6, change the URL authority as described in
+[IPv6 Metadata Transport](../dpu-management/dpu-lifecycle-management.md#ipv6-metadata-transport)
+and retain the identity path, audience, and required headers:
 
 ```bash
 # JSON (default)
-curl -sS -H 'Metadata: true' \
+curl --noproxy '*' -sS -H 'Metadata: true' \
   'http://169.254.169.254/latest/meta-data/identity?aud=<allowed-audience>'
 
 # Plain JWT
-curl -sS -H 'Metadata: true' -H 'Accept: text/plain' \
+curl --noproxy '*' -sS -H 'Metadata: true' -H 'Accept: text/plain' \
   'http://169.254.169.254/latest/meta-data/identity?aud=<allowed-audience>'
 ```
 
@@ -141,7 +141,6 @@ echo '<jwt>' | cut -d. -f2 | base64 -d 2>/dev/null | jq .
 
 Or use [jwt.io](https://jwt.io) in non-production environments only — do not paste production tokens into third-party sites.
 
-
 | Claim         | Expected                                                   |
 | ------------- | ---------------------------------------------------------- |
 | `iss`         | Matches configured `issuer`                                |
@@ -149,7 +148,6 @@ Or use [jwt.io](https://jwt.io) in non-production environments only — do not p
 | `aud`         | Contains requested audience; must be in org allowlist      |
 | `exp`         | Within `tokenTtlSeconds` of issuance                       |
 | `iat` / `nbf` | Reasonable skew relative to verifier clock                 |
-
 
 **Signature verification:** fetch JWKS (§2), locate the key by `kid` in the JWT header, verify ES256 signature with your JWT library or:
 
@@ -161,14 +159,12 @@ Or use [jwt.io](https://jwt.io) in non-production environments only — do not p
 
 ## Troubleshooting
 
-
 | Symptom                     | Action                                                                                                                   |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
 | Discovery/JWKS 404          | Confirm org, site id, and REST routing; config must exist                                                                |
 | JWKS empty                  | Org config missing or disabled; check GET config                                                                         |
 | IMDS 403/404/503/timeout    | Agent logs, `sign-timeout-secs`, Core or sign-proxy reachability; see [DPU-side debugging](#dpu-side-debugging-optional) |
 | Valid JWT, verifier rejects | Clock skew, wrong JWKS URL, overlap ended for old `kid`, wrong `iss`/`aud` check                                         |
-
 
 ### DPU-side debugging (optional)
 
@@ -201,13 +197,11 @@ grpcurl \
   carbide-api.forge:443 forge.Forge/SignMachineIdentity
 ```
 
-
 | gRPC result                               | Likely cause                                                                   |
 | ----------------------------------------- | ------------------------------------------------------------------------------ |
 | `NotFound` / `machine_identity not found` | No org config, org disabled, instance not `READY`, or DPU not linked to instance |
 | Invalid audience                          | Audience not in `allowedAudiences`                                             |
 | `UNAVAILABLE`                             | Site `[machine_identity]` disabled or broken global config                     |
-
 
 If this call succeeds but IMDS via your proxy fails, the issue is in the proxy HTTP layer (URL, TLS, headers, timeouts) — not Core signing.
 
@@ -219,4 +213,3 @@ If this call succeeds but IMDS via your proxy fails, the issue is in the proxy H
 - [JWT Signing Key Rotation](machine_identity_signing_key_rotation.md) — rotate org signing keys and re-verify JWKS
 - [Master Encryption Key Rotation (KEK)](machine_identity_kek_rotation.md) — site master key (does not change JWKS)
 - [Day 0 Machine Identity](../getting-started/installation-options/day0-machine-identity.md) — site enablement
-

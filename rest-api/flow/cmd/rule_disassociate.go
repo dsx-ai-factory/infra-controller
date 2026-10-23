@@ -34,9 +34,9 @@ func init() {
 	ruleDisassociateCmd.Flags().StringVar(&disassocOpType, "operation-type", "", "Operation type: power_control or firmware_control (required)")
 	ruleDisassociateCmd.Flags().StringVar(&disassocOperation, "operation", "", "Operation code: power_on, power_off, upgrade, etc. (required)")
 
-	ruleDisassociateCmd.MarkFlagRequired("rack-id")
-	ruleDisassociateCmd.MarkFlagRequired("operation-type")
-	ruleDisassociateCmd.MarkFlagRequired("operation")
+	cobra.CheckErr(ruleDisassociateCmd.MarkFlagRequired("rack-id"))
+	cobra.CheckErr(ruleDisassociateCmd.MarkFlagRequired("operation-type"))
+	cobra.CheckErr(ruleDisassociateCmd.MarkFlagRequired("operation"))
 }
 
 // runRuleDisassociate is the RunE handler for ruleDisassociateCmd. It parses

@@ -17,13 +17,10 @@
 
 use std::borrow::Cow;
 
-use serde_json::json;
-
-use crate::json::{JsonExt, JsonPatch};
-use crate::redfish::Builder;
+use super::schema::network_adapter::NetworkAdapter as NetworkAdapterModel;
 use crate::{hw, redfish};
 
-const NETWORK_ADAPTER_TYPE: &str = "#NetworkAdapter.v1_7_0.NetworkAdapter";
+const NETWORK_ADAPTER_TYPE: &str = redfish::schema::network_adapter::NetworkAdapter::ODATA_TYPE;
 const NETWORK_ADAPTER_NAME: &str = "Network Adapter";
 
 pub(crate) fn chassis_resource(chassis_id: &str, adapter_id: &str) -> redfish::Resource<'static> {
@@ -63,85 +60,47 @@ impl NetworkAdapter {
     }
 }
 
-/// Get builder of the network adapter.
-pub(crate) fn builder(resource: &redfish::Resource) -> NetworkAdapterBuilder {
-    NetworkAdapterBuilder {
-        id: Cow::Owned(resource.id.to_string()),
-        value: resource.json_patch(),
-        functions: Vec::new(),
-    }
+pub(crate) fn builder(resource: &redfish::Resource) -> NetworkAdapterModel {
+    NetworkAdapterModel::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        resource.name.as_ref(),
+    )
 }
 
 pub(crate) fn builder_from_nic(
     resource: &redfish::Resource,
     nic: &hw::nic::Nic,
-) -> NetworkAdapterBuilder {
-    builder(resource)
-        .maybe_with(NetworkAdapterBuilder::serial_number, &nic.serial_number)
-        .maybe_with(NetworkAdapterBuilder::description, &nic.description)
-        .maybe_with(NetworkAdapterBuilder::manufacturer, &nic.manufacturer)
-        .maybe_with(NetworkAdapterBuilder::model, &nic.model)
-        .maybe_with(NetworkAdapterBuilder::part_number, &nic.part_number)
+) -> NetworkAdapterModel {
+    NetworkAdapterModel {
+        serial_number: nic.serial_number.as_ref().map(|v| Some(v.to_string())),
+        description: nic.description.as_ref().map(|v| Some(v.to_string())),
+        manufacturer: nic.manufacturer.as_ref().map(|v| Some(v.to_string())),
+        model: nic.model.as_ref().map(|v| Some(v.to_string())),
+        part_number: nic.part_number.as_ref().map(|v| Some(v.to_string())),
+        ..builder(resource)
+    }
 }
 
-pub(crate) struct NetworkAdapterBuilder {
-    id: Cow<'static, str>,
-    value: serde_json::Value,
-    functions: Vec<redfish::network_device_function::NetworkDeviceFunction>,
-}
-
-impl Builder for NetworkAdapterBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-            id: self.id,
-            functions: self.functions,
+impl NetworkAdapterModel {
+    pub(crate) fn build(self) -> NetworkAdapter {
+        NetworkAdapter {
+            id: Cow::Owned(self.id.clone()),
+            value: serde_json::to_value(self).expect("generated Redfish model is serializable"),
+            functions: Vec::new(),
         }
     }
-}
 
-impl NetworkAdapterBuilder {
-    pub(crate) fn manufacturer(self, value: &str) -> Self {
-        self.add_str_field("Manufacturer", value)
-    }
-
-    pub(crate) fn model(self, value: &str) -> Self {
-        self.add_str_field("Model", value)
-    }
-
-    pub(crate) fn part_number(self, value: &str) -> Self {
-        self.add_str_field("PartNumber", value)
-    }
-
-    pub(crate) fn serial_number(self, value: &str) -> Self {
-        self.add_str_field("SerialNumber", value)
-    }
-
-    pub(crate) fn description(self, value: &str) -> Self {
-        self.add_str_field("Description", value)
-    }
-
-    pub(crate) fn network_device_functions(
+    pub(crate) fn build_with_functions(
         self,
         collection: &redfish::Collection<'_>,
         functions: Vec<redfish::network_device_function::NetworkDeviceFunction>,
-    ) -> Self {
-        let mut v = self.apply_patch(collection.nav_property("NetworkDeviceFunctions"));
-        v.functions = functions;
-        v
-    }
-
-    pub(crate) fn status(self, status: redfish::resource::Status) -> Self {
-        self.apply_patch(json!({
-            "Status": status.into_json()
-        }))
-    }
-
-    pub(crate) fn build(self) -> NetworkAdapter {
+    ) -> NetworkAdapter {
         NetworkAdapter {
-            id: self.id,
-            value: self.value,
-            functions: self.functions,
+            functions,
+            ..self
+                .network_device_functions(collection.odata_id.as_ref())
+                .build()
         }
     }
 }

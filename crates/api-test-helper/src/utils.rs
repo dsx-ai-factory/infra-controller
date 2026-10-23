@@ -53,6 +53,15 @@ lazy_static::lazy_static! {
     };
 }
 
+/// `api_server_runtime_builder` enables all Tokio drivers and uses the Core
+/// binary's 8 MiB worker stacks. In-process tests bypass Core's `main`, so they
+/// need to apply its runtime settings here.
+pub fn api_server_runtime_builder() -> tokio::runtime::Builder {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all().thread_stack_size(8 * 1024 * 1024);
+    builder
+}
+
 #[derive(Debug, Clone)]
 pub struct IntegrationTestEnvironment {
     /// API client addresses. Each slot starts at `127.0.0.1:0`; [`start_api_server`] replaces it
@@ -66,6 +75,12 @@ pub struct IntegrationTestEnvironment {
     pub db_pool: Pool<Postgres>,
     pub metrics: MetricsSetup,
     pub credential_config: CredentialConfig,
+    /// Enable the SPDM controller and the machine controller's SPDM measuring paths.
+    /// Defaults to false. [`start_api_server`] captures this value for each API
+    /// server it starts; changing it does not reconfigure running servers.
+    /// NRAS endpoints use deliberately nonfunctional loopback port 9, so this
+    /// fixture cannot complete verification.
+    pub spdm_enabled: bool,
     pub _vault_handle: Arc<Vault>,
 }
 
@@ -122,6 +137,7 @@ impl IntegrationTestEnvironment {
             root_dir,
             carbide_metrics_addrs,
             credential_config,
+            spdm_enabled: false,
             db_url,
             db_pool,
             metrics: {
@@ -206,6 +222,7 @@ pub async fn start_api_server(
     let db_url = test_env.db_url.clone();
     let root_dir = test_env.root_dir.clone();
     let credential_config = test_env.credential_config.clone();
+    let spdm_enabled = test_env.spdm_enabled;
 
     // SAFETY: Initial lint enablement: these test settings are installed before the API
     // server task is spawned, but callers already run in multi-threaded test processes.
@@ -261,6 +278,7 @@ pub async fn start_api_server(
                 ready_channel: ready_tx,
                 credential_config,
                 insecure_discovery,
+                spdm_enabled,
             })
             .await
             .inspect_err(|e| {

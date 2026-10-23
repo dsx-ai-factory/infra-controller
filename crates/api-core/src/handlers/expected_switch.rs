@@ -22,7 +22,9 @@ use ::rpc::forge_api_client::{EXPECTED_SWITCH_UPDATE_MASK_HEADER, ExpectedSwitch
 use carbide_instrument::emit;
 use db::{DatabaseError, expected_switch as db_expected_switch};
 use mac_address::MacAddress;
-use model::expected_switch::{ExpectedSwitch, ExpectedSwitchRequest};
+use model::expected_switch::{
+    ExpectedNvosInterface, ExpectedSwitch, ExpectedSwitchRequest, normalize_nvos_interfaces,
+};
 use tonic::{Request, Response, Status};
 
 use crate::CarbideError;
@@ -78,8 +80,12 @@ fn merge_expected_switch_patch(
         patch.switch_serial_number = current.switch_serial_number;
     }
 
-    if !fields.contains(&ExpectedSwitchUpdateField::NvosMacAddresses) {
-        patch.nvos_mac_addresses = current.nvos_mac_addresses;
+    // The NVOS port set is replaced as a whole: each supplied interface carries
+    // its own primary flag, so moving the primary means resending the ports with
+    // the new flags. When unselected, the current port set (and its primary) is
+    // preserved.
+    if !fields.contains(&ExpectedSwitchUpdateField::NvosInterfaces) {
+        patch.nvos_interfaces = current.nvos_interfaces;
     }
 
     if !fields.contains(&ExpectedSwitchUpdateField::NvosUsername) {
@@ -127,14 +133,14 @@ fn merge_expected_switch_patch(
 }
 
 /// `nvos_ip_address` is paired with the single wired NVOS port. We reject any
-/// caller that sets it alongside zero-or-multiple `nvos_mac_addresses`, so the
+/// caller that sets it alongside zero-or-multiple `nvos_interfaces`, so the
 /// (mac, ip) pairing stays unambiguous for the discover hook and the
 /// reconciliation pass.
 fn validate_nvos_ip_pairing(switch: &ExpectedSwitch) -> Result<(), CarbideError> {
-    if switch.nvos_ip_address.is_some() && switch.nvos_mac_addresses.len() != 1 {
+    if switch.nvos_ip_address.is_some() && switch.nvos_interfaces.len() != 1 {
         return Err(CarbideError::InvalidArgument(format!(
-            "nvos_ip_address requires exactly one nvos_mac_addresses entry, got {}",
-            switch.nvos_mac_addresses.len(),
+            "nvos_ip_address requires exactly one nvos_interfaces entry, got {}",
+            switch.nvos_interfaces.len(),
         )));
     }
     Ok(())
@@ -156,7 +162,18 @@ fn validate_nvos_credentials_pair(switch: &ExpectedSwitch) -> Result<(), Carbide
     }
 }
 
-fn validate_expected_switch(switch: &ExpectedSwitch) -> Result<(), CarbideError> {
+/// Validate the switch fields carried by a write.
+///
+/// Creates and replace-all entries require ports. Legacy zero-port rows remain
+/// writable when an update does not explicitly replace their port set.
+fn validate_expected_switch(
+    switch: &mut ExpectedSwitch,
+    validate_nvos_interfaces: bool,
+) -> Result<(), CarbideError> {
+    if validate_nvos_interfaces {
+        switch.nvos_interfaces = normalize_nvos_interfaces(&switch.nvos_interfaces)
+            .map_err(|e| CarbideError::InvalidArgument(e.to_string()))?;
+    }
     validate_nvos_ip_pairing(switch)?;
     validate_nvos_credentials_pair(switch)?;
 
@@ -167,7 +184,7 @@ pub(crate) async fn add_expected_switch(
     api: &Api,
     request: Request<rpc::ExpectedSwitch>,
 ) -> Result<Response<()>, Status> {
-    let switch: ExpectedSwitch =
+    let mut switch: ExpectedSwitch =
         request
             .into_inner()
             .try_into()
@@ -175,7 +192,7 @@ pub(crate) async fn add_expected_switch(
                 CarbideError::InvalidArgument(e.to_string())
             })?;
 
-    validate_expected_switch(&switch)?;
+    validate_expected_switch(&mut switch, true)?;
 
     let mut txn = api
         .database_connection
@@ -233,6 +250,10 @@ pub(crate) async fn update_expected_switch(
 ) -> Result<Response<()>, Status> {
     let update_mask = parse_expected_switch_update_mask(&request)?;
     let patch = request.into_inner();
+    let validate_nvos_interfaces = update_mask.as_ref().map_or_else(
+        || !patch.nvos_interfaces.is_empty(),
+        |fields| fields.contains(&ExpectedSwitchUpdateField::NvosInterfaces),
+    );
 
     let mut txn = api
         .database_connection
@@ -242,7 +263,7 @@ pub(crate) async fn update_expected_switch(
             message: format!("Database error: {}", e),
         })?;
 
-    let switch: ExpectedSwitch = if let Some(update_mask) = update_mask {
+    let mut switch: ExpectedSwitch = if let Some(update_mask) = update_mask {
         let lookup: ExpectedSwitchRequest = rpc::ExpectedSwitchRequest {
             bmc_mac_address: patch.bmc_mac_address.clone(),
             expected_switch_id: patch.expected_switch_id.clone(),
@@ -279,7 +300,8 @@ pub(crate) async fn update_expected_switch(
 
     let preallocations = update_switch_in_transaction(
         &mut txn,
-        &switch,
+        &mut switch,
+        validate_nvos_interfaces,
         api.runtime_config.retained_boot_interface_window,
     )
     .await?;
@@ -348,11 +370,23 @@ pub(crate) async fn patch_expected_switch(
     if fields.contains(UpdateField::SwitchSerialNumber) {
         switch.serial_number = patch.switch_serial_number;
     }
-    if fields.contains(UpdateField::NvosMacAddresses) {
-        switch.nvos_mac_addresses = patch
-            .nvos_mac_addresses
+    if fields.contains(UpdateField::NvosInterfaces) {
+        // Replace the whole port set. Each supplied interface carries its own
+        // primary flag; the invariant check (exactly one primary, lone port
+        // auto-primary) runs before persisting.
+        switch.nvos_interfaces = patch
+            .nvos_interfaces
             .into_iter()
-            .map(|address| address.parse::<MacAddress>().map_err(CarbideError::from))
+            .map(|interface| {
+                interface
+                    .mac_address
+                    .parse::<MacAddress>()
+                    .map_err(CarbideError::from)
+                    .map(|mac_address| ExpectedNvosInterface {
+                        mac_address,
+                        is_primary: interface.is_primary,
+                    })
+            })
             .collect::<Result<Vec<_>, _>>()?;
     }
     if fields.contains(UpdateField::BmcIpAddress) {
@@ -381,7 +415,8 @@ pub(crate) async fn patch_expected_switch(
     fields.update_metadata(patch.metadata, &mut switch.metadata)?;
     let preallocations = update_switch_in_transaction(
         &mut txn,
-        &switch,
+        &mut switch,
+        fields.contains(UpdateField::NvosInterfaces),
         api.runtime_config.retained_boot_interface_window,
     )
     .await?;
@@ -394,10 +429,11 @@ pub(crate) async fn patch_expected_switch(
 
 async fn update_switch_in_transaction(
     txn: &mut sqlx::PgConnection,
-    switch: &ExpectedSwitch,
+    switch: &mut ExpectedSwitch,
+    validate_nvos_interfaces: bool,
     retained_window: Option<chrono::Duration>,
 ) -> Result<Vec<PreallocationSuccess>, CarbideError> {
-    validate_expected_switch(switch)?;
+    validate_expected_switch(switch, validate_nvos_interfaces)?;
 
     // Lock the inventory before allocating addresses so PATCH and legacy
     // updates cannot wait on each other's locks.
@@ -418,8 +454,8 @@ async fn update_switch_in_transaction(
         );
     }
     if let Some(nvos_ip) = switch.nvos_ip_address {
-        // Pairing already validated above; nvos_mac_addresses has exactly one entry.
-        let nvos_mac = switch.nvos_mac_addresses[0];
+        // Pairing already validated above; there is exactly one NVOS port.
+        let nvos_mac = switch.nvos_interfaces[0].mac_address;
         preallocations.push(
             update_preallocated_machine_interface(&mut *txn, nvos_mac, nvos_ip, retained_window)
                 .await?,
@@ -506,14 +542,14 @@ pub(crate) async fn replace_all_expected_switches(
     let mut switches = Vec::with_capacity(req.expected_switches.len());
 
     for expected_switch in req.expected_switches {
-        let switch: ExpectedSwitch =
+        let mut switch: ExpectedSwitch =
             expected_switch
                 .try_into()
                 .map_err(|e: ::rpc::errors::RpcDataConversionError| {
                     CarbideError::InvalidArgument(e.to_string())
                 })?;
 
-        validate_expected_switch(&switch)?;
+        validate_expected_switch(&mut switch, true)?;
 
         switches.push(switch);
     }
