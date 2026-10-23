@@ -104,6 +104,7 @@ func (s *Session) registerFetchers() {
 	s.Resolver.RegisterFetcher("allocation", s.fetchAllocations)
 	s.Resolver.RegisterFetcher("expected-machine", s.fetchExpectedMachines)
 	s.Resolver.RegisterFetcher("expected-rack", s.fetchExpectedRacks)
+	s.Resolver.RegisterFetcher("expected-rack-group", s.fetchExpectedRackGroups)
 	s.Resolver.RegisterFetcher("expected-switch", s.fetchExpectedSwitches)
 	s.Resolver.RegisterFetcher("expected-power-shelf", s.fetchExpectedPowerShelves)
 	s.Resolver.RegisterFetcher("infiniband-partition", s.fetchInfiniBandPartitions)
@@ -118,6 +119,7 @@ func (s *Session) registerFetchers() {
 	s.Resolver.RegisterFetcher("vpc-peering", s.fetchVPCPeerings)
 	s.Resolver.RegisterFetcher("tenant", s.fetchTenants)
 	s.Resolver.RegisterFetcher("tray-component", s.fetchTrayComponents)
+	s.Resolver.RegisterFetcher("domain", s.fetchNVLinkDomains)
 }
 
 // fetchAll fetches all pages from a list endpoint and returns raw JSON objects.

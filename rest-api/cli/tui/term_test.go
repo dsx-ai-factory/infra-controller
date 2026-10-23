@@ -62,15 +62,26 @@ func TestSelectCancellationPreservesSentinel(t *testing.T) {
 		result <- err
 	}()
 
-	require.NoError(t, terminal.SetReadDeadline(time.Now().Add(time.Second)))
-	output := make([]byte, 0, 256)
-	buffer := make([]byte, 256)
-	for !bytes.Contains(output, []byte("Cancel")) {
-		n, readErr := terminal.Read(buffer)
-		require.NoError(t, readErr)
-		output = append(output, buffer[:n]...)
+	rendered := make(chan error, 1)
+	go func() {
+		output := make([]byte, 0, 256)
+		buffer := make([]byte, 256)
+		for !bytes.Contains(output, []byte("Cancel")) {
+			n, readErr := terminal.Read(buffer)
+			if readErr != nil {
+				rendered <- readErr
+				return
+			}
+			output = append(output, buffer[:n]...)
+		}
+		rendered <- nil
+	}()
+	select {
+	case err := <-rendered:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Select did not render before the timeout")
 	}
-	require.NoError(t, terminal.SetReadDeadline(time.Time{}))
 
 	_, err = terminal.Write([]byte{KeyCtrlD})
 	require.NoError(t, err)
