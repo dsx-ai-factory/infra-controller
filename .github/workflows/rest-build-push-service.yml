@@ -197,7 +197,7 @@ jobs:
       - name: Grype vulnerability scan
         if: matrix.arch == 'amd64' && github.ref == 'refs/heads/main'
         continue-on-error: true
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/security-container-scan@e8c0885851e9314211f2b3439e827990a46ea593 # reviewed commit e8c0885 (upstream #94, pending merge)
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/security-container-scan@911d86017e6e0715cef26cb3105d66c2fcd985fb # reviewed commit 911d860 (upstream #94, pending merge)
         with:
           image: ${{ steps.docker-tags.outputs.arch_tag }}
           fail-on: critical

@@ -49,7 +49,7 @@ jobs:
           persist-credentials: false
 
       - name: Validate Helm chart
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-validate@e8c0885851e9314211f2b3439e827990a46ea593 # reviewed commit e8c0885 (upstream #94, pending merge)
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-validate@911d86017e6e0715cef26cb3105d66c2fcd985fb # reviewed commit 911d860 (upstream #94, pending merge)
         with:
           chart-path: ${{ matrix.chart }}
           lint: 'true'
@@ -111,7 +111,7 @@ jobs:
 
       - name: Package and push Helm chart to NGC
         if: ${{ inputs.ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@e8c0885851e9314211f2b3439e827990a46ea593 # reviewed commit e8c0885 (upstream #94, pending merge)
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@911d86017e6e0715cef26cb3105d66c2fcd985fb # reviewed commit 911d860 (upstream #94, pending merge)
         with:
           chart-path: ${{ steps.prepare-umbrella.outputs.chart_path || matrix.chart }}
           chart-version: ${{ inputs.chart_version }}

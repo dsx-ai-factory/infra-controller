@@ -2121,7 +2121,7 @@ jobs:
           persist-credentials: false
 
       - name: Validate Helm chart
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-validate@e8c0885851e9314211f2b3439e827990a46ea593 # reviewed commit e8c0885 (upstream #94, pending merge)
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-validate@911d86017e6e0715cef26cb3105d66c2fcd985fb # reviewed commit 911d860 (upstream #94, pending merge)
         with:
           chart-path: helm
           lint: 'true'
@@ -2206,7 +2206,7 @@ jobs:
 
       - name: Package and push Helm chart to NGC
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@e8c0885851e9314211f2b3439e827990a46ea593 # reviewed commit e8c0885 (upstream #94, pending merge)
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@911d86017e6e0715cef26cb3105d66c2fcd985fb # reviewed commit 911d860 (upstream #94, pending merge)
         with:
           chart-path: helm
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2228,7 +2228,7 @@ jobs:
           persist-credentials: false
 
       - name: Validate Helm prereqs chart
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-validate@e8c0885851e9314211f2b3439e827990a46ea593 # reviewed commit e8c0885 (upstream #94, pending merge)
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-validate@911d86017e6e0715cef26cb3105d66c2fcd985fb # reviewed commit 911d860 (upstream #94, pending merge)
         with:
           chart-path: helm-prereqs
           lint: 'true'
@@ -2309,7 +2309,7 @@ jobs:
 
       - name: Package and push Helm prereqs chart to NGC
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@e8c0885851e9314211f2b3439e827990a46ea593 # reviewed commit e8c0885 (upstream #94, pending merge)
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@911d86017e6e0715cef26cb3105d66c2fcd985fb # reviewed commit 911d860 (upstream #94, pending merge)
         with:
           chart-path: helm-prereqs
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2516,21 +2516,21 @@ jobs:
           persist-credentials: false
 
       - name: Validate nico-otelcol chart
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-validate@e8c0885851e9314211f2b3439e827990a46ea593 # reviewed commit e8c0885 (upstream #94, pending merge)
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-validate@911d86017e6e0715cef26cb3105d66c2fcd985fb # reviewed commit 911d860 (upstream #94, pending merge)
         with:
           chart-path: bluefield/charts/nico-otelcol
           lint: 'true'
           template: 'true'
 
       - name: Validate nico-dpu-agent chart
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-validate@e8c0885851e9314211f2b3439e827990a46ea593 # reviewed commit e8c0885 (upstream #94, pending merge)
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-validate@911d86017e6e0715cef26cb3105d66c2fcd985fb # reviewed commit 911d860 (upstream #94, pending merge)
         with:
           chart-path: bluefield/charts/nico-dpu-agent
           lint: 'true'
           template: 'true'
 
       - name: Validate nico-dhcp-server chart
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-validate@e8c0885851e9314211f2b3439e827990a46ea593 # reviewed commit e8c0885 (upstream #94, pending merge)
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-validate@911d86017e6e0715cef26cb3105d66c2fcd985fb # reviewed commit 911d860 (upstream #94, pending merge)
         with:
           chart-path: bluefield/charts/nico-dhcp-server
           lint: 'true'
@@ -2543,7 +2543,7 @@ jobs:
           /usr/bin/python3 -B bluefield/charts/nico-dhcp-server/tests/test_listener_command.py
 
       - name: Validate nico-fmds chart
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-validate@e8c0885851e9314211f2b3439e827990a46ea593 # reviewed commit e8c0885 (upstream #94, pending merge)
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-validate@911d86017e6e0715cef26cb3105d66c2fcd985fb # reviewed commit 911d860 (upstream #94, pending merge)
         with:
           chart-path: bluefield/charts/nico-fmds
           lint: 'true'
@@ -2578,7 +2578,7 @@ jobs:
 
       - name: Package and push nico-otelcol chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@e8c0885851e9314211f2b3439e827990a46ea593 # reviewed commit e8c0885 (upstream #94, pending merge)
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@911d86017e6e0715cef26cb3105d66c2fcd985fb # reviewed commit 911d860 (upstream #94, pending merge)
         with:
           chart-path: bluefield/charts/nico-otelcol
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2590,7 +2590,7 @@ jobs:
 
       - name: Package and push nico-dpu-agent chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@e8c0885851e9314211f2b3439e827990a46ea593 # reviewed commit e8c0885 (upstream #94, pending merge)
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@911d86017e6e0715cef26cb3105d66c2fcd985fb # reviewed commit 911d860 (upstream #94, pending merge)
         with:
           chart-path: bluefield/charts/nico-dpu-agent
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2602,7 +2602,7 @@ jobs:
 
       - name: Package and push nico-dhcp-server chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@e8c0885851e9314211f2b3439e827990a46ea593 # reviewed commit e8c0885 (upstream #94, pending merge)
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@911d86017e6e0715cef26cb3105d66c2fcd985fb # reviewed commit 911d860 (upstream #94, pending merge)
         with:
           chart-path: bluefield/charts/nico-dhcp-server
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2614,7 +2614,7 @@ jobs:
 
       - name: Package and push nico-fmds chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@e8c0885851e9314211f2b3439e827990a46ea593 # reviewed commit e8c0885 (upstream #94, pending merge)
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@911d86017e6e0715cef26cb3105d66c2fcd985fb # reviewed commit 911d860 (upstream #94, pending merge)
         with:
           chart-path: bluefield/charts/nico-fmds
           chart-version: ${{ needs.prepare.outputs.helm_version }}
