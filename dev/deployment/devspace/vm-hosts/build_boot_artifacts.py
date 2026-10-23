@@ -164,6 +164,7 @@ def main():
         )
         + "\n"
     )
+    (output / ".dockerignore").write_text("build\n")
     print(f"Boot payloads: {payload}")
 
 

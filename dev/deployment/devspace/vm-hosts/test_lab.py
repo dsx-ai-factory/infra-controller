@@ -10,9 +10,105 @@ from unittest import mock
 import json
 
 import lab
+import importlib.util
+
+
+def load_setup():
+    spec = importlib.util.spec_from_file_location(
+        "vm_hosts_setup", Path(lab.__file__).with_name("setup.py")
+    )
+    setup = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(setup)
+    return setup
 
 
 class LabTests(unittest.TestCase):
+    def test_inspect_bounds_docker_wait_and_propagates_timeout(self):
+        def stalled(*args, **kwargs):
+            self.assertEqual(kwargs.get("timeout"), 120)
+            raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+        with mock.patch.object(lab.subprocess, "run", side_effect=stalled):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                lab.inspect("container", "unresponsive")
+
+    def test_network_identity_change_cleans_saved_rules_before_replacement(self):
+        setup = load_setup()
+        for changed in (False, True):
+            with self.subTest(
+                changed=changed
+            ), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / "network-state.json"
+                saved = dict(
+                    node="node",
+                    bridge="old-bridge",
+                    uplink="old-uplink",
+                    routes=[["4", "192.0.2.1/32", "192.0.2.2"]],
+                )
+                path.write_text(json.dumps(saved))
+                bridge = "new-bridge" if changed else saved["bridge"]
+                uplink = "new-uplink" if changed else saved["uplink"]
+                calls = []
+
+                def command(*args):
+                    calls.append(args)
+                    if "-json" in args:
+                        return json.dumps([{"gateway": "192.0.2.2"}])
+                    return "present"
+
+                with mock.patch.object(
+                    lab, "inspect", return_value={"State": {"Running": True}}
+                ), mock.patch.object(lab, "run", side_effect=command):
+                    result = setup.network_state(root, "node", bridge, uplink)
+                self.assertEqual(json.loads(path.read_text()), result)
+                if changed:
+                    self.assertEqual(
+                        result,
+                        dict(node="node", bridge=bridge, uplink=uplink, routes=[]),
+                    )
+                    deletions = [args for args in calls if "-D" in args]
+                    self.assertEqual(
+                        len(deletions),
+                        len(list(lab.network_rules(saved["bridge"], saved["uplink"]))),
+                    )
+                    self.assertTrue(any("old-uplink" in args for args in deletions))
+                    self.assertFalse(any("new-uplink" in args for args in deletions))
+                    self.assertIn(
+                        (
+                            "docker",
+                            "exec",
+                            lab.NAME,
+                            "ip",
+                            "-4",
+                            "route",
+                            "del",
+                            "192.0.2.1/32",
+                            "via",
+                            "192.0.2.2",
+                        ),
+                        calls,
+                    )
+                else:
+                    self.assertEqual(result, saved)
+                    self.assertEqual(calls, [])
+
+    def test_network_identity_cleanup_failure_retains_saved_state(self):
+        setup = load_setup()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "network-state.json"
+            original = json.dumps(
+                dict(node="old", bridge="old", uplink="old", routes=[])
+            )
+            path.write_text(original)
+            with mock.patch.object(
+                lab, "cleanup_network", side_effect=ValueError("cleanup failed")
+            ):
+                with self.assertRaisesRegex(ValueError, "cleanup failed"):
+                    setup.network_state(root, "new", "new", "new")
+            self.assertEqual(path.read_text(), original)
+
     def test_identity_matches_zero_dpu_bmc_and_domain(self):
         for index in (1, 2):
             with self.subTest(index=index):
@@ -336,6 +432,93 @@ class ProfileValuesTests(unittest.TestCase):
 
 
 class BootArtifactTests(unittest.TestCase):
+    def test_scout_dependency_check_rejects_ldd_failure_and_missing_libraries(self):
+        script = Path(lab.__file__).with_name("scout-vm-postinst.sh").read_text()
+        # Run the shipped dependency-check block without provisioning a root image.
+        check = (
+            script[script.index("if ldd ") :]
+            if "if ldd " in script
+            else script[script.index("scout_deps=") :]
+        )
+        for output, code, passed in (
+            ("libc => /lib/libc.so", 0, True),
+            ("libbad => not found", 0, False),
+            ("ldd failed", 1, False),
+        ):
+            with self.subTest(output=output):
+                command = (
+                    "set -euo pipefail\nldd() { printf '%s\\n' "
+                    + repr(output)
+                    + "; return "
+                    + str(code)
+                    + "; }\n"
+                    + check
+                )
+                result = subprocess.run(
+                    ["bash", "-c", command], capture_output=True, text=True
+                )
+                self.assertEqual(result.returncode == 0, passed, result.stderr)
+
+    def test_output_context_excludes_retained_build_workspace(self):
+        import build_boot_artifacts as builder
+
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "pxe/mkosi/bin").mkdir(parents=True)
+            (repo / "pxe/mkosi/bin/mkosi").touch()
+            package = repo / "scout.deb"
+            package.touch()
+            boot = repo / "boot"
+            boot.mkdir()
+            for name in ("ipxe.efi", "qcow-imager.efi"):
+                (boot / name).write_bytes(b"payload")
+            output = repo / "artifacts"
+
+            def build(*args, **kwargs):
+                built = output / "build/output"
+                built.mkdir(exist_ok=True)
+                for name in ("loader.efi", "scout.squashfs"):
+                    (built / name).write_bytes(b"built payload")
+
+            with mock.patch.object(builder, "REPO", repo), mock.patch.object(
+                builder.lab, "native_architecture", return_value="x86_64"
+            ), mock.patch.object(
+                builder.platform, "system", return_value="Linux"
+            ), mock.patch.object(
+                builder.os, "geteuid", return_value=0
+            ), mock.patch.object(
+                builder, "stage_profiles"
+            ), mock.patch.object(
+                builder.subprocess,
+                "check_output",
+                side_effect=["amd64", "1.0", "revision"],
+            ), mock.patch.object(
+                builder.subprocess, "run", side_effect=build
+            ), mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "builder",
+                    "--scout-package",
+                    str(package),
+                    "--boot-dir",
+                    str(boot),
+                    "--output",
+                    str(output),
+                ],
+            ), mock.patch(
+                "builtins.print"
+            ):
+                builder.main()
+            self.assertEqual((output / ".dockerignore").read_text(), "build\n")
+            self.assertTrue((output / "build").is_dir())
+            for name in ("ipxe.efi", "qcow-imager.efi", "scout.efi", "scout.squashfs"):
+                self.assertTrue((output / "x86_64" / name).stat().st_size)
+            self.assertEqual(
+                json.loads((output / "build-info.json").read_text())["source_revision"],
+                "revision",
+            )
+
     def test_vm_profiles_keep_real_scout_and_use_matching_virtual_kernels(self):
         import build_boot_artifacts as builder
 
