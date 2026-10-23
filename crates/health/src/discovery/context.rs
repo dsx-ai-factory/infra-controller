@@ -47,7 +47,9 @@ use crate::config::{
 };
 use crate::inventory::InventoryMetrics;
 use crate::limiter::RateLimiter;
-use crate::metrics::{MetricsManager, operation_duration_buckets_seconds};
+use crate::metrics::{
+    InventoryEndpointMetrics, MetricsManager, operation_duration_buckets_seconds,
+};
 use crate::tls::MtlsHttpClientProvider;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -344,6 +346,7 @@ pub struct DiscoveryLoopContext {
     pub(crate) limiter: Arc<dyn RateLimiter>,
     pub(crate) bmc_request_concurrency: NonZeroUsize,
     pub(crate) metrics_manager: Arc<MetricsManager>,
+    pub(crate) inventory_endpoint_metrics: Option<InventoryEndpointMetrics>,
     pub(crate) discovery_config: DiscoveryConfig,
     pub(crate) sensors_config: Configurable<SensorCollectorOptions>,
     pub(crate) metrics_config: Configurable<MetricsCollectorOptions>,
@@ -424,6 +427,11 @@ impl DiscoveryLoopContext {
         registry.register(Box::new(discovery_endpoint_fetch_histogram.clone()))?;
 
         let inventory_metrics = InventoryMetrics::new(registry, metrics_prefix)?;
+        let inventory_endpoint_metrics = config
+            .metrics
+            .enable_endpoint_inventory_metrics
+            .then(|| InventoryEndpointMetrics::new(registry, metrics_prefix))
+            .transpose()?;
 
         let tls_config = tls_config.or_else(|| config.tls.switch.clone());
 
@@ -451,6 +459,7 @@ impl DiscoveryLoopContext {
             limiter,
             bmc_request_concurrency: config.bmc_request_concurrency,
             metrics_manager,
+            inventory_endpoint_metrics,
             discovery_config: config.collectors.discovery.clone(),
             sensors_config: config.collectors.sensors.clone(),
             metrics_config: config.collectors.metrics.clone(),
@@ -587,5 +596,20 @@ mod tests {
             .expect("[tls.switch] config should be present");
 
         assert_eq!(actual_tls_config, &tls_config);
+    }
+
+    #[test]
+    fn default_context_does_not_register_endpoint_inventory_metric() {
+        let config = Config::default();
+        let prefix = config.metrics.prefix.clone();
+        let manager = Arc::new(MetricsManager::new(&prefix).expect("metrics manager"));
+        let _context = DiscoveryLoopContext::new(
+            Arc::new(crate::limiter::NoopLimiter),
+            manager.clone(),
+            Arc::new(config),
+        )
+        .expect("default context");
+
+        assert!(InventoryEndpointMetrics::new(manager.global_registry(), &prefix).is_ok());
     }
 }
