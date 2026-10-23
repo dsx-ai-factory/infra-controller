@@ -26,7 +26,7 @@ use carbide_uuid::spx::NULL_SPX_PARTITION_ID;
 use config_version::ConfigVersion;
 use db::ObjectColumnFilter;
 use mac_address::MacAddress;
-use model::dpa_interface::DpaSearchConfig;
+use model::dpa_interface::{DpaInterfaceType, DpaSearchConfig};
 use model::instance::config::spx::SpxAttachmentType;
 use model::machine::ManagedHostStateSnapshot;
 use model::machine::spx::{MachineSpxAttachmentStatusObservation, MachineSpxStatusObservation};
@@ -203,11 +203,10 @@ pub(super) async fn get_astra_config(
     Ok(Some(AstraConfig { astra_attachments }))
 }
 
-/// Processes Astra config status reported by the DPU agent.
-/// This function is called when the DPU agent reports the Astra config status.
-/// We need to update the Astra observation in the database.
-/// 1) Is dpa enabled in config? If not, return None.
-/// 2) Does the host associated with the DPU have any Astra NICs? If not, just return
+/// `process_astra_config_status` replaces observations when Astra reporting is
+/// enabled. Successful processing accepts Ready entries for current Astra
+/// interfaces and preserves current SVPC observations. It drops observations
+/// for absent interfaces; an empty report also clears all Astra readiness.
 pub(super) async fn process_astra_config_status(
     api: &Api,
     dpu_machine_id: &DpuMachineId,
@@ -230,22 +229,6 @@ pub(super) async fn process_astra_config_status(
             id: dpu_machine_id.to_string(),
         })?;
 
-    // Find all Astra NICs in the host.
-    let search_config = DpaSearchConfig {
-        only_svpc: false,
-        only_astra: true,
-    };
-
-    let dpa_interfaces =
-        db::dpa_interface::find_by_machine_id(&mut txn, snapshot.host_snapshot.id, search_config)
-            .await?;
-
-    if dpa_interfaces.is_empty() {
-        // This should not happen. How is the DPU reporting the Astra config status if there are no Astra NICs?
-        tracing::info!("No Astra NICs found in the host, skipping Astra config status processing");
-        return Ok(());
-    }
-
     txn.commit().await?;
 
     let mut txn = api
@@ -256,22 +239,18 @@ pub(super) async fn process_astra_config_status(
             message: format!("Failed to begin transaction: {e}"),
         })?;
 
-    let mut machine_observations = Vec::new();
+    let mut reported_observations = Vec::new();
 
-    // Update the Astra observation in the database.
+    // Resolve reported VNIs before taking the host lock.
     for obs in astra_config_status.astra_attachments_status.iter() {
-        // Skip attachments that are missing status or not in READY/DELETING phase.
-        // If an observation is in the PENDING phase, wait for it to become READY before
-        // recording the observation. If an observation is in the DELETING phase, we still
-        // need to record it until it is completely deleted and no observations are sent for it.
-        let Some(AstraPhase::PhaseReady | AstraPhase::PhaseDeleting) = obs
+        let Some(AstraPhase::PhaseReady) = obs
             .status
             .as_ref()
             .and_then(|status| AstraPhase::try_from(status.phase).ok())
         else {
             tracing::info!(
                 astra_status_observation = ?obs,
-                "Astra status is not READY or DELETING, skipping Astra config status processing",
+                "Astra status is not READY, skipping Astra observation",
             );
             continue;
         };
@@ -340,27 +319,13 @@ pub(super) async fn process_astra_config_status(
             );
         }
 
-        // Iterate through the dpa_interfaces and find the one that matches the mac_address in the current obs
-        // Create local variable dpa_interface based on the matching mac_address found. If no match is found, continue to the next obs.
         let Ok(obs_mac) = MacAddress::from_str(&obs.mac_address) else {
             tracing::error!(mac_address = %obs.mac_address, "failed to parse MAC from Astra observation, skipping");
             continue;
         };
-        let Some(dpa_interface) = dpa_interfaces
-            .iter()
-            .find(|dpa_interface| dpa_interface.mac_address == obs_mac)
-        else {
-            tracing::info!(
-                mac_address = %obs.mac_address,
-                machine_id = %snapshot.host_snapshot.id,
-                "DPA interface was not found",
-            );
-            continue;
-        };
 
-        // Create the MachineSpxAttachmentStatusObservation based on the dpa_interface and obs
         let machine_observation = MachineSpxAttachmentStatusObservation {
-            mac_address: dpa_interface.mac_address,
+            mac_address: obs_mac,
             partition_id: Some(spx_partition_id),
             config_version: Some(ncv),
             attachment_type: Some(SpxAttachmentType::Physical),
@@ -368,18 +333,55 @@ pub(super) async fn process_astra_config_status(
             observed_at: chrono::Utc::now(),
         };
 
-        machine_observations.push(machine_observation);
+        reported_observations.push(machine_observation);
     }
 
-    let machine_observation = MachineSpxStatusObservation {
-        spx_attachments: machine_observations,
+    // Astra and SVPC share `spx_status_observation`. Read after taking the
+    // host lock so a report committed while we waited is preserved.
+    db::machine::lock_by_id_for_update(&mut txn, &snapshot.host_snapshot.id.into()).await?;
+    let machine =
+        db::machine::find_one(txn.as_mut(), &snapshot.host_snapshot.id, Default::default())
+            .await?
+            .ok_or(CarbideError::NotFoundError {
+                kind: "machine",
+                id: snapshot.host_snapshot.id.to_string(),
+            })?;
+    let dpa_interfaces = db::dpa_interface::find_by_machine_id(
+        txn.as_mut(),
+        snapshot.host_snapshot.id,
+        DpaSearchConfig::default(),
+    )
+    .await?;
+    let mut spx_attachment_observations = machine
+        .status
+        .spx_status_observation
+        .unwrap_or_default()
+        .spx_attachments;
+    // A missing Astra interface does not make its old observation SVPC.
+    // Classify both stored and reported entries from the current inventory.
+    spx_attachment_observations.retain(|obs| {
+        dpa_interfaces.iter().any(|interface| {
+            interface.interface_type == DpaInterfaceType::Svpc
+                && interface.mac_address == obs.mac_address
+        })
+    });
+    reported_observations.retain(|obs| {
+        dpa_interfaces.iter().any(|interface| {
+            interface.interface_type == DpaInterfaceType::Astra
+                && interface.mac_address == obs.mac_address
+        })
+    });
+    spx_attachment_observations.extend(reported_observations);
+
+    let spx_status_observation = MachineSpxStatusObservation {
+        spx_attachments: spx_attachment_observations,
         observed_at: chrono::Utc::now(),
     };
 
     if let db::ConditionalWrite::NotApplied(reason) = db::machine::update_spx_status_observation(
         &mut txn,
         &snapshot.host_snapshot.id,
-        &machine_observation,
+        &spx_status_observation,
     )
     .await?
     {

@@ -20,6 +20,93 @@ use super::*;
 #[path = "fmds_routing.rs"]
 mod fmds_routing;
 
+/// Astra failures must retract readiness without replacing an earlier
+/// HBN/DHCP diagnostic in the shared network status.
+#[test]
+fn astra_status_reporting_maps_results_and_preserves_network_errors() {
+    use carbide_test_support::value_scenarios;
+
+    #[derive(Debug)]
+    struct Row {
+        configured: bool,
+        result: eyre::Result<rpc::AstraConfigStatus>,
+        previous_error: Option<&'static str>,
+    }
+
+    let config = rpc::AstraConfig::default();
+    let ready_status = rpc::AstraConfigStatus {
+        astra_attachments_status: vec![rpc::AstraAttachmentStatus {
+            mac_address: "02:00:00:00:00:01".to_string(),
+            vni: 42,
+            revision: "V2-T100".to_string(),
+            status: Some(rpc::AstraStatus {
+                phase: rpc::AstraPhase::PhaseReady.into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+    };
+
+    value_scenarios!(run = |row: Row| {
+        // HBN/DHCP can record an error before Astra reconciliation runs.
+        let mut status_out = rpc::DpuNetworkStatus {
+            network_config_error: row.previous_error.map(str::to_string),
+            ..Default::default()
+        };
+
+        set_astra_config_status(
+            row.configured.then_some(&config),
+            row.result,
+            &mut status_out,
+        );
+        (status_out.astra_config_status, status_out.network_config_error)
+    };
+        "absent configuration leaves Astra status absent" {
+            Row {
+                configured: false,
+                result: Ok(rpc::AstraConfigStatus::default()),
+                previous_error: None,
+            } => (None, None),
+        }
+        "successful reconciliation preserves its observations" {
+            Row {
+                configured: true,
+                result: Ok(ready_status.clone()),
+                previous_error: None,
+            } => (Some(ready_status.clone()), None),
+        }
+        "successful reconciliation keeps an earlier network error" {
+            Row {
+                configured: true,
+                result: Ok(ready_status.clone()),
+                previous_error: Some("HBN update failed"),
+            } => (Some(ready_status), Some("HBN update failed".to_string())),
+        }
+        // Core retracts old readiness for an explicit empty report; an omitted
+        // report would leave those observations unchanged after failure.
+        "failed reconciliation reports no ready attachments" {
+            Row {
+                configured: true,
+                result: Err(eyre::eyre!("astra list failed")),
+                previous_error: None,
+            } => (
+                Some(rpc::AstraConfigStatus::default()),
+                Some("astra list failed".to_string()),
+            ),
+        }
+        "an earlier network error keeps its diagnostic" {
+            Row {
+                configured: true,
+                result: Err(eyre::eyre!("astra list failed")),
+                previous_error: Some("HBN update failed"),
+            } => (
+                Some(rpc::AstraConfigStatus::default()),
+                Some("HBN update failed".to_string()),
+            ),
+        }
+    );
+}
+
 /// IPv6 tenant prefixes must produce replies from FMDS's configured endpoint,
 /// not its link-local address, without changing IPv4 or enabling IPv6 by default.
 #[test]

@@ -1375,23 +1375,11 @@ impl MainLoop {
                         }
                     }
 
-                    match astra_config_status {
-                        Ok(status) => {
-                            if conf.astra_config.is_some() {
-                                status_out.astra_config_status = Some(status);
-                            }
-                        }
-                        Err(err) => {
-                            tracing::error!(
-                                error = format!("{err:#}"),
-                                "Notifying Weave EW VPC Astra config"
-                            );
-                            // Don't clobber a real HBN/DHCP failure already reported above.
-                            if status_out.network_config_error.is_none() {
-                                status_out.network_config_error = Some(err.to_string());
-                            }
-                        }
-                    }
+                    set_astra_config_status(
+                        conf.astra_config.as_ref(),
+                        astra_config_status,
+                        &mut status_out,
+                    );
 
                     // In case of secondary DPU, the interface must be disabled if on admin network, else enabled.
                     // Note that the nvue config handles the blocking of traffic on the interface.  This is only so that the host link reflects the correct state.
@@ -1741,6 +1729,36 @@ fn effective_virtualization_type(
         });
 
     Ok(virtualization_type)
+}
+
+/// `set_astra_config_status` reports attempted Astra reconciliation independently
+/// of HBN/DHCP acknowledgements. Absent configuration leaves the report unchanged.
+/// Failure records an error unless the caller has already recorded one.
+fn set_astra_config_status(
+    config: Option<&rpc::AstraConfig>,
+    result: eyre::Result<rpc::AstraConfigStatus>,
+    status_out: &mut rpc::DpuNetworkStatus,
+) {
+    if config.is_none() {
+        return;
+    }
+
+    status_out.astra_config_status = Some(match result {
+        Ok(status) => status,
+        Err(err) => {
+            tracing::error!(
+                error = format!("{err:#}"),
+                "Notifying Weave EW VPC Astra config"
+            );
+            // Keep an HBN/DHCP error the caller already recorded.
+            if status_out.network_config_error.is_none() {
+                status_out.network_config_error = Some(format!("{err:#}"));
+            }
+            // An empty report retracts Core's previous Astra readiness. Omitting
+            // the report would leave that observation unchanged after failure.
+            rpc::AstraConfigStatus::default()
+        }
+    });
 }
 
 fn ack_network_config_update(
