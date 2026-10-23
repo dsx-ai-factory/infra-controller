@@ -1,0 +1,41 @@
+---
+tags: ["unreleased", "nvlink", "rest-api", "deployment"]
+---
+
+## NVLink partitioning configuration defaults — unreleased
+
+NVLink partitioning remains opt-in, but a site deployed with the nico-api Helm chart now needs only `nvlink_config.enabled = true`. When the NMX-C TLS keys are unset, `nico-api` uses the client certificate that the chart mounts at `/var/run/secrets/nvswitch-client`, `ca.crt` from that Secret or else `/var/run/secrets/nico-roots/ca.crt`, and `initial_domain_name` as the TLS authority. For the authority default to work, `initial_domain_name` must match a DNS SAN of the certificate NMX-C presents; on RMS-managed switches that is RMS's `apiServer.dnsDomain`.
+
+### Before upgrading
+
+<Warning title="Certificate monitor now follows partitioning">
+`nvlink_config.nmx_c_certificate_rotation.enabled` previously defaulted to `false`. When it is unset, it now follows `nvlink_config.enabled`. A site that already sets `nvlink_config.enabled = true` without setting `nmx_c_certificate_rotation.enabled` starts the NMX-C certificate monitor after upgrading, and the monitor can request full-rack `ConfigureNmxCluster` maintenance when a served certificate enters its rotation window. To keep the previous behavior, set `nvlink_config.nmx_c_certificate_rotation.enabled = false` before upgrading.
+</Warning>
+
+<Warning title="NMX-C client certificate issued by default">
+The nico-api chart now enables `nvSwitchTls.nicoClient` by default and mounts its Secret into the `nico-api` Pod, so the Pod does not start until cert-manager issues the certificate. The certificate uses `nvSwitchTls.issuerRef`, which now defaults to `global.certificate.issuerRef`. The issuer and any cert-manager approver policy must allow the `client auth` usage and the URI SAN `spiffe://<global.spiffe.trustDomain>/<namespace>/sa/nico-nmxc`. To skip the certificate, set `nico-api.nvSwitchTls.nicoClient.enabled: false`.
+</Warning>
+
+### REST API compatibility exception
+
+The Site capability `nvLinkPartition` is now owned by Site configuration inventory, like `flow` and `vpcSlaac`:
+
+- `PATCH /v2/org/{org}/nico/site/{siteId}` rejects `capabilities.nvLinkPartition` with HTTP 400. Remove the field from Site update requests. It is no longer part of `SiteCapabilitiesUpdateRequest` in the OpenAPI spec or the Go SDK.
+- Core reports its effective `nvlink_config.enabled` setting, and the REST service copies it into the Site's `nvLinkPartition` capability on each Site configuration inventory. An older Core that does not report the setting leaves the stored value unchanged, so existing Sites keep their current value.
+- New Sites start with `nvLinkPartition = false` until their Core reports the setting. A new Site managed by a Core without this change stays `false`, so NVLink logical partitions and VPC NVLink settings are rejected until Core is upgraded.
+
+### New and changed configuration
+
+| Setting | Change |
+| --- | --- |
+| `nvlink_config.allow_insecure` | Defaults to `false` when omitted instead of being required in `[nvlink_config]`. |
+| `nvlink_config.nmx_c_certificate_rotation.enabled` | Optional. Unset follows `nvlink_config.enabled`; set it to run or stop the certificate monitor independently. |
+| `nvlink_config.nmx_c_tls_ca_cert_path` | When unset and NMX-C is reached over HTTPS, defaults to the mounted client certificate's `ca.crt` or else `/var/run/secrets/nico-roots/ca.crt`, regardless of the other TLS keys. |
+| `nvlink_config.nmx_c_tls_client_cert_path`, `nmx_c_tls_client_key_path`, `nmx_c_tls_authority` | When `allow_insecure` is `false` and none of the four `nmx_c_tls_*` keys is set, default to the mounted client certificate and `initial_domain_name`. Setting any `nmx_c_tls_*` key disables these defaults. |
+| nico-api chart `nvlink.enabled` | New. When set, rendered as `nvlink_config.enabled` in the base configuration; the site configuration takes precedence. |
+| nico-api chart `nvSwitchTls.nicoClient.enabled` | Now `true` by default. Empty `uris` derive the SPIFFE URI SAN from the trust domain and namespace. |
+| nico-api chart `nvSwitchTls.issuerRef` | Empty by default; falls back to `global.certificate.issuerRef`. |
+
+<Note>
+Enabling NVLink partitioning on a rack with running instances removes the NMX-C default partition on the first monitor pass, so those instances lose NVLink connectivity until tenants configure NVLink partitions through NICo.
+</Note>
