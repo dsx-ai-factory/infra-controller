@@ -12,7 +12,8 @@ done
 mkdir -p /etc/cloud/cloud.cfg.d
 printf 'ssh_quiet_keygen: true\n' > /etc/cloud/cloud.cfg.d/99-nico-scout.cfg
 printf '%s\n' "$PKG_VERSION" > /etc/scout-image-version
-if ldd /opt/forge/forge-scout | grep -q 'not found'; then
+scout_deps="$(ldd /opt/forge/forge-scout)"
+if grep -q 'not found' <<<"$scout_deps"; then
     echo 'Scout runtime dependencies are missing' >&2
     exit 1
 fi
