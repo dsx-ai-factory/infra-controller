@@ -1340,8 +1340,8 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 	assert.NotNil(t, vpc9Secondary)
 	vpc9Site2 := testInstanceBuildVPC(t, dbSession, "test-vpc-9-site-2", ip, tn1, st2, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusReady, tnu1)
 	assert.NotNil(t, vpc9Site2)
-	foreignVpcSt1 := testInstanceBuildVPC(t, dbSession, "test-foreign-vpc-site-1", ip, tn2, st1, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusReady, tnu2)
-	assert.NotNil(t, foreignVpcSt1)
+	crossTenantVpcSt1 := testInstanceBuildVPC(t, dbSession, "test-cross-tenant-vpc-site-1", ip, tn2, st1, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusReady, tnu2)
+	assert.NotNil(t, crossTenantVpcSt1)
 
 	// VPC prefix
 	ipb1 := common.TestBuildVpcPrefixIPBlock(t, dbSession, "testipb", st1, ip, &tn1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.168.0.0", 24, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, tnu1)
@@ -1356,12 +1356,12 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 	vpcPrefix7 := common.TestBuildVPCPrefix(t, dbSession, "test-vpcprefix-7", st1, tn1, vpc9.ID, &ipb5.ID, cutil.GetPtr("192.168.0.0/24"), cutil.GetPtr(24), cdbm.VpcPrefixStatusReady, tnu1)
 	vpcPrefixSite2 := common.TestBuildVPCPrefix(t, dbSession, "test-vpcprefix-site2", st2, tn1, vpc9Site2.ID, &ipbSite2.ID, cutil.GetPtr("192.170.0.0/24"), cutil.GetPtr(24), cdbm.VpcPrefixStatusReady, tnu1)
 	assert.NotNil(t, vpcPrefixSite2)
-	foreignIPBlockSt1 := common.TestBuildVpcPrefixIPBlock(t, dbSession, "test-foreign-ipb-site1", st1, ip, &tn2.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.171.0.0", 24, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, tnu2)
-	assert.NotNil(t, foreignIPBlockSt1)
-	foreignVpcPrefixSt1 := common.TestBuildVPCPrefix(t, dbSession, "test-foreign-vpcprefix-site1", st1, tn2, foreignVpcSt1.ID, &foreignIPBlockSt1.ID, cutil.GetPtr("192.171.0.0/24"), cutil.GetPtr(24), cdbm.VpcPrefixStatusReady, tnu2)
-	foreignVpcPrefixProvisioningSt1 := common.TestBuildVPCPrefix(t, dbSession, "test-foreign-vpcprefix-provisioning-site1", st1, tn2, foreignVpcSt1.ID, &foreignIPBlockSt1.ID, cutil.GetPtr("192.171.0.0/24"), cutil.GetPtr(24), cdbm.VpcPrefixStatusProvisioning, tnu2)
-	assert.NotNil(t, foreignVpcPrefixProvisioningSt1)
-	assert.NotNil(t, foreignVpcPrefixSt1)
+	crossTenantIPBlockSt1 := common.TestBuildVpcPrefixIPBlock(t, dbSession, "test-cross-tenant-ipb-site1", st1, ip, &tn2.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.171.0.0", 24, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, tnu2)
+	assert.NotNil(t, crossTenantIPBlockSt1)
+	crossTenantVpcPrefixSt1 := common.TestBuildVPCPrefix(t, dbSession, "test-cross-tenant-vpcprefix-site1", st1, tn2, crossTenantVpcSt1.ID, &crossTenantIPBlockSt1.ID, cutil.GetPtr("192.171.0.0/24"), cutil.GetPtr(24), cdbm.VpcPrefixStatusReady, tnu2)
+	crossTenantVpcPrefixProvisioningSt1 := common.TestBuildVPCPrefix(t, dbSession, "test-cross-tenant-vpcprefix-provisioning-site1", st1, tn2, crossTenantVpcSt1.ID, &crossTenantIPBlockSt1.ID, cutil.GetPtr("192.171.0.0/24"), cutil.GetPtr(24), cdbm.VpcPrefixStatusProvisioning, tnu2)
+	assert.NotNil(t, crossTenantVpcPrefixProvisioningSt1)
+	assert.NotNil(t, crossTenantVpcPrefixSt1)
 	ipbExhausted := common.TestBuildVpcPrefixIPBlock(t, dbSession, "testipb-exhausted", st1, ip, &tn1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "10.99.1.0", 28, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, tnu1)
 	assert.NotNil(t, ipbExhausted)
 	vpcPrefixExhausted := common.TestBuildVPCPrefix(t, dbSession, "test-vpcprefix-exhausted", st1, tn1, vpc9.ID, &ipbExhausted.ID, cutil.GetPtr("10.99.1.0/28"), cutil.GetPtr(28), cdbm.VpcPrefixStatusReady, tnu1)
@@ -1807,7 +1807,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			verifyChildSpanner: true,
 		},
 		{
-			name: "foreign direct VPC attachment is forbidden without targetedInstanceCreation",
+			name: "cross-Tenant direct VPC attachment is forbidden without targetedInstanceCreation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -1819,7 +1819,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 					TenantID:          tn1.ID.String(),
 					InstanceTypeID:    cutil.GetPtr(istCrossTenantVpc.ID.String()),
 					VpcID:             vpc9.ID.String(),
-					SecondaryVpcIDs:   []string{foreignVpcSt1.ID.String()},
+					SecondaryVpcIDs:   []string{crossTenantVpcSt1.ID.String()},
 					OperatingSystemID: cutil.GetPtr(os1.ID.String()),
 					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
 						{
@@ -1828,7 +1828,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 							IsPhysical: true,
 						},
 						{
-							VpcID:      cutil.GetPtr(foreignVpcSt1.ID.String()),
+							VpcID:      cutil.GetPtr(crossTenantVpcSt1.ID.String()),
 							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
 						},
 					},
@@ -1841,7 +1841,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "foreign VPC Prefix attachment is forbidden without targetedInstanceCreation",
+			name: "cross-Tenant VPC Prefix attachment is forbidden without targetedInstanceCreation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -1853,7 +1853,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 					TenantID:          tn1.ID.String(),
 					InstanceTypeID:    cutil.GetPtr(istCrossTenantVpc.ID.String()),
 					VpcID:             vpc9.ID.String(),
-					SecondaryVpcIDs:   []string{foreignVpcSt1.ID.String()},
+					SecondaryVpcIDs:   []string{crossTenantVpcSt1.ID.String()},
 					OperatingSystemID: cutil.GetPtr(os1.ID.String()),
 					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
 						{
@@ -1862,7 +1862,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 							IsPhysical: true,
 						},
 						{
-							VpcPrefixID: cutil.GetPtr(foreignVpcPrefixSt1.ID.String()),
+							VpcPrefixID: cutil.GetPtr(crossTenantVpcPrefixSt1.ID.String()),
 						},
 					},
 				},
@@ -1874,7 +1874,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "foreign VPC Prefix state is not revealed without targetedInstanceCreation",
+			name: "cross-Tenant VPC Prefix state is not revealed without targetedInstanceCreation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -1886,7 +1886,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 					TenantID:          tn1.ID.String(),
 					InstanceTypeID:    cutil.GetPtr(istCrossTenantVpc.ID.String()),
 					VpcID:             vpc9.ID.String(),
-					SecondaryVpcIDs:   []string{foreignVpcSt1.ID.String()},
+					SecondaryVpcIDs:   []string{crossTenantVpcSt1.ID.String()},
 					OperatingSystemID: cutil.GetPtr(os1.ID.String()),
 					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
 						{
@@ -1895,7 +1895,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 							IsPhysical: true,
 						},
 						{
-							VpcPrefixID: cutil.GetPtr(foreignVpcPrefixProvisioningSt1.ID.String()),
+							VpcPrefixID: cutil.GetPtr(crossTenantVpcPrefixProvisioningSt1.ID.String()),
 						},
 					},
 				},
@@ -1907,7 +1907,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "primary physical Interface cannot use a foreign VPC",
+			name: "primary physical Interface cannot use a cross-Tenant VPC",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -1919,11 +1919,11 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 					TenantID:          tn1.ID.String(),
 					InstanceTypeID:    cutil.GetPtr(istCrossTenantVpc.ID.String()),
 					VpcID:             vpc9.ID.String(),
-					SecondaryVpcIDs:   []string{foreignVpcSt1.ID.String()},
+					SecondaryVpcIDs:   []string{crossTenantVpcSt1.ID.String()},
 					OperatingSystemID: cutil.GetPtr(os1.ID.String()),
 					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
 						{
-							VpcID:      cutil.GetPtr(foreignVpcSt1.ID.String()),
+							VpcID:      cutil.GetPtr(crossTenantVpcSt1.ID.String()),
 							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
 							IsPhysical: true,
 						},
@@ -1940,7 +1940,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "targetedInstanceCreation permits foreign direct VPC and VPC Prefix attachments",
+			name: "targetedInstanceCreation permits cross-Tenant direct VPC and VPC Prefix attachments",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -1948,11 +1948,11 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			},
 			args: args{
 				reqData: &model.APIInstanceCreateRequest{
-					Name:              "ForeignVpcAttachmentAllowed",
+					Name:              "CrossTenantVpcAttachmentAllowed",
 					TenantID:          tn1.ID.String(),
 					InstanceTypeID:    cutil.GetPtr(istCrossTenantVpc.ID.String()),
 					VpcID:             vpc9.ID.String(),
-					SecondaryVpcIDs:   []string{foreignVpcSt1.ID.String()},
+					SecondaryVpcIDs:   []string{crossTenantVpcSt1.ID.String()},
 					OperatingSystemID: cutil.GetPtr(os1.ID.String()),
 					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
 						{
@@ -1961,11 +1961,11 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 							IsPhysical: true,
 						},
 						{
-							VpcID:      cutil.GetPtr(foreignVpcSt1.ID.String()),
+							VpcID:      cutil.GetPtr(crossTenantVpcSt1.ID.String()),
 							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
 						},
 						{
-							VpcPrefixID: cutil.GetPtr(foreignVpcPrefixSt1.ID.String()),
+							VpcPrefixID: cutil.GetPtr(crossTenantVpcPrefixSt1.ID.String()),
 						},
 					},
 				},
@@ -1974,12 +1974,12 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				respCode: http.StatusCreated,
 			},
 			expectedControllerVpcIDs: map[string]uuid.UUID{
-				vpc9.ID.String():          *vpc9.ControllerVpcID,
-				foreignVpcSt1.ID.String(): *foreignVpcSt1.ControllerVpcID,
+				vpc9.ID.String():              *vpc9.ControllerVpcID,
+				crossTenantVpcSt1.ID.String(): *crossTenantVpcSt1.ControllerVpcID,
 			},
 			check: func(t *testing.T) {
 				instances, _, err := cdbm.NewInstanceDAO(dbSession).GetAll(ctx, nil, cdbm.InstanceFilterInput{
-					Names:     []string{"ForeignVpcAttachmentAllowed"},
+					Names:     []string{"CrossTenantVpcAttachmentAllowed"},
 					TenantIDs: []uuid.UUID{tn1.ID},
 				}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 				require.NoError(t, err)
@@ -1989,18 +1989,18 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 				require.NoError(t, err)
 				require.Len(t, interfaces, 3)
-				foundForeignVpc := false
-				foundForeignVpcPrefix := false
+				foundCrossTenantVpc := false
+				foundCrossTenantVpcPrefix := false
 				for _, ifc := range interfaces {
-					if ifc.VpcID != nil && *ifc.VpcID == foreignVpcSt1.ID {
-						foundForeignVpc = true
+					if ifc.VpcID != nil && *ifc.VpcID == crossTenantVpcSt1.ID {
+						foundCrossTenantVpc = true
 					}
-					if ifc.VpcPrefixID != nil && *ifc.VpcPrefixID == foreignVpcPrefixSt1.ID {
-						foundForeignVpcPrefix = true
+					if ifc.VpcPrefixID != nil && *ifc.VpcPrefixID == crossTenantVpcPrefixSt1.ID {
+						foundCrossTenantVpcPrefix = true
 					}
 				}
-				assert.True(t, foundForeignVpc)
-				assert.True(t, foundForeignVpcPrefix)
+				assert.True(t, foundCrossTenantVpc)
+				assert.True(t, foundCrossTenantVpcPrefix)
 			},
 		},
 		{
@@ -2016,7 +2016,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 					TenantID:          tn1.ID.String(),
 					InstanceTypeID:    cutil.GetPtr(istCrossTenantVpc.ID.String()),
 					VpcID:             vpc9.ID.String(),
-					SecondaryVpcIDs:   []string{foreignVpcSt1.ID.String()},
+					SecondaryVpcIDs:   []string{crossTenantVpcSt1.ID.String()},
 					OperatingSystemID: cutil.GetPtr(os1.ID.String()),
 					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
 						{
@@ -2025,7 +2025,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 							IsPhysical: true,
 						},
 						{
-							VpcID:      cutil.GetPtr(foreignVpcSt1.ID.String()),
+							VpcID:      cutil.GetPtr(crossTenantVpcSt1.ID.String()),
 							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
 						},
 					},
@@ -5063,16 +5063,16 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	assert.NotNil(t, testInstanceBuildMachineInstanceType(t, dbSession, mcVpcSelectionPreserve, ist4))
 	instVpcSelectionPreserve := testInstanceBuildInstance(t, dbSession, "test-instance-vpc-selection-preserve", tn1.ID, ip.ID, st3.ID, &ist4.ID, vpcSelection.ID, cutil.GetPtr(mcVpcSelectionPreserve.ID), &os2.ID, os2.IpxeScript, cdbm.InstanceStatusReady)
 	assert.NotNil(t, instVpcSelectionPreserve)
-	foreignVpcUpdateA := testInstanceBuildVPC(t, dbSession, "test-foreign-vpc-update-a", ip, tn2, st3, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusReady, tnu2)
-	assert.NotNil(t, foreignVpcUpdateA)
-	foreignVpcUpdateB := testInstanceBuildVPC(t, dbSession, "test-foreign-vpc-update-b", ip, tn2, st3, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusReady, tnu2)
-	assert.NotNil(t, foreignVpcUpdateB)
-	foreignVpcUpdatePending := testInstanceBuildVPC(t, dbSession, "test-foreign-vpc-update-pending", ip, tn2, st3, nil, nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusPending, tnu2)
-	assert.NotNil(t, foreignVpcUpdatePending)
+	crossTenantVpcUpdateA := testInstanceBuildVPC(t, dbSession, "test-cross-tenant-vpc-update-a", ip, tn2, st3, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusReady, tnu2)
+	assert.NotNil(t, crossTenantVpcUpdateA)
+	crossTenantVpcUpdateB := testInstanceBuildVPC(t, dbSession, "test-cross-tenant-vpc-update-b", ip, tn2, st3, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusReady, tnu2)
+	assert.NotNil(t, crossTenantVpcUpdateB)
+	crossTenantVpcUpdatePending := testInstanceBuildVPC(t, dbSession, "test-cross-tenant-vpc-update-pending", ip, tn2, st3, nil, nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusPending, tnu2)
+	assert.NotNil(t, crossTenantVpcUpdatePending)
 
-	// buildCrossTenantVpcUpdateInstance returns the Instance and, when foreignVpc
-	// is set, the ID of its foreign VPC Interface.
-	buildCrossTenantVpcUpdateInstance := func(name string, foreignVpc *cdbm.Vpc) (*cdbm.Instance, uuid.UUID) {
+	// buildCrossTenantVpcUpdateInstance returns the Instance and, when crossTenantVpc
+	// is set, the ID of its cross-Tenant VPC Interface.
+	buildCrossTenantVpcUpdateInstance := func(name string, crossTenantVpc *cdbm.Vpc) (*cdbm.Instance, uuid.UUID) {
 		machine := testInstanceBuildMachine(t, dbSession, ip.ID, st3.ID, cutil.GetPtr(false), nil)
 		assert.NotNil(t, testInstanceBuildMachineInstanceType(t, dbSession, machine, ist4))
 		instance := testInstanceBuildInstance(t, dbSession, name, tn1.ID, ip.ID, st3.ID, &ist4.ID, vpcSelection.ID, cutil.GetPtr(machine.ID), &os2.ID, os2.IpxeScript, cdbm.InstanceStatusReady)
@@ -5085,23 +5085,23 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			CreatedBy:       tnu1.ID,
 		})
 		require.NoError(t, err)
-		if foreignVpc == nil {
+		if crossTenantVpc == nil {
 			return instance, uuid.Nil
 		}
-		foreignIfc, err := cdbm.NewInterfaceDAO(dbSession).Create(ctx, nil, cdbm.InterfaceCreateInput{
+		crossTenantIfc, err := cdbm.NewInterfaceDAO(dbSession).Create(ctx, nil, cdbm.InterfaceCreateInput{
 			InstanceID:      instance.ID,
-			VpcID:           &foreignVpc.ID,
+			VpcID:           &crossTenantVpc.ID,
 			VpcIPFamilyMode: cutil.GetPtr(cdbm.InterfaceVpcIPFamilyModeIPv4Only),
 			Status:          cdbm.InterfaceStatusReady,
 			CreatedBy:       tnu1.ID,
 		})
 		require.NoError(t, err)
-		return instance, foreignIfc.ID
+		return instance, crossTenantIfc.ID
 	}
-	instCrossTenantUnchanged, foreignIfcUnchangedID := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-unchanged", foreignVpcUpdateA)
-	instCrossTenantRemove, foreignIfcRemoveID := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-remove", foreignVpcUpdateA)
+	instCrossTenantUnchanged, _ := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-unchanged", crossTenantVpcUpdateA)
+	instCrossTenantRemove, crossTenantIfcRemoveID := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-remove", crossTenantVpcUpdateA)
 	instCrossTenantAdd, _ := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-add", nil)
-	instCrossTenantRetarget, _ := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-retarget", foreignVpcUpdateA)
+	instCrossTenantRetarget, _ := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-retarget", crossTenantVpcUpdateA)
 
 	vpcSelectionIPBlock := common.TestBuildVpcPrefixIPBlock(t, dbSession, "testipb-vpc-selection-update", st3, ip, &tn1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.181.0.0", 24, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, tnu1)
 	assert.NotNil(t, vpcSelectionIPBlock)
@@ -7356,7 +7356,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			verifySiteControllerRequest: true,
 		},
 		{
-			name: "unrelated update preserves a foreign VPC attachment after capability revocation",
+			name: "unrelated update preserves a cross-Tenant VPC attachment after capability revocation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -7374,7 +7374,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "unchanged foreign Interface replacement succeeds after capability revocation",
+			name: "unchanged cross-Tenant Interface replacement fails after capability revocation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -7383,7 +7383,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			},
 			args: args{
 				reqData: &model.APIInstanceUpdateRequest{
-					SecondaryVpcIDs: []string{foreignVpcUpdateA.ID.String()},
+					SecondaryVpcIDs: []string{crossTenantVpcUpdateA.ID.String()},
 					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
 						{
 							VpcID:      cutil.GetPtr(vpcSelection.ID.String()),
@@ -7391,7 +7391,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 							IsPhysical: true,
 						},
 						{
-							VpcID:      cutil.GetPtr(foreignVpcUpdateA.ID.String()),
+							VpcID:      cutil.GetPtr(crossTenantVpcUpdateA.ID.String()),
 							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
 						},
 					},
@@ -7399,15 +7399,12 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				reqInstance: instCrossTenantUnchanged.ID.String(),
 				reqOrg:      tnOrg1,
 				reqUser:     tnu1,
-				respCode:    http.StatusOK,
-				ethernetReconciliation: &ethernetReconciliationExpectation{
-					rowCount: 2,
-					readyIDs: []uuid.UUID{foreignIfcUnchangedID},
-				},
+				respCode:    http.StatusForbidden,
+				respMessage: cutil.GetPtr("Tenant does not have targetedInstanceCreation capability enabled"),
 			},
 		},
 		{
-			name: "foreign Interface removal succeeds after capability revocation",
+			name: "cross-Tenant Interface removal succeeds after capability revocation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -7430,12 +7427,12 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				respCode:    http.StatusOK,
 				ethernetReconciliation: &ethernetReconciliationExpectation{
 					rowCount:    2,
-					deletingIDs: []uuid.UUID{foreignIfcRemoveID},
+					deletingIDs: []uuid.UUID{crossTenantIfcRemoveID},
 				},
 			},
 		},
 		{
-			name: "adding a foreign Interface fails after capability revocation",
+			name: "adding a cross-Tenant Interface fails after capability revocation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -7444,7 +7441,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			},
 			args: args{
 				reqData: &model.APIInstanceUpdateRequest{
-					SecondaryVpcIDs: []string{foreignVpcUpdateA.ID.String()},
+					SecondaryVpcIDs: []string{crossTenantVpcUpdateA.ID.String()},
 					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
 						{
 							VpcID:      cutil.GetPtr(vpcSelection.ID.String()),
@@ -7452,7 +7449,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 							IsPhysical: true,
 						},
 						{
-							VpcID:      cutil.GetPtr(foreignVpcUpdateA.ID.String()),
+							VpcID:      cutil.GetPtr(crossTenantVpcUpdateA.ID.String()),
 							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
 						},
 					},
@@ -7465,7 +7462,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "new foreign VPC state is not revealed after capability revocation",
+			name: "new cross-Tenant VPC state is not revealed after capability revocation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -7474,7 +7471,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			},
 			args: args{
 				reqData: &model.APIInstanceUpdateRequest{
-					SecondaryVpcIDs: []string{foreignVpcUpdatePending.ID.String()},
+					SecondaryVpcIDs: []string{crossTenantVpcUpdatePending.ID.String()},
 					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
 						{
 							VpcID:      cutil.GetPtr(vpcSelection.ID.String()),
@@ -7482,7 +7479,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 							IsPhysical: true,
 						},
 						{
-							VpcID:      cutil.GetPtr(foreignVpcUpdatePending.ID.String()),
+							VpcID:      cutil.GetPtr(crossTenantVpcUpdatePending.ID.String()),
 							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
 						},
 					},
@@ -7495,7 +7492,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "retargeting a foreign Interface fails after capability revocation",
+			name: "retargeting a cross-Tenant Interface fails after capability revocation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -7504,7 +7501,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			},
 			args: args{
 				reqData: &model.APIInstanceUpdateRequest{
-					SecondaryVpcIDs: []string{foreignVpcUpdateB.ID.String()},
+					SecondaryVpcIDs: []string{crossTenantVpcUpdateB.ID.String()},
 					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
 						{
 							VpcID:      cutil.GetPtr(vpcSelection.ID.String()),
@@ -7512,7 +7509,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 							IsPhysical: true,
 						},
 						{
-							VpcID:      cutil.GetPtr(foreignVpcUpdateB.ID.String()),
+							VpcID:      cutil.GetPtr(crossTenantVpcUpdateB.ID.String()),
 							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
 						},
 					},

@@ -1631,21 +1631,6 @@ func TenantHasTargetedInstanceCreation(ctx context.Context, tx *cdb.Tx, dbSessio
 	return cdbm.TenantHasTargetedInstanceCreation(ctx, tx, dbSession, tenant, scope)
 }
 
-// AuthorizeForeignVpcAttachment returns an error unless the Tenant has the
-// TargetedInstanceCreation capability at the Site, which also authorizes
-// attaching Instance Interfaces to another Tenant's VPC or VPC Prefix.
-func AuthorizeForeignVpcAttachment(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session, tenant *cdbm.Tenant, siteID uuid.UUID) *cutil.APIError {
-	enabled, err := TenantHasTargetedInstanceCreation(ctx, nil, dbSession, tenant, &TenantPrivilegeScope{SiteID: &siteID})
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to resolve targetedInstanceCreation capability for cross-Tenant VPC attachment")
-		return cutil.NewAPIError(http.StatusInternalServerError, "Failed to resolve targetedInstanceCreation capability, DB error", nil)
-	}
-	if !enabled {
-		return cutil.NewAPIError(http.StatusForbidden, "Tenant does not have targetedInstanceCreation capability enabled", nil)
-	}
-	return nil
-}
-
 // TenantHasSiteAccess reports whether the Tenant has an Allocation or effective TargetedInstanceCreation on the Site.
 func TenantHasSiteAccess(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, siteID uuid.UUID) (bool, error) {
 	return cdbm.TenantHasSiteAccess(ctx, tx, dbSession, tenant, siteID)

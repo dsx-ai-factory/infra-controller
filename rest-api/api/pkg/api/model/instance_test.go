@@ -528,47 +528,19 @@ func TestAPIInstanceUpdateRequest_PowerProfileJSON(t *testing.T) {
 	}
 }
 
-func TestAPIInstanceCreateRequest_IntroducesForeignVpcAttachment(t *testing.T) {
+func TestHasNewCrossTenantVpc(t *testing.T) {
 	tenantID := uuid.New()
-	foreignTenantID := uuid.New()
+	otherTenantID := uuid.New()
 	localVpcID := uuid.New()
-	foreignVpcID := uuid.New()
-	foreignPrefixID := uuid.New()
+	otherVpcID := uuid.New()
+	otherPrefixID := uuid.New()
 
 	localVpcs := map[uuid.UUID]*cdbm.Vpc{localVpcID: {ID: localVpcID, TenantID: tenantID}}
-	foreignVpcs := map[uuid.UUID]*cdbm.Vpc{foreignVpcID: {ID: foreignVpcID, TenantID: foreignTenantID}}
-	foreignPrefixes := map[uuid.UUID]*cdbm.VpcPrefix{foreignPrefixID: {ID: foreignPrefixID, TenantID: foreignTenantID}}
-
-	tests := []struct {
-		name        string
-		vpcs        map[uuid.UUID]*cdbm.Vpc
-		vpcPrefixes map[uuid.UUID]*cdbm.VpcPrefix
-		want        bool
-	}{
-		{name: "same-Tenant selector", vpcs: localVpcs},
-		{name: "foreign direct VPC", vpcs: foreignVpcs, want: true},
-		{name: "foreign VPC Prefix", vpcs: localVpcs, vpcPrefixes: foreignPrefixes, want: true},
-	}
-
-	request := APIInstanceCreateRequest{}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, request.IntroducesForeignVpcAttachment(tenantID, tc.vpcs, tc.vpcPrefixes))
-		})
-	}
-}
-
-func TestAPIInstanceUpdateRequest_SelectsNewForeignVpc(t *testing.T) {
-	tenantID := uuid.New()
-	foreignTenantID := uuid.New()
-	foreignVpcID := uuid.New()
-	foreignPrefixID := uuid.New()
-
-	foreignVpcs := map[uuid.UUID]*cdbm.Vpc{foreignVpcID: {ID: foreignVpcID, TenantID: foreignTenantID}}
-	foreignPrefixes := map[uuid.UUID]*cdbm.VpcPrefix{foreignPrefixID: {ID: foreignPrefixID, TenantID: foreignTenantID}}
-	attachedVpc := cdbm.Interface{VpcID: &foreignVpcID, Status: cdbm.InterfaceStatusReady}
-	deletingVpc := cdbm.Interface{VpcID: &foreignVpcID, Status: cdbm.InterfaceStatusDeleting}
-	attachedPrefix := cdbm.Interface{VpcPrefixID: &foreignPrefixID, Status: cdbm.InterfaceStatusReady}
+	otherVpcs := map[uuid.UUID]*cdbm.Vpc{otherVpcID: {ID: otherVpcID, TenantID: otherTenantID}}
+	otherPrefixes := map[uuid.UUID]*cdbm.VpcPrefix{otherPrefixID: {ID: otherPrefixID, TenantID: otherTenantID}}
+	attachedVpc := cdbm.Interface{VpcID: &otherVpcID, Status: cdbm.InterfaceStatusReady}
+	deletingVpc := cdbm.Interface{VpcID: &otherVpcID, Status: cdbm.InterfaceStatusDeleting}
+	attachedPrefix := cdbm.Interface{VpcPrefixID: &otherPrefixID, Status: cdbm.InterfaceStatusReady}
 
 	tests := []struct {
 		name        string
@@ -577,26 +549,28 @@ func TestAPIInstanceUpdateRequest_SelectsNewForeignVpc(t *testing.T) {
 		existing    []cdbm.Interface
 		want        bool
 	}{
-		{name: "foreign VPC already attached", vpcs: foreignVpcs, existing: []cdbm.Interface{attachedVpc}},
-		{name: "foreign VPC Prefix already attached", vpcPrefixes: foreignPrefixes, existing: []cdbm.Interface{attachedPrefix}},
-		{name: "new foreign VPC", vpcs: foreignVpcs, existing: []cdbm.Interface{attachedPrefix}, want: true},
-		{name: "Deleting Interface does not count as attached", vpcs: foreignVpcs, existing: []cdbm.Interface{deletingVpc}, want: true},
+		{name: "same-Tenant selector", vpcs: localVpcs},
+		{name: "other Tenant's VPC", vpcs: otherVpcs, want: true},
+		{name: "other Tenant's VPC Prefix", vpcs: localVpcs, vpcPrefixes: otherPrefixes, want: true},
+		{name: "other Tenant's VPC already attached", vpcs: otherVpcs, existing: []cdbm.Interface{attachedVpc}},
+		{name: "other Tenant's VPC Prefix already attached", vpcPrefixes: otherPrefixes, existing: []cdbm.Interface{attachedPrefix}},
+		{name: "attached VPC Prefix does not cover a new VPC", vpcs: otherVpcs, existing: []cdbm.Interface{attachedPrefix}, want: true},
+		{name: "Deleting Interface does not count as attached", vpcs: otherVpcs, existing: []cdbm.Interface{deletingVpc}, want: true},
 	}
 
-	request := APIInstanceUpdateRequest{}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, request.SelectsNewForeignVpc(tenantID, tc.vpcs, tc.vpcPrefixes, tc.existing))
+			assert.Equal(t, tc.want, HasNewCrossTenantVpc(tenantID, tc.vpcs, tc.vpcPrefixes, tc.existing))
 		})
 	}
 }
 
-func TestAPIInstanceUpdateRequest_IntroducesForeignVpcAttachment(t *testing.T) {
+func TestHasNewCrossTenantAttachment(t *testing.T) {
 	tenantID := uuid.New()
-	foreignTenantID := uuid.New()
+	crossTenantTenantID := uuid.New()
 	localVpcID := uuid.New()
-	foreignVpcID := uuid.New()
-	otherForeignVpcID := uuid.New()
+	crossTenantVpcID := uuid.New()
+	otherCrossTenantVpcID := uuid.New()
 	device := "eth0"
 	deviceInstance := 1
 
@@ -606,20 +580,20 @@ func TestAPIInstanceUpdateRequest_IntroducesForeignVpcAttachment(t *testing.T) {
 		Device:         &device,
 		DeviceInstance: &deviceInstance,
 	}
-	foreign := cdbm.Interface{
-		VpcID:          &foreignVpcID,
-		Vpc:            &cdbm.Vpc{ID: foreignVpcID, TenantID: foreignTenantID},
+	crossTenant := cdbm.Interface{
+		VpcID:          &crossTenantVpcID,
+		Vpc:            &cdbm.Vpc{ID: crossTenantVpcID, TenantID: crossTenantTenantID},
 		Device:         &device,
 		DeviceInstance: &deviceInstance,
 	}
-	otherForeign := foreign
-	otherForeign.VpcID = &otherForeignVpcID
-	otherForeign.Vpc = &cdbm.Vpc{ID: otherForeignVpcID, TenantID: foreignTenantID}
-	changedForeign := foreign
+	otherCrossTenant := crossTenant
+	otherCrossTenant.VpcID = &otherCrossTenantVpcID
+	otherCrossTenant.Vpc = &cdbm.Vpc{ID: otherCrossTenantVpcID, TenantID: crossTenantTenantID}
+	changedCrossTenant := crossTenant
 	changedDeviceInstance := 2
-	changedForeign.DeviceInstance = &changedDeviceInstance
-	deletingForeign := foreign
-	deletingForeign.Status = cdbm.InterfaceStatusDeleting
+	changedCrossTenant.DeviceInstance = &changedDeviceInstance
+	deletingCrossTenant := crossTenant
+	deletingCrossTenant.Status = cdbm.InterfaceStatusDeleting
 
 	tests := []struct {
 		name      string
@@ -627,18 +601,17 @@ func TestAPIInstanceUpdateRequest_IntroducesForeignVpcAttachment(t *testing.T) {
 		existing  []cdbm.Interface
 		want      bool
 	}{
-		{name: "unchanged foreign identity", requested: []cdbm.Interface{foreign}, existing: []cdbm.Interface{foreign}},
-		{name: "remove foreign Interface", requested: []cdbm.Interface{local}, existing: []cdbm.Interface{foreign}},
-		{name: "retarget foreign Interface", requested: []cdbm.Interface{otherForeign}, existing: []cdbm.Interface{foreign}, want: true},
-		{name: "change foreign Interface identity", requested: []cdbm.Interface{changedForeign}, existing: []cdbm.Interface{foreign}, want: true},
-		{name: "duplicate foreign request needs one match each", requested: []cdbm.Interface{foreign, foreign}, existing: []cdbm.Interface{foreign}, want: true},
-		{name: "deleting Interface cannot be reused", requested: []cdbm.Interface{foreign}, existing: []cdbm.Interface{deletingForeign}, want: true},
+		{name: "unchanged cross-Tenant identity", requested: []cdbm.Interface{crossTenant}, existing: []cdbm.Interface{crossTenant}},
+		{name: "remove cross-Tenant Interface", requested: []cdbm.Interface{local}, existing: []cdbm.Interface{crossTenant}},
+		{name: "retarget cross-Tenant Interface", requested: []cdbm.Interface{otherCrossTenant}, existing: []cdbm.Interface{crossTenant}, want: true},
+		{name: "change cross-Tenant Interface identity", requested: []cdbm.Interface{changedCrossTenant}, existing: []cdbm.Interface{crossTenant}, want: true},
+		{name: "duplicate cross-Tenant request needs one match each", requested: []cdbm.Interface{crossTenant, crossTenant}, existing: []cdbm.Interface{crossTenant}, want: true},
+		{name: "deleting Interface cannot be reused", requested: []cdbm.Interface{crossTenant}, existing: []cdbm.Interface{deletingCrossTenant}, want: true},
 	}
 
-	request := APIInstanceUpdateRequest{}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := request.IntroducesForeignVpcAttachment(tenantID, tc.requested, tc.existing)
+			got, err := HasNewCrossTenantAttachment(tenantID, tc.requested, tc.existing)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
 		})
