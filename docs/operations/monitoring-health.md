@@ -167,6 +167,105 @@ match `[a-zA-Z_][a-zA-Z0-9_]*`. Names owned by the health service, such as
 Custom labels are exported as Prometheus labels and OTLP resource attributes,
 as a `labels` object in JSONL logs, and as a structured map in tracing events.
 
+#### Endpoint identity
+
+`endpoint_sources.identity` lists the fields that identify an endpoint, in
+preference order. The first field the endpoint's source reports wins:
+
+```toml
+[endpoint_sources]
+identity = ["hostname", "mac", "ip"]
+```
+
+Accepted values are `hostname`, `mac`, and `ip`. The list must be nonempty and
+must not repeat a value. The default, `["mac", "ip"]`, keys an endpoint by its BMC
+MAC, or by its IP when the source reports no MAC. An empty hostname counts as missing. Endpoints that
+report none of the listed fields are skipped with a warning; keep `ip` last to
+include every endpoint.
+
+The identity sets the endpoint key (`host:<hostname>`, the MAC, or
+`ip:<address>`), the `endpoint_key` series label, and the shard assignment of
+endpoints without a rack ID. Collector registry IDs and the `endpoint_mac` and
+`endpoint_ip` labels do not change. When a source reports a hostname, the
+endpoint also carries an `endpoint_hostname` label, exported the same way as
+static endpoint custom labels; `endpoint_hostname` is therefore reserved.
+Changing the list re-keys endpoints whose identity changes, so their collectors
+restart once under the new keys.
+
+| Source | `hostname` | `mac` | `ip` |
+| --- | --- | --- | --- |
+| Static endpoints | optional `hostname` field | `mac` | `ip` |
+| Cluster inventory | `hostname` | synthetic for IPv4 | `bmc_ip` |
+| SQL inventory | `hostname` column | `bmc_mac` column | `bmc_ip` column |
+| NICo API | not reported | BMC MAC | BMC IP |
+
+#### SQL inventory source
+
+`[endpoint_sources.sql]` reads BMC endpoints from a PostgreSQL query, such as
+one against a NetBox database:
+
+```toml
+[endpoint_sources]
+static_credentials_file = "/run/secrets/bmc/credentials.json"
+identity = ["hostname", "mac", "ip"]
+
+[endpoint_sources.nico_api]
+enabled = false
+
+[endpoint_sources.sql]
+database_url_file = "/run/secrets/inventory-db/url"
+credentials_profile = "bmc"
+query = """
+SELECT
+  d.name                AS hostname,
+  HOST(oob.address)     AS bmc_ip,
+  mac.mac_address::text AS bmc_mac,
+  r.name                AS rack_id,
+  d.serial              AS serial,
+  'giga_gb300'          AS server_type
+FROM dcim_device d
+JOIN ipam_ipaddress oob ON oob.id = d.oob_ip_id
+JOIN dcim_devicetype dt ON dt.id = d.device_type_id
+LEFT JOIN dcim_rack r ON r.id = d.rack_id
+LEFT JOIN dcim_interface i
+  ON i.id = oob.assigned_object_id
+ AND oob.assigned_object_type_id = (
+   SELECT id FROM django_content_type WHERE app_label = 'dcim' AND model = 'interface')
+LEFT JOIN dcim_macaddress mac ON mac.id = i.primary_mac_address_id
+WHERE d.site_id = (SELECT id FROM dcim_site WHERE slug = 'th-aif')
+  AND dt.slug = 'gb300-compute-tray'
+"""
+```
+
+| Key | Required | Default | Meaning |
+| --- | --- | --- | --- |
+| `database_url_file` | yes | none | File holding a PostgreSQL URL, such as `postgres://user:pass@host:5432/netbox?sslmode=require`. Surrounding whitespace is ignored. |
+| `query` | yes | none | Query returning one row per BMC. |
+| `credentials_profile` | yes | none | Profile in `static_credentials_file` used for every row; per-MAC overrides still apply. Requires `static_credentials_file`. |
+| `port` | no | none (HTTPS 443) | BMC port for rows without `bmc_port`. |
+| `query_timeout` | no | `30s` | Deadline for one read: URL file, connect, and query. Must be greater than zero and at most `5m`. |
+
+Every result column must be `text`; cast other types, for example with
+`HOST(inet)` or `::text`. `bmc_ip` is required. The optional `hostname`,
+`bmc_mac`, `bmc_port`, `rack_id`, and `serial` columns map onto the endpoint, and
+every other column becomes a series label. Label column names must match
+`[a-zA-Z_][a-zA-Z0-9_]*`, must not be reserved series labels, and are limited
+to 32. NULL and empty values count as missing.
+
+The query runs every `endpoint_discovery_interval` over a new connection, which
+is closed afterwards. The URL file is read on each run, so a rotated Secret
+takes effect without a restart; credential profile selection still requires
+one. Rows are streamed, so result size is not limited by a message size. A row
+with a missing or invalid `bmc_ip`, an invalid `bmc_mac` or `bmc_port`, or a
+label value over 1024 bytes is skipped with a warning. A non-text column, a
+missing `bmc_ip` column, an invalid label column, a connection or query error,
+or the timeout fails that discovery iteration. An unparsable URL is reported
+by file path, without the URL itself.
+
+Every SQL endpoint is monitored as a machine BMC, with `serial` as its machine
+serial. Every shard runs the same query and keeps the endpoints assigned to it,
+as with the other sources; do not filter by shard inside the query.
+
 Collector defaults from the example config:
 
 | Area | Parameter | Example value | Meaning |

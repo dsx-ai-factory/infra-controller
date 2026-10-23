@@ -42,6 +42,7 @@ const CARBIDE_API_CONFIG_ALIAS: &str = "carbide_api";
 /// with one of these names would collide with the sink-owned value.
 const RESERVED_ENDPOINT_LABELS: &[&str] = &[
     "bmc_endpoint",
+    "endpoint_hostname",
     "bmc_ip",
     "collector_type",
     "component_type",
@@ -68,6 +69,22 @@ const RESERVED_ENDPOINT_LABELS: &[&str] = &[
     "switch_tray_index",
     "system_uuid",
 ];
+
+/// Why `name` cannot be an endpoint label, or None when it can.
+pub(crate) fn endpoint_label_name_problem(name: &str) -> Option<&'static str> {
+    let mut chars = name.chars();
+    let valid_start = chars
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_');
+    let valid_rest = chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
+    if !valid_start || !valid_rest {
+        return Some("must match [a-zA-Z_][a-zA-Z0-9_]*");
+    }
+    if RESERVED_ENDPOINT_LABELS.contains(&name) {
+        return Some("is reserved");
+    }
+    None
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -163,6 +180,13 @@ pub struct AttributesConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EndpointSourcesConfig {
+    /// Fields that identify an endpoint, in preference order; the first one the
+    /// endpoint's source reports wins. The identity sets the endpoint key, the
+    /// `endpoint_key` label, and the shard hash of endpoints without a rack.
+    /// Endpoints with none of the fields are skipped. Must be nonempty without
+    /// repeats. Default: `["mac", "ip"]`. Changing it re-keys every endpoint.
+    pub identity: Vec<IdentityField>,
+
     /// NICo API endpoint discovery settings.
     #[serde(rename = "nico_api", alias = "carbide_api")]
     pub carbide_api: Configurable<CarbideApiConnectionConfig>,
@@ -187,16 +211,34 @@ pub struct EndpointSourcesConfig {
 
     /// Cluster inventory file source (file or cluster manager JSON RPC)
     pub cluster: Configurable<ClusterEndpointSourceConfig>,
+
+    /// Inventory read from a PostgreSQL query.
+    pub sql: Configurable<SqlEndpointSourceConfig>,
+}
+
+/// An endpoint field that can identify it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IdentityField {
+    /// The BMC hostname. Static, cluster, and SQL sources can report it; the
+    /// NICo API source does not.
+    Hostname,
+    /// The BMC MAC address.
+    Mac,
+    /// The BMC IP address, which every endpoint has.
+    Ip,
 }
 
 impl Default for EndpointSourcesConfig {
     fn default() -> Self {
         Self {
+            identity: vec![IdentityField::Mac, IdentityField::Ip],
             carbide_api: Configurable::Enabled(CarbideApiConnectionConfig::default()),
             static_credentials_file: None,
             static_bmc_endpoints: Vec::new(),
             static_switch_host_endpoints: Vec::new(),
             cluster: Configurable::Disabled,
+            sql: Configurable::Disabled,
         }
     }
 }
@@ -284,11 +326,90 @@ impl std::fmt::Debug for ClusterEndpointSourceConfig {
     }
 }
 
+const MAX_SQL_QUERY_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Reads BMC endpoints from a PostgreSQL query, re-run every discovery iteration.
+///
+/// Every result column must be `text`. `bmc_ip` is required; `bmc_mac`,
+/// `bmc_port`, `rack_id`, and `serial` are optional; every other column becomes
+/// an endpoint label. Rows with a NULL or invalid `bmc_ip` are skipped.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SqlEndpointSourceConfig {
+    /// File holding a PostgreSQL connection URL, re-read every iteration. Required.
+    #[serde(default)]
+    pub database_url_file: PathBuf,
+
+    /// Query returning one row per BMC. Required.
+    #[serde(default)]
+    pub query: String,
+
+    /// Profile in `endpoint_sources.static_credentials_file` for every BMC. Required.
+    #[serde(default)]
+    pub credentials_profile: String,
+
+    /// BMC port used when a row has no `bmc_port`. None uses 443/HTTPS.
+    #[serde(default)]
+    pub port: Option<u16>,
+
+    /// Deadline for one inventory read: URL file, connect, and query. Default: 30s; max 5m.
+    #[serde(default = "default_sql_query_timeout", with = "humantime_serde")]
+    pub query_timeout: Duration,
+}
+
+const fn default_sql_query_timeout() -> Duration {
+    Duration::from_secs(30)
+}
+
+impl Default for SqlEndpointSourceConfig {
+    fn default() -> Self {
+        Self {
+            database_url_file: PathBuf::default(),
+            query: String::new(),
+            credentials_profile: String::new(),
+            port: None,
+            query_timeout: default_sql_query_timeout(),
+        }
+    }
+}
+
+impl SqlEndpointSourceConfig {
+    fn validate(&self, static_credentials_file: Option<&Path>) -> Result<(), String> {
+        const PATH: &str = "endpoint_sources.sql";
+
+        if self.database_url_file.as_os_str().is_empty() {
+            return Err(format!("{PATH}.database_url_file is required"));
+        }
+        if self.query.trim().is_empty() {
+            return Err(format!("{PATH}.query is required"));
+        }
+        if self.credentials_profile.is_empty() {
+            return Err(format!("{PATH}.credentials_profile is required"));
+        }
+        if static_credentials_file.is_none() {
+            return Err(format!(
+                "{PATH} requires endpoint_sources.static_credentials_file"
+            ));
+        }
+        if self.query_timeout.is_zero() || self.query_timeout > MAX_SQL_QUERY_TIMEOUT {
+            return Err(format!(
+                "{PATH}.query_timeout must be greater than zero and at most {}",
+                humantime::format_duration(MAX_SQL_QUERY_TIMEOUT)
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A single static BMC endpoint configuration.
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StaticBmcEndpoint {
     pub ip: IpAddr,
+
+    /// Optional BMC hostname, used when `endpoint_sources.identity` selects it.
+    #[serde(default)]
+    pub hostname: Option<String>,
 
     /// Optional Redfish or NVUE REST HTTPS port, depending on endpoint role.
     #[serde(default)]
@@ -428,19 +549,9 @@ impl StaticBmcEndpoint {
         }
 
         for (name, value) in &self.labels {
-            let mut chars = name.chars();
-            let valid_start = chars
-                .next()
-                .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_');
-            let valid_rest = chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
-            if !valid_start || !valid_rest {
+            if let Some(problem) = endpoint_label_name_problem(name) {
                 return Err(format!(
-                    "{config_path}[{index}].labels key {name:?} must match [a-zA-Z_][a-zA-Z0-9_]*"
-                ));
-            }
-            if RESERVED_ENDPOINT_LABELS.contains(&name.as_str()) {
-                return Err(format!(
-                    "{config_path}[{index}].labels key {name:?} is reserved"
+                    "{config_path}[{index}].labels key {name:?} {problem}"
                 ));
             }
             if value.len() > 1024 {
@@ -458,6 +569,16 @@ impl EndpointSourcesConfig {
     fn validate(&self) -> Result<(), String> {
         const BMC_ENDPOINTS_PATH: &str = "endpoint_sources.static_bmc_endpoints";
         const SWITCH_HOST_ENDPOINTS_PATH: &str = "endpoint_sources.static_switch_host_endpoints";
+
+        if self.identity.is_empty() {
+            return Err("endpoint_sources.identity must not be empty".into());
+        }
+        let mut identity_fields = HashSet::new();
+        for field in &self.identity {
+            if !identity_fields.insert(field) {
+                return Err(format!("endpoint_sources.identity repeats {field:?}"));
+            }
+        }
 
         if self
             .static_credentials_file
@@ -528,6 +649,10 @@ impl EndpointSourcesConfig {
 
         if let Configurable::Enabled(cluster) = &self.cluster {
             cluster.validate()?;
+        }
+
+        if let Configurable::Enabled(sql) = &self.sql {
+            sql.validate(self.static_credentials_file.as_deref())?;
         }
 
         Ok(())
@@ -3136,6 +3261,7 @@ mod tests {
 
     fn static_endpoint() -> StaticBmcEndpoint {
         StaticBmcEndpoint {
+            hostname: None,
             ip: "192.0.2.1".parse().unwrap(),
             port: None,
             mac: "00:11:22:33:44:55".to_string(),
@@ -3550,6 +3676,35 @@ mac = "00:11:22:33:44:55"
                 )
             );
         }
+    }
+
+    #[test]
+    fn identity_and_sql_source_validation() {
+        const CREDENTIALS: &str = "static_credentials_file = \"credentials.json\"";
+        const SQL: &str = "[endpoint_sources.sql]\ndatabase_url_file = \"/run/db-url\"\nquery = \"SELECT '10.0.0.1' AS bmc_ip\"\ncredentials_profile = \"bmc\"";
+        scenarios!(run = |(global, sql, extra): (&str, &str, &str)| -> Result<(), ()> {
+            let input = format!("[endpoint_sources]\n{global}\n{sql}\n{extra}");
+            let config: Config = Figment::new().merge(Toml::string(&input)).extract().map_err(|_| ())?;
+            config.endpoint_sources.validate().map_err(|_| ())
+        };
+            "identity" {
+                (r#"identity = ["hostname", "mac", "ip"]"#, "", "") => Yields(()),
+                ("identity = []", "", "") => Fails,
+                (r#"identity = ["mac", "mac"]"#, "", "") => Fails,
+                (r#"identity = ["serial"]"#, "", "") => Fails,
+            }
+            "sql source" {
+                (CREDENTIALS, SQL, "") => Yields(()),
+                (CREDENTIALS, SQL, "query_timeout = \"5m\"") => Yields(()),
+                ("", SQL, "") => Fails,
+                (CREDENTIALS, SQL, "query_timeout = \"0s\"") => Fails,
+                (CREDENTIALS, SQL, "query_timeout = \"6m\"") => Fails,
+                (CREDENTIALS, SQL, "unknown = true") => Fails,
+                (CREDENTIALS, "[endpoint_sources.sql]\ndatabase_url_file = \"/run/db-url\"\ncredentials_profile = \"bmc\"", "") => Fails,
+                (CREDENTIALS, "[endpoint_sources.sql]\nquery = \"SELECT 1\"\ncredentials_profile = \"bmc\"", "") => Fails,
+                (CREDENTIALS, "[endpoint_sources.sql]\ndatabase_url_file = \"/run/db-url\"\nquery = \"SELECT 1\"", "") => Fails,
+            }
+        );
     }
 
     #[test]
