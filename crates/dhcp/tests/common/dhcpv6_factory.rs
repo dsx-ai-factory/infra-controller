@@ -110,6 +110,15 @@ impl DHCPv6Factory {
         vec![0, 4, 0, 1, 2, 3]
     }
 
+    /// Build a SOLICIT that requests an allocator candidate explicitly.
+    pub(crate) fn solicit_with_address_hint(idx: u8, address: Ipv6Addr, duid: Vec<u8>) -> Vec<u8> {
+        let mut message =
+            Self::client_message_with_address(idx, MessageType::Solicit, address, None);
+        message.opts_mut().remove(OptionCode::ClientId);
+        message.opts_mut().insert(DhcpOption::ClientId(duid));
+        Self::relay_wrap(message, true)
+    }
+
     /// Build a stateful SOLICIT with IA_NA.
     pub(crate) fn solicit(idx: u8) -> Vec<u8> {
         Self::relay_wrap(Self::stateful_solicit_message(idx), true)
@@ -343,6 +352,21 @@ impl DHCPv6Factory {
         )
     }
 
+    /// Build a REQUEST that passes discovery but fails Kea's mandatory Server-ID check.
+    pub(crate) fn request_without_server_id(idx: u8) -> Vec<u8> {
+        Self::relay_wrap(
+            Self::client_message(
+                idx,
+                MessageType::Request,
+                Self::duid_ll(idx),
+                None,
+                true,
+                false,
+            ),
+            true,
+        )
+    }
+
     /// Build a REQUEST without relay option 79.
     pub(crate) fn request_without_relay_option79(
         idx: u8,
@@ -374,6 +398,17 @@ impl DHCPv6Factory {
             ),
             relay_option79,
         )
+    }
+
+    /// Build a REQUEST with IA_NA and no IAADDR allocation hint.
+    pub(crate) fn request_without_address_hint(
+        idx: u8,
+        server_id: Vec<u8>,
+        duid: Vec<u8>,
+    ) -> Vec<u8> {
+        let mut message = Self::client_message(idx, MessageType::Request, duid, None, true, false);
+        message.opts_mut().insert(DhcpOption::ServerId(server_id));
+        Self::relay_wrap(message, true)
     }
 
     /// Build a REQUEST carrying vendor-class option 16.
