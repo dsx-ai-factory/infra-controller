@@ -152,7 +152,7 @@ func TestReencryptTenantIdentitySecrets(t *testing.T) {
 	})
 }
 
-func TestJWKSKeyEncoding(t *testing.T) {
+func TestJwksDocumentForKeys(t *testing.T) {
 	const keyID = "fixture-key"
 	const keyUse = "sig"
 	scalar := make([]byte, p256CoordinateLen)
