@@ -535,10 +535,10 @@ async fn a_deployment_type_phase_requires_exactly_one_deployment() {
     }
 }
 
-/// A deployment phase read asks Kubernetes only for DPUs owned by the target
-/// deployment while retaining the per-resource ownership check.
+/// A deployment phase read fetches each requested DPU by name. Listing the
+/// collection would grow with the site's DPU count on every handler run.
 #[tokio::test]
-async fn a_deployment_type_phase_scopes_the_dpu_list_to_its_owner() {
+async fn a_deployment_type_phase_reads_requested_dpus_by_name() {
     let dpu = set_dpu_owner(
         dpu(
             Some("bf-bundle-abc"),
@@ -552,14 +552,12 @@ async fn a_deployment_type_phase_scopes_the_dpu_list_to_its_owner() {
         deployment_with_selector(Some("bf-bundle-abc"), true, DpuDeploymentType::Bf3Gb200);
     let mock = OutdatedDpuMock::with(dpu, deployment);
 
-    phase_for_deployment_type(mock.clone())
+    let phase = phase_for_deployment_type(mock.clone())
         .await
         .expect("deployment phase");
 
-    assert_eq!(
-        *mock.dpu_list_selectors.lock().unwrap(),
-        vec![Some(format!("{OWNED_BY_LABEL}={TEST_NS}_{DEPLOYMENT}"))]
-    );
+    assert_eq!(phase, Some(DpuPhase::Ready));
+    assert!(mock.dpu_list_selectors.lock().unwrap().is_empty());
 }
 
 /// Retrying a deployment migration removes a DPU owned by the source but
@@ -630,6 +628,7 @@ async fn deployment_migration_deletion_preserves_target_replacements() {
         .get(DPU_NAME)
         .expect("target replacement must be preserved");
     assert_eq!(replacement.metadata.uid.as_deref(), Some("target-uid"));
+    assert!(mock.dpu_list_selectors.lock().unwrap().is_empty());
 }
 
 /// Both provisioning sources, matching and drifted. A DPUDeployment declares

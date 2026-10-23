@@ -3870,19 +3870,13 @@ impl<R: DpuRepository + DpuDeploymentRepository, L: ResourceLabeler> DpfSdk<R, L
         }
 
         let expected_owner = dpu_deployment_owner_label_value(&self.namespace, &deployment_name);
-        let owner_selector = format!("{DPU_OWNED_BY_DEPLOYMENT_LABEL}={expected_owner}");
         let dpf_id = node_id_from_dpu_node_cr_name(node_name);
-        let mut dpus_by_name =
-            DpuRepository::list(&*self.repo, &self.namespace, Some(&owner_selector))
-                .await?
-                .into_iter()
-                .filter_map(|dpu| Some((dpu.metadata.name.clone()?, dpu)))
-                .collect::<HashMap<_, _>>();
         let mut phases = BTreeMap::new();
 
         for dpu_device_name in dpu_device_names {
             let cr_name = dpu_cr_name(dpu_device_name, dpf_id);
-            let Some(dpu) = dpus_by_name.remove(&cr_name) else {
+            let Some(dpu) = DpuRepository::get(&*self.repo, &cr_name, &self.namespace).await?
+            else {
                 return Ok(None);
             };
             let has_expected_owner = dpu
@@ -3941,15 +3935,11 @@ impl<R: DpuRepository + DpuDeploymentRepository, L: ResourceLabeler> DpfSdk<R, L
         let target_owner =
             dpu_deployment_owner_label_value(&self.namespace, &target_deployment_name);
         let dpf_id = node_id_from_dpu_node_cr_name(node_name);
-        let mut dpus_by_name = DpuRepository::list(&*self.repo, &self.namespace, None)
-            .await?
-            .into_iter()
-            .filter_map(|dpu| Some((dpu.metadata.name.clone()?, dpu)))
-            .collect::<HashMap<_, _>>();
 
         for dpu_device_name in dpu_device_names {
             let cr_name = dpu_cr_name(dpu_device_name, dpf_id);
-            let Some(dpu) = dpus_by_name.remove(&cr_name) else {
+            let Some(dpu) = DpuRepository::get(&*self.repo, &cr_name, &self.namespace).await?
+            else {
                 continue;
             };
             let owner = dpu
