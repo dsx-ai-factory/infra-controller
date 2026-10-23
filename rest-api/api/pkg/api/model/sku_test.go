@@ -1023,7 +1023,8 @@ func TestAPISku_MarshalJSON(t *testing.T) {
 			"infinibandDevices":null,
 			"tpm":null
 		},
-		"created":null
+		"created":null,
+		"updated":null
 	}`, string(encoded))
 }
 

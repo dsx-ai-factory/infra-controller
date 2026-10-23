@@ -115,6 +115,7 @@ pub(in crate::tests) mod tests {
         "id": "sku id",
         "description": "PowerEdge R760; 2xCPU; 8xGPU; 256 GiB",
         "created": "2025-01-22T04:33:27.950438037Z",
+        "updated": "2025-01-22T04:33:27.950438037Z",
         "machines_associated_count": 0,
         "components": {
           "chassis": {
@@ -172,6 +173,7 @@ pub(in crate::tests) mod tests {
   "id": "sku id",
   "description": "PowerEdge R750; 1xCPU; 1xGPU; 2 GiB; 6xIB",
   "created": "2025-01-24T21:51:12.465131195Z",
+  "updated": "2025-01-24T21:51:12.465131195Z",
   "machines_associated_count": 0,
   "components": {
     "chassis": {
@@ -413,8 +415,9 @@ pub(in crate::tests) mod tests {
         let mut actual_sku = db::sku::find(&mut txn, std::slice::from_ref(&expected_sku.id))
             .await?
             .remove(0);
-        // cheat the created timestamp
+        // cheat the created/updated timestamps (DB sets both to now())
         actual_sku.created = expected_sku.created;
+        actual_sku.updated = actual_sku.created;
 
         let actual_sku_json = serde_json::ser::to_string_pretty(&actual_sku)?;
 
@@ -519,9 +522,10 @@ pub(in crate::tests) mod tests {
         let expected_sku: Sku = serde_json::de::from_str::<rpc::forge::Sku>(SKU_DATA)?.into();
 
         let mut actual_sku = db::sku::generate_sku_from_machine(&pool, &machine_id).await?;
-        // cheat the created timestamp and id
+        // cheat the created/updated timestamps (DB sets both to now()) and id
         actual_sku.id = "sku id".to_string();
         actual_sku.created = expected_sku.created;
+        actual_sku.updated = actual_sku.created;
 
         let actual_sku_json: String = serde_json::ser::to_string_pretty(&actual_sku)?;
         tracing::info!(
@@ -2135,12 +2139,11 @@ pub(in crate::tests) mod tests {
         let replacement_sku_json = serde_json::ser::to_string_pretty(&replacement_sku)?;
         tracing::info!(replacement_sku_json, "replacment");
 
-        let expected_sku = Sku {
+        let mut expected_sku = Sku {
             schema_version: CURRENT_SKU_VERSION,
             components: replacement_sku.components,
             ..original_sku
         };
-        let expected_sku_json = serde_json::ser::to_string_pretty(&expected_sku)?;
 
         let returned_sku = db::sku::replace(&mut txn, &expected_sku).await?;
 
@@ -2148,9 +2151,11 @@ pub(in crate::tests) mod tests {
 
         let mut actual_sku = db::sku::find(&mut txn, &[sku_id]).await?.remove(0);
 
-        // cheat the created timestamp
+        // cheat the created timestamp; preserve the persisted replacement timestamp for comparison
         actual_sku.created = expected_sku.created;
+        expected_sku.updated = actual_sku.updated;
 
+        let expected_sku_json = serde_json::ser::to_string_pretty(&expected_sku)?;
         let actual_sku_json = serde_json::ser::to_string_pretty(&actual_sku)?;
 
         assert_eq!(actual_sku_json, returned_sku_json);
@@ -2227,6 +2232,68 @@ pub(in crate::tests) mod tests {
             .and_then(|status| status.verify_request_time)
             .expect("replacement should request SKU verification");
         assert_ne!(Some(verify_request_time), original_verify_request_time);
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn test_sku_updated_timestamp_advances_on_mutation(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        use rpc::forge::forge_server::Forge;
+
+        let env = create_test_env(pool.clone()).await;
+        let mut connection = pool.acquire().await?;
+        let (machine_id, _) = create_managed_host(&env).await.into();
+        let machine_id: MachineId = machine_id.into();
+
+        let original_sku =
+            db::sku::generate_sku_from_machine(connection.as_mut(), &machine_id).await?;
+        db::sku::create(&mut connection, &original_sku).await?;
+
+        let fetched = db::sku::find(&mut connection, std::slice::from_ref(&original_sku.id))
+            .await?
+            .pop()
+            .expect("created SKU should exist");
+        assert_eq!(fetched.created, fetched.updated);
+
+        // Advance time slightly and update metadata
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        db::sku::update_metadata(
+            &mut connection,
+            original_sku.id.clone(),
+            Some("updated description".to_string()),
+            None,
+        )
+        .await?;
+
+        let after_metadata = db::sku::find(&mut connection, std::slice::from_ref(&original_sku.id))
+            .await?
+            .pop()
+            .expect("SKU should exist after metadata update");
+        assert_eq!(after_metadata.description, "updated description");
+        assert!(after_metadata.updated > after_metadata.created);
+
+        // Advance time and replace SKU
+        let prior_updated = after_metadata.updated;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let mut replace_req = original_sku.clone();
+        replace_req.description = "replaced description".to_string();
+        let replaced_sku = db::sku::replace(&mut connection, &replace_req).await?;
+        assert_eq!(replaced_sku.description, "replaced description");
+        assert!(replaced_sku.updated > prior_updated);
+
+        // Verify across gRPC boundary
+        let rpc_res = env
+            .api
+            .find_skus_by_ids(tonic::Request::new(rpc::forge::SkusByIdsRequest {
+                ids: vec![original_sku.id],
+            }))
+            .await?
+            .into_inner();
+        let rpc_sku = &rpc_res.skus[0];
+        assert!(rpc_sku.created.is_some());
+        assert_eq!(rpc_sku.updated, Some(replaced_sku.updated.into()));
 
         Ok(())
     }

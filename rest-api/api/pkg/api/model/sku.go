@@ -35,6 +35,8 @@ type APISku struct {
 	Components *APISkuComponents `json:"components"`
 	// Created is the date and time the entity was created
 	Created *time.Time `json:"created"`
+	// Updated is the date and time the entity was last updated
+	Updated *time.Time `json:"updated"`
 }
 
 // APISkuCreateRequest is the POST /sku request body.
@@ -154,6 +156,10 @@ func NewAPISkuFromProto(sku *corev1.Sku, siteID string) *APISku {
 		created := sku.Created.AsTime()
 		response.Created = &created
 	}
+	if sku.Updated != nil {
+		updated := sku.Updated.AsTime()
+		response.Updated = &updated
+	}
 	return response
 }
 
@@ -164,6 +170,7 @@ func NewAPISkuFromCreateRequest(req APISkuCreateRequest, skuID, siteID string) *
 	if req.Description != nil {
 		description = *req.Description
 	}
+	now := time.Now().UTC()
 	return &APISku{
 		ID:                   skuID,
 		SiteID:               siteID,
@@ -172,7 +179,8 @@ func NewAPISkuFromCreateRequest(req APISkuCreateRequest, skuID, siteID string) *
 		DeviceType:           req.DeviceType,
 		AssociatedMachineIds: []string{},
 		Components:           NewAPISkuComponents(req.Components.ToProto()),
-		Created:              cutil.GetPtr(time.Now().UTC()), // best guess in absence of data from Core
+		Created:              cutil.GetPtr(now),
+		Updated:              cutil.GetPtr(now),
 	}
 }
 
@@ -190,6 +198,7 @@ func NewAPISku(dbSku *cdbm.SKU) *APISku {
 		DeviceType:           dbSku.DeviceType,
 		AssociatedMachineIds: dbSku.AssociatedMachineIds,
 		Created:              &dbSku.Created,
+		Updated:              &dbSku.Updated,
 	}
 
 	// Map SKU Components if available

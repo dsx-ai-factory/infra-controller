@@ -104,6 +104,9 @@ func (sk *SKU) ToProto() *corev1.Sku {
 	if !sk.Created.IsZero() {
 		proto.Created = timestamppb.New(sk.Created)
 	}
+	if !sk.Updated.IsZero() {
+		proto.Updated = timestamppb.New(sk.Updated)
+	}
 	if sk.Components != nil {
 		proto.Components = sk.Components.SkuComponents
 	}
@@ -149,6 +152,10 @@ func (sk *SKU) FromProto(proto *corev1.Sku, siteID uuid.UUID) {
 	sk.Created = time.Time{}
 	if proto.Created != nil && proto.Created.IsValid() {
 		sk.Created = proto.Created.AsTime().UTC().Round(time.Microsecond)
+	}
+	sk.Updated = time.Time{}
+	if proto.Updated != nil && proto.Updated.IsValid() {
+		sk.Updated = proto.Updated.AsTime().UTC().Round(time.Microsecond)
 	}
 	if proto.Components != nil {
 		sk.Components = &SkuComponents{SkuComponents: proto.Components}

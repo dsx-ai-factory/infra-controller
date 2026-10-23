@@ -8743,6 +8743,7 @@ message Sku {
   uint32 schema_version = 6;
   repeated common.MachineId associated_machine_ids = 7;
   optional string device_type = 8;
+  optional google.protobuf.Timestamp updated = 9;
 }
 
 message SkuMachinePair {

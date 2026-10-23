@@ -39,6 +39,8 @@ type Sku struct {
 	Components *SkuComponents `json:"components,omitempty"`
 	// ISO 8601 datetime when the SKU was created, using the Site-reported timestamp when available
 	Created *time.Time `json:"created,omitempty"`
+	// ISO 8601 datetime when the SKU was last updated, using the Site-reported timestamp when available
+	Updated NullableTime `json:"updated,omitempty"`
 }
 
 // NewSku instantiates a new Sku object
@@ -325,6 +327,49 @@ func (o *Sku) SetCreated(v time.Time) {
 	o.Created = &v
 }
 
+// GetUpdated returns the Updated field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *Sku) GetUpdated() time.Time {
+	if o == nil || IsNil(o.Updated.Get()) {
+		var ret time.Time
+		return ret
+	}
+	return *o.Updated.Get()
+}
+
+// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *Sku) GetUpdatedOk() (*time.Time, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.Updated.Get(), o.Updated.IsSet()
+}
+
+// HasUpdated returns a boolean if a field has been set.
+func (o *Sku) HasUpdated() bool {
+	if o != nil && o.Updated.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetUpdated gets a reference to the given NullableTime and assigns it to the Updated field.
+func (o *Sku) SetUpdated(v time.Time) {
+	o.Updated.Set(&v)
+}
+
+// SetUpdatedNil sets the value for Updated to be an explicit nil
+func (o *Sku) SetUpdatedNil() {
+	o.Updated.Set(nil)
+}
+
+// UnsetUpdated ensures that no value is present for Updated, not even an explicit nil
+func (o *Sku) UnsetUpdated() {
+	o.Updated.Unset()
+}
+
 func (o Sku) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -358,6 +403,9 @@ func (o Sku) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.Created) {
 		toSerialize["created"] = o.Created
+	}
+	if o.Updated.IsSet() {
+		toSerialize["updated"] = o.Updated.Get()
 	}
 	return toSerialize, nil
 }

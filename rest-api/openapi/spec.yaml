@@ -31884,6 +31884,7 @@ components:
               vendor: Supermicro
               model: SYS-420GP-TNR
           created: '2019-08-24T14:15:22Z'
+          updated: '2019-08-24T14:15:22Z'
       properties:
         id:
           type: string
@@ -31923,6 +31924,13 @@ components:
           type: string
           format: date-time
           description: ISO 8601 datetime when the SKU was created, using the Site-reported timestamp when available
+          readOnly: true
+        updated:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: ISO 8601 datetime when the SKU was last updated, using the Site-reported timestamp when available
           readOnly: true
     SkuCreateRequest:
       title: SkuCreateRequest

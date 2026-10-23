@@ -62,6 +62,7 @@ func TestSKU_ToProto(t *testing.T) {
 	siteID := uuid.New()
 	deviceType := "GPU"
 	created := time.Date(2025, time.January, 2, 3, 4, 5, 678_901_000, time.UTC)
+	updated := time.Date(2025, time.January, 2, 4, 5, 6, 123_456_000, time.UTC)
 
 	t.Run("populates proto from receiver", func(t *testing.T) {
 		sk := &SKU{
@@ -71,6 +72,7 @@ func TestSKU_ToProto(t *testing.T) {
 			SchemaVersion:        5,
 			DeviceType:           &deviceType,
 			Created:              created,
+			Updated:              updated,
 			Components:           &SkuComponents{SkuComponents: &corev1.SkuComponents{}},
 			AssociatedMachineIds: []string{"m-1", "m-2"},
 		}
@@ -82,6 +84,8 @@ func TestSKU_ToProto(t *testing.T) {
 		assert.Equal(t, &deviceType, proto.DeviceType)
 		require.NotNil(t, proto.Created)
 		assert.Equal(t, created, proto.Created.AsTime())
+		require.NotNil(t, proto.Updated)
+		assert.Equal(t, updated, proto.Updated.AsTime())
 		require.NotNil(t, proto.Components)
 		require.Len(t, proto.AssociatedMachineIds, 2)
 		assert.Equal(t, "m-1", proto.AssociatedMachineIds[0].Id)
@@ -109,6 +113,8 @@ func TestSKU_FromProto(t *testing.T) {
 	deviceType := "GPU"
 	created := time.Date(2025, time.January, 2, 3, 4, 5, 678_901_234, time.UTC)
 	normalizedCreated := created.Round(time.Microsecond)
+	updated := time.Date(2025, time.January, 2, 4, 5, 6, 789_012_345, time.UTC)
+	normalizedUpdated := updated.Round(time.Microsecond)
 
 	t.Run("nil proto leaves receiver unchanged", func(t *testing.T) {
 		sk := &SKU{ID: "preserved", SiteID: siteID}
@@ -125,6 +131,7 @@ func TestSKU_FromProto(t *testing.T) {
 			SchemaVersion: 4,
 			DeviceType:    &deviceType,
 			Created:       timestamppb.New(created),
+			Updated:       timestamppb.New(updated),
 			Components:    &corev1.SkuComponents{},
 			AssociatedMachineIds: []*corev1.MachineId{
 				{Id: "m-1"},
@@ -138,6 +145,7 @@ func TestSKU_FromProto(t *testing.T) {
 		assert.Equal(t, uint32(4), sk.SchemaVersion)
 		assert.Equal(t, &deviceType, sk.DeviceType)
 		assert.Equal(t, normalizedCreated, sk.Created)
+		assert.Equal(t, normalizedUpdated, sk.Updated)
 		assert.Equal(t, []string{"m-1", "m-2"}, sk.AssociatedMachineIds)
 		require.NotNil(t, sk.Components)
 	})
@@ -148,6 +156,12 @@ func TestSKU_FromProto(t *testing.T) {
 		assert.True(t, sk.Created.IsZero())
 	})
 
+	t.Run("missing updated timestamp clears stale value", func(t *testing.T) {
+		sk := &SKU{Updated: updated}
+		sk.FromProto(&corev1.Sku{Id: "sku-1"}, siteID)
+		assert.True(t, sk.Updated.IsZero())
+	})
+
 	t.Run("invalid created timestamp is treated as missing", func(t *testing.T) {
 		sk := &SKU{}
 		sk.FromProto(&corev1.Sku{
@@ -155,6 +169,15 @@ func TestSKU_FromProto(t *testing.T) {
 			Created: &timestamppb.Timestamp{Seconds: 253_402_300_800},
 		}, siteID)
 		assert.True(t, sk.Created.IsZero())
+	})
+
+	t.Run("invalid updated timestamp is treated as missing", func(t *testing.T) {
+		sk := &SKU{}
+		sk.FromProto(&corev1.Sku{
+			Id:      "sku-1",
+			Updated: &timestamppb.Timestamp{Seconds: 253_402_300_800},
+		}, siteID)
+		assert.True(t, sk.Updated.IsZero())
 	})
 
 	t.Run("nil description clears existing description", func(t *testing.T) {

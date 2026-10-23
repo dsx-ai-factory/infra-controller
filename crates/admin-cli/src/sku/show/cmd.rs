@@ -59,6 +59,7 @@ impl From<SkuWrapper> for Row {
                 .unwrap_or_default()
                 .model,
             sku.created.map(|id| id.to_string()).unwrap_or_default(),
+            sku.updated.map(|id| id.to_string()).unwrap_or_default(),
         ])
     }
 }
@@ -67,7 +68,13 @@ impl From<SkusWrapper> for Table {
     fn from(skus: SkusWrapper) -> Self {
         let mut table = Table::new();
 
-        table.set_titles(Row::from(vec!["ID", "Description", "Model", "Created"]));
+        table.set_titles(Row::from(vec![
+            "ID",
+            "Description",
+            "Model",
+            "Created",
+            "Updated",
+        ]));
 
         for sku in skus.skus {
             table.add_row(sku.into());
@@ -290,6 +297,15 @@ pub(in crate::sku) async fn show_sku_details(
                     .map(|v| v.to_string())
                     .unwrap_or_default()
             )?;
+            writeln!(
+                output,
+                "{:<width$}: {}",
+                "Updated At",
+                sku.updated
+                    .as_ref()
+                    .map(|v| v.to_string())
+                    .unwrap_or_default()
+            )?;
             if let Some(components) = sku.components {
                 if let Some(tpm) = components.tpm {
                     writeln!(output, "{:<width$}: {}", "TPM Version", tpm.version)?;
@@ -368,4 +384,181 @@ pub(super) async fn show(
     };
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+    use std::time::Duration;
+
+    use chrono::{TimeZone, Utc};
+    use clap::Parser;
+    use futures::stream;
+    use http_body_util::combinators::UnsyncBoxBody;
+    use http_body_util::{BodyExt, StreamBody};
+    use hyper::body::{Bytes, Frame, Incoming};
+    use hyper::server::conn::http2;
+    use hyper::service::service_fn;
+    use hyper::{Response, header};
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use prost::Message;
+    use rpc::admin_cli::OutputFormat;
+    use rpc::forge::{BuildInfo, Sku, SkuIdList, SkuList};
+    use rpc::forge_api_client::ForgeApiClient;
+    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use tokio::net::TcpListener;
+
+    use crate::async_write::CapturedOutput;
+    use crate::cfg::cli_options::{CliCommand, CliOptions, SortField};
+    use crate::cfg::dispatch::Dispatch;
+    use crate::cfg::runtime::{RuntimeConfig, RuntimeContext};
+    use crate::rpc::ApiClient;
+
+    fn grpc_response<T: Message>(message: T) -> Response<UnsyncBoxBody<Bytes, Infallible>> {
+        let mut data = Vec::with_capacity(message.encoded_len() + 5);
+        data.push(0);
+        data.extend_from_slice(
+            &u32::try_from(message.encoded_len())
+                .expect("test response fits in a gRPC frame")
+                .to_be_bytes(),
+        );
+        message
+            .encode(&mut data)
+            .expect("mock gRPC response encodes");
+        let mut trailers = hyper::HeaderMap::new();
+        trailers.insert(
+            header::HeaderName::from_static("grpc-status"),
+            header::HeaderValue::from_static("0"),
+        );
+        let body = StreamBody::new(stream::iter([
+            Ok::<_, Infallible>(Frame::data(Bytes::from(data))),
+            Ok(Frame::trailers(trailers)),
+        ]))
+        .boxed_unsync();
+        Response::builder()
+            .header(header::CONTENT_TYPE, "application/grpc+tonic")
+            .body(body)
+            .expect("mock gRPC response is valid")
+    }
+
+    async fn mock_sku_request(
+        request: hyper::Request<Incoming>,
+        skus: &[Sku],
+    ) -> Result<Response<UnsyncBoxBody<Bytes, Infallible>>, Infallible> {
+        match request.uri().path() {
+            "/forge.Forge/Version" => Ok(grpc_response(BuildInfo::default())),
+            "/forge.Forge/GetAllSkuIds" => {
+                let ids = skus.iter().map(|s| s.id.clone()).collect();
+                Ok(grpc_response(SkuIdList { ids }))
+            }
+            "/forge.Forge/FindSkusByIds" => Ok(grpc_response(SkuList {
+                skus: skus.to_vec(),
+            })),
+            path => panic!("unexpected mock gRPC request: {path}"),
+        }
+    }
+
+    async fn run_sku_show(skus: Vec<Sku>) -> String {
+        let options = CliOptions::try_parse_from(["nico-admin-cli", "sku", "show"])
+            .expect("public sku show command parses");
+        let Some(CliCommand::Sku(command)) = options.commands else {
+            panic!("expected the public sku show command path");
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock sku listener binds");
+        let address = listener.local_addr().expect("mock listener has an address");
+        let request_timeout = Duration::from_secs(5);
+        let client_config = ForgeClientConfig {
+            request_timeout: Some(request_timeout),
+            ..Default::default()
+        };
+        let mut captured = CapturedOutput::new();
+        let ctx = RuntimeContext {
+            api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(
+                &format!("http://{address}"),
+                &client_config,
+            ))),
+            config: RuntimeConfig {
+                format: OutputFormat::AsciiTable,
+                request_timeout: client_config.request_timeout,
+                page_size: 25,
+                extended: false,
+                cloud_unsafe_op: None,
+                sort_by: SortField::PrimaryId,
+            },
+            output_file: std::mem::replace(captured.writer(), Box::new(tokio::io::sink())),
+        };
+
+        let server_skus = skus.clone();
+        let server = tokio::spawn(async move {
+            let (connection, _) = listener.accept().await.expect("mock accepts a client");
+            http2::Builder::new(TokioExecutor::new())
+                .serve_connection(
+                    TokioIo::new(connection),
+                    service_fn(move |request| {
+                        let skus = server_skus.clone();
+                        async move { mock_sku_request(request, &skus).await }
+                    }),
+                )
+                .await
+                .expect("mock serves the sku connection");
+        });
+
+        tokio::time::timeout(request_timeout, command.dispatch(ctx))
+            .await
+            .expect("command completes before timeout")
+            .expect("public sku show succeeds");
+        let _ = server.await;
+
+        String::from_utf8(captured.into_bytes().await).expect("sku show output is UTF-8")
+    }
+
+    #[tokio::test]
+    async fn public_sku_show_command_table_renders_headers_and_updated_cell() {
+        let created_time = Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let updated_time = Utc.with_ymd_and_hms(2025, 1, 2, 3, 4, 5).unwrap();
+
+        let skus = vec![
+            Sku {
+                id: "sku-with-updated".to_string(),
+                description: Some("sku with updated".to_string()),
+                created: Some(created_time.into()),
+                updated: Some(updated_time.into()),
+                ..Default::default()
+            },
+            Sku {
+                id: "sku-without-updated".to_string(),
+                description: Some("sku without updated".to_string()),
+                created: Some(created_time.into()),
+                updated: None,
+                ..Default::default()
+            },
+        ];
+
+        let output = run_sku_show(skus.clone()).await;
+        let mut rows = output
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix('|')?.strip_suffix('|'))
+            .map(|line| line.split('|').map(str::trim).collect::<Vec<_>>());
+
+        assert_eq!(
+            rows.next(),
+            Some(vec!["ID", "Description", "Model", "Created", "Updated"]),
+            "table headers mismatch in output:\n{output}"
+        );
+
+        let rendered_rows: Vec<Vec<&str>> = rows.collect();
+        assert_eq!(rendered_rows.len(), 2, "output:\n{output}");
+
+        assert_eq!(rendered_rows[0][0], "sku-with-updated");
+        assert_eq!(
+            rendered_rows[0][4],
+            skus[0].updated.as_ref().unwrap().to_string().as_str()
+        );
+
+        assert_eq!(rendered_rows[1][0], "sku-without-updated");
+        assert_eq!(rendered_rows[1][4], "");
+    }
 }

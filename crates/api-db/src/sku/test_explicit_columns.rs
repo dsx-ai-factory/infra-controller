@@ -48,6 +48,7 @@ async fn exercise_queries(connection: &mut PgConnection) -> Result<(), Box<dyn s
         schema_version: CURRENT_SKU_VERSION,
         description: "accelerator host".to_string(),
         created: Utc::now(),
+        updated: Utc::now(),
         device_type: Some("host".to_string()),
         components: SkuComponents {
             chassis: SkuComponentChassis {
@@ -72,6 +73,7 @@ async fn exercise_queries(connection: &mut PgConnection) -> Result<(), Box<dyn s
     let found = find(txn.as_mut(), &[&expected.id]).await?;
     assert_eq!(found.len(), 1);
     expected.created = found[0].created;
+    expected.updated = found[0].updated;
     assert_eq!(
         serde_json::to_value(&found[0])?,
         serde_json::to_value(&expected)?

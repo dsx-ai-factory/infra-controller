@@ -37,6 +37,9 @@ pub struct Sku {
     pub id: String,
     pub description: String,
     pub created: DateTime<Utc>,
+    /// Timestamp when the SKU was last modified, initialized to `created` and
+    /// advanced on metadata updates or component replacements.
+    pub updated: DateTime<Utc>,
     pub components: SkuComponents,
     pub device_type: Option<String>,
 }
@@ -53,6 +56,7 @@ impl<'r> FromRow<'r, PgRow> for Sku {
         let id: String = row.try_get("id")?;
         let description: String = row.try_get("description")?;
         let created: DateTime<Utc> = row.try_get("created")?;
+        let updated: DateTime<Utc> = row.try_get("updated")?;
         let components = row
             .try_get::<sqlx::types::Json<SkuComponents>, _>("components")?
             .0;
@@ -62,6 +66,7 @@ impl<'r> FromRow<'r, PgRow> for Sku {
             id,
             description,
             created,
+            updated,
             components,
             device_type,
         })
@@ -684,6 +689,7 @@ mod tests {
             id: "test".to_string(),
             description: String::new(),
             created: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            updated: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
             components: SkuComponents {
                 chassis: SkuComponentChassis::default(),
                 cpus: Vec::new(),
