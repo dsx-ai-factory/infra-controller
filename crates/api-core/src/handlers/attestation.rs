@@ -15,8 +15,9 @@
  * limitations under the License.
  */
 use ::rpc::forge::{self as rpc};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use carbide_machine_controller::handler::attestation::{SchedulingOutcome, trigger_attestation};
-#[cfg(feature = "linux-build")]
 use carbide_uuid::machine::MachineId;
 use db::ObjectFilter;
 use model::attestation::spdm as model_spdm;
@@ -110,6 +111,7 @@ pub(crate) async fn trigger_machine_attestation(
         bmc_info,
         &machine_id,
         redfish_timeout_duration,
+        false, // A gRPC request does not originate from the managed-host controller.
     )
     .await
     .map_err(|error| match error {
@@ -233,6 +235,114 @@ pub(crate) async fn list_attestation(
     txn.commit().await?;
 
     Ok(response)
+}
+
+// The token carries only the cursor and filter, so page sizes can change without
+// keeping server-side state. Versioning lets us reject incompatible encodings.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MachineAttestationPageToken {
+    version: u8,
+    after_machine_id: MachineId,
+    attestation_status: Option<i32>,
+}
+
+pub(crate) async fn list_machine_attestations(
+    api: &Api,
+    request: Request<rpc::ListSpdmMachineAttestationsRequest>,
+) -> Result<Response<rpc::ListSpdmMachineAttestationsResponse>, Status> {
+    log_request_data(&request);
+    let request = request.into_inner();
+    // Presence matters: enum zero means in-progress, not an omitted filter.
+    let status = request
+        .attestation_status
+        .map(|value| {
+            rpc::SpdmAttestationStatus::try_from(value)
+                .map(|status| match status {
+                    rpc::SpdmAttestationStatus::SpdmAttInProgress => {
+                        model_spdm::SpdmAttestationStatus::InProgress
+                    }
+                    rpc::SpdmAttestationStatus::SpdmAttCancelled => {
+                        model_spdm::SpdmAttestationStatus::Cancelled
+                    }
+                    rpc::SpdmAttestationStatus::SpdmAttPassed => {
+                        model_spdm::SpdmAttestationStatus::Passed
+                    }
+                    rpc::SpdmAttestationStatus::SpdmAttFailed => {
+                        model_spdm::SpdmAttestationStatus::Failed
+                    }
+                })
+                .map_err(|_| Status::invalid_argument("invalid attestation status"))
+        })
+        .transpose()?;
+    let cap = api.runtime_config.max_find_by_ids;
+    if cap == 0 {
+        return Err(Status::internal(
+            "machine attestation page limit must be positive",
+        ));
+    }
+    let page_size = if request.page_size == 0 {
+        cap
+    } else {
+        request.page_size.min(cap)
+    };
+    // A continuation resumes the same search; changing its filter could skip matches.
+    let after_machine_id = if request.page_token.is_empty() {
+        None
+    } else {
+        let bytes = URL_SAFE_NO_PAD
+            .decode(&request.page_token)
+            .map_err(|_| Status::invalid_argument("invalid machine attestation page token"))?;
+        let token: MachineAttestationPageToken = serde_json::from_slice(&bytes)
+            .map_err(|_| Status::invalid_argument("invalid machine attestation page token"))?;
+        if token.version != 1 || token.attestation_status != request.attestation_status {
+            return Err(Status::invalid_argument(
+                "machine attestation page token is incompatible with this search",
+            ));
+        }
+        Some(token.after_machine_id)
+    };
+    // One statement computes matching statuses and reads one extra row for lookahead.
+    let mut txn = api.txn_begin().await?;
+    let mut summaries = db::attestation::spdm::find_machine_attestation_statuses(
+        &mut txn,
+        after_machine_id,
+        status,
+        page_size,
+    )
+    .await?;
+    txn.commit().await?;
+    let has_more = summaries.len() > page_size as usize;
+    summaries.truncate(page_size as usize);
+    let next_page_token = if let Some(last) = summaries.last().filter(|_| has_more) {
+        let token = MachineAttestationPageToken {
+            version: 1,
+            after_machine_id: last.machine_id,
+            attestation_status: request.attestation_status,
+        };
+        let bytes = serde_json::to_vec(&token).map_err(|error| {
+            tracing::error!(%error, "failed to encode machine attestation page token");
+            Status::internal("failed to encode machine attestation page token")
+        })?;
+        URL_SAFE_NO_PAD.encode(bytes)
+    } else {
+        String::new()
+    };
+    Ok(Response::new(rpc::ListSpdmMachineAttestationsResponse {
+        statuses: summaries
+            .into_iter()
+            .map(|summary| rpc::SpdmMachineAttestationStatus {
+                machine_id: Some(summary.machine_id),
+                job_id: summary.job_id.map(|id| ::rpc::common::Uuid {
+                    value: id.to_string(),
+                }),
+                attestation_status: summary
+                    .attestation_status
+                    .map(|status| convert_model_status_to_rpc_status(status).into()),
+            })
+            .collect(),
+        next_page_token,
+    }))
 }
 
 pub(crate) async fn get_attestation(

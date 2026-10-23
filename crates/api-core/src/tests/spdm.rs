@@ -387,6 +387,21 @@ pub(in crate::tests) mod tests {
                 "{}: the response must report the rows' own timestamp",
                 case.scenario
             );
+
+            // Check every scheduled row: external callers must not supply controller provenance.
+            let origins: Vec<bool> = sqlx::query_scalar(
+                "SELECT triggered_by_mh_controller FROM spdm_machine_devices_attestation
+                 WHERE machine_id = $1",
+            )
+            .bind(machine_id)
+            .fetch_all(&env.pool)
+            .await?;
+            assert_eq!(
+                origins,
+                vec![false; case.expect_devices as usize],
+                "{}: gRPC-triggered devices must not be marked as controller-triggered",
+                case.scenario
+            );
         }
 
         Ok(())
@@ -1017,6 +1032,167 @@ pub(in crate::tests) mod tests {
             assert!(completed_at.is_some());
         }
 
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn predicted_machine_attestation_rpc_paginates_and_validates(
+        pool: sqlx::PgPool,
+    ) -> eyre::Result<()> {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use carbide_uuid::machine::{MachineIdSource, MachineType};
+        use rpc::forge::{ListSpdmMachineAttestationsRequest, SpdmAttestationStatus};
+
+        let mut config = get_config();
+        config.max_find_by_ids = 2;
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(config),
+                ..Default::default()
+            },
+        )
+        .await;
+        let mut machines = [0x91, 0x92, 0x93, 0x94, 0x95].map(|seed| {
+            MachineId::new(
+                MachineIdSource::ProductBoardChassisSerial,
+                [seed; 32],
+                MachineType::Host,
+            )
+        });
+        machines.sort();
+        let job_id = uuid::Uuid::new_v4();
+        for (index, id) in machines.iter().enumerate() {
+            sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+                .bind(id)
+                .execute(&env.pool)
+                .await?;
+            // Interleaved unknown machines prove filtering precedes the page limit.
+            if index % 2 == 0 {
+                sqlx::query(
+                    "INSERT INTO spdm_machine_devices_attestation
+                     (machine_id, device_id, nonce, state, job_id, started_at, triggered_by_mh_controller)
+                     VALUES ($1, 'GPU_0', gen_random_uuid(), $2, $3, now(), true)",
+                )
+                .bind(id).bind(sqlx::types::Json(SpdmAttestationState::Passed))
+                .bind(job_id).execute(&env.pool).await?;
+            }
+        }
+        // Fleet listing remains available without a BMC client or enabled SPDM controller.
+        env.redfish_sim
+            .set_create_client_error("fleet listing must not contact BMCs");
+        let mut statuses = Vec::new();
+        let mut page_token = String::new();
+        // Zero uses the configured cap, oversized values are capped, and continuation
+        // permits changing page size. Five machines must produce pages of 2, 2, 1.
+        for (page_size, expected_len) in [(0, 2), (u32::MAX, 2), (1, 1)] {
+            let response = env
+                .api
+                .list_spdm_machine_attestations(Request::new(ListSpdmMachineAttestationsRequest {
+                    attestation_status: None,
+                    page_size,
+                    page_token,
+                }))
+                .await?
+                .into_inner();
+            assert_eq!(response.statuses.len(), expected_len);
+            page_token = response.next_page_token;
+            statuses.extend(response.statuses);
+            assert_eq!(page_token.is_empty(), statuses.len() == machines.len());
+        }
+        assert_eq!(
+            statuses
+                .iter()
+                .map(|row| row.machine_id.unwrap())
+                .collect::<Vec<_>>(),
+            machines
+        );
+        assert_eq!(
+            statuses[0].attestation_status,
+            Some(SpdmAttestationStatus::SpdmAttPassed.into())
+        );
+        assert_eq!(
+            uuid::Uuid::try_from(statuses[0].job_id.as_ref().unwrap())?,
+            job_id
+        );
+        assert!(statuses[1].attestation_status.is_none() && statuses[1].job_id.is_none());
+
+        let passed = Some(SpdmAttestationStatus::SpdmAttPassed.into());
+        let first = env
+            .api
+            .list_spdm_machine_attestations(Request::new(ListSpdmMachineAttestationsRequest {
+                attestation_status: passed,
+                page_size: 1,
+                page_token: String::new(),
+            }))
+            .await?
+            .into_inner();
+        assert_eq!(first.statuses[0].machine_id, Some(machines[0]));
+        assert!(!first.next_page_token.is_empty());
+        let last = env
+            .api
+            .list_spdm_machine_attestations(Request::new(ListSpdmMachineAttestationsRequest {
+                attestation_status: passed,
+                page_size: 2,
+                page_token: first.next_page_token.clone(),
+            }))
+            .await?
+            .into_inner();
+        assert_eq!(
+            last.statuses
+                .iter()
+                .map(|row| row.machine_id.unwrap())
+                .collect::<Vec<_>>(),
+            vec![machines[2], machines[4]]
+        );
+        assert!(
+            last.next_page_token.is_empty(),
+            "an exactly full final page needs no continuation"
+        );
+        let empty = env
+            .api
+            .list_spdm_machine_attestations(Request::new(ListSpdmMachineAttestationsRequest {
+                attestation_status: Some(SpdmAttestationStatus::SpdmAttFailed.into()),
+                ..Default::default()
+            }))
+            .await?
+            .into_inner();
+        assert!(empty.statuses.is_empty() && empty.next_page_token.is_empty());
+
+        // Reject malformed encodings and changed search semantics at the RPC boundary.
+        let invalid_tokens = [
+            ("invalid enum", Some(-1), String::new()),
+            ("invalid base64", None, "%%%".to_string()),
+            ("invalid token payload", None, URL_SAFE_NO_PAD.encode(b"{}")),
+            ("changed filter", None, first.next_page_token),
+            (
+                "unsupported token version",
+                passed,
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({
+                    "version": 2, "after_machine_id": machines[0], "attestation_status": passed,
+                }))?),
+            ),
+            (
+                "invalid machine cursor",
+                passed,
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({
+                    "version": 1, "after_machine_id": "invalid", "attestation_status": passed,
+                }))?),
+            ),
+        ];
+        for (scenario, attestation_status, page_token) in invalid_tokens {
+            let error = env
+                .api
+                .list_spdm_machine_attestations(Request::new(ListSpdmMachineAttestationsRequest {
+                    attestation_status,
+                    page_token,
+                    ..Default::default()
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), tonic::Code::InvalidArgument, "{scenario}");
+        }
         Ok(())
     }
 

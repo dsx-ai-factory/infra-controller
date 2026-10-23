@@ -18,6 +18,7 @@
 mod cancel;
 mod coverage;
 mod job;
+mod machines;
 mod profile;
 mod trigger;
 
@@ -70,6 +71,16 @@ pub(crate) enum Cmd {
         visible_alias = "jobs"
     )]
     Job(job::Cmd),
+    #[dispatch]
+    #[clap(
+        subcommand,
+        about = "Inspect predicted SPDM attestation status per machine",
+        defer = |command| {
+            // Machine predictions always use machine-ID order.
+            command.mut_arg("sort_by", |arg| arg.hide(true))
+        }
+    )]
+    Machines(machines::Cmd),
     #[dispatch]
     #[clap(
         subcommand,

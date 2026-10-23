@@ -1035,6 +1035,8 @@ service Forge {
 
   rpc ListAttestation(SpdmListAttestationRequest) returns (SpdmListAttestationResponse);
   rpc GetAttestation(common.UUID) returns (SpdmGetAttestationResponse);
+  // Lists predicted machine statuses in pages, without contacting BMCs.
+  rpc ListSpdmMachineAttestations(ListSpdmMachineAttestationsRequest) returns (ListSpdmMachineAttestationsResponse);
   // Attestation profiles APIs
   rpc CreateAttestationProfile(CreateAttestationProfileRequest) returns (AttestationProfile);
   rpc UpdateAttestationProfile(UpdateAttestationProfileRequest) returns (AttestationProfile);
@@ -12093,4 +12095,43 @@ message GetDesiredNicFirmwareResponse {
   // do not fail the request or remove saved selections. Ambiguous matches and
   // multiple selections for a device are reported in that device's result.error.
   repeated string warnings = 3;
+}
+
+// Lists predictions from each machine's latest retained controller-triggered job.
+// Each page is ordered by ascending machine ID. Inventory and externally triggered jobs
+// are not consulted. Pages are separate reads: concurrent changes can affect membership.
+message ListSpdmMachineAttestationsRequest {
+  // Omission includes all machines, including those without a retained controller job.
+  // A supplied status excludes machines without such a job. Unknown enum values are rejected.
+  optional SpdmAttestationStatus attestation_status = 1;
+  // Maximum matching records to return. Zero uses RuntimeConfig.max_find_by_ids;
+  // larger values are capped at that setting. This setting defaults to 100.
+  uint32 page_size = 2;
+  // Empty for the first page; otherwise copy the preceding response's next_page_token.
+  // Tokens are opaque and bound to the status filter; keep the filter unchanged.
+  // Malformed tokens or a changed filter return INVALID_ARGUMENT. Page size may change.
+  string page_token = 3;
+}
+
+// A prediction, not a live inventory-based attestation assessment.
+message SpdmMachineAttestationStatus {
+  // Always present: the machine whose prediction is reported.
+  common.MachineId machine_id = 1;
+  // Aggregate over all this machine's devices in its latest retained controller job:
+  // unfinished takes precedence over failed, cancelled, then all-passed.
+  // Absent when no controller-triggered job is retained; this means unknown, not passed.
+  optional SpdmAttestationStatus attestation_status = 2;
+  // The source job, chosen by started_at DESC, then job_id DESC to break ties.
+  // Absent when no controller-triggered job is retained.
+  common.UUID job_id = 3;
+}
+
+message ListSpdmMachineAttestationsResponse {
+  // Matching machines ordered by ascending machine ID, at most the effective page size.
+  // Machines without a retained controller job have absent status and job_id fields.
+  // No matches produces an empty list and an empty next_page_token.
+  repeated SpdmMachineAttestationStatus statuses = 1;
+  // Continue strictly after the last returned machine ID. Empty means no further matches.
+  // This does not preserve a snapshot across requests.
+  string next_page_token = 2;
 }

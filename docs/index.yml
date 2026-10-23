@@ -399,6 +399,10 @@ navigation:
               path: development/tls.md
             - page: nico-admin-cli
               path: manuals/nico-admin-cli.md
+            - page: SPDM Machine Commands
+              path: manuals/nico-admin-cli/commands/attestation/attestation-spdm-machines.md
+            - page: SPDM Machine Attestation Status
+              path: manuals/nico-admin-cli/commands/attestation/attestation-spdm-machines-list.md
             - page: NICo mTLS and Authorization
               path: manuals/nico-api-auth.md
             - page: Re-creating Issuer/CA in Local Dev

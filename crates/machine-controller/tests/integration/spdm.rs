@@ -460,6 +460,21 @@ async fn changed_spdm_attesters_cancel_and_restart_jobs(pool: PgPool) -> eyre::R
             assert_ne!(*new_job_id, other_job_id, "{}", case.scenario);
             let new_attestations =
                 db::attestation::spdm::get_attestations_for_job_id(&mut txn, new_job_id).await?;
+            // The replacement is scheduled by the managed-host controller for every selected device.
+            let origins: Vec<bool> = sqlx::query_scalar(
+                "SELECT triggered_by_mh_controller FROM spdm_machine_devices_attestation
+                 WHERE machine_id = $1 AND job_id = $2",
+            )
+            .bind(machine_id)
+            .bind(new_job_id)
+            .fetch_all(&mut *txn)
+            .await?;
+            assert_eq!(
+                origins,
+                vec![true; case.selected_devices.len()],
+                "{}: every replacement device must be marked as controller-triggered",
+                case.scenario
+            );
             assert_eq!(
                 new_attestations
                     .iter()

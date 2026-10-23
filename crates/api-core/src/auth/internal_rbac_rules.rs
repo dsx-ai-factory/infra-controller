@@ -813,6 +813,10 @@ impl InternalRBACRules {
         x.perm("CancelAttestation", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ListAttestation", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GetAttestation", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm(
+            "ListSpdmMachineAttestations",
+            vec![ForgeAdminCLI, SiteAgent],
+        );
         x.perm("CreateAttestationProfile", vec![ForgeAdminCLI]);
         x.perm("UpdateAttestationProfile", vec![ForgeAdminCLI]);
         x.perm("DeleteAttestationProfile", vec![ForgeAdminCLI]);

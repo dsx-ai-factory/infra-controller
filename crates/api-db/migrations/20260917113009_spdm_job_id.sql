@@ -1,6 +1,9 @@
 ALTER TABLE spdm_machine_devices_attestation ADD COLUMN job_id uuid;
 ALTER TABLE spdm_machine_devices_attestation ADD COLUMN evidence_collection_locked BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- Existing attestations have no recorded trigger origin.
+ALTER TABLE spdm_machine_devices_attestation ADD COLUMN triggered_by_mh_controller BOOLEAN NOT NULL DEFAULT FALSE;
+
 -- Each machine held one logical job before this migration, so backfill generate job ids
 UPDATE spdm_machine_devices_attestation AS a
 SET job_id = m.job_id

@@ -30,11 +30,15 @@ use crate::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError, Database
 #[cfg(test)]
 mod test_explicit_columns;
 
+/// Inserts a job's device attestations with one shared trigger origin.
+/// `triggered_by_mh_controller` is true only for managed-host controller triggers;
+/// false also covers attestations whose controller origin is unknown.
 pub async fn insert_device_attestations(
     txn: &mut PgConnection,
     machine_id: &MachineId,
     devices: Vec<SpdmDeviceAttestation>,
     job_id: &uuid::Uuid,
+    triggered_by_mh_controller: bool,
 ) -> DatabaseResult<u64> {
     let device_ids = devices.iter().map(|x| &x.device_id).collect_vec();
     let nonces = devices.iter().map(|x| x.nonce).collect_vec();
@@ -51,9 +55,10 @@ pub async fn insert_device_attestations(
 
     let started_at_timestamps = devices.iter().map(|x| &x.started_at).collect_vec();
 
-    let query = r#"INSERT INTO spdm_machine_devices_attestation (machine_id, device_id, nonce, state, state_version, ca_certificate_link, evidence_target, job_id, started_at)
+    // Bind provenance once for the job rather than independently for each device.
+    let query = r#"INSERT INTO spdm_machine_devices_attestation (machine_id, device_id, nonce, state, state_version, ca_certificate_link, evidence_target, job_id, started_at, triggered_by_mh_controller)
         SELECT 
-            $1 as machine_id, device_id, nonce, state, state_version, ca_certificate_link, evidence_target, $8 as job_id, started_at
+            $1 as machine_id, device_id, nonce, state, state_version, ca_certificate_link, evidence_target, $8 as job_id, started_at, $10 as triggered_by_mh_controller
         FROM 
             UNNEST($2::TEXT[], $3::uuid[], $4::JSONB[], $5::TEXT[], $6::TEXT[], $7::TEXT[], $9::timestamptz[])
             AS t(device_id, nonce, state, state_version, ca_certificate_link, evidence_target, started_at)
@@ -68,6 +73,7 @@ pub async fn insert_device_attestations(
         .bind(evidence_targets)
         .bind(job_id)
         .bind(started_at_timestamps)
+        .bind(triggered_by_mh_controller)
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -428,6 +434,86 @@ pub async fn list_all_attestation_statuses(
         .collect::<Result<Vec<_>, DatabaseError>>()?;
 
     Ok(attestation_statuses)
+}
+
+/// A machine's predicted status from its latest retained controller-triggered job.
+pub struct MachineAttestationSummary {
+    /// The machine whose prediction is reported.
+    pub machine_id: MachineId,
+    /// The source job, absent when no controller-triggered job is retained.
+    pub job_id: Option<uuid::Uuid>,
+    /// The job's aggregate for this machine, absent when no controller job is retained.
+    pub attestation_status: Option<SpdmAttestationStatus>,
+}
+
+/// Reads a page of predictions in ascending machine-ID order without contacting BMCs.
+/// Selects one controller job per machine by started_at DESC, then job_id DESC,
+/// and aggregates all that machine's device rows in that job. External and older
+/// jobs do not contribute. An omitted status filter includes machines without a
+/// retained controller job; a supplied status excludes them. Only IDs strictly
+/// after `after_machine_id` are considered, or all IDs when it is absent.
+/// Returns at most `page_size + 1` matching rows, including a lookahead row so the
+/// caller can detect another page. Filtering happens before this limit.
+pub async fn find_machine_attestation_statuses(
+    txn: &mut PgConnection,
+    after_machine_id: Option<MachineId>,
+    status: Option<SpdmAttestationStatus>,
+    page_size: u32,
+) -> DatabaseResult<Vec<MachineAttestationSummary>> {
+    let status = status.map(|status| match status {
+        SpdmAttestationStatus::InProgress => "in_progress",
+        SpdmAttestationStatus::Failed => "failed",
+        SpdmAttestationStatus::Cancelled => "cancelled",
+        SpdmAttestationStatus::Passed => "passed",
+    });
+    // Resolve the complete source job before aggregating, so obsolete devices
+    // from earlier jobs cannot keep a machine failed. Aggregate within each machine
+    // lookup so an ordered scan can stop once the page and lookahead are filled.
+    let query = r#"
+        SELECT m.id AS machine_id, latest.job_id, prediction.attestation_status
+        FROM machines m
+        LEFT JOIN LATERAL (
+            SELECT job_id
+            FROM spdm_machine_devices_attestation
+            WHERE machine_id = m.id AND triggered_by_mh_controller
+            ORDER BY started_at DESC, job_id DESC
+            LIMIT 1
+        ) latest ON true
+        LEFT JOIN LATERAL (
+            SELECT CASE
+                WHEN bool_or(a.state NOT IN ('"Passed"'::jsonb, '"Cancelled"'::jsonb) AND NOT (a.state ? 'Failed'))
+                    THEN 'in_progress'
+                WHEN bool_or(a.state ? 'Failed') THEN 'failed'
+                WHEN bool_or(a.state = '"Cancelled"'::jsonb) THEN 'cancelled'
+                WHEN bool_and(a.state = '"Passed"'::jsonb) THEN 'passed'
+            END AS attestation_status
+            FROM spdm_machine_devices_attestation a
+            WHERE a.machine_id = m.id AND a.job_id = latest.job_id
+        ) prediction ON true
+        WHERE ($1::varchar IS NULL OR m.id > $1)
+            AND ($2::text IS NULL OR prediction.attestation_status = $2)
+        ORDER BY m.id
+        LIMIT $3
+    "#;
+    let rows: Vec<(MachineId, Option<uuid::Uuid>, Option<String>)> = sqlx::query_as(query)
+        .bind(after_machine_id)
+        .bind(status)
+        .bind(i64::from(page_size) + 1)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    rows.into_iter()
+        .map(|(machine_id, job_id, status)| {
+            Ok(MachineAttestationSummary {
+                machine_id,
+                job_id,
+                attestation_status: status
+                    .as_deref()
+                    .map(convert_status_str_to_model_status)
+                    .transpose()?,
+            })
+        })
+        .collect()
 }
 
 /// Aggregates the latest attestation for each device on a machine.
@@ -903,6 +989,7 @@ mod tests {
             job_status_matches: bool,
             machine_status_matches: bool,
             list_selectors_match: [bool; 4],
+            predicted_machine_selectors_match: [bool; 4],
         }
 
         let cases = [
@@ -917,6 +1004,7 @@ mod tests {
                     job_status_matches: true,
                     machine_status_matches: true,
                     list_selectors_match: [true; 4],
+                    predicted_machine_selectors_match: [true; 4],
                 }),
             },
             Case {
@@ -930,6 +1018,7 @@ mod tests {
                     job_status_matches: true,
                     machine_status_matches: true,
                     list_selectors_match: [true; 4],
+                    predicted_machine_selectors_match: [true; 4],
                 }),
             },
             Case {
@@ -943,6 +1032,7 @@ mod tests {
                     job_status_matches: true,
                     machine_status_matches: true,
                     list_selectors_match: [true; 4],
+                    predicted_machine_selectors_match: [true; 4],
                 }),
             },
         ];
@@ -985,8 +1075,8 @@ mod tests {
                     for (device_id, state) in devices {
                         sqlx::query(
                             "INSERT INTO spdm_machine_devices_attestation \
-                             (machine_id, device_id, nonce, state, job_id, started_at) \
-                             VALUES ($1, $2, $3, $4, $5, now())",
+                             (machine_id, device_id, nonce, state, job_id, started_at, triggered_by_mh_controller) \
+                             VALUES ($1, $2, $3, $4, $5, now(), true)",
                         )
                         .bind(member_id)
                         .bind(device_id)
@@ -1008,6 +1098,7 @@ mod tests {
                         .await
                         .map_err(|e| e.to_string())?;
                 let mut list_selectors_match = [false; 4];
+                let mut predicted_machine_selectors_match = [false; 4];
                 for (index, selector) in [
                     SpdmAttestationStatus::InProgress,
                     SpdmAttestationStatus::Failed,
@@ -1026,6 +1117,20 @@ mod tests {
                         Vec::new()
                     };
                     list_selectors_match[index] = statuses == expected;
+                    // One job can span machines whose own aggregates differ.
+                    let predicted = find_machine_attestation_statuses(&mut txn, None, Some(selector), 100)
+                        .await.map_err(|error| error.to_string())?;
+                    let expected = machine_ids.iter().copied().filter(|id| {
+                        let status = if *id == machine_id {
+                            input.expected_status
+                        } else {
+                            SpdmAttestationStatus::Passed
+                        };
+                        status == selector
+                    }).collect::<Vec<_>>();
+                    predicted_machine_selectors_match[index] = predicted.iter().all(|row| {
+                        row.job_id == Some(job_id) && row.attestation_status == Some(selector)
+                    }) && predicted.into_iter().map(|row| row.machine_id).collect::<Vec<_>>() == expected;
                 }
 
                 txn.rollback().await.map_err(|e| e.to_string())?;
@@ -1033,9 +1138,140 @@ mod tests {
                     job_status_matches: job_status == input.expected_status,
                     machine_status_matches: machine_status == input.expected_status,
                     list_selectors_match,
+                    predicted_machine_selectors_match,
                 })
             }
         })
         .await;
+    }
+
+    #[crate::sqlx_test]
+    async fn machine_predictions_use_the_latest_controller_job(
+        pool: sqlx::PgPool,
+    ) -> eyre::Result<()> {
+        let machines = [0x81, 0x82, 0x83, 0x84].map(|seed| {
+            MachineId::new(
+                MachineIdSource::ProductBoardChassisSerial,
+                [seed; 32],
+                MachineType::Host,
+            )
+        });
+        let mut txn = pool.begin().await?;
+        for id in machines {
+            sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+                .bind(id)
+                .execute(&mut *txn)
+                .await?;
+        }
+        let older_job = uuid::Uuid::from_u128(1);
+        let current_job = uuid::Uuid::from_u128(2);
+        let external_job = uuid::Uuid::from_u128(3);
+        let time = chrono::Utc::now();
+        // Distinct boundaries: obsolete devices, external jobs, tied start times,
+        // and both external-only and never-attested machines.
+        for (machine, job, minutes, device, controller, state) in [
+            (
+                machines[0],
+                older_job,
+                -2,
+                "removed",
+                true,
+                SpdmAttestationState::Failed("obsolete failure".to_string()),
+            ),
+            (
+                machines[0],
+                current_job,
+                -1,
+                "GPU_0",
+                true,
+                SpdmAttestationState::Passed,
+            ),
+            (
+                machines[0],
+                external_job,
+                0,
+                "GPU_0",
+                false,
+                SpdmAttestationState::Failed("external failure".to_string()),
+            ),
+            (
+                machines[1],
+                older_job,
+                -1,
+                "GPU_0",
+                true,
+                SpdmAttestationState::Passed,
+            ),
+            (
+                machines[1],
+                current_job,
+                -1,
+                "GPU_0",
+                true,
+                SpdmAttestationState::FetchMetadata,
+            ),
+            (
+                machines[2],
+                external_job,
+                0,
+                "GPU_0",
+                false,
+                SpdmAttestationState::Passed,
+            ),
+        ] {
+            sqlx::query(
+                "INSERT INTO spdm_machine_devices_attestation
+                 (machine_id, device_id, nonce, state, job_id, started_at, triggered_by_mh_controller)
+                 VALUES ($1, $2, gen_random_uuid(), $3, $4, $5, $6)",
+            ).bind(machine).bind(device).bind(sqlx::types::Json(state)).bind(job)
+                .bind(time + chrono::Duration::minutes(minutes)).bind(controller)
+                .execute(&mut *txn).await?;
+        }
+        let mut expected = vec![
+            (
+                machines[0],
+                Some(current_job),
+                Some(SpdmAttestationStatus::Passed),
+            ),
+            (
+                machines[1],
+                Some(current_job),
+                Some(SpdmAttestationStatus::InProgress),
+            ),
+            (machines[2], None, None),
+            (machines[3], None, None),
+        ];
+        expected.sort_by_key(|row| row.0);
+        let predictions = find_machine_attestation_statuses(&mut txn, None, None, 100).await?;
+        assert_eq!(
+            predictions
+                .into_iter()
+                .map(|row| (row.machine_id, row.job_id, row.attestation_status))
+                .collect::<Vec<_>>(),
+            expected
+        );
+
+        // Lookahead includes one extra row, and continuation excludes the cursor itself.
+        for (scenario, cursor, expected_ids) in [
+            ("first page plus lookahead", None, &expected[..2]),
+            (
+                "resume after the first ID",
+                Some(expected[0].0),
+                &expected[1..3],
+            ),
+            ("last page", Some(expected[2].0), &expected[3..]),
+            ("past the last ID", Some(expected[3].0), &expected[4..]),
+        ] {
+            let predictions = find_machine_attestation_statuses(&mut txn, cursor, None, 1).await?;
+            assert_eq!(
+                predictions
+                    .into_iter()
+                    .map(|row| row.machine_id)
+                    .collect::<Vec<_>>(),
+                expected_ids.iter().map(|row| row.0).collect::<Vec<_>>(),
+                "{scenario}"
+            );
+        }
+        Ok(())
     }
 }

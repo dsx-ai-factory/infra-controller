@@ -176,6 +176,9 @@ struct AttestationScheduled {
 /// Schedules SPDM attestation for a machine according to the profile its
 /// hardware class resolves to, writing one work row per selected attester.
 ///
+/// `triggered_by_mh_controller` is true only for managed-host lifecycle triggers;
+/// external triggers pass false. Every device row in the job records this origin.
+///
 /// `connect` is called only once the profile turns out to need the BMC.
 /// Building a client authenticates against it, so taking a built one would
 /// contact every BMC whose profile answers without it.
@@ -185,6 +188,7 @@ pub async fn trigger_attestation(
     bmc_info: &BmcInfo,
     machine_id: &MachineId,
     redfish_timeout_duration: std::time::Duration,
+    triggered_by_mh_controller: bool,
 ) -> Result<SchedulingResult, StateHandlerError> {
     let result = schedule(
         db_pool,
@@ -192,6 +196,7 @@ pub async fn trigger_attestation(
         bmc_info,
         machine_id,
         redfish_timeout_duration,
+        triggered_by_mh_controller,
     )
     .await?;
 
@@ -213,6 +218,7 @@ async fn schedule(
     bmc_info: &BmcInfo,
     machine_id: &MachineId,
     redfish_timeout_duration: std::time::Duration,
+    triggered_by_mh_controller: bool,
 ) -> Result<SchedulingResult, StateHandlerError> {
     let selection = select_machine_attesters(
         db_pool,
@@ -251,11 +257,13 @@ async fn schedule(
 
     let mut txn = db_pool.begin().await?;
 
+    // Origin belongs to the whole job, so all its device rows receive the same value.
     let records_inserted = db::attestation::spdm::insert_device_attestations(
         &mut txn,
         machine_id,
         device_attestations,
         &job_id,
+        triggered_by_mh_controller,
     )
     .await?;
 
@@ -453,6 +461,7 @@ pub(crate) async fn handle_spdm_trigger_state(
         &mh_snapshot.host_snapshot.status.bmc_info,
         host_machine_id,
         std::time::Duration::MAX,
+        true, // This job is part of the managed-host lifecycle.
     )
     .await?;
 

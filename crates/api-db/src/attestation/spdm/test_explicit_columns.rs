@@ -144,6 +144,7 @@ async fn spdm_snapshot_uses_topology_selected_bmc(
         &machine_id,
         vec![attestation.clone()],
         &attestation.job_id,
+        false,
     )
     .await?;
 
@@ -332,7 +333,8 @@ async fn exercise_snapshot(
             txn.as_mut(),
             &machine_id,
             vec![expected.clone()],
-            &expected.job_id
+            &expected.job_id,
+            false,
         )
         .await?,
         1

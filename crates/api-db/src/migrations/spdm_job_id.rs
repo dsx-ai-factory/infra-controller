@@ -161,6 +161,30 @@ async fn spdm_job_migration_restarts_legacy_polling(
     for (_, job_ids) in &jobs {
         assert!(job_ids.iter().all(|job_id| !job_id.is_nil()));
     }
+
+    // Pre-migration rows have unknown origin, even when their machine was polling.
+    let origins: Vec<bool> = sqlx::query_scalar(
+        "SELECT triggered_by_mh_controller FROM spdm_machine_devices_attestation",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(origins, vec![false; 3]);
+
+    // Writers supplying the required job ID can omit origin and retain the false default.
+    let origin: bool = sqlx::query_scalar(
+        r#"INSERT INTO spdm_machine_devices_attestation
+               (machine_id, device_id, nonce, state, job_id, started_at)
+           VALUES ('spdm-migration-0', 'GPU-3', gen_random_uuid(), '"FetchMetadata"'::jsonb, $1, now())
+           RETURNING triggered_by_mh_controller"#,
+    )
+    .bind(jobs[0].1[0])
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        !origin,
+        "omitting origin must not imply a controller trigger"
+    );
+
     let error = sqlx::query(
         r#"INSERT INTO spdm_machine_devices_attestation
                (machine_id, device_id, nonce, state, started_at)
