@@ -304,6 +304,22 @@ devspace deploy --profile core-only
 
 ## Ubuntu host preparation
 
+The Ubuntu host bootstrap shares cluster creation and reuse with Tilt through
+[`setup-kind.sh`](../setup-kind.sh), which also runs directly on macOS with a
+local Docker runtime. Ubuntu package and host configuration remain in this host
+bootstrap. It exports the selected
+cluster to the developer's `$HOME/.kube/config` and binds its commands to that
+file, ignoring an inherited `KUBECONFIG`. It retains its node TLS configuration,
+image preloading and DevSpace deployment steps. The shared helper rejects a
+cluster with multiple nodes, a different native architecture or incompatible
+pod IP families instead of rebuilding it. Kind cleans up a failed creation;
+preexisting clusters are not deleted. The selected checkout must contain
+`dev/deployment/setup-kind.sh`, including when using `--repo-ref`. Cluster names
+must be lowercase DNS labels of 1–49 characters. DevSpace retains its `nico-dev`
+default; use a separate cluster for Tilt. The `devspace purge` reset path retains
+its separate cluster recreation implementation. See the
+[shared cluster setup contract](../tilt/README.md#create-the-development-cluster).
+
 [`setup-devspace-on-host.sh`](setup-devspace-on-host.sh) uses Docker and
 containerd's standard storage paths without requiring `/dockerroot` or overriding
 an existing data-root configuration. Its former `--docker-root` option is removed;

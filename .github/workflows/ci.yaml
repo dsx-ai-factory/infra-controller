@@ -2225,7 +2225,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3-yaml
+          sudo apt-get install -y --no-install-recommends python3-yaml jq
           # Use upstream promtool with Kubernetes discovery, matching kube-prometheus-stack 59.1.0.
           prometheus_version=2.52.0
           prometheus_archive="prometheus-${prometheus_version}.linux-amd64.tar.gz"
@@ -2250,6 +2250,12 @@ jobs:
       # Uses python3-yaml installed by the configuration check above.
       - name: Test DevSpace bootstrap manifests
         run: /usr/bin/python3 -B dev/deployment/devspace/test_bootstrap_prereqs.py
+
+      # Uses jq installed by the configuration check above.
+      - name: Test shared kind bootstrap
+        run: |
+          /usr/bin/python3 -B -m unittest discover -s dev/deployment/tests -p 'test_setup_kind.py'
+          /usr/bin/python3 -B -m unittest discover -s dev/deployment/devspace/tests -p 'test_setup_devspace_on_host.py'
 
       - name: Test local native development image builds
         run: /usr/bin/python3 -B -m unittest discover -s dev/docker/tests

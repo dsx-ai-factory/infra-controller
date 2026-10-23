@@ -13,11 +13,107 @@ workflow.
 - Docker connected to a Linux AMD64 or ARM64 daemon, with BuildKit available
 - Tilt
 - Helm 3 or Helm 4, plus Python 3 for Tilt's `helm_resource` extension
-- `kubectl` connected to a kind cluster
+- `kubectl` connected to a native kind cluster; the setup helper below requires
+  kind 0.32.0 or newer and `jq`
 
 The Tiltfile refuses to load unless the active Kubernetes context starts with
 `kind-`. This is stricter than Tilt's built-in local-cluster safety check and
 prevents this development stack from targeting another cluster type.
+
+## Create the development cluster
+
+Run the shared cluster helper directly on macOS or Linux, with Docker, kind,
+`kubectl` and `jq` on `PATH`. On macOS, start a local Docker runtime such as
+Docker Desktop and select its Docker context. Kind and Tilt run from your macOS
+terminal; a separately provisioned vfkit VM is not required. The runtime must
+provide Linux AMD64 or ARM64 containers through a local Docker Unix socket.
+
+The optional vfkit lab for BMC-controlled guests, bridged networking and an IPv6
+gateway is separate work tracked in
+[#8124](https://github.com/dsx-ai-factory/infra-controller/issues/8124). It is not a
+prerequisite for this cluster setup. The Ubuntu host preparation script remains
+responsible for Linux package installation and host configuration.
+
+From the repository root:
+
+```bash
+bash dev/deployment/setup-kind.sh --name nico-tilt
+export KUBECONFIG="$HOME/.kube/kind-nico-tilt.yaml"
+kubectl --context kind-nico-tilt get nodes
+```
+
+The default `nico-tilt` name is separate from DevSpace's `nico-dev`. Select an
+unused cluster for Tilt: this helper does not detect or migrate an existing
+DevSpace deployment, and both frontends deploy into the same NICo namespaces.
+For deliberate reuse after removing a DevSpace deployment, see
+[existing local clusters](#existing-local-clusters).
+
+For an isolated dual-stack cluster, select a different name:
+
+```bash
+bash dev/deployment/setup-kind.sh --name nico-dual --ip-family dual
+export KUBECONFIG="$HOME/.kube/kind-nico-dual.yaml"
+kubectl --context kind-nico-dual get nodes -o wide
+```
+
+Both architectures use the same helper and configuration. Dual stack requires
+IPv6 support in the container runtime's Linux kernel and Docker network, but not
+Internet IPv6.
+It configures Kubernetes pod/service networking; it does not configure NICo
+underlays, tenant prefixes, DHCPv6, SLAAC or instance networking.
+
+The helper accepts these options; repeated options use the last value:
+
+| Option | Default | Contract |
+| --- | --- | --- |
+| `--name NAME` | `nico-tilt` | Lowercase DNS label, 1–49 characters. Selects one cluster with one `NAME-control-plane` node. |
+| `--ip-family FAMILY` | `ipv4` | `ipv4` or `dual`. An existing cluster's pod CIDRs must match. IPv6-only clusters are not accepted by this helper. |
+| `--image IMAGE` | The digest-pinned Kubernetes 1.36.1 node image from the [kind 0.32.0 release](https://github.com/kubernetes-sigs/kind/releases/tag/v0.32.0) | Used only when creating a cluster; existing nodes are never upgraded. Custom images must work with the installed kind version and selected daemon architecture. |
+| `--kubeconfig PATH` | `$HOME/.kube/kind-NAME.yaml` | Exported after node readiness, architecture and pod-family validation. Kind merges an existing file and selects the cluster context in that file. Relative paths resolve from the working directory. |
+| `--help`, `-h` | — | Print usage and exit without host changes. |
+
+Missing values, invalid names/families and unknown options fail before contacting
+Docker. The helper requires kind 0.32.0 or newer for the pinned node image. It
+captures the active Docker context, requires a local Unix socket and a Linux
+AMD64/ARM64 daemon, and forces kind's Docker provider. Node images use the daemon
+architecture. On Linux it must match the host; on macOS it comes from the local
+container runtime, independently of the client process architecture. The helper
+does not detect whether a macOS runtime is using hardware emulation. SSH/TCP
+Docker endpoints are rejected because this helper does not arrange remote API
+access; run it on that Docker host instead.
+A `DOCKER_HOST` Unix socket is honored with Docker's default context.
+
+Validation uses a private temporary kubeconfig with explicit context selection;
+inherited `KUBECONFIG` is ignored. Your normal kubeconfig and current context
+remain unchanged unless you explicitly select that file with `--kubeconfig`.
+New clusters publish their API on `127.0.0.1`, on a port chosen by kind. Run Tilt
+from the same macOS or Linux client, using the exported kubeconfig and the same
+Docker context.
+
+Setup reuses compatible clusters without pulling a node image, restarting nodes
+or changing installed workloads. It rejects multiple-node clusters and mismatched
+pod families or architectures. It passes `--wait 180s` to kind and
+`--timeout=180s` to the node readiness check; these do not impose an overall
+timeout on image downloads or setup. Failure returns nonzero, removes temporary
+files and lets kind clean up a failed creation. A cluster that was created
+successfully but fails subsequent validation remains available for diagnosis.
+The helper does not delete/recreate preexisting clusters or repair incompatible
+settings. Choose another name or explicitly remove an unused
+cluster through kind after accounting for its workloads and data.
+
+When adding a second cluster, kubelet/containerd errors about "too many open
+files" can indicate exhausted inotify resources in the runtime's Linux kernel.
+On macOS these limits belong to the container runtime, not macOS sysctl. Follow
+[kind's inotify troubleshooting](https://kind.sigs.k8s.io/docs/user/known-issues/#pod-errors-due-to-too-many-open-files)
+to diagnose and size those Linux limits through the runtime; the helper does not
+change sysctls.
+Image imports with Docker's containerd image store can require
+[kind's native-platform archive workaround](https://kind.sigs.k8s.io/docs/user/known-issues/#unable-to-kind-load-docker-images).
+
+This step installs no NICo services, host packages, registry workarounds or BMC
+targets, and does not modify the Docker daemon configuration. The DevSpace host
+bootstrap calls the same helper, then applies its existing node TLS settings and
+continues its own deployment workflow.
 
 ## Start
 
