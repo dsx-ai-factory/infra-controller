@@ -244,3 +244,67 @@ impl OutdatedHost<'_> {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{DpuMachineUpdate, OutdatedDpfDpu};
+    use crate::machine::{InstanceState, ManagedHostState};
+    use crate::test_support::machine_snapshot::managed_host_state_snapshot;
+
+    #[test]
+    fn dpf_updates_require_eligible_hosts_and_capacity() {
+        let mut eligible = managed_host_state_snapshot();
+        eligible.managed_state = ManagedHostState::Ready;
+        eligible.host_snapshot.config.dpf.used_for_ingestion = true;
+        let outdated = [OutdatedDpfDpu {
+            dpu_machine_id: eligible.dpu_snapshots[0].id,
+            target_source: "test-namespace-bf-bundle-abc.bfb".to_string(),
+        }];
+        let mut assigned = eligible.clone();
+        assigned.managed_state = ManagedHostState::Assigned {
+            instance_state: InstanceState::Ready,
+        };
+        let mut unhealthy = eligible.clone();
+        unhealthy.aggregate_health.alerts.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "TestHealthFailure", "message": "test failure", "classifications": [],
+            }))
+            .expect("health alert"),
+        );
+        let mut pending = eligible.clone();
+        pending.dpu_snapshots[1].reprovision_requested = Some(
+        serde_json::from_value(serde_json::json!({
+            "requested_at": "2026-01-01T00:00:00Z", "initiator": "test",
+            "update_firmware": false, "restart_reprovision_requested_at": "2026-01-01T00:00:00Z",
+        }))
+        .expect("reprovision request"),
+    );
+
+        for (name, snapshot, capacity, expected_count) in vec![
+            ("healthy unassigned host", eligible.clone(), 1, 1),
+            ("assigned host", assigned, 1, 0),
+            ("unhealthy host", unhealthy, 1, 0),
+            ("another DPU already reprovisioning", pending, 1, 0),
+            ("no update capacity", eligible, 0, 0),
+        ]
+        .into_boxed_slice()
+        {
+            let host_id = snapshot.host_snapshot.id;
+            let snapshots = std::collections::HashMap::from([(host_id, snapshot)]);
+            let updates = DpuMachineUpdate::find_available_outdated_dpus(
+                Some(capacity),
+                &[],
+                &snapshots,
+                &outdated,
+            )
+            .expect(name);
+            assert_eq!(updates.len(), expected_count, "{name}");
+            if let Some(update) = updates.first() {
+                assert_eq!(update.host_machine_id, host_id);
+                assert_eq!(update.dpu_machine_id, outdated[0].dpu_machine_id);
+                assert!(update.dpf_managed);
+                assert_eq!(update.firmware_version, outdated[0].target_source);
+            }
+        }
+    }
+}
