@@ -49,6 +49,54 @@ pub enum ConfigureSwitchCertificateState {
     Failed,
 }
 
+/// Backend diagnostics for a failed certificate submission or completed job.
+/// An empty failure list means RMS supplied no node-specific failures, not success.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwitchCertificateFailure {
+    /// Parent (or single-switch child) job ID, absent when submission returned none.
+    pub job_id: Option<String>,
+    /// Reported node failures and missing child statuses, ordered by node ID and child job ID.
+    pub node_failures: Vec<SwitchCertificateNodeFailure>,
+}
+
+/// A failed node operation or missing child status; multiple child jobs may refer to the same node.
+/// A missing status records unavailable diagnostics, not a confirmed child failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwitchCertificateNodeFailure {
+    /// RMS node identity; an empty value means RMS did not identify the node.
+    pub node_id: String,
+    /// Child job ID, absent for a rejection before child-job creation.
+    pub job_id: Option<String>,
+    /// RMS JobError numeric value, including unknown values; absent on submission or missing status.
+    pub error_code: Option<i32>,
+    /// Error message returned by RMS verbatim, or an explanation that the child status is missing.
+    pub message: String,
+}
+
+impl std::fmt::Display for SwitchCertificateFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "switch certificate failure: job {}",
+            self.job_id.as_deref().unwrap_or("unavailable")
+        )?;
+        if self.node_failures.is_empty() {
+            write!(f, "; node failure details unavailable")?;
+        }
+        for failure in &self.node_failures {
+            write!(f, "; node {}", failure.node_id)?;
+            if let Some(job_id) = &failure.job_id {
+                write!(f, " (job {job_id})")?;
+            }
+            if let Some(code) = failure.error_code {
+                write!(f, " [RMS error {code}]")?;
+            }
+            write!(f, ": {}", failure.message)?;
+        }
+        Ok(())
+    }
+}
+
 impl ConfigureSwitchCertificateState {
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed)

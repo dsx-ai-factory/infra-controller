@@ -641,6 +641,7 @@ fn backend_error_category(error: &ComponentManagerError) -> &'static str {
         ComponentManagerError::Unsupported(_) => "unsupported",
         ComponentManagerError::RejectedBeforeDispatch(_) => "rejected_before_dispatch",
         ComponentManagerError::OperationOutcomeUnknown(_) => "operation_outcome_unknown",
+        ComponentManagerError::SwitchCertificateSubmission { .. } => "operation_outcome_unknown",
         ComponentManagerError::Internal(_) => "internal",
         ComponentManagerError::Transport(_) => "transport",
         ComponentManagerError::Status(_) => "grpc_status",
