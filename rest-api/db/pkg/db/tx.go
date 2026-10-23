@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/avast/retry-go/v4"
+	"github.com/rs/zerolog/log"
 	"github.com/uptrace/bun"
 )
 
@@ -51,7 +52,10 @@ func BeginTx(ctx context.Context, dbSession *Session, txOptions *sql.TxOptions) 
 	// will block indefinitely.
 	_, err = tx.Exec(fmt.Sprintf("SET LOCAL lock_timeout = '%ds'", DefaultTxLockTimeoutSeconds))
 	if err != nil {
-		tx.Rollback()
+		rollbackErr := tx.Rollback()
+		if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			log.Error().Err(rollbackErr).Msg("failed to rollback transaction")
+		}
 		return nil, err
 	}
 
@@ -64,7 +68,10 @@ func BeginTx(ctx context.Context, dbSession *Session, txOptions *sql.TxOptions) 
 // if transaction was committed, this will do nothing
 func RollbackTx(ctx context.Context, tx *Tx, committed *bool) {
 	if committed != nil && !*committed {
-		tx.Rollback()
+		err := tx.Rollback()
+		if err != nil && !errors.Is(err, sql.ErrTxDone) {
+			log.Error().Err(err).Msg("failed to rollback transaction")
+		}
 	}
 }
 
