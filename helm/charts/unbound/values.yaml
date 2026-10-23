@@ -113,13 +113,35 @@ localConfig:
     server:
         verbosity: 1
   nico_local_unknowndomain.conf: |
-    # This .unknowndomain value is hardcoded in nico as a default if a VPC
-    # doesn't have one configured. We shouldn't forward any of these queries further
-    # upstream.
-    local-zone: "unknowndomain." static
-    local-data: "unknowndomain. 10800 IN NS localhost."
-    local-data: "unknowndomain. 10800 IN SOA localhost. nobody.invalid. 1 3600 1200 604800 10800"
+    server:
+        # This .unknowndomain value is hardcoded in nico as a default if a VPC
+        # doesn't have one configured. We shouldn't forward any of these queries further
+        # upstream.
+        local-zone: "unknowndomain." static
+        local-data: "unknowndomain. 10800 IN NS localhost."
+        local-data: "unknowndomain. 10800 IN SOA localhost. nobody.invalid. 1 3600 1200 604800 10800"
   forwarders.conf: |
-    # This file's contents are intended to be broken if used at runtime. The base
-    # configMapGenerator should be merged with a later one that replaces this file.
-    include: patchme/patchme.conf
+    # No forwarders configured. Override localConfig.forwarders.conf in values
+    # to add forward-zone blocks for upstream resolvers.
+
+## Optional override for the main unbound.cfg. When non-empty, the value is
+## injected as-is into the ConfigMap as unbound.cfg. Use this to supply
+## interface, chroot, pidfile, and username directives required by stock UBI
+## unbound images (which do not ship the NVIDIA nvforge entrypoint wrapper).
+## Example (OpenShift / UBI unbound, port 5353):
+##   unbound:
+##     mainConfig: |
+##       server:
+##           interface: 0.0.0.0@5353
+##           interface: ::0@5353
+##           chroot: ""
+##           username: ""
+##           pidfile: ""
+##       include: "/etc/unbound/local.conf.d/*.conf"
+## Port unbound listens on inside the container. Change to 5353 when running
+## under OpenShift restricted-v2 (no CAP_NET_BIND_SERVICE). The Services keep
+## port 53 externally; kube-proxy/OVN routes :53→containerPort.
+containerPort: 53
+
+unbound:
+  mainConfig: ""  # override the main unbound.cfg content

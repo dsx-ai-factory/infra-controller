@@ -26,6 +26,17 @@ global:
 namespaceOverride: ""
 
 replicas: 2
+
+## Container-level security context, rendered after the always-applied
+## `allowPrivilegeEscalation: false` baseline. The chart default adds SYS_PTRACE.
+## OpenShift's restricted Security Context Constraints (SCC) do not permit it, so
+## set the value to null there; the baseline is still applied:
+##   containerSecurityContext: null
+containerSecurityContext:
+  capabilities:
+    add:
+      - SYS_PTRACE
+
 annotations:
   configmap.reloader.stakater.com/reload: '{{ include "nico-dns.name" . }}, {{ include "nico-dns.name" . }}-config'
 
@@ -34,6 +45,10 @@ annotations:
 listenAddress: "[::]:53"
 
 service:
+  # Allow configuring a different targetPort (e.g. 5353 when running as
+  # unprivileged user under OpenShift restricted-v2 SCC). Applies to the
+  # cluster-internal Service and the per-pod external LoadBalancer Services.
+  targetPort: null  # defaults to the service port when null
   ports:
     - port: 53
       name: tcp

@@ -27,6 +27,16 @@ namespaceOverride: ""
 
 replicas: 1
 
+## Container-level security context, rendered after the always-applied
+## `allowPrivilegeEscalation: false` baseline. The chart default adds IPC_LOCK.
+## OpenShift's restricted Security Context Constraints (SCC) do not permit it, so
+## set the value to null there; the baseline is still applied:
+##   containerSecurityContext: null
+containerSecurityContext:
+  capabilities:
+    add:
+      - IPC_LOCK
+
 ## Container resource requests and limits. Empty by default.
 resources: {}
 
