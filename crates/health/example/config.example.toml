@@ -28,6 +28,10 @@ bmc_proxy_url = "http://proxy.example.com:8080"
 
 endpoint_discovery_interval = "5m"
 
+# Budget for draining collectors on SIGTERM/SIGINT; keep below the pod's
+# terminationGracePeriodSeconds. Default: 20s.
+shutdown_timeout = "20s"
+
 # ==============================================================================
 # Endpoint Sources: Where to discover BMC endpoints from
 # ==============================================================================

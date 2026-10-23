@@ -112,6 +112,11 @@ pub struct Config {
     #[serde(with = "humantime_serde")]
     pub endpoint_discovery_interval: Duration,
 
+    /// Budget for draining started collectors on SIGTERM or SIGINT; collectors
+    /// still running when it passes are abandoned.
+    #[serde(with = "humantime_serde")]
+    pub shutdown_timeout: Duration,
+
     /// BMC proxy URL
     pub bmc_proxy_url: Option<Url>,
 }
@@ -132,6 +137,7 @@ impl Default for Config {
             cache_size: 100,
             bmc_request_concurrency: DEFAULT_BMC_REQUEST_CONCURRENCY,
             endpoint_discovery_interval: Duration::from_secs(300),
+            shutdown_timeout: Duration::from_secs(20),
             bmc_proxy_url: None,
         }
     }
@@ -2837,6 +2843,10 @@ impl Config {
 
         if self.endpoint_discovery_interval.is_zero() {
             return Err("endpoint_discovery_interval must be greater than 0".to_string());
+        }
+
+        if self.shutdown_timeout.is_zero() {
+            return Err("shutdown_timeout must be greater than 0".to_string());
         }
 
         if self.bmc_request_concurrency.get() > Semaphore::MAX_PERMITS {

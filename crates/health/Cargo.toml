@@ -113,7 +113,7 @@ carbide-rpc = { path = "../rpc" }
 carbide-secrets = { path = "../secrets" }
 carbide-tls = { path = "../tls" }
 carbide-version = { path = "../version" }
-carbide-utils = { path = "../utils" }
+carbide-utils = { path = "../utils", features = ["shutdown-handler"] }
 carbide-uuid = { path = "../uuid" }
 logfmt = { path = "../logfmt" }
 

@@ -1,0 +1,17 @@
+suite: hardware-health termination grace period
+templates:
+  - templates/deployment.yaml
+tests:
+  - it: leaves headroom over the default 20s collector drain budget
+    asserts:
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 30
+
+  - it: allows operators to set a longer grace period
+    set:
+      terminationGracePeriodSeconds: 45
+    asserts:
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 45

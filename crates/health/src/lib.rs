@@ -22,6 +22,7 @@ use nv_redfish::bmc_http::reqwest::{
     BmcError, Client as ReqwestClient, ClientParams as ReqwestClientParams,
 };
 use prometheus::{Gauge, GaugeVec, Opts};
+use tokio_util::sync::CancellationToken;
 
 pub mod api_client;
 pub mod bmc;
@@ -391,6 +392,12 @@ impl discovery::DiscoveryIteration for ServiceDiscoveryIteration {
 
         Ok(())
     }
+
+    async fn shutdown(&mut self) -> discovery::DiscoveryShutdown {
+        self.ctx
+            .drain_collectors(self.config.shutdown_timeout)
+            .await
+    }
 }
 
 /// Runs the hardware-health service after validating configured TLS profiles.
@@ -398,11 +405,17 @@ impl discovery::DiscoveryIteration for ServiceDiscoveryIteration {
 /// Switch and OTLP TLS material is preflighted before listeners and background
 /// tasks start, so invalid certificate configuration fails startup.
 ///
+/// `cancel_token` carries the shutdown signal: once cancelled, the service stops
+/// discovery and drains its collectors within the configured `shutdown_timeout`.
+///
 /// # Errors
 ///
 /// Returns an error when startup validation or initialization fails, or when a
 /// long-running service task exits with an error.
-pub async fn run_service(config: Config) -> Result<(), HealthError> {
+pub async fn run_service(
+    config: Config,
+    cancel_token: CancellationToken,
+) -> Result<(), HealthError> {
     if let Some(tls_config) = &config.tls.switch {
         tls::preflight(tls_config).await?;
     }
@@ -479,7 +492,7 @@ pub async fn run_service(config: Config) -> Result<(), HealthError> {
 
     let config_arc = Arc::new(config);
 
-    let join_discovery: tokio::task::JoinHandle<()> = tokio::spawn({
+    let mut join_discovery: tokio::task::JoinHandle<discovery::DiscoveryShutdown> = tokio::spawn({
         let config = config_arc.clone();
         let shard_manager = ShardManager {
             shard: config.shard,
@@ -521,11 +534,32 @@ pub async fn run_service(config: Config) -> Result<(), HealthError> {
             interval,
             BackoffConfig::default(),
             collector_transition_notify,
+            cancel_token.clone(),
             iteration,
         )
     });
 
     tokio::select! {
+        // Cancellation is polled first so a discovery loop that has already
+        // drained is reported as a graceful shutdown rather than an unexpected
+        // exit.
+        biased;
+
+        () = cancel_token.cancelled() => {
+            tracing::info!("Shutdown signal received; draining collectors");
+
+            // The loop observes the same cancellation and drains its collectors.
+            match join_discovery.await {
+                Ok(shutdown) => tracing::info!(
+                    closed = shutdown.closed,
+                    timed_out = shutdown.timed_out,
+                    "graceful_shutdown"
+                ),
+                Err(e) => {
+                    tracing::error!(error=?e, "Discovery loop join error during shutdown");
+                }
+            }
+        }
         res = join_listener => {
             match res {
                 Ok(Ok(_)) => {
@@ -539,9 +573,9 @@ pub async fn run_service(config: Config) -> Result<(), HealthError> {
                 }
             }
         }
-        res = join_discovery => {
+        res = &mut join_discovery => {
             match res {
-                Ok(()) => {
+                Ok(_) => {
                     tracing::error!("Discovery loop ended unexpectedly");
                 }
                 Err(e) => {
