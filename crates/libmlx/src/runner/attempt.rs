@@ -132,6 +132,7 @@ fn diagnostic(bytes: &[u8]) -> String {
 /// and completed processes do not prove that device-internal work has stopped.
 #[derive(Clone, Debug, Default)]
 pub struct FirmwareToolExecutor {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     supervisor_path: Option<std::path::PathBuf>,
     #[cfg(target_os = "linux")]
     owner_exit_behavior: ToolOwnerExitBehavior,
