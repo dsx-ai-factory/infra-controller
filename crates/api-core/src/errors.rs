@@ -497,6 +497,7 @@ impl OperatorError for CarbideError {
         use ErrorSubsystem::{Api, Redfish};
         match self {
             CarbideError::InvalidArgument(_)
+            | CarbideError::UuidConversionError(_)
             | CarbideError::VpcCapability(_)
             | CarbideError::InvalidConfiguration(_)
             | CarbideError::RpcDataConversionError(_)
@@ -594,6 +595,9 @@ impl From<CarbideError> for tonic::Status {
             }
             e @ CarbideError::Internal { .. } => Status::internal(e.to_string()),
             CarbideError::InvalidArgument(msg) => Status::invalid_argument(msg),
+            error @ CarbideError::UuidConversionError(_) => {
+                Status::invalid_argument(error.to_string())
+            }
             error @ CarbideError::VpcCapability(_) => Status::invalid_argument(error.to_string()),
             CarbideError::InvalidConfiguration(e) => Status::invalid_argument(e.to_string()),
             CarbideError::RpcDataConversionError(e) => Status::invalid_argument(e.to_string()),
@@ -981,6 +985,41 @@ fn invalid_argument_status_includes_operator_schema_metadata() {
             .to_str()
             .expect("operator error text should be ASCII"),
         "argument is invalid: bad input"
+    );
+}
+
+#[test]
+fn uuid_conversion_status_includes_invalid_argument_metadata() {
+    use carbide_test_support::{Check, check_values};
+
+    let errors = [
+        (
+            "direct UUID error",
+            CarbideError::from(uuid::Uuid::parse_str("not-a-uuid").unwrap_err()),
+        ),
+        (
+            "database UUID error",
+            CarbideError::from(DatabaseError::from(
+                uuid::Uuid::parse_str("not-a-uuid").unwrap_err(),
+            )),
+        ),
+    ];
+    check_values(
+        errors.map(|(scenario, input)| Check {
+            scenario,
+            input,
+            expect: (tonic::Code::InvalidArgument, "NICO-API-400".to_owned()),
+        }),
+        |error| {
+            let status: tonic::Status = error.into();
+            let code = status
+                .metadata()
+                .get("nico-error-code")
+                .expect("metadata should include operator error code")
+                .to_str()
+                .expect("operator error code should be ASCII");
+            (status.code(), code.to_owned())
+        },
     );
 }
 
