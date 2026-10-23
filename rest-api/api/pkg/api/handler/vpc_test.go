@@ -4058,6 +4058,20 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 	vpcPrefix := testVPCBuildVPCPrefix(t, dbSession, "test-vpc-prefix", tn1, vpc3, cutil.GetPtr(ipb1.ID), "10.0.0.0/24", tnu1)
 	assert.NotNil(t, vpcPrefix)
 
+	vpcWithCrossTenantAttachment := testVPCBuildVPC(t, dbSession, "test-vpc-with-cross-tenant-attachment", ip, tn1, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu1)
+	crossTenantPrimaryVpc := testVPCBuildVPC(t, dbSession, "test-cross-tenant-primary-vpc", ip, tn2, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu2)
+	crossTenantInstance := testInstanceBuildInstance(
+		t, dbSession, "test-cross-tenant-instance", tn2.ID, ip.ID, st.ID,
+		nil, crossTenantPrimaryVpc.ID, nil, nil, nil, cdbm.InstanceStatusReady,
+	)
+	_, err := cdbm.NewInterfaceDAO(dbSession).Create(ctx, nil, cdbm.InterfaceCreateInput{
+		InstanceID: crossTenantInstance.ID,
+		VpcID:      &vpcWithCrossTenantAttachment.ID,
+		Status:     cdbm.InterfaceStatusReady,
+		CreatedBy:  tnu2.ID,
+	})
+	require.NoError(t, err)
+
 	nvllp := testBuildNVLinkLogicalPartition(t, dbSession, "test-nvllp", cutil.GetPtr("Test NVLink Logical Partition"), tn1.Org, st, tn1, cutil.GetPtr(cdbm.NVLinkLogicalPartitionStatusReady), false)
 	assert.NotNil(t, nvllp)
 
@@ -4322,6 +4336,22 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 				reqUser:  tnu1,
 				respCode: http.StatusBadRequest,
 			},
+		},
+		{
+			name: "VPC delete is blocked by a cross-Tenant Interface attachment",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqVPC:   vpcWithCrossTenantAttachment.ID.String(),
+				reqOrg:   tnOrg1,
+				reqUser:  tnu1,
+				respCode: http.StatusBadRequest,
+			},
+			responseContains: "one or more instances for this VPC",
 		},
 	}
 	for _, tt := range tests {

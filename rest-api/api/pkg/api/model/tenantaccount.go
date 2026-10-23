@@ -120,7 +120,7 @@ type APITenantAccountSiteCapabilitiesUpdateRequest []APITenantAccountSiteCapabil
 // Validate ensures the replace payload is structurally valid.
 func (caps APITenantAccountSiteCapabilitiesUpdateRequest) Validate() error {
 	if len(caps) == 0 {
-		return validation.Errors{"siteCapabilities": fmt.Errorf("siteCapabilities must contain at least one entry")}
+		return validation.Errors{"siteCapabilities": errors.New("siteCapabilities must contain at least one entry")}
 	}
 
 	accountCapabilityCount := 0
@@ -205,7 +205,7 @@ type APITenantAccount struct {
 	// Deprecations is the list of deprecations for the TenantAccount
 	Deprecations []APIDeprecation `json:"deprecations"`
 	// SiteCapabilities describes provider-scoped TargetedInstanceCreation settings
-	SiteCapabilities []APITenantAccountSiteCapability `json:"siteCapabilities,omitempty"`
+	SiteCapabilities []APITenantAccountSiteCapability `json:"siteCapabilities"`
 }
 
 // APITenantAccountStats is a data structure to capture information about a TenantAccount stats at the API layer

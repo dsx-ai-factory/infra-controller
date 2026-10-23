@@ -528,6 +528,90 @@ func TestAPIInstanceUpdateRequest_PowerProfileJSON(t *testing.T) {
 	}
 }
 
+func TestHasCrossTenantInterface(t *testing.T) {
+	tenantID := uuid.New()
+	otherTenantID := uuid.New()
+	localVpcID := uuid.New()
+	otherVpcID := uuid.New()
+	otherPrefixID := uuid.New()
+
+	vpcs := map[uuid.UUID]*cdbm.Vpc{
+		localVpcID: {ID: localVpcID, TenantID: tenantID},
+		otherVpcID: {ID: otherVpcID, TenantID: otherTenantID},
+	}
+	vpcPrefixes := map[uuid.UUID]*cdbm.VpcPrefix{otherPrefixID: {ID: otherPrefixID, TenantID: otherTenantID}}
+
+	tests := []struct {
+		name       string
+		interfaces []APIInterfaceCreateOrUpdateRequest
+		want       bool
+	}{
+		{name: "same-Tenant VPC", interfaces: []APIInterfaceCreateOrUpdateRequest{{VpcID: cutil.GetPtr(localVpcID.String())}}},
+		{name: "other Tenant's VPC", interfaces: []APIInterfaceCreateOrUpdateRequest{{VpcID: cutil.GetPtr(localVpcID.String())}, {VpcID: cutil.GetPtr(otherVpcID.String())}}, want: true},
+		{name: "other Tenant's VPC Prefix", interfaces: []APIInterfaceCreateOrUpdateRequest{{VpcPrefixID: cutil.GetPtr(otherPrefixID.String())}}, want: true},
+		{name: "selector missing from the maps is left to the not-found checks", interfaces: []APIInterfaceCreateOrUpdateRequest{{VpcID: cutil.GetPtr(uuid.NewString())}}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, HasCrossTenantInterface(tc.interfaces, tenantID, vpcs, vpcPrefixes))
+		})
+	}
+}
+
+func TestHasNewCrossTenantInterface(t *testing.T) {
+	tenantID := uuid.New()
+	crossTenantTenantID := uuid.New()
+	localVpcID := uuid.New()
+	crossTenantVpcID := uuid.New()
+	otherCrossTenantVpcID := uuid.New()
+	device := "eth0"
+	deviceInstance := 1
+
+	local := cdbm.Interface{
+		VpcID:          &localVpcID,
+		Vpc:            &cdbm.Vpc{ID: localVpcID, TenantID: tenantID},
+		Device:         &device,
+		DeviceInstance: &deviceInstance,
+	}
+	crossTenant := cdbm.Interface{
+		VpcID:          &crossTenantVpcID,
+		Vpc:            &cdbm.Vpc{ID: crossTenantVpcID, TenantID: crossTenantTenantID},
+		Device:         &device,
+		DeviceInstance: &deviceInstance,
+	}
+	otherCrossTenant := crossTenant
+	otherCrossTenant.VpcID = &otherCrossTenantVpcID
+	otherCrossTenant.Vpc = &cdbm.Vpc{ID: otherCrossTenantVpcID, TenantID: crossTenantTenantID}
+	changedCrossTenant := crossTenant
+	changedDeviceInstance := 2
+	changedCrossTenant.DeviceInstance = &changedDeviceInstance
+	deletingCrossTenant := crossTenant
+	deletingCrossTenant.Status = cdbm.InterfaceStatusDeleting
+
+	tests := []struct {
+		name      string
+		requested []cdbm.Interface
+		existing  []cdbm.Interface
+		want      bool
+	}{
+		{name: "unchanged cross-Tenant identity", requested: []cdbm.Interface{crossTenant}, existing: []cdbm.Interface{crossTenant}},
+		{name: "remove cross-Tenant Interface", requested: []cdbm.Interface{local}, existing: []cdbm.Interface{crossTenant}},
+		{name: "retarget cross-Tenant Interface", requested: []cdbm.Interface{otherCrossTenant}, existing: []cdbm.Interface{crossTenant}, want: true},
+		{name: "change cross-Tenant Interface identity", requested: []cdbm.Interface{changedCrossTenant}, existing: []cdbm.Interface{crossTenant}, want: true},
+		{name: "duplicate cross-Tenant request needs one match each", requested: []cdbm.Interface{crossTenant, crossTenant}, existing: []cdbm.Interface{crossTenant}, want: true},
+		{name: "deleting Interface cannot be reused", requested: []cdbm.Interface{crossTenant}, existing: []cdbm.Interface{deletingCrossTenant}, want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := HasNewCrossTenantInterface(tenantID, tc.requested, tc.existing)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestAPIInstanceCreateRequest_Validate(t *testing.T) {
 	type fields struct {
 		Name                           string

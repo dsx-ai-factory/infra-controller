@@ -1911,9 +1911,10 @@ func (dvh DeleteVPCHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Cannot delete VPC, one or more VPC prefixes exist for this VPC", nil)
 	}
 
-	// Check if VPC has instance
+	// Check if VPC has instance. The VpcIDs filter also matches other Tenants' Instances
+	// whose Interfaces select this VPC or one of its VPC Prefixes.
 	insDAO := cdbm.NewInstanceDAO(dvh.dbSession)
-	instances, _, err := insDAO.GetAll(ctx, nil, cdbm.InstanceFilterInput{TenantIDs: []uuid.UUID{vpc.TenantID}, VpcIDs: []uuid.UUID{vpc.ID}}, cdbp.PageInput{}, []string{})
+	instances, _, err := insDAO.GetAll(ctx, nil, cdbm.InstanceFilterInput{VpcIDs: []uuid.UUID{vpc.ID}}, cdbp.PageInput{}, []string{})
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving instances for this VPC")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve instances for this VPC", nil)
@@ -1943,7 +1944,7 @@ func (dvh DeleteVPCHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to reload VPC power configuration", nil)
 			}
 			vpc = lockedVPC
-			lockedInstances, _, lockErr := insDAO.GetAll(ctx, tx, cdbm.InstanceFilterInput{TenantIDs: []uuid.UUID{vpc.TenantID}, VpcIDs: []uuid.UUID{vpc.ID}}, cdbp.PageInput{}, nil)
+			lockedInstances, _, lockErr := insDAO.GetAll(ctx, tx, cdbm.InstanceFilterInput{VpcIDs: []uuid.UUID{vpc.ID}}, cdbp.PageInput{}, nil)
 			if lockErr != nil {
 				logger.Error().Err(lockErr).Str("vpcID", vpc.ID.String()).Msg("failed to retrieve instances for VPC deletion")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve instances for this VPC", nil)
