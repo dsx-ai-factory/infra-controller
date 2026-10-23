@@ -220,6 +220,12 @@ async fn main() -> color_eyre::Result<()> {
     }
 
     let url = get_api_url(config.api_url, file_config.as_ref());
+    // A root CA from the flag, env var or config file is one the user chose
+    // for this server; an auto-discovered default may not match it.
+    let root_ca_explicit = config.root_ca_path.is_some()
+        || file_config
+            .as_ref()
+            .is_some_and(|f| f.root_ca_path.is_some());
     let root_ca_path = get_root_ca_path(config.root_ca_path, file_config.as_ref());
 
     let command = match config.commands {
@@ -232,7 +238,8 @@ async fn main() -> color_eyre::Result<()> {
     // `version` calls forge/Version which allows anonymous access, so no
     // client cert is needed. All other commands authenticate via the admin
     // CLI client cert (trusted-certificate principal).
-    let client_cert = if matches!(command, CliCommand::Version(_)) {
+    let is_version = matches!(command, CliCommand::Version(_));
+    let client_cert = if is_version {
         None
     } else {
         Some(get_client_cert_info(
@@ -246,6 +253,26 @@ async fn main() -> color_eyre::Result<()> {
 
     let mut client_config = ForgeClientConfig::new(root_ca_path, client_cert);
     client_config.socks_proxy(proxy);
+    // Without a client cert, `ForgeClientConfig::new` disables server
+    // verification. `version` verifies the server only if the user explicitly
+    // supplied a usable root CA; an auto-discovered default CA may not be the
+    // issuer for this server, and a missing or malformed CA must not make
+    // `version` fail.
+    if is_version && root_ca_explicit {
+        if client_config.root_ca_is_usable() {
+            client_config = client_config.require_tls_enforcement();
+        } else if std::path::Path::new(&client_config.root_ca_path).exists() {
+            tracing::warn!(
+                path = %client_config.root_ca_path,
+                "root CA contains no valid certificate; server certificate will not be verified"
+            );
+        } else {
+            tracing::debug!(
+                path = %client_config.root_ca_path,
+                "root CA not found; server certificate will not be verified"
+            );
+        }
+    }
 
     let ctx = RuntimeContext {
         api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(&url, &client_config))),
