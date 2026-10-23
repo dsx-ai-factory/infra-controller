@@ -510,14 +510,6 @@ func TestGenericComponentStepWorkflow_FirmwareControlAction(t *testing.T) {
 // PowerControl action constructs PowerControlTaskInfo from ParamOperation
 // when the workflow's operationInfo is a different type (cross-workflow use).
 func TestGenericComponentStepWorkflow_PowerControlWithParamOperation(t *testing.T) {
-	testSuite := &testsuite.WorkflowTestSuite{}
-	env := testSuite.NewTestWorkflowEnvironment()
-
-	env.RegisterActivityWithOptions(mockPowerControl,
-		activity.RegisterOptions{Name: activitypkg.NamePowerControl})
-
-	env.OnActivity(mockPowerControl, mock.Anything, mock.Anything,
-		mock.Anything).Return(nil)
 
 	step := operationrules.SequenceStep{
 		ComponentType: devicetypes.ComponentTypeCompute,
@@ -540,19 +532,45 @@ func TestGenericComponentStepWorkflow_PowerControlWithParamOperation(t *testing.
 		devicetypes.ComponentTypeCompute: target,
 	}
 
-	// Pass FirmwareControlTaskInfo as operationInfo -- NOT PowerControlTaskInfo.
-	// The action executor should use ParamOperation instead.
-	firmwareInfo := &operations.FirmwareControlTaskInfo{
-		Operation: operations.FirmwareOperationUpgrade,
-		StartTime: time.Now().Unix(),
-		EndTime:   time.Now().Add(2 * time.Hour).Unix(),
+	cases := []struct {
+		name         string
+		parent       any
+		wantOverride bool
+		wantBypass   bool
+	}{
+		{
+			name:   "firmware power sub-action",
+			parent: &operations.FirmwareControlTaskInfo{Operation: operations.FirmwareOperationUpgrade},
+		},
+		{
+			name:         "readiness override retains routing across child serialization",
+			parent:       &operations.PowerControlTaskInfo{OverrideReadinessCheck: true},
+			wantOverride: true,
+		},
+		{
+			name:       "explicit bypass survives child serialization",
+			parent:     &operations.PowerControlTaskInfo{BypassStateController: true},
+			wantBypass: true,
+		},
 	}
-
-	env.ExecuteWorkflow(genericComponentStepWorkflow, step, target,
-		firmwareInfo, allTargets)
-
-	assert.True(t, env.IsWorkflowCompleted())
-	assert.NoError(t, env.GetWorkflowError())
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			testSuite := &testsuite.WorkflowTestSuite{}
+			env := testSuite.NewTestWorkflowEnvironment()
+			env.RegisterActivityWithOptions(mockPowerControl,
+				activity.RegisterOptions{Name: activitypkg.NamePowerControl})
+			env.OnActivity(mockPowerControl, mock.Anything, mock.Anything,
+				mock.MatchedBy(func(info *operations.PowerControlTaskInfo) bool {
+					return info.Operation == operations.PowerOperationForcePowerOff &&
+						info.OverrideReadinessCheck == tc.wantOverride &&
+						info.BypassStateController == tc.wantBypass
+				})).Return(nil).Once()
+			env.ExecuteWorkflow(genericComponentStepWorkflow, step, target, tc.parent, allTargets)
+			assert.True(t, env.IsWorkflowCompleted())
+			assert.NoError(t, env.GetWorkflowError())
+			env.AssertExpectations(t)
+		})
+	}
 }
 
 // TestGenericComponentStepWorkflow_InjectExpectationAction tests the

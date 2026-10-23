@@ -195,6 +195,7 @@ func executePowerControlAction(actx actionExecutionContext) error {
 		info := operations.PowerControlTaskInfo{
 			Operation:              op,
 			OverrideReadinessCheck: extractOverrideReadinessCheck(actx.operationInfo),
+			BypassStateController:  extractBypassStateController(actx.operationInfo),
 		}
 		return executeGenericActivity(
 			actx.workflowContext, activity.NamePowerControl, actx.target, info,
@@ -1060,6 +1061,23 @@ func evaluateDecommissionResult(result *activity.GetDecommissionStatusResult) (b
 		}
 	}
 	return !inProgress, nil
+}
+
+// extractBypassStateController preserves the explicit flag across Temporal's
+// JSON boundary when a rule synthesizes a power operation.
+func extractBypassStateController(operationInfo any) bool {
+	var probe struct {
+		BypassStateController bool `json:"bypass_state_controller"`
+	}
+	data, err := json.Marshal(operationInfo)
+	if err != nil {
+		return false
+	}
+	err = json.Unmarshal(data, &probe)
+	if err != nil {
+		return false
+	}
+	return probe.BypassStateController
 }
 
 // extractOverrideReadinessCheck reads the OverrideReadinessCheck flag from

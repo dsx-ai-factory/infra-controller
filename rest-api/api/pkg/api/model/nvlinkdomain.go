@@ -26,6 +26,8 @@ type APIBatchUpdateNVLinkDomainPowerStateRequest struct {
 	// OverrideReadinessCheck applies the readiness bypass to every spawned task.
 	// See APIUpdatePowerStateRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck"`
+	// BypassStateController requests direct backend dispatch and also skips readiness.
+	BypassStateController bool `json:"bypassStateController"`
 }
 
 // Validate checks the NVLink Domain IDs and power-control fields.

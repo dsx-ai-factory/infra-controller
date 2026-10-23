@@ -116,7 +116,16 @@ type PowerControlTaskInfo struct {
 	// not ready for the operation. The bypass is intended for operator-
 	// supervised maintenance windows and is recorded as a warning log on
 	// the worker that executes the task; authorisation lives upstream.
+	// Core state-controller routing is controlled separately by BypassStateController.
 	OverrideReadinessCheck bool `json:"override_readiness_check,omitempty"`
+	// BypassStateController requests direct backend dispatch from Core and also
+	// skips Flow's readiness gate. False retains Core's normal routing.
+	BypassStateController bool `json:"bypass_state_controller,omitempty"`
+}
+
+// SkipReadinessCheck reports whether power control may skip Flow's readiness gate.
+func (info PowerControlTaskInfo) SkipReadinessCheck() bool {
+	return info.OverrideReadinessCheck || info.BypassStateController
 }
 
 func (t *PowerControlTaskInfo) Validate() error {

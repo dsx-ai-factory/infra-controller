@@ -88,6 +88,9 @@ type APIUpdatePowerStateRequest struct {
 	// rack-scoped components) are reported as not ready by their persisted
 	// status. Intended for operator-supervised maintenance.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// BypassStateController requests direct backend dispatch from Core, also
+	// skipping readiness. Defaults to false; does not recover controller state.
+	BypassStateController bool `json:"bypassStateController,omitempty"`
 }
 
 // Validate validates the power control request
@@ -142,6 +145,9 @@ type APIBatchUpdateRackPowerStateRequest struct {
 	// OverrideReadinessCheck applies the readiness-gate bypass to every task
 	// spawned by this batch. See APIUpdatePowerStateRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// BypassStateController requests direct backend dispatch from Core, also
+	// skipping readiness. Defaults to false; does not recover controller state.
+	BypassStateController bool `json:"bypassStateController,omitempty"`
 }
 
 // Validate checks required fields and power state validity.
@@ -172,6 +178,9 @@ type APIBatchUpdateTrayPowerStateRequest struct {
 	// OverrideReadinessCheck applies the readiness-gate bypass to every task
 	// spawned by this batch. See APIUpdatePowerStateRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// BypassStateController requests direct backend dispatch from Core, also
+	// skipping readiness. Defaults to false; does not recover controller state.
+	BypassStateController bool `json:"bypassStateController,omitempty"`
 }
 
 // Validate checks required fields, power state validity, and filter constraints.

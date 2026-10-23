@@ -183,13 +183,17 @@ func (m *Manager) PowerControl(
 		return fmt.Errorf("target is invalid: %w", err)
 	}
 
-	// Refuse to power-cycle a host that is not ready for the operation.
-	// The poll blocks until the persisted ComponentOperationStatus reports the host
-	// as ready, or returns an error at the deadline. The operator may set
-	// OverrideReadinessCheck to bypass this gate for supervised
-	// maintenance; the bypass is logged inside ensureMachinesOperable.
-	if err := m.ensureMachinesOperable(ctx, target.Identifiers, types.OperationTypePowerControl, info.OverrideReadinessCheck); err != nil {
-		return fmt.Errorf("refused: %w", err)
+	if info.SkipReadinessCheck() {
+		log.Warn().
+			Strs("component_identifiers", target.Identifiers).
+			Bool("override_readiness_check", info.OverrideReadinessCheck).
+			Bool("bypass_state_controller", info.BypassStateController).
+			Msg("Readiness check bypassed for power control")
+	} else {
+		err := m.ensureMachinesOperable(ctx, target.Identifiers, types.OperationTypePowerControl, false)
+		if err != nil {
+			return fmt.Errorf("refused: %w", err)
+		}
 	}
 
 	// Map common.PowerOperation to nicoapi.SystemPowerControl

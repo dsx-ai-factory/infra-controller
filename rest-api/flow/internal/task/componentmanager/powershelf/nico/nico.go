@@ -228,8 +228,17 @@ func (m *Manager) PowerControl(
 		return fmt.Errorf("target is invalid: %w", err)
 	}
 
-	if err := m.ensureTargetOperable(ctx, target, types.OperationTypePowerControl, info.OverrideReadinessCheck); err != nil {
-		return fmt.Errorf("refused: %w", err)
+	if info.SkipReadinessCheck() {
+		log.Warn().
+			Strs("component_identifiers", target.Identifiers).
+			Bool("override_readiness_check", info.OverrideReadinessCheck).
+			Bool("bypass_state_controller", info.BypassStateController).
+			Msg("Readiness check bypassed for power control")
+	} else {
+		err := m.ensureTargetOperable(ctx, target, types.OperationTypePowerControl, false)
+		if err != nil {
+			return fmt.Errorf("refused: %w", err)
+		}
 	}
 
 	var action corev1.SystemPowerControl
@@ -250,7 +259,7 @@ func (m *Manager) PowerControl(
 
 	req := &corev1.ComponentPowerControlRequest{
 		Action:                action,
-		BypassStateController: info.OverrideReadinessCheck,
+		BypassStateController: info.BypassStateController,
 	}
 	if target.UsesMACAddresses() {
 		req.Target = &corev1.ComponentPowerControlRequest_PowerShelfPmcMacs{

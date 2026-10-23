@@ -743,30 +743,28 @@ func TestFirmwareControl_RefusesInUseMachine(t *testing.T) {
 	assert.Contains(t, err.Error(), "timed out")
 }
 
-// TestPowerControl_OverrideBypassesReadinessCheck verifies that the
-// operator-controlled OverrideReadinessCheck flag short-circuits the
-// readiness gate on PowerControl. The target host is reported as in-use
-// — which would otherwise block the call — yet the operation is
-// expected to proceed past the gate.
-func TestPowerControl_OverrideBypassesReadinessCheck(t *testing.T) {
-	reader := readiness.NewMemReader()
-	reader.SetStatus("machine-1", inUseStatus())
-
-	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
-	target := common.Target{
-		Type:        devicetypes.ComponentTypeCompute,
-		Identifiers: []string{"machine-1"},
+func TestManager_PowerControlReadinessOverride(t *testing.T) {
+	cases := []struct {
+		name string
+		info operations.PowerControlTaskInfo
+	}{
+		{name: "readiness override", info: operations.PowerControlTaskInfo{OverrideReadinessCheck: true}},
+		{name: "controller bypass implies readiness override", info: operations.PowerControlTaskInfo{BypassStateController: true}},
 	}
-
-	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
-		Operation:              operations.PowerOperationPowerOn,
-		OverrideReadinessCheck: true,
-	})
-	require.NoError(t, err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := readiness.NewMemReader()
+			reader.SetStatus("machine-1", inUseStatus())
+			m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
+			target := common.Target{Type: devicetypes.ComponentTypeCompute, Identifiers: []string{"machine-1"}}
+			tc.info.Operation = operations.PowerOperationPowerOn
+			require.NoError(t, m.PowerControl(context.Background(), target, tc.info))
+		})
+	}
 }
 
 // TestBringUpControl_OverrideBypassesReadinessCheck is the BringUp
-// counterpart of TestPowerControl_OverrideBypassesReadinessCheck.
+// counterpart of TestManager_PowerControlReadinessOverride.
 func TestBringUpControl_OverrideBypassesReadinessCheck(t *testing.T) {
 	reader := readiness.NewMemReader()
 	reader.SetStatus("machine-1", inUseStatus())

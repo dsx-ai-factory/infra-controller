@@ -4,11 +4,14 @@
 package nico
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -543,26 +546,49 @@ func TestFirmwareControl_RefusesInUseMachine(t *testing.T) {
 	assert.Contains(t, err.Error(), "timed out")
 }
 
-// TestPowerControl_OverrideBypassesReadinessCheck verifies that
-// OverrideReadinessCheck short-circuits the readiness gate on
-// PowerControl. The host is reported as in-use — which would otherwise
-// block the call — yet the operation is expected to proceed past the
-// gate.
-func TestPowerControl_OverrideBypassesReadinessCheck(t *testing.T) {
-	reader := readiness.NewMemReader()
-	reader.SetStatus("machine-1", inUseStatus())
-
-	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
-	target := common.Target{
-		Type:        devicetypes.ComponentTypeCompute,
-		Identifiers: []string{"machine-1"},
+func TestManager_PowerControlRouting(t *testing.T) {
+	cases := []struct {
+		name     string
+		override bool
+		bypass   bool
+	}{
+		{name: "readiness override retains controller routing", override: true},
+		{name: "controller bypass also skips readiness", bypass: true},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := nicoapi.NewMockClient()
 
-	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
-		Operation:              operations.PowerOperationPowerOn,
-		OverrideReadinessCheck: true,
-	})
-	require.NoError(t, err)
+			reader := readiness.NewMemReader()
+			reader.SetStatus("machine-1", &types.ComponentOperationStatus{
+				Phase:             types.PhaseError,
+				BlockedOperations: []types.OperationType{types.OperationTypePowerControl},
+			})
+			m := newManagerForReadinessTest(t, client, reader)
+			target := common.Target{
+				Type:        devicetypes.ComponentTypeCompute,
+				Identifiers: []string{"machine-1"},
+			}
+			var logs bytes.Buffer
+			previous := log.Logger
+			log.Logger = zerolog.New(&logs).Level(zerolog.WarnLevel)
+			t.Cleanup(func() { log.Logger = previous })
+			err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
+				Operation:              operations.PowerOperationPowerOn,
+				OverrideReadinessCheck: tc.override,
+				BypassStateController:  tc.bypass,
+			})
+			require.NoError(t, err)
+			request := client.LastComponentPowerControlRequest()
+			require.NotNil(t, request)
+			assert.Equal(t, tc.bypass, request.GetBypassStateController())
+			var event map[string]any
+			require.NoError(t, json.Unmarshal(logs.Bytes(), &event))
+			assert.Equal(t, "Readiness check bypassed for power control", event["message"])
+			assert.Equal(t, tc.override, event["override_readiness_check"])
+			assert.Equal(t, tc.bypass, event["bypass_state_controller"])
+		})
+	}
 }
 
 func TestBringUpControl_RefusesInUseMachine(t *testing.T) {

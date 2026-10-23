@@ -16,35 +16,87 @@ import (
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 )
 
-func TestFlowServerImpl_ACPowerCycleRack(t *testing.T) {
-	manager := &powerControlTaskManager{}
-	server := &FlowServerImpl{taskManager: manager}
-	targetID := uuid.New()
-
-	response, err := server.ACPowerCycleRack(context.Background(), &pb.ACPowerCycleRackRequest{
-		TargetSpec: &pb.OperationTargetSpec{
-			Targets: &pb.OperationTargetSpec_Components{
-				Components: &pb.ComponentTargets{
-					Targets: []*pb.ComponentTarget{{
-						Identifier: &pb.ComponentTarget_Id{Id: &pb.UUID{Id: targetID.String()}},
-					}},
-				},
+func TestFlowServerImpl_PowerControl(t *testing.T) {
+	target := &pb.OperationTargetSpec{
+		Targets: &pb.OperationTargetSpec_Components{Components: &pb.ComponentTargets{
+			Targets: []*pb.ComponentTarget{{Identifier: &pb.ComponentTarget_Id{Id: &pb.UUID{Id: uuid.NewString()}}}},
+		}},
+	}
+	cases := []struct {
+		name     string
+		submit   func(*FlowServerImpl) (*pb.SubmitTaskResponse, error)
+		want     operations.PowerOperation
+		override bool
+		bypass   bool
+	}{
+		{
+			name: "PowerOnRack",
+			submit: func(server *FlowServerImpl) (*pb.SubmitTaskResponse, error) {
+				return server.PowerOnRack(context.Background(), &pb.PowerOnRackRequest{
+					TargetSpec: target, Description: "power test", BypassStateController: true,
+				})
 			},
+			want:   operations.PowerOperationPowerOn,
+			bypass: true,
 		},
-		Description:            "AC power cycle test",
-		OverrideReadinessCheck: true,
-	})
-
-	require.NoError(t, err)
-	require.Len(t, response.GetTaskIds(), 1)
-	require.NotNil(t, manager.request)
-	assert.Equal(t, "AC power cycle test", manager.request.Description)
-
-	var info operations.PowerControlTaskInfo
-	require.NoError(t, info.Unmarshal(manager.request.Operation.Info))
-	assert.Equal(t, operations.PowerOperationColdReset, info.Operation)
-	assert.False(t, info.Forced)
-	assert.True(t, info.OverrideReadinessCheck)
+		{
+			name: "PowerOffRack",
+			submit: func(server *FlowServerImpl) (*pb.SubmitTaskResponse, error) {
+				return server.PowerOffRack(context.Background(), &pb.PowerOffRackRequest{
+					TargetSpec: target, Description: "power test", BypassStateController: true,
+				})
+			},
+			want:   operations.PowerOperationPowerOff,
+			bypass: true,
+		},
+		{
+			name: "PowerResetRack",
+			submit: func(server *FlowServerImpl) (*pb.SubmitTaskResponse, error) {
+				return server.PowerResetRack(context.Background(), &pb.PowerResetRackRequest{
+					TargetSpec: target, Description: "power test", BypassStateController: true,
+				})
+			},
+			want:   operations.PowerOperationRestart,
+			bypass: true,
+		},
+		{
+			name: "ACPowerCycleRack",
+			submit: func(server *FlowServerImpl) (*pb.SubmitTaskResponse, error) {
+				return server.ACPowerCycleRack(context.Background(), &pb.ACPowerCycleRackRequest{
+					TargetSpec: target, Description: "power test", BypassStateController: true,
+				})
+			},
+			want:   operations.PowerOperationColdReset,
+			bypass: true,
+		},
+		{
+			name: "ACPowerCycleRack readiness override",
+			submit: func(server *FlowServerImpl) (*pb.SubmitTaskResponse, error) {
+				return server.ACPowerCycleRack(context.Background(), &pb.ACPowerCycleRackRequest{
+					TargetSpec: target, Description: "power test", OverrideReadinessCheck: true,
+				})
+			},
+			want:     operations.PowerOperationColdReset,
+			override: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := &powerControlTaskManager{}
+			server := &FlowServerImpl{taskManager: manager}
+			response, err := tc.submit(server)
+			require.NoError(t, err)
+			require.Len(t, response.GetTaskIds(), 1)
+			require.NotNil(t, manager.request)
+			assert.Equal(t, "power test", manager.request.Description)
+			var info operations.PowerControlTaskInfo
+			require.NoError(t, info.Unmarshal(manager.request.Operation.Info))
+			assert.Equal(t, tc.want, info.Operation)
+			assert.False(t, info.Forced)
+			assert.Equal(t, tc.override, info.OverrideReadinessCheck)
+			assert.Equal(t, tc.bypass, info.BypassStateController)
+		})
+	}
 }
 
 type powerControlTaskManager struct {

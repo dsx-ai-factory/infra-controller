@@ -126,7 +126,10 @@ func TestBringUpWorkflow(t *testing.T) {
 	}{
 		"success": {
 			setupMocks: func(env *testsuite.TestWorkflowEnvironment) {
-				env.OnActivity(activitypkg.NamePowerControl, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+				env.OnActivity(activitypkg.NamePowerControl, mock.Anything, mock.Anything,
+					mock.MatchedBy(func(info *operations.PowerControlTaskInfo) bool {
+						return info.OverrideReadinessCheck && info.BypassStateController
+					})).Return(nil)
 				env.OnActivity(activitypkg.NameGetPowerStatus, mock.Anything, mock.Anything).Return(
 					map[string]operations.PowerStatus{
 						"ps-1": operations.PowerStatusOn,
@@ -166,7 +169,7 @@ func TestBringUpWorkflow(t *testing.T) {
 				Components:     createBringUpTestComponents(),
 				RuleDefinition: createBringUpTestRuleDef(),
 			}
-			info := &operations.BringUpTaskInfo{}
+			info := &operations.BringUpTaskInfo{OverrideReadinessCheck: true}
 
 			env.ExecuteWorkflow("BringUp", reqInfo, info)
 
@@ -175,6 +178,7 @@ func TestBringUpWorkflow(t *testing.T) {
 				assert.Error(t, env.GetWorkflowError())
 			} else {
 				assert.NoError(t, env.GetWorkflowError())
+				env.AssertExpectations(t)
 			}
 		})
 	}

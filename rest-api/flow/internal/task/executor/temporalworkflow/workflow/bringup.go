@@ -50,12 +50,22 @@ func bringUp(
 
 	typeToTargets := buildTargets(&reqInfo)
 
+	// Keep the existing direct-dispatch behavior of power sub-actions when
+	// bring-up readiness is overridden. Power tasks have their own flag.
+	actionInfo := struct {
+		*operations.BringUpTaskInfo
+		BypassStateController bool `json:"bypass_state_controller"`
+	}{
+		BringUpTaskInfo:       info,
+		BypassStateController: info.OverrideReadinessCheck,
+	}
+
 	report, err := executeRuleBasedOperation(
 		ctx,
 		reqInfo.TaskID,
 		typeToTargets,
 		typeToTargets,
-		info,
+		actionInfo,
 		reqInfo.RuleDefinition,
 	)
 

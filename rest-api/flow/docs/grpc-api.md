@@ -270,7 +270,8 @@
 | description | [string](#string) |  | optional task description |
 | queue_options | [QueueOptions](#v1-QueueOptions) | optional |  |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
-| override_readiness_check | [bool](#bool) |  | When true, proceed with the AC power cycle even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
+| override_readiness_check | [bool](#bool) |  | When true, proceed with the AC power cycle even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. Defaults to false. Does not bypass Core state-controller routing. |
+| bypass_state_controller | [bool](#bool) |  | Optional, defaults to false. Requests direct backend dispatch from Core instead of state-controller maintenance, and also skips Flow readiness. Intended for operator-supervised maintenance. Does not recover controller state. |
 
 <a name="v1-AddComponentRequest"></a>
 
@@ -1998,7 +1999,8 @@ A Core observation, including its per-device failure, or a Flow read failure.
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | operation | [PowerControlOperation](#v1-PowerControlOperation) |  | Required. UNSPECIFIED and unknown values are rejected. |
-| override_readiness_check | [bool](#bool) |  | Bypasses the component readiness gate when the task executes. |
+| override_readiness_check | [bool](#bool) |  | Bypasses the component readiness gate when the task executes. Defaults to false. Does not bypass Core state-controller routing. |
+| bypass_state_controller | [bool](#bool) |  | Optional, defaults to false. Requests direct backend dispatch from Core instead of state-controller maintenance, and also skips Flow readiness. Intended for operator-supervised maintenance. Does not recover controller state. |
 
 <a name="v1-PowerDesiredDetails"></a>
 
@@ -2022,7 +2024,8 @@ Stored Core policy, including NotApplicable/Unavailable, or a Flow read failure.
 | description | [string](#string) |  | optional task description |
 | queue_options | [QueueOptions](#v1-QueueOptions) | optional |  |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
-| override_readiness_check | [bool](#bool) |  | When true, proceed with the power-off even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
+| override_readiness_check | [bool](#bool) |  | When true, proceed with the power-off even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. Defaults to false. Does not bypass Core state-controller routing. |
+| bypass_state_controller | [bool](#bool) |  | Optional, defaults to false. Requests direct backend dispatch from Core instead of state-controller maintenance, and also skips Flow readiness. Intended for operator-supervised maintenance. Does not recover controller state. |
 
 <a name="v1-PowerOnRackRequest"></a>
 
@@ -2034,7 +2037,8 @@ Stored Core policy, including NotApplicable/Unavailable, or a Flow read failure.
 | description | [string](#string) |  | optional task description |
 | queue_options | [QueueOptions](#v1-QueueOptions) | optional |  |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
-| override_readiness_check | [bool](#bool) |  | When true, proceed with the power-on even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
+| override_readiness_check | [bool](#bool) |  | When true, proceed with the power-on even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. Defaults to false. Does not bypass Core state-controller routing. |
+| bypass_state_controller | [bool](#bool) |  | Optional, defaults to false. Requests direct backend dispatch from Core instead of state-controller maintenance, and also skips Flow readiness. Intended for operator-supervised maintenance. Does not recover controller state. |
 
 <a name="v1-PowerOperations"></a>
 
@@ -2058,7 +2062,8 @@ Core maintenance and Flow tasks are separate records without a correlation ID.
 | description | [string](#string) |  | optional task description |
 | queue_options | [QueueOptions](#v1-QueueOptions) | optional |  |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
-| override_readiness_check | [bool](#bool) |  | When true, proceed with the reset even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
+| override_readiness_check | [bool](#bool) |  | When true, proceed with the reset even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. Defaults to false. Does not bypass Core state-controller routing. |
+| bypass_state_controller | [bool](#bool) |  | Optional, defaults to false. Requests direct backend dispatch from Core instead of state-controller maintenance, and also skips Flow readiness. Intended for operator-supervised maintenance. Does not recover controller state. |
 
 <a name="v1-PowerTaskDetails"></a>
 

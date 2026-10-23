@@ -66,12 +66,22 @@ func firmwareControl(
 		executionTargets = selectFirmwareTargets(typeToTargets, info.TargetVersion)
 	}
 
+	// Keep the existing direct-dispatch behavior of power sub-actions when
+	// firmware readiness is overridden. Power tasks have their own flag.
+	actionInfo := struct {
+		*operations.FirmwareControlTaskInfo
+		BypassStateController bool `json:"bypass_state_controller"`
+	}{
+		FirmwareControlTaskInfo: info,
+		BypassStateController:   info.OverrideReadinessCheck,
+	}
+
 	report, err := executeRuleBasedOperation(
 		ctx,
 		reqInfo.TaskID,
 		executionTargets,
 		typeToTargets,
-		info,
+		actionInfo,
 		reqInfo.RuleDefinition,
 	)
 

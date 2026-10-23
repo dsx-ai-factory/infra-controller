@@ -2071,6 +2071,7 @@ func ExecutePowerControlWorkflow(
 	state string,
 	ruleID *string,
 	overrideReadinessCheck bool,
+	bypassStateController bool,
 	workflowID string,
 	entityName string,
 ) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
@@ -2086,6 +2087,7 @@ func ExecutePowerControlWorkflow(
 			Description:            fmt.Sprintf("API power on %s", entityName),
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
+			BypassStateController:  bypassStateController,
 		}
 	case cam.PowerControlStateOff:
 		fullMethod = flowv1.Flow_PowerOffRack_FullMethodName
@@ -2094,6 +2096,7 @@ func ExecutePowerControlWorkflow(
 			Description:            fmt.Sprintf("API power off %s", entityName),
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
+			BypassStateController:  bypassStateController,
 		}
 	case cam.PowerControlStateCycle:
 		fullMethod = flowv1.Flow_PowerResetRack_FullMethodName
@@ -2102,6 +2105,7 @@ func ExecutePowerControlWorkflow(
 			Description:            fmt.Sprintf("API power cycle %s", entityName),
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
+			BypassStateController:  bypassStateController,
 		}
 	case cam.PowerControlStateForceOff:
 		fullMethod = flowv1.Flow_PowerOffRack_FullMethodName
@@ -2111,6 +2115,7 @@ func ExecutePowerControlWorkflow(
 			Description:            fmt.Sprintf("API force power off %s", entityName),
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
+			BypassStateController:  bypassStateController,
 		}
 	case cam.PowerControlStateForceCycle:
 		fullMethod = flowv1.Flow_PowerResetRack_FullMethodName
@@ -2120,6 +2125,7 @@ func ExecutePowerControlWorkflow(
 			Description:            fmt.Sprintf("API force power cycle %s", entityName),
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
+			BypassStateController:  bypassStateController,
 		}
 	case cam.PowerControlStateACCycle:
 		fullMethod = flowv1.Flow_ACPowerCycleRack_FullMethodName
@@ -2128,6 +2134,7 @@ func ExecutePowerControlWorkflow(
 			Description:            fmt.Sprintf("API AC power cycle %s", entityName),
 			RuleId:                 ruleUUID,
 			OverrideReadinessCheck: overrideReadinessCheck,
+			BypassStateController:  bypassStateController,
 		}
 	default:
 		return nil, cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Invalid power control state: %s", state), nil)

@@ -1596,6 +1596,7 @@ func ScheduledOperationFrom(
 		return &operations.PowerControlTaskInfo{
 			Operation:              operations.PowerOperationPowerOn,
 			OverrideReadinessCheck: r.PowerOn.GetOverrideReadinessCheck(),
+			BypassStateController:  r.PowerOn.GetBypassStateController(),
 		}, ts, r.PowerOn.GetQueueOptions(), r.PowerOn.GetRuleId(), nil
 
 	case *pb.ScheduledOperation_PowerOff:
@@ -1615,6 +1616,7 @@ func ScheduledOperationFrom(
 			Operation:              powerOp,
 			Forced:                 r.PowerOff.GetForced(),
 			OverrideReadinessCheck: r.PowerOff.GetOverrideReadinessCheck(),
+			BypassStateController:  r.PowerOff.GetBypassStateController(),
 		}, ts, r.PowerOff.GetQueueOptions(), r.PowerOff.GetRuleId(), nil
 
 	case *pb.ScheduledOperation_PowerReset:
@@ -1634,6 +1636,7 @@ func ScheduledOperationFrom(
 			Operation:              powerOp,
 			Forced:                 r.PowerReset.GetForced(),
 			OverrideReadinessCheck: r.PowerReset.GetOverrideReadinessCheck(),
+			BypassStateController:  r.PowerReset.GetBypassStateController(),
 		}, ts, r.PowerReset.GetQueueOptions(), r.PowerReset.GetRuleId(), nil
 
 	case *pb.ScheduledOperation_BringUp:

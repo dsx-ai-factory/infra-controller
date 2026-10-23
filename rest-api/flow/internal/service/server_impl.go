@@ -823,6 +823,7 @@ func (rs *FlowServerImpl) PowerOnRack(
 		&operations.PowerControlTaskInfo{
 			Operation:              operations.PowerOperationPowerOn,
 			OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
+			BypassStateController:  req.GetBypassStateController(),
 		},
 	)
 }
@@ -845,6 +846,7 @@ func (rs *FlowServerImpl) PowerOffRack(
 			Operation:              op,
 			Forced:                 req.GetForced(),
 			OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
+			BypassStateController:  req.GetBypassStateController(),
 		},
 	)
 }
@@ -867,6 +869,7 @@ func (rs *FlowServerImpl) PowerResetRack(
 			Operation:              op,
 			Forced:                 req.GetForced(),
 			OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
+			BypassStateController:  req.GetBypassStateController(),
 		},
 	)
 }
@@ -885,6 +888,7 @@ func (rs *FlowServerImpl) ACPowerCycleRack(
 		&operations.PowerControlTaskInfo{
 			Operation:              operations.PowerOperationColdReset,
 			OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
+			BypassStateController:  req.GetBypassStateController(),
 		},
 	)
 }

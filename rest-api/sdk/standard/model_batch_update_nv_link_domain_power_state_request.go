@@ -32,8 +32,10 @@ type BatchUpdateNVLinkDomainPowerStateRequest struct {
 	State string `json:"state"`
 	// Optional Operation Rule UUID. When set, pins every task spawned by this operation to the named rule and overrides Flow's default rule resolution.
 	RuleId *string `json:"ruleId,omitempty"`
-	// When true, proceed even if one or more target components (or hosts on the owning rack for rack-scoped components) are reported as not ready by their persisted status. Intended for operator-supervised maintenance.
+	// When true, proceed even if one or more target components (or hosts on the owning rack for rack-scoped components) are reported as not ready by their persisted status. Intended for operator-supervised maintenance. This flag only skips Flow readiness checks; it does not bypass Core state-controller routing.
 	OverrideReadinessCheck *bool `json:"overrideReadinessCheck,omitempty"`
+	// When true, request direct backend dispatch from Core instead of state-controller maintenance, and also skip Flow readiness checks. Intended for operator-supervised maintenance. This does not recover controller state. When false or omitted, retain Core's normal routing.
+	BypassStateController *bool `json:"bypassStateController,omitempty"`
 }
 
 type _BatchUpdateNVLinkDomainPowerStateRequest BatchUpdateNVLinkDomainPowerStateRequest
@@ -49,6 +51,8 @@ func NewBatchUpdateNVLinkDomainPowerStateRequest(siteId string, domainIds []stri
 	this.State = state
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
+	var bypassStateController bool = false
+	this.BypassStateController = &bypassStateController
 	return &this
 }
 
@@ -59,6 +63,8 @@ func NewBatchUpdateNVLinkDomainPowerStateRequestWithDefaults() *BatchUpdateNVLin
 	this := BatchUpdateNVLinkDomainPowerStateRequest{}
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
+	var bypassStateController bool = false
+	this.BypassStateController = &bypassStateController
 	return &this
 }
 
@@ -198,6 +204,38 @@ func (o *BatchUpdateNVLinkDomainPowerStateRequest) SetOverrideReadinessCheck(v b
 	o.OverrideReadinessCheck = &v
 }
 
+// GetBypassStateController returns the BypassStateController field value if set, zero value otherwise.
+func (o *BatchUpdateNVLinkDomainPowerStateRequest) GetBypassStateController() bool {
+	if o == nil || IsNil(o.BypassStateController) {
+		var ret bool
+		return ret
+	}
+	return *o.BypassStateController
+}
+
+// GetBypassStateControllerOk returns a tuple with the BypassStateController field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *BatchUpdateNVLinkDomainPowerStateRequest) GetBypassStateControllerOk() (*bool, bool) {
+	if o == nil || IsNil(o.BypassStateController) {
+		return nil, false
+	}
+	return o.BypassStateController, true
+}
+
+// HasBypassStateController returns a boolean if a field has been set.
+func (o *BatchUpdateNVLinkDomainPowerStateRequest) HasBypassStateController() bool {
+	if o != nil && !IsNil(o.BypassStateController) {
+		return true
+	}
+
+	return false
+}
+
+// SetBypassStateController gets a reference to the given bool and assigns it to the BypassStateController field.
+func (o *BatchUpdateNVLinkDomainPowerStateRequest) SetBypassStateController(v bool) {
+	o.BypassStateController = &v
+}
+
 func (o BatchUpdateNVLinkDomainPowerStateRequest) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -216,6 +254,9 @@ func (o BatchUpdateNVLinkDomainPowerStateRequest) ToMap() (map[string]interface{
 	}
 	if !IsNil(o.OverrideReadinessCheck) {
 		toSerialize["overrideReadinessCheck"] = o.OverrideReadinessCheck
+	}
+	if !IsNil(o.BypassStateController) {
+		toSerialize["bypassStateController"] = o.BypassStateController
 	}
 	return toSerialize, nil
 }
