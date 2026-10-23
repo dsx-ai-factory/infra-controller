@@ -386,13 +386,25 @@ func TestGrpcClient_GetLeakingRackIds(t *testing.T) {
 			want: []string{},
 		},
 		{
-			name: "rejects incomplete detail snapshot",
+			name: "preserves leaking racks from incomplete detail snapshot",
 			fake: &recordingForgeClient{
 				rackIDs: []string{"rack-1", "rack-2"},
 				omitID:  "rack-2",
+				rackHealth: map[string]*corev1.HealthReport{
+					"rack-1": rackLeak,
+				},
 			},
-			wantErr:     "missing IDs",
+			want:        []string{"rack-1"},
 			wantBatches: [][]string{{"rack-1", "rack-2"}},
+		},
+		{
+			name: "returns detail RPC failure",
+			fake: &recordingForgeClient{
+				rackIDs:  []string{"rack-1"},
+				failCall: 1,
+			},
+			wantErr:     "injected rack lookup failure",
+			wantBatches: [][]string{{"rack-1"}},
 		},
 	}
 

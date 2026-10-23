@@ -432,7 +432,7 @@ func (c *grpcClient) GetLeakingRackIds(ctx context.Context) ([]string, error) {
 	defer detailsCancel()
 	request := &corev1.RacksByIdsRequest{RackIds: rackIDs}
 	leakingRackIDs := make([]string, 0, len(rackIDs))
-	err = c.gclient.visitRackBatches(detailsCtx, request, func(batch []*corev1.Rack) error {
+	err = c.gclient.visitRackBatchesAllowPartial(detailsCtx, request, func(batch []*corev1.Rack) error {
 		for _, rack := range batch {
 			health := rack.GetStatus().GetHealth()
 			for _, alert := range health.GetAlerts() {
