@@ -1,0 +1,18 @@
+suite: deployment strategy
+templates:
+  - deployment.yaml
+tests:
+  - it: should use a rolling update by default
+    asserts:
+      - equal:
+          path: spec.strategy.type
+          value: RollingUpdate
+
+  - it: should allow operators to select recreate
+    set:
+      strategy:
+        type: Recreate
+    asserts:
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
