@@ -3,7 +3,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-FROM build-container-localdev AS source
+ARG CONTAINER_BUILD=nico-dev-build
+ARG CONTAINER_RUNTIME=nico-dev-runtime
+
+FROM ${CONTAINER_BUILD} AS source
+
+ARG TARGETARCH
 
 ENV CARGO_HOME=/cargo-home
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
@@ -24,7 +29,7 @@ COPY . .
 #
 # Instead, we take the SHA256 sum of the built artifact and copy *that* to the
 # output directory, making the resulting builder image tiny. Then, in the
-# runtime containers below, we mount the shared nico-tilt-cargo-target
+# runtime containers below, we mount the shared nico-dev-cargo-target-${TARGETARCH}
 # directory, copy the expected artifact *from there*, then ensure it matches
 # the same SHA256 sum as what the builder produced.
 #
@@ -32,7 +37,7 @@ COPY . .
 # processes while a build is happening. The only potential issues are:
 #
 # - If the builder RUN instruction is cached, but the runtime layer's RUN
-# instruction is not, *and* the nico-tilt-cargo-target cache volume is GC'd,
+# instruction is not, *and* the nico-dev-cargo-target-${TARGETARCH} cache volume is GC'd,
 # the build will fail. But the builder RUN instruction is only ever cached when
 # no source files have changed, or else the `COPY . .` will invalidate it. And
 # if it *is* cached, the runtime container's RUN line will typically be cached
@@ -52,8 +57,8 @@ COPY . .
 # carbide-api builder
 FROM source AS api-builder
 
-RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
-    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
     cargo build --locked \
     -p carbide-api --bin carbide-api \
     -p nico-admin-cli --bin nico-admin-cli \
@@ -64,8 +69,8 @@ RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked
 # carbide-bmc-proxy builder
 FROM source AS bmc-proxy-builder
 
-RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
-    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
     cargo build --locked -p carbide-bmc-proxy --bin carbide-bmc-proxy \
     && mkdir -p /out \
     && sha256sum </cargo-target/debug/carbide-bmc-proxy >/out/carbide-bmc-proxy.sha256sum
@@ -73,8 +78,8 @@ RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked
 # libdhcp.so builder
 FROM source AS dhcp-builder
 
-RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
-    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
     cargo build --locked -p carbide-dhcp --lib \
     && mkdir -p /out \
     && sha256sum </cargo-target/debug/libdhcp.so >/out/libdhcp.so.sha256sum
@@ -82,8 +87,8 @@ RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked
 # machine-a-tron builder
 FROM source AS machine-a-tron-builder
 
-RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
-    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
     cargo build --locked -p carbide-machine-a-tron --bin machine-a-tron \
     && mkdir -p /out \
     && sha256sum </cargo-target/debug/machine-a-tron >/out/machine-a-tron.sha256sum
@@ -91,8 +96,8 @@ RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked
 # ssh-console builder
 FROM source AS ssh-console-builder
 
-RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
-    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
     cargo build --locked -p carbide-ssh-console --bin ssh-console \
     && mkdir -p /out \
     && sha256sum </cargo-target/debug/ssh-console >/out/ssh-console.sha256sum
@@ -100,8 +105,8 @@ RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked
 # mat-protocol-gateway builder
 FROM source AS mat-protocol-gateway-builder
 
-RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
-    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
     cargo build --locked -p carbide-mat-protocol-gateway --bin mat-protocol-gateway \
     && mkdir -p /out \
     && sha256sum </cargo-target/debug/mat-protocol-gateway >/out/mat-protocol-gateway.sha256sum
@@ -109,8 +114,8 @@ RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked
 # nico-postgres-exporter builder
 FROM source AS nico-postgres-exporter-builder
 
-RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
-    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
     cargo build --locked -p nico-postgres-exporter --bin nico-postgres-exporter \
     && mkdir -p /out \
     && sha256sum </cargo-target/debug/nico-postgres-exporter >/out/nico-postgres-exporter.sha256sum
@@ -118,7 +123,9 @@ RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked
 ### Runtime layers
 
 # api runtime image
-FROM nico-tilt-runtime-base AS api
+FROM ${CONTAINER_RUNTIME} AS api
+
+ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   curl \
@@ -136,8 +143,8 @@ COPY crates/api/casbin-policy.csv /opt/carbide/casbin-policy.csv
 COPY --from=api-builder /out/carbide-api.sha256sum /tmp/carbide-api.sha256sum
 COPY --from=api-builder /out/nico-admin-cli.sha256sum /tmp/nico-admin-cli.sha256sum
 
-RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
-    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
     cp /cargo-target/debug/carbide-api /opt/carbide/carbide-api \
     && cp /cargo-target/debug/nico-admin-cli /opt/carbide/nico-admin-cli \
     && test "$(sha256sum < /opt/carbide/carbide-api)" = "$(cat /tmp/carbide-api.sha256sum)" \
@@ -149,39 +156,48 @@ ENV CASBIN_POLICY_FILE=/opt/carbide/casbin-policy.csv
 ENV PATH /opt/carbide:$PATH
 
 # bmc-proxy runtime image
-FROM nico-tilt-runtime-base AS bmc-proxy
+FROM ${CONTAINER_RUNTIME} AS bmc-proxy
+
+ARG TARGETARCH
 
 RUN mkdir -p /opt/carbide /mnt/persistence
 
 COPY --from=bmc-proxy-builder /out/carbide-bmc-proxy.sha256sum /tmp/carbide-bmc-proxy.sha256sum
 
-RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
-    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
     cp /cargo-target/debug/carbide-bmc-proxy /opt/carbide/carbide-bmc-proxy \
     && test "$(sha256sum < /opt/carbide/carbide-bmc-proxy)" = "$(cat /tmp/carbide-bmc-proxy.sha256sum)" \
     && rm /tmp/carbide-bmc-proxy.sha256sum
 
 # dhcp runtime image
-FROM nico-tilt-runtime-base AS dhcp
+FROM ${CONTAINER_RUNTIME} AS dhcp
+
+ARG TARGETARCH
 
 ARG KEA_VERSION
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+  curl \
+  iproute2 \
   kea-dhcp4-server=${KEA_VERSION} \
+  kea-dhcp6-server=${KEA_VERSION} \
   && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /usr/lib/x86_64-linux-gnu/kea/hooks /var/lib/kea /var/run/kea
+RUN mkdir -p /usr/lib/kea/hooks /var/lib/kea /var/run/kea
 
 COPY --from=dhcp-builder /out/libdhcp.so.sha256sum /tmp/libdhcp.so.sha256sum
 
-RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
-    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
-    cp /cargo-target/debug/libdhcp.so /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so \
-    && test "$(sha256sum < /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so)" = "$(cat /tmp/libdhcp.so.sha256sum)" \
+RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
+    cp /cargo-target/debug/libdhcp.so /usr/lib/kea/hooks/libdhcp.so \
+    && test "$(sha256sum < /usr/lib/kea/hooks/libdhcp.so)" = "$(cat /tmp/libdhcp.so.sha256sum)" \
     && rm /tmp/libdhcp.so.sha256sum
 
 # machine-a-tron runtime image
-FROM nico-tilt-runtime-base AS machine-a-tron
+FROM ${CONTAINER_RUNTIME} AS machine-a-tron
+
+ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
   ipmitool \
@@ -199,14 +215,16 @@ COPY crates/bmc-mock/nvidia_dpu.tar.gz /opt/machine-a-tron/nvidia_dpu.tar.gz
 
 COPY --from=machine-a-tron-builder /out/machine-a-tron.sha256sum /tmp/machine-a-tron.sha256sum
 
-RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
-    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
     cp /cargo-target/debug/machine-a-tron /opt/machine-a-tron/bin/machine-a-tron \
     && test "$(sha256sum < /opt/machine-a-tron/bin/machine-a-tron)" = "$(cat /tmp/machine-a-tron.sha256sum)" \
     && rm /tmp/machine-a-tron.sha256sum
 
 # ssh-console runtime image
-FROM nico-tilt-runtime-base AS ssh-console
+FROM ${CONTAINER_RUNTIME} AS ssh-console
+
+ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y --no-install-recommends ipmitool libudev1 libssl3 \
     && rm -rf /var/lib/apt/lists/*
@@ -215,31 +233,35 @@ RUN mkdir -p /opt/carbide
 
 COPY --from=ssh-console-builder /out/ssh-console.sha256sum /tmp/ssh-console.sha256sum
 
-RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
-    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
     cp /cargo-target/debug/ssh-console /opt/carbide/ssh-console \
     && test "$(sha256sum < /opt/carbide/ssh-console)" = "$(cat /tmp/ssh-console.sha256sum)" \
     && rm /tmp/ssh-console.sha256sum
 
 # mat-protocol-gateway runtime image
-FROM nico-tilt-runtime-base AS mat-protocol-gateway
+FROM ${CONTAINER_RUNTIME} AS mat-protocol-gateway
+
+ARG TARGETARCH
 
 RUN mkdir -p /opt/carbide
 
 COPY --from=mat-protocol-gateway-builder /out/mat-protocol-gateway.sha256sum /tmp/mat-protocol-gateway.sha256sum
 
-RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
-    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
     cp /cargo-target/debug/mat-protocol-gateway /opt/carbide/mat-protocol-gateway \
     && test "$(sha256sum < /opt/carbide/mat-protocol-gateway)" = "$(cat /tmp/mat-protocol-gateway.sha256sum)" \
     && rm /tmp/mat-protocol-gateway.sha256sum
 
 # nico-postgres-exporter runtime image
-FROM nico-tilt-runtime-base AS nico-postgres-exporter
+FROM ${CONTAINER_RUNTIME} AS nico-postgres-exporter
+
+ARG TARGETARCH
 COPY --from=nico-postgres-exporter-builder /out/nico-postgres-exporter.sha256sum /tmp/nico-postgres-exporter.sha256sum
 
-RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
-    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
     cp /cargo-target/debug/nico-postgres-exporter /usr/local/bin/nico-postgres-exporter \
     && test "$(sha256sum < /usr/local/bin/nico-postgres-exporter)" = "$(cat /tmp/nico-postgres-exporter.sha256sum)" \
     && rm /tmp/nico-postgres-exporter.sha256sum
