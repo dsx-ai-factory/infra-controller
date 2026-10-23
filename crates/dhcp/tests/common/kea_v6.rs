@@ -448,19 +448,28 @@ impl Kea6 {
     }
 
     pub(crate) fn wait_for_log(&self, needle: &str, timeout: Duration) -> bool {
+        self.wait_for_log_count(needle, 1, timeout) > 0
+    }
+
+    /// Wait for at least `minimum` matching log lines; return the observed count,
+    /// including a smaller count if the timeout expires first.
+    pub(crate) fn wait_for_log_count(
+        &self,
+        needle: &str,
+        minimum: usize,
+        timeout: Duration,
+    ) -> usize {
         let deadline = Instant::now() + timeout;
         loop {
-            if self
+            let count = self
                 .logs
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|line| line.contains(needle))
-            {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
+                .filter(|line| line.contains(needle))
+                .count();
+            if count >= minimum || Instant::now() >= deadline {
+                return count;
             }
             thread::sleep(Duration::from_millis(20));
         }
