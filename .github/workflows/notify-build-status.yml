@@ -112,7 +112,7 @@ jobs:
 
       - name: Notify Slack - Build Success
         if: steps.analyze.outputs.status == 'success' && inputs.notify-on-success
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/slack-notify@2eeda375a465badd24f229e68c62ac98c0561c6a # v1.4.1
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/slack-notify@e8c0885851e9314211f2b3439e827990a46ea593 # reviewed commit e8c0885 (upstream #94, pending merge)
         with:
           slack-bot-token: ${{ secrets.slack-bot-token }}
           channel-id: ${{ inputs.channel-id }}
@@ -182,7 +182,7 @@ jobs:
 
       - name: Notify Slack - Partial Failure
         if: steps.analyze.outputs.status == 'partial' && inputs.notify-on-partial
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/slack-notify@2eeda375a465badd24f229e68c62ac98c0561c6a # v1.4.1
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/slack-notify@e8c0885851e9314211f2b3439e827990a46ea593 # reviewed commit e8c0885 (upstream #94, pending merge)
         with:
           slack-bot-token: ${{ secrets.slack-bot-token }}
           channel-id: ${{ inputs.channel-id }}
@@ -259,7 +259,7 @@ jobs:
 
       - name: Notify Slack - Build Failure
         if: steps.analyze.outputs.status == 'failure' && inputs.notify-on-failure
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/slack-notify@2eeda375a465badd24f229e68c62ac98c0561c6a # v1.4.1
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/slack-notify@e8c0885851e9314211f2b3439e827990a46ea593 # reviewed commit e8c0885 (upstream #94, pending merge)
         with:
           slack-bot-token: ${{ secrets.slack-bot-token }}
           channel-id: ${{ inputs.channel-id }}
