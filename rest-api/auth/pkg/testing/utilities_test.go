@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestCreateJWKMapECDSA(t *testing.T) {
+func TestMockServerHelper_createJWKMap(t *testing.T) {
 	const keyUse = "sig"
 	tests := []struct {
 		name      string
