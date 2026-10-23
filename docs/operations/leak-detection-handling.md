@@ -74,9 +74,18 @@ BMS-based and derived rack leak health alerts come with these classifications:
 - `SensorCritical`
 - `PreventAllocations`
 
+Flow polls NICo's aggregate rack health and treats every active `RackLeak`
+classification as a rack-scoped leak. The default response submits a forced
+power-off operation for every component currently known to Flow in that rack.
+This handling is in addition to any electrical or liquid isolation performed
+by the BMS. Rack alerts do not populate the component-level `leakStatus` field,
+which continues to reflect the tray-sensor status of each component.
+
 `PreventAllocations` blocks new allocations for hosts affected by the active tray- or rack-health condition. When the health alert clears later, NICo recalculates aggregate health; allocation eligibility can recover when no other active health condition prevents allocation.
 
-Tray list and detail responses expose `leakStatus` (`Unknown`, `Leaking`, or `NoLeak`) and `leakHandlingStatus` (`Unknown`, `None`, `ShuttingDown`, `Down`, or `Failed`). Rack responses expose these fields on objects in `components[]` only when `includeComponents=true`, not on the rack itself. These summarize detection and handling separately; `Unknown` is not confirmation that no leak exists. See [Rack-Level Administration](../manuals/rack_level_admin.md) for the inventory endpoints.
+Tray list and detail responses expose `leakStatus` (`Unknown`, `Leaking`, or `NoLeak`) and `leakHandlingStatus` (`Unknown`, `None`, `ShuttingDown`, `Down`, or `Failed`). Rack responses expose these fields on objects in `components[]` only when `includeComponents=true`, not on the rack itself. These summarize detection and handling separately; `Unknown` is not confirmation that no leak exists.
+
+`leakHandlingStatus` tracks forced power-off tasks created by the event-rule leak handler. The legacy direct handler, which is selected by default, submits the same power-off response but its tasks do not update this field. See [Leakage runtime configuration](../../rest-api/flow/docs/event-rules-guide.md#leakage-runtime-configuration) for the implementation selector and [Rack-Level Administration](../manuals/rack_level_admin.md) for the inventory endpoints.
 
 For diagnostic details, use NICo's health reports, logs, and metrics. To obtain a machine's health reports, use the `GET /v2/org/{org}/nico/machine/{id}/health-report` [REST API endpoint](api:GET/v2/org/:org/nico/machine/:machineId/health-report).
 
