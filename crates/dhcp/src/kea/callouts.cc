@@ -22,6 +22,7 @@
 #include <dhcp/option6_status_code.h>
 #include <vector>
 #include <dhcpsrv/lease_mgr_factory.h>
+#include <dhcpsrv/ncr_generator.h>
 #include <mutex>
 #include <set>
 #if CARBIDE_KEA_HOOKS_VERSION >= 20400
@@ -1765,27 +1766,55 @@ int lease6_expire(CalloutHandle &handle) {
       !own_lease6_address(handle, lease->addr_)) {
     return 0;
   }
-  const auto current = isc::dhcp::LeaseMgrFactory::instance().getLease6(lease->type_, lease->addr_);
-  if (!current || *current != *lease) {
-    return 0;
-  }
-  const int result = handle_carbide_lease6_end(handle, "lease6_expire");
-  boost::shared_ptr<Machine> machine;
+  const bool retire_owned = lease->type_ == Lease::TYPE_NA &&
+      lease->state_ == Lease::STATE_DEFAULT && !mac.empty();
   try {
-    handle.getContext("machine", machine);
-  } catch (const isc::hooks::NoSuchCalloutContext &) {
-  }
-  if (machine) {
-    // Allocation-time reclamation leaves the old database row unchanged.
-    // Persist its reclaimed state before SELECT can refuse the replacement,
-    // otherwise every retry expires Core and decrements assigned-nas again.
-    Lease6Ptr reclaimed(new Lease6(*lease));
-    reclaimed->state_ = Lease::STATE_EXPIRED_RECLAIMED;
-    isc::dhcp::LeaseMgrFactory::instance().updateLease6(reclaimed);
+    auto &leases = isc::dhcp::LeaseMgrFactory::instance();
+    const auto current = leases.getLease6(lease->type_, lease->addr_);
+    if (!current || *current != *lease) {
+      return 0;
+    }
+    // Retire an owned IA_NA row before notifying Core. A failed write must
+    // preserve both allocations, the refusal flag, and counter compensation.
+    // This also covers allocation-time reclamation, where Kea itself would
+    // leave the old row unchanged if SELECT subsequently refuses replacement.
+    if (retire_owned) {
+      bool remove_lease = false;
+      handle.getArgument("remove_lease", remove_lease);
+      if (remove_lease) {
+        if (!leases.deleteLease(lease)) {
+          return 0;
+        }
+      } else {
+        Lease6Ptr reclaimed(new Lease6(*lease));
+        reclaimed->reuseable_valid_lft_ = 0;
+        reclaimed->hostname_.clear();
+        reclaimed->fqdn_fwd_ = false;
+        reclaimed->fqdn_rev_ = false;
+        reclaimed->state_ = Lease::STATE_EXPIRED_RECLAIMED;
+        leases.updateLease6(reclaimed);
+      }
+    }
+  } catch (const std::exception &error) {
+    // Kea 2.4 converts an uncaught hook exception to DROP, which its
+    // reclamation engine does not treat as a veto. Keep SKIP and counter
+    // compensation in place until a later attempt can retire the row.
+    LOG_ERROR(logger, isc::log::LOG_CARBIDE_LEASE_EXPIRE_ERROR)
+        .arg("lease6_expire: could not retire " + lease->addr_.toText() +
+             ": " + error.what());
+    return 0;
   }
   compensate(-1);
   handle.setContext(lease6_reclaim_refused_context, false);
-  handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
-  return result;
+  if (retire_owned) {
+    // SKIP tells Kea persistence and DNS cleanup are already handled, but it
+    // still updates reclamation counters. Do not permit a second database
+    // write after Core expiry: that could fail after the irreversible side effect.
+    isc::dhcp::queueNCR(isc::dhcp_ddns::CHG_REMOVE, lease);
+  } else {
+    // Keep native declined-lease recovery and unsupported lease types intact.
+    handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
+  }
+  return handle_carbide_lease6_end(handle, "lease6_expire");
 }
 }

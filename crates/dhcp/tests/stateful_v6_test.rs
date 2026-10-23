@@ -1402,3 +1402,148 @@ fn expired_candidate_redirects_to_authoritative_address() -> Result<(), eyre::Re
     }
     Ok(())
 }
+
+// A file-size limit makes the real memfile append fail, before either its disk
+// row or its in-memory index changes. Exercise both native sweep modes and the
+// allocation-time path whose caller otherwise leaves the expired row unchanged.
+#[cfg(target_os = "linux")]
+#[test]
+fn reclamation_recovers_from_memfile_write_failure() -> Result<(), eyre::Report> {
+    const HEADER: &str = "address,duid,valid_lifetime,expire,subnet_id,pref_lifetime,lease_type,iaid,prefix_len,fqdn_fwd,fqdn_rev,hostname,hwaddr,state,user_context,hwtype,hwaddr_source";
+    for (case, sweep_remove) in [
+        ("allocation followed by SELECT refusal", None),
+        ("sweep retaining reclaimed row", Some(false)),
+        ("sweep removing row", Some(true)),
+    ] {
+        let idx = 0x67;
+        let candidate = "2001:db8::1".parse::<Ipv6Addr>()?;
+        let address = DHCPv6Factory::mock_addr(idx);
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let rows = format!(
+            "{HEADER}\n{candidate},{},600,{},1,300,0,1,128,1,1,expired.example.test,{},0,,1,1\n{address},{},7200,{},1,3600,0,1,128,0,0,,{},0,,1,1\n",
+            DHCPv6Factory::duid_ll_hex(1),
+            now - 60,
+            DHCPv6Factory::mac_string(1),
+            DHCPv6Factory::duid_ll_hex(idx + 1),
+            now + 7200,
+            DHCPv6Factory::mac_string(idx + 1),
+        );
+        let mut h = Harness::new_with_leases(
+            Kea6Config {
+                // Include the hint even if Kea considers it outside the link prefix.
+                address_pool: "::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+                expired_leases_processing: Some(Kea6ExpiredLeasesProcessing {
+                    reclaim_timer_wait_time: 3600,
+                    flush_reclaimed_timer_wait_time: 3600,
+                    hold_reclaimed_time: 3600,
+                    max_reclaim_leases: 10,
+                    max_reclaim_time: 100,
+                    unwarned_reclaim_cycles: 1,
+                }),
+                ..Kea6Config::default()
+            },
+            &rows,
+        );
+        let duid = DHCPv6Factory::duid_en(24);
+        let offer = send_and_recv_v6(
+            &h.socket,
+            DHCPv6Factory::solicit_with_address_hint(idx, candidate, duid.clone()),
+        )?
+        .expect(case);
+        let server_id = DHCPv6Factory::server_id(&offer);
+        let reclaim = |h: &Harness| -> Result<(), eyre::Report> {
+            if let Some(remove) = sweep_remove {
+                h.kea.reclaim_expired_leases(remove)?;
+            } else {
+                let response = send_and_recv_v6(
+                    &h.socket,
+                    DHCPv6Factory::request_with_duid(
+                        idx,
+                        server_id.clone(),
+                        candidate,
+                        duid.clone(),
+                        true,
+                    ),
+                )?
+                .expect(case);
+                assert!(DHCPv6Factory::ia_addr(&response).is_none(), "{case}");
+            }
+            Ok(())
+        };
+        let original = fs::read(&h.lease_file_path)?;
+        h.kea.set_file_size_limit(Some(original.len() as u64))?;
+        for _ in 0..2 {
+            reclaim(&h)?;
+            assert!(
+                h.kea
+                    .wait_for_log("failed to write CSV row", MEMFILE_TIMEOUT),
+                "{case}"
+            );
+            assert_eq!(fs::read(&h.lease_file_path)?, original, "{case}");
+            assert!(
+                h.api_server.expired_leases().is_empty(),
+                "Core must not expire a lease until Kea can retire its row: {case}"
+            );
+            let stats = h.kea.statistics()?;
+            assert_assigned_leases(&stats, 2, 2);
+            assert_eq!(stats["reclaimed-leases"][0][0], 0, "{case}");
+            assert_eq!(stats["subnet[1].reclaimed-leases"][0][0], 0, "{case}");
+            for (name, samples) in stats.as_object().unwrap() {
+                if name.starts_with("subnet[1].pool[") && name.ends_with(".reclaimed-leases") {
+                    assert_eq!(samples[0][0], 0, "{case}: {name}");
+                }
+            }
+        }
+        h.kea.set_file_size_limit(None)?;
+        reclaim(&h)?;
+        h.wait_for_no_active_lease(candidate, &DHCPv6Factory::duid_ll_hex(1))?;
+        let leases = h.read_leases()?;
+        let retired = leases
+            .iter()
+            .find(|lease| lease.address == candidate)
+            .unwrap();
+        if sweep_remove == Some(true) {
+            assert_eq!(retired.valid_lifetime, 0, "{case}");
+        } else {
+            assert_eq!(retired.state, KEA_LEASE_STATE_EXPIRED_RECLAIMED, "{case}");
+            let contents = fs::read_to_string(&h.lease_file_path)?;
+            let row = contents
+                .lines()
+                .rev()
+                .find(|line| line.starts_with(&format!("{candidate},")))
+                .unwrap();
+            let columns = row.split(',').collect::<Vec<_>>();
+            assert_eq!(
+                &columns[9..12],
+                &["0", "0", ""],
+                "reclamation clears DNS metadata: {case}"
+            );
+        }
+        h.wait_for_scoped_expiry(candidate, &DHCPv6Factory::mac_string(1));
+        let stats = h.kea.statistics()?;
+        assert_assigned_leases(&stats, 1, 1);
+        assert_eq!(stats["reclaimed-leases"][0][0], 1, "{case}");
+        assert_eq!(stats["subnet[1].reclaimed-leases"][0][0], 1, "{case}");
+        for (name, samples) in stats.as_object().unwrap() {
+            if name.starts_with("subnet[1].pool[") && name.ends_with(".reclaimed-leases") {
+                assert_eq!(samples[0][0], 1, "{case}: {name}");
+            }
+        }
+        reclaim(&h)?;
+        assert_eq!(h.api_server.expired_leases().len(), 1, "{case}");
+        assert_eq!(h.kea.statistics()?["reclaimed-leases"][0][0], 1, "{case}");
+        // Restart reloads the retired row; it must not expire Core again. The
+        // same-MAC client must then be able to reuse its address normally.
+        h.kea.restart()?;
+        reclaim(&h)?;
+        assert_eq!(h.api_server.expired_leases().len(), 1, "{case}");
+        h.establish_lease(1)?;
+        assert_assigned_leases(&h.kea.statistics()?, 2, 2);
+        assert!(
+            h.active_lease(address, &DHCPv6Factory::duid_ll_hex(idx + 1))?
+                .is_some(),
+            "{case}"
+        );
+    }
+    Ok(())
+}
