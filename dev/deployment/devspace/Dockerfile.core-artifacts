@@ -5,6 +5,11 @@
 
 FROM build-container-localdev AS builder
 
+# Caps concurrent rustc jobs on memory-constrained Docker hosts. Peak usage is
+# during linking, so a host with less than ~2 GiB per core can have its daemon
+# OOM-killed mid-build. Empty keeps the Cargo default of one job per core.
+ARG CARGO_JOBS=""
+
 ENV CARGO_HOME=/cargo-home
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 ENV CARGO_TARGET_DIR=/cargo-target
@@ -15,7 +20,7 @@ COPY . .
 
 RUN --mount=type=cache,id=nico-devspace-cargo-home,target=/cargo-home,sharing=locked \
   --mount=type=cache,id=nico-devspace-cargo-target,target=/cargo-target,sharing=locked \
-  cargo build --locked \
+  cargo build --locked ${CARGO_JOBS:+--jobs ${CARGO_JOBS}} \
     -p carbide-api --bin carbide-api \
     -p nico-admin-cli --bin nico-admin-cli \
     -p carbide-bmc-proxy --bin carbide-bmc-proxy \
