@@ -1338,6 +1338,7 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 		wantVersion           *string
 		wantVpcSlaac          bool
 		wantFlow              bool
+		wantNVLinkPartition   bool
 		wantAgentVersion      *string
 		wantInterval          *int
 		wantDBUpdate          bool
@@ -1537,6 +1538,53 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 			wantFlow:           true,
 		},
 		{
+			name:            "enables NVLink partition when Core reports it enabled",
+			existingVersion: cutil.GetPtr("1.0.0"),
+			existingConfig:  &cdbm.SiteConfig{},
+			buildInfo: &corev1.BuildInfo{
+				BuildVersion:  "1.0.0",
+				RuntimeConfig: &corev1.RuntimeConfig{NvlinkPartitioningEnabled: proto.Bool(true)},
+			},
+			wantVersion:         cutil.GetPtr("1.0.0"),
+			wantNVLinkPartition: true,
+			wantDBUpdate:        true,
+		},
+		{
+			name:            "disables NVLink partition when Core reports it disabled",
+			existingVersion: cutil.GetPtr("1.0.0"),
+			existingConfig:  &cdbm.SiteConfig{NVLinkPartition: true},
+			buildInfo: &corev1.BuildInfo{
+				BuildVersion:  "1.0.0",
+				RuntimeConfig: &corev1.RuntimeConfig{NvlinkPartitioningEnabled: proto.Bool(false)},
+			},
+			wantVersion:  cutil.GetPtr("1.0.0"),
+			wantDBUpdate: true,
+		},
+		{
+			// Older Core versions omit the field, and inventory without runtime config carries
+			// no NVLink setting; either must leave the stored value alone.
+			name:            "preserves NVLink partition when Core omits it",
+			existingVersion: cutil.GetPtr("1.0.0"),
+			existingConfig:  &cdbm.SiteConfig{NVLinkPartition: true},
+			buildInfo: &corev1.BuildInfo{
+				BuildVersion:  "1.0.0",
+				RuntimeConfig: &corev1.RuntimeConfig{},
+			},
+			wantVersion:         cutil.GetPtr("1.0.0"),
+			wantNVLinkPartition: true,
+		},
+		{
+			name:            "skips update when reported NVLink partition matches",
+			existingVersion: cutil.GetPtr("1.0.0"),
+			existingConfig:  &cdbm.SiteConfig{NVLinkPartition: true},
+			buildInfo: &corev1.BuildInfo{
+				BuildVersion:  "1.0.0",
+				RuntimeConfig: &corev1.RuntimeConfig{NvlinkPartitioningEnabled: proto.Bool(true)},
+			},
+			wantVersion:         cutil.GetPtr("1.0.0"),
+			wantNVLinkPartition: true,
+		},
+		{
 			name:            "initializes nil config with advertised VPC SLAAC",
 			existingVersion: cutil.GetPtr("1.0.0"),
 			existingConfig:  nil,
@@ -1620,6 +1668,7 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 			require.NotNil(t, got.Config)
 			assert.Equal(t, tt.wantVpcSlaac, got.Config.VpcSlaac)
 			assert.Equal(t, tt.wantFlow, got.Config.Flow)
+			assert.Equal(t, tt.wantNVLinkPartition, got.Config.NVLinkPartition)
 
 			// A nil expectation means the report left the stored value as createSite wrote it.
 			wantAgentVersion := existingAgentVersion

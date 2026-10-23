@@ -19,6 +19,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use carbide_nvlink_manager::config::{
+    DefaultNmxCCa, DefaultNmxCClientTls, DefaultNmxCTls, NvLinkConfig,
+};
 use eyre::WrapErr;
 use figment::providers::{Env, Format, Toml};
 use figment::value::{Dict, Map, Value};
@@ -409,6 +412,10 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
         config.periodic_state_republish.validate()?;
     }
 
+    config
+        .nvlink_config
+        .get_or_insert_with(NvLinkConfig::default);
+
     // Publish the configured tool list so the admin-UI sidebar and per-machine
     // "Logs" deep link can read it back via `crate::configured_tools`. The list
     // is owned here (not in `carbide-api-web`) because it is derived from the
@@ -455,6 +462,51 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
 
     tracing::trace!(config = ?config.redacted(), "Carbide config");
     Ok((Arc::new(config), diagnostics))
+}
+
+/// Fills in NMX-C TLS settings the configuration leaves unset and logs the outcome.
+///
+/// Like [`log_vpc_peering_policy_deprecations`], the caller runs this after logging setup so the
+/// outcome reaches the production subscriber.
+pub fn apply_nmx_c_tls_defaults(config: &mut CarbideConfig) {
+    let initial_domain_name = config.initial_domain_name.clone();
+    let nvlink_config = config
+        .nvlink_config
+        .get_or_insert_with(NvLinkConfig::default);
+    let DefaultNmxCTls { client, ca } = nvlink_config.apply_default_nmx_c_tls(
+        Path::new(NvLinkConfig::DEFAULT_NMX_C_CLIENT_TLS_DIR),
+        Path::new(NvLinkConfig::DEFAULT_NMX_C_FALLBACK_CA_CERT),
+        initial_domain_name.as_deref(),
+    );
+    match client {
+        DefaultNmxCClientTls::Applied => tracing::info!(
+            tls_dir = NvLinkConfig::DEFAULT_NMX_C_CLIENT_TLS_DIR,
+            authority = ?nvlink_config.nmx_c_tls_authority,
+            "Using default client certificate for NMX-C connections"
+        ),
+        DefaultNmxCClientTls::CertificateMissing => tracing::warn!(
+            tls_dir = NvLinkConfig::DEFAULT_NMX_C_CLIENT_TLS_DIR,
+            "NMX-C connections have no TLS settings configured and no client certificate was \
+             found in tls_dir, so they will present no client certificate. Mount \
+             the certificate there (Helm nvSwitchTls.nicoClient.mountPath) or set the \
+             nvlink_config.nmx_c_tls_* keys"
+        ),
+        DefaultNmxCClientTls::NotNeeded => {}
+    }
+    match ca {
+        DefaultNmxCCa::Applied => tracing::info!(
+            ca_cert = ?nvlink_config.nmx_c_tls_ca_cert_path,
+            "Using default CA bundle for NMX-C connections"
+        ),
+        DefaultNmxCCa::Missing => tracing::warn!(
+            client_tls_dir = NvLinkConfig::DEFAULT_NMX_C_CLIENT_TLS_DIR,
+            fallback_ca_cert = NvLinkConfig::DEFAULT_NMX_C_FALLBACK_CA_CERT,
+            "NMX-C is reached over HTTPS but no CA bundle is configured and \
+             neither default exists; no NMX-C server certificate can be verified. Set \
+             nvlink_config.nmx_c_tls_ca_cert_path"
+        ),
+        DefaultNmxCCa::NotNeeded => {}
+    }
 }
 
 /// Logs deprecations that must be visible through the production subscriber.
@@ -639,6 +691,45 @@ request_timeout_seconds = 5"#
                     && line.fields.get("config_source").map(String::as_str) == Some("config.toml")
                     && line.fields.get("replacement").map(String::as_str) == Some("exclusive")
             }));
+            Ok(())
+        })
+    }
+
+    /// Reports the NMX-C TLS default outcome through the subscriber installed after parsing,
+    /// so it is not lost before logging setup. Assumes the default NMX-C client certificate
+    /// mount does not exist on the test host.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn nmx_c_tls_default_outcome_is_logged_after_logging_setup() {
+        figment::Jail::expect_with(|jail| {
+            let config_text = format!(
+                "{}\n[nvlink_config]\nenabled = true\n",
+                include_str!("test_data/min_config.toml")
+            );
+            jail.create_file("config.toml", &config_text)?;
+
+            // Match startup ordering: parse before installing the logging subscriber.
+            let stream = LogStream::new(16, 64 * 1024);
+            let mut logs = stream.subscribe();
+            let subscriber = tracing_subscriber::registry().with(LogStreamLayer::new(stream));
+            let mut config = Arc::unwrap_or_clone(
+                parse_carbide_config(Path::new("config.toml"), None)
+                    .expect("configuration with NVLink partitioning must load"),
+            );
+            tracing::subscriber::with_default(subscriber, || apply_nmx_c_tls_defaults(&mut config));
+
+            let warning = std::iter::from_fn(|| logs.try_recv().ok())
+                .find(|line| {
+                    line.message.starts_with(
+                        "NMX-C connections have no TLS settings configured and no client certificate",
+                    )
+                })
+                .expect("missing NMX-C client certificate warning");
+            assert_eq!(warning.level, "WARN");
+            assert_eq!(
+                warning.fields.get("tls_dir").map(String::as_str),
+                Some(NvLinkConfig::DEFAULT_NMX_C_CLIENT_TLS_DIR)
+            );
             Ok(())
         })
     }

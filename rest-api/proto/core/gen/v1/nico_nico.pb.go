@@ -11322,8 +11322,11 @@ type RuntimeConfig struct {
 	DatabasePoolAcquireTimeoutMs uint64      `protobuf:"varint,59,opt,name=database_pool_acquire_timeout_ms,json=databasePoolAcquireTimeoutMs,proto3" json:"database_pool_acquire_timeout_ms,omitempty"`
 	DatabasePoolIdleTimeoutMs    uint64      `protobuf:"varint,60,opt,name=database_pool_idle_timeout_ms,json=databasePoolIdleTimeoutMs,proto3" json:"database_pool_idle_timeout_ms,omitempty"`
 	DatabasePoolMaxLifetimeMs    uint64      `protobuf:"varint,61,opt,name=database_pool_max_lifetime_ms,json=databasePoolMaxLifetimeMs,proto3" json:"database_pool_max_lifetime_ms,omitempty"`
-	unknownFields                protoimpl.UnknownFields
-	sizeCache                    protoimpl.SizeCache
+	// Effective nvlink_config.enabled, whether NVLink partitioning is enabled.
+	// Older Core versions omit this field.
+	NvlinkPartitioningEnabled *bool `protobuf:"varint,62,opt,name=nvlink_partitioning_enabled,json=nvlinkPartitioningEnabled,proto3,oneof" json:"nvlink_partitioning_enabled,omitempty"`
+	unknownFields             protoimpl.UnknownFields
+	sizeCache                 protoimpl.SizeCache
 }
 
 func (x *RuntimeConfig) Reset() {
@@ -11747,6 +11750,13 @@ func (x *RuntimeConfig) GetDatabasePoolMaxLifetimeMs() uint64 {
 		return x.DatabasePoolMaxLifetimeMs
 	}
 	return 0
+}
+
+func (x *RuntimeConfig) GetNvlinkPartitioningEnabled() bool {
+	if x != nil && x.NvlinkPartitioningEnabled != nil {
+		return *x.NvlinkPartitioningEnabled
+	}
+	return false
 }
 
 type EchoRequest struct {
@@ -74927,7 +74937,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x0f_runtime_config\"\x16\n" +
 	"\x14GetRmsVersionRequest\"1\n" +
 	"\x15GetRmsVersionResponse\x12\x18\n" +
-	"\aversion\x18\x01 \x01(\tR\aversion\"\xbe\x1a\n" +
+	"\aversion\x18\x01 \x01(\tR\aversion\"\xa3\x1b\n" +
 	"\rRuntimeConfig\x12\x16\n" +
 	"\x06listen\x18\x01 \x01(\tR\x06listen\x12)\n" +
 	"\x10metrics_endpoint\x18\x02 \x01(\tR\x0fmetricsEndpoint\x12!\n" +
@@ -74986,14 +74996,16 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x17site_fabric_null_routes\x18: \x01(\v2\x12.common.StringListH\x03R\x14siteFabricNullRoutes\x88\x01\x01\x12F\n" +
 	" database_pool_acquire_timeout_ms\x18; \x01(\x04R\x1cdatabasePoolAcquireTimeoutMs\x12@\n" +
 	"\x1ddatabase_pool_idle_timeout_ms\x18< \x01(\x04R\x19databasePoolIdleTimeoutMs\x12@\n" +
-	"\x1ddatabase_pool_max_lifetime_ms\x18= \x01(\x04R\x19databasePoolMaxLifetimeMs\x1aN\n" +
+	"\x1ddatabase_pool_max_lifetime_ms\x18= \x01(\x04R\x19databasePoolMaxLifetimeMs\x12C\n" +
+	"\x1bnvlink_partitioning_enabled\x18> \x01(\bH\x04R\x19nvlinkPartitioningEnabled\x88\x01\x01\x1aN\n" +
 	" DpuNicFirmwareUpdateVersionEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x16\n" +
 	"\x14_initial_domain_nameB\x1a\n" +
 	"\x18_dpu_network_pinger_typeB\v\n" +
 	"\t_sitenameB\x1a\n" +
-	"\x18_site_fabric_null_routesJ\x04\b\x03\x10\x04J\x04\b\x06\x10\aJ\x04\b\x0e\x10\x0fJ\x04\b\x18\x10\x19J\x04\b&\x10'R\vdpa_enabled\"'\n" +
+	"\x18_site_fabric_null_routesB\x1e\n" +
+	"\x1c_nvlink_partitioning_enabledJ\x04\b\x03\x10\x04J\x04\b\x06\x10\aJ\x04\b\x0e\x10\x0fJ\x04\b\x18\x10\x19J\x04\b&\x10'R\vdpa_enabled\"'\n" +
 	"\vEchoRequest\x12\x18\n" +
 	"\amessage\x18\x01 \x01(\tR\amessage\"(\n" +
 	"\fEchoResponse\x12\x18\n" +

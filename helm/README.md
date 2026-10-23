@@ -79,10 +79,11 @@ Top-level `global:` values are automatically passed to all subcharts.
 
 `nico-api.nvSwitchTls` can ask cert-manager to issue NICo's dedicated NMX-C
 client identity and, optionally, the NVSwitch server identity. Both leaves
-use the existing `nvSwitchTls.issuerRef`, which defaults to
-`vault-nico-issuer`. NMX-C/NVUE must trust the CA behind that issuer when NICo
-connects, and NICo must use an independently managed CA bundle that validates
-the server certificate presented by the switch.
+use `nvSwitchTls.issuerRef`, or `global.certificate.issuerRef` when it is
+empty, which defaults to `vault-nico-issuer`. NMX-C/NVUE must trust the CA
+behind that issuer when NICo connects, and NICo must use an independently
+managed CA bundle that validates the server certificate presented by the
+switch.
 
 The profiles are deliberately fixed to the capabilities each peer needs:
 
@@ -95,10 +96,33 @@ The profiles are deliberately fixed to the capabilities each peer needs:
   nico-api. A switch installer or operator must copy the certificate, private
   key, and CA to NMX-C/NVUE and bind them there.
 
-Both profiles are off by default. Enable `switchServer` only when this Helm
-release should own the server artifact. Configure `dnsNames` or `ipAddresses`,
-as appropriate, with a SAN that exactly matches `nmx_c_tls_authority` in the
-NICo site configuration.
+`nicoClient` is on by default. When `nicoClient.uris` is empty, its URI SAN is
+`spiffe://<global.spiffe.trustDomain>/<release namespace>/sa/nico-nmxc`, for
+example `spiffe://nico.local/nico-system/sa/nico-nmxc`.
+
+NVLink partitioning is off by default. Set `nico-api.nvlink.enabled` to render
+`nvlink_config.enabled` into the base configuration; a value in the site
+configuration takes precedence. On a rack with running instances, enabling it
+removes the NMX-C default partition on the first monitor pass.
+
+When `nvlink_config.enabled` or
+`nvlink_config.nmx_c_certificate_rotation.enabled` is `true`, nico-api fills
+in unset NMX-C TLS settings at startup:
+
+- If the site configuration sets none of the four `nvlink_config.nmx_c_tls_*`
+  keys and `mountPath` keeps its default, nico-api uses this certificate for
+  NMX-C mTLS, with `initial_domain_name` as the TLS authority.
+- If `nvlink_config.nmx_c_tls_ca_cert_path` is unset and NMX-C is reached over
+  HTTPS, nico-api uses `ca.crt` from the client Secret, or else
+  `/var/run/secrets/nico-roots/ca.crt`, as the CA bundle. NMX-C is reached
+  over plain HTTP, with no CA, when `allow_insecure = true` and no client
+  certificate and key are set.
+
+`switchServer` is off by default. Enable it only when this Helm release should
+own the server artifact. Configure `dnsNames` or `ipAddresses`, as
+appropriate, with a SAN that exactly matches `nmx_c_tls_authority`. When the
+site configuration sets none of the `nmx_c_tls_*` keys, that authority is
+`initial_domain_name`.
 
 ```yaml
 nico-api:

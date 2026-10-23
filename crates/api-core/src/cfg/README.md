@@ -70,7 +70,7 @@ behavior.
 | `bmc_max_sessions_per_caller` | `usize` | `4` | `security` | Cap on outstanding Redfish sessions per calling service identity per BMC; a `GetBmcCredentials` mint past the cap revokes that caller's oldest sessions. Values below 1 are treated as 1. |
 | `bmc_proxy` | `Option<BmcProxyConfig>` | — | `security` | Routes this instance's ordinary BMC Redfish traffic — including established-endpoint credentialed exploration — through nico-bmc-proxy. Credential setup and rotation, session minting, exploration's anonymous vendor probes, and component-manager compute-tray power control (explicit per-endpoint credentials) always stay direct. |
 | `ib_fabrics` | `HashMap<String, IbFabricDefinition>` | `{}` | `hardware` | InfiniBand fabrics managed by the site. When `ib_config.enabled = true`, v2.4 accepts at most one fabric, named `default`. Each fabric accepts optional `backend` and `remote_pool` selectors with the [ResourcePoolConfig](#resourcepoolconfig) rules, using `ib_fabrics.<fabric>.pkey` as its logical pool name. When InfiniBand management is disabled, selectors are still validated, but fabric configuration alone creates no PKey binding; existing pool inventory can still receive a missing binding. |
-| `initial_domain_name` | `Option<String>` | — | `machines` | Domain to create if none exist. Most sites use a single domain. |
+| `initial_domain_name` | `Option<String>` | — | `machines` | Domain to create if none exist. Most sites use a single domain. Also the default NMX-C TLS authority; see [NvLinkConfig](#nvlinkconfig). |
 | `initial_dpu_agent_upgrade_policy` | `Option<AgentUpgradePolicyChoice>` | — | `machines` | Policy for nico-dpu-agent upgrades. Also settable via `nico-admin-cli`. |
 | `max_concurrent_machine_updates` | `Option<i32>` | — | `machines` | **Deprecated.** Use `machine_updater` instead. |
 | `machine_update_run_interval` | `Option<u64>` | — | `machines` | Interval (seconds) at which the machine update manager checks for updates. |
@@ -624,28 +624,59 @@ disabled in v2.4.
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
-| `enabled` | `bool` | `false` | Enables NvLink partitioning. |
+| `enabled` | `bool` | `false` | Enables NvLink partitioning. On a rack with running instances, the first monitor pass removes the NMX-C default partition. |
 | `monitor_run_interval` | `Duration` | `60s` | NvLink monitor polling interval. |
-| `nmx_c_tls_ca_cert_path` | `Option<String>` | — | Extra CA bundle for verifying the NMX-C server over HTTPS. |
-| `nmx_c_tls_client_cert_path` | `Option<String>` | — | Client certificate for mTLS to NMX-C. |
-| `nmx_c_tls_client_key_path` | `Option<String>` | — | Client private key for mTLS to NMX-C. |
-| `nmx_c_tls_authority` | `Option<String>` | — | TLS server name used for SNI and certificate verification. |
-| `allow_insecure` | `bool` | `false` | Skip TLS verification for NMX-C. |
+| `nmx_c_tls_ca_cert_path` | `Option<String>` | *(see below)* | CA bundle that verifies the NMX-C server certificate over HTTPS. It is the only trust source: no system roots are loaded. |
+| `nmx_c_tls_client_cert_path` | `Option<String>` | *(see below)* | Client certificate for mTLS to NMX-C. |
+| `nmx_c_tls_client_key_path` | `Option<String>` | *(see below)* | Client private key for mTLS to NMX-C. |
+| `nmx_c_tls_authority` | `Option<String>` | *(see below)* | TLS server name used for SNI and certificate verification. Unset or empty uses the endpoint host, which is the switch NVOS IP. |
+| `allow_insecure` | `bool` | `false` | Reach NMX-C over plain HTTP when no client certificate and key are set. With both set, NMX-C is still reached over verified HTTPS. |
 | `nmx_c_endpoint_port` | `Option<u16>` | — | TCP port for NMX-C endpoints derived from switch NVOS IP. Unset uses the production NMX-C port. |
 | `nmx_c_certificate_rotation` | `NmxCCertificateRotationConfig` | *(default)* | Optional expiry-driven rotation for NMX-C server certificates. |
 | `partition_monitor_max_concurrent_groups` | `NonZeroUsize` | `16` | Maximum number of NMX-C machine groups (chassis or rack) processed concurrently per monitor iteration. Bounds DB pool usage and gRPC fan-out. Must be ≥ 1. |
+
+When `enabled` or `nmx_c_certificate_rotation.enabled` is `true`, `nico-api`
+fills in unset NMX-C TLS settings at startup:
+
+- **Client certificate, key, and authority.** When `allow_insecure` is `false`
+  and none of the four `nmx_c_tls_*` keys is set, `nico-api` checks for
+  `/var/run/secrets/nvswitch-client/tls.crt` and `tls.key` (the Helm chart's
+  `nvSwitchTls.nicoClient` mount). If both exist, it uses them as the client
+  certificate and key and sets `nmx_c_tls_authority` to
+  `initial_domain_name`. Setting any `nmx_c_tls_*` key disables these three
+  defaults; unset keys among them stay unset.
+- **CA bundle.** When `nmx_c_tls_ca_cert_path` is unset and NMX-C is reached
+  over HTTPS, `nico-api` uses `/var/run/secrets/nvswitch-client/ca.crt`, or
+  else `/var/run/secrets/nico-roots/ca.crt`, whichever exists first. This
+  applies regardless of the other keys.
+
+`nico-api` logs a warning when it reaches NMX-C over HTTPS with no client
+certificate under the first rule, or with no CA bundle after the second.
+
+For the authority default to work, set `initial_domain_name`, and make it
+match a DNS SAN of the certificate NMX-C presents. On switches whose server
+certificate is issued by the RMS Helm chart, that SAN is RMS's
+`apiServer.dnsDomain`, so set both to the same value. If `initial_domain_name`
+is unset, `nmx_c_tls_authority` stays unset and each NMX-C endpoint is
+verified against its own host, which for rack endpoints is the switch NVOS IP.
 
 ### `NmxCCertificateRotationConfig`
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
-| `enabled` | `bool` | `false` | Enables NMX-C server certificate expiry checks and rotation. |
+| `enabled` | `Option<bool>` | *(follows `nvlink_config.enabled`)* | Enables NMX-C server certificate expiry checks and rotation. Unset follows `nvlink_config.enabled`; set it to run or stop the certificate monitor independently. |
 | `run_interval` | `Duration` | `1h` | Interval between checks of the certificate served by NMX-C. |
 | `rotate_before_expiry` | `Duration` | `1w` | Requests rotation when the served certificate expires within this duration. Must leave enough time for the replacement certificate to be issued first. |
 | `probe_timeout` | `Duration` | `10s` | Timeout for each NMX-C certificate probe operation. |
 
 `expiry_warning_window` remains accepted as a deprecated alias for
 `rotate_before_expiry`; its value now controls rotation rather than warning only.
+
+Upgrade note: `enabled` previously defaulted to `false`. A site that sets
+`nvlink_config.enabled = true` without this key starts the certificate monitor
+after upgrading, and the monitor can request `ConfigureNmxCluster` rack
+maintenance when a served certificate nears expiry. Set `enabled = false` here
+to keep the previous behavior.
 
 ### `SiteExplorerConfig`
 

@@ -4941,6 +4941,12 @@ impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
                 .as_millis()
                 .try_into()
                 .unwrap_or_default(),
+            nvlink_partitioning_enabled: Some(
+                value
+                    .nvlink_config
+                    .as_ref()
+                    .map_or(NvLinkConfig::default().enabled, |config| config.enabled),
+            ),
         }
     }
 }
@@ -7070,6 +7076,7 @@ path = "credentials.yaml"
                 r#""https://rms.example.test""#,
             ),
             ("{{ .Values.rms.enforceTls }}", "true"),
+            ("{{ $nvlinkEnabled }}", "true"),
             (
                 r#"{{ .Values.bmcProxy.address | default (printf "nico-bmc-proxy.%s.svc.cluster.local:1079" (include "nico-api.namespace" .)) }}"#,
                 "nico-bmc-proxy.nico-system.svc.cluster.local:1079",
@@ -7579,6 +7586,28 @@ path = "credentials.yaml"
                 Some(vec![]) => Some(vec![]),
                 // A configured override replaces the legacy list in operator output.
                 Some(vec!["192.0.2.0/24".parse().unwrap()]) => Some(vec!["192.0.2.0/24".to_string()]),
+            }
+        );
+    }
+
+    /// REST syncs its Site NVLink partition capability from this field, so it must be
+    /// present and report the effective setting, including the default when omitted.
+    #[test]
+    fn runtime_config_reports_effective_nvlink_partitioning_enabled() {
+        value_scenarios!(
+            run = |configured| {
+                let mut config = crate::test_support::default_config::get();
+                config.nvlink_config = configured.map(|enabled| NvLinkConfig {
+                    enabled,
+                    ..NvLinkConfig::default()
+                });
+                let runtime_config: rpc::forge::RuntimeConfig = config.into();
+                runtime_config.nvlink_partitioning_enabled
+            };
+            "runtime NVLink partitioning flag" {
+                None => Some(NvLinkConfig::default().enabled),
+                Some(false) => Some(false),
+                Some(true) => Some(true),
             }
         );
     }

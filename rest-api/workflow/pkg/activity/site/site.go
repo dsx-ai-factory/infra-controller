@@ -145,6 +145,17 @@ func (mst ManageSite) UpdateSiteInDB(ctx context.Context, siteID uuid.UUID, core
 		updateInput.Config.Flow = siteAgentBuildInfo.FlowEnabled
 	}
 
+	// Core's runtime config owns the NVLink partition flag once it reports the field. Older Core
+	// versions omit it, which preserves the stored value.
+	runtimeConfig := coreBuildInfo.GetRuntimeConfig()
+	if runtimeConfig != nil && runtimeConfig.NvlinkPartitioningEnabled != nil &&
+		(site.Config == nil || site.Config.NVLinkPartition != runtimeConfig.GetNvlinkPartitioningEnabled()) {
+		if updateInput.Config == nil {
+			updateInput.Config = &cdbm.SiteConfigUpdateInput{}
+		}
+		updateInput.Config.NVLinkPartition = runtimeConfig.NvlinkPartitioningEnabled
+	}
+
 	// Update build version for Site when Core reports a changed, non-empty value.
 	siteControllerVersion := coreBuildInfo.GetBuildVersion()
 	if siteControllerVersion != "" && (site.SiteControllerVersion == nil || (site.SiteControllerVersion != nil && *site.SiteControllerVersion != siteControllerVersion)) {

@@ -1087,7 +1087,7 @@ impl NvLinkManager {
         )
         .start(join_set, cancel_token.clone())?;
 
-        if self.config.nmx_c_certificate_rotation.enabled {
+        if self.config.certificate_rotation_enabled() {
             let switch_cert_monitor = switch_cert_monitor::SwitchCertificateMonitor::new(
                 self.db_pool,
                 self.meter,

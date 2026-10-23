@@ -502,7 +502,6 @@ func (ush UpdateSiteHandler) Handle(c echo.Context) error {
 				siteUpdateInput.Config = &cdbm.SiteConfigUpdateInput{
 					NativeNetworking:          apiRequest.Capabilities.NativeNetworking,
 					NetworkSecurityGroup:      apiRequest.Capabilities.NetworkSecurityGroup,
-					NVLinkPartition:           apiRequest.Capabilities.NVLinkPartition,
 					Flow:                      apiRequest.Capabilities.Flow,
 					ImageBasedOperatingSystem: apiRequest.Capabilities.ImageBasedOperatingSystem,
 					DPSPowerManagement:        apiRequest.Capabilities.DPSPowerManagement,
