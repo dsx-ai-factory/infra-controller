@@ -595,7 +595,7 @@ async fn test_failed_first_probe_is_retried_before_routine_refresh(
     let routine_ip: IpAddr = machines[0].ip.parse()?;
     let retry_ip: IpAddr = machines[1].ip.parse()?;
     let mut txn = env.pool.begin().await?;
-    // Only declared BMCs receive priority retries under the current scheduling rules.
+    // Declare the BMC so failed probes qualify for refresh-wait retries.
     db::expected_machine::create(
         &mut txn,
         ExpectedMachine {
