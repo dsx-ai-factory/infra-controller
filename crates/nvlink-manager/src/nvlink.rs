@@ -62,6 +62,8 @@ pub mod test_support {
         _simulator_endpoint: Option<Endpoint>,
         /// `get_partition_info_list` calls across this client and the clients it created.
         _partition_info_list_calls: Arc<AtomicUsize>,
+        /// GPUs served by `get_gpu_info_list`.
+        _gpu_info_list: Arc<Vec<nmxc_model::GpuInfo>>,
     }
 
     impl Default for NmxcSimClient {
@@ -73,6 +75,7 @@ pub mod test_support {
                 _grpc_pool: None,
                 _simulator_endpoint: None,
                 _partition_info_list_calls: Arc::new(AtomicUsize::new(0)),
+                _gpu_info_list: Arc::new(Vec::new()),
             }
         }
     }
@@ -157,6 +160,14 @@ pub mod test_support {
         pub fn with_fail_after_n_creates(n: usize) -> Self {
             NmxcSimClient {
                 _fail_after_n_creates: Some(Arc::new(Mutex::new(n))),
+                ..Self::default()
+            }
+        }
+
+        /// Serves `gpus` from [`Nmxc::get_gpu_info_list`].
+        pub fn with_gpu_info_list(gpus: Vec<nmxc_model::GpuInfo>) -> Self {
+            NmxcSimClient {
+                _gpu_info_list: Arc::new(gpus),
                 ..Self::default()
             }
         }
@@ -340,7 +351,7 @@ pub mod test_support {
             Ok(GetGpuInfoListResponse {
                 server_header: Some(Self::success_server_header()),
                 context: None,
-                gpu_info_list: vec![],
+                gpu_info_list: self._gpu_info_list.as_ref().clone(),
             })
         }
 
@@ -546,6 +557,7 @@ pub mod test_support {
                 _grpc_pool: self._grpc_pool.clone(),
                 _simulator_endpoint: self._simulator_endpoint.clone(),
                 _partition_info_list_calls: self._partition_info_list_calls.clone(),
+                _gpu_info_list: self._gpu_info_list.clone(),
             }))
         }
     }

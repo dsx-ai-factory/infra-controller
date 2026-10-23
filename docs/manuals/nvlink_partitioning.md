@@ -170,7 +170,9 @@ full check is not due. Full checks run every
 `nvlink_config.partition_monitor_full_check_interval` (default `10m`),
 staggered per group so they spread evenly over the interval, and catch changes
 made on the NMX-C side. A group whose check failed, or that applied changes, is
-checked again on the next pass. Setting the interval to `0s` disables skipping.
+checked again on the next pass. A group whose GPU health could not be fetched,
+or whose health report write failed, is also checked again on the next pass.
+Setting the interval to `0s` disables skipping.
 While a group is skipped its per-domain `nmxc_partition_count`,
 `nmxc_gpu_count`, and `nmxc_compute_node_count` gauges keep the values of its
 last full check, and `machine_status_updates_count` counts only machines in the
@@ -193,7 +195,7 @@ The monitor exposes metrics under the
 | ------ | --- | --------------- |
 | `carbide_nvlink_partition_monitor_iteration_latency_milliseconds` | Time per reconcile pass | |
 | `carbide_nvlink_partition_monitor_stage_latency_milliseconds` | Time per stage, by `stage`: `fleet_load` once per pass, `group_hello`, `group_domain_publish`, `group_inventory`, and `group_status_write` once per chassis or rack that ran them, `group_apply` once per chassis or rack that issued NMX-C operations or wrote `nvlink_info`, `null_observations` once per pass that cleared observations | |
-| `carbide_nvlink_partition_monitor_groups_total` | Counter of chassis and racks finished, by `outcome`: `reconciled`, `operations_failed` (NMX-C was reached but an operation failed, so the group is rechecked next pass), `skipped_unchanged`, or `unreachable`. In steady state most groups are `skipped_unchanged` and about one full-check interval's worth per pass are `reconciled` | |
+| `carbide_nvlink_partition_monitor_groups_total` | Counter of chassis and racks finished, by `outcome`: `reconciled`, `operations_failed` (NMX-C was reached but an operation failed, so the group is rechecked next pass), `health_not_recorded` (every operation completed but GPU health could not be fetched or its host alert write failed, so the group is rechecked next pass), `skipped_unchanged`, or `unreachable`. In steady state most groups are `skipped_unchanged` and about one full-check interval's worth per pass are `reconciled` | |
 | `carbide_nvlink_partition_monitor_iteration_overruns_total` | Counter of passes that ran longer than `monitor_run_interval`. Nonzero in steady state means the fleet outgrew the interval | |
 | `carbide_nvlink_partition_monitor_nmxc_op_latency_milliseconds` | Per-operation latency against NMX-C | |
 | `carbide_nvlink_partition_monitor_nmxc_changes_applied_total` | Counter of changes issued; nonzero in steady state is an anomaly | |

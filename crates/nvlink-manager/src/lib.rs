@@ -1146,6 +1146,15 @@ struct CheckPartitionsInput<'a> {
     nvlink_info_db_updates: Vec<(HostMachineId, MachineNvLinkInfo)>,
 }
 
+/// What one group's partition check left behind.
+struct PartitionCheckOutcome {
+    /// NMX-C operations that completed.
+    completed_operations: usize,
+    /// Whether GPU health was fetched from NMX-C and every host alert write it
+    /// required succeeded. Partition reconciliation does not depend on it.
+    health_recorded: bool,
+}
+
 /// Work queued when NMX-C cannot be used for a machine group and observations must be cleared.
 struct PendingNullNvlinkObservation {
     /// Chassis serial or rack id for the group whose observations will be cleared.
@@ -1179,7 +1188,8 @@ struct GroupResult {
     completed_operations: usize,
     null_observations: Vec<PendingNullNvlinkObservation>,
     partial_metrics: NvlPartitionMonitorMetrics,
-    /// Whether NMX-C was reached and every operation issued to it completed.
+    /// Whether NMX-C was reached, every operation issued to it completed, and
+    /// the GPU health pass was fetched and persisted.
     check_ok: bool,
     /// Domain UUID observed by this pass's Hello for a rack group. `None` for
     /// chassis groups and when Hello did not yield a usable UUID.
@@ -1827,21 +1837,30 @@ impl NvlPartitionMonitor {
             )
             .await
         {
-            Ok(num_completed) => {
+            Ok(PartitionCheckOutcome {
+                completed_operations,
+                health_recorded,
+            }) => {
                 // An operation that failed or timed out leaves NMX-C short of
-                // the desired state, so the group is checked again next time.
+                // the desired state, and an unrecorded GPU health pass leaves
+                // the host alerts stale, so the group is checked again next time.
                 let every_operation_completed =
                     group_metrics.applied_changes.iter().all(|(change, count)| {
                         change.status == NmxcMetricOperationStatus::Completed || *count == 0
                     });
                 carbide_instrument::emit(NvlPartitionMonitorGroupFinished {
-                    outcome: if every_operation_completed {
-                        GroupOutcome::Reconciled
-                    } else {
+                    outcome: if !every_operation_completed {
                         GroupOutcome::OperationsFailed
+                    } else if !health_recorded {
+                        GroupOutcome::HealthNotRecorded
+                    } else {
+                        GroupOutcome::Reconciled
                     },
                 });
-                (num_completed, every_operation_completed)
+                (
+                    completed_operations,
+                    every_operation_completed && health_recorded,
+                )
             }
             Err(e) => {
                 tracing::warn!(
@@ -2044,14 +2063,15 @@ impl NvlPartitionMonitor {
     }
 
     /// Fetches partition list from NMX-C, checks for needed create/update/delete operations,
-    /// executes them, polls for completion, and updates the DB with the results.
+    /// executes them, polls for completion, and updates the DB with the results. GPU health
+    /// is read and persisted on the way; its outcome is reported, not returned as an error.
     async fn check_partitions_and_apply_nmx_c_operations(
         &self,
         nmxc_client: &mut dyn Nmxc,
         metrics: &mut NvlPartitionMonitorMetrics,
         domain_uuid: NvLinkDomainId,
         input: CheckPartitionsInput<'_>,
-    ) -> NvLinkManagerResult<usize> {
+    ) -> NvLinkManagerResult<PartitionCheckOutcome> {
         let domain = domain_uuid.to_string();
         let CheckPartitionsInput {
             db_nvl_logical_partitions,
@@ -2086,8 +2106,9 @@ impl NvlPartitionMonitor {
             aggregate_partition_health(&partition_info_list),
         );
 
-        // GPU health for metrics, best-effort: log and skip on failure, never blocking reconciliation.
-        match nmxc_client
+        // GPU health for metrics and host alerts. A failure never blocks
+        // reconciliation; it is reported so the group is checked again next pass.
+        let health_recorded = match nmxc_client
             .get_gpu_info_list(GetGpuInfoListRequest {
                 context: Some(libnmxc::nmxc_model::Context {
                     context: String::new(),
@@ -2116,16 +2137,19 @@ impl NvlPartitionMonitor {
                     &machine_nvlink_info,
                     &managed_host_snapshots,
                 )
-                .await;
+                .await
             }
-            Err(e) => tracing::warn!(
-                %domain_uuid,
-                endpoint = %metrics.nmxc.endpoint,
-                version = %metrics.nmxc.version,
-                error = %e,
-                "NMX-C GetGpuInfoList failed; GPU health metrics missing for this domain this iteration"
-            ),
-        }
+            Err(e) => {
+                tracing::warn!(
+                    %domain_uuid,
+                    endpoint = %metrics.nmxc.endpoint,
+                    version = %metrics.nmxc.version,
+                    error = %e,
+                    "NMX-C GetGpuInfoList failed; GPU health metrics missing for this domain this iteration"
+                );
+                false
+            }
+        };
 
         // Compute-node health for metrics, best-effort (same handling as above).
         match nmxc_client
@@ -2213,7 +2237,10 @@ impl NvlPartitionMonitor {
             if had_operations {
                 record_stage(MonitorStage::GroupApply, apply_started);
             }
-            return Ok(num_completed_operations);
+            return Ok(PartitionCheckOutcome {
+                completed_operations: num_completed_operations,
+                health_recorded,
+            });
         }
 
         // Created partitions are matched to their NMX-C ids through a fresh
@@ -2259,7 +2286,10 @@ impl NvlPartitionMonitor {
         txn.commit().await?;
         record_stage(MonitorStage::GroupApply, apply_started);
 
-        Ok(num_completed_operations)
+        Ok(PartitionCheckOutcome {
+            completed_operations: num_completed_operations,
+            health_recorded,
+        })
     }
 
     /// Correlates NMX-C per-GPU health for a domain with the locally known NVLink GPUs for
@@ -2267,15 +2297,16 @@ impl NvlPartitionMonitor {
     /// carries `prevent_allocations`, so an affected machine cannot be allocated until its
     /// GPUs recover.
     ///
-    /// Best-effort: failures are logged and never block partition reconciliation, matching the
-    /// handling of the `GetGpuInfoList` call itself.
+    /// Failures are logged and never block partition reconciliation, matching the handling of
+    /// the `GetGpuInfoList` call itself. Returns whether every write it attempted succeeded, so
+    /// the caller keeps the group out of the skip cache until the writes are retried.
     async fn record_nvlink_unhealthy_alerts(
         &self,
         domain_uuid: &NvLinkDomainId,
         gpu_info_list: &[libnmxc::nmxc_model::GpuInfo],
         machine_nvlink_info: &HashMap<HostMachineId, Option<MachineNvLinkInfo>>,
         mh_snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
-    ) {
+    ) -> bool {
         // UID 0 is NMX-C's placeholder for a GPU under rediscovery, not an identity, so it
         // must never be matched against inventory (see `next_nvlink_unhealthy_alerts`).
         let health_by_guid: HashMap<u64, i32> = gpu_info_list
@@ -2284,6 +2315,7 @@ impl NvlPartitionMonitor {
             .map(|gpu| (gpu.gpu_uid, gpu.gpu_health))
             .collect();
 
+        let mut every_write_succeeded = true;
         for (machine_id, mh) in mh_snapshots {
             let gpus: &[NvLinkGpu] = machine_nvlink_info
                 .get(machine_id)
@@ -2345,9 +2377,10 @@ impl NvlPartitionMonitor {
                 continue;
             };
 
-            // The pass still reports success; this counter is the only signal that the
+            // Partition reconciliation still proceeds; this counter is the signal that the
             // allocation block was not applied or cleared. The write is retried next pass.
             if let Err(error) = result {
+                every_write_succeeded = false;
                 carbide_instrument::emit(NvlinkUnhealthyAlertWriteFailed {
                     write,
                     machine_id: machine_id.to_string(),
@@ -2356,6 +2389,7 @@ impl NvlPartitionMonitor {
                 });
             }
         }
+        every_write_succeeded
     }
 
     // Check the passed NvLink partition "observations" (physical partition info from NMX-C supplemented by physical and logical partition info from DB)
@@ -4237,9 +4271,10 @@ mod machine_group_tests {
     use tokio::task::JoinSet;
 
     use super::{
-        ChassisNmxCUnreachableReason, GroupResult, NvLinkConfig, NvlPartitionMonitor,
+        ChassisNmxCUnreachableReason, GroupResult, LoadSnapshotOptions,
+        NVLINK_UNHEALTHY_OVERRIDE_SOURCE, NvLinkConfig, NvlPartitionMonitor,
         NvlPartitionMonitorMetrics, ProcessMachineGroupInput, group_managed_hosts_by_group_type,
-        nmx_c_endpoint,
+        load_by_machine_ids, nmx_c_endpoint,
     };
     use crate::group_state::group_fingerprint;
     use crate::nvlink::test_support::NmxcSimClient;
@@ -4432,6 +4467,25 @@ mod machine_group_tests {
         );
     }
 
+    /// Reloads the persisted snapshot of a seeded machine.
+    async fn load_snapshot(
+        pool: &sqlx::PgPool,
+        id: &MachineId,
+    ) -> Result<ManagedHostStateSnapshot, Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let mut snapshots = load_by_machine_ids(
+            txn.as_mut(),
+            &[*id],
+            LoadSnapshotOptions {
+                include_history: false,
+                include_instance_data: false,
+                host_health_config: HostHealthConfig::default(),
+            },
+        )
+        .await?;
+        Ok(snapshots.remove(id).expect("seeded machine loads"))
+    }
+
     /// Persistence contract for `record_nvlink_unhealthy_alerts`, which the pure helpers cannot
     /// prove: an unhealthy GPU writes a `prevent_allocations` merge report under this monitor's
     /// source that the aggregate health gate sees, and recovery removes exactly that source,
@@ -4444,30 +4498,10 @@ mod machine_group_tests {
         use model::hardware_info::NvLinkGpu;
         use model::machine::ManagedHostState;
 
-        use super::{LoadSnapshotOptions, NVLINK_UNHEALTHY_OVERRIDE_SOURCE, load_by_machine_ids};
-
         const OTHER_SOURCE: &str = "other-monitor";
         let gpu_guid: u64 = 0x1234_5678_9abc_def0;
         let domain_uuid: NvLinkDomainId = "ffffffff-ffff-ffff-ffff-ffffffffffff".parse()?;
         let id = machine_id(41);
-
-        async fn load(
-            pool: &sqlx::PgPool,
-            id: &MachineId,
-        ) -> Result<ManagedHostStateSnapshot, Box<dyn std::error::Error>> {
-            let mut txn = pool.begin().await?;
-            let mut snapshots = load_by_machine_ids(
-                txn.as_mut(),
-                &[*id],
-                LoadSnapshotOptions {
-                    include_history: false,
-                    include_instance_data: false,
-                    host_health_config: HostHealthConfig::default(),
-                },
-            )
-            .await?;
-            Ok(snapshots.remove(id).expect("seeded machine loads"))
-        }
 
         let blocks_allocation = |snapshot: &ManagedHostStateSnapshot| {
             snapshot
@@ -4526,7 +4560,7 @@ mod machine_group_tests {
             }]
         };
 
-        let before = load(&pool, &id).await?;
+        let before = load_snapshot(&pool, &id).await?;
         assert!(
             !blocks_allocation(&before),
             "seeded machine starts allocatable"
@@ -4544,7 +4578,7 @@ mod machine_group_tests {
             )
             .await;
 
-        let after_set = load(&pool, &id).await?;
+        let after_set = load_snapshot(&pool, &id).await?;
         let stored = after_set
             .host_snapshot
             .health_reports
@@ -4580,7 +4614,7 @@ mod machine_group_tests {
             )
             .await;
 
-        let after_clear = load(&pool, &id).await?;
+        let after_clear = load_snapshot(&pool, &id).await?;
         assert!(
             !after_clear
                 .host_snapshot
@@ -4600,6 +4634,149 @@ mod machine_group_tests {
         assert!(
             !blocks_allocation(&after_clear),
             "machine is allocatable again"
+        );
+
+        join_set.shutdown().await;
+        Ok(())
+    }
+
+    /// A GPU health result that was not persisted is not a good check: cached
+    /// as one, the group would be skipped and the allocation block left stale
+    /// until its next full check. The write is retried by the next pass.
+    #[sqlx_test]
+    async fn failed_health_report_write_fails_the_check_and_is_retried_next_pass(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use libnmxc::nmxc_model::{GpuHealth, GpuInfo};
+        use model::hardware_info::NvLinkGpu;
+        use model::machine::ManagedHostState;
+
+        const GROUPS_METRIC: &str = "carbide_nvlink_partition_monitor_groups_total";
+        let gpu_guid: u64 = 0x1234_5678_9abc_def0;
+        let domain_uuid: NvLinkDomainId = "ffffffff-ffff-ffff-ffff-ffffffffffff".parse()?;
+        let id = machine_id(42);
+
+        // The per-group check an iteration runs for a chassis, from the persisted machine.
+        async fn check_group(
+            monitor: &NvlPartitionMonitor,
+            snapshot: ManagedHostStateSnapshot,
+        ) -> GroupResult {
+            let machine_id = snapshot.host_snapshot.id;
+            let nvlink_info = snapshot.host_snapshot.status.nvlink_info.clone();
+            let all_snapshots = HashMap::from([(machine_id, snapshot)]);
+            let chassis_snapshots = vec![&all_snapshots[&machine_id]];
+            monitor
+                .process_nmx_c_partition_monitor_group(ProcessMachineGroupInput {
+                    group_id: "CHASSIS-A".to_string(),
+                    group_type: nmx_c_endpoint::ManagedHostGroupType::Chassis,
+                    snapshots: &chassis_snapshots,
+                    endpoint_url: Some("http://nmxc.example:9370"),
+                    rack_id: None,
+                    all_managed_host_snapshots: &all_snapshots,
+                    machine_nvlink_info: HashMap::from([(machine_id, nvlink_info)]),
+                    db_nvl_partitions: &[],
+                    db_nvl_logical_partitions: &[],
+                })
+                .await
+        }
+
+        let mut txn = pool.begin().await?;
+        db::machine::create(txn.as_mut(), None, &id, ManagedHostState::Ready, None, 2).await?;
+        db::machine::update_nvlink_info(
+            txn.as_mut(),
+            &id,
+            MachineNvLinkInfo {
+                domain_uuid,
+                chassis_serial: "CHASSIS-A".to_string(),
+                gpus: vec![NvLinkGpu {
+                    tray_index: 0,
+                    slot_id: 0,
+                    device_id: 1,
+                    guid: gpu_guid,
+                }],
+            },
+        )
+        .await?;
+        // Rejects health report writes until dropped; other machine columns stay writable.
+        sqlx::query(
+            "CREATE FUNCTION reject_health_report_write() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN RAISE EXCEPTION 'health_reports write rejected'; END $$",
+        )
+        .execute(txn.as_mut())
+        .await?;
+        sqlx::query(
+            "CREATE TRIGGER reject_health_report_write BEFORE UPDATE OF health_reports ON machines
+             FOR EACH ROW EXECUTE FUNCTION reject_health_report_write()",
+        )
+        .execute(txn.as_mut())
+        .await?;
+        txn.commit().await?;
+
+        let mut join_set = JoinSet::new();
+        let work_lock_manager =
+            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let monitor = NvlPartitionMonitor::new(
+            pool.clone(),
+            Arc::new(NmxcSimClient::with_gpu_info_list(vec![GpuInfo {
+                gpu_uid: gpu_guid,
+                gpu_health: GpuHealth::NmxGpuHealthDegraded as i32,
+                ..Default::default()
+            }])),
+            TestMeter::default().meter(),
+            NvLinkConfig::default(),
+            HostHealthConfig::default(),
+            work_lock_manager,
+        );
+
+        // Pass 1: the write is rejected.
+        let metrics = MetricsCapture::start();
+        let rejected = check_group(&monitor, load_snapshot(&pool, &id).await?).await;
+        assert_eq!(
+            metrics.counter_delta(GROUPS_METRIC, &[("outcome", "health_not_recorded")]),
+            1.0
+        );
+        drop(metrics);
+        assert!(
+            !rejected.check_ok,
+            "an unrecorded health pass is not a good check"
+        );
+        assert_eq!(
+            rejected.partial_metrics.num_machines_scanned, 1,
+            "partition reconciliation still ran"
+        );
+        let after_rejected = load_snapshot(&pool, &id).await?;
+        assert!(
+            !after_rejected
+                .host_snapshot
+                .health_reports
+                .merges
+                .contains_key(NVLINK_UNHEALTHY_OVERRIDE_SOURCE),
+            "nothing persisted while the write is rejected"
+        );
+
+        // Pass 2: the write goes through.
+        sqlx::query("DROP TRIGGER reject_health_report_write ON machines")
+            .execute(&pool)
+            .await?;
+        let retried = check_group(&monitor, after_rejected).await;
+        assert!(retried.check_ok, "the retried pass is a good check");
+        let after_retry = load_snapshot(&pool, &id).await?;
+        let stored = after_retry
+            .host_snapshot
+            .health_reports
+            .merges
+            .get(NVLINK_UNHEALTHY_OVERRIDE_SOURCE)
+            .expect("retried write persisted the report");
+        assert_eq!(stored.alerts.len(), 1, "one alert per affected GPU");
+        assert_eq!(
+            stored.alerts[0].id,
+            health_report::HealthProbeId::nvlink_unhealthy()
+        );
+        assert!(
+            stored.alerts[0]
+                .classifications
+                .contains(&health_report::HealthAlertClassification::prevent_allocations()),
+            "alert blocks allocation"
         );
 
         join_set.shutdown().await;

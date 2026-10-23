@@ -42,7 +42,8 @@ use crate::{ProcessMachineGroupInput, managed_host_chassis_serial};
 pub(super) struct GroupReconcileState {
     /// [`group_fingerprint`] of the inputs at the last full check.
     fingerprint: u64,
-    /// Whether the last full check reached NMX-C and every operation it issued completed.
+    /// Whether the last full check reached NMX-C, every operation it issued
+    /// completed, and its GPU health pass was fetched and persisted.
     last_check_ok: bool,
     /// When the next full check is due regardless of input changes.
     next_full_check: Instant,
@@ -57,6 +58,8 @@ pub(super) struct GroupReconcileState {
 /// What a full check leaves behind for the next skip decision.
 pub(super) struct FullCheckOutcome {
     pub(super) fingerprint: u64,
+    /// Whether NMX-C was reached, every operation completed, and GPU health
+    /// was fetched and persisted. A `false` check is repeated next iteration.
     pub(super) check_ok: bool,
     pub(super) applied_changes: bool,
     pub(super) health: NmxcMetrics,

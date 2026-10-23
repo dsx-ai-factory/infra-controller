@@ -451,6 +451,9 @@ pub(super) enum GroupOutcome {
     /// NMX-C was contacted but an operation failed or timed out, so the
     /// group is checked again next iteration.
     OperationsFailed,
+    /// Every operation completed but GPU health could not be fetched or a
+    /// host alert write failed, so the group is checked again next iteration.
+    HealthNotRecorded,
     /// The group's inputs were unchanged since its last good check and its
     /// full check was not due, so NMX-C was not contacted.
     SkippedUnchanged,
@@ -1138,6 +1141,11 @@ mod tests {
                     scenario: "operations failed",
                     input: GroupOutcome::OperationsFailed,
                     expect: "operations_failed".to_string(),
+                },
+                Check {
+                    scenario: "health not recorded",
+                    input: GroupOutcome::HealthNotRecorded,
+                    expect: "health_not_recorded".to_string(),
                 },
                 Check {
                     scenario: "skipped unchanged",
