@@ -201,7 +201,7 @@ def domain_xml(host, root, memory, cpus, bridge, architecture=None):
 
 def inspect(kind, name):
     result = subprocess.run(
-        ["docker", kind, "inspect", name], text=True, capture_output=True
+        ["docker", kind, "inspect", name], text=True, capture_output=True, timeout=120
     )
     if result.returncode:
         # Distinguish an absent resource from an unavailable Docker daemon.
@@ -736,5 +736,10 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (ValueError, OSError, subprocess.CalledProcessError) as error:
+    except (
+        ValueError,
+        OSError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+    ) as error:
         sys.exit(str(error))

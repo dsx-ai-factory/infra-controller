@@ -25,6 +25,18 @@ def admin(*args):
     return lab.run("bash", str(HERE.parent / "core-admin.sh"), *args)
 
 
+def network_state(root, node, bridge, uplink):
+    path = root / "network-state.json"
+    current = dict(node=node, bridge=bridge, uplink=uplink)
+    if path.exists():
+        saved = json.loads(path.read_text())
+        if {key: saved[key] for key in current} != current:
+            lab.cleanup_network(root)
+    state = json.loads(path.read_text()) if path.exists() else dict(current, routes=[])
+    path.write_text(json.dumps(state))
+    return state
+
+
 def main():
     root = Path(
         os.environ.get(
@@ -130,12 +142,7 @@ def main():
 
     uplink = json.loads(host("ip", "-json", "route", "get", "1.1.1.1"))[0]["dev"]
     state_path = root / "network-state.json"
-    state = (
-        json.loads(state_path.read_text())
-        if state_path.exists()
-        else dict(node=node, bridge=bridge, uplink=uplink, routes=[])
-    )
-    state_path.write_text(json.dumps(state))
+    state = network_state(root, node, bridge, uplink)
     for address in services.values():
         version = ipaddress.ip_address(address).version
         prefix = f"{address}/{32 if version == 4 else 128}"
