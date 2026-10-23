@@ -13,7 +13,6 @@ DEVSPACE_VERSION="v6.3.21"
 KIND_VERSION="v0.32.0"
 KUBECTL_VERSION="v1.36.3"
 HELM_VERSION="v3.21.3"
-KIND_NODE_IMAGE="kindest/node:v1.36.1"
 
 DEV_USER=""
 REPO_DIR=""
@@ -67,7 +66,8 @@ Options:
                        ~/infra-controller.
   --repo-url URL       Repository to clone if --repo-dir does not exist.
   --repo-ref REF       Branch, tag, or commit to check out after cloning.
-  --cluster-name NAME  kind cluster name. Default: nico-dev.
+                       Must include dev/deployment/setup-kind.sh.
+  --cluster-name NAME  Lowercase DNS label, 1-49 characters. Default: nico-dev.
   --profile PROFILE    Single DevSpace profile to deploy. Default: full.
                        Must exist in the checkout; no fallback if unavailable.
   --ip-family FAMILY   kind networking: ipv4 (default) or dual.
@@ -132,6 +132,9 @@ while (($#)); do
       ;;
   esac
 done
+
+[[ "${CLUSTER_NAME}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#CLUSTER_NAME} -le 49 ]] ||
+  die "--cluster-name must be a lowercase DNS label of 1 to 49 characters"
 
 case "${IP_FAMILY}" in
   ipv4|dual) ;;
@@ -210,6 +213,7 @@ run_as_user() {
   runuser -u "${DEV_USER}" -- env \
     HOME="${USER_HOME}" \
     USER="${DEV_USER}" \
+    KUBECONFIG="${USER_HOME}/.kube/config" \
     PATH="${USER_HOME}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     GODEBUG="tlsmlkem=0" \
     "$@"
@@ -438,6 +442,8 @@ prepare_checkout() {
     run_as_user git -C "${REPO_DIR}" fetch origin "${REPO_REF}"
     run_as_user git -C "${REPO_DIR}" checkout --detach FETCH_HEAD
   fi
+  [[ -f "${REPO_DIR}/dev/deployment/setup-kind.sh" ]] ||
+    die "selected checkout lacks dev/deployment/setup-kind.sh; choose a revision containing the shared cluster bootstrap"
 }
 
 configure_kind_node_tls() {
@@ -459,37 +465,12 @@ configure_kind_node_tls() {
 }
 
 prepare_cluster() {
-  local clusters actual_family config_file
-  clusters="$(run_as_user kind get clusters)"
-  if grep -Fxq "${CLUSTER_NAME}" <<<"${clusters}"; then
-    log "Reusing kind cluster ${CLUSTER_NAME}"
-    run_as_user kind export kubeconfig --name "${CLUSTER_NAME}"
-    actual_family="$(run_as_user kubectl --context "kind-${CLUSTER_NAME}" get node \
-      "${CLUSTER_NAME}-control-plane" -o json | jq -r '
-        .spec.podCIDRs | if length == 2 then "dual"
-        elif .[0] | contains(":") then "ipv6" else "ipv4" end')"
-    [[ "${actual_family}" == "${IP_FAMILY}" ]] || \
-      die "existing cluster uses ${actual_family}, requested ${IP_FAMILY}; use a different cluster name or explicitly delete the cluster"
-  else
-    log "Creating kind cluster ${CLUSTER_NAME} with ${KIND_NODE_IMAGE}"
-    run_as_user docker pull "${KIND_NODE_IMAGE}"
-    config_file="$(mktemp)"
-    printf 'kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnetworking:\n  ipFamily: %s\n' \
-      "${IP_FAMILY}" >"${config_file}"
-    chown "${DEV_USER}:${USER_GROUP}" "${config_file}"
-    if ! run_as_user kind create cluster \
-      --name "${CLUSTER_NAME}" \
-      --image "${KIND_NODE_IMAGE}" \
-      --config "${config_file}"; then
-      rm -f "${config_file}"
-      die "kind cluster creation failed"
-    fi
-    rm -f "${config_file}"
-  fi
-
+  run_as_user bash "${REPO_DIR}/dev/deployment/setup-kind.sh" \
+    --name "${CLUSTER_NAME}" --ip-family "${IP_FAMILY}" \
+    --kubeconfig "${USER_HOME}/.kube/config"
   configure_kind_node_tls
-  run_as_user kubectl wait --for=condition=Ready "node/${CLUSTER_NAME}-control-plane" \
-    --timeout=180s
+  run_as_user kubectl --context "kind-${CLUSTER_NAME}" \
+    wait --for=condition=Ready "node/${CLUSTER_NAME}-control-plane" --timeout=180s
 }
 
 kind_node_has_image() {
