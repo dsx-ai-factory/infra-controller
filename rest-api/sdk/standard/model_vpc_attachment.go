@@ -430,8 +430,15 @@ func (o *VpcAttachment) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
+	nullableRequiredProperties := map[string]struct{}{
+		"vpcPrefixId":       {},
+		"device":            {},
+		"deviceInstance":    {},
+		"virtualFunctionId": {},
+	}
 	for _, requiredProperty := range requiredProperties {
-		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+		_, nullable := nullableRequiredProperties[requiredProperty]
+		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

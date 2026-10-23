@@ -31,7 +31,9 @@ type APIVpcAttachment struct {
 func (a *APIVpcAttachment) FromDBModel(ifc *cdbm.Interface, vpcID uuid.UUID) {
 	a.ID = ifc.ID.String()
 	a.VpcID = vpcID.String()
-	if ifc.VpcPrefixID != nil {
+	// Inventory reconciliation also stores the resolved VPC Prefix on an Interface that selects
+	// the VPC directly, so report a VPC Prefix only when it was the selector.
+	if ifc.VpcID == nil && ifc.VpcPrefixID != nil {
 		vpcPrefixID := ifc.VpcPrefixID.String()
 		a.VpcPrefixID = &vpcPrefixID
 	}

@@ -471,7 +471,7 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 	tnu2 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-3", tnOrg2, tnOrgRoles2)
 	tn2 := testInstanceBuildTenant(t, dbSession, "test-tenant-2", tnOrg2, tnu2)
 	vpcOtherTenant := testInstanceBuildVPC(t, dbSession, "test-vpc-other-tenant", ip, tn2, st1, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, cdbm.VpcStatusReady, tnu2)
-	foreignVpcFNN := testInstanceBuildVPC(t, dbSession, "test-foreign-vpc-fnn", ip, tn2, st1, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusReady, tnu2)
+	crossTenantVpcFNN := testInstanceBuildVPC(t, dbSession, "test-cross-tenant-vpc-fnn", ip, tn2, st1, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusReady, tnu2)
 	subnetOtherTenant := testInstanceBuildSubnet(t, dbSession, "test-subnet-other-tenant", tn2, vpcOtherTenant, cutil.GetPtr(uuid.New()), cdbm.SubnetStatusReady, tnu2)
 
 	// OS owned by different tenant (for OS ownership test)
@@ -587,7 +587,7 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "batch create rejects a foreign VPC attachment without targetedInstanceCreation",
+			name: "batch create rejects a cross-Tenant VPC attachment without targetedInstanceCreation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -601,7 +601,7 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 					TenantID:        tn1.ID.String(),
 					InstanceTypeID:  istCrossTenantVpc.ID.String(),
 					VpcID:           vpcFNN.ID.String(),
-					SecondaryVpcIDs: []string{foreignVpcFNN.ID.String()},
+					SecondaryVpcIDs: []string{crossTenantVpcFNN.ID.String()},
 					IpxeScript:      cutil.GetPtr("test script"),
 					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
 						{
@@ -610,7 +610,7 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 							IsPhysical: true,
 						},
 						{
-							VpcID:      cutil.GetPtr(foreignVpcFNN.ID.String()),
+							VpcID:      cutil.GetPtr(crossTenantVpcFNN.ID.String()),
 							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
 						},
 					},
@@ -625,7 +625,7 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "batch create does not reveal foreign VPC state without targetedInstanceCreation",
+			name: "batch create does not reveal cross-Tenant VPC state without targetedInstanceCreation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -664,7 +664,7 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "batch create permits a foreign VPC attachment with targetedInstanceCreation",
+			name: "batch create permits a cross-Tenant VPC attachment with targetedInstanceCreation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -678,7 +678,7 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 					TenantID:        tn1.ID.String(),
 					InstanceTypeID:  istCrossTenantVpc.ID.String(),
 					VpcID:           vpcFNN.ID.String(),
-					SecondaryVpcIDs: []string{foreignVpcFNN.ID.String()},
+					SecondaryVpcIDs: []string{crossTenantVpcFNN.ID.String()},
 					IpxeScript:      cutil.GetPtr("test script"),
 					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
 						{
@@ -687,7 +687,7 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 							IsPhysical: true,
 						},
 						{
-							VpcID:      cutil.GetPtr(foreignVpcFNN.ID.String()),
+							VpcID:      cutil.GetPtr(crossTenantVpcFNN.ID.String()),
 							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
 						},
 					},
@@ -697,8 +697,8 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 				respCode: http.StatusCreated,
 			},
 			expectedControllerVpcIDs: map[string]uuid.UUID{
-				vpcFNN.ID.String():        *vpcFNN.ControllerVpcID,
-				foreignVpcFNN.ID.String(): *foreignVpcFNN.ControllerVpcID,
+				vpcFNN.ID.String():            *vpcFNN.ControllerVpcID,
+				crossTenantVpcFNN.ID.String(): *crossTenantVpcFNN.ControllerVpcID,
 			},
 		},
 		{

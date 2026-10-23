@@ -936,7 +936,11 @@ func (icr *APIInstanceCreateRequest) ValidateInfiniBandInterfaces(itIbCaps []cdb
 	return ValidateInfiniBandInterfaces(itIbCaps, icr.InfiniBandInterfaces)
 }
 
-func introducesForeignVpcAttachment(requested, existing []cdbm.Interface, tenantID uuid.UUID) (bool, error) {
+// HasNewCrossTenantAttachment reports whether a requested Interface selects another Tenant's
+// VPC or VPC Prefix and has no persisted Interface, other than a Deleting one, with the same
+// identity to reuse. Unchanged cross-Tenant Interfaces stay allowed after the capability is
+// revoked, but moving one to a different selector or device is not.
+func HasNewCrossTenantAttachment(tenantID uuid.UUID, requested, existing []cdbm.Interface) (bool, error) {
 	existingByKey := make(map[string]int, len(existing))
 	for _, ifc := range existing {
 		if ifc.Status == cdbm.InterfaceStatusDeleting {
@@ -946,20 +950,20 @@ func introducesForeignVpcAttachment(requested, existing []cdbm.Interface, tenant
 	}
 
 	for _, ifc := range requested {
-		foreign := false
+		crossTenant := false
 		switch {
 		case ifc.VpcID != nil:
 			if ifc.Vpc == nil {
 				return false, fmt.Errorf("interface selecting VPC %s is missing its VPC relation", ifc.VpcID.String())
 			}
-			foreign = ifc.Vpc.TenantID != tenantID
+			crossTenant = ifc.Vpc.TenantID != tenantID
 		case ifc.VpcPrefixID != nil:
 			if ifc.VpcPrefix == nil {
 				return false, fmt.Errorf("interface selecting VPC Prefix %s is missing its VPC Prefix relation", ifc.VpcPrefixID.String())
 			}
-			foreign = ifc.VpcPrefix.TenantID != tenantID
+			crossTenant = ifc.VpcPrefix.TenantID != tenantID
 		}
-		if !foreign {
+		if !crossTenant {
 			continue
 		}
 
@@ -974,11 +978,11 @@ func introducesForeignVpcAttachment(requested, existing []cdbm.Interface, tenant
 	return false, nil
 }
 
-// selectsNewForeignVpc reports whether a loaded VPC or VPC Prefix selector
-// belongs to another Tenant and no persisted Interface that is not Deleting
-// already selects it. Selectors missing from the maps are left to the
-// not-found checks that follow.
-func selectsNewForeignVpc(tenantID uuid.UUID, vpcs map[uuid.UUID]*cdbm.Vpc, vpcPrefixes map[uuid.UUID]*cdbm.VpcPrefix, existing []cdbm.Interface) bool {
+// HasNewCrossTenantVpc reports whether a selected VPC or VPC Prefix belongs to another Tenant
+// and no persisted Interface, other than a Deleting one, already selects it. Pass a nil existing
+// on create. It works on the loaded selectors, so it can run before they are validated.
+// Selectors missing from the maps are left to the not-found checks that follow.
+func HasNewCrossTenantVpc(tenantID uuid.UUID, vpcs map[uuid.UUID]*cdbm.Vpc, vpcPrefixes map[uuid.UUID]*cdbm.VpcPrefix, existing []cdbm.Interface) bool {
 	attachedVpcIDs := make(map[uuid.UUID]struct{}, len(existing))
 	attachedVpcPrefixIDs := make(map[uuid.UUID]struct{}, len(existing))
 	for _, ifc := range existing {
@@ -1008,8 +1012,8 @@ func selectsNewForeignVpc(tenantID uuid.UUID, vpcs map[uuid.UUID]*cdbm.Vpc, vpcP
 
 // ValidateInterfaceVpcs checks the Site, readiness, and network virtualization
 // type of each VPC selected by an Interface. Run it only after any cross-Tenant
-// authorization, so a Tenant without the capability can't read a foreign VPC's
-// state from these errors.
+// authorization, so a Tenant without the capability can't read another Tenant's
+// VPC state from these errors.
 func ValidateInterfaceVpcs(vpcs map[uuid.UUID]*cdbm.Vpc, interfaces []APIInterfaceCreateOrUpdateRequest, siteID uuid.UUID) *cutil.APIError {
 	seenVpcIDs := make(map[uuid.UUID]struct{}, len(vpcs))
 	for _, ifc := range interfaces {
@@ -1037,23 +1041,9 @@ func ValidateInterfaceVpcs(vpcs map[uuid.UUID]*cdbm.Vpc, interfaces []APIInterfa
 	return nil
 }
 
-// IntroducesForeignVpcAttachment reports whether Instance create selects a VPC
-// or VPC Prefix owned by another Tenant. It takes the loaded selectors so the
-// capability can be checked before they are validated.
-func (icr *APIInstanceCreateRequest) IntroducesForeignVpcAttachment(tenantID uuid.UUID, vpcs map[uuid.UUID]*cdbm.Vpc, vpcPrefixes map[uuid.UUID]*cdbm.VpcPrefix) bool {
-	return selectsNewForeignVpc(tenantID, vpcs, vpcPrefixes, nil)
-}
-
 // ValidateDpuExtensionServiceDeployments validates the DpuExtensionServiceDeployments for the Instance create request
 func (icr *APIInstanceCreateRequest) ValidateDpuExtensionServiceDeployments(desdrs []APIDpuExtensionServiceDeploymentRequest) error {
 	return ValidateDpuExtensionServiceDeployments(desdrs)
-}
-
-// IntroducesForeignVpcAttachment reports whether batch Instance create selects
-// a VPC or VPC Prefix owned by another Tenant. It takes the loaded selectors so
-// the capability can be checked before they are validated.
-func (bicr *APIBatchInstanceCreateRequest) IntroducesForeignVpcAttachment(tenantID uuid.UUID, vpcs map[uuid.UUID]*cdbm.Vpc, vpcPrefixes map[uuid.UUID]*cdbm.VpcPrefix) bool {
-	return selectsNewForeignVpc(tenantID, vpcs, vpcPrefixes, nil)
 }
 
 // Validate ensure the values passed in batch instance create request are acceptable
@@ -1655,20 +1645,6 @@ func (iur *APIInstanceUpdateRequest) ValidateMultiEthernetDeviceInterfaces(itNet
 // ValidateInfiniBandInterfaces validates the InfiniBand Interfaces for the Instance
 func (iur *APIInstanceUpdateRequest) ValidateInfiniBandInterfaces(itIbCaps []cdbm.MachineCapability) error {
 	return ValidateInfiniBandInterfaces(itIbCaps, iur.InfiniBandInterfaces)
-}
-
-// SelectsNewForeignVpc reports whether Instance update selects a VPC or VPC
-// Prefix owned by another Tenant that no persisted Interface already selects.
-// It runs before the selectors are validated, and IntroducesForeignVpcAttachment
-// still compares full Interface identities afterward.
-func (iur *APIInstanceUpdateRequest) SelectsNewForeignVpc(tenantID uuid.UUID, vpcs map[uuid.UUID]*cdbm.Vpc, vpcPrefixes map[uuid.UUID]*cdbm.VpcPrefix, existing []cdbm.Interface) bool {
-	return selectsNewForeignVpc(tenantID, vpcs, vpcPrefixes, existing)
-}
-
-// IntroducesForeignVpcAttachment reports whether Instance update
-// introduces a foreign Interface identity that cannot reuse a persisted row.
-func (iur *APIInstanceUpdateRequest) IntroducesForeignVpcAttachment(tenantID uuid.UUID, requested, existing []cdbm.Interface) (bool, error) {
-	return introducesForeignVpcAttachment(requested, existing, tenantID)
 }
 
 // ValidateDpuExtensionServiceDeployments validates the DpuExtensionServiceDeployments for the Instance update request

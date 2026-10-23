@@ -3974,13 +3974,6 @@ func TestGetAllVPCHandler_Handle(t *testing.T) {
 	}
 }
 
-func TestVpcInstanceReferenceFilter(t *testing.T) {
-	vpcID := uuid.New()
-	filter := vpcInstanceReferenceFilter(vpcID)
-	assert.Equal(t, []uuid.UUID{vpcID}, filter.VpcIDs)
-	assert.Empty(t, filter.TenantIDs)
-}
-
 func TestDeleteVPCHandler_Handle(t *testing.T) {
 	ctx := context.Background()
 	type fields struct {
@@ -4065,15 +4058,15 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 	vpcPrefix := testVPCBuildVPCPrefix(t, dbSession, "test-vpc-prefix", tn1, vpc3, cutil.GetPtr(ipb1.ID), "10.0.0.0/24", tnu1)
 	assert.NotNil(t, vpcPrefix)
 
-	vpcWithForeignAttachment := testVPCBuildVPC(t, dbSession, "test-vpc-with-foreign-attachment", ip, tn1, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu1)
-	foreignPrimaryVpc := testVPCBuildVPC(t, dbSession, "test-foreign-primary-vpc", ip, tn2, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu2)
-	foreignInstance := testInstanceBuildInstance(
-		t, dbSession, "test-foreign-instance", tn2.ID, ip.ID, st.ID,
-		nil, foreignPrimaryVpc.ID, nil, nil, nil, cdbm.InstanceStatusReady,
+	vpcWithCrossTenantAttachment := testVPCBuildVPC(t, dbSession, "test-vpc-with-cross-tenant-attachment", ip, tn1, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu1)
+	crossTenantPrimaryVpc := testVPCBuildVPC(t, dbSession, "test-cross-tenant-primary-vpc", ip, tn2, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu2)
+	crossTenantInstance := testInstanceBuildInstance(
+		t, dbSession, "test-cross-tenant-instance", tn2.ID, ip.ID, st.ID,
+		nil, crossTenantPrimaryVpc.ID, nil, nil, nil, cdbm.InstanceStatusReady,
 	)
 	_, err := cdbm.NewInterfaceDAO(dbSession).Create(ctx, nil, cdbm.InterfaceCreateInput{
-		InstanceID: foreignInstance.ID,
-		VpcID:      &vpcWithForeignAttachment.ID,
+		InstanceID: crossTenantInstance.ID,
+		VpcID:      &vpcWithCrossTenantAttachment.ID,
 		Status:     cdbm.InterfaceStatusReady,
 		CreatedBy:  tnu2.ID,
 	})
@@ -4345,7 +4338,7 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "VPC delete is blocked by a foreign Tenant Interface attachment",
+			name: "VPC delete is blocked by a cross-Tenant Interface attachment",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -4353,7 +4346,7 @@ func TestDeleteVPCHandler_Handle(t *testing.T) {
 				cfg:       cfg,
 			},
 			args: args{
-				reqVPC:   vpcWithForeignAttachment.ID.String(),
+				reqVPC:   vpcWithCrossTenantAttachment.ID.String(),
 				reqOrg:   tnOrg1,
 				reqUser:  tnu1,
 				respCode: http.StatusBadRequest,

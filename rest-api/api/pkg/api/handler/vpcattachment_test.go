@@ -62,7 +62,7 @@ func TestGetAllVPCAttachmentHandler_Handle(t *testing.T) {
 		nil, ownerVpc.ID, nil, nil, nil, cdbm.InstanceStatusReady,
 	)
 	consumerInstance := testInstanceBuildInstance(
-		t, dbSession, "Foreign Instance", consumerTenant.ID, provider.ID, site.ID,
+		t, dbSession, "Cross-Tenant Instance", consumerTenant.ID, provider.ID, site.ID,
 		nil, consumerVpc.ID, nil, nil, nil, cdbm.InstanceStatusReady,
 	)
 	vpcPrefix := testInstanceBuildVPCPrefix(
@@ -81,7 +81,7 @@ func TestGetAllVPCAttachmentHandler_Handle(t *testing.T) {
 	require.NoError(t, err)
 	device := "eth1"
 	deviceInstance := 1
-	foreignDirect, err := ifcDAO.Create(ctx, nil, cdbm.InterfaceCreateInput{
+	crossTenantDirect, err := ifcDAO.Create(ctx, nil, cdbm.InterfaceCreateInput{
 		InstanceID:     consumerInstance.ID,
 		VpcID:          &ownerVpc.ID,
 		Device:         &device,
@@ -91,7 +91,7 @@ func TestGetAllVPCAttachmentHandler_Handle(t *testing.T) {
 	})
 	require.NoError(t, err)
 	virtualFunctionID := 2
-	foreignPrefix, err := ifcDAO.Create(ctx, nil, cdbm.InterfaceCreateInput{
+	crossTenantPrefix, err := ifcDAO.Create(ctx, nil, cdbm.InterfaceCreateInput{
 		InstanceID:        consumerInstance.ID,
 		VpcPrefixID:       &vpcPrefix.ID,
 		Device:            &device,
@@ -113,7 +113,7 @@ func TestGetAllVPCAttachmentHandler_Handle(t *testing.T) {
 		check      func(*httptest.ResponseRecorder)
 	}{
 		{
-			name:       "owner sees same-Tenant and foreign direct and prefix attachments",
+			name:       "owner sees same-Tenant and cross-Tenant direct and prefix attachments",
 			org:        ownerOrg,
 			user:       ownerUser,
 			vpcID:      ownerVpc.ID.String(),
@@ -124,7 +124,7 @@ func TestGetAllVPCAttachmentHandler_Handle(t *testing.T) {
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &attachments))
 				require.Len(t, attachments, 3)
 				assert.ElementsMatch(t,
-					[]string{ownerDirect.ID.String(), foreignDirect.ID.String(), foreignPrefix.ID.String()},
+					[]string{ownerDirect.ID.String(), crossTenantDirect.ID.String(), crossTenantPrefix.ID.String()},
 					[]string{attachments[0].ID, attachments[1].ID, attachments[2].ID},
 				)
 				assert.ElementsMatch(t,

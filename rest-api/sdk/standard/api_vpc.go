@@ -634,7 +634,7 @@ GetAllVpcAttachment Retrieve VPC attachments
 
 Retrieve the current, non-deleted REST Interface rows that explicitly select this VPC, either directly through `vpcId` or through a `vpcPrefixId` whose parent is this VPC. The response reflects REST's persisted desired/current Interface state and status; it is not a Core visibility query.
 
-The caller's organization must own the requested VPC, and the user must have authorization role with `TENANT_ADMIN` suffix. The `targetedInstanceCreation` capability is not required to list attachments. Results include attachments from Instances owned by other Tenants, but expose only opaque attachment, Instance, and consuming-Tenant identity plus device identity and Interface status. Visibility does not grant authority over a foreign Instance or its security policy.
+The caller's organization must own the requested VPC, and the user must have authorization role with `TENANT_ADMIN` suffix. The `targetedInstanceCreation` capability is not required to list attachments. Results include attachments from Instances owned by other Tenants, but expose only opaque attachment, Instance, and consuming-Tenant identity plus device identity and Interface status. Visibility does not grant authority over another Tenant's Instance or its security policy.
 
 This endpoint does not expose Instance names, Machine or Controller IDs, operating systems, user data, metadata, labels, Network Security Group contents, IP addresses, MAC addresses, or requested IP addresses. Generic VPC and VPC Prefix list, get, and mutation endpoints remain scoped to resources owned by the caller's Tenant.
 

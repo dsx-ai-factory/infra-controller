@@ -220,7 +220,7 @@ Error: API error 400: Tenant Account status is not Invited
 - Set `isRepairTenant: true` when releasing an instance, which is what the repair tenant workflow requires.
 - Read a set of otherwise provider-only resources, including machines, machine health, SKUs, racks, trays, and expected machines, at the sites of a provider it holds a `Ready` tenant account with, wherever the capability is effective. A site override that disables it also removes these reads at that site.
 - Receive alternative VPC routing profiles from `tenant/current/routing-profile`.
-- Attach non-primary instance interfaces to another tenant's VPC or VPC prefix at the same site, by `vpcId` or `vpcPrefixId`, on instance create, batch create, and update. The primary physical interface must still use the instance's own VPC, and foreign subnets are still rejected. Attachments that already exist survive a later revocation; adding or retargeting one needs the capability again.
+- Attach non-primary instance interfaces to another tenant's VPC or VPC prefix at the same site, by `vpcId` or `vpcPrefixId`, on instance create, batch create, and update. The primary physical interface must still use the instance's own VPC, and subnets owned by another tenant are still rejected. Attachments that already exist survive a later revocation, but any interface update that still selects another tenant's VPC or VPC prefix needs the capability again.
 
 A Provider Admin configures it per tenant account with the `siteCapabilities` field. This is
 the only supported way to grant it, and it applies to regular tenants as well as
