@@ -968,6 +968,9 @@ service Forge {
   rpc FindSkusByIds(SkusByIdsRequest) returns (SkuList);
   rpc UpdateSkuMetadata(SkuUpdateMetadataRequest) returns (google.protobuf.Empty);
   rpc ReplaceSku(Sku) returns (Sku);
+  // Replace the complete component definition, preserving omitted metadata.
+  // Requests SKU verification and returns the replaced SKU with its associated machine IDs.
+  rpc ReplaceSkuComponents(ReplaceSkuComponentsRequest) returns (Sku);
 
   // get/set/clear quarantine state on machines
   rpc GetManagedHostQuarantineState(GetManagedHostQuarantineStateRequest) returns (GetManagedHostQuarantineStateResponse);
@@ -12610,4 +12613,26 @@ message MachineSpxMultiplaneDpuStatus {
   // One entry per declared interface, including entries without an observation.
   // The revision is the last attempted revision, not necessarily the current host revision.
   repeated AstraMultiplaneInterfaceStatus interfaces = 2;
+}
+
+// Replace a SKU's components without resending unchanged metadata.
+// Missing components, an empty SKU ID, an unsupported schema version, invalid
+// storage constraints, or components matching another SKU return INVALID_ARGUMENT.
+// A missing SKU returns NOT_FOUND. Metadata is preserved inside the write
+// transaction, so an omitted field cannot overwrite a concurrent metadata edit.
+message ReplaceSkuComponentsRequest {
+  // ID of the existing SKU to update; must not be empty.
+  string sku_id = 1;
+  // Required complete component definition. Omitted component collections become
+  // empty, and an omitted chassis uses its default values, as with ReplaceSku.
+  // An omitted TPM removes the stored TPM. As with ReplaceSku, ethernet_devices
+  // and the storage vendor/capacity_mb fields are ignored and are not stored.
+  SkuComponents components = 2;
+  // Must equal the current SKU schema version accepted by CreateSku/ReplaceSku.
+  uint32 schema_version = 3;
+  // Omission preserves the stored description; an empty string sets it to empty.
+  optional string description = 4;
+  // Omission preserves the stored device type; an empty string sets it to empty.
+  // This operation does not clear the database value to NULL.
+  optional string device_type = 5;
 }

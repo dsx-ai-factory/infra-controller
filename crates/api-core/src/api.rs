@@ -3247,6 +3247,13 @@ impl Forge for Api {
         crate::handlers::sku::replace_sku(self, request).await
     }
 
+    async fn replace_sku_components(
+        &self,
+        request: Request<rpc::ReplaceSkuComponentsRequest>,
+    ) -> Result<Response<rpc::Sku>, Status> {
+        crate::handlers::sku::replace_sku_components(self, request).await
+    }
+
     async fn set_managed_host_quarantine_state(
         &self,
         request: Request<rpc::SetManagedHostQuarantineStateRequest>,
