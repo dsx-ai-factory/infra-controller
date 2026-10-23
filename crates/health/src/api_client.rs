@@ -1019,6 +1019,8 @@ impl ApiEndpointSource {
             machine.system_uuid = cached.system_uuid;
         }
         Ok(Arc::new(BmcEndpoint {
+            hostname: None,
+            identity: None,
             addr,
             metadata,
             rack_id,

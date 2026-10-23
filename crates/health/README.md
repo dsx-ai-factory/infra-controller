@@ -62,6 +62,15 @@ Profile/override changes need no restart. Removed overrides restore profile valu
 removing a selected profile or the last username causes lookup errors. Main
 configuration changes, including targets and profile selections, require restart.
 
+## Endpoint identity and SQL inventory
+
+`endpoint_sources.identity` selects whether endpoints are keyed by hostname, MAC,
+or IP, and `[endpoint_sources.sql]` reads BMC endpoints from a PostgreSQL query
+such as one against a NetBox database. See
+[Endpoint identity](../../docs/operations/monitoring-health.md#endpoint-identity)
+and [SQL inventory source](../../docs/operations/monitoring-health.md#sql-inventory-source)
+for the configuration reference.
+
 ## Prerequisites
 
 - Run every command from the repository root.
