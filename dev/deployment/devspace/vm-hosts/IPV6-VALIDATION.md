@@ -366,7 +366,8 @@ Machine-specific captures, credentials, instance identifiers and private lab
 artifacts are not part of this branch. The IPv6 lifecycle prerequisites and
 remaining manual steps are described in [the profile README](README.md).
 
-The final reusable setup helper was applied twice to the retained lab: service
+At source revision `3ebd6b695`, the reusable setup helper was applied twice to
+the retained lab: service
 addresses and CoreDNS/DHCPv6 pod identities remained stable on the second run.
 Both guests then passed the same 15 functional checks using the reusable
 validator, which retained the two known schema/warning failures. All 30
