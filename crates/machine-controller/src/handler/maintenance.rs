@@ -17,18 +17,19 @@
 
 //! Handler for [`ManagedHostState::Maintenance`].
 
-use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, Credentials,
 };
 use carbide_uuid::machine::HostMachineId;
+use chrono::Utc;
 use component_manager::compute_tray_manager::{ComputeTrayEndpoint, ComputeTrayResult};
 use db::machine as db_machine;
 use mac_address::MacAddress;
 use model::component_manager::PowerAction;
+use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{
-    HostMachine, MachineMaintenanceOperation, MachineMaintenanceRequest, ManagedHostState,
-    ManagedHostStateSnapshot,
+    FailureCause, FailureDetails, FailureSource, HostMachine, MachineMaintenanceOperation,
+    MachineMaintenanceRequest, ManagedHostState, ManagedHostStateSnapshot, StateMachineArea,
 };
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -37,8 +38,8 @@ use state_controller::state_handler::{
 use crate::context::MachineStateHandlerContextObjects;
 
 /// Handles the Maintenance state for a host, dispatching on the requested
-/// operation (`PowerOn` / `PowerOff` / `Reset` / `ChassisReset`). Failures return
-/// a handler error, retaining the state and request for normal reconciliation.
+/// operation. Power-state failures retain the request for reconciliation; reset
+/// dispatch failures stop because the device may already have executed the action.
 pub(super) async fn handle_maintenance(
     host_machine_id: &HostMachineId,
     mh_snapshot: &ManagedHostStateSnapshot,
@@ -48,6 +49,24 @@ pub(super) async fn handle_maintenance(
         unreachable!("handle_maintenance called with non-Maintenance state");
     };
     let request = request.as_ref();
+
+    // Replace a failed attempt between calls, without cancelling in-flight work
+    // or guessing the identity of a legacy state's unrecorded request.
+    if matches!(
+        mh_snapshot.host_snapshot.controller_state_outcome,
+        Some(PersistentStateHandlerOutcome::Error { .. })
+    ) && let (Some(original), Some(pending)) = (
+        request,
+        mh_snapshot
+            .host_snapshot
+            .machine_maintenance_requested
+            .as_ref(),
+    ) && original != pending
+    {
+        return Ok(StateHandlerOutcome::transition(
+            ManagedHostState::maintenance_for_request(pending.clone()),
+        ));
+    }
 
     match operation {
         MachineMaintenanceOperation::PowerOn => {
@@ -143,10 +162,12 @@ async fn handle_chassis_reset(
         .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
         .await?;
 
-    redfish_client
+    if let Err(error) = redfish_client
         .chassis_reset(chassis_id, libredfish::SystemPowerControl::ForceRestart)
         .await
-        .map_err(|error| redfish_error("chassis_reset", error))?;
+    {
+        return finish_uncertain_reset(host_machine_id, request, ctx, error.to_string()).await;
+    }
 
     tracing::info!(
         machine_id = %host_machine_id,
@@ -213,6 +234,9 @@ async fn invoke_power_operation(
             let summary = result
                 .error
                 .unwrap_or_else(|| "power control failed".into());
+            if matches!(action, PowerAction::ForceRestart) {
+                return finish_uncertain_reset(host_machine_id, request, ctx, summary).await;
+            }
             tracing::warn!(
                 machine_id = %host_machine_id,
                 operation = operation_label,
@@ -225,6 +249,10 @@ async fn invoke_power_operation(
             )))
         }
         Err(error) => {
+            if matches!(action, PowerAction::ForceRestart) {
+                return finish_uncertain_reset(host_machine_id, request, ctx, error.to_string())
+                    .await;
+            }
             tracing::warn!(
                 machine_id = %host_machine_id,
                 operation = operation_label,
@@ -287,6 +315,34 @@ async fn lookup_bmc_credentials(
             "failed to read BMC credentials for {bmc_mac}: {error}"
         )),
     }
+}
+
+/// Do not replay a reset whose response cannot establish whether it executed.
+async fn finish_uncertain_reset(
+    host_machine_id: &HostMachineId,
+    request: Option<&MachineMaintenanceRequest>,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    cause: String,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    finish_maintenance(
+        host_machine_id,
+        request,
+        ctx,
+        ManagedHostState::Failed {
+            details: FailureDetails {
+                cause: FailureCause::UnhandledState {
+                    err: format!(
+                        "reset outcome unknown; verify the device before retrying: {cause}"
+                    ),
+                },
+                failed_at: Utc::now(),
+                source: FailureSource::StateMachineArea(StateMachineArea::MainFlow),
+            },
+            machine_id: (*host_machine_id).into(),
+            retry_count: 0,
+        },
+    )
+    .await
 }
 
 async fn finish_maintenance(

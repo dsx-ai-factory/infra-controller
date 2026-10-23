@@ -162,6 +162,7 @@ struct ReconciliationCase {
 enum ResultingState {
     Ready,
     Maintenance,
+    Failed,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -295,12 +296,24 @@ async fn reconcile(
     // Second iteration reconciles the operation with the backend.
     env.run_single_iteration().await;
     let machine = host.host.machine().await;
-    if !matches!(case.backend_outcome, BackendOutcome::Success) {
+    let uncertain_reset = matches!(case.operation, MachineMaintenanceOperation::Reset)
+        && !matches!(case.backend_outcome, BackendOutcome::Success);
+    if uncertain_reset {
+        let ManagedHostState::Failed { details, .. } = &machine.state.value else {
+            panic!("reset dispatch failure must stop automatic retries");
+        };
+        assert!(
+            matches!(&details.cause, FailureCause::UnhandledState { err }
+            if err.contains("reset outcome unknown"))
+        );
+        env.run_single_iteration().await;
+    } else if !matches!(case.backend_outcome, BackendOutcome::Success) {
         assert_retryable_failure(&entered, &machine);
     }
     let resulting_state = match machine.state.value {
         ManagedHostState::Ready => ResultingState::Ready,
         ManagedHostState::Maintenance { .. } => ResultingState::Maintenance,
+        ManagedHostState::Failed { .. } => ResultingState::Failed,
         other => return Err(format!("unexpected resulting state: {other:?}")),
     };
 
@@ -327,6 +340,8 @@ fn backend_cases() -> Vec<Case<ReconciliationCase, Observation, String>> {
                 BackendOutcome::TransportFailure,
             ] {
                 let succeeds = matches!(backend_outcome, BackendOutcome::Success);
+                let uncertain_reset =
+                    !succeeds && matches!(operation, MachineMaintenanceOperation::Reset);
                 cases.push(Case {
                     scenario: Box::leak(
                         format!("{operation:?} / {entry_state:?} / {backend_outcome:?}")
@@ -338,9 +353,11 @@ fn backend_cases() -> Vec<Case<ReconciliationCase, Observation, String>> {
                         backend_outcome,
                     },
                     expect: Outcome::Yields(Observation {
-                        request_cleared: succeeds,
+                        request_cleared: succeeds || uncertain_reset,
                         resulting_state: if succeeds {
                             ResultingState::Ready
+                        } else if uncertain_reset {
+                            ResultingState::Failed
                         } else {
                             ResultingState::Maintenance
                         },
@@ -571,8 +588,8 @@ async fn preserves_replacement_maintenance_after_power_completion(pool: PgPool) 
     network_controller.create_admin_segment(&domain).await;
     let host = create_ready_host(&env, &underlay_segment).await;
 
-    // A replacement stays pending until the active operation succeeds, including
-    // when it needs another attempt after the controller reloads the replacement.
+    // A request arriving during dispatch survives completion and replaces a
+    // failed operation before another backend attempt, including after restart.
     for (result, replacement_operation) in [
         (
             BackendOutcome::Success,
@@ -641,19 +658,10 @@ async fn preserves_replacement_maintenance_after_power_completion(pool: PgPool) 
         assert_eq!(backend.take_actions(), vec![PowerAction::On]);
 
         if matches!(result, BackendOutcome::TransportFailure) {
-            env.run_single_iteration().await;
-            assert_retryable_failure(&machine, &host.host.machine().await);
-            assert_eq!(backend.take_actions(), vec![PowerAction::On]);
-
-            backend.set_outcome(BackendOutcome::Success);
-            env.run_single_iteration().await;
-            let completed = host.host.machine().await;
-            assert_eq!(completed.state.value, ManagedHostState::Ready);
-            assert_eq!(
-                completed.machine_maintenance_requested,
-                Some(replacement.clone())
-            );
-            assert_eq!(backend.take_actions(), vec![PowerAction::On]);
+            env = Env::builder(pool.clone())
+                .with_component_manager(component_manager.clone())
+                .with_credential_manager(valid_credential_manager())
+                .build_with_harness(env.test_harness, env.redfish_sim);
         }
 
         env.run_single_iteration().await;
@@ -661,6 +669,11 @@ async fn preserves_replacement_maintenance_after_power_completion(pool: PgPool) 
             host.host.machine().await.state.value,
             ManagedHostState::maintenance_for_request(replacement)
         );
+        assert!(
+            backend.take_actions().is_empty(),
+            "superseded operation was redispatched"
+        );
+        backend.set_outcome(BackendOutcome::Success);
         env.run_single_iteration().await;
         let completed = host.host.machine().await;
         assert_eq!(completed.state.value, ManagedHostState::Ready);
@@ -673,7 +686,7 @@ async fn preserves_replacement_maintenance_after_power_completion(pool: PgPool) 
 }
 
 #[sqlx_test]
-async fn chassis_reset_retries_transient_failure(pool: PgPool) {
+async fn chassis_reset_response_failure_does_not_redispatch(pool: PgPool) {
     let mut env = Env::builder(pool).build().await;
     let domain = env.test_harness.test_domain().await;
     let network_controller = env.test_harness.network_controller();
@@ -690,19 +703,26 @@ async fn chassis_reset_retries_transient_failure(pool: PgPool) {
     )
     .await;
     env.run_single_iteration().await;
-    let entered = host.host.machine().await;
     let timepoint = env.redfish_sim.timepoint();
     env.redfish_sim
         .fail_next_chassis_reset(libredfish::RedfishError::HTTPErrorCode {
             url: "https://bmc/redfish/v1/Chassis/HGX_Chassis_0".into(),
-            status_code: 503.try_into().unwrap(),
-            response_body: "BMC temporarily unavailable".into(),
+            status_code: 504.try_into().unwrap(),
+            response_body: "reset response lost after execution".into(),
         });
     env.run_single_iteration().await;
-    assert_retryable_failure(&entered, &host.host.machine().await);
+    let failed = host.host.machine().await;
+    let ManagedHostState::Failed { details, .. } = &failed.state.value else {
+        panic!("uncertain chassis reset must require operator intervention");
+    };
+    assert!(
+        matches!(&details.cause, FailureCause::UnhandledState { err }
+        if err.contains("reset outcome unknown"))
+    );
+    assert!(failed.machine_maintenance_requested.is_none());
     env.run_single_iteration().await;
     let completed = host.host.machine().await;
-    assert_eq!(completed.state.value, ManagedHostState::Ready);
+    assert_eq!(completed.state.value, failed.state.value);
     assert!(completed.machine_maintenance_requested.is_none());
     let attempts = env
         .redfish_sim
@@ -716,7 +736,7 @@ async fn chassis_reset_retries_transient_failure(pool: PgPool) {
             )
         })
         .count();
-    assert_eq!(attempts, 2);
+    assert_eq!(attempts, 1);
 }
 
 #[sqlx_test]
