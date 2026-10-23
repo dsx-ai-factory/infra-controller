@@ -783,28 +783,72 @@ func (h CreateMachineValidationRunHandler) Handle(c echo.Context) error {
 	return c.JSON(http.StatusAccepted, model.NewAPIMachineValidationRunFromOnDemandResponse(coreResponse))
 }
 
-func resolveMachineValidationTarget(ctx context.Context, c echo.Context, logger zerolog.Logger, dbSession *cdb.Session, provider *cdbm.InfrastructureProvider) (string, *cdbm.Site, *cutil.APIError) {
-	machineID := c.Param("id")
-	if machineID != "" {
-		machine, apiError := getMachineForValidation(ctx, logger, dbSession, provider, machineID)
-		if apiError != nil {
-			return machineID, nil, apiError
+// getMachineValidationReadParams returns the Machine ID for reading validation runs or results. The
+// legacy /site/:siteID/machine-validation/machine/:machineID routes also return their Site ID.
+func getMachineValidationReadParams(c echo.Context) (string, string) {
+	legacySiteID := c.Param("siteID")
+	if legacySiteID != "" {
+		return c.Param("machineID"), legacySiteID
+	}
+	return c.Param("id"), ""
+}
+
+// authorizeMachineValidationRead returns the Site to read a Machine's validation runs or results from,
+// and whether the caller reads them as the Machine's Provider. A Tenant with targeted Instance creation
+// at the Machine's Site can read them too. The /site/:siteID/machine-validation routes share these
+// handlers and pass legacySiteID, which stays Provider Admin only.
+func authorizeMachineValidationRead(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session, org string, dbUser *cdbm.User, machineID string, legacySiteID string) (*cdbm.Site, bool, *cutil.APIError) {
+	if legacySiteID != "" {
+		if !auth.ValidateUserRoles(dbUser, org, nil, auth.ProviderAdminRole) {
+			logger.Warn().Msg("user does not have Provider Admin role, access denied")
+			return nil, false, cutil.NewAPIError(http.StatusForbidden, "User does not have Provider Admin role with org", nil)
 		}
-		return machineID, machine.Site, nil
+
+		provider, err := common.GetInfrastructureProviderForOrg(ctx, nil, dbSession, org)
+		if err != nil {
+			logger.Warn().Err(err).Msg("error getting infrastructure provider for org")
+			return nil, false, cutil.NewAPIError(http.StatusBadRequest, "Failed to retrieve Infrastructure Provider for org", nil)
+		}
+
+		site, err := common.GetSiteFromIDString(ctx, nil, legacySiteID, dbSession)
+		if err != nil {
+			logger.Warn().Err(err).Str("Site ID", legacySiteID).Msg("error getting site from request")
+			return nil, false, cutil.NewAPIError(http.StatusBadRequest, "Error retrieving Site in request", nil)
+		}
+		if site.InfrastructureProviderID != provider.ID {
+			return nil, false, cutil.NewAPIError(http.StatusBadRequest, "Site specified in request doesn't belong to current org's Provider", nil)
+		}
+
+		return site, true, nil
 	}
 
-	machineID = c.Param("machineID")
-	siteID := c.Param("siteID")
-	site, err := common.GetSiteFromIDString(ctx, nil, siteID, dbSession)
+	machine, err := cdbm.NewMachineDAO(dbSession).GetByID(ctx, nil, machineID, []string{cdbm.SiteRelationName}, false)
 	if err != nil {
-		logger.Warn().Err(err).Str("Site ID", siteID).Msg("error getting site from request")
-		return machineID, nil, cutil.NewAPIError(http.StatusBadRequest, "Error retrieving Site in request", nil)
+		if errors.Is(err, cdb.ErrDoesNotExist) {
+			return nil, false, cutil.NewAPIError(http.StatusNotFound, "Could not find Machine with specified ID", nil)
+		}
+		logger.Error().Err(err).Msg("failed to retrieve Machine details from DB")
+		return nil, false, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Machine details, DB error", nil)
 	}
-	if site.InfrastructureProviderID != provider.ID {
-		return machineID, nil, cutil.NewAPIError(http.StatusBadRequest, "Site specified in request doesn't belong to current org's Provider", nil)
+	if machine.Site == nil {
+		logger.Error().Msg("Related Site was not returned for Machine DB entity")
+		return nil, false, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Site details for Machine, DB error", nil)
 	}
 
-	return machineID, site, nil
+	// A Tenant is only returned when it has targeted Instance creation at the Machine's Site.
+	provider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, dbSession, org, dbUser, false, &common.TenantPrivilegeScope{SiteID: &machine.SiteID})
+	if apiError != nil {
+		return nil, false, apiError
+	}
+	if provider != nil && machine.InfrastructureProviderID == provider.ID {
+		return machine.Site, true, nil
+	}
+	if tenant != nil {
+		return machine.Site, false, nil
+	}
+
+	logger.Error().Msg("Machine doesn't belong to org's Infrastructure provider")
+	return nil, false, cutil.NewAPIError(http.StatusNotFound, "Could not find Machine with specified ID", nil)
 }
 
 // GetMachineValidationResultsHandler is the API Handler to get MachineValidationResults
@@ -855,22 +899,9 @@ func (handler GetMachineValidationResultsHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
 	}
 
-	// Validate role, only Provider Admins are allowed to retrieve Machine validation results
-	ok = auth.ValidateUserRoles(dbUser, org, nil, auth.ProviderAdminRole)
-	if !ok {
-		logger.Warn().Msg("user does not have Provider Admin role, access denied")
-		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Provider Admin role with org", nil)
-	}
-
-	// Check that infrastructureProvider exists in org
-	ip, err := common.GetInfrastructureProviderForOrg(ctx, nil, handler.dbSession, org)
-	if err != nil {
-		logger.Warn().Err(err).Msg("error getting infrastructure provider for org")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to retrieve Infrastructure Provider for org", nil)
-	}
-
-	machineID, site, apiError := resolveMachineValidationTarget(ctx, c, logger, handler.dbSession, ip)
+	machineID, legacySiteID := getMachineValidationReadParams(c)
 	cotel.SetAttribute(handlerSpan, attribute.String("machine_id", machineID))
+	site, isProvider, apiError := authorizeMachineValidationRead(ctx, logger, handler.dbSession, org, dbUser, machineID, legacySiteID)
 	if apiError != nil {
 		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
@@ -925,7 +956,7 @@ func (handler GetMachineValidationResultsHandler) Handle(c echo.Context) error {
 	// Create response
 	response := make([]*model.APIMachineValidationResult, 0, len(getProtoResponse.GetResults()))
 	for _, proto := range getProtoResponse.GetResults() {
-		response = append(response, model.NewAPIMachineValidationResult(proto))
+		response = append(response, model.NewAPIMachineValidationResult(proto, isProvider))
 	}
 	logger.Info().Msg("finishing API handler")
 	return c.JSON(http.StatusOK, response)
@@ -979,22 +1010,9 @@ func (handler GetAllMachineValidationRunHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
 	}
 
-	// Validate role, only Provider Admins are allowed to retrieve Machine validation runs
-	ok = auth.ValidateUserRoles(dbUser, org, nil, auth.ProviderAdminRole)
-	if !ok {
-		logger.Warn().Msg("user does not have Provider Admin role, access denied")
-		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Provider Admin role with org", nil)
-	}
-
-	// Check that infrastructureProvider exists in org
-	ip, err := common.GetInfrastructureProviderForOrg(ctx, nil, handler.dbSession, org)
-	if err != nil {
-		logger.Warn().Err(err).Msg("error getting infrastructure provider for org")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to retrieve Infrastructure Provider for org", nil)
-	}
-
-	machineID, site, apiError := resolveMachineValidationTarget(ctx, c, logger, handler.dbSession, ip)
+	machineID, legacySiteID := getMachineValidationReadParams(c)
 	cotel.SetAttribute(handlerSpan, attribute.String("machine_id", machineID))
+	site, _, apiError := authorizeMachineValidationRead(ctx, logger, handler.dbSession, org, dbUser, machineID, legacySiteID)
 	if apiError != nil {
 		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}

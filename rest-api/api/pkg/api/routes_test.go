@@ -74,6 +74,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"audit":                     2,
 		"network-security-group":    5,
 		"machine-validation":        11,
+		"external-validation":       5,
 		"dpu-extension-service":     7,
 		"sku":                       5,
 		"task":                      3,
@@ -220,9 +221,16 @@ func TestNewAPIRoutes(t *testing.T) {
 			assertRouteExists(t, got, http.MethodGet, machineAdminPath+"/validation/run")
 			assertRouteExists(t, got, http.MethodGet, machineAdminPath+"/validation/result")
 
+			assertRouteExists(t, got, http.MethodPost, machineAdminPath+"/external-validation/attempt")
+			assertRouteExists(t, got, http.MethodPost, machineAdminPath+"/external-validation/attempt/:attemptId/complete")
+			assertRouteExists(t, got, http.MethodPost, machineAdminPath+"/external-validation/attempt/:attemptId/cancel")
+			assertRouteExists(t, got, http.MethodDelete, machineAdminPath+"/external-validation/hold/:holdId")
+
 			siteMachineValidationPath := "/org/:orgName/" + cfg.GetAPIName() + "/site/:siteID/machine-validation/machine/:machineID"
 			assertRouteExists(t, got, http.MethodGet, siteMachineValidationPath+"/runs")
 			assertRouteExists(t, got, http.MethodGet, siteMachineValidationPath+"/results")
+
+			assertRouteExists(t, got, http.MethodGet, "/org/:orgName/"+cfg.GetAPIName()+"/machine/external-validation/hold")
 
 			expectedMachineBatchPath := "/org/:orgName/" + cfg.GetAPIName() + "/expected-machine/batch"
 			assertRouteExists(t, got, http.MethodPost, expectedMachineBatchPath)
