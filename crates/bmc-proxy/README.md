@@ -8,7 +8,7 @@ A small authenticated HTTP/2 proxy for BMC access:
 - fetches the BMC's credentials from nico-api over gRPC
 - proxies the HTTP request to the target BMC
 
-The same path serves a switch's NVOS management interface. When nico-api identifies an address as a switch's NVOS interface, the proxy forwards the request to the switch's NVUE REST API with the switch's NVOS admin credentials. A caller reaches `/nvue_v1/` paths the same way it reaches `/redfish/v1/` paths on a BMC.
+The same path serves a switch's NVOS management interface. When nico-api identifies an address as a switch's NVOS interface, the proxy forwards the request to the switch's NVUE REST API with the switch's NVOS admin credentials. A caller reaches `/nvue_v1/` paths the same way it reaches `/redfish/v1/` paths on a BMC. Where switches require a client certificate, [`tls.switch`](#tlsswitch) gives the proxy its own.
 
 The point is to keep BMC authentication and credential handling in one place, while allowing multiple higher-level systems to coexist as peers.
 
@@ -26,6 +26,8 @@ Important configuration fields:
 - `metrics_endpoint`: metrics listen address, default `[::]:1080`
 - `allowed_principals`: authorized caller principals, for example `spiffe-service-id/<name>`
 - `tls.*`: server certificate, key, and trust roots for mTLS
+- `tls.switch`: optional client certificate and CA bundle for switches whose
+  NVUE REST API requires a client certificate; see [`tls.switch`](#tlsswitch)
 - `carbide_api.*`: nico-api gRPC endpoint (`api_url`) and mTLS material (`root_ca`,
   `client_cert`, `client_key`) used to resolve targets and fetch their BMC or NVOS
   credentials. Without the table, the proxy dials
@@ -100,6 +102,77 @@ connections immediately and joins connection and reload tasks. A blocking TLS
 file read that has already started cannot be cancelled; shutdown waits for it
 to finish. TCP accept errors retry after one second; shutdown interrupts that
 wait. These timers do not limit connection concurrency.
+
+### `tls.switch`
+
+A switch's NVUE REST API can require a client certificate (NVUE mTLS). The optional `[tls.switch]`
+table gives the proxy its own client certificate for switches, and the CA bundle their
+certificates must chain to:
+
+```toml
+[tls.switch]
+ca_cert_path = "/var/run/secrets/nico-roots/ca.crt"
+client_cert_path = "/var/run/secrets/switch-client/tls.crt"
+client_key_path = "/var/run/secrets/switch-client/tls.key"
+tls_server_name = "switches.example.internal"
+```
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| `ca_cert_path` | Yes | PEM bundle of the CAs a switch's certificate must chain to. A PEM syntax error anywhere in it fails the load. A certificate that parses but is not a usable trust anchor is skipped, and at least one must be usable. The system trust store is not used. |
+| `client_cert_path` | Yes | PEM certificate chain the proxy presents to switches. |
+| `client_key_path` | Yes | PEM private key of `client_cert_path`, as PKCS#8, PKCS#1, or SEC1. |
+| `tls_server_name` | No | The DNS name every switch's certificate carries, when switches share one instead of carrying their IPs. Omitted or empty, a switch's certificate must carry the IP the proxy connects to. An IP address or any other non-DNS name stops the proxy at startup. |
+
+Other keys in the table are rejected, and so are unknown keys under `[tls]`: a misspelled
+`[tls.switch]` stops the proxy instead of leaving switches reached without it.
+
+The table applies only to addresses nico-api identifies as a switch's NVOS management interface,
+the requests whose span has `bmc_proxy.target = "switch_nvos"`. The proxy presents its client
+certificate when the switch asks for one, and sends the request only once the switch's certificate
+chains to `ca_cert_path` and is valid for `tls_server_name`, or else for the switch's IP.
+`tls_server_name` serves that check alone: the proxy still connects to the switch's IP, names the
+IP in `Host`, and sends no SNI. Only HTTP/1.1 is offered to switches, and the `HTTP_PROXY` family
+of environment variables is ignored for them: an HTTPS forward proxy's certificate would be held to
+the switch CA too. With a host [`bmc_proxy`](#configuration) override, a dev/test setting,
+requests to switches go to that host instead, and the table applies to it: its certificate must
+chain to `ca_cert_path` and carry `tls_server_name`, or else the override host's name. The request
+then names the override host in `Host`, and in SNI when it is a DNS name.
+
+A switch whose certificate fails that check receives neither the request nor its credentials. The
+proxy counts the attempt in `carbide_bmc_proxy_upstream_certificate_rejected_total`, and drops the
+credentials it cached for the address, since the address may have passed to a BMC, whose
+self-signed certificate the check refuses. A request whose body can be sent again is replayed
+once with freshly resolved credentials, as one a BMC answers `401` or `403` is, and reaches the
+address as what nico-api now says it is. When the replay fails the check too, or the body cannot
+be sent again, the caller gets `502`, naming the certificate's fault. Breakers never count these
+failures; see [`admission.breaker`](#admissionbreaker).
+
+BMC addresses are reached as without the table: no client certificate is presented, and the BMC's
+certificate is accepted as presented. Without the table, switches are reached the same way, and a
+switch that requires a client certificate refuses the request; NVOS reads it, credentials
+included, and answers `400`.
+
+The files must load at startup, or the proxy does not start. Once a request to a switch finds
+five minutes passed since their last check, they are checked again in the background, and that
+request and the ones after it use the material loaded before until the check ends. When any of the
+files changed, all three are reloaded; when none did, nothing is, and the connections to switches
+stay open. A failed reload keeps the certificate, key, and CA bundle loaded before, increments
+`carbide_bmc_proxy_switch_tls_reload_failures_total`, and is retried by the first request to a
+switch 30 seconds later, rather than five minutes. Adding or removing the table takes a restart.
+
+An expired or not yet valid certificate in `client_cert_path` or `ca_cert_path` still loads, so
+it does not stop the proxy or its BMC traffic, but the load and every check after it increment
+`carbide_bmc_proxy_switch_tls_certificate_out_of_validity_total` with the file as `file`
+(`client_certificate` or `ca_bundle`). A switch refuses an expired client certificate. An expired
+CA is only reported: the proxy keeps trusting it, and still accepts a switch whose certificate it
+anchors, so remove a CA from the bundle to stop trusting it.
+
+`NICO_BMC_PROXY__TLS__SWITCH__CA_CERT_PATH`, `NICO_BMC_PROXY__TLS__SWITCH__CLIENT_CERT_PATH`,
+`NICO_BMC_PROXY__TLS__SWITCH__CLIENT_KEY_PATH`, and `NICO_BMC_PROXY__TLS__SWITCH__TLS_SERVER_NAME`
+set the same keys and take precedence over the file, key by key: a key no variable sets keeps the
+file's value, and an empty `NICO_BMC_PROXY__TLS__SWITCH__TLS_SERVER_NAME` unsets a name the file
+gives. The Helm chart sets all four from `switchTls`.
 
 ### `redirects.mode`
 
@@ -510,8 +583,9 @@ its class's budget: a shorter attempt was cut short by its wait for a slot,
 and a streamed upload that times out may have been slowed by its caller, so
 neither counts. A status counts as the BMC's answer to the last attempt, after
 any replay with fresh credentials. A connection the BMC closes without
-answering, a body that stalls after the answer, and a failure of the proxy's
-own, such as a credential lookup, never count. Every other freed slot counts
+answering, a body that stalls after the answer, a failure of the proxy's
+own, such as a credential lookup, and a switch certificate the proxy refuses
+(see [`tls.switch`](#tlsswitch)) never count. Every other freed slot counts
 as a success, including one whose request stopped waiting, or got its slot too
 late to use it: such requests dilute the failures, and one can be the request
 that closes the breaker.
