@@ -10546,30 +10546,18 @@ async fn release_vpc_dpu_loopback_for_memberships(
         return Ok(());
     }
 
-    let retained_memberships = db::instance::find_service_vpc_memberships(&mut *txn, instance_id)
-        .await?
-        .into_iter()
-        .chain(retained_host_memberships.iter().copied())
-        .collect::<HashSet<_>>();
-
-    let mut releasable_by_dpu = HashMap::<DpuMachineId, Vec<VpcId>>::new();
-    for &(dpu_id, vpc_id) in candidate_memberships {
-        // Host and service use retain only their exact DPU/VPC loopback.
-        if !retained_memberships.contains(&(dpu_id, vpc_id)) {
-            releasable_by_dpu.entry(dpu_id).or_default().push(vpc_id);
-        }
-    }
-
-    for (dpu_id, vpc_ids) in releasable_by_dpu {
-        db::vpc_dpu_loopback::delete_and_deallocate_for_vpcs(common_pools, &dpu_id, &vpc_ids, txn)
-            .await
-            .map_err(|e| StateHandlerError::ResourceCleanupError {
-                resource: "VpcLoopbackIp",
-                error: e.to_string(),
-            })?;
-    }
-
-    Ok(())
+    db::vpc_dpu_loopback::release_unretained_instance_loopbacks(
+        common_pools,
+        txn,
+        instance_id,
+        candidate_memberships,
+        retained_host_memberships,
+    )
+    .await
+    .map_err(|e| StateHandlerError::ResourceCleanupError {
+        resource: "VpcLoopbackIp",
+        error: e.to_string(),
+    })
 }
 
 /// Maps each VPC interface to its exact host DPU when possible and to every current host DPU when

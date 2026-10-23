@@ -930,8 +930,8 @@ mod tests {
         DpuServiceInterfaceTemplateType,
     };
     use carbide_dpf::{
-        build_deployment_dpu_interfaces, build_service_configuration, build_service_interface,
-        build_service_nad, build_service_template,
+        SERVICE_VPC_MTU, build_deployment_dpu_interfaces, build_service_configuration,
+        build_service_interface, build_service_nad, build_service_template,
     };
     use carbide_test_support::value_scenarios;
     use url::Url;
@@ -1112,15 +1112,15 @@ mod tests {
                 expected_nads
             );
             for (name, nad) in &rendered_nads {
-                let expected_bridge = if name == "service-vpc-dhcp-slot0" {
-                    "br-svc-0"
+                let (expected_bridge, expected_mtu) = if name == "service-vpc-dhcp-slot0" {
+                    ("br-svc-0", SERVICE_VPC_MTU)
                 } else {
-                    "br-sfc"
+                    ("br-sfc", 1500)
                 };
                 assert_eq!(nad.metadata.name.as_deref(), Some(name.as_str()));
                 assert_eq!(nad.spec.bridge.as_deref(), Some(expected_bridge));
                 assert_eq!(nad.spec.ipam, Some(false));
-                assert_eq!(nad.spec.service_mtu, Some(1500));
+                assert_eq!(nad.spec.service_mtu, Some(expected_mtu));
                 assert!(matches!(
                     nad.spec.resource_type,
                     carbide_dpf::crds::dpuservicenads_generated::DpuServiceNadResourceType::Sf

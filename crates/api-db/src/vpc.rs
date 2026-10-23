@@ -200,6 +200,7 @@ async fn find_by_inner<'a, C: ColumnInfo<'a, TableType = Vpc>>(
     txn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
     row_lock: VpcRowLock,
+    include_deleted: bool,
 ) -> Result<Vec<Vpc>, DatabaseError> {
     let mut query = FilterableQueryBuilder::new(
         "SELECT id, version, organization_id, network_security_group_id,
@@ -210,7 +211,9 @@ async fn find_by_inner<'a, C: ColumnInfo<'a, TableType = Vpc>>(
     )
     .filter(&filter);
 
-    query.push(" AND deleted IS NULL");
+    if !include_deleted {
+        query.push(" AND deleted IS NULL");
+    }
     if matches!(row_lock, VpcRowLock::Mutation) {
         query.push(" FOR NO KEY UPDATE");
     }
@@ -228,14 +231,32 @@ pub async fn find_by_with_lock<'a, C: ColumnInfo<'a, TableType = Vpc>>(
     filter: ObjectColumnFilter<'a, C>,
     row_lock: VpcRowLock,
 ) -> Result<Vec<Vpc>, DatabaseError> {
-    find_by_inner(&mut *txn, filter, row_lock).await
+    find_by_inner(&mut *txn, filter, row_lock, false).await
 }
 
 pub async fn find_by<'a, C: ColumnInfo<'a, TableType = Vpc>>(
     txn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<Vpc>, DatabaseError> {
-    find_by_inner(txn, filter, VpcRowLock::None).await
+    find_by_inner(txn, filter, VpcRowLock::None, false).await
+}
+
+/// Finds one VPC by ID while retaining a soft-deleted row so allocation validation can distinguish
+/// a deleted VPC from an identifier that never existed.
+///
+/// Callers that serialize with deletion must lock the `instance_addresses` table before this read.
+pub async fn find_by_id_including_deleted(
+    txn: impl DbReader<'_>,
+    id: VpcId,
+) -> Result<Option<Vpc>, DatabaseError> {
+    Ok(find_by_inner(
+        txn,
+        ObjectColumnFilter::One(IdColumn, &id),
+        VpcRowLock::None,
+        true,
+    )
+    .await?
+    .pop())
 }
 
 pub async fn find_by_vni(txn: &mut PgConnection, vni: i32) -> Result<Vec<Vpc>, DatabaseError> {
