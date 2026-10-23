@@ -982,8 +982,9 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 					Roles: []string{}, // No roles
 				},
 				RegisteredClaims: jwt.RegisteredClaims{
-					Subject: "user-subject-123",
-					Issuer:  jwksServer.URL + "/realms/nico",
+					Subject:   "user-subject-123",
+					Issuer:    jwksServer.URL + "/realms/nico",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 				},
 			},
 			path:           "/v2/org/testorg/user/current",
@@ -1106,8 +1107,9 @@ func TestAuthProcessor_KeycloakServiceAccountsDisabled(t *testing.T) {
 					Roles: []string{"testorg:PROVIDER_ADMIN"},
 				},
 				RegisteredClaims: jwt.RegisteredClaims{
-					Subject: "service-account-disabled-123",
-					Issuer:  jwksServer.URL + "/realms/nico",
+					Subject:   "service-account-disabled-123",
+					Issuer:    jwksServer.URL + "/realms/nico",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 				},
 			},
 			path:           "/v2/org/testorg/user/current",
