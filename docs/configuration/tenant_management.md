@@ -637,7 +637,7 @@ An instance in NICo is a bare-metal machine assigned to a tenant within a VPC. C
 | `--instance-type-id` | no | Pick from the pool of machines of this type (alternative to `--machine-id`) |
 | `--operating-system-id` | no | OS for PXE provisioning; see [Templated iPXE Operating Systems](templated-ipxe-operating-systems.md) |
 | `--allow-unhealthy-machine` | no | Override health checks |
-| `--ipxe-script` | no | Custom iPXE script |
+| `--ipxe-script` | no | Custom iPXE script that can use [iPXE script variables](../provisioning/ipxe-script-variables.md). |
 | `--user-data` | no | cloud-init style user data |
 | `--phone-home-enabled` | no | Whether to wait for the OS to phone home for `BootCompleted` |
 | `--network-security-group-id` | no | NSG to apply |
