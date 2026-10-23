@@ -1132,6 +1132,10 @@ lazy_static! {
     );
 }
 
+/// Load the DPUs attached to a host through any non-BMC host interface.
+///
+/// Each attached DPU is returned once, even when several host interfaces
+/// attach to it.
 pub async fn find_dpus_by_host_machine_id(
     txn: &mut PgConnection,
     host_machine_id: &HostMachineId,
