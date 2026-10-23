@@ -41,6 +41,22 @@ pub struct Sku {
     pub device_type: Option<String>,
 }
 
+/// `SkuComponentsReplacement` replaces a SKU's hardware definition while preserving
+/// omitted metadata. Supplied metadata, including empty strings, replaces the stored value.
+pub struct SkuComponentsReplacement {
+    /// `id` identifies the existing SKU to replace and must not be empty.
+    pub id: String,
+    /// `components` is the complete replacement hardware definition.
+    pub components: SkuComponents,
+    /// `schema_version` must be the current supported SKU format.
+    pub schema_version: u32,
+    /// `description` replaces the stored description when supplied.
+    pub description: Option<String>,
+    /// `device_type` replaces the stored device type when supplied; omission
+    /// preserves it, including a stored `NULL`.
+    pub device_type: Option<String>,
+}
+
 impl<'r> FromRow<'r, PgRow> for Sku {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         let schema_version =
