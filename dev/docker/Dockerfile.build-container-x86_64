@@ -15,6 +15,12 @@
 # limitations under the License.
 #
 
+ARG DEBIAN_IMAGE=debian:12-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+FROM ${DEBIAN_IMAGE} AS kea-builder
+ARG KEA_VERSION
+COPY dev/docker/build-kea.sh dev/docker/kea-reuse-null.patch /tmp/kea-build/
+RUN /tmp/kea-build/build-kea.sh "${KEA_VERSION}"
+
 # This should match rust-toolchain.toml
 FROM rust:1.97.1-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3
 
@@ -72,6 +78,11 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update && \
         plantuml \
 	git && \
 	rm -rf /var/lib/apt/lists/*
+
+# Install the same patched Kea library used by runtime images and retain the
+# package for the DevSpace artifact image.
+COPY --from=kea-builder /kea-packages/kea-common.deb /opt/kea/kea-common.deb
+RUN dpkg -i /opt/kea/kea-common.deb
 
 RUN test "$(dpkg-query -W -f='${Version}' kea-dev)" = "${KEA_VERSION}" && \
 	kea-dhcp6 -V
