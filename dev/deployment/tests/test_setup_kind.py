@@ -111,7 +111,7 @@ else:
                 self.assertEqual(output, "selected cluster\n")
 
     def test_macos_uses_local_docker_runtime_architecture(self):
-        # An Intel/Rosetta CLI can use an ARM64 Docker Desktop daemon.
+        # The client process and container runtime can have different architectures.
         for daemon, arch in (("linux/aarch64", "arm64"), ("linux/x86_64", "amd64")):
             with self.subTest(arch=arch):
                 result, calls, output = self.run_setup(
