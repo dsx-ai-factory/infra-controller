@@ -5,6 +5,7 @@ package certs
 
 import (
 	"context"
+	"crypto/tls"
 	"net/http"
 	"os"
 
@@ -16,7 +17,7 @@ import (
 const (
 	svcKeyFile  = "/tmp/svc.key"
 	svcCertFile = "/tmp/svc.cert"
-	svcTTL      = 10 * 365 * 24
+	svcTTL      = 365 * 24
 )
 
 // Options defines options for the server
@@ -26,15 +27,19 @@ type Options struct {
 	// DNSNames are the hostnames the TLS listener's certificate must match.
 	// Every name clients dial has to appear here, because hostname
 	// verification only consults the certificate's SANs.
-	DNSNames  []string
-	CABaseDNS string
-	sentryDSN string
+	DNSNames          []string
+	CABaseDNS         string
+	sentryDSN         string
+	AuthorizationMode string
+	AllowedIdentities []string
+	ClientCAFile      string
 }
 
 // Server defines a server
 type Server struct {
 	Options
 	certificateIssuer CertificateIssuer
+	authorizer        *certificateAuthorizer
 	appService        *core.HTTPService
 	insecService      *core.HTTPService
 }
@@ -45,15 +50,19 @@ func NewServerWithIssuer(ctx context.Context, o Options, certIssuer CertificateI
 		panic("certIssuer is required")
 	}
 
-	s := &Server{Options: o}
-	s.certificateIssuer = certIssuer
+	authorizer, err := newCertificateAuthorizer(ctx, o, certIssuer)
+	if err != nil {
+		return nil, err
+	}
+	s := &Server{Options: o, certificateIssuer: certIssuer, authorizer: authorizer}
 
-	err := s.tlsSetup(ctx)
+	err = s.tlsSetup(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	appService := core.NewTLSService(s.Addr, svcCertFile, svcKeyFile)
+	appService.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, ClientAuth: tls.RequestClientCert}
 	appService.AddHealthRoute(ctx)
 	appService.AddVersionRoute(ctx)
 	appService.AddMetricsRoute(ctx)
@@ -69,10 +78,13 @@ func NewServerWithIssuer(ctx context.Context, o Options, certIssuer CertificateI
 	s.insecService = insec
 
 	if o.sentryDSN != "" {
-		sentry.Init(sentry.ClientOptions{
+		err = sentry.Init(sentry.ClientOptions{
 			Dsn:   o.sentryDSN,
 			Debug: true,
 		})
+		if err != nil {
+			return nil, err
+		}
 	}
 	return s, nil
 }
@@ -122,7 +134,7 @@ func (s *Server) PKICloudCertificateHandler(_ context.Context) http.Handler {
 		certificateIssuer: s.certificateIssuer,
 	}
 
-	return s.withWraps(h, "ccm-get-cert")
+	return s.withWraps(s.authorizeCertificateRequest(h), "ccm-get-cert")
 }
 
 func (s *Server) tlsSetup(ctx context.Context) error {

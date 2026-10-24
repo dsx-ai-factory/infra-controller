@@ -42,3 +42,7 @@ subchart being relocated, set args.credsManagerUrl explicitly.
 {{- define "nico-rest-site-manager.image" -}}
 {{ .Values.global.image.repository }}/{{ .Values.image.name }}:{{ .Values.global.image.tag }}
 {{- end }}
+
+{{- define "nico-rest-site-manager.clientIdentity" -}}
+{{- default (printf "spiffe://%s/%s/sa/%s" (default "nico.local" .Values.global.spiffeTrustDomain) (include "nico-rest-site-manager.namespace" .) (include "nico-rest-site-manager.name" .)) .Values.clientCertificate.spiffeID -}}
+{{- end -}}

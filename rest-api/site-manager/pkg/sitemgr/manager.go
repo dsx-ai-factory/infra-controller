@@ -14,11 +14,13 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/certs"
 	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core"
+	commontls "github.com/NVIDIA/infra-controller/rest-api/common/pkg/tls"
 	crdclient "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/client/clientset/versioned"
 	"github.com/getsentry/sentry-go"
 	"github.com/pkg/errors"
@@ -38,7 +40,9 @@ const (
 
 // Options are args passed to the site manager at boot
 type Options struct {
-	credsMgrURL string
+	credsMgrURL            string
+	credsMgrClientCertPath string
+	credsMgrClientKeyPath  string
 	// credsMgrCAPath is the CA bundle used to verify credsMgrURL. It is the
 	// ca.crt of the same CA that signs the cert-manager's listener, so the
 	// certificate chain and the hostname both have to check out.
@@ -82,17 +86,20 @@ func NewSiteManager(ctx context.Context, o Options) (*SiteMgr, error) {
 	}
 
 	if o.sentryDSN != "" {
-		sentry.Init(sentry.ClientOptions{
+		err = sentry.Init(sentry.ClientOptions{
 			Dsn:   o.sentryDSN,
 			Debug: true,
 		})
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return newSiteManager(ctx, o, c)
 }
 
 func newSiteManager(ctx context.Context, o Options, c crdclient.Interface) (*SiteMgr, error) {
-	certClient, err := newCertManagerClient(o.credsMgrCAPath)
+	certClient, err := newCertManagerClient(ctx, o)
 	if err != nil {
 		return nil, errors.Wrap(err, "newCertManagerClient")
 	}
@@ -125,6 +132,45 @@ func newSiteManager(ctx context.Context, o Options, c crdclient.Interface) (*Sit
 	return s, nil
 }
 
+func newCertManagerClient(ctx context.Context, o Options) (*http.Client, error) {
+	endpoint, err := url.Parse(o.credsMgrURL)
+	if err != nil {
+		return nil, errors.Wrap(err, "parse certificate manager URL")
+	}
+	if endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil {
+		return nil, fmt.Errorf("certificate manager URL must use HTTPS without user information")
+	}
+	if o.credsMgrCAPath == "" {
+		return nil, fmt.Errorf("certificate manager CA file is required")
+	}
+	caPEM, err := os.ReadFile(o.credsMgrCAPath)
+	if err != nil {
+		return nil, errors.Wrapf(err, "read cert manager CA bundle %q", o.credsMgrCAPath)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(caPEM) {
+		return nil, fmt.Errorf("cert manager CA bundle contains no usable certificates")
+	}
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
+	if o.credsMgrClientCertPath != "" || o.credsMgrClientKeyPath != "" {
+		if o.credsMgrClientCertPath == "" || o.credsMgrClientKeyPath == "" {
+			return nil, fmt.Errorf("both client certificate and key paths are required")
+		}
+		dynamic, err := commontls.NewDynTLSCfg(o.credsMgrClientKeyPath, o.credsMgrClientCertPath, o.credsMgrCAPath)
+		if err != nil {
+			return nil, errors.Wrap(err, "configure certificate manager client identity")
+		}
+		context.AfterFunc(ctx, dynamic.Close)
+		tlsConfig = dynamic.ClientCfg()
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = tlsConfig
+	client := &http.Client{Timeout: vaultTimeout, Transport: otelhttp.NewTransport(transport, otelhttp.WithSpanNameFormatter(func(_ string, _ *http.Request) string { return certMgrClientName }))}
+	context.AfterFunc(ctx, client.CloseIdleConnections)
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	return client, nil
+}
+
 // Start starts the manager
 func (s *SiteMgr) Start(ctx context.Context) {
 	l, err := s.appService.Start(ctx)
@@ -132,39 +178,6 @@ func (s *SiteMgr) Start(ctx context.Context) {
 		log.Fatalf("failed to start appService: %v", err)
 	}
 	s.l = l
-}
-
-// newCertManagerClient builds the HTTP client used to reach
-// nico-rest-cert-manager. The CA bundle at caPath is the only trust anchor, so
-// an unreadable or malformed file is a startup failure rather than a silent
-// downgrade to an unverified connection.
-func newCertManagerClient(caPath string) (*http.Client, error) {
-	if caPath == "" {
-		return nil, fmt.Errorf("a CA bundle path is required to verify the cert manager endpoint")
-	}
-
-	caPEM, err := os.ReadFile(caPath)
-	if err != nil {
-		return nil, errors.Wrapf(err, "read cert manager CA bundle %q", caPath)
-	}
-
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, fmt.Errorf("cert manager CA bundle %q contains no certificates", caPath)
-	}
-
-	return &http.Client{
-		Timeout: vaultTimeout,
-		// wrap transport with otel
-		Transport: otelhttp.NewTransport(&http.Transport{
-			TLSClientConfig: &tls.Config{
-				RootCAs:    pool,
-				MinVersion: tls.VersionTLS12,
-			},
-		}, otelhttp.WithSpanNameFormatter(func(_ string, _ *http.Request) string {
-			return certMgrClientName
-		})),
-	}, nil
 }
 
 func (s *SiteMgr) tlsSetup(ctx context.Context) error {
@@ -218,6 +231,9 @@ func (s *SiteMgr) getCertificate(ctx context.Context, name, app string, ttl int)
 	}
 	url := s.credsMgrURL + "/v1/pki/cloud-cert"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, payloadBuf)
+	if err != nil {
+		return nil, err
+	}
 	content, err := s.roundTrip(req)
 	if err != nil {
 		return nil, errors.Wrap(err, "s.roundTrip(req)")
@@ -237,6 +253,9 @@ func (s *SiteMgr) getCertificate(ctx context.Context, name, app string, ttl int)
 func (s *SiteMgr) getCA(ctx context.Context) (string, error) {
 	url := s.credsMgrURL + "/v1/pki/ca/pem"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
 	content, err := s.roundTrip(req)
 	if err != nil {
 		return "", errors.Wrap(err, "s.roundTrip(req)")

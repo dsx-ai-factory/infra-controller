@@ -76,7 +76,14 @@ func (i *NativeCertificateIssuer) NewCertificate(ctx context.Context, req *types
 	sans := req.UniqueName(i.baseDNS)
 	ttl := req.TTL
 	if ttl == 0 {
-		ttl = 24 * 90 // 90 days default
+		ttl = 90 * 24
+	}
+	maxTTL := maxCertificateTTL
+	if req.App != "" {
+		maxTTL = 90 * 24
+	}
+	if ttl < 1 || ttl > maxTTL {
+		return "", "", fmt.Errorf("%w: must be between 1 and %d hours", types.ErrInvalidTTL, maxTTL)
 	}
 	return i.ca.IssueCertificate(sans, nil, ttl)
 }

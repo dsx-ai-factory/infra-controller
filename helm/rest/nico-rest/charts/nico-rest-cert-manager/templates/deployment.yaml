@@ -1,6 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+{{- if not (has .Values.authorization.mode (list "AUDIT" "ENFORCE")) }}
+{{- fail "authorization.mode must be AUDIT or ENFORCE" }}
+{{- end }}
+{{- if hasKey .Values.extraEnv "CERT_AUTH_MODE" }}
+{{- fail "configure CERT_AUTH_MODE through chart values, not extraEnv" }}
+{{- end }}
+{{- if hasKey .Values.extraEnv "CERT_AUTH_ALLOWED_IDENTITIES" }}
+{{- fail "configure CERT_AUTH_ALLOWED_IDENTITIES through chart values, not extraEnv" }}
+{{- end }}
+{{- if hasKey .Values.extraEnv "CERT_AUTH_CLIENT_CA_FILE" }}
+{{- fail "configure CERT_AUTH_CLIENT_CA_FILE through chart values, not extraEnv" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -62,8 +74,14 @@ spec:
               name: https
             - containerPort: {{ .Values.config.insecurePort }}
               name: http
-          {{- with .Values.extraEnv }}
           env:
+            - name: CERT_AUTH_MODE
+              value: {{ .Values.authorization.mode | quote }}
+            - name: CERT_AUTH_ALLOWED_IDENTITIES
+              value: {{ include "nico-rest-cert-manager.allowedIdentities" . | fromYamlArray | join "," | quote }}
+            - name: CERT_AUTH_CLIENT_CA_FILE
+              value: {{ .Values.authorization.clientCaFile | quote }}
+          {{- with .Values.extraEnv }}
             {{- range $k, $v := . }}
             - name: {{ $k }}
               value: {{ $v | quote }}

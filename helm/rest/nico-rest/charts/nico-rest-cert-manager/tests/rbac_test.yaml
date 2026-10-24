@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Certificate Manager has no Kubernetes API credentials
+templates:
+  - rbac.yaml
+tests:
+  - it: creates only a service account with token mounting disabled
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: automountServiceAccountToken
+          value: false

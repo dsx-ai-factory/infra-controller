@@ -72,4 +72,12 @@ are rejected by x509.VerifyHostname and so are not accepted here either.
 {{- end -}}
 
 {{- end -}}
+
+{{- $siteContext := dict "Values" $siteManager "Release" .Release "Chart" (dict "Name" "nico-rest-site-manager") -}}
+{{- $certContext := dict "Values" $certManager "Release" .Release -}}
+{{- $clientID := include "nico-rest-site-manager.clientIdentity" $siteContext -}}
+{{- $allowedIDs := include "nico-rest-cert-manager.allowedIdentities" $certContext | fromYamlArray -}}
+{{- if not (has $clientID $allowedIDs) -}}
+{{- fail (printf "Site Manager client SPIFFE ID %q is missing from nico-rest-cert-manager.authorization.allowedIdentities" $clientID) -}}
+{{- end -}}
 {{- end -}}

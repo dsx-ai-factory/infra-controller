@@ -33,6 +33,12 @@
 set -e
 
 NAMESPACE="nico-rest"
+# Match the deployed Certificate Manager CA Secret and serving certificate name.
+CM_CA_SECRET=${CM_CA_SECRET:-ca-signing-secret}
+CM_SERVER_NAME=${CM_SERVER_NAME:-nico-rest-cert-manager.$NAMESPACE}
+CM_CA_FILE=""
+CM_CLIENT_DIR=""
+CM_CLIENT_SECRET=${CM_CLIENT_SECRET:-site-manager-client-tls}
 PASSED=0
 FAILED=0
 STRICT_MODE=${STRICT_MODE:-true}
@@ -48,6 +54,12 @@ fail() {
 }
 
 cleanup() {
+    if [[ -n "$CM_CLIENT_DIR" ]]; then
+        rm -rf "$CM_CLIENT_DIR"
+    fi
+    if [[ -n "$CM_CA_FILE" ]]; then
+        rm -f "$CM_CA_FILE"
+    fi
     if [[ -n "$CM_PF_PID" ]]; then
         kill $CM_PF_PID 2>/dev/null || true
     fi
@@ -435,10 +447,22 @@ echo "=========================================="
 echo ""
 echo "--- Test 25: PKI API Issues Certificate ---"
 echo "Checks: POST to /v1/pki/cloud-cert returns a certificate and private key"
-echo "        This is the API that services call to get their certs"
-ISSUE_RESP=$(curl -sk -X POST https://localhost:18000/v1/pki/cloud-cert \
+echo "        Authenticate with the deployed Site Manager client certificate"
+CM_CA_FILE=$(mktemp)
+kubectl -n "$NAMESPACE" get secret "$CM_CA_SECRET" \
+    -o jsonpath='{.data.tls\.crt}' | base64 -d > "$CM_CA_FILE"
+CM_CLIENT_DIR=$(mktemp -d)
+kubectl -n "$NAMESPACE" get secret "$CM_CLIENT_SECRET" \
+    -o jsonpath='{.data.tls\.crt}' | base64 -d > "$CM_CLIENT_DIR/tls.crt"
+kubectl -n "$NAMESPACE" get secret "$CM_CLIENT_SECRET" \
+    -o jsonpath='{.data.tls\.key}' | base64 -d > "$CM_CLIENT_DIR/tls.key"
+chmod 600 "$CM_CLIENT_DIR/tls.key"
+ISSUE_RESP=$(curl -sSf --cacert "$CM_CA_FILE" --noproxy "$CM_SERVER_NAME" \
+    --cert "$CM_CLIENT_DIR/tls.crt" --key "$CM_CLIENT_DIR/tls.key" \
+    --resolve "$CM_SERVER_NAME:18000:127.0.0.1" \
+    -X POST "https://$CM_SERVER_NAME:18000/v1/pki/cloud-cert" \
     -H "Content-Type: application/json" \
-    -d '{"name":"test-service","app":"e2e-test","ttl":24}' 2>/dev/null || echo "")
+    -d '{"name":"test-service","app":"e2e-test","ttl":24}' || echo "")
 if echo "$ISSUE_RESP" | jq -e '.certificate' > /dev/null 2>&1; then
     ISSUED_CERT=$(echo "$ISSUE_RESP" | jq -r '.certificate')
     ISSUED_KEY=$(echo "$ISSUE_RESP" | jq -r '.key')
@@ -448,7 +472,7 @@ if echo "$ISSUE_RESP" | jq -e '.certificate' > /dev/null 2>&1; then
         fail "PKI API response missing cert or key"
     fi
 else
-    fail "PKI API certificate issuance (response: ${ISSUE_RESP:0:100})"
+    fail "PKI API certificate issuance (missing certificate in response)"
 fi
 
 echo ""
