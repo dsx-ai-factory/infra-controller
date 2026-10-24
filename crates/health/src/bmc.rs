@@ -42,6 +42,7 @@ use nv_redfish::core::{
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, OnceCell};
 use url::Url;
 
@@ -168,21 +169,79 @@ fn admit_one_after_cooldown(since: &mut Instant, cooldown: Duration) -> bool {
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
+/// One-way digest of a credential value, used only to detect rotation.
+///
+/// The digest stays in memory and its `Debug` output is redacted, so it cannot
+/// reveal the credential through logs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct CredentialFingerprint([u8; 32]);
+
+impl CredentialFingerprint {
+    fn of(credentials: &BmcCredentials) -> Self {
+        // Tag and length-prefix every field so distinct credentials cannot
+        // produce the same byte stream.
+        fn field(hasher: &mut Sha256, value: &str) {
+            hasher.update((value.len() as u64).to_be_bytes());
+            hasher.update(value.as_bytes());
+        }
+
+        let mut hasher = Sha256::new();
+        match credentials {
+            BmcCredentials::UsernamePassword { username, password } => {
+                hasher.update([0u8]);
+                field(&mut hasher, username);
+                match password {
+                    Some(password) => {
+                        hasher.update([1u8]);
+                        field(&mut hasher, password);
+                    }
+                    None => hasher.update([0u8]),
+                }
+            }
+            BmcCredentials::SessionToken { token } => {
+                hasher.update([1u8]);
+                field(&mut hasher, token);
+            }
+        }
+        Self(hasher.finalize().into())
+    }
+}
+
+impl std::fmt::Debug for CredentialFingerprint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CredentialFingerprint(<redacted>)")
+    }
+}
+
 pub trait CredentialProvider: Send + Sync {
     fn fetch_credentials<'a>(
         &'a self,
         endpoint: &'a BmcAddr,
     ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>>;
+
+    /// Returns a digest of statically configured credentials.
+    ///
+    /// Discovery restarts collectors when this value changes for an endpoint.
+    /// Providers that resolve credentials remotely return `None`; they recover
+    /// from rotation by refetching after an authentication failure.
+    fn fingerprint(&self) -> Option<CredentialFingerprint> {
+        None
+    }
 }
 
 #[derive(Clone)]
 pub struct FixedCredentialProvider {
     credentials: BmcCredentials,
+    fingerprint: CredentialFingerprint,
 }
 
 impl FixedCredentialProvider {
     pub fn new(credentials: BmcCredentials) -> Self {
-        Self { credentials }
+        let fingerprint = CredentialFingerprint::of(&credentials);
+        Self {
+            credentials,
+            fingerprint,
+        }
     }
 }
 
@@ -193,6 +252,10 @@ impl CredentialProvider for FixedCredentialProvider {
     ) -> BoxFuture<'a, Result<BmcCredentials, HealthError>> {
         let credentials = self.credentials.clone();
         Box::pin(async move { Ok(credentials) })
+    }
+
+    fn fingerprint(&self) -> Option<CredentialFingerprint> {
+        Some(self.fingerprint)
     }
 }
 
@@ -1782,6 +1845,46 @@ mod tests {
     use crate::metrics::BmcLatencyAttribute;
 
     const TEST_REQUEST_CONCURRENCY: NonZeroUsize = NonZeroUsize::MIN;
+
+    #[test]
+    fn credential_fingerprint_tracks_value_and_redacts_debug() {
+        let user_pass = |username: &str, password: Option<&str>| {
+            CredentialFingerprint::of(&BmcCredentials::UsernamePassword {
+                username: username.to_string(),
+                password: password.map(str::to_string),
+            })
+        };
+
+        assert_eq!(
+            user_pass("reader", Some("secret")),
+            user_pass("reader", Some("secret"))
+        );
+        assert_ne!(
+            user_pass("reader", Some("secret")),
+            user_pass("reader", Some("rotated"))
+        );
+        assert_ne!(user_pass("reader", None), user_pass("reader", Some("")));
+        // Length prefixes keep field boundaries distinct.
+        assert_ne!(user_pass("ab", Some("c")), user_pass("a", Some("bc")));
+        assert_ne!(
+            user_pass("token", None),
+            CredentialFingerprint::of(&BmcCredentials::SessionToken {
+                token: "token".to_string(),
+            })
+        );
+
+        let rendered = format!("{:?}", user_pass("reader", Some("secret")));
+        assert_eq!(rendered, "CredentialFingerprint(<redacted>)");
+
+        let provider = FixedCredentialProvider::new(BmcCredentials::UsernamePassword {
+            username: "reader".to_string(),
+            password: Some("secret".to_string()),
+        });
+        assert_eq!(
+            provider.fingerprint(),
+            Some(user_pass("reader", Some("secret")))
+        );
+    }
 
     struct CountingProvider {
         calls: Arc<AtomicUsize>,

@@ -24,8 +24,8 @@ use futures::{StreamExt, stream};
 
 use super::DiscoveryIterationStats;
 use super::cleanup::{
-    stop_ineligible_nmxc_collectors, stop_removed_bmc_collectors, stop_stale_machine_collectors,
-    stop_stale_power_shelf_collectors, stop_stale_switch_collectors,
+    stop_ineligible_nmxc_collectors, stop_removed_bmc_collectors, stop_stale_endpoint_connections,
+    stop_stale_machine_collectors, stop_stale_power_shelf_collectors, stop_stale_switch_collectors,
 };
 use super::context::{CollectorKind, DiscoveryLoopContext};
 use super::identity::ensure_primary_system_uuid;
@@ -155,6 +155,7 @@ pub async fn run_discovery_iteration(
     stop_stale_machine_collectors(ctx, &sharded_endpoints).await;
     stop_stale_switch_collectors(ctx, &sharded_endpoints).await;
     stop_stale_power_shelf_collectors(ctx, &sharded_endpoints).await;
+    stop_stale_endpoint_connections(ctx, &sharded_endpoints).await;
 
     let active_endpoints = active_keys(&sharded_endpoints);
     stop_removed_bmc_collectors(ctx, &active_endpoints).await;
@@ -730,5 +731,106 @@ mod tests {
         reconcile_reachability_collectors(&mut ctx, &[], Some(sink), "test")
             .await
             .expect("reachability cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn cluster_inventory_credential_rotation_reaches_bmc_requests() {
+        use std::sync::Mutex as StdMutex;
+        use std::time::Duration;
+
+        use axum::Router;
+        use axum::http::{HeaderMap, StatusCode};
+        use bmc_mock::test_support::serve_https;
+        use carbide_utils::redfish::redfish_basic_authorization_context;
+
+        use crate::config::ClusterEndpointSourceConfig;
+        use crate::endpoint::ClusterEndpointSource;
+        use crate::endpoint::test_support::reqwest;
+
+        // Record every Authorization header the BMC receives. Responses do not
+        // matter; only the credentials attached to collector requests do.
+        let seen = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let recorder = Arc::clone(&seen);
+        let app = Router::new().fallback(move |headers: HeaderMap| {
+            if let Some(value) = headers
+                .get(http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+            {
+                recorder.lock().unwrap().push(value.to_string());
+            }
+            async { StatusCode::NOT_FOUND }
+        });
+        let (_server, base_url) = serve_https("health-cluster-rotation", app);
+
+        let inventory = tempfile::NamedTempFile::new().expect("create inventory file");
+        let write_inventory = |password: &str| {
+            std::fs::write(
+                inventory.path(),
+                serde_json::json!({
+                    "default_credentials": {"username": "reader", "password": password},
+                    "nodes": [{"hostname": "host-a", "bmc_ip": "10.2.3.4", "rack": "rack-a"}],
+                })
+                .to_string(),
+            )
+            .expect("write inventory file");
+        };
+        write_inventory("old-secret");
+
+        let source: Arc<dyn EndpointSource> = Arc::new(ClusterEndpointSource::from_config(
+            ClusterEndpointSourceConfig {
+                inventory_path: inventory.path().to_path_buf(),
+                ..Default::default()
+            },
+            &reqwest(),
+            Some(&base_url),
+            10,
+            None,
+        ));
+        let mut config = Config::default();
+        config.endpoint_sources.carbide_api = Configurable::Disabled;
+        let mut ctx = DiscoveryLoopContext::new(
+            Arc::new(NoopLimiter),
+            Arc::new(MetricsManager::new("cluster_rotation_iteration").unwrap()),
+            Arc::new(config),
+        )
+        .expect("discovery context should start");
+        let shard_manager = ShardManager {
+            shard: 0,
+            shards_count: 1,
+        };
+
+        let (old_auth, _) = redfish_basic_authorization_context("reader", Some("old-secret"));
+        let (new_auth, _) = redfish_basic_authorization_context("reader", Some("new-secret"));
+        let wait_for = |expected: String, from: usize| {
+            let seen = Arc::clone(&seen);
+            async move {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while !seen.lock().unwrap()[from..].contains(&expected) {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .expect("collector request with expected credentials");
+            }
+        };
+
+        run_discovery_iteration(source.clone(), &shard_manager, &mut ctx, None, "test")
+            .await
+            .expect("initial discovery should complete");
+        wait_for(old_auth.clone(), 0).await;
+
+        write_inventory("new-secret");
+        run_discovery_iteration(source, &shard_manager, &mut ctx, None, "test")
+            .await
+            .expect("rotated discovery should complete");
+
+        // Replaced collectors finish shutdown before the iteration returns, so
+        // every later request must carry the rotated credentials.
+        let rotated_from = seen.lock().unwrap().len();
+        wait_for(new_auth.clone(), rotated_from).await;
+        assert!(
+            !seen.lock().unwrap()[rotated_from..].contains(&old_auth),
+            "no request after rotation may use the old credentials"
+        );
     }
 }
