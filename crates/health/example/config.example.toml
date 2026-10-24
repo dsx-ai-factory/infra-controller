@@ -357,6 +357,8 @@ exclude_services = ["Journal"]
 [collectors.logs.sse]
 initial_backoff = "1s"
 max_backoff = "30s"
+# Deadline for deleting the BMC subscription a closed stream opened.
+close_timeout = "5s"
 
 # Required when mode = "periodic"; ignored when mode = "sse".
 [collectors.logs.periodic]

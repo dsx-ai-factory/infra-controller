@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use nv_redfish::core::{Bmc, EntityTypeRef, NavProperty};
-use nv_redfish::event_service::{Event, EventStreamPayload};
+use nv_redfish::core::{Bmc, BmcError as _, BmcErrorClass, EntityTypeRef, NavProperty};
+use nv_redfish::event_service::{Event, EventDestination, EventStreamPayload};
 use tokio::sync::Semaphore;
 
 use super::diagnostic::{
@@ -40,7 +40,8 @@ use crate::collectors::inventory::{
     EntityInventory, GpuIdentity, SharedInventory, normalize_odata_id,
 };
 use crate::collectors::runtime::{
-    EventStream, StreamingCollector, StreamingConnectResult, open_sse_stream,
+    CloseReason, EventStream, OpenedDestination, StreamingCollector, StreamingConnectResult,
+    open_sse_stream,
 };
 use crate::endpoint::BmcEndpoint;
 use crate::metrics::MetricLabel;
@@ -75,6 +76,55 @@ struct EventRecordResolutionFailed {
     error: String,
 }
 
+/// What closing an SSE stream did to the `EventDestination` it opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, carbide_instrument::LabelValue)]
+enum SseCloseOutcome {
+    SocketOnly,
+    Deleted,
+    AlreadyGone,
+    DeleteFailed,
+    TimedOut,
+}
+
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "redfish_sse_subscription_closed",
+    metric_name = "carbide_health_redfish_sse_subscription_close_total",
+    component = "nico-hardware-health",
+    log = debug,
+    metric = counter,
+    message = "closed a Redfish SSE subscription",
+    describe = "Number of Redfish SSE streams closed, by what happened to the EventDestination each opened."
+)]
+struct SseSubscriptionClosed {
+    #[label]
+    outcome: SseCloseOutcome,
+    #[context]
+    odata_id: String,
+    #[context]
+    endpoint: String,
+    #[context]
+    error: String,
+}
+
+/// Returns the outcome with the error of a failed DELETE. A task the BMC
+/// returns for the DELETE is not polled.
+async fn delete_destination<B: Bmc>(
+    destination: EventDestination<B>,
+    timeout: Duration,
+) -> (SseCloseOutcome, String) {
+    match tokio::time::timeout(timeout, destination.delete()).await {
+        Ok(Ok(_)) => (SseCloseOutcome::Deleted, String::new()),
+        Ok(Err(nv_redfish::Error::Bmc(cause)))
+            if cause.error_class() == BmcErrorClass::HttpResponse { status: 404 } =>
+        {
+            (SseCloseOutcome::AlreadyGone, String::new())
+        }
+        Ok(Err(error)) => (SseCloseOutcome::DeleteFailed, error.to_string()),
+        Err(_) => (SseCloseOutcome::TimedOut, String::new()),
+    }
+}
+
 /// Configuration for the Redfish SSE log collector.
 pub struct SseLogCollectorConfig<B: Bmc> {
     /// Attach Redfish diagnostic payloads to emitted log records.
@@ -86,13 +136,19 @@ pub struct SseLogCollectorConfig<B: Bmc> {
     /// Entity inventory used to resolve `origin_of_condition` to the GPU
     /// currently occupying that chassis slot. `None` disables enrichment.
     pub(crate) gpu_inventory: Option<SharedInventory<B>>,
+
+    /// Deadline for deleting the `EventDestination` a closed stream opened.
+    pub close_timeout: Duration,
 }
 
 pub struct SseLogCollector<B: Bmc> {
     bmc: Arc<B>,
+    endpoint: Arc<BmcEndpoint>,
     include_diagnostics: bool,
     request_concurrency: usize,
     gpu_inventory: Option<SharedInventory<B>>,
+    close_timeout: Duration,
+    destination: Option<EventDestination<B>>,
 }
 
 #[async_trait]
@@ -101,19 +157,27 @@ impl<B: Bmc + 'static> StreamingCollector<B> for SseLogCollector<B> {
 
     fn new_runner(
         bmc: Arc<B>,
-        _endpoint: Arc<BmcEndpoint>,
+        endpoint: Arc<BmcEndpoint>,
         config: Self::Config,
     ) -> Result<Self, HealthError> {
         Ok(Self {
             bmc,
+            endpoint,
             include_diagnostics: config.include_diagnostics,
             request_concurrency: config.request_concurrency.get(),
             gpu_inventory: config.gpu_inventory,
+            close_timeout: config.close_timeout,
+            destination: None,
         })
     }
 
     async fn connect(&mut self) -> Result<StreamingConnectResult<'_>, HealthError> {
-        let sse_stream = open_sse_stream(Arc::clone(&self.bmc)).await?;
+        let (sse_stream, opened) = open_sse_stream(Arc::clone(&self.bmc)).await?;
+
+        self.destination = match opened {
+            OpenedDestination::Identified(destination) => Some(destination),
+            OpenedDestination::NoneCreated | OpenedDestination::Unknown => None,
+        };
 
         let event_stream = map_event_stream(
             sse_stream,
@@ -124,6 +188,32 @@ impl<B: Bmc + 'static> StreamingCollector<B> for SseLogCollector<B> {
         );
 
         Ok(StreamingConnectResult::Connected(event_stream))
+    }
+
+    /// Deletes the destination the stream created; some BMCs keep it after the stream closes.
+    async fn disconnect(&mut self, _reason: CloseReason) {
+        let endpoint = format!("{:?}", self.endpoint.addr);
+
+        let Some(destination) = self.destination.take() else {
+            carbide_instrument::emit(SseSubscriptionClosed {
+                outcome: SseCloseOutcome::SocketOnly,
+                odata_id: String::new(),
+                endpoint,
+                error: String::new(),
+            });
+
+            return;
+        };
+
+        let odata_id = destination.raw().odata_id().to_string();
+        let (outcome, error) = delete_destination(destination, self.close_timeout).await;
+
+        carbide_instrument::emit(SseSubscriptionClosed {
+            outcome,
+            odata_id,
+            endpoint,
+            error,
+        });
     }
 
     fn collector_type(&self) -> &'static str {
@@ -604,6 +694,7 @@ mod tests {
                     include_diagnostics: false,
                     request_concurrency: NonZeroUsize::MIN,
                     gpu_inventory: None,
+                    close_timeout: Duration::from_secs(5),
                 },
             )
             .expect("collector builds");
@@ -637,6 +728,81 @@ mod tests {
 
             server.stop().await.expect("server stops");
         }
+    }
+
+    #[tokio::test]
+    async fn deleting_each_opened_subscription_keeps_a_leaking_bmc_below_its_cap() {
+        use bmc_mock::test_support::{dell_poweredge_r750_router_with_event_limits, serve_https};
+        use bmc_mock::{EventServiceConfig, EventServiceLimits};
+
+        use crate::endpoint::test_support::endpoint_with_creds;
+        use crate::endpoint::{BmcAddr, BmcCredentials as HealthCredentials};
+
+        let limits = EventServiceConfig::try_from(EventServiceLimits {
+            max_subscribers: 2,
+            reap_on_close: false,
+            heartbeat: None,
+            ..Default::default()
+        })
+        .expect("valid limits");
+
+        let (router, state) = dell_poweredge_r750_router_with_event_limits(limits);
+        let events = Arc::clone(state.event_service.as_ref().expect("event service"));
+        let (mut server, base_url) = serve_https("health-sse-cleanup", router);
+
+        let endpoint = Arc::new(endpoint_with_creds(
+            BmcAddr {
+                ip: "127.0.0.1".parse().unwrap(),
+                port: base_url.port(),
+                mac: None,
+            },
+            HealthCredentials::SessionToken {
+                token: "fixture-token".into(),
+            },
+            None,
+            None,
+        ));
+
+        let mut collector = SseLogCollector::new_runner(
+            Arc::clone(endpoint.bmc()),
+            endpoint,
+            SseLogCollectorConfig {
+                include_diagnostics: false,
+                request_concurrency: NonZeroUsize::MIN,
+                gpu_inventory: None,
+                close_timeout: Duration::from_secs(5),
+            },
+        )
+        .expect("collector builds");
+
+        tokio::time::timeout(Duration::from_secs(30), async {
+            for cycle in 0..10 {
+                match collector.connect().await {
+                    Ok(StreamingConnectResult::Connected(_)) => {}
+                    Ok(StreamingConnectResult::Failed { error, .. }) | Err(error) => {
+                        panic!("cycle {cycle}: {error}")
+                    }
+                }
+
+                collector
+                    .disconnect(CloseReason::Ended {
+                        received: false,
+                        connected_for: Duration::ZERO,
+                    })
+                    .await;
+
+                // The mock frees a stream's slot once it sees the connection close.
+                while events.stats().streams != 0 {
+                    tokio::task::yield_now().await;
+                }
+            }
+        })
+        .await
+        .expect("ten connect and disconnect cycles finish within their deadline");
+
+        assert_eq!(events.stats().subscribers, 0);
+
+        server.stop().await.expect("server stops");
     }
 
     async fn event_to_logs_with_timeout<B: Bmc>(

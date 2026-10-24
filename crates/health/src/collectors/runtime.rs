@@ -24,8 +24,8 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use nv_redfish::ServiceRoot;
-use nv_redfish::core::Bmc;
-use nv_redfish::event_service::EventStreamPayload;
+use nv_redfish::core::{Bmc, EntityTypeRef as _};
+use nv_redfish::event_service::{EventDestination, EventStreamPayload, SubscriptionType};
 use prometheus::{Counter, Gauge, Histogram, HistogramOpts, IntCounter, IntGauge, Opts};
 use rand::RngExt;
 use tokio::task::JoinHandle;
@@ -109,8 +109,30 @@ pub trait StreamingCollector<B: Bmc>: Send + 'static {
     /// Open or reopen the streaming connection using the injected BMC.
     async fn connect(&mut self) -> Result<StreamingConnectResult<'_>, HealthError>;
 
+    /// Called once after each opened stream closes. Must bound its own I/O.
+    async fn disconnect(&mut self, _reason: CloseReason) {}
+
     fn collector_type(&self) -> &'static str;
 }
+
+/// Why an open stream closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseReason {
+    /// The runtime stopped the collector.
+    Cancelled,
+
+    /// The stream ended or errored.
+    Ended {
+        /// Whether the stream yielded an item.
+        received: bool,
+
+        /// How long the stream was open.
+        connected_for: Duration,
+    },
+}
+
+/// How long a cancelled `connect` may finish so its stream is still released.
+const CANCELLED_CONNECT_GRACE: Duration = Duration::from_secs(5);
 
 pub struct BackoffConfig {
     pub initial: Duration,
@@ -163,10 +185,20 @@ type SseStream = Pin<
     >,
 >;
 
+pub(crate) enum OpenedDestination<B: Bmc> {
+    Identified(EventDestination<B>),
+
+    /// No new destination of any type appeared.
+    NoneCreated,
+
+    /// A listing failed, or the new destinations hold no single SSE one.
+    Unknown,
+}
+
 /// Open a Redfish SSE event stream from a BMC.
 pub(crate) async fn open_sse_stream<B: Bmc + 'static>(
     bmc: Arc<B>,
-) -> Result<SseStream, HealthError> {
+) -> Result<(SseStream, OpenedDestination<B>), HealthError> {
     let root = ServiceRoot::new(bmc)
         .await
         .map_err(|e| HealthError::BmcError(Box::new(e)))?;
@@ -179,14 +211,47 @@ pub(crate) async fn open_sse_stream<B: Bmc + 'static>(
             HealthError::SseNotAvailable("BMC does not expose an EventService".to_string())
         })?;
 
+    let before = event_service.subscriptions().await;
+
     let stream = event_service
         .events()
         .await
         .map_err(|e| HealthError::BmcError(Box::new(e)))?;
 
-    Ok(Box::pin(
-        stream.map_err(|e| HealthError::BmcError(Box::new(e))),
-    ))
+    let after = event_service.subscriptions().await;
+
+    let (Ok(before), Ok(after)) = (before, after) else {
+        let stream: SseStream = Box::pin(stream.map_err(|e| HealthError::BmcError(Box::new(e))));
+
+        return Ok((stream, OpenedDestination::Unknown));
+    };
+
+    let mut added = after
+        .into_iter()
+        .filter(|listed| {
+            let id = listed.raw().odata_id().clone();
+
+            before.iter().all(|known| known.raw().odata_id() != &id)
+        })
+        .peekable();
+
+    // Redfish records no owner, so a single new SSE destination is ours on a
+    // best-effort basis; a failed listing or several new ones identify none.
+    let opened = if added.peek().is_none() {
+        OpenedDestination::NoneCreated
+    } else {
+        let mut sse =
+            added.filter(|listed| listed.subscription_type() == Some(SubscriptionType::Sse));
+
+        match (sse.next(), sse.next()) {
+            (Some(destination), None) => OpenedDestination::Identified(destination),
+            _ => OpenedDestination::Unknown,
+        }
+    };
+
+    let stream: SseStream = Box::pin(stream.map_err(|e| HealthError::BmcError(Box::new(e))));
+
+    Ok((stream, opened))
 }
 
 pub struct StreamMetrics {
@@ -497,118 +562,161 @@ impl Collector {
                     "streaming collector connecting"
                 );
 
-                let Some(stream_result) =
-                    cancel_clone.run_until_cancelled(collector.connect()).await
-                else {
+                // The grace below would otherwise start an attempt cancellation preempted.
+                if cancel_clone.is_cancelled() {
                     return;
+                }
+
+                let closed = {
+                    let mut connect = collector.connect();
+
+                    let Some(connected) = cancel_clone.run_until_cancelled(&mut connect).await
+                    else {
+                        // The open may already have created a destination on the BMC.
+                        let opened = matches!(
+                            tokio::time::timeout(CANCELLED_CONNECT_GRACE, connect).await,
+                            Ok(Ok(StreamingConnectResult::Connected(_)))
+                        );
+
+                        if opened {
+                            collector.disconnect(CloseReason::Cancelled).await;
+                        }
+
+                        return;
+                    };
+
+                    match connected {
+                        Err(e) => {
+                            metrics.reconnections_total.inc();
+                            tracing::error!(
+                                error = ?e,
+                                collector_type,
+                                endpoint = ?endpoint.addr,
+                                rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                                "streaming collector connection failed"
+                            );
+
+                            if !on_stream_failure(Err(&e)) {
+                                return;
+                            }
+
+                            None
+                        }
+                        Ok(StreamingConnectResult::Failed { events, error }) => {
+                            metrics.reconnections_total.inc();
+
+                            for event in events {
+                                metrics.items_processed_total.inc();
+                                data_sink.handle_event(&event_context, &event);
+                            }
+
+                            tracing::error!(
+                                error = ?error,
+                                collector_type,
+                                endpoint = ?endpoint.addr,
+                                rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                                "streaming collector connection failed"
+                            );
+
+                            if !on_stream_failure(Err(&error)) {
+                                return;
+                            }
+
+                            None
+                        }
+                        Ok(StreamingConnectResult::Connected(mut stream)) => {
+                            // the guard lives exactly as long as we hold an open stream; Drop
+                            // handles dec for every exit path (shutdown, error, stream end).
+                            let _conn_guard =
+                                StreamingConnectionGuard::inc(metrics.connected.clone());
+
+                            let connected_at = Instant::now();
+                            let mut received = false;
+
+                            tracing::info!(
+                                collector_type,
+                                endpoint = ?endpoint.addr,
+                                rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                                "streaming collector connected"
+                            );
+
+                            let cancelled = loop {
+                                let Some(item) =
+                                    cancel_clone.run_until_cancelled(stream.next()).await
+                                else {
+                                    break true;
+                                };
+
+                                match item {
+                                    Some(Ok(event)) => {
+                                        received = true;
+                                        metrics.items_processed_total.inc();
+                                        data_sink.handle_event(&event_context, &event);
+                                    }
+                                    Some(Err(e)) => {
+                                        metrics.stream_errors_total.inc();
+                                        metrics.reconnections_total.inc();
+                                        tracing::error!(
+                                            error = ?e,
+                                            collector_type,
+                                            endpoint = ?endpoint.addr,
+                                            rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                                            "streaming collector stream error, reconnecting"
+                                        );
+
+                                        break false;
+                                    }
+                                    None => {
+                                        tracing::info!(
+                                            collector_type,
+                                            endpoint = ?endpoint.addr,
+                                            rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                                            "streaming collector stream ended, reconnecting"
+                                        );
+
+                                        break false;
+                                    }
+                                }
+                            };
+
+                            Some(if cancelled {
+                                CloseReason::Cancelled
+                            } else {
+                                CloseReason::Ended {
+                                    received,
+                                    connected_for: connected_at.elapsed(),
+                                }
+                            })
+                        }
+                    }
                 };
 
-                match stream_result {
-                    Err(e) => {
-                        metrics.reconnections_total.inc();
-                        tracing::error!(
-                            error = ?e,
-                            collector_type,
-                            endpoint = ?endpoint.addr,
-                            rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
-                            "streaming collector connection failed"
-                        );
+                if let Some(reason) = closed {
+                    collector.disconnect(reason).await;
 
-                        if !on_stream_failure(Err(&e)) {
-                            return;
-                        }
-                    }
-                    Ok(StreamingConnectResult::Failed { events, error }) => {
-                        metrics.reconnections_total.inc();
-
-                        for event in events {
-                            metrics.items_processed_total.inc();
-                            data_sink.handle_event(&event_context, &event);
-                        }
-
-                        tracing::error!(
-                            error = ?error,
-                            collector_type,
-                            endpoint = ?endpoint.addr,
-                            rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
-                            "streaming collector connection failed"
-                        );
-
-                        if !on_stream_failure(Err(&error)) {
-                            return;
-                        }
-                    }
-                    Ok(StreamingConnectResult::Connected(mut stream)) => {
-                        // the guard lives exactly as long as we hold an open stream; Drop
-                        // handles dec for every exit path (shutdown, error, stream end).
-                        let _conn_guard = StreamingConnectionGuard::inc(metrics.connected.clone());
-                        let connected_at = Instant::now();
-                        let mut received = false;
-
+                    let CloseReason::Ended {
+                        received,
+                        connected_for,
+                    } = reason
+                    else {
                         tracing::info!(
                             collector_type,
                             endpoint = ?endpoint.addr,
                             rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
-                            "streaming collector connected"
+                            "streaming collector shutting down"
                         );
 
-                        loop {
-                            let Some(item) = cancel_clone.run_until_cancelled(stream.next()).await
-                            else {
-                                tracing::info!(
-                                    collector_type,
-                                    endpoint = ?endpoint.addr,
-                                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
-                                    "streaming collector shutting down"
-                                );
-                                return;
-                            };
+                        return;
+                    };
 
-                            match item {
-                                Some(Ok(event)) => {
-                                    received = true;
-                                    metrics.items_processed_total.inc();
-                                    data_sink.handle_event(&event_context, &event);
-                                }
-                                Some(Err(e)) => {
-                                    metrics.stream_errors_total.inc();
-                                    metrics.reconnections_total.inc();
-                                    tracing::error!(
-                                        error = ?e,
-                                        collector_type,
-                                        endpoint = ?endpoint.addr,
-                                        rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
-                                        "streaming collector stream error, reconnecting"
-                                    );
+                    if !on_stream_failure(Ok(connected_for)) {
+                        return;
+                    }
 
-                                    if !on_stream_failure(Ok(connected_at.elapsed())) {
-                                        return;
-                                    }
-
-                                    break;
-                                }
-                                None => {
-                                    tracing::info!(
-                                        collector_type,
-                                        endpoint = ?endpoint.addr,
-                                        rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
-                                        "streaming collector stream ended, reconnecting"
-                                    );
-
-                                    if !on_stream_failure(Ok(connected_at.elapsed())) {
-                                        return;
-                                    }
-
-                                    break;
-                                }
-                            }
-                        }
-
-                        // A stream that delivered data, or stayed up a full backoff
-                        // period, was healthy; one that only connected was not.
-                        if received || connected_at.elapsed() >= backoff_config.max {
-                            backoff.reset();
-                        }
+                    // A stream that delivered data, or stayed up a full backoff
+                    // period, was healthy; one that only connected was not.
+                    if received || connected_for >= backoff_config.max {
+                        backoff.reset();
                     }
                 }
 
@@ -774,31 +882,47 @@ mod tests {
         EventThenEnd,
         Error,
         Pending,
+        PendingAfter(Duration),
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum SessionStep {
+        Opened,
+        Cancelled,
+        Ended { received: bool },
     }
 
     struct SessionStreamingCollector {
         behaviors: VecDeque<StreamBehavior>,
+        steps: Arc<std::sync::Mutex<Vec<SessionStep>>>,
     }
 
     #[async_trait]
     impl StreamingCollector<BmcClient> for SessionStreamingCollector {
-        type Config = Vec<StreamBehavior>;
+        type Config = (Vec<StreamBehavior>, Arc<std::sync::Mutex<Vec<SessionStep>>>);
 
         fn new_runner(
             _bmc: Arc<BmcClient>,
             _endpoint: Arc<BmcEndpoint>,
-            config: Self::Config,
+            (behaviors, steps): Self::Config,
         ) -> Result<Self, HealthError> {
             Ok(Self {
-                behaviors: config.into(),
+                behaviors: behaviors.into(),
+                steps,
             })
         }
 
         async fn connect(&mut self) -> Result<StreamingConnectResult<'_>, HealthError> {
+            self.steps.lock().unwrap().push(SessionStep::Opened);
+
             let behavior = self
                 .behaviors
                 .pop_front()
                 .unwrap_or(StreamBehavior::Pending);
+
+            if let StreamBehavior::PendingAfter(delay) = behavior {
+                tokio::time::sleep(delay).await;
+            }
 
             let stream: EventStream<'_> = match behavior {
                 StreamBehavior::End => Box::pin(futures::stream::empty()),
@@ -813,10 +937,21 @@ mod tests {
                 StreamBehavior::Error => Box::pin(futures::stream::once(async {
                     Err(HealthError::GenericError("stream failed".to_string()))
                 })),
-                StreamBehavior::Pending => Box::pin(futures::stream::pending()),
+                StreamBehavior::Pending | StreamBehavior::PendingAfter(_) => {
+                    Box::pin(futures::stream::pending())
+                }
             };
 
             Ok(StreamingConnectResult::Connected(stream))
+        }
+
+        async fn disconnect(&mut self, reason: CloseReason) {
+            let step = match reason {
+                CloseReason::Cancelled => SessionStep::Cancelled,
+                CloseReason::Ended { received, .. } => SessionStep::Ended { received },
+            };
+
+            self.steps.lock().unwrap().push(step);
         }
 
         fn collector_type(&self) -> &'static str {
@@ -871,7 +1006,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn streaming_collector_reports_stream_end_and_error_but_not_cancellation()
+    async fn streaming_collector_disconnects_after_every_stream_and_reports_all_but_cancellation()
     -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let endpoint = Arc::new(test_endpoint(mac("00:11:22:33:44:77")));
         let bmc = Arc::clone(endpoint.bmc());
@@ -884,15 +1019,20 @@ mod tests {
 
         let data_sink: Arc<dyn DataSink> = Arc::new(CountingSink::default());
         let (callback_tx, mut callback_rx) = tokio::sync::mpsc::unbounded_channel();
+        let steps = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let collector = Collector::start_streaming::<SessionStreamingCollector, _>(
             endpoint,
             bmc,
-            vec![
-                StreamBehavior::End,
-                StreamBehavior::Error,
-                StreamBehavior::Pending,
-            ],
+            (
+                vec![
+                    StreamBehavior::End,
+                    StreamBehavior::Error,
+                    StreamBehavior::EventThenEnd,
+                    StreamBehavior::Pending,
+                ],
+                Arc::clone(&steps),
+            ),
             data_sink,
             StreamingCollectorStartContext {
                 backoff_config: BackoffConfig {
@@ -905,14 +1045,256 @@ mod tests {
         )?;
 
         let callbacks = tokio::time::timeout(Duration::from_secs(1), async {
-            [callback_rx.recv().await, callback_rx.recv().await]
+            let callbacks = [
+                callback_rx.recv().await,
+                callback_rx.recv().await,
+                callback_rx.recv().await,
+            ];
+
+            // Cancel only once the pending stream is open.
+            while steps.lock().unwrap().len() < 7 {
+                tokio::task::yield_now().await;
+            }
+
+            callbacks
         })
         .await?;
 
         collector.stop().await;
 
-        assert_eq!(callbacks, [Some(true), Some(true)]);
+        assert_eq!(callbacks, [Some(true), Some(true), Some(true)]);
         assert!(callback_rx.try_recv().is_err());
+
+        let ended = SessionStep::Ended { received: false };
+
+        assert_eq!(
+            *steps.lock().unwrap(),
+            [
+                SessionStep::Opened,
+                ended,
+                SessionStep::Opened,
+                ended,
+                SessionStep::Opened,
+                SessionStep::Ended { received: true },
+                SessionStep::Opened,
+                SessionStep::Cancelled,
+            ],
+            "each stream must disconnect once after it closes"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_connect_disconnects_only_if_it_started_and_opens_within_the_grace()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let cases = [
+            (
+                "opens within the grace",
+                true,
+                CANCELLED_CONNECT_GRACE / 5,
+                vec![SessionStep::Opened, SessionStep::Cancelled],
+            ),
+            (
+                "still opening when the grace ends",
+                true,
+                CANCELLED_CONNECT_GRACE * 2,
+                vec![SessionStep::Opened],
+            ),
+            (
+                "stopped before connecting",
+                false,
+                CANCELLED_CONNECT_GRACE / 5,
+                vec![],
+            ),
+        ];
+
+        for (name, started, connect_takes, expected) in cases {
+            let endpoint = Arc::new(test_endpoint(mac("00:11:22:33:44:88")));
+            let bmc = Arc::clone(endpoint.bmc());
+            let metrics_manager = MetricsManager::new("test_streaming_runtime_cancelled_connect")?;
+
+            let collector_registry = Arc::new(metrics_manager.create_collector_registry(
+                "streaming_collector_cancelled_connect_test".to_string(),
+                "test_streaming_runtime_cancelled_connect",
+            )?);
+
+            let data_sink: Arc<dyn DataSink> = Arc::new(CountingSink::default());
+            let steps = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+            let collector = Collector::start_streaming::<SessionStreamingCollector, _>(
+                endpoint,
+                bmc,
+                (
+                    vec![StreamBehavior::PendingAfter(connect_takes)],
+                    Arc::clone(&steps),
+                ),
+                data_sink,
+                StreamingCollectorStartContext {
+                    backoff_config: BackoffConfig::default(),
+                    collector_registry,
+                },
+                |_| true,
+            )?;
+
+            while started && steps.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+
+            let stopping = tokio::time::Instant::now();
+            collector.stop().await;
+
+            assert!(
+                stopping.elapsed() <= CANCELLED_CONNECT_GRACE,
+                "{name}: stop took {:?}",
+                stopping.elapsed()
+            );
+
+            assert_eq!(*steps.lock().unwrap(), expected, "{name}");
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_sse_stream_identifies_only_a_single_new_sse_destination()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use axum::extract::Request;
+        use axum::http::StatusCode;
+        use axum::middleware::{self, Next};
+        use axum::response::IntoResponse;
+        use bmc_mock::test_support::{dell_poweredge_r750_router_with_event_limits, serve_https};
+        use bmc_mock::{EventServiceConfig, EventServiceLimits};
+        use serde_json::Value;
+
+        use crate::endpoint::test_support::endpoint_with_creds;
+        use crate::endpoint::{BmcAddr, BmcCredentials};
+
+        const SUBSCRIPTIONS: &str = "/redfish/v1/EventService/Subscriptions";
+
+        #[derive(Clone, Copy)]
+        enum Listing {
+            AsServed,
+            Empty,
+            Failing,
+            TypeOmitted,
+            TypeNull,
+        }
+
+        #[derive(Debug, PartialEq)]
+        enum Opened {
+            Identified,
+            NoneCreated,
+            Unknown,
+        }
+
+        let cases = [
+            (
+                "the open adds one SSE destination",
+                Listing::AsServed,
+                Opened::Identified,
+            ),
+            (
+                "the listing is unchanged",
+                Listing::Empty,
+                Opened::NoneCreated,
+            ),
+            ("the listing fails", Listing::Failing, Opened::Unknown),
+            (
+                "the new destination omits SubscriptionType",
+                Listing::TypeOmitted,
+                Opened::Unknown,
+            ),
+            (
+                "the new destination has a null SubscriptionType",
+                Listing::TypeNull,
+                Opened::Unknown,
+            ),
+        ];
+
+        for (name, listing, expected) in cases {
+            let limits = EventServiceConfig::try_from(EventServiceLimits::default())?;
+            let (router, _state) = dell_poweredge_r750_router_with_event_limits(limits);
+
+            let router = router.layer(middleware::from_fn(
+                move |request: Request, next: Next| async move {
+                    let path = request.uri().path().to_owned();
+                    let response = next.run(request).await;
+                    let member = path.starts_with(&format!("{SUBSCRIPTIONS}/"));
+
+                    match listing {
+                        Listing::Failing if path == SUBSCRIPTIONS => {
+                            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                        }
+                        Listing::Empty if path == SUBSCRIPTIONS => {}
+                        Listing::TypeOmitted | Listing::TypeNull if member => {}
+                        _ => return response,
+                    }
+
+                    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                        .await
+                        .expect("buffered body");
+
+                    let mut body: Value = serde_json::from_slice(&bytes).expect("JSON body");
+
+                    match listing {
+                        Listing::Empty => {
+                            body["Members"] = Value::Array(Vec::new());
+                            body["Members@odata.count"] = Value::from(0);
+                        }
+                        Listing::TypeOmitted => {
+                            body.as_object_mut()
+                                .expect("JSON object")
+                                .remove("SubscriptionType");
+                        }
+                        Listing::TypeNull => body["SubscriptionType"] = Value::Null,
+                        Listing::AsServed | Listing::Failing => {}
+                    }
+
+                    axum::Json(body).into_response()
+                },
+            ));
+
+            let (mut server, base_url) = serve_https("health-sse-open", router);
+
+            let endpoint = endpoint_with_creds(
+                BmcAddr {
+                    ip: "127.0.0.1".parse().unwrap(),
+                    port: base_url.port(),
+                    mac: None,
+                },
+                BmcCredentials::SessionToken {
+                    token: "fixture-token".into(),
+                },
+                None,
+                None,
+            );
+
+            let (stream, opened) = tokio::time::timeout(
+                Duration::from_secs(10),
+                open_sse_stream(Arc::clone(endpoint.bmc())),
+            )
+            .await??;
+
+            let opened = match opened {
+                OpenedDestination::Identified(destination) => {
+                    assert_eq!(
+                        destination.subscription_type(),
+                        Some(SubscriptionType::Sse),
+                        "{name}"
+                    );
+
+                    Opened::Identified
+                }
+                OpenedDestination::NoneCreated => Opened::NoneCreated,
+                OpenedDestination::Unknown => Opened::Unknown,
+            };
+
+            drop(stream);
+            server.stop().await.expect("server stops");
+
+            assert_eq!(opened, expected, "{name}");
+        }
 
         Ok(())
     }
@@ -935,12 +1317,15 @@ mod tests {
         let collector = Collector::start_streaming::<SessionStreamingCollector, _>(
             endpoint,
             bmc,
-            vec![
-                StreamBehavior::End,
-                StreamBehavior::End,
-                StreamBehavior::EventThenEnd,
-                StreamBehavior::End,
-            ],
+            (
+                vec![
+                    StreamBehavior::End,
+                    StreamBehavior::End,
+                    StreamBehavior::EventThenEnd,
+                    StreamBehavior::End,
+                ],
+                Arc::default(),
+            ),
             data_sink,
             StreamingCollectorStartContext {
                 backoff_config: BackoffConfig {

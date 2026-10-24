@@ -1539,6 +1539,10 @@ pub struct SseLogConfig {
     /// Maximum retry backoff after repeated streaming connection failures.
     #[serde(with = "humantime_serde")]
     pub max_backoff: Duration,
+
+    /// Deadline for deleting the BMC subscription a closed stream opened.
+    #[serde(with = "humantime_serde")]
+    pub close_timeout: Duration,
 }
 
 impl Default for SseLogConfig {
@@ -1546,6 +1550,7 @@ impl Default for SseLogConfig {
         Self {
             initial_backoff: Duration::from_secs(1),
             max_backoff: Duration::from_secs(30),
+            close_timeout: Duration::from_secs(5),
         }
     }
 }
@@ -1565,6 +1570,10 @@ impl SseLogConfig {
                 "[collectors.logs.sse].max_backoff must be greater than or equal to initial_backoff"
                     .to_string(),
             );
+        }
+
+        if self.close_timeout.is_zero() {
+            return Err("[collectors.logs.sse].close_timeout must be greater than 0".to_string());
         }
 
         Ok(())
@@ -6555,9 +6564,19 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                 SseLogConfig {
                     initial_backoff: Duration::from_secs(30),
                     max_backoff: Duration::from_secs(1),
+                    ..SseLogConfig::default()
                 } => FailsWith(
                     "[collectors.logs.sse].max_backoff must be greater than or equal to initial_backoff"
                         .to_string()
+                ),
+            }
+
+            "zero close timeout" {
+                SseLogConfig {
+                    close_timeout: Duration::ZERO,
+                    ..SseLogConfig::default()
+                } => FailsWith(
+                    "[collectors.logs.sse].close_timeout must be greater than 0".to_string()
                 ),
             }
         );
@@ -6690,6 +6709,7 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                     sse: Some(SseLogConfig {
                         initial_backoff: Duration::from_secs(30),
                         max_backoff: Duration::from_secs(1),
+                        ..SseLogConfig::default()
                     }),
                     ..LogsCollectorConfig::default()
                 } => FailsWith(
@@ -6967,12 +6987,14 @@ max_backoff = "1m"
                     configured_sse: Some(SseLogConfig {
                         initial_backoff: Duration::from_secs(2),
                         max_backoff: Duration::from_secs(60),
+                        ..SseLogConfig::default()
                     }),
                     configured_periodic: None,
                     configured_auto: None,
                     effective_sse: SseLogConfig {
                         initial_backoff: Duration::from_secs(2),
                         max_backoff: Duration::from_secs(60),
+                        ..SseLogConfig::default()
                     },
                     effective_periodic: PeriodicLogConfig::default(),
                     effective_auto_periodic: PeriodicLogConfig::default(),
@@ -7055,12 +7077,14 @@ max_backoff = "45s"
                     configured_sse: Some(SseLogConfig {
                         initial_backoff: Duration::from_secs(3),
                         max_backoff: Duration::from_secs(45),
+                        ..SseLogConfig::default()
                     }),
                     configured_periodic: None,
                     configured_auto: None,
                     effective_sse: SseLogConfig {
                         initial_backoff: Duration::from_secs(3),
                         max_backoff: Duration::from_secs(45),
+                        ..SseLogConfig::default()
                     },
                     effective_periodic: PeriodicLogConfig::default(),
                     effective_auto_periodic: PeriodicLogConfig::default(),
