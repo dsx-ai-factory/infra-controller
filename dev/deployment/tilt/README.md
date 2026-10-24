@@ -10,7 +10,7 @@ workflow.
 
 ## Requirements
 
-- Docker
+- Docker connected to a Linux AMD64 or ARM64 daemon, with BuildKit available
 - Tilt
 - Helm 3 or Helm 4, plus Python 3 for Tilt's `helm_resource` extension
 - `kubectl` connected to a kind cluster
@@ -210,21 +210,37 @@ mock on port 443.
 
 ## Image builds
 
-Tilt owns its service Dockerfiles and build-context ignore files in this directory.
-The shared compiler-container Dockerfile remains under `dev/docker`, where CI and
-other development workflows also use it. Their existing service Dockerfiles
-remain independent of Tilt.
+Tilt and `make images-dev` share the Core service recipes and build-context
+ignore files in `dev/docker/Dockerfile.dev-services` and
+`dev/docker/Dockerfile.dev-runtime`. The compiler-container Dockerfiles in
+`dev/docker` are also shared with other build workflows. Tilt retains the
+MAT controller recipe in this directory and uses the REST service Dockerfiles
+under `rest-api`.
+
+Both workflows select the native Linux AMD64 or ARM64 architecture from the
+active Docker daemon. Other daemon platforms fail before builds start. The Docker
+daemon and the kind cluster must use the same architecture.
+
+For a standalone image build, use `make images-dev` from the repository root.
+See [building one local development service](../../../docs/manuals/building_nico_containers.md#build-one-local-development-service)
+for target selection, image names, prerequisites and the isolated DHCP image
+runtime check. It builds into the selected Docker daemon without publishing
+images or deploying Kubernetes resources.
 
 All Tilt runtime images derive from one digest-pinned Debian Bookworm slim base
 with CA certificates. Service images install their additional runtime packages;
-the compiler toolchains remain in build stages. DHCP uses the Kea version in
-`dev/docker/kea.version`, matching the compiler container.
+the compiler toolchains remain in build stages. DHCP includes both Kea DHCPv4
+and DHCPv6 servers, using the version in `dev/docker/kea.version` to match the
+compiler container. Its hook library is installed at
+`/usr/lib/kea/hooks/libdhcp.so` on both architectures. Tilt values select that
+path for DHCPv4; the DHCPv6 chart already uses it directly.
 
-`Dockerfile.core` has separate targets for API, BMC proxy, DHCP,
-machine-a-tron, SSH console, and the MAT protocol gateway. Each target builds
-and packages its own binary (or DHCP hook library), sharing locked Cargo
-dependency and target caches. Tilt's Rust build stages use `line-tables-only`
-debug information for development and release profiles, retaining source-line
+`Dockerfile.dev-services` has separate targets for API, BMC proxy, DHCP,
+machine-a-tron, SSH console, the MAT protocol gateway and PostgreSQL exporter.
+Each target builds and packages its own binary (or DHCP hook library), sharing
+locked Cargo dependency and target caches separated by architecture. The Rust
+build stages use `line-tables-only` debug information for development and release
+profiles, retaining source-line
 backtraces without full debugger type and variable information. The API image
 contains a copy of nico-admin-cli for convenience.
 
