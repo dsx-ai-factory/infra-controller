@@ -19,8 +19,6 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use futures::future::join_all;
-
 use super::context::{CollectorKind, DiscoveryLoopContext};
 use crate::collectors::Collector;
 use crate::endpoint::BmcEndpoint;
@@ -107,7 +105,7 @@ pub(super) async fn stop_stale_switch_collectors(
 
     // CollectorRemoved unregisters the old Prometheus label set. Wait for that
     // cleanup before replacement collectors register the new serial or domain UUID.
-    join_all(stale_collectors.into_iter().map(Collector::stop)).await;
+    ctx.collectors.stop(stale_collectors).await;
 }
 
 /// Restarts machine collectors when discovery reports a different NVLink domain.
@@ -159,7 +157,7 @@ pub(super) async fn stop_stale_machine_collectors(
         })
         .collect::<Vec<_>>();
 
-    join_all(stale_collectors.into_iter().map(Collector::stop)).await;
+    ctx.collectors.stop(stale_collectors).await;
 }
 
 /// Restarts PowerShelf collectors when discovery reports a different NICo ID.
@@ -212,7 +210,7 @@ pub(super) async fn stop_stale_power_shelf_collectors(
 
     // CollectorRemoved unregisters the old Prometheus label set before the
     // discovery loop starts replacements with the updated PowerShelf ID.
-    join_all(stale_collectors.into_iter().map(Collector::stop)).await;
+    ctx.collectors.stop(stale_collectors).await;
 }
 
 fn take_collectors_for_keys(
@@ -244,11 +242,8 @@ fn stop_collectors_for_keys(
     removed_keys: &HashSet<Cow<'static, str>>,
     stop_reason: CollectorStopReason,
 ) {
-    for collector in take_collectors_for_keys(ctx, kind, removed_keys, stop_reason) {
-        tokio::spawn(async move {
-            collector.stop().await;
-        });
-    }
+    let collectors = take_collectors_for_keys(ctx, kind, removed_keys, stop_reason);
+    ctx.collectors.start_stopping(collectors);
 }
 
 /// Removes collectors for absent endpoints and waits for their shutdown hooks.
@@ -277,7 +272,7 @@ pub(super) async fn stop_removed_bmc_collectors(
         ctx.collectors.remove_endpoint_caches(key);
     }
 
-    join_all(removed_collectors.into_iter().map(Collector::stop)).await;
+    ctx.collectors.stop(removed_collectors).await;
 
     if !removed_keys.is_empty() {
         tracing::info!(
@@ -332,6 +327,8 @@ pub(super) fn stop_ineligible_nmxc_collectors(
 mod tests {
     use std::str::FromStr;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     use carbide_uuid::power_shelf::PowerShelfId;
 
@@ -357,6 +354,36 @@ mod tests {
 
     fn noop_collector() -> Collector {
         Collector::spawn_task(|_| async {})
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_waits_for_a_removal_its_cancelled_iteration_started() {
+        let mut ctx = context("test_cancelled_removal_drain");
+        let cleaned_up = Arc::new(AtomicBool::new(false));
+        let cleanup = cleaned_up.clone();
+
+        ctx.collectors.insert(
+            CollectorKind::Logs,
+            Cow::Borrowed("removed"),
+            Collector::spawn_task(|cancel| async move {
+                cancel.cancelled().await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                cleanup.store(true, Ordering::SeqCst);
+            }),
+        );
+
+        let removal = tokio::time::timeout(
+            Duration::from_secs(1),
+            stop_removed_bmc_collectors(&mut ctx, &HashSet::new()),
+        )
+        .await;
+
+        assert!(removal.is_err(), "the removal must outlast its iteration");
+
+        let shutdown = ctx.drain_collectors(Duration::from_secs(20)).await;
+
+        assert_eq!((shutdown.closed, shutdown.timed_out), (1, 0));
+        assert!(cleaned_up.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
