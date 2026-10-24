@@ -118,6 +118,30 @@ where
         .transpose()
 }
 
+fn deserialize_optional_std_duration<'de, D>(
+    deserializer: D,
+) -> Result<Option<std::time::Duration>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|value| duration_str::parse(&value).map_err(serde::de::Error::custom))
+        .transpose()
+}
+
+fn serialize_optional_std_duration<S>(
+    duration: &Option<std::time::Duration>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match duration {
+        None => serializer.serialize_none(),
+        Some(duration) => as_std_duration(duration, serializer),
+    }
+}
+
 /// nico-api configuration file content
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1061,6 +1085,15 @@ pub struct ApiAdmissionControlConfig {
     )]
     pub pending_timeout: std::time::Duration,
 
+    /// Maximum time an admitted request may execute its handler. Must cover the
+    /// longest legitimate unary RPC served by nico-api.
+    #[serde(
+        default = "default_api_admission_max_execution_time",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub max_execution_time: std::time::Duration,
+
     /// How long empty client scheduling state remains cached.
     #[serde(
         default = "default_api_admission_client_idle_timeout",
@@ -1084,6 +1117,13 @@ pub struct ApiAdmissionServiceLimitsConfig {
         serialize_with = "as_std_duration"
     )]
     pub pending_timeout: std::time::Duration,
+    /// Overrides the global `max_execution_time` for this service when set.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_std_duration",
+        serialize_with = "serialize_optional_std_duration"
+    )]
+    pub max_execution_time: Option<std::time::Duration>,
 }
 
 impl Default for ApiAdmissionControlConfig {
@@ -1095,6 +1135,7 @@ impl Default for ApiAdmissionControlConfig {
             max_work_in_flight_per_client: default_api_admission_max_work_in_flight_per_client(),
             max_pending_per_client: default_api_admission_max_pending_per_client(),
             pending_timeout: default_api_admission_pending_timeout(),
+            max_execution_time: default_api_admission_max_execution_time(),
             client_idle_timeout: default_api_admission_client_idle_timeout(),
             service_limits: BTreeMap::new(),
         }
@@ -1115,6 +1156,7 @@ impl ApiAdmissionControlConfig {
             self.max_work_in_flight_per_client,
             self.max_pending_per_client,
             self.pending_timeout,
+            self.max_execution_time,
             self.client_idle_timeout,
         )
         .map(Some)
@@ -1135,6 +1177,7 @@ impl ApiAdmissionControlConfig {
                 limits.max_work_in_flight,
                 limits.max_pending,
                 limits.pending_timeout,
+                limits.max_execution_time.unwrap_or(self.max_execution_time),
                 self.max_work_in_flight,
                 self.max_pending,
             )
@@ -4177,6 +4220,10 @@ const fn default_api_admission_max_pending_per_client() -> usize {
     64
 }
 
+const fn default_api_admission_max_execution_time() -> std::time::Duration {
+    std::time::Duration::from_secs(120)
+}
+
 const fn default_api_admission_pending_timeout() -> std::time::Duration {
     // This is intentionally half of the normal ten-second client timeout,
     // leaving roughly half of the deadline for handler execution and response
@@ -6537,7 +6584,7 @@ path = "credentials.yaml"
     #[test]
     fn api_admission_control_only_validates_bounds_when_enabled() {
         type ZeroOut = fn(&mut ApiAdmissionControlConfig);
-        let cases: [(&str, ZeroOut); 6] = [
+        let cases: [(&str, ZeroOut); 7] = [
             ("max_work_in_flight", |config| config.max_work_in_flight = 0),
             ("max_pending", |config| config.max_pending = 0),
             ("max_work_in_flight_per_client", |config| {
@@ -6548,6 +6595,9 @@ path = "credentials.yaml"
             }),
             ("pending_timeout", |config| {
                 config.pending_timeout = std::time::Duration::ZERO
+            }),
+            ("max_execution_time", |config| {
+                config.max_execution_time = std::time::Duration::ZERO
             }),
             ("client_idle_timeout", |config| {
                 config.client_idle_timeout = std::time::Duration::ZERO
@@ -6561,6 +6611,7 @@ path = "credentials.yaml"
             max_work_in_flight_per_client: 0,
             max_pending_per_client: 0,
             pending_timeout: std::time::Duration::ZERO,
+            max_execution_time: std::time::Duration::from_secs(120),
             client_idle_timeout: std::time::Duration::ZERO,
             service_limits: BTreeMap::new(),
         };
@@ -6612,6 +6663,42 @@ path = "credentials.yaml"
         assert_api_admission_semaphore_bound("max_work_in_flight", |config, value| {
             config.max_work_in_flight = value;
         });
+    }
+
+    #[test]
+    fn api_admission_control_parses_max_execution_time_overrides() {
+        let config = toml::from_str::<ApiAdmissionControlConfig>(
+            r#"
+            max_execution_time = "45s"
+
+            [service_limits.site-agent]
+            max_work_in_flight = 4
+            max_pending = 32
+            pending_timeout = "5s"
+            max_execution_time = "300s"
+
+            [service_limits.flow]
+            max_work_in_flight = 4
+            max_pending = 32
+            pending_timeout = "5s"
+            "#,
+        )
+        .expect("admission config parses");
+
+        assert_eq!(
+            config.max_execution_time,
+            std::time::Duration::from_secs(45)
+        );
+        assert_eq!(
+            config.service_limits["site-agent"].max_execution_time,
+            Some(std::time::Duration::from_secs(300))
+        );
+        // An omitted override inherits the global value when limits are built.
+        assert_eq!(config.service_limits["flow"].max_execution_time, None);
+        config
+            .admission_limits()
+            .expect("overrides are valid")
+            .expect("admission is enabled");
     }
 
     #[test]
@@ -6771,6 +6858,7 @@ path = "credentials.yaml"
                 max_work_in_flight_per_client: 8,
                 max_pending_per_client: 64,
                 pending_timeout: std::time::Duration::from_secs(5),
+                max_execution_time: std::time::Duration::from_secs(120),
                 client_idle_timeout: std::time::Duration::from_secs(5 * 60),
                 service_limits: BTreeMap::new(),
             }

@@ -431,6 +431,7 @@ different share without allowing it to exceed either global bound.
 | `max_work_in_flight_per_client` | `usize` | `8` | Default maximum business requests from one client that may execute concurrently. Must be greater than zero, no greater than `max_work_in_flight`, and representable as a `u32`. |
 | `max_pending_per_client` | `usize` | `64` | Default hard bound on pending business requests from one client. Must be greater than zero and no greater than `max_pending`. |
 | `pending_timeout` | `Duration` | `5s` | Default maximum time a client's pending request may wait for execution. Admission can reject earlier when its queue-delay estimate exceeds this value. Must be greater than zero. |
+| `max_execution_time` | `Duration` | `120s` | Maximum time an admitted request may execute its handler. Must cover the longest legitimate unary RPC. Must be greater than zero. |
 | `client_idle_timeout` | `Duration` | `5m` | How long an empty, inactive client's scheduler state is cached before cleanup. Must be greater than zero. |
 | `service_limits` | `BTreeMap<String, ApiAdmissionServiceLimitsConfig>` | `{}` | Per-service overrides keyed by the exact SPIFFE service identifier described below. Unlisted services use the default per-client limits. |
 
@@ -444,6 +445,7 @@ field-level defaults.
 | `max_work_in_flight` | `usize` | **required** | Maximum requests from this service that may execute concurrently. Must be greater than zero, no greater than the global `max_work_in_flight`, and representable as a `u32`. |
 | `max_pending` | `usize` | **required** | Hard bound on this service's pending requests. Must be greater than zero and no greater than the global `max_pending`. |
 | `pending_timeout` | `Duration` | **required** | Maximum time this service's pending request may wait for execution. Admission can reject earlier when its queue-delay estimate exceeds this value. Must be greater than zero. |
+| `max_execution_time` | `Duration` | *(optional)* | Overrides the global `max_execution_time` for this service. Must be greater than zero when set. |
 
 The map key is the identifier extracted by removing one of
 `auth.trust.spiffe_service_base_paths` from the certificate's SPIFFE path. For
