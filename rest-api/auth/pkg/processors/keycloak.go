@@ -30,7 +30,7 @@ type KeycloakProcessor struct {
 func (h *KeycloakProcessor) ProcessToken(c echo.Context, tokenStr string, jwksConfig *config.JwksConfig, logger zerolog.Logger) (*cdbm.User, *util.APIError) {
 	claims := &claim.KeycloakClaims{}
 
-	token, err := jwksConfig.ValidateToken(tokenStr, claims)
+	token, err := jwksConfig.ValidateTokenContext(c.Request().Context(), tokenStr, claims)
 	if err != nil {
 		if strings.Contains(err.Error(), jwt.ErrTokenExpired.Error()) {
 			logger.Error().Err(err).Msg("Token expired")

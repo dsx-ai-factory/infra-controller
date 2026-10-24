@@ -57,6 +57,24 @@ data:
       enabled: false
       serviceName: nico-rest-api
 
+    # Deployment-wide auth policy.
+    #
+    # issuerReloadInterval is how often every replica rebuilds DB-sourced issuers
+    # into the live registry (default 30s). jwksRefreshInterval is how often each
+    # replica re-fetches signing keys for those issuers (default 15m).
+    # resolveFlightTimeout is the ceiling for one on-demand issuer lookup when a
+    # token names an issuer this replica has not reloaded yet (default 30s).
+    # All three are Go duration strings.
+    auth:
+      issuerReloadInterval: 30s
+      jwksRefreshInterval: 15m
+      resolveFlightTimeout: 30s
+
+    # Keycloak is this base's auth source. The other two modes — static
+    # ConfigMap issuers, and DB-backed issuers managed through the
+    # /nico/auth-issuer API — are described in deploy/INSTALLATION.md and both
+    # require keycloak.enabled=false. Any issuer configured here must use HTTPS
+    # JWKS endpoints the API can verify.
     keycloak:
       enabled: true
       baseURL: http://keycloak:8082

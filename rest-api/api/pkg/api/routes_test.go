@@ -12,6 +12,7 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	temporalClient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
@@ -259,8 +260,37 @@ func TestNewAPIRoutes(t *testing.T) {
 			assertRouteExists(t, got, http.MethodPost, runPath+"/:id/resume")
 			assertRouteExists(t, got, http.MethodPost, runPath+"/:id/advance")
 			assertRouteExists(t, got, http.MethodPost, runPath+"/:id/cancel")
+
 		})
 	}
+}
+
+func TestNewAuthIssuerRoutes(t *testing.T) {
+	// Use one static custom issuer as the bootstrap IdP for this route-shape test.
+	// An empty static list also enables the routes for deployments whose database
+	// already contains Auth Issuers.
+	cfg, err := config.NewConfigFromYAML(`
+keycloak:
+  enabled: false
+issuers:
+  - issuer: https://provider.example.com
+    jwks: https://provider.example.com/jwks
+    origin: custom
+    claimMappings:
+      - orgName: provider-org
+        roles: [PROVIDER_ADMIN]
+env:
+  disconnected: true
+`)
+	require.NoError(t, err)
+
+	got := NewAuthIssuerRoutes(&cdb.Session{}, cfg)
+	authIssuerPath := "/org/:orgName/" + cfg.GetAPIName() + "/auth-issuer"
+	assert.Len(t, got, 4)
+	assertRouteExists(t, got, http.MethodPut, authIssuerPath)
+	assertRouteExists(t, got, http.MethodGet, authIssuerPath)
+	assertRouteExists(t, got, http.MethodGet, authIssuerPath+"/:authIssuerId")
+	assertRouteExists(t, got, http.MethodDelete, authIssuerPath+"/:authIssuerId")
 }
 
 func assertRouteExists(t *testing.T, routes []Route, method, path string) {

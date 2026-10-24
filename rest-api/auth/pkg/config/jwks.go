@@ -5,9 +5,9 @@ package config
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/core"
@@ -17,6 +17,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/labstack/echo/v4"
 	"github.com/pkg/errors"
+	"golang.org/x/sync/singleflight"
 )
 
 // =============================================================================
@@ -24,7 +25,20 @@ import (
 // =============================================================================
 
 const (
-	minUpdateInterval = 10 * time.Second
+	// minUpdateInterval is the fetch throttle. It is a second under the issuer
+	// refresh loop's 10s tick, so scheduling jitter between ticks never makes a
+	// failing replica skip its retry.
+	minUpdateInterval = 9 * time.Second
+
+	// negativeKIDTTL is how long a kid missing from a fresh key set is remembered.
+	negativeKIDTTL = 30 * time.Second
+
+	// maxNegativeKIDs bounds the negative cache against tokens minted with random
+	// kids. On overflow the map is dropped wholesale, costing at most one fetch.
+	maxNegativeKIDs = 256
+
+	// maxJWKSAge is how long a key set stays usable without a successful fetch.
+	maxJWKSAge = 24 * time.Hour
 )
 
 // =============================================================================
@@ -33,6 +47,9 @@ const (
 
 var (
 	isServiceAccountContextKey = AuthContextKey("isServiceAccount")
+
+	// jwksFetchGroup shares one in-flight fetch per JWKS URL.
+	jwksFetchGroup singleflight.Group
 )
 
 // =============================================================================
@@ -83,6 +100,9 @@ type ClaimMapping struct {
 
 	// Audiences: optional token audiences allowed to authorize this mapping. Any one exact match is sufficient.
 	Audiences []string `mapstructure:"audiences"`
+
+	// Scopes: optional scopes the token must carry to authorize this mapping. All are required, in addition to any issuer-level scopes.
+	Scopes []string `mapstructure:"scopes"`
 
 	// IsServiceAccount: if true, assigns admin roles (PROVIDER_ADMIN, TENANT_ADMIN). Ignores RolesAttribute/Roles.
 	IsServiceAccount bool `mapstructure:"isServiceAccount"`
@@ -142,16 +162,16 @@ func (cm *ClaimMapping) GetOrgNameAndDisplayName(claims jwt.MapClaims) (orgName 
 
 // JwksConfig holds configuration for a JWKS endpoint and token validation.
 type JwksConfig struct {
-	Name          string
-	IsUpdating    uint32        // atomic flag for concurrent JWKS updates
 	sync.RWMutex                // protects JWKS access
 	URL           string        // JWKS endpoint URL
 	Issuer        string        // expected "iss" claim value
 	Origin        string        // token origin type (e.g., "kas-legacy", "kas-ssa", "keycloak", "custom", "kas")
-	LastUpdated   time.Time     // last successful JWKS update timestamp
-	LastAttempted time.Time     // last JWKS update attempt timestamp
+	LastUpdated   time.Time     // when the installed key set was fetched (success only)
+	LastAttempted time.Time     // last JWKS fetch attempt, successful or not; keys the throttle
+	lastSettledAt time.Time     // attempt time of the last fetch that settled; what LastAttempt reports
+	lastError     error         // how the last settled fetch ended, nil for success
 	jwks          *core.JWKS    // cached JWKS keys
-	updateDone    chan struct{} // closed when the current JWKS update finishes
+	updateDone    chan struct{} // closed when this config's in-flight fetch settles
 	JWKSTimeout   time.Duration // fetch timeout (default: 5s)
 
 	Audiences []string // allowed audience values (token must have at least one)
@@ -163,21 +183,22 @@ type JwksConfig struct {
 	// For custom issuers, use ClaimMapping.IsServiceAccount instead.
 	ServiceAccount bool
 
-	// ReservedOrgNames prevents dynamic org mappings from claiming statically-configured org names.
-	// Populated by nico-rest-api during initialization.
-	ReservedOrgNames map[string]bool
+	// reservedOrgNames prevents dynamic org mappings from claiming
+	// statically-configured org names. Guarded by the embedded mutex.
+	reservedOrgNames map[string]bool
 
-	subjectPrefix string // SHA256(issuer)[0:10] - namespaces subject claims
+	// negativeKIDs maps kids missing after a fresh fetch to when they may be
+	// rechecked. Cleared when a new key set is installed.
+	negativeKIDs map[string]time.Time
 }
 
 // NewJwksConfig is a function that initializes and returns a configuration object for managing JWKS
-func NewJwksConfig(name string, url string, issuer string, origin string, serviceAccount bool, audiences []string, scopes []string) *JwksConfig {
+func NewJwksConfig(url string, issuer string, origin string, serviceAccount bool, audiences []string, scopes []string) *JwksConfig {
 	// Default to custom origin if not specified
 	if origin == "" {
 		origin = TokenOriginCustom
 	}
 	return &JwksConfig{
-		Name:           name,
 		URL:            url,
 		Issuer:         issuer,
 		Origin:         origin,
@@ -199,6 +220,9 @@ func (jcfg *JwksConfig) GetKeyByID(id string) (interface{}, error) {
 
 	if jcfg.jwks == nil {
 		return nil, core.ErrJWKSNotInitialized
+	}
+	if jcfg.expiredLocked() {
+		return nil, core.ErrJWKSExpired
 	}
 
 	key, err := jcfg.jwks.GetKeyByID(id)
@@ -242,75 +266,215 @@ func (jcfg *JwksConfig) MatchesIssuer(issuer string) bool {
 	return issuer == jcfg.Issuer
 }
 
-// UpdateJWKS fetches and validates JWKS from the configured URL. Throttled to minUpdateInterval.
-func (jcfg *JwksConfig) UpdateJWKS() error {
-	jcfg.Lock()
-	if jcfg.URL == "" {
-		jcfg.Unlock()
-		return core.ErrJWKSURLEmpty
-	}
-	if !jcfg.LastAttempted.IsZero() && time.Since(jcfg.LastAttempted) < minUpdateInterval {
-		if atomic.LoadUint32(&jcfg.IsUpdating) != 0 {
-			jcfg.Unlock()
-			return core.ErrJWKSUpdateInProgress
-		}
-		hasCachedKeys := jcfg.jwks != nil
-		jcfg.Unlock()
-		if !hasCachedKeys {
-			return core.ErrJWKSNotInitialized
-		}
-		return nil
-	}
-	if !atomic.CompareAndSwapUint32(&jcfg.IsUpdating, 0, 1) {
-		jcfg.Unlock()
-		return core.ErrJWKSUpdateInProgress
-	}
-	jcfg.updateDone = make(chan struct{})
-	urlCopy, timeout := jcfg.URL, jcfg.JWKSTimeout
-	jcfg.LastAttempted = time.Now()
-	jcfg.Unlock()
-	defer func() {
-		jcfg.Lock()
-		atomic.StoreUint32(&jcfg.IsUpdating, 0)
-		close(jcfg.updateDone)
-		jcfg.updateDone = nil
-		jcfg.Unlock()
-	}()
+// expiredLocked reports whether the installed key set is older than maxJWKSAge and
+// so may no longer be used to validate tokens. The caller must hold the lock.
+func (jcfg *JwksConfig) expiredLocked() bool {
+	return !jcfg.LastUpdated.IsZero() && time.Since(jcfg.LastUpdated) > maxJWKSAge
+}
 
-	jwks, err := core.NewJWKSFromURL(urlCopy, timeout)
-	if err != nil {
-		return errors.Wrapf(err, "failed to update JWKS from %s", urlCopy)
-	}
-	if jwks.Set == nil || len(jwks.Set.Keys) == 0 {
-		return errors.Wrapf(core.ErrEmptyKeySet, "from %s", urlCopy)
-	}
-
-	validKeyCount := 0
-	for _, key := range jwks.Set.Keys {
-		if key.Valid() {
-			validKeyCount++
-		}
-	}
-	if validKeyCount == 0 {
-		return errors.Wrapf(core.ErrNoValidKeys, "from %s", urlCopy)
-	}
-
+// beginFetch claims a fetch unless one was attempted within minUpdateInterval.
+// finishFetch closes the returned channel.
+func (jcfg *JwksConfig) beginFetch() (chan struct{}, time.Time, bool) {
 	jcfg.Lock()
 	defer jcfg.Unlock()
-	jcfg.jwks = jwks
-	jcfg.LastUpdated = time.Now()
+	if !jcfg.LastAttempted.IsZero() && time.Since(jcfg.LastAttempted) < minUpdateInterval {
+		return nil, time.Time{}, false
+	}
+	jcfg.LastAttempted = time.Now()
+	done := make(chan struct{})
+	jcfg.updateDone = done
+	return done, jcfg.LastAttempted, true
+}
+
+// finishFetch releases callers waiting on the fetch begun with done.
+func (jcfg *JwksConfig) finishFetch(done chan struct{}) {
+	jcfg.Lock()
+	defer jcfg.Unlock()
+	close(done)
+	if jcfg.updateDone == done {
+		jcfg.updateDone = nil
+	}
+}
+
+// awaitInFlight waits for a fetch this config has in flight and reports whether
+// one settled. It reports false at once when none is in flight or ctx is done.
+func (jcfg *JwksConfig) awaitInFlight(ctx context.Context) bool {
+	jcfg.RLock()
+	done := jcfg.updateDone
+	jcfg.RUnlock()
+	if done == nil {
+		return false
+	}
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// UpdateJWKS fetches and installs the key set. Throttled to minUpdateInterval.
+func (jcfg *JwksConfig) UpdateJWKS() error {
+	ctx := context.Background()
+	fetched, err := jcfg.RefreshJWKS(ctx)
+	if err != nil || fetched {
+		return err
+	}
+	jcfg.awaitInFlight(ctx)
+	if jcfg.GetJWKS() == nil {
+		return core.ErrJWKSNotInitialized
+	}
 	return nil
 }
 
-// GetJWKS returns the enhanced JWKS with go-jose capabilities
+// RefreshJWKS fetches and installs the key set. fetched is false when the throttle
+// suppressed the fetch or a newer set was already installed.
+func (jcfg *JwksConfig) RefreshJWKS(ctx context.Context) (fetched bool, err error) {
+	jcfg.RLock()
+	urlCopy, timeout := jcfg.URL, jcfg.JWKSTimeout
+	jcfg.RUnlock()
+	if urlCopy == "" {
+		return false, core.ErrJWKSURLEmpty
+	}
+	done, attemptAt, ok := jcfg.beginFetch()
+	if !ok {
+		return false, nil
+	}
+
+	fetchCtx := context.WithoutCancel(ctx)
+	ch := jwksFetchGroup.DoChan(urlCopy, func() (any, error) {
+		return fetchJWKS(fetchCtx, urlCopy, timeout)
+	})
+
+	// Every waiter installs the shared result on its own config.
+	type outcome struct {
+		res       singleflight.Result
+		installed bool
+	}
+	settled := make(chan outcome, 1)
+	go func() {
+		res := <-ch
+		installed := false
+		if res.Err == nil {
+			result := res.Val.(*jwksFetchResult)
+			installed = jcfg.install(result.jwks, result.fetchedAt, true)
+		}
+		jcfg.Lock()
+		jcfg.lastSettledAt, jcfg.lastError = attemptAt, res.Err
+		jcfg.Unlock()
+		jcfg.finishFetch(done)
+		settled <- outcome{res: res, installed: installed}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case o := <-settled:
+		// A set the monotonic guard refused changed nothing: the caller must not
+		// retry its lookup against it.
+		return o.installed, o.res.Err
+	}
+}
+
+// jwksFetchResult is what one deduplicated fetch hands to every waiter.
+type jwksFetchResult struct {
+	jwks *core.JWKS
+	// fetchedAt is when the request was issued, not when it completed.
+	fetchedAt time.Time
+}
+
+// fetchJWKS performs the single deduplicated fetch behind RefreshJWKS.
+func fetchJWKS(ctx context.Context, url string, timeout time.Duration) (*jwksFetchResult, error) {
+	fetchedAt := time.Now().UTC()
+
+	jwks, err := core.NewJWKSFromURLContext(ctx, url, timeout)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to update JWKS from %s", url)
+	}
+	if err := jwks.Validate(); err != nil {
+		return nil, errors.Wrapf(err, "from %s", url)
+	}
+
+	return &jwksFetchResult{jwks: jwks, fetchedAt: fetchedAt}, nil
+}
+
+// install replaces the key set unless the installed one was fetched at or after
+// fetchedAt, and reports whether it did. A set this process fetched arms the
+// throttle; a persisted one only when this config has never attempted a fetch, so
+// adopting a peer's keys does not delay this replica's own retry.
+func (jcfg *JwksConfig) install(jwks *core.JWKS, fetchedAt time.Time, fetchedHere bool) bool {
+	jcfg.Lock()
+	defer jcfg.Unlock()
+	if jcfg.jwks != nil && !fetchedAt.After(jcfg.LastUpdated) {
+		return false
+	}
+	jcfg.jwks = jwks
+	jcfg.LastUpdated = fetchedAt
+	if (fetchedHere || jcfg.LastAttempted.IsZero()) && fetchedAt.After(jcfg.LastAttempted) {
+		jcfg.LastAttempted = fetchedAt
+	}
+	jcfg.negativeKIDs = nil
+	return true
+}
+
+// SetJWKSFromCache installs a persisted key set, with a future fetchedAt clamped
+// to now.
+func (jcfg *JwksConfig) SetJWKSFromCache(jwks *core.JWKS, fetchedAt time.Time) {
+	if jwks == nil {
+		return
+	}
+	if now := time.Now(); fetchedAt.After(now) {
+		fetchedAt = now
+	}
+	jcfg.install(jwks, fetchedAt, false)
+}
+
+// InheritLastAttempt adopts the settled fetch of the entry this one replaces for the
+// same endpoint, so the replacement reports the outcome this process observed.
+func (jcfg *JwksConfig) InheritLastAttempt(old *JwksConfig) {
+	at, err := old.LastAttempt()
+	jcfg.Lock()
+	defer jcfg.Unlock()
+	if at.After(jcfg.lastSettledAt) {
+		jcfg.lastSettledAt, jcfg.lastError = at, err
+	}
+}
+
+// JWKSURL returns the key endpoint.
+func (jcfg *JwksConfig) JWKSURL() string {
+	jcfg.RLock()
+	defer jcfg.RUnlock()
+	return jcfg.URL
+}
+
+// LastAttempt returns when the last settled fetch was attempted and its error.
+// Zero time means none has settled.
+func (jcfg *JwksConfig) LastAttempt() (time.Time, error) {
+	jcfg.RLock()
+	defer jcfg.RUnlock()
+	return jcfg.lastSettledAt, jcfg.lastError
+}
+
+// LastFetchedAt reports when the installed key set was fetched, zero if never.
+func (jcfg *JwksConfig) LastFetchedAt() time.Time {
+	jcfg.RLock()
+	defer jcfg.RUnlock()
+	return jcfg.LastUpdated
+}
+
+// GetJWKS returns the installed key set, or nil once it is older than maxJWKSAge.
 func (jcfg *JwksConfig) GetJWKS() *core.JWKS {
 	jcfg.RLock()
 	defer jcfg.RUnlock()
+	if jcfg.expiredLocked() {
+		return nil
+	}
 	return jcfg.jwks
 }
 
-// ValidateToken parses token from Authorization header with caller-provided claims and enhanced validation
-func (jcfg *JwksConfig) ValidateToken(authHeader string, claims jwt.Claims) (*jwt.Token, error) {
+// ValidateTokenContext parses and validates the token in authHeader. ctx bounds any
+// key fetch the lookup triggers.
+func (jcfg *JwksConfig) ValidateTokenContext(ctx context.Context, authHeader string, claims jwt.Claims) (*jwt.Token, error) {
 	// Validate input parameters
 	if strings.TrimSpace(authHeader) == "" {
 		return nil, jwt.ErrTokenMalformed
@@ -332,7 +496,7 @@ func (jcfg *JwksConfig) ValidateToken(authHeader string, claims jwt.Claims) (*jw
 
 	jwtParser := jwt.NewParser(jwt.WithValidMethods(allCommonAlgorithms))
 
-	token, err := jwtParser.ParseWithClaims(authHeader, claims, jcfg.getPublicKey)
+	token, err := jwtParser.ParseWithClaims(authHeader, claims, jcfg.keyFunc(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -344,8 +508,16 @@ func (jcfg *JwksConfig) ValidateToken(authHeader string, claims jwt.Claims) (*jw
 	return token, nil
 }
 
+// keyFunc returns the jwt.Keyfunc that resolves a token's signing key, carrying
+// ctx so that any JWKS fetch the resolution triggers is bounded by the caller.
+func (jcfg *JwksConfig) keyFunc(ctx context.Context) jwt.Keyfunc {
+	return func(token *jwt.Token) (interface{}, error) {
+		return jcfg.getPublicKey(ctx, token)
+	}
+}
+
 // getPublicKey retrieves the public key from the JWKS for JWT validation
-func (jcfg *JwksConfig) getPublicKey(token *jwt.Token) (interface{}, error) {
+func (jcfg *JwksConfig) getPublicKey(ctx context.Context, token *jwt.Token) (interface{}, error) {
 	if token == nil || token.Header == nil {
 		return nil, jwt.ErrTokenMalformed
 	}
@@ -359,47 +531,78 @@ func (jcfg *JwksConfig) getPublicKey(token *jwt.Token) (interface{}, error) {
 
 	// If kid is present, use existing single-key logic
 	if kid != "" {
-		key, err := jcfg.getKeyFromJWKS(kid)
-		if err != nil {
-			// Attempt JWKS update with retry logic for concurrent updates
-			if updateErr := jcfg.tryUpdateJWKSWithRetry(); updateErr == nil {
-				key, err = jcfg.getKeyFromJWKS(kid)
-			}
-		}
-		return key, err
+		return jcfg.resolveKeyByID(ctx, kid)
 	}
 
 	// No kid provided - try all candidate keys for the algorithm
-	return jcfg.tryMultipleKeysForValidation(token, algorithm)
+	return jcfg.tryMultipleKeysForValidation(ctx, token, algorithm)
 }
 
-// tryUpdateJWKSWithRetry attempts to update JWKS with retry logic for concurrent updates
-func (jcfg *JwksConfig) tryUpdateJWKSWithRetry() error {
-	updateErr := jcfg.UpdateJWKS()
-	if updateErr == nil {
-		return nil
+// resolveKeyByID looks up kid, refreshing the key set once on a miss.
+func (jcfg *JwksConfig) resolveKeyByID(ctx context.Context, kid string) (interface{}, error) {
+	key, err := jcfg.getKeyFromJWKS(kid)
+	if err == nil {
+		return key, nil
 	}
-	if !errors.Is(updateErr, core.ErrJWKSUpdateInProgress) {
-		return updateErr
+	if jcfg.isUnknownKID(kid) {
+		return nil, err
 	}
 
+	retry, refreshErr := jcfg.awaitRefresh(ctx)
+	if refreshErr != nil {
+		// The fetch that could have produced this kid failed; remember the miss so the
+		// next request within negativeKIDTTL does not pay for another attempt.
+		jcfg.rememberUnknownKID(kid)
+		return nil, errors.Wrap(err, refreshErr.Error())
+	}
+	if !retry {
+		return nil, err
+	}
+
+	key, retryErr := jcfg.getKeyFromJWKS(kid)
+	if retryErr != nil {
+		jcfg.rememberUnknownKID(kid)
+		return nil, retryErr
+	}
+
+	return key, nil
+}
+
+// awaitRefresh refreshes the key set, or waits for the in-flight fetch when
+// throttled, and reports whether a missed lookup is worth retrying.
+func (jcfg *JwksConfig) awaitRefresh(ctx context.Context) (bool, error) {
+	fetched, err := jcfg.RefreshJWKS(ctx)
+	if err != nil {
+		return false, err
+	}
+	return fetched || jcfg.awaitInFlight(ctx), nil
+}
+
+// isUnknownKID reports whether kid was already found absent from a freshly
+// fetched key set recently enough that re-fetching would be pointless.
+func (jcfg *JwksConfig) isUnknownKID(kid string) bool {
 	jcfg.RLock()
-	updateDone := jcfg.updateDone
-	jcfg.RUnlock()
-	if updateDone != nil {
-		<-updateDone
-	}
+	defer jcfg.RUnlock()
 
-	if jcfg.GetJWKS() == nil {
-		return core.ErrJWKSNotInitialized
+	expiry, ok := jcfg.negativeKIDs[kid]
+	return ok && time.Now().Before(expiry)
+}
+
+// rememberUnknownKID records a kid that a fresh fetch did not produce.
+func (jcfg *JwksConfig) rememberUnknownKID(kid string) {
+	jcfg.Lock()
+	defer jcfg.Unlock()
+
+	if jcfg.negativeKIDs == nil || len(jcfg.negativeKIDs) >= maxNegativeKIDs {
+		jcfg.negativeKIDs = make(map[string]time.Time, 1)
 	}
-	return nil
+	jcfg.negativeKIDs[kid] = time.Now().Add(negativeKIDTTL)
 }
 
 // tryMultipleKeysForValidation tries all candidate keys for algorithm-only validation
-func (jcfg *JwksConfig) tryMultipleKeysForValidation(token *jwt.Token, algorithm string) (interface{}, error) {
+func (jcfg *JwksConfig) tryMultipleKeysForValidation(ctx context.Context, token *jwt.Token, algorithm string) (interface{}, error) {
 	// Get all candidate keys from current JWKS
-	candidateKeys, err := jcfg.getCandidateKeysWithRetry(algorithm)
+	candidateKeys, err := jcfg.getCandidateKeysWithRetry(ctx, algorithm)
 	if err != nil {
 		return nil, errors.Wrap(jwt.ErrInvalidKey, err.Error())
 	}
@@ -411,15 +614,15 @@ func (jcfg *JwksConfig) tryMultipleKeysForValidation(token *jwt.Token, algorithm
 	}
 
 	// If all current keys failed, try with fresh JWKS update
-	return jcfg.tryValidateWithFreshJWKS(token, algorithm, err)
+	return jcfg.tryValidateWithFreshJWKS(ctx, token, algorithm, err)
 }
 
-// getCandidateKeysWithRetry gets candidate keys, with JWKS update retry if initial attempt fails
-func (jcfg *JwksConfig) getCandidateKeysWithRetry(algorithm string) ([]interface{}, error) {
+// getCandidateKeysWithRetry gets candidate keys, refreshing the key set once if
+// the first attempt finds none.
+func (jcfg *JwksConfig) getCandidateKeysWithRetry(ctx context.Context, algorithm string) ([]interface{}, error) {
 	candidateKeys, err := jcfg.getAllCandidateKeys(algorithm)
 	if err != nil {
-		// Attempt JWKS update and retry
-		if updateErr := jcfg.tryUpdateJWKSWithRetry(); updateErr == nil {
+		if retry, refreshErr := jcfg.awaitRefresh(ctx); refreshErr == nil && retry {
 			candidateKeys, err = jcfg.getAllCandidateKeys(algorithm)
 		}
 	}
@@ -456,8 +659,8 @@ func (jcfg *JwksConfig) tryValidateWithCandidateKeys(token *jwt.Token, candidate
 }
 
 // tryValidateWithFreshJWKS attempts validation after updating JWKS with fresh keys
-func (jcfg *JwksConfig) tryValidateWithFreshJWKS(token *jwt.Token, algorithm string, previousErr error) (interface{}, error) {
-	if updateErr := jcfg.tryUpdateJWKSWithRetry(); updateErr == nil {
+func (jcfg *JwksConfig) tryValidateWithFreshJWKS(ctx context.Context, token *jwt.Token, algorithm string, previousErr error) (interface{}, error) {
+	if retry, refreshErr := jcfg.awaitRefresh(ctx); refreshErr == nil && retry {
 		freshCandidateKeys, freshErr := jcfg.getAllCandidateKeys(algorithm)
 		if freshErr == nil && len(freshCandidateKeys) > 0 {
 			key, err := jcfg.tryValidateWithCandidateKeys(token, freshCandidateKeys)
@@ -510,13 +713,9 @@ func (jcfg *JwksConfig) getAllCandidateKeys(algorithm string) ([]interface{}, er
 	return result, nil
 }
 
-// getKeyFromJWKS retrieves a key from JWKS by kid
+// getKeyFromJWKS retrieves a key by kid, leaving the uninitialized and expired
+// cases to GetKeyByID so the caller can tell one from the other.
 func (jcfg *JwksConfig) getKeyFromJWKS(kid string) (interface{}, error) {
-	jwks := jcfg.GetJWKS()
-	if jwks == nil {
-		return nil, core.ErrJWKSNotInitialized
-	}
-
 	if kid == "" {
 		return nil, errors.Wrapf(jwt.ErrInvalidKeyType, "kid is empty")
 	}
@@ -530,12 +729,41 @@ func (jcfg *JwksConfig) HasClaimMappings() bool { return len(jcfg.ClaimMappings)
 // GetClaimMappings returns the claim mappings.
 func (jcfg *JwksConfig) GetClaimMappings() []ClaimMapping { return jcfg.ClaimMappings }
 
+// SetReservedOrgNames replaces the reserved-org set. The input is copied so a
+// caller cannot race readers by retaining and mutating the map.
+func (jcfg *JwksConfig) SetReservedOrgNames(reserved map[string]bool) {
+	jcfg.Lock()
+	defer jcfg.Unlock()
+	jcfg.reservedOrgNames = make(map[string]bool, len(reserved))
+	for org := range reserved {
+		jcfg.reservedOrgNames[org] = true
+	}
+}
+
+// GetReservedOrgNames returns a snapshot of the current reserved-org set.
+func (jcfg *JwksConfig) GetReservedOrgNames() map[string]bool {
+	jcfg.RLock()
+	defer jcfg.RUnlock()
+	reserved := make(map[string]bool, len(jcfg.reservedOrgNames))
+	for org := range jcfg.reservedOrgNames {
+		reserved[org] = true
+	}
+	return reserved
+}
+
+// isReservedOrg reports whether some issuer statically owns org.
+func (jcfg *JwksConfig) isReservedOrg(org string) bool {
+	jcfg.RLock()
+	defer jcfg.RUnlock()
+	return jcfg.reservedOrgNames[org]
+}
+
 // GetSubjectPrefix returns the issuer-derived prefix for namespacing subjects.
 func (jcfg *JwksConfig) GetSubjectPrefix() string {
-	if jcfg.Origin == TokenOriginCustom && jcfg.subjectPrefix == "" && jcfg.Issuer != "" {
-		jcfg.subjectPrefix = core.ComputeIssuerPrefix(jcfg.Issuer)
+	if jcfg.Origin != TokenOriginCustom || jcfg.Issuer == "" {
+		return ""
 	}
-	return jcfg.subjectPrefix
+	return core.ComputeIssuerPrefix(jcfg.Issuer)
 }
 
 // hasAnyAudience checks if the token has any of the configured audiences.
@@ -561,64 +789,95 @@ func (jcfg *JwksConfig) ValidateAudience(claims jwt.MapClaims) error {
 	return nil
 }
 
+// hasAllScopes checks if the token carries every required scope.
+func hasAllScopes(claims jwt.MapClaims, scopes []string) bool {
+	if len(scopes) == 0 {
+		return true
+	}
+
+	tokenScopeSet := mapset.NewSet(core.GetScopes(claims)...)
+	requiredScopeSet := mapset.NewSet(scopes...)
+	return tokenScopeSet.IsSuperset(requiredScopeSet)
+}
+
 // ValidateScopes checks token has ALL configured scopes. Returns nil if none configured.
 func (jcfg *JwksConfig) ValidateScopes(claims jwt.MapClaims) error {
-	if len(jcfg.Scopes) == 0 {
-		return nil
-	}
-	tokenScopes := core.GetScopes(claims)
-	tokenScopeSet := mapset.NewSet(tokenScopes...)
-	requiredScopeSet := mapset.NewSet(jcfg.Scopes...)
-	if !tokenScopeSet.IsSuperset(requiredScopeSet) {
+	if !hasAllScopes(claims, jcfg.Scopes) {
 		return core.ErrInvalidScope
 	}
 	return nil
 }
 
 // GetOrgDataFromClaim extracts org data for the requested org from claim mappings.
+// Exactly one mapping must accept the token's audience and scopes.
 // This method validates org access and returns errors if:
-//   - core.ErrReservedOrgName: dynamic org claims a statically-configured org name
-//   - core.ErrInvalidAudience: token audience is not authorized for the requested org
-//   - core.ErrInvalidConfiguration: no claim mapping configured for the requested org
-//   - core.ErrNoClaimRoles: no roles found for the requested org
+//   - core.ErrReservedOrgName: only a dynamic mapping named the org, and it is reserved
+//   - core.ErrInvalidAudience: no mapping for the org accepts the token's audience
+//   - core.ErrInvalidScope: a mapping accepts the audience but the token lacks a scope it requires;
+//     when other mappings refused the audience, the error carries both
+//   - core.ErrAmbiguousMapping: more than one mapping accepts the token
+//   - core.ErrInvalidConfiguration: no claim mapping names the requested org
+//   - core.ErrNoClaimRoles: the selected mapping yields no roles
 //
 // Returns orgData, isServiceAccount, and any error.
 func (jcfg *JwksConfig) GetOrgDataFromClaim(claims jwt.MapClaims, reqOrgFromRoute string) (cdbm.OrgData, bool, error) {
 	reqOrg := strings.ToLower(reqOrgFromRoute)
 
-	for _, cm := range jcfg.ClaimMappings {
+	var selected *ClaimMapping
+	var selectedOrg, selectedDisplay string
+	named, audienceMiss, reserved := 0, 0, false
+	for i := range jcfg.ClaimMappings {
+		cm := &jcfg.ClaimMappings[i]
 		orgName, displayName := cm.GetOrgNameAndDisplayName(claims)
 		if orgName != reqOrg {
 			continue
 		}
+		named++
 
-		if cm.IsOrgDynamic() && jcfg.ReservedOrgNames != nil && jcfg.ReservedOrgNames[orgName] {
-			return nil, false, core.ErrReservedOrgName
+		if cm.IsOrgDynamic() && jcfg.isReservedOrg(orgName) {
+			reserved = true
+			continue
 		}
-
 		if !jcfg.hasAnyAudience(claims, cm.Audiences) {
-			return nil, false, core.ErrInvalidAudience
+			audienceMiss++
+			continue
 		}
-
-		roles, err := cm.GetRoles(claims)
-		if err != nil || len(roles) == 0 {
-			return nil, false, core.ErrNoClaimRoles
+		if !hasAllScopes(claims, cm.Scopes) {
+			continue
 		}
-
-		now := time.Now().UTC()
-		orgData := cdbm.OrgData{
-			orgName: cdbm.Org{
-				Name:        orgName,
-				DisplayName: displayName,
-				OrgType:     "ENTERPRISE",
-				Roles:       roles,
-				Teams:       []cdbm.Team{},
-				Updated:     &now,
-			},
+		if selected != nil {
+			return nil, false, core.ErrAmbiguousMapping
 		}
-
-		return orgData, cm.IsServiceAccount, nil
+		selected, selectedOrg, selectedDisplay = cm, orgName, displayName
+	}
+	switch {
+	case named == 0:
+		return nil, false, core.ErrInvalidConfiguration
+	case selected == nil && reserved:
+		return nil, false, core.ErrReservedOrgName
+	case selected == nil && audienceMiss == named:
+		return nil, false, core.ErrInvalidAudience
+	case selected == nil && audienceMiss > 0:
+		return nil, false, fmt.Errorf("%w; %w", core.ErrInvalidAudience, core.ErrInvalidScope)
+	case selected == nil:
+		return nil, false, core.ErrInvalidScope
 	}
 
-	return nil, false, core.ErrInvalidConfiguration
+	roles, err := selected.GetRoles(claims)
+	if err != nil || len(roles) == 0 {
+		return nil, false, core.ErrNoClaimRoles
+	}
+
+	now := time.Now().UTC()
+	orgData := cdbm.OrgData{
+		selectedOrg: cdbm.Org{
+			Name:        selectedOrg,
+			DisplayName: selectedDisplay,
+			OrgType:     "ENTERPRISE",
+			Roles:       roles,
+			Teams:       []cdbm.Team{},
+			Updated:     &now,
+		},
+	}
+	return orgData, selected.IsServiceAccount, nil
 }
