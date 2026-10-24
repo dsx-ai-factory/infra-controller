@@ -79,13 +79,12 @@ impl<'a> HostDpuMatches<'a> {
             (pcie_matches, reported_total)
         };
 
-        let matched_total = inventory_matches.len();
         let dpu_inventory = DpuInventoryState {
             reported_total,
-            matched_total,
-            has_unmatched_reported_dpu: reported_total > matched_total,
+            has_unmatched_reported_dpu: reported_total > inventory_matches.len(),
         };
-        let needs_expected_serial_fallback = dpu_inventory.needs_expected_serial_fallback();
+        let needs_expected_serial_fallback =
+            inventory_matches.is_empty() || dpu_inventory.has_unmatched_reported_dpu;
         // Expected serials resolve incomplete matching. Once every
         // reported DPU is matched, mode changes and configuration errors
         // must wait for the next iteration.
@@ -165,21 +164,13 @@ impl MatchedDpu<'_> {
     }
 }
 
-/// Host inventory counts and serial matches, independent of DPU configuration.
+/// Host inventory counts and matching completeness, independent of DPU configuration.
 #[derive(Debug)]
 pub(super) struct DpuInventoryState {
     /// Host inventory DPUs identified by part number or a discovered BMC serial.
     pub(super) reported_total: usize,
-    /// Host inventory devices matched to discovered DPU BMCs before mode checks.
-    pub(super) matched_total: usize,
     /// At least one reported BlueField has no discovered DPU BMC match.
-    has_unmatched_reported_dpu: bool,
-}
-
-impl DpuInventoryState {
-    pub(super) fn needs_expected_serial_fallback(&self) -> bool {
-        self.matched_total == 0 || self.has_unmatched_reported_dpu
-    }
+    pub(super) has_unmatched_reported_dpu: bool,
 }
 
 #[cfg(test)]
@@ -289,8 +280,7 @@ mod tests {
         };
 
         assert_eq!(matches.inventory.reported_total, 2);
-        assert_eq!(matches.inventory.matched_total, 1);
-        assert!(matches.inventory.needs_expected_serial_fallback());
+        assert!(matches.inventory.has_unmatched_reported_dpu);
         assert_eq!(matches.inventory_matches.len(), 1);
         assert_eq!(
             matches.inventory_matches[0].target_operating_mode,
@@ -308,6 +298,14 @@ mod tests {
             "known-dpu".to_string(),
             bf2_dpu(Some(BlueFieldOperatingMode::Dpu)),
         )]);
+        let expected_machine = ExpectedMachine {
+            id: None,
+            bmc_mac_address: "00:11:22:33:44:55".parse().unwrap(),
+            data: ExpectedMachineData {
+                fallback_dpu_serial_numbers: vec!["known-dpu".to_string()],
+                ..Default::default()
+            },
+        };
         const BLUEFIELD: &str = "900-9D3B6-00SV-AA0";
         check_values(
             [
@@ -372,14 +370,15 @@ mod tests {
                         },
                     )
                     .collect();
-                let matches = HostDpuMatches::new(&host, &endpoints, None, HostDpuPolicy::Manage);
-                assert_eq!(
-                    matches.inventory.matched_total,
-                    matches.inventory_matches.len()
+                let matches = HostDpuMatches::new(
+                    &host,
+                    &endpoints,
+                    Some(&expected_machine),
+                    HostDpuPolicy::Manage,
                 );
                 (
                     matches.inventory.reported_total,
-                    matches.inventory.needs_expected_serial_fallback(),
+                    !matches.fallback_matches.is_empty(),
                 )
             },
         );

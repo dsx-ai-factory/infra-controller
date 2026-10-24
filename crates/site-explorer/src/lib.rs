@@ -1372,7 +1372,9 @@ impl SiteExplorer {
             fallback_matches,
             expected_fallback_count,
         } = matches;
-        let needs_expected_serial_fallback = dpu_inventory.needs_expected_serial_fallback();
+        let needs_expected_serial_fallback =
+            inventory_matches.is_empty() || dpu_inventory.has_unmatched_reported_dpu;
+        let matched_total = inventory_matches.len();
 
         let inventory_cfg_status = self
             .configure_matched_dpus(ep, inventory_matches, metrics)
@@ -1381,7 +1383,7 @@ impl SiteExplorer {
             .configure_matched_dpus(ep, fallback_matches, metrics)
             .await;
 
-        let has_unready_matches = dpu_inventory.matched_total
+        let has_unready_matches = matched_total
             > inventory_cfg_status.running_as_dpu.len() + inventory_cfg_status.running_as_nic_total;
 
         let host_reported_dpus_total = dpu_inventory.reported_total;
