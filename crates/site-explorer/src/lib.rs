@@ -28,7 +28,6 @@ use std::time::{Duration, Instant};
 use carbide_firmware::FirmwareConfigSnapshot;
 use carbide_redfish::libredfish::conv::IntoModel;
 use carbide_secrets::credentials::CredentialManager;
-use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::machine::MachineType;
 use chrono::Utc;
@@ -52,7 +51,7 @@ use model::site_explorer::{
     BlueFieldOperatingMode, EndpointExplorationError, EndpointExplorationReport, EndpointType,
     ExplorationTier, ExploredDpu, ExploredEndpoint, ExploredManagedHost,
     HostPrimaryInterfaceSelection, MachineExpectation, PowerState, PreingestionState,
-    SiteExplorerLastRun, is_bluefield_part_number,
+    SiteExplorerLastRun,
 };
 use sqlx::PgPool;
 use tokio::task::JoinSet;
@@ -3486,24 +3485,6 @@ fn is_dpu_in_nic_mode(dpu_ep: &ExploredEndpoint, host_ep: &ExploredEndpoint) -> 
     nic_mode
 }
 
-/// Returns the normalized serial when a host inventory record repeats a BlueField
-/// serial already seen during this host's ingestion pass.
-fn duplicate_bluefield_serial<'a>(
-    part_number: Option<&str>,
-    serial_number: Option<&'a str>,
-    seen: &mut HashSet<&'a str>,
-) -> Option<&'a str> {
-    if !part_number
-        .map(str::trim)
-        .is_some_and(is_bluefield_part_number)
-    {
-        return None;
-    }
-
-    let serial_number = serial_number.map(str::trim).none_if_empty()?;
-    (!seen.insert(serial_number)).then_some(serial_number)
-}
-
 /// Status of matched DPUs after applying target operating modes.
 #[derive(Debug)]
 struct DpuConfigStatus {
@@ -4883,71 +4864,6 @@ mod tests {
             classify_matched_dpu(&matched_pcie_dpu(&dpu), &host, Some(Err(err))),
             DiscoveredDpu::ModeCheckFailed(_)
         ));
-    }
-
-    #[test]
-    fn duplicate_bluefield_serial_only_flags_repeated_bluefield_serials() {
-        struct Case {
-            name: &'static str,
-            devices: &'static [(Option<&'static str>, Option<&'static str>)],
-            expected: &'static [bool],
-        }
-
-        let cases = [
-            Case {
-                name: "duplicate BlueField serial",
-                devices: &[
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                ],
-                expected: &[false, true],
-            },
-            Case {
-                name: "trimmed duplicate BlueField serial",
-                devices: &[
-                    (Some("900-9D3B6-00SV-AA0"), Some(" DPU-SERIAL-1 ")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                ],
-                expected: &[false, true],
-            },
-            Case {
-                name: "distinct BlueField serials",
-                devices: &[
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-2")),
-                ],
-                expected: &[false, false],
-            },
-            Case {
-                name: "non-BlueField does not reserve serial",
-                devices: &[
-                    (Some("0JKJDC"), Some("DPU-SERIAL-1")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                ],
-                expected: &[false, false],
-            },
-            Case {
-                name: "missing and empty serials are not duplicates",
-                devices: &[
-                    (Some("900-9D3B6-00SV-AA0"), None),
-                    (Some("900-9D3B6-00SV-AA0"), Some("")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("   ")),
-                ],
-                expected: &[false, false, false],
-            },
-        ];
-
-        for case in cases {
-            let mut seen = HashSet::new();
-            let actual: Vec<bool> = case
-                .devices
-                .iter()
-                .map(|(part_number, serial_number)| {
-                    duplicate_bluefield_serial(*part_number, *serial_number, &mut seen).is_some()
-                })
-                .collect();
-            assert_eq!(actual, case.expected, "{}", case.name);
-        }
     }
 
     #[test]
