@@ -271,9 +271,9 @@ Sensor-backed values (carrying a Redfish `DataSourceUri`) are skipped:
 the sensor collector already publishes them as `hw_sensor` series, so nothing
 is double-reported.
 
-Exported series are named
-`{prefix}_hw_metric_{metric_type}_{unit}` — with the default
-`carbide_hardware_health` prefix, for example:
+The existing series remain gauges named
+`{prefix}_hw_metric_{metric_type}_{unit}`. With the default
+`carbide_hardware_health` prefix, examples include:
 
 ```text
 carbide_hardware_health_hw_metric_correctable_core_errors_count
@@ -282,20 +282,54 @@ carbide_hardware_health_hw_metric_bandwidth_percent
 carbide_hardware_health_hw_metric_input_power_watts
 ```
 
+Readings classified as cumulative counters also export a
+[counter alias](https://github.com/dsx-ai-factory/infra-controller/issues/7902) named
+`<existing>_total` when the value is finite and nonnegative. For example, the
+PCIe correctable error count exports the following gauge and counter:
+
+```text
+carbide_hardware_health_hw_metric_pcie_correctable_errors_count
+carbide_hardware_health_hw_metric_pcie_correctable_errors_count_total
+```
+
+Within each exporter, the gauge and its counter alias expose the same labels
+and absolute hardware reading. Repeated polls do not add readings together.
+If the source resets from 13 to 2, both series report 2 after collection.
+Readings classified as gauges, and negative or non-finite counter readings,
+export only the existing gauge.
+
 On the Prometheus endpoint, series carry entity labels (`processor_id`,
 `memory_id`, `drive_id`, `powersupply_id`, `system_id`, `model`, ...) plus the
 standard identity labels added by the sink (`machine_id`, `endpoint_ip`,
 `serial_number`, `rack_id`, ...), with `collector_type="metrics_collector"`.
+The Prometheus sink rejects samples with duplicate label names.
 
-The OTLP sink (`[sinks.otlp]`) emits the same metric *names* and puts the
-identity context in two places: on OTLP resource attributes, and on each
-datapoint under the Prometheus sink's label names, custom endpoint labels
-included. A backend that keeps resource attributes off its series, such as the
-OpenTelemetry Collector's Prometheus exporter with its default settings, still
-gets every identity label. A backend that flattens resource attributes onto
-every series, such as VictoriaMetrics, also shows the resource attributes whose
-names differ, for example `switch_serial_number` beside `serial_number`, with
-the same value.
+The OTLP sink (`[sinks.otlp]`) uses the same metric names and absolute readings.
+It exports the existing names as `Gauge` metrics and counter aliases as `Sum`
+metrics with cumulative temporality and `is_monotonic = true`.
+
+A counter point's `start_time_unix_nano` identifies the source accumulation
+start when valid source metadata is available. Redfish `LifetimeStartDateTime`
+supplies the start for memory lifetime errors and drive I/O errors. OpenConfig
+interface counters use same-interface `last-clear` metadata when the configured
+subscription supplies it and it applies to the reading. Reconnection or a
+source deletion that covers this metadata clears it.
+
+A missing start, a start before the Unix epoch, a start later than the point's
+observation time, or a start that does not fit in Unix nanoseconds is encoded
+as `0`, meaning unknown. A lower counter reading alone does not establish a new
+start. Collector startup and reconnection do not establish a source
+accumulation start.
+
+The OTLP sink puts identity context in resource attributes and adds standard
+identity labels and custom endpoint labels to each datapoint. If a sample label
+or its normalized Prometheus name matches one of those names, the datapoint
+keeps the sample label and omits the conflicting context label. A backend that
+keeps resource attributes off its series, such as the OpenTelemetry Collector's
+Prometheus exporter with its default settings, still receives the datapoint
+attributes. A backend that flattens resource attributes onto every series, such
+as VictoriaMetrics, also shows the resource attributes whose names differ, for
+example `switch_serial_number` beside `serial_number`, with the same value.
 
 Entity discovery runs as its own periodic task (`[collectors.discovery]`,
 always on) that walks each BMC's Redfish Systems and Chassis trees and
@@ -317,7 +351,11 @@ service restarts. Their names are fixed and do not use `metrics.prefix`.
 | `carbide_health_otlp_ingress_records_total` | Log records or metric samples accepted into a target queue, including replacements and insertions that evict an older entry. |
 | `carbide_health_otlp_egress_records_total` | Log records or metric data points acknowledged by the receiver, excluding explicit partial-success rejections. |
 
-For `metrics`, each exported sample contributes one data point to the request.
+For `metrics`, each sample with a counter alias contributes two data points to
+the request: the existing `Gauge` and the cumulative `Sum`. Other samples
+contribute one gauge point. Ingress counts one input sample for each accepted
+reading, before this expansion.
+
 Filtered events and collection markers do not count as ingress. Sending the same
 record to multiple targets increments ingress once for each target. Failed
 attempts do not count as egress; successful retries and split requests count only
@@ -344,19 +382,25 @@ sum by (target, signal) (
 ```
 
 Both queries sum rates across service instances with the same target and signal.
-The units are log records per second for `logs` and metric samples or data points
-per second for `metrics`. The `[5m]` range averages each rate over five minutes.
+The units are log records per second for `logs`. For `metrics`, ingress measures
+input samples per second, while egress measures acknowledged data points per
+second. The `[5m]` range averages each rate over five minutes.
 Add scrape-label selectors to restrict either query to a specific instance.
 
-Ingress minus egress is not queue growth: queue replacements, capacity evictions,
-receiver rejections, export failures, and buffered or in-flight records affect
-the difference. Compare the rates with `carbide_health_otlp_queue_depth`,
+Counter aliases can make metric egress exceed ingress because each sample with
+an alias produces two data points. Queue replacements, capacity evictions,
+receiver rejections, export failures, and buffered or in-flight records also
+affect the difference. Subtracting the rates does not measure queue growth.
+
+Compare the rates with `carbide_health_otlp_queue_depth`,
 `carbide_health_otlp_queue_dropped_total`, and
 `carbide_health_otlp_export_failures_total`, plus the replacement counters
 `{prefix}_otlp_sink_replaced_total` and
 `{prefix}_otlp_sink_metrics_replaced_total`, where `{prefix}` is `metrics.prefix`.
-Queue depth excludes buffered and in-flight batches. Egress measures receiver
-acknowledgment, not unique delivery or downstream storage: a receiver can accept
+For metrics, queue depth, replacements, and capacity drops count input entries
+before alias expansion. Queue depth excludes buffered and in-flight batches.
+Egress measures receiver acknowledgment, not unique delivery or downstream
+storage: a receiver can accept
 a request whose response is lost before a retry.
 
 ### Hardware Health Logs
