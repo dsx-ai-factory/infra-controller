@@ -15,7 +15,7 @@ usage() {
 Usage: setup-kind.sh [options]
 
 Create or reuse one local kind control-plane node, without deploying NICo.
-Run on macOS or Linux with a local Linux AMD64 or ARM64 Docker runtime.
+Uses a local Linux AMD64 or ARM64 Docker runtime.
 
   --name NAME         Cluster name (default: nico-tilt).
   --ip-family FAMILY  ipv4 (default) or dual. Existing clusters must match.
@@ -80,7 +80,7 @@ case "$platform" in
   linux/arm64|linux/aarch64) arch=arm64 ;;
   *) die "unsupported Docker daemon platform: $platform" ;;
 esac
-# macOS runtimes own the Linux daemon; the client can also run under Rosetta.
+# A runtime-managed daemon can differ from the client process architecture.
 if [[ "$host_os" == Linux ]]; then
   case "$(uname -m)" in
     x86_64|amd64) host_arch=amd64 ;;
