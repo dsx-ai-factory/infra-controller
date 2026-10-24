@@ -219,10 +219,7 @@ under `rest-api`.
 
 Both workflows select the native Linux AMD64 or ARM64 architecture from the
 active Docker daemon. Other daemon platforms fail before builds start. The Docker
-daemon and the kind cluster must use the same architecture. Host VM, isolated
-gateway and BMC-backed target setup is separate from image builds; that migration
-is tracked in
-[#8124](https://github.com/dsx-ai-factory/infra-controller/issues/8124).
+daemon and the kind cluster must use the same architecture.
 
 For a standalone image build, use `make images-dev` from the repository root.
 See [building one local development service](../../../docs/manuals/building_nico_containers.md#build-one-local-development-service)
