@@ -28,6 +28,7 @@ use crate::instance::status::extension_service::InstanceExtensionServiceStatusOb
 use crate::machine::infiniband::MachineInfinibandStatusObservation;
 use crate::machine::nvlink::MachineNvLinkStatusObservation;
 use crate::machine::spx::MachineSpxStatusObservation;
+use crate::machine::spx_multiplane::MachineSpxMultiplaneStatus;
 use crate::machine::{FailureDetails, MachineInterfaceSnapshot, MachineLastRebootRequested};
 use crate::machine_boot_interface::BootInterfaceStatusObservation;
 use crate::power_manager::PowerOptions;
@@ -58,6 +59,8 @@ pub struct MachineStatus {
     pub infiniband_status_observation: Option<MachineInfinibandStatusObservation>,
     pub nvlink_status_observation: Option<MachineNvLinkStatusObservation>,
     pub spx_status_observation: Option<MachineSpxStatusObservation>,
+    /// Latest per-interface maintenance readback for each DPU machine.
+    pub spx_multiplane_status: Option<MachineSpxMultiplaneStatus>,
     /// Latest successful unfiltered Scout MLX report, or `None` before one is stored.
     pub mlx_device_observation: Option<MlxDeviceObservation>,
     pub extension_service_status_observations: InstanceExtensionServiceStatusObservationByType,

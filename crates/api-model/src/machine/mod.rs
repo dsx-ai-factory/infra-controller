@@ -75,11 +75,13 @@ pub mod machine_search_config;
 pub mod network;
 pub mod nvlink;
 pub mod spx;
+pub mod spx_multiplane;
 pub mod status;
 pub mod topology;
 pub mod upgrade_policy;
 
 pub use self::config::MachineConfig;
+pub use self::spx_multiplane::MachineSpxMultiplane;
 pub use self::status::MachineStatus;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -941,6 +943,9 @@ pub struct Machine<ID: MachineIdSubtypeTrait> {
     /// [`ManagedHostState::Maintenance`] to execute the requested operation.
     pub machine_maintenance_requested: Option<MachineMaintenanceRequest>,
 
+    /// Desired Astra plane maintenance keyed by logical interface name; absent on non-Astra machines.
+    pub spx_multiplane: Option<MachineSpxMultiplane>,
+
     /// When set by the API, the state controller transitions a Ready managed host into the
     /// decommissioning workflow and clears the marker in the same transaction.
     pub decommission_requested: bool,
@@ -1026,6 +1031,7 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
             host_reprovision_requested: self.host_reprovision_requested,
             reset_requested: self.reset_requested,
             machine_maintenance_requested: self.machine_maintenance_requested,
+            spx_multiplane: self.spx_multiplane,
             decommission_requested: self.decommission_requested,
             bmc_credential_rotation_requested: self.bmc_credential_rotation_requested,
             uefi_credential_rotation_requested: self.uefi_credential_rotation_requested,

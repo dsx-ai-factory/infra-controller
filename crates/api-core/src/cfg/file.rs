@@ -3750,6 +3750,13 @@ impl CarbideConfig {
         conf.svpc_enabled
     }
 
+    /// Whether partial-multiplane maintenance is enabled for this site; defaults to true.
+    pub fn is_partial_multiplane_enabled(&self) -> bool {
+        self.ewethers_config
+            .as_ref()
+            .is_none_or(|config| config.partial_multiplane == PartialMultiplane::Enabled)
+    }
+
     pub fn is_astra_enabled(&self) -> bool {
         let Some(conf) = &self.ewethers_config else {
             return false;
@@ -4953,7 +4960,7 @@ fn default_mqtt_broker_port() -> u16 {
 }
 
 pub use carbide_dpa_manager::config::{
-    AstraConfig, EwEthersConfig, MqttAuthConfig, MqttAuthMode, SvpcConfig,
+    AstraConfig, EwEthersConfig, MqttAuthConfig, MqttAuthMode, PartialMultiplane, SvpcConfig,
 };
 use model::vpc::VpcDefinition;
 
@@ -7855,6 +7862,26 @@ enabled = true
 
     #[test]
     fn deserialize_dpa_config() {
+        for (setting, expected) in [
+            ("", PartialMultiplane::Enabled),
+            ("partial-multiplane=\"enabled\"", PartialMultiplane::Enabled),
+            (
+                "partial-multiplane=\"disabled\"",
+                PartialMultiplane::Disabled,
+            ),
+        ] {
+            let config: EwEthersConfig = Figment::new()
+                .merge(Toml::string(setting))
+                .extract()
+                .unwrap();
+            assert_eq!(config.partial_multiplane, expected);
+        }
+        assert!(
+            Figment::new()
+                .merge(Toml::string("partial-multiplane=\"invalid\""))
+                .extract::<EwEthersConfig>()
+                .is_err()
+        );
         let toml = r#"
 enabled=true
 svpc_enabled=true
@@ -7872,6 +7899,7 @@ mqtt_endpoint = "mqtt.forge"
                 enabled: true,
                 svpc_enabled: true,
                 astra_enabled: false,
+                partial_multiplane: Default::default(),
                 monitor_run_interval: std::time::Duration::from_secs(60),
                 subnet_ip: Ipv4Addr::UNSPECIFIED,
                 subnet_mask: EwEthersConfig::default_subnet_mask(),

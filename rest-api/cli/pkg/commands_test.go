@@ -1331,6 +1331,8 @@ func TestBuildCommands_RunnablePaths(t *testing.T) {
 		{name: "tenant current", path: []string{"tenant", "current"}},
 		{name: "infrastructure provider current", path: []string{"infrastructure-provider", "current"}},
 		{name: "service account current", path: []string{"service-account", "current"}},
+		{name: "machine multiplane get", path: []string{"machine", "spectrumx-multiplane", "get"}},
+		{name: "machine multiplane update", path: []string{"machine", "spectrumx-multiplane", "update"}},
 		{name: "machine health report delete", path: []string{"machine", "health-report", "delete"}},
 		{name: "machine health report list", path: []string{"machine", "health-report", "list"}},
 		{name: "machine health report update", path: []string{"machine", "health-report", "update"}},

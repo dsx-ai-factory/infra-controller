@@ -1483,6 +1483,31 @@ After changing the DPF status for a host in this way, you should trigger a repro
 
 ---
 
+### Site-wide partial-multiplane maintenance
+
+In `carbide.toml`, partial-multiplane maintenance defaults to `enabled`.
+To disable it, add the following key to the existing East West Ethernet section:
+
+```toml
+[ewethers_config]
+partial-multiplane = "disabled"
+```
+
+Accepted values are `enabled` and `disabled`. This setting is read at startup.
+When disabled, maintenance configuration is no longer delivered to agents. Saved configuration
+and per-DPU observations remain in the machine database, but observations become stale while
+reporting is disabled. Re-enabling resumes delivery of saved requests and refreshes observations
+on subsequent reports.
+
+Disabling does not change the existing plane states: planes in maintenance mode remain disabled,
+and enabled planes remain enabled. To enable all planes, turn maintenance off for them before
+disabling the feature.
+
+If the DPU is reingested or reprovisioned with the feature disabled, maintenance initialization
+is skipped and all planes start in their default enabled state.
+
+The NICo partial-multiplane site config setting is also used to derive the agent internal Helm value `xplaneMaintenance.enabled` automatically.
+
 ## 4. Start carbide-api to create the DPF initialization objects
 
 Once everything in sections 1–3 is in place, deploy Core with

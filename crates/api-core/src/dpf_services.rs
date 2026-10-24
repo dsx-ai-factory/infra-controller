@@ -43,6 +43,7 @@ use carbide_machine_controller::dpf::DpfOperations;
 use crate::cfg::file::{
     DpfBootstrapCaObjectKind, DpfDpuAgentBootstrapCa, DpfExtraService,
     DpfResolvedMandatoryServicesConfig, DpfServiceConfig, EwEthersConfig, NodeAuthConfig,
+    PartialMultiplane,
 };
 
 /// Default DOCA helm registry (DPUServiceTemplate source.repoURL).
@@ -1184,11 +1185,27 @@ pub(crate) fn mandatory_services(
     // Slot listeners attach directly to their own bridge, so each needs its own NAD.
     let mut dhcp = dhcp_server_service(&resolved.base.dhcp_server, interfaces);
     service_vpc_slots.append_dhcp_interfaces(&mut dhcp);
+
+    // If Xplane service is enabled, then set the xplaneMaintenance from the
+    // site config's partial-multiplane setting. Apply this
+    // after extra_helm_values so the mounts stay consistent with that setting.
+    // Mounted directories contain the Xplane core socket and provisioned
+    // netdev-to-logical-name mapping.
+    let mut agent = dpu_agent_service(&resolved.base.dpu_agent, bootstrap_ca);
+    if resolved.extra.contains_key(&DpfExtraService::DocaXplane) {
+        let enabled = ewethers_config
+            .is_none_or(|config| config.partial_multiplane == PartialMultiplane::Enabled);
+        agent
+            .helm_values
+            .as_mut()
+            .expect("DPU agent has generated Helm values")["xplaneMaintenance"] =
+            serde_json::json!({ "enabled": enabled });
+    }
     let mut service_vec = vec![
         dts_service(&resolved.base.dts),
         doca_hbn_service(&resolved.base.doca_hbn, interfaces, service_vpc_slots),
         dhcp,
-        dpu_agent_service(&resolved.base.dpu_agent, bootstrap_ca),
+        agent,
         // Not `node_auth.enabled` directly: an operator staging a disable
         // moves fmds off tokens first, while the API still accepts them.
         fmds_service(

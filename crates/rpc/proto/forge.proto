@@ -97,6 +97,10 @@ service Forge {
   rpc DeleteSpxPartition(SpxPartitionDeletionRequest) returns (SpxPartitionDeletionResult);
   rpc FindSpxPartitionIds(SpxPartitionSearchFilter) returns (SpxPartitionIdList);
   rpc FindSpxPartitionsByIds(SpxPartitionsByIdsRequest) returns (SpxPartitionList);
+  // Read requested maintenance for the declared CX9 logical interfaces on a host.
+  rpc GetMachineSpxMultiplane(MachineSpxMultiplaneRequest) returns (MachineSpxMultiplane);
+  // Atomically save maintenance mode for the selected rails and planes.
+  rpc UpdateMachineSpxMultiplaneMaintenance(MachineSpxMultiplaneMaintenanceUpdateRequest) returns (MachineSpxMultiplane);
 
   // VPC prefixes
   rpc CreateVpcPrefix(VpcPrefixCreationRequest) returns (VpcPrefix);
@@ -9579,6 +9583,17 @@ message MachineSpxAttachmentStatusObservation {
 message AstraConfig {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   repeated AstraAttachment astra_attachments = 1;
+  repeated AstraMultiplaneInterface multiplane_interfaces = 2;
+  optional bool is_attachment_config_present = 3;
+  optional bool is_maintenance_config_present = 4;
+}
+
+message AstraMultiplaneInterface {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  string logical_ifname = 1;
+  optional bool cfg_maintenance_mode = 2;
+  optional string reference = 3;
+  string revision = 4;
 }
 
 // Used if attachment_type is Virtual
@@ -9615,6 +9630,25 @@ message AstraAttachment {
 message AstraConfigStatus {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   repeated AstraAttachmentStatus astra_attachments_status = 1;
+  repeated AstraMultiplaneInterfaceStatus multiplane_interfaces_status = 2;
+  // False means attachment status is absent; preserve stored observations.
+  // Omission retains legacy behavior (true), including an observed empty list.
+  optional bool is_attachment_status_present = 3;
+  // False means maintenance status is absent; preserve stored observations.
+  // Omission retains legacy behavior (true). Updates apply per reported interface.
+  optional bool is_maintenance_status_present = 4;
+}
+
+// Readback from Xplane for the desired revision attempted on one logical port.
+message AstraMultiplaneInterfaceStatus {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  string logical_ifname = 1;
+  // Absent when readback failed; explicit false means maintenance is off.
+  optional bool maintenance_mode = 2;
+  string revision = 3;
+  optional string netdev = 4;
+  optional string error = 5;
+  google.protobuf.Timestamp observed_at = 6;
 }
 
 message AstraAttachmentStatus {
@@ -12916,4 +12950,74 @@ message ResourcePoolStats {
   uint64 non_auto_assign_used = 5;
   // Available values in the manual partition.
   uint64 non_auto_assign_free = 6;
+}
+
+// Requests and responses shared by the SPX multiplane REST and Core APIs.
+message MachineSpxMultiplaneRequest {
+  common.MachineId machine_id = 1;
+}
+
+// Patch one, an inclusive range, or all planes on the selected rails in a single transaction.
+// The selected logical interfaces must be declared on the expected machine.
+// Rail and plane selections form a Cartesian product; undeclared selections reject the whole update.
+// Providers may update maintenance mode even when a machine has an instance.
+message MachineSpxMultiplaneMaintenanceUpdateRequest {
+  common.MachineId machine_id = 1;
+  // Exactly one selector is required. A rail is in 0..3.
+  oneof rail_selector {
+    uint32 rail = 2;
+    google.protobuf.Empty all_rails = 3;
+    // Inclusive bounds from 0 through 3, with start <= end.
+    SpxMultiplaneRange rail_range = 8;
+  }
+  // Exactly one selector is required. A plane is in 0..7.
+  oneof plane_selector {
+    uint32 plane = 4;
+    google.protobuf.Empty all_planes = 7;
+    // Inclusive bounds from 0 through 7, with start <= end.
+    SpxMultiplaneRange plane_range = 9;
+  }
+  // Required. True disables the selected planes; false enables them.
+  optional bool maintenance_mode = 5;
+  // Omission preserves the reference; an empty string clears it.
+  optional string reference = 6;
+}
+
+// Inclusive, ascending bounds for a maintenance selection. Both bounds are required.
+message SpxMultiplaneRange {
+  optional uint32 start = 1;
+  optional uint32 end = 2;
+}
+
+message MachineSpxMultiplane {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  common.MachineId machine_id = 1;
+  // Ordered by rail, then plane; at most 32 declared interfaces.
+  repeated MachineSpxMultiplaneInterface interfaces = 2;
+  // Separate observations for every associated BF4 Astra DPU, ordered by DPU ID.
+  // Empty when no eligible DPUs are present; there is no aggregate host status.
+  repeated MachineSpxMultiplaneDpuStatus dpu_statuses = 3;
+}
+
+message MachineSpxMultiplaneInterface {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  string logical_ifname = 1;
+  uint32 rail = 2;
+  uint32 plane = 3;
+  // Absent until an operator requests a mode; the flavor owns initialization.
+  optional bool cfg_maintenance_mode = 4;
+  optional string reference = 5;
+  string revision = 6;
+  // Readback belongs to each reporting DPU, not to the host configuration.
+  reserved 7 to 11;
+  reserved "applied_maintenance_mode", "applied_revision", "netdev", "error", "observed_at";
+}
+
+// Each DPU independently applies the host's desired interface configuration.
+message MachineSpxMultiplaneDpuStatus {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  common.MachineId dpu_machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
+  // One entry per declared interface, including entries without an observation.
+  // The revision is the last attempted revision, not necessarily the current host revision.
+  repeated AstraMultiplaneInterfaceStatus interfaces = 2;
 }

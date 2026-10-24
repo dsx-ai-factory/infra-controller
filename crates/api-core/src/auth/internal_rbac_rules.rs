@@ -1044,6 +1044,11 @@ impl InternalRBACRules {
         x.perm("DeleteSpxPartition", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("FindSpxPartitionIds", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("FindSpxPartitionsByIds", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("GetMachineSpxMultiplane", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm(
+            "UpdateMachineSpxMultiplaneMaintenance",
+            vec![ForgeAdminCLI, SiteAgent],
+        );
         x.perm("FindNVLinkPartitionIds", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("FindNVLinkPartitionsByIds", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("NVLinkPartitionsForTenant", vec![ForgeAdminCLI, SiteAgent]);
