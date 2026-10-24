@@ -1518,7 +1518,7 @@ on or off.
 | ServiceMonitor (per chart) | Helm | `<chart>.serviceMonitor.enabled` | off | Enable when the Prometheus Operator is installed. |
 | Hardware-health telemetry | Helm | `nico-hardware-health.telemetryServiceMonitor.enabled` | off | Enable for per-machine sensor metrics (temperature, power, fans). |
 | IB Fabric Monitor | siteConfig | `[ib_config].enabled` | off | Sites running InfiniBand fabrics managed by UFM. |
-| NvLink Monitor | siteConfig | `[nvlink_config].enabled` | off | GB200/GB300 sites using NMX-C for NvLink partitioning. |
+| NvLink Monitor | siteConfig | `[nvlink_config].enabled` | off | GB200/GB300/VR sites using NMX-C for NvLink partitioning. |
 | DSX Exchange Event Bus | siteConfig | `[dsx_exchange_event_bus]` present | off | Pairs with the `nico-dsx-exchange-consumer` chart. Requires MQTT broker. |
 | DPA (Cluster Interconnect) | siteConfig | `[dpa_config].enabled` | off | East-west Ethernet cluster networking; requires MQTT broker. |
 | FNN (L3 VPC overlay) | siteConfig | `[fnn]` present | off | Tenant VPC networking via VXLAN; needs `routing_profiles` and route targets. |
