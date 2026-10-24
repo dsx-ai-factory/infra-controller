@@ -7,7 +7,7 @@
 //! in `crate::sse`; the `/Mock/EventService` controls in `crate::event_controls`.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
@@ -59,6 +59,7 @@ pub struct EventServiceLimits {
     /// How long an emitted frame may wait for transport progress before the
     /// serving connection is closed. Idle waits between frames do not count.
     pub output_stall_timeout: Duration,
+
     /// Delete a subscription when its stream closes. `false` models a BMC that
     /// leaks them.
     pub reap_on_close: bool,
@@ -166,7 +167,7 @@ struct Inner {
     next_seq: u64,
     next_subscriber: u64,
     subscribers: BTreeMap<u64, Subscription>,
-    streams: usize,
+    streams: BTreeSet<u64>,
     frames: VecDeque<Frame>,
     retained_bytes: usize,
     scripts: VecDeque<(VecDeque<StreamStep>, usize)>,
@@ -213,7 +214,7 @@ impl EventServiceState {
                 next_seq: 1,
                 next_subscriber: 1,
                 subscribers: BTreeMap::new(),
-                streams: 0,
+                streams: BTreeSet::new(),
                 frames: VecDeque::new(),
                 retained_bytes: 0,
                 scripts: VecDeque::new(),
@@ -249,7 +250,7 @@ impl EventServiceState {
                 inner.subscribers.remove(&id);
             }
 
-            inner.streams = inner.streams.saturating_sub(1);
+            inner.streams.remove(&id);
         }
     }
 
@@ -308,7 +309,7 @@ impl EventServiceState {
         EventServiceStats {
             generation: inner.generation.clone(),
             subscribers: inner.subscribers.len(),
-            streams: inner.streams,
+            streams: inner.streams.len(),
             retained_frames: inner.frames.len(),
             retained_bytes: inner.retained_bytes,
             queued_scripts: inner.scripts.len(),
@@ -449,7 +450,13 @@ impl EventServiceState {
         };
 
         // A subscription a leaking service kept after its stream closed holds a slot.
-        if inner.streams.max(inner.subscribers.len()) >= self.config.limits.max_subscribers {
+        let leaked = inner
+            .subscribers
+            .keys()
+            .filter(|id| !inner.streams.contains(id))
+            .count();
+
+        if inner.streams.len() + leaked >= self.config.limits.max_subscribers {
             return Err(EventServiceError::Unavailable);
         }
         let id = inner.next_subscriber;
@@ -469,8 +476,9 @@ impl EventServiceState {
                 heartbeat_at: None,
             }
         };
+
         inner.subscribers.insert(id, Subscription { script });
-        inner.streams += 1;
+        inner.streams.insert(id);
         Ok(Subscriber::new(
             self.clone(),
             id,
@@ -1093,6 +1101,40 @@ mod tests {
 
         assert!(state.delete_subscription(id));
         assert!(state.subscribe(None).is_ok(), "DELETE must free the slot");
+    }
+
+    #[test]
+    fn a_deleted_held_stream_and_a_different_leaked_subscription_fill_two_slots() {
+        let state = EventServiceState::new(
+            EventServiceConfig::try_from(EventServiceLimits {
+                max_subscribers: 2,
+                reap_on_close: false,
+                heartbeat: None,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+
+        let held = state.subscribe(None).unwrap();
+        drop(state.subscribe(None).unwrap());
+
+        let [deleted, _leaked] = state.subscription_ids()[..] else {
+            panic!("both subscriptions must be listed");
+        };
+
+        assert!(state.delete_subscription(deleted));
+
+        assert!(
+            matches!(state.subscribe(None), Err(EventServiceError::Unavailable)),
+            "the held stream and the leaked subscription must each hold a slot"
+        );
+
+        drop(held);
+
+        assert!(
+            state.subscribe(None).is_ok(),
+            "dropping the body must free its slot"
+        );
     }
 
     #[test]
