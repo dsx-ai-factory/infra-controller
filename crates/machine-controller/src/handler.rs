@@ -247,6 +247,8 @@ pub struct ReachabilityParams {
     pub uefi_boot_wait: chrono::Duration,
 }
 
+const DELL_SCOUT_EARLY_RETRY_DELAY: Duration = Duration::minutes(10);
+
 /// Parameters used by the HostStateMachineHandler.
 #[derive(Clone, Debug)]
 pub struct HostHandlerParams {
@@ -1935,14 +1937,30 @@ impl MachineStateHandler {
                             mh_snapshot.host_snapshot.state.version,
                             mh_snapshot.host_snapshot.status.last_cleanup_time,
                         ) {
-                            let status = trigger_reboot_if_needed(
+                            let early_retry_attempted = dell_scout_early_retry_attempted(
                                 &mh_snapshot.host_snapshot,
+                                false,
+                            );
+                            let status = match trigger_dell_scout_early_retry_if_needed(
                                 mh_snapshot,
-                                None,
+                                early_retry_attempted,
                                 &self.reachability_params,
                                 ctx,
                             )
-                            .await?;
+                            .await?
+                            {
+                                Some(status) => status,
+                                None => {
+                                    trigger_reboot_if_needed(
+                                        &mh_snapshot.host_snapshot,
+                                        mh_snapshot,
+                                        None,
+                                        &self.reachability_params,
+                                        ctx,
+                                    )
+                                    .await?
+                                }
+                            };
                             return Ok(StateHandlerOutcome::wait(status.status));
                         }
 
@@ -6243,6 +6261,107 @@ fn trigger_reboot_if_needed_without_power_cycle(
     )
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum DellScoutEarlyRetry {
+    WaitUntil(DateTime<Utc>),
+    RetryNow,
+}
+
+fn dell_scout_early_retry(
+    is_dell: bool,
+    entered_state_at: DateTime<Utc>,
+    last_scout_contact_time: Option<DateTime<Utc>>,
+    retry_attempted: bool,
+    current_time: DateTime<Utc>,
+) -> Option<DellScoutEarlyRetry> {
+    if !is_dell
+        || retry_attempted
+        || last_scout_contact_time.is_some_and(|contact| contact >= entered_state_at)
+    {
+        return None;
+    }
+
+    let retry_at = entered_state_at + DELL_SCOUT_EARLY_RETRY_DELAY;
+    Some(if current_time >= retry_at {
+        DellScoutEarlyRetry::RetryNow
+    } else {
+        DellScoutEarlyRetry::WaitUntil(retry_at)
+    })
+}
+
+fn dell_scout_early_retry_attempted(
+    host: &HostMachine,
+    normal_retry_attempted: bool,
+) -> bool {
+    // Writes from the iteration that enters a state are persisted before its
+    // version is advanced, so only a reboot at or after the version timestamp
+    // was requested from within the current state.
+    normal_retry_attempted
+        || host
+            .status
+            .last_reboot_requested
+            .as_ref()
+            .is_some_and(|request| request.time >= host.state.version.timestamp())
+}
+
+async fn trigger_dell_scout_early_retry_if_needed(
+    state: &ManagedHostStateSnapshot,
+    retry_attempted: bool,
+    reachability_params: &ReachabilityParams,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+) -> Result<Option<RebootStatus>, StateHandlerError> {
+    let host = &state.host_snapshot;
+    let entered_state_at = host.state.version.timestamp();
+    let current_time = Utc::now();
+
+    // Preserve the normal recovery policy before the Dell-specific deadline.
+    // These cheap checks also avoid a Site Explorer lookup after Scout contacts
+    // NICo or after any retry has already been requested in this state.
+    if retry_attempted
+        || host
+            .status
+            .last_scout_contact_time
+            .is_some_and(|contact| contact >= entered_state_at)
+        || current_time < entered_state_at + DELL_SCOUT_EARLY_RETRY_DELAY
+    {
+        return Ok(None);
+    }
+
+    // Proactive hosts have default hardware inventory until Scout first boots.
+    // Use Site Explorer's BMC vendor while Scout's vendor is still unknown.
+    let scout_vendor = host.bmc_vendor();
+    let is_dell = if !scout_vendor.is_unknown() {
+        scout_vendor.is_dell()
+    } else if let Some(bmc_ip) = host.status.bmc_info.ip {
+        db::explored_endpoints::lookup_bmc_metadata_by_ip(bmc_ip, &mut ctx.services.db_reader)
+            .await?
+            .vendor
+            .as_deref()
+            .is_some_and(|vendor| bmc_vendor::BMCVendor::from(vendor).is_dell())
+    } else {
+        false
+    };
+    let Some(decision) = dell_scout_early_retry(
+        is_dell,
+        entered_state_at,
+        host.status.last_scout_contact_time,
+        retry_attempted,
+        current_time,
+    ) else {
+        return Ok(None);
+    };
+
+    debug_assert_eq!(decision, DellScoutEarlyRetry::RetryNow);
+
+    let early_retry_params = ReachabilityParams {
+        failure_retry_time: DELL_SCOUT_EARLY_RETRY_DELAY,
+        ..*reachability_params
+    };
+    trigger_reboot_if_needed_without_power_cycle(host, state, None, &early_retry_params, ctx)
+        .await
+        .map(Some)
+}
+
 /// Queues a fresh retry timestamp after earlier writes and disables generic restart verification.
 /// The next retry's cooldown starts at this time. Queue this after verification
 /// writes so they don't reject the new record created by the same pass.
@@ -9767,11 +9886,29 @@ impl StateHandler for InstanceStateHandler {
                 }
                 InstanceState::BootingWithDiscoveryImage { retry } => {
                     if !rebooted(&mh_snapshot.host_snapshot) {
+                        let retry_count = Some(retry.count as i64 + 1);
+                        let early_retry_attempted = dell_scout_early_retry_attempted(
+                            &mh_snapshot.host_snapshot,
+                            retry.count > 0,
+                        );
+                        if let Some(status) = trigger_dell_scout_early_retry_if_needed(
+                            mh_snapshot,
+                            early_retry_attempted,
+                            &self.reachability_params,
+                            ctx,
+                        )
+                        .await?
+                        {
+                            // The Dell-specific restart is an extra attempt. Keep the normal retry
+                            // count and its restart/power-cycle schedule unchanged.
+                            return Ok(StateHandlerOutcome::wait(status.status));
+                        }
+
                         let status = trigger_reboot_if_needed(
                             &mh_snapshot.host_snapshot,
                             mh_snapshot,
                             // can't send 0. 0 will force power-off as cycle calculator.
-                            Some(retry.count as i64 + 1),
+                            retry_count,
                             &self.reachability_params,
                             ctx,
                         )
@@ -15283,6 +15420,65 @@ mod tests {
     use regex::Regex;
 
     use super::*;
+
+    #[test]
+    fn dell_scout_early_retry_policy() {
+        let entered_state_at = Utc::now();
+        let retry_at = entered_state_at + DELL_SCOUT_EARLY_RETRY_DELAY;
+        check_values(
+            [
+                Check {
+                    scenario: "Dell waits until the early retry deadline",
+                    input: (true, None, false, retry_at - Duration::microseconds(1)),
+                    expect: Some(DellScoutEarlyRetry::WaitUntil(retry_at)),
+                },
+                Check {
+                    scenario: "Dell retries at the deadline",
+                    input: (true, None, false, retry_at),
+                    expect: Some(DellScoutEarlyRetry::RetryNow),
+                },
+                Check {
+                    scenario: "Dell retries after the deadline",
+                    input: (true, None, false, retry_at + Duration::seconds(1)),
+                    expect: Some(DellScoutEarlyRetry::RetryNow),
+                },
+                Check {
+                    scenario: "a prior retry suppresses the early retry",
+                    input: (true, None, true, retry_at),
+                    expect: None,
+                },
+                Check {
+                    scenario: "Scout contact in the state suppresses the early retry",
+                    input: (true, Some(entered_state_at), false, retry_at),
+                    expect: None,
+                },
+                Check {
+                    scenario: "Scout contact before the state does not suppress the retry",
+                    input: (
+                        true,
+                        Some(entered_state_at - Duration::seconds(1)),
+                        false,
+                        retry_at,
+                    ),
+                    expect: Some(DellScoutEarlyRetry::RetryNow),
+                },
+                Check {
+                    scenario: "non-Dell hosts keep the standard retry policy",
+                    input: (false, None, false, retry_at),
+                    expect: None,
+                },
+            ],
+            |(is_dell, last_scout_contact_time, retry_attempted, current_time)| {
+                dell_scout_early_retry(
+                    is_dell,
+                    entered_state_at,
+                    last_scout_contact_time,
+                    retry_attempted,
+                    current_time,
+                )
+            },
+        );
+    }
 
     #[tokio::test]
     async fn firmware_upload_entry_holds_capacity_until_transfer_finishes() {
