@@ -1468,6 +1468,11 @@ pub enum ManagedHostState {
         /// omit this, so their completion must leave pending requests alone.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request: Option<MachineMaintenanceRequest>,
+        /// Power-operation retries scheduled after failures, at most
+        /// five. Zero (including older saved states) attempts immediately;
+        /// counts 1/2/3/4/5 wait 1/2/4/8/16 minutes from the state version timestamp.
+        #[serde(default)]
+        retry_count: u32,
     },
 
     /// Host is assigned to an Instance.
@@ -1907,6 +1912,22 @@ impl std::fmt::Display for ValidationState {
 /// machine stays in its failure state until an operator intervenes.
 pub const MAX_FIRMWARE_UPGRADE_RETRIES: u32 = 5;
 
+/// Maximum retries after the initial attempt of a maintenance power operation.
+pub const MAX_MAINTENANCE_POWER_RETRIES: u32 = 5;
+
+/// Planned wait from the maintenance state version timestamp before an attempt.
+/// Zero attempts immediately; retries 1 through 5 wait 1/2/4/8/16 minutes.
+/// Larger counts are clamped to the final delay. The handler and SLA calculation
+/// share this schedule so planned waits do not count as overdue execution.
+pub fn maintenance_power_retry_backoff(retry_count: u32) -> std::time::Duration {
+    match retry_count {
+        0 => std::time::Duration::ZERO,
+        n => {
+            std::time::Duration::from_secs(60 * 2_u64.pow(n.min(MAX_MAINTENANCE_POWER_RETRIES) - 1))
+        }
+    }
+}
+
 impl ManagedHostState {
     /// Whether any DPU is waiting for DPF provisioning or handling its requested reboot.
     /// Site Explorer must stay paused until every DPU leaves these states.
@@ -1936,6 +1957,7 @@ impl ManagedHostState {
         Self::Maintenance {
             operation: request.operation.clone(),
             request: Some(request),
+            retry_count: 0,
         }
     }
 
@@ -3505,9 +3527,10 @@ pub fn state_sla(
         ManagedHostState::BootConfiguring { .. } => {
             StateSla::with_sla(slas::BOOT_CONFIGURING, time_in_state)
         }
-        ManagedHostState::Maintenance { .. } => {
-            StateSla::with_sla(slas::MAINTENANCE, time_in_state)
-        }
+        ManagedHostState::Maintenance { retry_count, .. } => StateSla::with_sla(
+            slas::MAINTENANCE + maintenance_power_retry_backoff(*retry_count),
+            time_in_state,
+        ),
         ManagedHostState::Assigned { instance_state } => match instance_state {
             InstanceState::Ready => StateSla::no_sla(),
             InstanceState::BootingWithDiscoveryImage { retry } => {
@@ -3974,6 +3997,30 @@ mod tests {
     use crate::test_support::machine_snapshot::{
         dpu_machine, host_machine, managed_host_state_snapshot,
     };
+
+    #[test]
+    fn maintenance_retry_count_persistence() {
+        value_scenarios!(
+            run = |json: &str| {
+                let state: ManagedHostState = serde_json::from_str(json).unwrap();
+                let saved = serde_json::to_value(&state).unwrap();
+                let reloaded: ManagedHostState = serde_json::from_value(saved).unwrap();
+                assert_eq!(state, reloaded);
+                let ManagedHostState::Maintenance { retry_count, request, .. } = reloaded else {
+                    panic!("expected maintenance");
+                };
+                assert!(request.is_none());
+                retry_count
+            };
+            "legacy maintenance starts immediately" {
+                r#"{"state":"maintenance","operation":{"operation":"poweron"}}"# => 0,
+            }
+            "explicit retry progress survives reload" {
+                r#"{"state":"maintenance","operation":{"operation":"poweron"},"retry_count":0}"# => 0,
+                r#"{"state":"maintenance","operation":{"operation":"poweron"},"retry_count":5}"# => 5,
+            }
+        );
+    }
 
     #[derive(Clone, Copy)]
     struct DpuProvisioningInput {
@@ -5419,6 +5466,7 @@ mod tests {
                     scenario: "maintenance uses the maintenance SLA",
                     input: stale(ManagedHostState::Maintenance {
                         operation: MachineMaintenanceOperation::PowerOn,
+                        retry_count: 0,
                         request: None,
                     }),
                     expect: (seconds(300), true),
@@ -5647,6 +5695,45 @@ mod tests {
                 );
                 (state_sla.sla, state_sla.time_in_state_above_sla)
             },
+        );
+    }
+
+    #[test]
+    fn maintenance_sla_allows_backoff_but_detects_overdue_execution() {
+        let machine_id: MachineId = "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng"
+            .parse()
+            .unwrap();
+        let sla_config = slas::MachineSlaConfig::new(Duration::minutes(10));
+        value_scenarios!(
+            run = |(retry_count, elapsed_seconds)| {
+                let state = ManagedHostState::Maintenance {
+                    operation: MachineMaintenanceOperation::PowerOn,
+                    request: None,
+                    retry_count,
+                };
+                let version = format!(
+                    "V1-T{}",
+                    (Utc::now() - Duration::seconds(elapsed_seconds)).timestamp_micros(),
+                ).parse().unwrap();
+                let result = state_sla(
+                    &machine_id,
+                    &state,
+                    &version,
+                    &health_report_with_alerts(vec![]),
+                    &sla_config,
+                );
+                (result.sla.unwrap().as_secs(), result.time_in_state_above_sla)
+            };
+            "planned wait longer than the base SLA" {
+                (4, 470) => (780, false),
+            }
+            "execution retains five minutes after the longest wait" {
+                (5, 1_250) => (1_260, false),
+            }
+            "overdue execution still breaches SLA" {
+                (4, 781) => (780, true),
+                (5, 1_261) => (1_260, true),
+            }
         );
     }
 

@@ -22,7 +22,9 @@ pub(super) fn machine(
     pending: Option<&MachineMaintenanceRequest>,
 ) -> rpc::ComponentPowerActionDetails {
     let (operation, admitted) = match state {
-        ManagedHostState::Maintenance { operation, request } => (Some(operation), request.as_ref()),
+        ManagedHostState::Maintenance {
+            operation, request, ..
+        } => (Some(operation), request.as_ref()),
         _ => (None, None),
     };
     let active = operation.map(|operation| {

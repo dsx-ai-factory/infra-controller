@@ -113,11 +113,11 @@ impl ComputeTrayManager for ReconciliationComputeTrayManager {
                 bmc_ip: endpoints[0].bmc_ip,
                 bmc_mac: endpoints[0].bmc_mac,
                 success: false,
-                error: Some("test backend rejection".into()),
+                error: Some("RMS power operation timed out".into()),
                 backend_job_id: None,
             }]),
             BackendOutcome::TransportFailure => Err(ComponentManagerError::Status(
-                tonic::Status::unavailable("test transport failure"),
+                tonic::Status::deadline_exceeded("test power request timed out"),
             )),
         }
     }
@@ -161,6 +161,7 @@ struct ReconciliationCase {
 enum ResultingState {
     Ready,
     Failed,
+    Retrying(u32),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -297,6 +298,7 @@ async fn reconcile(
     let resulting_state = match machine.state.value {
         ManagedHostState::Ready => ResultingState::Ready,
         ManagedHostState::Failed { .. } => ResultingState::Failed,
+        ManagedHostState::Maintenance { retry_count, .. } => ResultingState::Retrying(retry_count),
         other => return Err(format!("unexpected resulting state: {other:?}")),
     };
 
@@ -334,11 +336,11 @@ fn backend_cases() -> Vec<Case<ReconciliationCase, Observation, String>> {
                         backend_outcome,
                     },
                     expect: Outcome::Yields(Observation {
-                        request_cleared: true,
+                        request_cleared: succeeds,
                         resulting_state: if succeeds {
                             ResultingState::Ready
                         } else {
-                            ResultingState::Failed
+                            ResultingState::Retrying(1)
                         },
                         actions: vec![expected_action(operation.clone())],
                     }),
@@ -376,6 +378,145 @@ async fn reconciles_all_power_operations_and_backend_outcomes(pool: PgPool) {
     .await;
 }
 
+async fn age_maintenance_state(pool: &PgPool, host: &TestManagedHost, seconds: i64) {
+    let machine = host.host.machine().await;
+    let version: config_version::ConfigVersion = format!(
+        "V{}-T{}",
+        machine.state.version.version_nr(),
+        (chrono::Utc::now() - chrono::TimeDelta::seconds(seconds)).timestamp_micros(),
+    )
+    .parse()
+    .unwrap();
+    sqlx::query("UPDATE machines SET controller_state_version = $1 WHERE id = $2")
+        .bind(version)
+        .bind(host.host.id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx_test]
+async fn power_retries_survive_restart_and_stop_after_five_retries(pool: PgPool) {
+    let backend = Arc::new(ReconciliationComputeTrayManager::new());
+    let mut env = Env::builder(pool.clone())
+        .with_component_manager(component_manager(backend.clone()))
+        .with_credential_manager(valid_credential_manager())
+        .build()
+        .await;
+    let domain = env.test_harness.test_domain().await;
+    let network_controller = env.test_harness.network_controller();
+    let underlay_segment = network_controller.create_underlay_segment(&domain).await;
+    network_controller.create_admin_segment(&domain).await;
+    let host = create_ready_host(&env, &underlay_segment).await;
+    for (scenario, operation, failure, recovers) in [
+        (
+            "recovery",
+            MachineMaintenanceOperation::PowerOn,
+            BackendOutcome::NonSuccess,
+            true,
+        ),
+        (
+            "exhaustion",
+            MachineMaintenanceOperation::Reset,
+            BackendOutcome::TransportFailure,
+            false,
+        ),
+    ] {
+        let action = expected_action(operation.clone());
+        enter_requested_state(&env, &host, operation.clone(), EntryState::Ready).await;
+        env.run_single_iteration().await;
+        let request = host
+            .host
+            .machine()
+            .await
+            .machine_maintenance_requested
+            .unwrap();
+
+        backend.set_outcome(failure);
+        env.run_single_iteration().await;
+        assert_eq!(backend.take_actions(), vec![action], "{scenario}");
+
+        for (retry_count, delay) in [(1, 60), (2, 120), (3, 240), (4, 480), (5, 960)] {
+            let machine = host.host.machine().await;
+            assert_eq!(
+                machine.state.value,
+                ManagedHostState::Maintenance {
+                    operation: operation.clone(),
+                    request: Some(request.clone()),
+                    retry_count,
+                },
+                "{scenario}"
+            );
+            assert_eq!(
+                machine.machine_maintenance_requested.as_ref(),
+                Some(&request)
+            );
+
+            // Recreate the controller with the same database during backoff.
+            // Exhaustion restarts after two failures to prove the budget is retained.
+            if retry_count == if recovers { 1 } else { 2 } {
+                env = Env::builder(pool.clone())
+                    .with_component_manager(component_manager(backend.clone()))
+                    .with_credential_manager(valid_credential_manager())
+                    .build_with_harness(env.test_harness, env.redfish_sim);
+            }
+
+            age_maintenance_state(&pool, &host, delay - 10).await;
+            let waiting = host.host.machine().await;
+            env.run_single_iteration().await;
+            let reloaded = host.host.machine().await;
+            assert_eq!(
+                reloaded.state.value, waiting.state.value,
+                "backoff must preserve its counter"
+            );
+            assert_eq!(
+                reloaded.state.version, waiting.state.version,
+                "backoff must preserve its clock"
+            );
+            assert_eq!(
+                reloaded.machine_maintenance_requested.as_ref(),
+                Some(&request)
+            );
+            assert!(
+                backend.take_actions().is_empty(),
+                "{scenario}: premature retry"
+            );
+
+            age_maintenance_state(&pool, &host, delay + 1).await;
+            if recovers {
+                backend.set_outcome(BackendOutcome::Success);
+            }
+            env.run_single_iteration().await;
+            assert_eq!(backend.take_actions(), vec![action], "{scenario}");
+            if recovers {
+                break;
+            }
+        }
+
+        let completed = host.host.machine().await;
+        assert!(
+            completed.machine_maintenance_requested.is_none(),
+            "{scenario}"
+        );
+        if recovers {
+            assert_eq!(completed.state.value, ManagedHostState::Ready);
+        } else {
+            let ManagedHostState::Failed { details, .. } = &completed.state.value else {
+                panic!("retry exhaustion should fail: {:?}", completed.state.value);
+            };
+            let FailureCause::UnhandledState { err } = &details.cause else {
+                panic!("expected power failure");
+            };
+            assert!(err.contains("after 5 retries"));
+        }
+        env.run_single_iteration().await;
+        assert!(
+            backend.take_actions().is_empty(),
+            "{scenario}: completed request ran again"
+        );
+    }
+}
+
 async fn reconcile_precondition_failure(
     env: &mut Env,
     host: &TestManagedHost,
@@ -389,8 +530,11 @@ async fn reconcile_precondition_failure(
     let machine = host.host.machine().await;
     Ok(Observation {
         request_cleared: machine.machine_maintenance_requested.is_none(),
-        resulting_state: if matches!(machine.state.value, ManagedHostState::Failed { .. }) {
-            ResultingState::Failed
+        resulting_state: if matches!(
+            machine.state.value,
+            ManagedHostState::Maintenance { retry_count: 1, .. }
+        ) {
+            ResultingState::Retrying(1)
         } else {
             return Err(format!(
                 "unexpected resulting state: {:?}",
@@ -415,8 +559,8 @@ fn precondition_cases() -> Vec<Case<(MachineMaintenanceOperation, EntryState), O
                 scenario: Box::leak(format!("{operation:?} / {entry_state:?}").into_boxed_str()),
                 input: (operation.clone(), entry_state),
                 expect: Outcome::Yields(Observation {
-                    request_cleared: true,
-                    resulting_state: ResultingState::Failed,
+                    request_cleared: false,
+                    resulting_state: ResultingState::Retrying(1),
                     actions: Vec::new(),
                 }),
             });
@@ -426,7 +570,7 @@ fn precondition_cases() -> Vec<Case<(MachineMaintenanceOperation, EntryState), O
 }
 
 #[sqlx_test]
-async fn clears_requests_when_component_manager_is_missing(pool: PgPool) {
+async fn retries_when_component_manager_is_missing(pool: PgPool) {
     let env = Env::builder(pool)
         .with_credential_manager(valid_credential_manager())
         .build()
@@ -450,7 +594,7 @@ async fn clears_requests_when_component_manager_is_missing(pool: PgPool) {
 }
 
 #[sqlx_test]
-async fn clears_requests_when_credentials_are_missing(pool: PgPool) {
+async fn retries_when_credentials_are_missing(pool: PgPool) {
     let backend = Arc::new(ReconciliationComputeTrayManager::new());
     let env = Env::builder(pool)
         .with_component_manager(component_manager(backend.clone()))
@@ -556,7 +700,7 @@ async fn preserves_replacement_maintenance_after_power_completion(pool: PgPool) 
             (BackendOutcome::Success, ManagedHostState::Ready)
                 | (
                     BackendOutcome::TransportFailure,
-                    ManagedHostState::Failed { .. }
+                    ManagedHostState::Maintenance { retry_count: 1, .. }
                 )
         ));
         let replacement = machine.machine_maintenance_requested.unwrap();
@@ -579,6 +723,57 @@ async fn preserves_replacement_maintenance_after_power_completion(pool: PgPool) 
             vec![expected_action(replacement_operation)]
         );
     }
+}
+
+#[sqlx_test]
+async fn chassis_reset_retries_transient_redfish_failure(pool: PgPool) {
+    let mut env = Env::builder(pool.clone()).build().await;
+    let domain = env.test_harness.test_domain().await;
+    let network_controller = env.test_harness.network_controller();
+    let underlay_segment = network_controller.create_underlay_segment(&domain).await;
+    network_controller.create_admin_segment(&domain).await;
+    let host = create_ready_host(&env, &underlay_segment).await;
+    let operation = MachineMaintenanceOperation::ChassisReset {
+        chassis_id: "HGX_Chassis_0".into(),
+    };
+    enter_requested_state(&env, &host, operation.clone(), EntryState::Ready).await;
+    env.run_single_iteration().await;
+    let request = host
+        .host
+        .machine()
+        .await
+        .machine_maintenance_requested
+        .unwrap();
+    let timepoint = env.redfish_sim.timepoint();
+    env.redfish_sim
+        .fail_next_chassis_reset(libredfish::RedfishError::HTTPErrorCode {
+            url: "https://bmc/redfish/v1/Chassis/HGX_Chassis_0".into(),
+            status_code: 503.try_into().unwrap(),
+            response_body: "BMC temporarily unavailable".into(),
+        });
+
+    env.run_single_iteration().await;
+    let waiting = host.host.machine().await;
+    assert_eq!(
+        waiting.state.value,
+        ManagedHostState::Maintenance {
+            operation: operation.clone(),
+            request: Some(request.clone()),
+            retry_count: 1,
+        }
+    );
+    assert_eq!(waiting.machine_maintenance_requested, Some(request));
+    age_maintenance_state(&pool, &host, 61).await;
+    env.run_single_iteration().await;
+    let completed = host.host.machine().await;
+    assert_eq!(completed.state.value, ManagedHostState::Ready);
+    assert!(completed.machine_maintenance_requested.is_none());
+    let resets = env.redfish_sim.actions_since(&timepoint).all_hosts().iter()
+        .filter(|action| matches!(action,
+            carbide_redfish::libredfish::test_support::RedfishSimAction::ChassisReset { chassis_id, .. }
+            if chassis_id == "HGX_Chassis_0"))
+        .count();
+    assert_eq!(resets, 2);
 }
 
 #[sqlx_test]
@@ -609,6 +804,7 @@ async fn chassis_reset_preserves_replacement_including_legacy_state(pool: PgPool
                 &host.host.id,
                 &ManagedHostState::Maintenance {
                     operation: operation.clone(),
+                    retry_count: 0,
                     request: None,
                 },
             )

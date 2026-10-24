@@ -3766,6 +3766,7 @@ async fn test_ready_boot_config_waits_for_all_dpu_network_config_versions(pool: 
         machine.current_state(),
         &ManagedHostState::Maintenance {
             operation: MachineMaintenanceOperation::PowerOff { graceful: true },
+            retry_count: 0,
             request: machine.machine_maintenance_requested.clone(),
         },
         "maintenance must remain available while Prepare waits",
