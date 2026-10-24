@@ -28,7 +28,6 @@ use std::time::{Duration, Instant};
 use carbide_firmware::FirmwareConfigSnapshot;
 use carbide_redfish::libredfish::conv::IntoModel;
 use carbide_secrets::credentials::CredentialManager;
-use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::machine::MachineType;
 use chrono::Utc;
@@ -49,10 +48,10 @@ use model::machine_interface::InterfaceType;
 use model::rack_type::RackProfileConfig;
 use model::resource_pool::common::CommonPools;
 use model::site_explorer::{
-    BlueFieldOperatingMode, Chassis, EndpointExplorationError, EndpointExplorationReport,
-    EndpointType, ExplorationTier, ExploredDpu, ExploredEndpoint, ExploredManagedHost,
+    BlueFieldOperatingMode, EndpointExplorationError, EndpointExplorationReport, EndpointType,
+    ExplorationTier, ExploredDpu, ExploredEndpoint, ExploredManagedHost,
     HostPrimaryInterfaceSelection, MachineExpectation, PowerState, PreingestionState,
-    SiteExplorerLastRun, is_bluefield_part_number,
+    SiteExplorerLastRun,
 };
 use sqlx::PgPool;
 use tokio::task::JoinSet;
@@ -90,6 +89,7 @@ pub use inventory_creator::{
 use inventory_creator::{ConfiguredIngestionCandidate, InventoryCreator};
 mod machine_location_reconciler;
 pub use machine_location_reconciler::MachineLocationReconciler;
+mod endpoint_exploration_report_ext;
 mod explored_endpoint_ext;
 use explored_endpoint_ext::ExploredEndpointExt;
 pub use explored_endpoint_ext::get_sys_image_version;
@@ -477,15 +477,6 @@ struct IngestionCandidate<'a> {
     dpu_matches: Option<HostDpuMatches<'a>>,
     host_dpu_policy: HostDpuPolicy,
     declared_primary: Option<MacAddress>,
-}
-
-/// Host inventory fields that can identify one DPU by serial number.
-#[derive(Clone, Copy)]
-struct HostDpuInventoryCandidate<'a> {
-    /// Part number used by the existing BlueField detection and mode checks.
-    part_number: Option<&'a str>,
-    /// Serial number joined to the DPU endpoint report.
-    serial_number: Option<&'a str>,
 }
 
 /// When Site Explorer last physically reset a BMC, tracked per reset method.
@@ -1381,7 +1372,9 @@ impl SiteExplorer {
             fallback_matches,
             expected_fallback_count,
         } = matches;
-        let needs_expected_serial_fallback = dpu_inventory.needs_expected_serial_fallback();
+        let needs_expected_serial_fallback =
+            inventory_matches.is_empty() || dpu_inventory.has_unmatched_reported_dpu;
+        let matched_total = inventory_matches.len();
 
         let inventory_cfg_status = self
             .configure_matched_dpus(ep, inventory_matches, metrics)
@@ -1390,7 +1383,7 @@ impl SiteExplorer {
             .configure_matched_dpus(ep, fallback_matches, metrics)
             .await;
 
-        let has_unready_matches = dpu_inventory.matched_total
+        let has_unready_matches = matched_total
             > inventory_cfg_status.running_as_dpu.len() + inventory_cfg_status.running_as_nic_total;
 
         let host_reported_dpus_total = dpu_inventory.reported_total;
@@ -3494,58 +3487,6 @@ fn is_dpu_in_nic_mode(dpu_ep: &ExploredEndpoint, host_ep: &ExploredEndpoint) -> 
     nic_mode
 }
 
-/// Returns the normalized serial when a host inventory record repeats a BlueField
-/// serial already seen during this host's ingestion pass.
-fn duplicate_bluefield_serial<'a>(
-    part_number: Option<&str>,
-    serial_number: Option<&'a str>,
-    seen: &mut HashSet<&'a str>,
-) -> Option<&'a str> {
-    if !part_number
-        .map(str::trim)
-        .is_some_and(is_bluefield_part_number)
-    {
-        return None;
-    }
-
-    let serial_number = serial_number.map(str::trim).none_if_empty()?;
-    (!seen.insert(serial_number)).then_some(serial_number)
-}
-
-/// `host_dpu_inventory_records` applies the existing chassis inventory rule in
-/// one place. Some BMCs put the BlueField identity on the chassis itself;
-/// others put it on a nested network adapter. Reading only one form avoids
-/// duplicate representations within this chassis. The same serial can still
-/// appear in other chassis, so callers counting DPUs must deduplicate per host.
-fn host_dpu_inventory_records(chassis: &Chassis) -> Vec<HostDpuInventoryCandidate<'_>> {
-    let chassis_is_bluefield = chassis
-        .part_number
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(is_bluefield_part_number);
-    let chassis_has_serial = chassis
-        .serial_number
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|serial| !serial.is_empty());
-
-    if chassis_is_bluefield && chassis_has_serial {
-        return vec![HostDpuInventoryCandidate {
-            part_number: chassis.part_number.as_deref(),
-            serial_number: chassis.serial_number.as_deref(),
-        }];
-    }
-
-    chassis
-        .network_adapters
-        .iter()
-        .map(|adapter| HostDpuInventoryCandidate {
-            part_number: adapter.part_number.as_deref(),
-            serial_number: adapter.serial_number.as_deref(),
-        })
-        .collect()
-}
-
 /// Status of matched DPUs after applying target operating modes.
 #[derive(Debug)]
 struct DpuConfigStatus {
@@ -4925,71 +4866,6 @@ mod tests {
             classify_matched_dpu(&matched_pcie_dpu(&dpu), &host, Some(Err(err))),
             DiscoveredDpu::ModeCheckFailed(_)
         ));
-    }
-
-    #[test]
-    fn duplicate_bluefield_serial_only_flags_repeated_bluefield_serials() {
-        struct Case {
-            name: &'static str,
-            devices: &'static [(Option<&'static str>, Option<&'static str>)],
-            expected: &'static [bool],
-        }
-
-        let cases = [
-            Case {
-                name: "duplicate BlueField serial",
-                devices: &[
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                ],
-                expected: &[false, true],
-            },
-            Case {
-                name: "trimmed duplicate BlueField serial",
-                devices: &[
-                    (Some("900-9D3B6-00SV-AA0"), Some(" DPU-SERIAL-1 ")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                ],
-                expected: &[false, true],
-            },
-            Case {
-                name: "distinct BlueField serials",
-                devices: &[
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-2")),
-                ],
-                expected: &[false, false],
-            },
-            Case {
-                name: "non-BlueField does not reserve serial",
-                devices: &[
-                    (Some("0JKJDC"), Some("DPU-SERIAL-1")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                ],
-                expected: &[false, false],
-            },
-            Case {
-                name: "missing and empty serials are not duplicates",
-                devices: &[
-                    (Some("900-9D3B6-00SV-AA0"), None),
-                    (Some("900-9D3B6-00SV-AA0"), Some("")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("   ")),
-                ],
-                expected: &[false, false, false],
-            },
-        ];
-
-        for case in cases {
-            let mut seen = HashSet::new();
-            let actual: Vec<bool> = case
-                .devices
-                .iter()
-                .map(|(part_number, serial_number)| {
-                    duplicate_bluefield_serial(*part_number, *serial_number, &mut seen).is_some()
-                })
-                .collect();
-            assert_eq!(actual, case.expected, "{}", case.name);
-        }
     }
 
     #[test]
