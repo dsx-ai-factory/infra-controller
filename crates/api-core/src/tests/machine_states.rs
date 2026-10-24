@@ -1401,7 +1401,10 @@ async fn test_dell_boss_deprovision_lockhost_honors_disable_lockdown(pool: sqlx:
         .unwrap();
         txn.commit().await.unwrap();
 
-        env.run_machine_state_controller_iteration().await;
+        // Observe LockHost's immediate successor before another host's pending
+        // work allows this host to be requeued and advance again.
+        env.run_machine_state_controller_iteration_no_requeue()
+            .await;
 
         let platform_actions = env.redfish_sim.platform_actions();
         let lockdown_actions: Vec<_> = platform_actions[platform_action_count..]
