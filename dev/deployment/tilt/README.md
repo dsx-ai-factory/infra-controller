@@ -22,10 +22,8 @@ prevents this development stack from targeting another cluster type.
 
 ## Create the development cluster
 
-Run the shared cluster helper directly on macOS or Linux, with Docker, kind,
-`kubectl` and `jq` on `PATH`. On macOS, start a local Docker runtime such as
-Docker Desktop and select its Docker context. Kind and Tilt run from your macOS
-terminal; a separately provisioned vfkit VM is not required. The runtime must
+Start a local Docker runtime and select its Docker context. Run the shared
+cluster helper with Docker, kind, `kubectl` and `jq` on `PATH`. The runtime must
 provide Linux AMD64 or ARM64 containers through a local Docker Unix socket.
 
 The optional vfkit lab for BMC-controlled guests, bridged networking and an IPv6
@@ -76,9 +74,8 @@ Missing values, invalid names/families and unknown options fail before contactin
 Docker. The helper requires kind 0.32.0 or newer for the pinned node image. It
 captures the active Docker context, requires a local Unix socket and a Linux
 AMD64/ARM64 daemon, and forces kind's Docker provider. Node images use the daemon
-architecture. On Linux it must match the host; on macOS it comes from the local
-container runtime, independently of the client process architecture. The helper
-does not detect whether a macOS runtime is using hardware emulation. SSH/TCP
+architecture. On Linux, the client and daemon architectures must also match.
+The helper does not detect runtime hardware emulation. SSH/TCP
 Docker endpoints are rejected because this helper does not arrange remote API
 access; run it on that Docker host instead.
 A `DOCKER_HOST` Unix socket is honored with Docker's default context.
@@ -87,7 +84,7 @@ Validation uses a private temporary kubeconfig with explicit context selection;
 inherited `KUBECONFIG` is ignored. Your normal kubeconfig and current context
 remain unchanged unless you explicitly select that file with `--kubeconfig`.
 New clusters publish their API on `127.0.0.1`, on a port chosen by kind. Run Tilt
-from the same macOS or Linux client, using the exported kubeconfig and the same
+from the same client, using the exported kubeconfig and the same
 Docker context.
 
 Setup reuses compatible clusters without pulling a node image, restarting nodes
