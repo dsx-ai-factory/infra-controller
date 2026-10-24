@@ -54,6 +54,11 @@ const (
 
 	// NVLinkLogicalPartitionOrderByDefault default field to be used for ordering when none specified
 	NVLinkLogicalPartitionOrderByDefault = "created"
+
+	// NVLinkLogicalPartitionNameMinLength is the minimum supported NVLink Logical Partition name length.
+	NVLinkLogicalPartitionNameMinLength = 2
+	// NVLinkLogicalPartitionNameMaxLength is the maximum supported NVLink Logical Partition name length.
+	NVLinkLogicalPartitionNameMaxLength = 256
 )
 
 var (
@@ -146,7 +151,7 @@ func (nvllp *NVLinkLogicalPartition) Validate() error {
 	return validation.ValidateStruct(nvllp,
 		validation.Field(&nvllp.Name,
 			validation.Required.Error("NVLinkLogicalPartition Name must be specified"),
-			validation.Length(2, 256).Error("NVLinkLogicalPartition Name must be at least 2 characters and maximum 256 characters"),
+			validation.Length(NVLinkLogicalPartitionNameMinLength, NVLinkLogicalPartitionNameMaxLength).Error("NVLinkLogicalPartition Name must be at least 2 characters and maximum 256 characters"),
 			validation.By(validateNVLinkLogicalPartitionNameWhitespace)),
 		validation.Field(&nvllp.Status,
 			validation.Required.Error("NVLinkLogicalPartition Status must be specified"),
@@ -197,12 +202,8 @@ func (nvllp *NVLinkLogicalPartition) ToProto() *corev1.NVLinkLogicalPartition {
 }
 
 // FromProto populates this NVLink Logical Partition from its workflow
-// proto representation. A nil proto is a no-op. This is the inverse of
-// `ToProto` and exists for convention symmetry — currently no code
-// path on the cloud side reconstructs a full entity from the workflow
-// proto (the site is the destination, not the source), but the method
-// is provided so future reconciliation flows have a single canonical
-// entry point.
+// proto representation. A nil proto is a no-op. Inventory reconciliation
+// uses this as the canonical translation when recovering Site-only records.
 //
 // Field-level contract:
 //   - `nvllp.ID` is preserved on a missing or unparseable `proto.Id`,
@@ -275,6 +276,8 @@ type NVLinkLogicalPartitionUpdateInput struct {
 type NVLinkLogicalPartitionClearInput struct {
 	NVLinkLogicalPartitionID uuid.UUID
 	Description              bool
+	// Deleted clears the soft-delete timestamp.
+	Deleted bool
 }
 
 // NVLinkLogicalPartitionFilterInput input parameters for Filter method
@@ -286,6 +289,8 @@ type NVLinkLogicalPartitionFilterInput struct {
 	TenantIDs                 []uuid.UUID
 	Statuses                  []string
 	SearchQuery               *string
+	// IncludeDeleted returns soft-deleted rows in addition to active rows.
+	IncludeDeleted bool
 }
 
 var _ bun.BeforeAppendModelHook = (*NVLinkLogicalPartition)(nil)
@@ -370,6 +375,9 @@ func (nvllpsd NVLinkLogicalPartitionSQLDAO) GetAll(ctx context.Context, tx *db.T
 	nvllps := []NVLinkLogicalPartition{}
 
 	query := db.GetIDB(tx, nvllpsd.dbSession).NewSelect().Model(&nvllps)
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
 	if filter.Names != nil {
 		query = query.Where("nvllp.name IN (?)", bun.In(filter.Names))
 	}
@@ -477,10 +485,11 @@ func (nvllpsd NVLinkLogicalPartitionSQLDAO) Update(ctx context.Context, tx *db.T
 	updatedFields := []string{}
 
 	if input.Name != nil {
-		if err := validation.Validate(*input.Name,
+		err := validation.Validate(*input.Name,
 			validation.Required.Error("NVLinkLogicalPartition Name must be specified"),
-			validation.Length(2, 256).Error("NVLinkLogicalPartition Name must be at least 2 characters and maximum 256 characters"),
-			validation.By(validateNVLinkLogicalPartitionNameWhitespace)); err != nil {
+			validation.Length(NVLinkLogicalPartitionNameMinLength, NVLinkLogicalPartitionNameMaxLength).Error("NVLinkLogicalPartition Name must be at least 2 characters and maximum 256 characters"),
+			validation.By(validateNVLinkLogicalPartitionNameWhitespace))
+		if err != nil {
 			return nil, err
 		}
 		nvllp.Name = *input.Name
@@ -537,10 +546,21 @@ func (nvllpsd NVLinkLogicalPartitionSQLDAO) Clear(ctx context.Context, tx *db.Tx
 		updatedFields = append(updatedFields, "description")
 	}
 
+	if input.Deleted {
+		nvllp.Deleted = nil
+		updatedFields = append(updatedFields, "deleted")
+	}
+
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, nvllpsd.dbSession).NewUpdate().Model(nvllp).Column(updatedFields...).Where("id = ?", nvllp.ID).Exec(ctx)
+		query := db.GetIDB(tx, nvllpsd.dbSession).NewUpdate().Model(nvllp).Column(updatedFields...).Where("id = ?", nvllp.ID)
+		// Soft-deleted rows are excluded by default; include them when undeleting.
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+
+		_, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
 		}

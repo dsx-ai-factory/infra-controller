@@ -20,6 +20,7 @@ import (
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/internal/config"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
@@ -72,6 +73,9 @@ func testNVLinkLogicalPartitionSetupSchema(t *testing.T, dbSession *cdb.Session)
 	// create TenantSite table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.TenantSite)(nil))
 	assert.Nil(t, err)
+	// create Status Details table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.StatusDetail)(nil))
+	assert.Nil(t, err)
 	// create NVLinkLogicalPartition table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.NVLinkLogicalPartition)(nil))
 	assert.Nil(t, err)
@@ -103,9 +107,19 @@ func TestManageNVLinkLogicalPartition_UpdateNVLinkLogicalPartitionsInDB(t *testi
 
 	st1 := cwu.TestBuildSite(t, dbSession, ip, "test-site-1", cdbm.SiteStatusRegistered, nil, ipu)
 	st2 := cwu.TestBuildSite(t, dbSession, ip, "test-site-2", cdbm.SiteStatusRegistered, nil, ipu)
+	st3 := cwu.TestBuildSite(t, dbSession, ip, "test-site-3", cdbm.SiteStatusRegistered, nil, ipu)
+	st4 := cwu.TestBuildSite(t, dbSession, ip, "test-site-4", cdbm.SiteStatusRegistered, nil, ipu)
+	st5 := cwu.TestBuildSite(t, dbSession, ip, "test-site-5", cdbm.SiteStatusRegistered, nil, ipu)
+	st6 := cwu.TestBuildSite(t, dbSession, ip, "test-site-6", cdbm.SiteStatusRegistered, nil, ipu)
+	st7 := cwu.TestBuildSite(t, dbSession, ip, "test-site-7", cdbm.SiteStatusRegistered, nil, ipu)
 
 	ts1 := cwu.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st1.ID, tn.ID)
 	assert.NotNil(t, ts1)
+	cwu.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st3.ID, tnu.ID)
+	cwu.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st4.ID, tnu.ID)
+	cwu.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st5.ID, tnu.ID)
+	cwu.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st6.ID, tnu.ID)
+	cwu.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st7.ID, tnu.ID)
 
 	nvllp1 := cwu.TestBuildNVLinkLogicalPartition(t, dbSession, "test-nvllp-1", cwutil.GetPtr("Test description"), st1, tn, cdbm.NVLinkLogicalPartitionStatusPending, false)
 	assert.NotNil(t, nvllp1)
@@ -180,7 +194,39 @@ func TestManageNVLinkLogicalPartition_UpdateNVLinkLogicalPartitionsInDB(t *testi
 	_, err = dbSession.DB.Exec("UPDATE nvlink_logical_partition SET created = ?, updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval)*2), time.Now().Add(-time.Duration(cwutil.DefaultInventoryReceiptInterval)*2), nvllp11.ID.String())
 	assert.NoError(t, err)
 
-	// Build InfiniBand Partition inventory that is paginated
+	recoveredNvllpID := uuid.New()
+	failedRecoveredNvllpID := uuid.New()
+	terminalNvllpID := uuid.New()
+	recoveredDescription := "recovered from Site inventory"
+
+	// Names are unique per Tenant, so this conflicts with the Site-only Partition on st3.
+	cwu.TestBuildNVLinkLogicalPartition(
+		t,
+		dbSession,
+		"site-only-nvllp",
+		nil,
+		st7,
+		tn,
+		cdbm.NVLinkLogicalPartitionStatusReady,
+		false,
+	)
+
+	softDeletedNvllp := cwu.TestBuildNVLinkLogicalPartition(
+		t,
+		dbSession,
+		"test-nvllp-soft-deleted",
+		cwutil.GetPtr("old description"),
+		st4,
+		tn,
+		cdbm.NVLinkLogicalPartitionStatusDeleting,
+		true,
+	)
+	nvllpDAO := cdbm.NewNVLinkLogicalPartitionDAO(dbSession)
+	err = nvllpDAO.Delete(ctx, nil, softDeletedNvllp.ID)
+	require.NoError(t, err)
+	cwu.TestInventoryAgeDeletedTimestamp(ctx, t, dbSession, (*cdbm.NVLinkLogicalPartition)(nil), softDeletedNvllp.ID)
+
+	// Build NVLink Logical Partition inventory that is paginated
 	// Generate data for 34 NVLinkLogicalPartitions reported from Site Agent while Cloud has 38 NVLinkLogicalPartitions
 	pagedIbps := []*cdbm.NVLinkLogicalPartition{}
 	pagedInvIds := []string{}
@@ -204,6 +250,25 @@ func TestManageNVLinkLogicalPartition_UpdateNVLinkLogicalPartitionsInDB(t *testi
 			},
 		}
 		pagedCtrlNvllps = append(pagedCtrlNvllps, ctrlNvllp)
+	}
+
+	siteOnlyInventory := &corev1.NVLinkLogicalPartitionInventory{
+		Partitions: []*corev1.NVLinkLogicalPartition{
+			{
+				Id: &corev1.NVLinkLogicalPartitionId{Value: recoveredNvllpID.String()},
+				Config: &corev1.NVLinkLogicalPartitionConfig{
+					Metadata: &corev1.Metadata{
+						Name:        "site-only-nvllp",
+						Description: recoveredDescription,
+					},
+					TenantOrganizationId: tn.Org,
+				},
+				Status: &corev1.NVLinkLogicalPartitionStatus{
+					State: corev1.TenantState_READY,
+				},
+			},
+		},
+		InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
 	}
 
 	tSiteClientPool := testTemporalSiteClientPool(t)
@@ -236,6 +301,7 @@ func TestManageNVLinkLogicalPartition_UpdateNVLinkLogicalPartitionsInDB(t *testi
 		restoredNVLinkLogicalPartition  *cdbm.NVLinkLogicalPartition
 
 		wantErr bool
+		check   func(t *testing.T)
 	}{
 		{
 			name: "test NVLinkLogicalPartition inventory processing error, non-existent Site",
@@ -339,6 +405,192 @@ func TestManageNVLinkLogicalPartition_UpdateNVLinkLogicalPartitionsInDB(t *testi
 			deletingNVLinkLogicalPartitions: []*cdbm.NVLinkLogicalPartition{nvllp3},
 			restoredNVLinkLogicalPartition:  nvllp8,
 			wantErr:                         false,
+		},
+		{
+			name: "test NVLink Logical Partition inventory auto-creates partition found only on Site",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:                             ctx,
+				siteID:                          st3.ID,
+				nvLinkLogicalPartitionInventory: siteOnlyInventory,
+			},
+			check: func(t *testing.T) {
+				t.Helper()
+
+				recovered, rerr := cdbm.NewNVLinkLogicalPartitionDAO(dbSession).GetByID(ctx, nil, recoveredNvllpID, nil)
+				require.NoError(t, rerr)
+				require.NotNil(t, recovered)
+				assert.Equal(t, recoveredNvllpID, recovered.ID)
+				assert.Equal(t, "site-only-nvllp-recovered-"+recoveredNvllpID.String()[:8], recovered.Name)
+				require.NotNil(t, recovered.Description)
+				assert.Equal(t, recoveredDescription, *recovered.Description)
+				assert.Equal(t, tn.Org, recovered.Org)
+				assert.Equal(t, st3.ID, recovered.SiteID)
+				assert.Equal(t, tn.ID, recovered.TenantID)
+				assert.Equal(t, tn.CreatedBy, recovered.CreatedBy)
+				assert.Equal(t, cdbm.NVLinkLogicalPartitionStatusReady, recovered.Status)
+				assert.False(t, recovered.IsMissingOnSite)
+
+				statusDetails, total, rerr := cdbm.NewStatusDetailDAO(dbSession).GetAll(
+					ctx,
+					nil,
+					cdbm.StatusDetailFilterInput{EntityIDs: []string{recovered.ID.String()}},
+					cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+				)
+				require.NoError(t, rerr)
+				assert.Equal(t, 1, total)
+				if assert.Len(t, statusDetails, 1) {
+					assert.Equal(t, string(cdbm.NVLinkLogicalPartitionStatusReady), statusDetails[0].Status)
+					assert.Equal(t, cwutil.GetPtr("NVLink Logical Partition was found on Site, ready for use"), statusDetails[0].Message)
+				}
+
+				// Once the row is past the stale-inventory window, the Site name must not replace
+				// the recovered name, since the Tenant already uses it.
+				cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.NVLinkLogicalPartition)(nil))
+				err := NewManageNVLinkLogicalPartition(dbSession, tSiteClientPool).UpdateNVLinkLogicalPartitionsInDB(ctx, st3.ID, siteOnlyInventory)
+				require.NoError(t, err)
+
+				recovered, rerr = cdbm.NewNVLinkLogicalPartitionDAO(dbSession).GetByID(ctx, nil, recoveredNvllpID, nil)
+				require.NoError(t, rerr)
+				assert.Equal(t, "site-only-nvllp-recovered-"+recoveredNvllpID.String()[:8], recovered.Name)
+			},
+		},
+		{
+			name: "test NVLink Logical Partition inventory recovers failed partition with error history",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st6.ID,
+				nvLinkLogicalPartitionInventory: &corev1.NVLinkLogicalPartitionInventory{
+					Partitions: []*corev1.NVLinkLogicalPartition{
+						{
+							Id: &corev1.NVLinkLogicalPartitionId{Value: failedRecoveredNvllpID.String()},
+							Config: &corev1.NVLinkLogicalPartitionConfig{
+								Metadata:             &corev1.Metadata{Name: "failed-site-only-nvllp"},
+								TenantOrganizationId: tn.Org,
+							},
+							Status: &corev1.NVLinkLogicalPartitionStatus{
+								State: corev1.TenantState_FAILED,
+							},
+						},
+					},
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				},
+			},
+			check: func(t *testing.T) {
+				t.Helper()
+
+				recovered, rerr := cdbm.NewNVLinkLogicalPartitionDAO(dbSession).GetByID(ctx, nil, failedRecoveredNvllpID, nil)
+				require.NoError(t, rerr)
+				require.NotNil(t, recovered)
+				assert.Equal(t, cdbm.NVLinkLogicalPartitionStatusError, recovered.Status)
+
+				statusDetails, total, rerr := cdbm.NewStatusDetailDAO(dbSession).GetAll(
+					ctx,
+					nil,
+					cdbm.StatusDetailFilterInput{EntityIDs: []string{recovered.ID.String()}},
+					cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+				)
+				require.NoError(t, rerr)
+				assert.Equal(t, 1, total)
+				if assert.Len(t, statusDetails, 1) {
+					assert.Equal(t, string(cdbm.NVLinkLogicalPartitionStatusError), statusDetails[0].Status)
+					assert.Equal(t, cwutil.GetPtr("NVLink Logical Partition was found on Site"), statusDetails[0].Message)
+				}
+			},
+		},
+		{
+			name: "test NVLink Logical Partition inventory restores soft-deleted partition",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st4.ID,
+				nvLinkLogicalPartitionInventory: &corev1.NVLinkLogicalPartitionInventory{
+					Partitions: []*corev1.NVLinkLogicalPartition{
+						{
+							Id: &corev1.NVLinkLogicalPartitionId{Value: softDeletedNvllp.ID.String()},
+							Config: &corev1.NVLinkLogicalPartitionConfig{
+								Metadata:             &corev1.Metadata{Name: softDeletedNvllp.ID.String()},
+								TenantOrganizationId: tn.Org,
+							},
+							Status: &corev1.NVLinkLogicalPartitionStatus{
+								State: corev1.TenantState_READY,
+							},
+						},
+					},
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				},
+			},
+			check: func(t *testing.T) {
+				t.Helper()
+
+				restored, rerr := cdbm.NewNVLinkLogicalPartitionDAO(dbSession).GetByID(ctx, nil, softDeletedNvllp.ID, nil)
+				require.NoError(t, rerr)
+				require.NotNil(t, restored)
+				assert.Nil(t, restored.Deleted)
+				assert.Equal(t, softDeletedNvllp.Name, restored.Name)
+				assert.Nil(t, restored.Description)
+				assert.False(t, restored.IsMissingOnSite)
+				assert.Equal(t, cdbm.NVLinkLogicalPartitionStatusReady, restored.Status)
+
+				statusDetails, total, rerr := cdbm.NewStatusDetailDAO(dbSession).GetAll(
+					ctx,
+					nil,
+					cdbm.StatusDetailFilterInput{EntityIDs: []string{restored.ID.String()}},
+					cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)},
+				)
+				require.NoError(t, rerr)
+				assert.Equal(t, 1, total)
+				if assert.Len(t, statusDetails, 1) {
+					assert.Equal(t, string(cdbm.NVLinkLogicalPartitionStatusReady), statusDetails[0].Status)
+					assert.Equal(t, cwutil.GetPtr("NVLink Logical Partition was found on Site, ready for use"), statusDetails[0].Message)
+				}
+			},
+		},
+		{
+			name: "test NVLink Logical Partition inventory skips terminal Site-only partition",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st5.ID,
+				nvLinkLogicalPartitionInventory: &corev1.NVLinkLogicalPartitionInventory{
+					Partitions: []*corev1.NVLinkLogicalPartition{
+						{
+							Id: &corev1.NVLinkLogicalPartitionId{Value: terminalNvllpID.String()},
+							Config: &corev1.NVLinkLogicalPartitionConfig{
+								Metadata:             &corev1.Metadata{Name: "terminating-site-only-nvllp"},
+								TenantOrganizationId: tn.Org,
+							},
+							Status: &corev1.NVLinkLogicalPartitionStatus{
+								State: corev1.TenantState_TERMINATING,
+							},
+						},
+					},
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				},
+			},
+			check: func(t *testing.T) {
+				t.Helper()
+
+				_, rerr := cdbm.NewNVLinkLogicalPartitionDAO(dbSession).GetByID(ctx, nil, terminalNvllpID, nil)
+				assert.Equal(t, cdb.ErrDoesNotExist, rerr)
+			},
 		},
 		{
 			name: "test paged NVLinkLogicalPartition inventory processing, empty inventory",
@@ -469,6 +721,10 @@ func TestManageNVLinkLogicalPartition_UpdateNVLinkLogicalPartitionsInDB(t *testi
 				rv, _ := nvllpDAO.GetByID(ctx, nil, tt.restoredNVLinkLogicalPartition.ID, nil)
 				assert.False(t, rv.IsMissingOnSite)
 				assert.Equal(t, cdbm.NVLinkLogicalPartitionStatusReady, rv.Status)
+			}
+
+			if tt.check != nil {
+				tt.check(t)
 			}
 		})
 	}
