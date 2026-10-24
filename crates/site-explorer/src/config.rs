@@ -58,7 +58,8 @@ pub struct SiteExplorerConfig {
         serialize_with = "as_std_duration"
     )]
     pub run_interval: std::time::Duration,
-    /// The maximum amount of nodes that are explored concurrently.
+    /// The maximum amount of nodes that are explored concurrently. `0` is
+    /// treated as `1`.
     #[serde(default = "SiteExplorerConfig::default_concurrent_explorations")]
     pub concurrent_explorations: u64,
     /// How many routine (non-requested) endpoints should be explored in a single run.
@@ -100,8 +101,10 @@ pub struct SiteExplorerConfig {
     /// How many ManagedHosts `create_machines` creates at the same time within
     /// one run. Each in-flight creation holds one admin-lock admission permit
     /// (`admin_lock_admission_permits`, default 16) and one pool connection,
-    /// so the effective value is clamped to one below the permit count. `1`
-    /// creates hosts one after another and `0` is treated as `1`.
+    /// so the effective value is clamped to one below the permit count. A
+    /// permit count of 1 still allows one creation, which then holds the only
+    /// permit while it runs. `1` creates hosts one after another and `0` is
+    /// treated as `1`.
     #[serde(default = "SiteExplorerConfig::default_machine_creation_concurrency")]
     pub machine_creation_concurrency: u64,
 

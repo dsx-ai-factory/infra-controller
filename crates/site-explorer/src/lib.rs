@@ -399,6 +399,12 @@ fn plan_explorations<'a>(
     }
 }
 
+/// Probe and host-check parallelism: `concurrent_explorations`, at least 1 so
+/// a configured 0 cannot leave every task waiting on an empty semaphore.
+fn exploration_concurrency(configured: u64) -> usize {
+    usize::try_from(configured).unwrap_or(usize::MAX).max(1)
+}
+
 /// How many of `budget` each tier gets: its share, capped by its candidates,
 /// then the unused rest tier by tier in order. Rounding leftovers go to the
 /// first tier, so a budget below ten still reaches the tiers in order.
@@ -1418,9 +1424,9 @@ impl SiteExplorer {
         };
         let host_interfaces = &host_interfaces;
         let already_ingested = &already_ingested_bmc_ips;
-        let concurrency_limiter = Arc::new(tokio::sync::Semaphore::new(
-            self.config.concurrent_explorations as usize,
-        ));
+        let concurrency_limiter = Arc::new(tokio::sync::Semaphore::new(exploration_concurrency(
+            self.config.concurrent_explorations,
+        )));
         let decisions = host_endpoints
             .into_iter()
             .map(|ep| {
@@ -2202,9 +2208,9 @@ impl SiteExplorer {
         metrics.record_phase_latency("update_explored_endpoints_plan", plan_start.elapsed());
 
         let task_set = FuturesUnordered::new();
-        let concurrency_limiter = Arc::new(tokio::sync::Semaphore::new(
-            self.config.concurrent_explorations as usize,
-        ));
+        let concurrency_limiter = Arc::new(tokio::sync::Semaphore::new(exploration_concurrency(
+            self.config.concurrent_explorations,
+        )));
 
         // Record the difference between the total expected machine count and
         // the number of expected machines we've actually "seen."
@@ -4476,6 +4482,25 @@ mod tests {
 
     fn addresses<T>(selected: &[T], address: impl Fn(&T) -> IpAddr) -> Vec<IpAddr> {
         selected.iter().map(address).collect()
+    }
+
+    #[test]
+    fn exploration_concurrency_is_at_least_one() {
+        check_values(
+            [
+                Check {
+                    scenario: "a configured value is used as is",
+                    input: 300,
+                    expect: 300,
+                },
+                Check {
+                    scenario: "zero would block every task, so it runs one at a time",
+                    input: 0,
+                    expect: 1,
+                },
+            ],
+            exploration_concurrency,
+        );
     }
 
     #[test]

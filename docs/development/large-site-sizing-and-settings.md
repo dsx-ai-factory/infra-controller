@@ -130,16 +130,22 @@ Two settings bound how many managed hosts Site Explorer creates at once:
 hosts one explorer iteration creates at the same time, and each in-flight
 creation holds one permit of the top-level `admin_lock_admission_permits`
 (default 16), which DHCP discovery and machine discovery share. Raise the two
-together and keep the concurrency below the permit count. The
+together. Site Explorer clamps its concurrency to at most one below the
+permit count so the other flows keep a permit, except that a permit count of
+1 still runs one creation at a time, and that creation holds the only permit
+while it runs. The
 [configuration reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md)
 has both contracts.
 
 Two further behaviors decide when racks complete rather than how fast hosts
-are created. Site Explorer creates the hosts of one run in rack order: the
+are created. Site Explorer dispatches the hosts of one run in rack order: the
 racks the run can complete first, then the racks with the fewest hosts
-missing, one rack at a time. A smaller `machines_created_per_run` therefore
-makes each run finish a few racks instead of spreading its budget over many,
-at the cost of more runs and their fixed per-run phases. Hosts that already
+missing, with one rack's hosts kept together. Up to
+`machine_creation_concurrency` creations are in flight at once, so the last
+hosts of one rack overlap the first hosts of the next. A smaller
+`machines_created_per_run` therefore makes each run finish a few racks instead
+of spreading its budget over many, at the cost of more runs and their fixed
+per-run phases. Hosts that already
 have a machine and need only the steady-state repair come after every host
 that still needs one, so while `machines_created_per_run` binds, those repairs
 wait for a run with spare cap. The

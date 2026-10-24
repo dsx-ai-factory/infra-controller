@@ -20,8 +20,8 @@
 //! A rack becomes usable once every expected host, switch, and power shelf in
 //! it has a machine, so the order in which hosts are created decides when
 //! racks complete. The identify phase produces hosts in hash order; this
-//! module replaces that with a rack-affine order so each run finishes the
-//! racks it can before it starts new ones.
+//! module replaces that with a rack-affine order so each run dispatches the
+//! racks it can complete before the racks it cannot.
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;

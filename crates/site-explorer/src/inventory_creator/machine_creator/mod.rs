@@ -1683,7 +1683,8 @@ impl CreationBudget {
 
 /// The in-flight creation bound: the configured value, at least 1 and at
 /// most one below the admission permit count, so the other gated flows keep
-/// a permit while creation runs.
+/// a permit while creation runs. With a single permit one creation still
+/// runs and holds it.
 fn creation_concurrency(configured: u64, admission_permits: usize) -> usize {
     let ceiling = admission_permits.saturating_sub(1).max(1);
     let configured = usize::try_from(configured).unwrap_or(usize::MAX).max(1);
