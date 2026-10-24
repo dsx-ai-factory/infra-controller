@@ -1204,6 +1204,100 @@ jobs:
       - name: Final repository clean check
         run: bash scripts/check-repo-clean.sh "release-container service tests"
 
+  test-dev-dhcp-image:
+    name: test-dev-dhcp-image (${{ matrix.arch }})
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && contains('success,skipped', needs.build-container-x86_64.result)
+        && contains('success,skipped', needs.build-container-aarch64.result)
+      }}
+    needs:
+      - prepare
+      - build-container-x86_64
+      - build-container-aarch64
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: linux-amd64-cpu8
+            build_container: ${{ needs.prepare.outputs.build_container_x86_64_ref }}
+            build_container_rebuilt: ${{ needs.prepare.outputs.build_container_x86_64_run }}
+          - arch: arm64
+            runner: linux-arm64-cpu8
+            build_container: ${{ needs.prepare.outputs.build_container_aarch64_ref }}
+            build_container_rebuilt: ${{ needs.prepare.outputs.build_container_aarch64_run }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Login to source registry
+        uses: ./.github/actions/docker-auth
+        with:
+          registry: ${{ needs.prepare.outputs.source_registry_host }}
+          username: ${{ secrets.NICO_SOURCE_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NICO_SOURCE_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+
+      - name: Login to target registry
+        if: ${{ needs.prepare.outputs.publish_images == 'true' && needs.prepare.outputs.registry_host != needs.prepare.outputs.source_registry_host }}
+        uses: ./.github/actions/docker-auth
+        with:
+          registry: ${{ needs.prepare.outputs.registry_host }}
+          username: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+
+      # Reuse the prepared compiler, but build the actual development recipes
+      # so runtime dependencies and COPY paths are checked on both architectures.
+      - name: Build and smoke-test native development DHCP image
+        env:
+          ARCH: ${{ matrix.arch }}
+          BUILD_CONTAINER: ${{ matrix.build_container }}
+          BUILD_CONTAINER_REBUILT: ${{ matrix.build_container_rebuilt }}
+          PUBLISH_COMPILER: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+          KEA_VERSION: ${{ needs.prepare.outputs.kea_version }}
+          DOCKER_BUILDKIT: '1'
+        run: |
+          set -euo pipefail
+          docker_context="$(docker context show)"
+          export DOCKER_CONTEXT="$docker_context" BUILDX_BUILDER="$docker_context"
+          daemon_platform="$(docker info --format '{{.OSType}}/{{.Architecture}}')"
+          case "$daemon_platform" in
+            linux/amd64|linux/x86_64) daemon_arch=amd64; compiler=x86_64 ;;
+            linux/arm64|linux/aarch64) daemon_arch=arm64; compiler=aarch64 ;;
+            *) echo "Unsupported Docker daemon platform: $daemon_platform" >&2; exit 1 ;;
+          esac
+          if [[ "$daemon_arch" != "$ARCH" ]]; then
+            echo "Docker daemon platform $daemon_platform does not match requested linux/$ARCH" >&2
+            exit 1
+          fi
+          if [[ "$BUILD_CONTAINER_REBUILT" == true && "$PUBLISH_COMPILER" != true ]]; then
+            # Mirror PRs build the compiler without publishing it to another job.
+            docker build --platform "linux/$ARCH" \
+              --file "dev/docker/Dockerfile.build-container-$compiler" \
+              --build-arg KEA_VERSION="$KEA_VERSION" --tag "$BUILD_CONTAINER" .
+          else
+            docker pull --platform "linux/$ARCH" "$BUILD_CONTAINER"
+          fi
+          test "$(docker image inspect --format '{{.Architecture}}' "$BUILD_CONTAINER")" = "$ARCH"
+          docker build --platform "linux/$ARCH" \
+            --file dev/docker/Dockerfile.dev-runtime \
+            --tag nico-dev-runtime:ci .
+          docker build --platform "linux/$ARCH" \
+            --file dev/docker/Dockerfile.dev-services --target dhcp \
+            --build-arg CONTAINER_BUILD="$BUILD_CONTAINER" \
+            --build-arg CONTAINER_RUNTIME=nico-dev-runtime:ci \
+            --build-arg KEA_VERSION="$KEA_VERSION" \
+            --tag nico-dev-dhcp:ci .
+          test "$(docker image inspect --format '{{.Architecture}}' nico-dev-dhcp:ci)" = "$ARCH"
+          bash dev/docker/tests/smoke_dhcp_image.sh nico-dev-dhcp:ci
+
   # ============================================================================
   # BUILD STAGE - Forge CLI (Multi-arch)
   # ============================================================================
@@ -2131,7 +2225,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends python3-yaml
+          sudo apt-get install -y --no-install-recommends python3-yaml jq
           # Use upstream promtool with Kubernetes discovery, matching kube-prometheus-stack 59.1.0.
           prometheus_version=2.52.0
           prometheus_archive="prometheus-${prometheus_version}.linux-amd64.tar.gz"
@@ -2156,6 +2250,15 @@ jobs:
       # Uses python3-yaml installed by the configuration check above.
       - name: Test DevSpace bootstrap manifests
         run: /usr/bin/python3 -B dev/deployment/devspace/test_bootstrap_prereqs.py
+
+      # Uses jq installed by the configuration check above.
+      - name: Test shared kind bootstrap
+        run: |
+          /usr/bin/python3 -B -m unittest discover -s dev/deployment/tests -p 'test_setup_kind.py'
+          /usr/bin/python3 -B -m unittest discover -s dev/deployment/devspace/tests -p 'test_setup_devspace_on_host.py'
+
+      - name: Test local native development image builds
+        run: /usr/bin/python3 -B -m unittest discover -s dev/docker/tests
 
       # Charts with tests must be listed explicitly.
       - name: Run Helm unit tests
@@ -2643,6 +2746,7 @@ jobs:
       - build-site-health-probe
       - test-mat-k8s-controller
       - test-release-container-services
+      - test-dev-dhcp-image
       - build-boot-artifacts-x86
       - build-boot-artifacts-bfb
       - build-package-scout-aarch64
@@ -2757,6 +2861,7 @@ jobs:
       - build-mat-k8s-controller
       - build-site-health-probe
       - test-release-container-services
+      - test-dev-dhcp-image
       - build-boot-artifacts-x86
       - build-boot-artifacts-bfb
       - build-package-scout-aarch64
@@ -2839,6 +2944,7 @@ jobs:
       - build-site-health-probe
       - test-mat-k8s-controller
       - test-release-container-services
+      - test-dev-dhcp-image
 
       # CLI images
       - build-forge-cli-x86_64

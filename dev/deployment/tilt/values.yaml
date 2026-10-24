@@ -197,6 +197,7 @@ nico-dhcp:
   enabled: true
   config:
     kea:
+      hookLibraryPath: /usr/lib/kea/hooks/libdhcp.so
       hookParameters:
         nameservers: 127.0.0.1
         ntpServer: 127.0.0.1
