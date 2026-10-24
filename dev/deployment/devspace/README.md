@@ -305,10 +305,9 @@ devspace deploy --profile core-only
 ## Ubuntu host preparation
 
 The Ubuntu host bootstrap shares cluster creation and reuse with Tilt through
-[`setup-kind.sh`](../setup-kind.sh), which also runs directly on macOS with a
-local Docker runtime. Ubuntu package and host configuration remain in this host
-bootstrap. It exports the selected
-cluster to the developer's `$HOME/.kube/config` and binds its commands to that
+[`setup-kind.sh`](../setup-kind.sh). Ubuntu package and host configuration remain
+in this host bootstrap. It exports the selected cluster to the developer's
+`$HOME/.kube/config` and binds its commands to that
 file, ignoring an inherited `KUBECONFIG`. It retains its node TLS configuration,
 image preloading and DevSpace deployment steps. The shared helper rejects a
 cluster with multiple nodes, a different native architecture or incompatible
