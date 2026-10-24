@@ -53,7 +53,13 @@ use crate::crds::dpusets_generated::DPUSet;
 use crate::error::DpfError;
 use crate::types::DpfDeletePreconditions;
 
+mod trace_context;
+
 /// Kubernetes-backed implementation of DPF repository.
+///
+/// The client injects active trace context into annotations on DPF CR creates, applies, and merge
+/// patches. JSON patches, subresources, core resources, and explicit metadata deletions pass through
+/// unchanged. The globally configured propagator determines the fields under `tracing.k8s.io/`.
 #[derive(Clone)]
 pub struct KubeRepository {
     client: Client,
@@ -63,17 +69,13 @@ pub struct KubeRepository {
 impl KubeRepository {
     /// Create a new KubeRepository with the default in-cluster or kubeconfig client.
     pub async fn new() -> Result<Self, DpfError> {
-        let client = Client::try_default().await?;
-        Ok(Self {
-            client,
-            cancel: CancellationToken::new(),
-        })
+        Ok(Self::with_client(Client::try_default().await?))
     }
 
-    /// Create a new KubeRepository with a provided client.
+    /// Create a new KubeRepository with a provided client and DPF trace-annotation interception.
     pub fn with_client(client: Client) -> Self {
         Self {
-            client,
+            client: trace_context::wrap_client(client),
             cancel: CancellationToken::new(),
         }
     }
