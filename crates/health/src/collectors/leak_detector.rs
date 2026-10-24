@@ -241,36 +241,34 @@ fn build_health_report(
             .status
             .as_ref()
             .and_then(|status| status.state.flatten());
-        if resource_state != Some(State::Enabled) {
-            tracing::warn!(
-                detector = %target,
-                leak_detector_state = ?detector.detector_state.flatten(),
-                leak_detector_resource_state = ?resource_state,
-                rack_id = context.rack_id().map(tracing::field::display),
-                "Leak detector resource state does not permit leak classification"
-            );
-            continue;
-        }
 
-        match detector.detector_state.flatten() {
-            Some(DetectorState::Ok) => successes.push(HealthReportSuccess {
-                attribution: None,
-                probe_id: Probe::LeakDetection,
-                target: Some(target),
-            }),
-            Some(DetectorState::Warning) | Some(DetectorState::Critical) => {
+        match (resource_state, detector.detector_state.flatten()) {
+            (Some(State::Enabled), Some(DetectorState::Ok)) => {
+                successes.push(HealthReportSuccess {
+                    attribution: None,
+                    probe_id: Probe::LeakDetection,
+                    target: Some(target),
+                })
+            }
+            (Some(State::Enabled), Some(DetectorState::Warning | DetectorState::Critical)) => {
                 alerts.push(leak_alert(&detector, target));
             }
-            Some(DetectorState::Unavailable)
-            | Some(DetectorState::Absent)
-            | Some(DetectorState::UnsupportedValue)
-            | None => {
+            _ => {
                 tracing::warn!(
                     detector = %target,
                     leak_detector_state = ?detector.detector_state.flatten(),
+                    leak_detector_resource_state = ?resource_state,
                     rack_id = context.rack_id().map(tracing::field::display),
                     "Leak detector is not reporting an actionable leak state"
                 );
+
+                alerts.push(HealthReportAlert {
+                    attribution: None,
+                    probe_id: Probe::LeakDetection,
+                    message: format!("Leak detector '{target}' has no actionable reading"),
+                    target: Some(target),
+                    classifications: vec![Classification::SensorFailure],
+                });
             }
         }
     }
@@ -451,6 +449,105 @@ mod tests {
         }
     }
 
+    fn expected_failure_report(targets: &[&str]) -> ReportSummary {
+        let alerts = targets
+            .iter()
+            .map(|target| AlertSummary {
+                probe_id: Probe::LeakDetection,
+                target: Some((*target).to_string()),
+                message: format!("Leak detector '{target}' has no actionable reading"),
+                classifications: vec![Classification::SensorFailure],
+            })
+            .collect();
+
+        expected_report(vec![], alerts)
+    }
+
+    #[test]
+    fn unknown_detector_preserves_tray_and_rack_leaks() {
+        use carbide_uuid::rack::RackId;
+
+        use crate::processor::{EventProcessor, LeakEventProcessor, RackLeakProcessor};
+
+        let tray_processor = LeakEventProcessor::new(1);
+        let rack_processor = RackLeakProcessor::new(2);
+        let mut first = context();
+        first.rack_id = Some(RackId::new("leaking-rack"));
+
+        let mut second = first.clone();
+        second.endpoint_key = "42:9e:b1:bd:9d:de".to_string();
+        second.addr.mac = Some(MacAddress::from_str(&second.endpoint_key).expect("valid MAC"));
+
+        let detector = |state: &str| {
+            Arc::new(
+                serde_json::from_value::<LeakDetector>(serde_json::json!({
+                    "@odata.id": format!("{DETECTORS_PATH}/{state}"),
+                    "Id": state,
+                    "Name": state,
+                    "DetectorState": state,
+                    "Status": { "State": "Enabled" }
+                }))
+                .expect("valid detector"),
+            )
+        };
+
+        for endpoint in [&first, &second] {
+            let report = build_health_report(vec![detector("Critical")], &[], endpoint);
+
+            let events = tray_processor
+                .process_event(endpoint, &CollectorEvent::HealthReport(Arc::new(report)));
+
+            assert_eq!(events.len(), 1);
+
+            rack_processor.process_event(endpoint, &events[0]);
+        }
+
+        let unknown =
+            build_health_report(vec![detector("Unavailable"), detector("OK")], &[], &first);
+
+        let derived_unknown =
+            tray_processor.process_event(&first, &CollectorEvent::HealthReport(Arc::new(unknown)));
+
+        assert!(
+            derived_unknown.is_empty(),
+            "unknown state must not derive recovery"
+        );
+
+        let still_leaking = build_health_report(vec![detector("Critical")], &[], &second);
+
+        let events = tray_processor.process_event(
+            &second,
+            &CollectorEvent::HealthReport(Arc::new(still_leaking)),
+        );
+
+        let rack_events = rack_processor.process_event(&second, &events[0]);
+
+        let CollectorEvent::HealthReport(rack_report) = &rack_events[0] else {
+            panic!("expected rack health report");
+        };
+
+        assert!(
+            !rack_report.alerts.is_empty(),
+            "both leaking trays must remain counted"
+        );
+
+        let healthy = build_health_report(vec![detector("OK")], &[], &first);
+
+        let events =
+            tray_processor.process_event(&first, &CollectorEvent::HealthReport(Arc::new(healthy)));
+
+        let rack_events = rack_processor.process_event(&first, &events[0]);
+
+        let CollectorEvent::HealthReport(rack_report) = &rack_events[0] else {
+            panic!("expected rack health report");
+        };
+
+        assert!(
+            rack_report.alerts.is_empty(),
+            "healthy evidence permits recovery"
+        );
+    }
+
     #[test]
     fn leak_detector_health_report_cases() {
         check_values(
@@ -512,7 +609,7 @@ mod tests {
                     ),
                 },
                 Check {
-                    scenario: "degraded leak detectors do not produce leak alerts",
+                    scenario: "degraded leak detectors report uncertainty",
                     input: vec![
                         r##"{
                             "@odata.id": "/redfish/v1/Chassis/Chassis_0/ThermalSubsystem/LeakDetection/LeakDetectors/Chassis_0_LeakDetector_0_ColdPlate",
@@ -524,10 +621,12 @@ mod tests {
                             "Status": { "Health": "Critical", "State": "Degraded" }
                         }"##,
                     ],
-                    expect: expected_report(vec![], vec![]),
+                    expect: expected_failure_report(&[
+                        "/redfish/v1/Chassis/Chassis_0/ThermalSubsystem/LeakDetection/LeakDetectors/Chassis_0_LeakDetector_0_ColdPlate",
+                    ]),
                 },
                 Check {
-                    scenario: "missing and disabled resource states do not produce leak alerts",
+                    scenario: "missing and disabled resource states report uncertainty",
                     input: vec![
                         r#"{
                             "@odata.id": "/redfish/v1/Chassis/System/LeakDetectors/MissingStatus",
@@ -550,10 +649,14 @@ mod tests {
                             "Status": { "Health": "Critical", "State": "Disabled" }
                         }"#,
                     ],
-                    expect: expected_report(vec![], vec![]),
+                    expect: expected_failure_report(&[
+                        "/redfish/v1/Chassis/System/LeakDetectors/MissingStatus",
+                        "/redfish/v1/Chassis/System/LeakDetectors/MissingResourceState",
+                        "/redfish/v1/Chassis/System/LeakDetectors/Disabled",
+                    ]),
                 },
                 Check {
-                    scenario: "non-actionable and missing states do not produce report entries",
+                    scenario: "non-actionable and missing states report uncertainty",
                     input: vec![
                         r#"{
                             "@odata.id": "/redfish/v1/Chassis/System/LeakDetectors/Unavailable",
@@ -590,7 +693,13 @@ mod tests {
                             "Status": { "State": "Enabled" }
                         }"#,
                     ],
-                    expect: expected_report(vec![], vec![]),
+                    expect: expected_failure_report(&[
+                        "/redfish/v1/Chassis/System/LeakDetectors/Unavailable",
+                        "/redfish/v1/Chassis/System/LeakDetectors/Absent",
+                        "/redfish/v1/Chassis/System/LeakDetectors/Vendor",
+                        "/redfish/v1/Chassis/System/LeakDetectors/Missing",
+                        "/redfish/v1/Chassis/System/LeakDetectors/Null",
+                    ]),
                 },
             ],
             |json_detectors| {
