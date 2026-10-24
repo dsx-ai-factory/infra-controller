@@ -376,7 +376,10 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_site_explorer_iteration_latency_milliseconds</td><td>histogram</td><td>The time it took to perform one site explorer iteration</td></tr>
 <tr><td>carbide_site_explorer_last_run_status</td><td>gauge</td><td>The status of the latest Site Explorer run</td></tr>
 <tr><td>carbide_site_explorer_machine_slot_tray_enrichment_failures_total</td><td>counter</td><td>Number of Site Explorer machine slot and tray enrichment failures, by failure stage.</td></tr>
+<tr><td>carbide_site_explorer_managed_host_creation_latency_milliseconds</td><td>histogram</td><td>Time one Site Explorer managed host creation attempt took, from admission to the end of the after-commit repair, by outcome; the _count series, split by outcome, is the per-host creation and failure rate.</td></tr>
+<tr><td>carbide_site_explorer_managed_host_creation_stage_latency_milliseconds</td><td>histogram</td><td>Time one stage of a Site Explorer managed host creation attempt took, by stage: the admission permit wait, the creation transaction, and the after-commit admin address repair.</td></tr>
 <tr><td>carbide_site_explorer_phase_latency_milliseconds</td><td>histogram</td><td>The time it took to perform one site explorer iteration phase</td></tr>
+<tr><td>carbide_site_explorer_rack_host_fill_count</td><td>gauge</td><td>Racks with expected hosts before the last create_machines phase, by kind: expected, all_hosts_ingested (every expected host has a machine), and completable_this_run (every expected host still without a machine was identified for creation in that run)</td></tr>
 <tr><td>carbide_site_explorer_update_explored_endpoints_count</td><td>gauge</td><td>Counts from the last update_explored_endpoints phase by kind</td></tr>
 <tr><td>carbide_site_prefix_admission_total</td><td>counter</td><td>Number of completed tenant SitePrefix admission attempts, by result.</td></tr>
 <tr><td>carbide_site_prefix_retirements_total</td><td>counter</td><td>Number of tenant SitePrefix retirements, by previous lifecycle state.</td></tr>

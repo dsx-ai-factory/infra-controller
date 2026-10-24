@@ -58,7 +58,8 @@ pub struct SiteExplorerConfig {
         serialize_with = "as_std_duration"
     )]
     pub run_interval: std::time::Duration,
-    /// The maximum amount of nodes that are explored concurrently.
+    /// The maximum amount of nodes that are explored concurrently. `0` is
+    /// treated as `1`.
     #[serde(default = "SiteExplorerConfig::default_concurrent_explorations")]
     pub concurrent_explorations: u64,
     /// How many routine (non-requested) endpoints should be explored in a single run.
@@ -96,6 +97,29 @@ pub struct SiteExplorerConfig {
     /// How many ManagedHosts should be created in a single run.
     #[serde(default = "SiteExplorerConfig::default_machines_created_per_run")]
     pub machines_created_per_run: u64,
+
+    /// How many ManagedHosts `create_machines` creates at the same time within
+    /// one run. Each in-flight creation holds one admin-lock admission permit
+    /// (`admin_lock_admission_permits`, default 16) and one pool connection,
+    /// so the effective value is clamped to one below the permit count. A
+    /// permit count of 1 still allows one creation, which then holds the only
+    /// permit while it runs. `1` creates hosts one after another and `0` is
+    /// treated as `1`.
+    #[serde(default = "SiteExplorerConfig::default_machine_creation_concurrency")]
+    pub machine_creation_concurrency: u64,
+
+    /// How often, while `create_machines` still has hosts to create in a run,
+    /// Site Explorer runs an extra identify-and-create pass for the switches
+    /// and power shelves whose endpoints have completed preingestion. The
+    /// pass also runs once at the end of every run, and
+    /// `switches_created_per_run` and `power_shelves_created_per_run` count
+    /// across all passes of a run. `0s` disables the extra passes.
+    #[serde(
+        default = "SiteExplorerConfig::default_switch_and_power_shelf_pass_interval",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub switch_and_power_shelf_pass_interval: std::time::Duration,
 
     /// Whether SiteExplorer should rotate/update Switch NVOS admin credentials
     #[serde(
@@ -204,6 +228,8 @@ impl From<&SiteExplorerConfig> for crate::inventory_creator::Config {
         Self {
             create_machines: config.create_machines.clone(),
             machines_created_per_run: config.machines_created_per_run,
+            machine_creation_concurrency: config.machine_creation_concurrency,
+            switch_and_power_shelf_pass_interval: config.switch_and_power_shelf_pass_interval,
             create_power_shelves: config.create_power_shelves.clone(),
             power_shelves_created_per_run: config.power_shelves_created_per_run,
             create_switches: config.create_switches.clone(),
@@ -225,6 +251,9 @@ impl Default for SiteExplorerConfig {
             explorations_per_run: Self::default_explorations_per_run(),
             create_machines: Self::default_create_machines(),
             machines_created_per_run: Self::default_machines_created_per_run(),
+            machine_creation_concurrency: Self::default_machine_creation_concurrency(),
+            switch_and_power_shelf_pass_interval:
+                Self::default_switch_and_power_shelf_pass_interval(),
             override_target_ip: None,
             override_target_port: None,
             bmc_proxy: bmc_proxy(None),
@@ -256,6 +285,8 @@ impl PartialEq for SiteExplorerConfig {
             explorations_per_run,
             create_machines,
             machines_created_per_run,
+            machine_creation_concurrency,
+            switch_and_power_shelf_pass_interval,
             rotate_switch_nvos_credentials,
             override_target_ip,
             override_target_port,
@@ -281,6 +312,8 @@ impl PartialEq for SiteExplorerConfig {
             && create_machines.load(AtomicOrdering::Relaxed)
                 == other.create_machines.load(AtomicOrdering::Relaxed)
             && *machines_created_per_run == other.machines_created_per_run
+            && *machine_creation_concurrency == other.machine_creation_concurrency
+            && *switch_and_power_shelf_pass_interval == other.switch_and_power_shelf_pass_interval
             && rotate_switch_nvos_credentials.load(AtomicOrdering::Relaxed)
                 == other
                     .rotate_switch_nvos_credentials
@@ -336,6 +369,18 @@ impl SiteExplorerConfig {
     /// independently of how many hosts exploration has identified.
     pub const fn default_machines_created_per_run() -> u64 {
         100
+    }
+
+    /// Managed hosts created at the same time within one cycle: a quarter of
+    /// the default admission permits, so the other gated flows keep theirs.
+    pub const fn default_machine_creation_concurrency() -> u64 {
+        4
+    }
+
+    /// Interval of the switch and power shelf pass while hosts are being
+    /// created.
+    pub const fn default_switch_and_power_shelf_pass_interval() -> std::time::Duration {
+        std::time::Duration::from_secs(15 * 60)
     }
 
     pub fn default_rotate_switch_nvos_credentials() -> Arc<AtomicBool> {

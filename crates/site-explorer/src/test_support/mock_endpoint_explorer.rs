@@ -74,6 +74,8 @@ pub struct MockEndpointExplorer {
         Arc<Mutex<HashMap<IpAddr, Result<EndpointExplorationReport, EndpointExplorationError>>>>,
     pub precondition_result: Arc<Mutex<Result<(), EndpointExplorationError>>>,
     pub power_states: Arc<Mutex<HashMap<IpAddr, PowerState>>>,
+    /// Addresses whose power state was read live, in call order.
+    pub redfish_get_power_state_calls: Arc<Mutex<Vec<SocketAddr>>>,
     pub redfish_power_control_calls: Arc<Mutex<Vec<(SocketAddr, SystemPowerControl)>>>,
     /// Records every `redfish_chassis_reset` call (BMC address, chassis id, and
     /// requested action) so tests can assert the reset was routed correctly.
@@ -102,6 +104,7 @@ impl Default for MockEndpointExplorer {
             reports: Arc::default(),
             precondition_result: Arc::new(Mutex::new(Ok(()))),
             power_states: Arc::default(),
+            redfish_get_power_state_calls: Arc::default(),
             redfish_power_control_calls: Arc::default(),
             redfish_chassis_reset_calls: Arc::default(),
             power_control_failures: Arc::default(),
@@ -248,6 +251,10 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
     ) -> Result<PowerState, EndpointExplorationError> {
+        self.redfish_get_power_state_calls
+            .lock()
+            .unwrap()
+            .push(address);
         Ok(self
             .power_states
             .lock()

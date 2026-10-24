@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
+use carbide_uuid::rack::RackId;
 use mac_address::MacAddress;
 use model::expected_entity::ExpectedEntity;
 use model::expected_machine::ExpectedMachine;
@@ -125,6 +126,20 @@ impl ExploredEndpointIndex {
                 }
             })
             .collect()
+    }
+
+    /// Count the expected machines of every rack, over all expected machines
+    /// that declare a rack.
+    pub(crate) fn expected_hosts_per_rack(&self) -> HashMap<&RackId, usize> {
+        let mut counts = HashMap::new();
+        for expected in self.expected.values() {
+            if let ExpectedEntity::Machine(machine) = expected
+                && let Some(rack_id) = machine.data.rack_id.as_ref()
+            {
+                *counts.entry(rack_id).or_default() += 1;
+            }
+        }
+        counts
     }
 
     /// Return the expected machines that were found in `explored_underlay_interfaces`
