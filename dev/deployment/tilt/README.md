@@ -1,8 +1,7 @@
 # Local development with Tilt
 
 Tilt runs the complete local NICo development stack from the repository's Helm
-charts and Kubernetes sources. DevSpace remains available as a separate
-workflow.
+charts and Kubernetes sources.
 
 > [!WARNING]
 > This workflow is intended only for local development and is
@@ -34,11 +33,7 @@ export KUBECONFIG="$HOME/.kube/kind-nico-tilt.yaml"
 kubectl --context kind-nico-tilt get nodes
 ```
 
-The default `nico-tilt` name is separate from DevSpace's `nico-dev`. Select an
-unused cluster for Tilt: this helper does not detect or migrate an existing
-DevSpace deployment, and both frontends deploy into the same NICo namespaces.
-For deliberate reuse after removing a DevSpace deployment, see
-[existing local clusters](#existing-local-clusters).
+Select an unused cluster for Tilt.
 
 For an isolated dual-stack cluster, select a different name:
 
@@ -89,9 +84,6 @@ successfully but fails subsequent validation remains available for diagnosis.
 The helper does not delete/recreate preexisting clusters or repair incompatible
 settings. Choose another name or explicitly remove an unused
 cluster through kind after accounting for its workloads and data.
-
-The DevSpace host bootstrap calls the same helper, then applies its existing
-node TLS settings and continues its deployment workflow.
 
 ## Start
 
@@ -379,23 +371,6 @@ An earlier draft of this Tilt setup deployed Core as one Helm release named
 
 ```bash
 helm uninstall nico -n nico-system
-```
-
-Tilt and DevSpace deploy the same application object names and should not manage
-the same cluster simultaneously. Before switching an existing DevSpace kind
-cluster to Tilt, run:
-
-```bash
-LOCAL_DEV_INSTALL_REST_PREREQS=0 devspace purge -n nico-system
-```
-
-To switch back to DevSpace, remove the Tilt stack and use the existing DevSpace
-bootstrap and deploy commands:
-
-```bash
-tilt down -f dev/deployment/tilt/Tiltfile
-dev/deployment/devspace/bootstrap-prereqs.sh
-devspace deploy -n nico-system
 ```
 
 ## Stop and remove
