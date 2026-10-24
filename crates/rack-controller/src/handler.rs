@@ -27,12 +27,17 @@ use carbide_rack_controller::ready::handle_ready;
 use carbide_rack_controller::validating::handle_validating;
 use carbide_uuid::rack::RackId;
 use model::rack::{Rack, RackState, derive_rack_aggregate_health};
+use state_controller::db_write_batch::DbWriteBatch;
 use state_controller::state_handler::{
     StateHandler, StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
 
 use crate as carbide_rack_controller;
-use crate::write_ops::PersistRackHealthHistory;
+use crate::component_inventory::{COMPONENT_INVENTORY_HEALTH_SOURCE, RackComponentCounts};
+use crate::resolve_capabilities;
+use crate::write_ops::{
+    PersistRackComponentHealth, PersistRackHealthHistory, RemoveRackComponentHealth,
+};
 
 //------------------------------------------------------------------------------
 
@@ -42,6 +47,63 @@ use crate::write_ops::PersistRackHealthHistory;
 pub struct RackStateHandler {}
 
 impl RackStateHandler {
+    fn record_health(
+        &self,
+        state: &Rack,
+        ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
+    ) {
+        let aggregate_health = derive_rack_aggregate_health(&state.health_reports);
+        self.record_metrics(state, &aggregate_health, ctx);
+        self.record_health_history(state, &aggregate_health, ctx);
+    }
+
+    fn reconcile_component_health(
+        &self,
+        state: &mut Rack,
+        capabilities: Option<&model::rack_type::RackCapabilitiesSet>,
+        component_counts: RackComponentCounts,
+        pending_db_writes: &mut DbWriteBatch,
+    ) {
+        // An unresolved profile is not evidence that missing components recovered.
+        let Some(capabilities) = capabilities else {
+            return;
+        };
+        let previous = state
+            .health_reports
+            .merges
+            .get(COMPONENT_INVENTORY_HEALTH_SOURCE);
+        let mut desired = component_counts.missing_component_report(capabilities);
+
+        if let Some(desired) = desired.as_mut() {
+            desired.update_in_alert_since(previous);
+        }
+
+        match (previous, desired) {
+            (Some(_), None) => {
+                state
+                    .health_reports
+                    .merges
+                    .remove(COMPONENT_INVENTORY_HEALTH_SOURCE);
+                pending_db_writes.push(RemoveRackComponentHealth {
+                    rack_id: state.id.clone(),
+                    source: COMPONENT_INVENTORY_HEALTH_SOURCE,
+                });
+            }
+            (Some(previous), Some(desired)) if previous.alerts == desired.alerts => {}
+            (_, Some(desired)) => {
+                state.health_reports.merges.insert(
+                    COMPONENT_INVENTORY_HEALTH_SOURCE.to_string(),
+                    desired.clone(),
+                );
+                pending_db_writes.push(PersistRackComponentHealth {
+                    rack_id: state.id.clone(),
+                    health_report: desired,
+                });
+            }
+            (None, None) => {}
+        }
+    }
+
     fn record_metrics(
         &self,
         state: &Rack,
@@ -81,13 +143,15 @@ impl RackStateHandler {
         id: &RackId,
         state: &mut Rack,
         controller_state: &RackState,
+        capabilities: Option<&model::rack_type::RackCapabilitiesSet>,
+        component_counts: RackComponentCounts,
         ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
     ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
         let rack_profile_id = state.rack_profile_id.clone();
         let config = state.config.clone();
 
         match controller_state {
-            RackState::Created => handle_created(id, rack_profile_id.as_ref(), ctx).await,
+            RackState::Created => handle_created(id, capabilities, component_counts),
             RackState::Discovering => handle_discovering(id, rack_profile_id.as_ref(), ctx).await,
             RackState::Maintenance { maintenance_state } => {
                 handle_maintenance(id, state, rack_profile_id.as_ref(), maintenance_state, ctx)
@@ -127,11 +191,11 @@ impl StateHandler for RackStateHandler {
             "Rack is in state",
         );
 
-        let aggregate_health = derive_rack_aggregate_health(&state.health_reports);
-        self.record_metrics(state, &aggregate_health, ctx);
-        self.record_health_history(state, &aggregate_health, ctx);
-
-        if state.deleted.is_some() && !matches!(controller_state, RackState::Deleting) {
+        if state.deleted.is_some() {
+            self.record_health(state, ctx);
+            if matches!(controller_state, RackState::Deleting) {
+                return handle_deleting().await;
+            }
             tracing::info!(
                 rack_id = %id,
                 rack_state = %controller_state,
@@ -140,7 +204,24 @@ impl StateHandler for RackStateHandler {
             return Ok(StateHandlerOutcome::transition(RackState::Deleting));
         }
 
-        self.attempt_state_transition(id, state, controller_state, ctx)
-            .await
+        let capabilities = resolve_capabilities(id, state.rack_profile_id.as_ref(), ctx).cloned();
+        let component_counts = RackComponentCounts::load(&ctx.services.db_pool, id).await?;
+        self.reconcile_component_health(
+            state,
+            capabilities.as_ref(),
+            component_counts,
+            ctx.pending_db_writes,
+        );
+        self.record_health(state, ctx);
+
+        self.attempt_state_transition(
+            id,
+            state,
+            controller_state,
+            capabilities.as_ref(),
+            component_counts,
+            ctx,
+        )
+        .await
     }
 }

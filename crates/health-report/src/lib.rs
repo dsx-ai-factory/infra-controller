@@ -644,6 +644,11 @@ impl HealthProbeId {
         HealthProbeId("NvueApiRunning".to_string())
     }
 
+    /// The ID used when a rack has fewer components than its profile requires.
+    pub fn missing_rack_component() -> Self {
+        HealthProbeId("MissingRackComponent".to_string())
+    }
+
     /// The ID used while a new HBN configuration waits for a later health sample.
     pub fn post_config_check_wait() -> Self {
         HealthProbeId("PostConfigCheckWait".to_string())

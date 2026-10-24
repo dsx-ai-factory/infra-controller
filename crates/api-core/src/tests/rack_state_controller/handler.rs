@@ -35,11 +35,13 @@ use db::db_read::DbReader;
 use db::{
     ObjectColumnFilter, expected_rack as db_expected_rack, rack as db_rack, switch as db_switch,
 };
+use health_report::HealthAlertClassification;
 use librms::RackManagerError;
 use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::expected_machine::ExpectedMachineData;
 use model::expected_rack::ExpectedRack;
+use model::machine::LoadSnapshotOptions;
 use model::rack::{
     ConfigureNmxClusterState, FirmwareProgressState, FirmwareUpgradeDeviceStatus,
     FirmwareUpgradeJob, FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope,
@@ -205,6 +207,33 @@ pub(crate) fn config_with_rack_profiles() -> crate::cfg::file::CarbideConfig {
         .into_iter()
         .collect(),
     };
+    config
+}
+
+fn config_with_switch_profile() -> crate::cfg::file::CarbideConfig {
+    let mut config = config_with_rack_profiles();
+    config.rack_profiles.rack_profiles.insert(
+        "SwitchOnly".to_string(),
+        RackProfile {
+            product_family: Some(RackProductFamily::Gb200),
+            rack_hardware_topology: Some(RackHardwareTopology::Gb200Nvl72r1C2g4Topology),
+            rack_hardware_type: Some(RackHardwareType::any()),
+            rack_hardware_class: Some(RackHardwareClass::Prod),
+            rack_capabilities: RackCapabilitiesSet {
+                compute: RackCapabilityCompute {
+                    count: 0,
+                    vendor: Some("NVIDIA".to_string()),
+                    ..Default::default()
+                },
+                switch: RackCapabilitySwitch {
+                    count: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
     config
 }
 
@@ -928,6 +957,434 @@ async fn test_expected_incomplete_device_counts_stays(
         matches!(outcome, StateHandlerOutcome::Wait { .. }),
         "Rack with incomplete device counts should wait in Created"
     );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_missing_compute_component_health_tracks_host_inventory(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = config_with_rack_profiles();
+    config.rack_profiles.rack_profiles.insert(
+        "ComputeOnly".to_string(),
+        RackProfile {
+            product_family: Some(RackProductFamily::Gb200),
+            rack_hardware_topology: Some(RackHardwareTopology::Gb200Nvl72r1C2g4Topology),
+            rack_hardware_type: Some(RackHardwareType::any()),
+            rack_hardware_class: Some(RackHardwareClass::Prod),
+            rack_capabilities: RackCapabilitiesSet {
+                compute: RackCapabilityCompute {
+                    count: 2,
+                    vendor: Some("NVIDIA".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let env =
+        create_test_env_with_overrides(pool.clone(), TestEnvOverrides::with_config(config)).await;
+    let rack_id = new_rack_id();
+    db_rack::create(
+        pool.acquire().await?.as_mut(),
+        &rack_id,
+        Some(&RackProfileId::new("ComputeOnly")),
+        &RackConfig::default(),
+        None,
+    )
+    .await?;
+    for host_count in 1..=2 {
+        let host = new_host(
+            &env,
+            ManagedHostConfig::default().with_expected_machine_data(ExpectedMachineData {
+                rack_id: Some(rack_id.clone()),
+                ..Default::default()
+            }),
+        )
+        .await?;
+        assert!(!host.dpu_snapshots.is_empty());
+        env.run_rack_controller_iteration().await;
+        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        if host_count == 1 {
+            let report = &rack.health_reports.merges["rack-component-inventory"];
+            let [alert] = report.alerts.as_slice() else {
+                panic!("expected one compute shortage alert");
+            };
+            assert_eq!(alert.target.as_deref(), Some("compute"));
+            assert_eq!(
+                alert.message,
+                "Rack component count is below the rack profile: expected 2, found 1, missing 1"
+            );
+            assert!(matches!(rack.controller_state.value, RackState::Created));
+        } else {
+            assert!(
+                !rack
+                    .health_reports
+                    .merges
+                    .contains_key("rack-component-inventory")
+            );
+            assert!(matches!(
+                rack.controller_state.value,
+                RackState::Discovering
+            ));
+        }
+        let host = db::managed_host::load_snapshot(
+            &mut env.db_reader(),
+            &host.host_snapshot.id,
+            LoadSnapshotOptions::default(),
+        )
+        .await?
+        .expect("host snapshot should exist");
+        assert_eq!(
+            host.aggregate_health.alerts.iter().any(|alert| {
+                alert.id.as_str() == "MissingRackComponent"
+                    && alert.target.as_deref() == Some("compute")
+            }),
+            host_count == 1,
+        );
+        assert_eq!(host.is_usable_as_instance(false), Ok(()));
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_missing_component_health_is_persisted_and_propagated(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::with_config(config_with_switch_profile()),
+    )
+    .await;
+    let rack_id = new_rack_id();
+    db_rack::create(
+        pool.acquire().await?.as_mut(),
+        &rack_id,
+        Some(&RackProfileId::new("SwitchOnly")),
+        &RackConfig::default(),
+        None,
+    )
+    .await?;
+    let host = new_host(
+        &env,
+        ManagedHostConfig::default().with_expected_machine_data(ExpectedMachineData {
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
+        }),
+    )
+    .await?;
+
+    run_rack_handler_and_apply_writes(&env, &pool, &rack_id, RackState::Created).await?;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let report = rack
+        .health_reports
+        .merges
+        .get("rack-component-inventory")
+        .expect("missing component report should be persisted");
+    let [alert] = report.alerts.as_slice() else {
+        panic!("expected one missing component alert");
+    };
+    assert_eq!(alert.id.as_str(), "MissingRackComponent");
+    assert_eq!(alert.target.as_deref(), Some("switch"));
+    assert_eq!(
+        alert.message,
+        "Rack component count is below the rack profile: expected 1, found 0, missing 1"
+    );
+    assert_eq!(
+        alert.classifications,
+        vec![HealthAlertClassification::hardware()]
+    );
+
+    let host = db::managed_host::load_snapshot(
+        &mut env.db_reader(),
+        &host.host_snapshot.id,
+        LoadSnapshotOptions::default(),
+    )
+    .await?
+    .expect("host snapshot should exist");
+    assert!(host.aggregate_health.alerts.iter().any(|alert| {
+        alert.id.as_str() == "MissingRackComponent" && alert.target.as_deref() == Some("switch")
+    }));
+    assert_eq!(host.is_usable_as_instance(false), Ok(()));
+
+    // Reconcile a persisted report from the allocation-blocking implementation.
+    let mut previous_report = report.clone();
+    previous_report.alerts[0]
+        .classifications
+        .push(HealthAlertClassification::prevent_allocations());
+    db_rack::insert_health_report(
+        pool.acquire().await?.as_mut(),
+        &rack_id,
+        health_report::HealthReportApplyMode::Merge,
+        &previous_report,
+    )
+    .await?;
+    run_rack_handler_and_apply_writes(&env, &pool, &rack_id, RackState::Created).await?;
+    let updated = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert_eq!(
+        updated.health_reports.merges["rack-component-inventory"].alerts, report.alerts,
+        "reconciliation must remove the old classification without resetting alert age"
+    );
+    let host = db::managed_host::load_snapshot(
+        &mut env.db_reader(),
+        &host.host_snapshot.id,
+        LoadSnapshotOptions::default(),
+    )
+    .await?
+    .expect("host snapshot should exist");
+    assert_eq!(host.is_usable_as_instance(false), Ok(()));
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_missing_component_health_clears_after_recovery(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::with_config(config_with_switch_profile()),
+    )
+    .await;
+    let rack_id = new_rack_id();
+    db_rack::create(
+        pool.acquire().await?.as_mut(),
+        &rack_id,
+        Some(&RackProfileId::new("SwitchOnly")),
+        &RackConfig::default(),
+        None,
+    )
+    .await?;
+
+    run_rack_handler_and_apply_writes(&env, &pool, &rack_id, RackState::Created).await?;
+    let first = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let first_alert_since = first.health_reports.merges["rack-component-inventory"].alerts[0]
+        .in_alert_since
+        .expect("alert timestamp should be set");
+
+    run_rack_handler_and_apply_writes(&env, &pool, &rack_id, RackState::Created).await?;
+    let repeated = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert_eq!(
+        repeated.health_reports.merges["rack-component-inventory"].alerts[0].in_alert_since,
+        Some(first_alert_since),
+        "repeated observations should retain the first alert timestamp"
+    );
+
+    attach_switch_with_nvos_credentials(&env, &rack_id).await?;
+    run_rack_handler_and_apply_writes(&env, &pool, &rack_id, RackState::Created).await?;
+    let recovered = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert!(
+        !recovered
+            .health_reports
+            .merges
+            .contains_key("rack-component-inventory"),
+        "component recovery should clear the controller-owned health report"
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_component_health_preserves_unresolved_profile(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::with_config(config_with_switch_profile()),
+    )
+    .await;
+    let rack_id = new_rack_id();
+    db_rack::create(
+        pool.acquire().await?.as_mut(),
+        &rack_id,
+        Some(&RackProfileId::new("SwitchOnly")),
+        &RackConfig::default(),
+        None,
+    )
+    .await?;
+    env.run_rack_controller_iteration().await;
+    let initial = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let report = &initial.health_reports.merges["rack-component-inventory"];
+
+    for profile in [Some("UnknownProfile"), None] {
+        sqlx::query("UPDATE racks SET rack_profile_id = $1 WHERE id = $2")
+            .bind(profile)
+            .bind(&rack_id)
+            .execute(&pool)
+            .await?;
+        env.run_rack_controller_iteration().await;
+        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        assert_eq!(
+            &rack.health_reports.merges["rack-component-inventory"], report,
+            "unresolved profile {profile:?} must preserve the existing report"
+        );
+    }
+
+    sqlx::query("UPDATE racks SET rack_profile_id = 'SwitchOnly' WHERE id = $1")
+        .bind(&rack_id)
+        .execute(&pool)
+        .await?;
+    attach_switch_with_nvos_credentials(&env, &rack_id).await?;
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert!(
+        !rack
+            .health_reports
+            .merges
+            .contains_key("rack-component-inventory")
+    );
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Discovering
+    ));
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_component_health_waits_for_successful_handler(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fetcher = Arc::new(StaticFirmwareObjectFetcher {
+        response: Mutex::new(Err("temporary firmware fetch failure".to_string())),
+        requested_urls: Mutex::new(Vec::new()),
+        requested_timeouts: Mutex::new(Vec::new()),
+    });
+    let mut config = config_with_switch_profile();
+    config
+        .rack_profiles
+        .rack_profiles
+        .get_mut("SwitchOnly")
+        .unwrap()
+        .firmware_object = Some(RackFirmwareObjectConfig {
+        url: url::Url::parse("https://firmware.example.invalid/sot.json")?,
+        access_token_credential: None,
+        fetch_timeout: std::time::Duration::from_secs(5),
+    });
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides {
+            config: Some(config),
+            firmware_object_fetcher: Some(fetcher.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let rack_id = new_rack_id();
+    db_rack::create(
+        pool.acquire().await?.as_mut(),
+        &rack_id,
+        Some(&RackProfileId::new("SwitchOnly")),
+        &RackConfig::default(),
+        None,
+    )
+    .await?;
+    let maintenance = RackState::Maintenance {
+        maintenance_state: RackMaintenanceState::NVOSUpdate {
+            nvos_update: NvosUpdateState::Start,
+        },
+    };
+    for (iteration, recovered) in [false, true].into_iter().enumerate() {
+        if recovered {
+            attach_switch_with_nvos_credentials(&env, &rack_id).await?;
+        }
+        super::fixtures::rack::set_rack_controller_state(
+            pool.acquire().await?.as_mut(),
+            &rack_id,
+            maintenance.clone(),
+        )
+        .await?;
+        env.run_rack_controller_iteration().await;
+        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        assert_eq!(rack.controller_state.value, maintenance);
+        assert!(matches!(
+            rack.controller_state_outcome,
+            Some(model::controller_outcome::PersistentStateHandlerOutcome::Error { ref err, .. })
+                if err.contains("temporary firmware fetch failure")
+        ));
+        assert_eq!(fetcher.requested_urls.lock().unwrap().len(), iteration + 1);
+        assert_eq!(
+            rack.health_reports
+                .merges
+                .contains_key("rack-component-inventory"),
+            recovered,
+            "failed handlers must not persist report creation or removal",
+        );
+        let history_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM rack_health_history WHERE object_id = $1")
+                .bind(rack_id.to_string())
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(history_count, iteration as i64);
+
+        super::fixtures::rack::set_rack_controller_state(
+            pool.acquire().await?.as_mut(),
+            &rack_id,
+            RackState::Created,
+        )
+        .await?;
+        env.run_rack_controller_iteration().await;
+        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        assert_eq!(
+            rack.health_reports
+                .merges
+                .contains_key("rack-component-inventory"),
+            !recovered,
+            "a subsequent successful handler must reconcile the report",
+        );
+        let histories = db::health_history::find_by_object_ids(
+            pool.acquire().await?.as_mut(),
+            db::health_history::HealthHistoryTableId::Rack,
+            std::slice::from_ref(&rack_id),
+            None,
+            None,
+        )
+        .await?;
+        assert_eq!(
+            histories[&rack_id.to_string()][0]
+                .health
+                .alerts
+                .iter()
+                .any(|alert| alert.id.as_str() == "MissingRackComponent"),
+            !recovered,
+            "history must agree with the report after a successful handler",
+        );
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_ready_rack_reports_deleted_component(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::with_config(config_with_switch_profile()),
+    )
+    .await;
+    let rack_id = new_rack_id();
+    db_rack::create(
+        pool.acquire().await?.as_mut(),
+        &rack_id,
+        Some(&RackProfileId::new("SwitchOnly")),
+        &RackConfig::default(),
+        None,
+    )
+    .await?;
+    let switch_id = attach_switch_with_nvos_credentials(&env, &rack_id).await?;
+    sqlx::query("UPDATE switches SET deleted = now() WHERE id = $1")
+        .bind(switch_id)
+        .execute(pool.acquire().await?.as_mut())
+        .await?;
+
+    run_rack_handler_and_apply_writes(&env, &pool, &rack_id, RackState::Ready).await?;
+
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let report = &rack.health_reports.merges["rack-component-inventory"];
+    assert_eq!(report.alerts.len(), 1);
+    assert_eq!(report.alerts[0].target.as_deref(), Some("switch"));
 
     Ok(())
 }
@@ -6453,4 +6910,34 @@ where
         .unwrap()
         .pop()
         .unwrap()
+}
+
+async fn run_rack_handler_and_apply_writes(
+    env: &TestEnv,
+    pool: &sqlx::PgPool,
+    rack_id: &RackId,
+    controller_state: RackState,
+) -> Result<Rack, Box<dyn std::error::Error>> {
+    let mut rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
+    let handler = RackStateHandler::default();
+    let mut services = env.rack_state_handler_services();
+    let mut metrics = RackMetrics::default();
+    let mut db_writes = DbWriteBatch::default();
+    let mut ctx = StateHandlerContext::<RackStateHandlerContextObjects> {
+        services: &mut services,
+        metrics: &mut metrics,
+        pending_db_writes: &mut db_writes,
+    };
+
+    let mut outcome = handler
+        .handle_object_state(rack_id, &mut rack, &controller_state, &mut ctx)
+        .await?;
+    let mut txn = match outcome.take_transaction() {
+        Some(txn) => txn,
+        None => pool.begin().await?,
+    };
+    db_writes.apply_all(&mut txn).await?;
+    txn.commit().await?;
+
+    Ok(rack)
 }
