@@ -28,7 +28,6 @@ use std::time::{Duration, Instant};
 use carbide_firmware::FirmwareConfigSnapshot;
 use carbide_redfish::libredfish::conv::IntoModel;
 use carbide_secrets::credentials::CredentialManager;
-use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::machine::MachineType;
 use chrono::Utc;
@@ -49,10 +48,10 @@ use model::machine_interface::InterfaceType;
 use model::rack_type::RackProfileConfig;
 use model::resource_pool::common::CommonPools;
 use model::site_explorer::{
-    BlueFieldOperatingMode, Chassis, EndpointExplorationError, EndpointExplorationReport,
-    EndpointType, ExplorationTier, ExploredDpu, ExploredEndpoint, ExploredManagedHost,
+    BlueFieldOperatingMode, EndpointExplorationError, EndpointExplorationReport, EndpointType,
+    ExplorationTier, ExploredDpu, ExploredEndpoint, ExploredManagedHost,
     HostPrimaryInterfaceSelection, MachineExpectation, PowerState, PreingestionState,
-    SiteExplorerLastRun, is_bluefield_part_number,
+    SiteExplorerLastRun,
 };
 use sqlx::PgPool;
 use tokio::task::JoinSet;
@@ -90,6 +89,7 @@ pub use inventory_creator::{
 use inventory_creator::{ConfiguredIngestionCandidate, InventoryCreator};
 mod machine_location_reconciler;
 pub use machine_location_reconciler::MachineLocationReconciler;
+mod endpoint_exploration_report_ext;
 mod explored_endpoint_ext;
 use explored_endpoint_ext::ExploredEndpointExt;
 pub use explored_endpoint_ext::get_sys_image_version;
@@ -477,15 +477,6 @@ struct IngestionCandidate<'a> {
     dpu_matches: Option<HostDpuMatches<'a>>,
     host_dpu_policy: HostDpuPolicy,
     declared_primary: Option<MacAddress>,
-}
-
-/// Host inventory fields that can identify one DPU by serial number.
-#[derive(Clone, Copy)]
-struct HostDpuInventoryCandidate<'a> {
-    /// Part number used by the existing BlueField detection and mode checks.
-    part_number: Option<&'a str>,
-    /// Serial number joined to the DPU endpoint report.
-    serial_number: Option<&'a str>,
 }
 
 /// When Site Explorer last physically reset a BMC, tracked per reset method.
@@ -1376,38 +1367,12 @@ impl SiteExplorer {
         metrics: &mut SiteExplorationMetrics,
     ) -> Option<Vec<ExploredDpu>> {
         let HostDpuMatches {
-            inventory: dpu_inventory,
-            inventory_matches,
-            fallback_matches,
-            expected_fallback_count,
+            expected_total,
+            matched_dpus,
         } = matches;
-        let needs_expected_serial_fallback = dpu_inventory.needs_expected_serial_fallback();
+        let cfg_status = self.configure_matched_dpus(ep, matched_dpus, metrics).await;
 
-        let inventory_cfg_status = self
-            .configure_matched_dpus(ep, inventory_matches, metrics)
-            .await;
-        let fallback_cfg_status = self
-            .configure_matched_dpus(ep, fallback_matches, metrics)
-            .await;
-
-        let has_unready_matches = dpu_inventory.matched_total
-            > inventory_cfg_status.running_as_dpu.len() + inventory_cfg_status.running_as_nic_total;
-
-        let host_reported_dpus_total = dpu_inventory.reported_total;
-
-        let incomplete_dpu_exploration = needs_expected_serial_fallback
-            || has_unready_matches
-            || inventory_cfg_status.running_as_dpu.is_empty()
-            || inventory_cfg_status.running_as_dpu.len()
-                != host_reported_dpus_total
-                    .saturating_sub(inventory_cfg_status.running_as_nic_total);
-
-        let host_reported_dpus_nic_mode_total =
-            inventory_cfg_status.running_as_nic_total + fallback_cfg_status.running_as_nic_total;
-        let configuration_requests = inventory_cfg_status.configuration_requests
-            + fallback_cfg_status.configuration_requests;
-
-        if configuration_requests > 0 {
+        if cfg_status.configuration_requests > 0 {
             // A queued `set_nic_mode` only takes effect after a host
             // power cycle, so drive one for every vendor --
             // `redfish_powercycle` issues `PowerCycle` and falls back
@@ -1459,71 +1424,48 @@ impl SiteExplorer {
             return None;
         }
 
-        // Every selected fallback serial must be discovered and ready, whether
-        // the DPU is managed or intentionally runs as a NIC.
-        if fallback_cfg_status.running_as_dpu.len() + fallback_cfg_status.running_as_nic_total
-            != expected_fallback_count
-        {
+        // Every DPU reported by PCIe/chassis or listed in ExpectedMachine must
+        // be discovered and ready, whether managed or intentionally in NIC mode.
+        if cfg_status.running_as_dpu.len() + cfg_status.running_as_nic_total != expected_total {
+            tracing::warn!(
+                bmc_ip_address = %ep.address,
+                discovered_dpu_count = cfg_status.running_as_dpu.len(),
+                expected_managed_dpu_count = expected_total
+                    .saturating_sub(cfg_status.running_as_nic_total),
+                all_dpus_configured_properly_in_host = cfg_status.configuration_requests == 0,
+                "cannot identify managed host because the site explorer has not discovered all attached DPUs"
+            );
             return None;
         }
 
-        // The site explorer should only create a managed host after exploring all of the DPUs attached to the host.
-        // If a host reports that it has two DPUs, the site explorer must wait until **both** DPUs have made the DHCP request.
-        // If only one of the two DPUs have made the DHCP request, the site explorer must wait until it has explored the latter DPU's BMC
-        // (ensuring that the second DPU has also made the DHCP request).
-        if incomplete_dpu_exploration && fallback_cfg_status.running_as_dpu.is_empty() {
-            // Net DPUs still expected to pair: reported DPU minus those
-            // confirmed to be running as plain NICs.
-            let expected_managed_dpus_total =
-                host_reported_dpus_total.saturating_sub(host_reported_dpus_nic_mode_total);
-            if expected_managed_dpus_total > 0 || has_unready_matches {
-                if expected_managed_dpus_total > 0 {
-                    tracing::warn!(
-                        bmc_ip_address = %ep.address,
-                        discovered_dpu_count = inventory_cfg_status.running_as_dpu.len(),
-                        expected_managed_dpu_count = expected_managed_dpus_total,
-                        all_dpus_configured_properly_in_host = configuration_requests == 0,
-                        "cannot identify managed host because the site explorer has not discovered all attached DPUs"
-                    );
-                }
-
-                return None;
-            } else if host_dpu_policy.expects_managed_dpus() {
-                // No DPUs remain available for management, and the
-                // effective policy is `Manage` --
-                // i.e. neither per-host `ExpectedMachine.dpu_policy`
-                // nor site-wide `[site_explorer] dpu_policy` declared
-                // this host as zero-DPU. We expect DPUs but found none --
-                // probably a misconfiguration or a DPU-discovery
-                // bug. Skip ingestion this cycle; site-explorer
-                // will retry on the next iteration, giving the
-                // operator a chance to either fix the host, select
-                // `HostDpuPolicy::Nic` for installed BlueFields
-                // that should run as NICs, or select
-                // `HostDpuPolicy::Ignore` for a host with no usable DPU
-                // hardware.
-                //
-                // `Ignore` hosts are handled before this method is called;
-                // `Nic` hosts can return an empty DPU list.
-                tracing::warn!(
-                    bmc_ip_address = %ep.address,
-                    exploration_report = ?ep,
-                    ?host_dpu_policy,
-                    "cannot identify managed host: site explorer found no DPUs available for management while the effective DPU policy is `Manage`; use `dpu_policy = \"nic\"` for installed BlueFields that should run as NICs, or `dpu_policy = \"ignore\"` for a host with no usable DPU hardware",
-                );
-                metrics
-                    .increment_host_dpu_pairing_blocker(PairingBlockerReason::NoDpuReportedByHost);
-                return None;
-            }
+        if cfg_status.running_as_dpu.is_empty() && host_dpu_policy.expects_managed_dpus() {
+            // No DPUs remain available for management, and the
+            // effective policy is `Manage` --
+            // i.e. neither per-host `ExpectedMachine.dpu_policy`
+            // nor site-wide `[site_explorer] dpu_policy` declared
+            // this host as zero-DPU. We expect DPUs but found none --
+            // probably a misconfiguration or a DPU-discovery
+            // bug. Skip ingestion this cycle; site-explorer
+            // will retry on the next iteration, giving the
+            // operator a chance to either fix the host, select
+            // `HostDpuPolicy::Nic` for installed BlueFields
+            // that should run as NICs, or select
+            // `HostDpuPolicy::Ignore` for a host with no usable DPU
+            // hardware.
+            //
+            // `Ignore` hosts are handled before this method is called;
+            // `Nic` hosts can return an empty DPU list.
+            tracing::warn!(
+                bmc_ip_address = %ep.address,
+                exploration_report = ?ep,
+                ?host_dpu_policy,
+                "cannot identify managed host: site explorer found no DPUs available for management while the effective DPU policy is `Manage`; use `dpu_policy = \"nic\"` for installed BlueFields that should run as NICs, or `dpu_policy = \"ignore\"` for a host with no usable DPU hardware",
+            );
+            metrics.increment_host_dpu_pairing_blocker(PairingBlockerReason::NoDpuReportedByHost);
+            return None;
         }
 
-        // Expected serials replace inventory DPUs only after a ready DPU match.
-        // An empty or all-NIC fallback keeps the inventory DPU list.
-        if fallback_cfg_status.running_as_dpu.is_empty() {
-            Some(inventory_cfg_status.running_as_dpu)
-        } else {
-            Some(fallback_cfg_status.running_as_dpu)
-        }
+        Some(cfg_status.running_as_dpu)
     }
 
     /// Applies the selected target modes and records each matched DPU's outcome.
@@ -3494,58 +3436,6 @@ fn is_dpu_in_nic_mode(dpu_ep: &ExploredEndpoint, host_ep: &ExploredEndpoint) -> 
     nic_mode
 }
 
-/// Returns the normalized serial when a host inventory record repeats a BlueField
-/// serial already seen during this host's ingestion pass.
-fn duplicate_bluefield_serial<'a>(
-    part_number: Option<&str>,
-    serial_number: Option<&'a str>,
-    seen: &mut HashSet<&'a str>,
-) -> Option<&'a str> {
-    if !part_number
-        .map(str::trim)
-        .is_some_and(is_bluefield_part_number)
-    {
-        return None;
-    }
-
-    let serial_number = serial_number.map(str::trim).none_if_empty()?;
-    (!seen.insert(serial_number)).then_some(serial_number)
-}
-
-/// `host_dpu_inventory_records` applies the existing chassis inventory rule in
-/// one place. Some BMCs put the BlueField identity on the chassis itself;
-/// others put it on a nested network adapter. Reading only one form avoids
-/// duplicate representations within this chassis. The same serial can still
-/// appear in other chassis, so callers counting DPUs must deduplicate per host.
-fn host_dpu_inventory_records(chassis: &Chassis) -> Vec<HostDpuInventoryCandidate<'_>> {
-    let chassis_is_bluefield = chassis
-        .part_number
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(is_bluefield_part_number);
-    let chassis_has_serial = chassis
-        .serial_number
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|serial| !serial.is_empty());
-
-    if chassis_is_bluefield && chassis_has_serial {
-        return vec![HostDpuInventoryCandidate {
-            part_number: chassis.part_number.as_deref(),
-            serial_number: chassis.serial_number.as_deref(),
-        }];
-    }
-
-    chassis
-        .network_adapters
-        .iter()
-        .map(|adapter| HostDpuInventoryCandidate {
-            part_number: adapter.part_number.as_deref(),
-            serial_number: adapter.serial_number.as_deref(),
-        })
-        .collect()
-}
-
 /// Status of matched DPUs after applying target operating modes.
 #[derive(Debug)]
 struct DpuConfigStatus {
@@ -3702,7 +3592,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::host_dpu_matches::matched_pcie_dpu;
+    use crate::host_dpu_matches::matched_inventory_dpu;
     use crate::test_support::{bf2_dpu, explored_endpoint};
 
     #[test]
@@ -4885,12 +4775,12 @@ mod tests {
         let host = explored_endpoint(load_dell_ep_report());
         // Mode already correct (`Ok(true)`) -> attach as a managed DPU.
         assert!(matches!(
-            classify_matched_dpu(&matched_pcie_dpu(&dpu), &host, Some(Ok(true))),
+            classify_matched_dpu(&matched_inventory_dpu(&dpu), &host, Some(Ok(true))),
             DiscoveredDpu::RunningAsDpu(_)
         ));
         // A skipped mode check (`None`) behaves the same.
         assert!(matches!(
-            classify_matched_dpu(&matched_pcie_dpu(&dpu), &host, None),
+            classify_matched_dpu(&matched_inventory_dpu(&dpu), &host, None),
             DiscoveredDpu::RunningAsDpu(_)
         ));
     }
@@ -4900,7 +4790,7 @@ mod tests {
         let dpu = bf2_dpu(Some(BlueFieldOperatingMode::Nic));
         let host = explored_endpoint(load_dell_ep_report());
         assert!(matches!(
-            classify_matched_dpu(&matched_pcie_dpu(&dpu), &host, Some(Ok(true))),
+            classify_matched_dpu(&matched_inventory_dpu(&dpu), &host, Some(Ok(true))),
             DiscoveredDpu::RunningAsNic
         ));
     }
@@ -4911,7 +4801,7 @@ mod tests {
         let dpu = bf2_dpu(Some(BlueFieldOperatingMode::Nic));
         let host = explored_endpoint(load_dell_ep_report());
         assert!(matches!(
-            classify_matched_dpu(&matched_pcie_dpu(&dpu), &host, Some(Ok(false))),
+            classify_matched_dpu(&matched_inventory_dpu(&dpu), &host, Some(Ok(false))),
             DiscoveredDpu::NeedsReconfig
         ));
     }
@@ -4922,74 +4812,9 @@ mod tests {
         let host = explored_endpoint(load_dell_ep_report());
         let err = SiteExplorerError::InvalidArgument("boom".to_string());
         assert!(matches!(
-            classify_matched_dpu(&matched_pcie_dpu(&dpu), &host, Some(Err(err))),
+            classify_matched_dpu(&matched_inventory_dpu(&dpu), &host, Some(Err(err))),
             DiscoveredDpu::ModeCheckFailed(_)
         ));
-    }
-
-    #[test]
-    fn duplicate_bluefield_serial_only_flags_repeated_bluefield_serials() {
-        struct Case {
-            name: &'static str,
-            devices: &'static [(Option<&'static str>, Option<&'static str>)],
-            expected: &'static [bool],
-        }
-
-        let cases = [
-            Case {
-                name: "duplicate BlueField serial",
-                devices: &[
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                ],
-                expected: &[false, true],
-            },
-            Case {
-                name: "trimmed duplicate BlueField serial",
-                devices: &[
-                    (Some("900-9D3B6-00SV-AA0"), Some(" DPU-SERIAL-1 ")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                ],
-                expected: &[false, true],
-            },
-            Case {
-                name: "distinct BlueField serials",
-                devices: &[
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-2")),
-                ],
-                expected: &[false, false],
-            },
-            Case {
-                name: "non-BlueField does not reserve serial",
-                devices: &[
-                    (Some("0JKJDC"), Some("DPU-SERIAL-1")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                ],
-                expected: &[false, false],
-            },
-            Case {
-                name: "missing and empty serials are not duplicates",
-                devices: &[
-                    (Some("900-9D3B6-00SV-AA0"), None),
-                    (Some("900-9D3B6-00SV-AA0"), Some("")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("   ")),
-                ],
-                expected: &[false, false, false],
-            },
-        ];
-
-        for case in cases {
-            let mut seen = HashSet::new();
-            let actual: Vec<bool> = case
-                .devices
-                .iter()
-                .map(|(part_number, serial_number)| {
-                    duplicate_bluefield_serial(*part_number, *serial_number, &mut seen).is_some()
-                })
-                .collect();
-            assert_eq!(actual, case.expected, "{}", case.name);
-        }
     }
 
     #[test]
