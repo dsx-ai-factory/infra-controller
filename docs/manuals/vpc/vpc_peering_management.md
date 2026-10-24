@@ -1,6 +1,35 @@
 # VPC Peering
 
-VPC peering connects two VPCs so their instances can communicate in both directions. This page explains how to manage peering with `nico-admin-cli` and delete connections through REST.
+VPC peering connects two VPCs so their instances can communicate in both directions. This page explains how to manage peering with `nico-admin-cli` and create or delete connections through REST. For an edge/bastion access pattern, see [Tenant Connectivity and Shared Services](tenant_connectivity.md#reach-a-tenant-through-an-edge-vpc).
+
+## Creating Through REST
+
+Send `POST /v2/org/{org}/nico/vpc-peering` with a JSON body containing these three required UUIDs:
+
+```json
+{
+  "siteId": "72771e6a-6f5e-4de4-a5b9-1266c4197811",
+  "vpc1Id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
+  "vpc2Id": "34f5c98e-f430-457b-a812-92637d0c6fd0"
+}
+```
+
+Replace the example IDs with the Site and VPC IDs from your deployment, and `{org}` with the organization in which the caller has the appropriate role. The VPC IDs must be distinct, but their order does not affect connectivity. Both VPCs must be `Ready` on the same `Registered` Site.
+
+| Caller | Authorized creation |
+|---|---|
+| Role with `TENANT_ADMIN` suffix | Both VPCs belong to the caller's tenant, and that tenant has access to the Site |
+| Role with `PROVIDER_ADMIN` suffix | The Site belongs to the provider, the VPCs belong to different tenants, and both tenants have accounts with that provider and access to the Site |
+
+A Provider Admin role alone does not authorize peering two VPCs within one tenant. Use the owning tenant's authorized context for that operation. The REST API does not implement a separate peer invitation/acceptance exchange. Agree on the intended access with both owners before creating cross-tenant peering.
+
+Site policy must permit peering creation and activation, and the two VPC virtualization types must be compatible. The Core `vpc_peering_policy` is disabled when omitted or set to `none`. Setting it to `exclusive` enables compatible pairs (`mixed` is a deprecated alias for `exclusive`). For stored peerings, `vpc_peering_policy_on_existing` overrides activation policy and otherwise inherits the creation policy. Its `none` value disables imports even if the peering record exists. For FNN-to-Flat connections, follow the [additional routing prerequisite](#virtualized-to-flat-routing-prerequisite).
+
+A successful request returns HTTP `201` with the peering resource and its `id`. Poll `GET /v2/org/{org}/nico/vpc-peering/{id}` for status, then verify the routes and traffic on the affected DPUs. Creation or a REST status alone does not demonstrate end-to-end reachability. Invalid IDs or readiness/site mismatches return `400`, missing VPCs return `404`, unauthorized requests return `403`, and an existing pair, including one being deleted, returns `409`. Core/site workflow errors may also prevent creation.
+
+Peering exchanges routes without opening NSG rules or creating NAT. It is not transitive: A-to-B and B-to-C peerings do not create A-to-C connectivity. Plan non-overlapping addresses for routes imported into a common VRF, and verify both permitted traffic and unwanted transit through external gateways.
+
+The [REST contract](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/openapi/spec.yaml) and [peering handler](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/api/pkg/api/handler/vpcpeering.go) define request validation and authorization.
 
 ## Virtualized-to-Flat Routing Prerequisite
 

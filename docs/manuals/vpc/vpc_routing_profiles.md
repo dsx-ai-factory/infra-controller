@@ -139,6 +139,9 @@ The exact route-target values, leak settings, and `access_tier` values are site-
 
 ## How Tenant Routing Profiles Affect VPC Creation
 
+For a worked storage route-target policy and its return path, see
+[Tenant Connectivity and Shared Services](tenant_connectivity.md#example-a-shared-storage-vrf).
+
 Each tenant can have a `routing_profile_type`. In a production site, this serves as the default routing profile for VPCs created under that tenant. This has the following important consequences:
 
 - If a VPC creation request does not specify `routing_profile_type`, the tenant's routing profile is used automatically.
@@ -146,6 +149,36 @@ Each tenant can have a `routing_profile_type`. In a production site, this serves
 - An FNN VPC creation request must reference an existing tenant with a routing profile.
 
 For this reason, tenant configuration and API server routing profile configuration must be managed together.
+
+## Per-VPC Routing-Profile Overrides
+
+The named profile supplies the baseline policy. `routingProfileOverrides` on a REST VPC create or update request replaces selected properties of that baseline for one VPC. Updating these overrides does not require editing site TOML or restarting the API server. Allow time for the DPU configuration to converge.
+
+For REST updates, use `PATCH /v2/org/{org}/nico/vpc/{id}` in the owning tenant's organization. The caller needs the `TENANT_ADMIN` role suffix, access to the Site, and the `TargetedInstanceCreation` capability must be effective for the tenant at that Site. The VPC's virtualization type must support routing profiles, as FNN does. An unsupported type is rejected with HTTP `400`, and missing override privileges with HTTP `403`.
+
+For example, this request body overrides the profile's imports with a control-plane service RT and a storage RT. The numbers are illustrative. Preserve every import required by the site's policy. Each RT is an object with `asn` and `vni` unsigned 32-bit integer fields. Set both explicitly to the values agreed with the network team. The `vni` member here is the RT's value, not a request to allocate or change the VPC's VNI.
+
+```json
+{
+  "routingProfileOverrides": {
+    "routeTargetImports": [
+      { "asn": 64512, "vni": 50100 },
+      { "asn": 64512, "vni": 50600 }
+    ]
+  }
+}
+```
+
+The replacement semantics are significant:
+
+- Omitting `routingProfileOverrides`, or sending it as `null`, preserves the VPC's existing override definition on update.
+- Sending an object replaces the **whole existing override definition**. Include any existing overrides that must remain. Omitted properties inherit from the named profile, rather than from the previous override object.
+- Within the object, an omitted or `null` property inherits its named-profile value. A present list replaces that profile list rather than appending to it. An empty list selects no entries from that profile property. Sending `{}` restores inheritance for all properties.
+- `routeTargetsOnExports` follows the same rules for additional export tags. These lists do not remove the VPC's native RT, an optional site-wide common export RT, active peering imports, or site-wide additional imports that the DPU adds separately. See [Export Route-Targets](vpc_network_virtualization.md#export-route-targets-and-return-path-reachability).
+
+Fetch the VPC before updating it. Afterward, authorized callers can inspect `effectiveRoutingProfile` once Site inventory has reported the resolved policy, then verify the DPU routes and application connectivity. That field can be `null` while inventory catches up and is visible only to callers with the required capability.
+
+See the [REST schemas and operation descriptions](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/openapi/spec.yaml) for the complete override fields, and the [profile resolver](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/file.rs) for inheritance behavior.
 
 ## Changing a Tenant’s Routing Profile
 
