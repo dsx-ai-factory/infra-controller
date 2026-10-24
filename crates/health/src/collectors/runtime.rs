@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use nv_redfish::ServiceRoot;
-use nv_redfish::core::{Bmc, EntityTypeRef as _};
+use nv_redfish::core::{Bmc, BmcError as _, BmcErrorClass, EntityTypeRef as _};
 use nv_redfish::event_service::{EventDestination, EventStreamPayload, SubscriptionType};
 use prometheus::{Counter, Gauge, Histogram, HistogramOpts, IntCounter, IntGauge, Opts};
 use rand::RngExt;
@@ -195,28 +195,59 @@ pub(crate) enum OpenedDestination<B: Bmc> {
     Unknown,
 }
 
+pub(crate) enum SseOpenError {
+    /// Reading `ServiceRoot` or `EventService` failed, or there is no `EventService`.
+    Setup(HealthError),
+
+    Open {
+        error: HealthError,
+        class: BmcErrorClass,
+
+        /// Whether the `Subscriptions` listing just before the open succeeded.
+        before_listed: bool,
+    },
+}
+
+impl From<SseOpenError> for HealthError {
+    fn from(error: SseOpenError) -> Self {
+        match error {
+            SseOpenError::Setup(error) | SseOpenError::Open { error, .. } => error,
+        }
+    }
+}
+
 /// Open a Redfish SSE event stream from a BMC.
 pub(crate) async fn open_sse_stream<B: Bmc + 'static>(
     bmc: Arc<B>,
-) -> Result<(SseStream, OpenedDestination<B>), HealthError> {
+) -> Result<(SseStream, OpenedDestination<B>), SseOpenError> {
     let root = ServiceRoot::new(bmc)
         .await
-        .map_err(|e| HealthError::BmcError(Box::new(e)))?;
+        .map_err(|e| SseOpenError::Setup(HealthError::BmcError(Box::new(e))))?;
 
     let event_service = root
         .event_service()
         .await
-        .map_err(|e| HealthError::BmcError(Box::new(e)))?
+        .map_err(|e| SseOpenError::Setup(HealthError::BmcError(Box::new(e))))?
         .ok_or_else(|| {
-            HealthError::SseNotAvailable("BMC does not expose an EventService".to_string())
+            SseOpenError::Setup(HealthError::SseNotAvailable(
+                "BMC does not expose an EventService".to_string(),
+            ))
         })?;
 
     let before = event_service.subscriptions().await;
 
-    let stream = event_service
-        .events()
-        .await
-        .map_err(|e| HealthError::BmcError(Box::new(e)))?;
+    let stream = event_service.events().await.map_err(|e| {
+        let class = match &e {
+            nv_redfish::Error::Bmc(cause) => cause.error_class(),
+            _ => BmcErrorClass::Other,
+        };
+
+        SseOpenError::Open {
+            error: HealthError::BmcError(Box::new(e)),
+            class,
+            before_listed: before.is_ok(),
+        }
+    })?;
 
     let after = event_service.subscriptions().await;
 
@@ -1274,7 +1305,8 @@ mod tests {
                 Duration::from_secs(10),
                 open_sse_stream(Arc::clone(endpoint.bmc())),
             )
-            .await??;
+            .await?
+            .map_err(HealthError::from)?;
 
             let opened = match opened {
                 OpenedDestination::Identified(destination) => {

@@ -24,9 +24,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use nv_redfish::ServiceRoot;
 use nv_redfish::core::{Bmc, BmcError as _, BmcErrorClass, EntityTypeRef, NavProperty};
-use nv_redfish::event_service::{Event, EventDestination, EventStreamPayload};
+use nv_redfish::event_service::{Event, EventDestination, EventStreamPayload, SubscriptionType};
 use tokio::sync::Semaphore;
+use tokio::time::Instant;
 
 use super::diagnostic::{
     DiagnosticPayload, make_diagnostic_record, nullable_ref, nullable_str, redfish_enum_string,
@@ -40,8 +42,8 @@ use crate::collectors::inventory::{
     EntityInventory, GpuIdentity, SharedInventory, normalize_odata_id,
 };
 use crate::collectors::runtime::{
-    CloseReason, EventStream, OpenedDestination, StreamingCollector, StreamingConnectResult,
-    open_sse_stream,
+    CloseReason, EventStream, OpenedDestination, SseOpenError, StreamingCollector,
+    StreamingConnectResult, open_sse_stream,
 };
 use crate::endpoint::BmcEndpoint;
 use crate::metrics::MetricLabel;
@@ -50,6 +52,11 @@ use crate::sink::{CollectorEvent, LogRecord};
 const EVENT_RECORD_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(10);
 const EVENT_RECORD_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const EVENT_RECORD_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(1);
+
+/// A stream that ends empty this soon after an open that created no destination
+/// reads as a BMC at its SSE subscription cap.
+const EARLY_END_WINDOW: Duration = Duration::from_secs(10);
+const CAP_WARNING_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, carbide_instrument::LabelValue)]
 enum EventRecordResolutionFailure {
@@ -107,6 +114,27 @@ struct SseSubscriptionClosed {
     error: String,
 }
 
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "redfish_sse_capacity_exhausted",
+    metric_name = "carbide_health_redfish_sse_capacity_exhausted_total",
+    component = "nico-hardware-health",
+    log = warn,
+    metric = counter,
+    message = "BMC SSE subscription cap reached; stale SSE EventDestinations may need DELETE",
+    describe = "Number of times a BMC refused or immediately dropped an SSE open while it held SSE subscriptions."
+)]
+struct SseCapacityExhausted {
+    #[context]
+    endpoint: String,
+    #[context]
+    sse_destinations: String,
+    #[context]
+    sse_destination_count: usize,
+    #[context]
+    tracked_destination: String,
+}
+
 /// Returns the outcome with the error of a failed DELETE. A task the BMC
 /// returns for the DELETE is not polled.
 async fn delete_destination<B: Bmc>(
@@ -149,6 +177,55 @@ pub struct SseLogCollector<B: Bmc> {
     gpu_inventory: Option<SharedInventory<B>>,
     close_timeout: Duration,
     destination: Option<EventDestination<B>>,
+    none_created: bool,
+    undeleted_destination: Option<String>,
+    last_cap_warning: Option<Instant>,
+}
+
+impl<B: Bmc + 'static> SseLogCollector<B> {
+    async fn report_capacity_exhausted(&mut self) {
+        if self
+            .last_cap_warning
+            .is_some_and(|warned| warned.elapsed() < CAP_WARNING_INTERVAL)
+        {
+            return;
+        }
+
+        let listed = tokio::time::timeout(self.close_timeout, async {
+            let root = ServiceRoot::new(Arc::clone(&self.bmc)).await.ok()?;
+
+            root.event_service().await.ok()??.subscriptions().await.ok()
+        })
+        .await;
+
+        let Ok(Some(listed)) = listed else {
+            return;
+        };
+
+        let sse: Vec<String> = listed
+            .iter()
+            .filter(|listed| listed.subscription_type() == Some(SubscriptionType::Sse))
+            .map(|listed| listed.raw().odata_id().to_string())
+            .collect();
+
+        self.undeleted_destination = self
+            .undeleted_destination
+            .take()
+            .filter(|id| sse.contains(id));
+
+        if sse.is_empty() {
+            return;
+        }
+
+        self.last_cap_warning = Some(Instant::now());
+
+        carbide_instrument::emit(SseCapacityExhausted {
+            endpoint: format!("{:?}", self.endpoint.addr),
+            sse_destination_count: sse.len(),
+            sse_destinations: sse.join(","),
+            tracked_destination: self.undeleted_destination.clone().unwrap_or_default(),
+        });
+    }
 }
 
 #[async_trait]
@@ -168,16 +245,46 @@ impl<B: Bmc + 'static> StreamingCollector<B> for SseLogCollector<B> {
             gpu_inventory: config.gpu_inventory,
             close_timeout: config.close_timeout,
             destination: None,
+            none_created: false,
+            undeleted_destination: None,
+            last_cap_warning: None,
         })
     }
 
     async fn connect(&mut self) -> Result<StreamingConnectResult<'_>, HealthError> {
-        let (sse_stream, opened) = open_sse_stream(Arc::clone(&self.bmc)).await?;
+        let (sse_stream, opened) = match open_sse_stream(Arc::clone(&self.bmc)).await {
+            Ok(opened) => opened,
+            Err(error) => {
+                // Only a refused SSE GET right after a successful listing points at the cap.
+                let refused = matches!(
+                    error,
+                    SseOpenError::Open {
+                        class: BmcErrorClass::HttpResponse { status: 503 },
+                        before_listed: true,
+                        ..
+                    }
+                );
+
+                if refused {
+                    self.report_capacity_exhausted().await;
+                }
+
+                return Err(error.into());
+            }
+        };
+
+        self.none_created = matches!(opened, OpenedDestination::NoneCreated);
 
         self.destination = match opened {
             OpenedDestination::Identified(destination) => Some(destination),
             OpenedDestination::NoneCreated | OpenedDestination::Unknown => None,
         };
+
+        // A bmcweb open at the cap also succeeds, so only an identified destination
+        // shows the cap has cleared.
+        if self.destination.is_some() && self.last_cap_warning.take().is_some() {
+            tracing::info!(endpoint = ?self.endpoint.addr, "BMC SSE subscription cap cleared");
+        }
 
         let event_stream = map_event_stream(
             sse_stream,
@@ -191,7 +298,7 @@ impl<B: Bmc + 'static> StreamingCollector<B> for SseLogCollector<B> {
     }
 
     /// Deletes the destination the stream created; some BMCs keep it after the stream closes.
-    async fn disconnect(&mut self, _reason: CloseReason) {
+    async fn disconnect(&mut self, reason: CloseReason) {
         let endpoint = format!("{:?}", self.endpoint.addr);
 
         let Some(destination) = self.destination.take() else {
@@ -202,11 +309,28 @@ impl<B: Bmc + 'static> StreamingCollector<B> for SseLogCollector<B> {
                 error: String::new(),
             });
 
+            let early_end = matches!(
+                reason,
+                CloseReason::Ended { received: false, connected_for }
+                    if connected_for < EARLY_END_WINDOW
+            );
+
+            if early_end && self.none_created {
+                self.report_capacity_exhausted().await;
+            }
+
             return;
         };
 
         let odata_id = destination.raw().odata_id().to_string();
         let (outcome, error) = delete_destination(destination, self.close_timeout).await;
+
+        if matches!(
+            outcome,
+            SseCloseOutcome::DeleteFailed | SseCloseOutcome::TimedOut
+        ) {
+            self.undeleted_destination = Some(odata_id.clone());
+        }
 
         carbide_instrument::emit(SseSubscriptionClosed {
             outcome,
@@ -801,6 +925,445 @@ mod tests {
         .expect("ten connect and disconnect cycles finish within their deadline");
 
         assert_eq!(events.stats().subscribers, 0);
+
+        server.stop().await.expect("server stops");
+    }
+
+    const CAPACITY_EXHAUSTED: &str = "carbide_health_redfish_sse_capacity_exhausted_total";
+
+    fn sse_collector(
+        base_url: &Url,
+        close_timeout: Duration,
+    ) -> SseLogCollector<crate::bmc::BmcClient> {
+        use crate::endpoint::test_support::endpoint_with_creds;
+        use crate::endpoint::{BmcAddr, BmcCredentials as HealthCredentials};
+
+        let endpoint = Arc::new(endpoint_with_creds(
+            BmcAddr {
+                ip: "127.0.0.1".parse().unwrap(),
+                port: base_url.port(),
+                mac: None,
+            },
+            HealthCredentials::SessionToken {
+                token: "fixture-token".into(),
+            },
+            None,
+            None,
+        ));
+
+        SseLogCollector::new_runner(
+            Arc::clone(endpoint.bmc()),
+            endpoint,
+            SseLogCollectorConfig {
+                include_diagnostics: false,
+                request_concurrency: NonZeroUsize::MIN,
+                gpu_inventory: None,
+                close_timeout,
+            },
+        )
+        .expect("collector builds")
+    }
+
+    /// A BMC with one other consumer's destination, `/Subscriptions/other`.
+    #[derive(Clone)]
+    struct CapacityBmc {
+        service_root: StatusCode,
+        listing: StatusCode,
+        sse: StatusCode,
+
+        /// `SubscriptionType` of the other consumer's destination; `None` omits it.
+        other_type: Option<&'static str>,
+
+        /// `SubscriptionType` of the destination a successful SSE open adds,
+        /// `/Subscriptions/ours`; `None` adds none.
+        creates_destination: Option<&'static str>,
+        listings_answered: usize,
+
+        listings: Arc<AtomicUsize>,
+        opened: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Default for CapacityBmc {
+        fn default() -> Self {
+            Self {
+                service_root: StatusCode::OK,
+                listing: StatusCode::OK,
+                sse: StatusCode::OK,
+                other_type: Some("SSE"),
+                creates_destination: None,
+                listings_answered: usize::MAX,
+                listings: Arc::default(),
+                opened: Arc::default(),
+            }
+        }
+    }
+
+    impl CapacityBmc {
+        fn router(self) -> Router {
+            use axum::extract::Path;
+            use axum::routing::delete;
+
+            const SUBSCRIPTIONS: &str = "/redfish/v1/EventService/Subscriptions";
+
+            let root = self.service_root;
+            let listing = self.clone();
+            let member = self.clone();
+            let sse = self;
+
+            Router::new()
+                .route(
+                    "/redfish/v1",
+                    get(move || async move {
+                        let body = json!({
+                            "@odata.type": "#ServiceRoot.ServiceRoot",
+                            "@odata.id": "/redfish/v1", "Id": "RootService", "Name": "Root",
+                            "Links": {
+                                "Sessions": {"@odata.id": "/redfish/v1/SessionService/Sessions"}
+                            },
+                            "EventService": {"@odata.id": "/redfish/v1/EventService"}
+                        });
+
+                        (root, Json(body))
+                    }),
+                )
+                .route(
+                    "/redfish/v1/EventService",
+                    get(|| async {
+                        Json(json!({
+                            "@odata.type": "#EventService.EventService",
+                            "@odata.id": "/redfish/v1/EventService", "Id": "EventService",
+                            "Name": "Event service", "ServerSentEventUri": "/events",
+                            "Subscriptions": {"@odata.id": SUBSCRIPTIONS}
+                        }))
+                    }),
+                )
+                .route(
+                    SUBSCRIPTIONS,
+                    get(move || async move {
+                        if listing.listings.fetch_add(1, Ordering::SeqCst)
+                            >= listing.listings_answered
+                        {
+                            futures::future::pending::<()>().await;
+                        }
+
+                        let mut members =
+                            vec![json!({"@odata.id": format!("{SUBSCRIPTIONS}/other")})];
+
+                        if listing.creates_destination.is_some()
+                            && listing.opened.load(Ordering::SeqCst)
+                        {
+                            members.push(json!({"@odata.id": format!("{SUBSCRIPTIONS}/ours")}));
+                        }
+
+                        let body = json!({
+                            "@odata.type": "#EventDestinationCollection.EventDestinationCollection",
+                            "@odata.id": SUBSCRIPTIONS, "Name": "Subscriptions",
+                            "Members@odata.count": members.len(), "Members": members
+                        });
+
+                        (listing.listing, Json(body))
+                    }),
+                )
+                .route(
+                    &format!("{SUBSCRIPTIONS}/{{id}}"),
+                    get(move |Path(id): Path<String>| async move {
+                        let mut body = json!({
+                            "@odata.type": "#EventDestination.v1_15_0.EventDestination",
+                            "@odata.id": format!("{SUBSCRIPTIONS}/{id}"), "Id": id,
+                            "Name": "Subscription", "Context": "fixture", "Protocol": "Redfish",
+                            "SubscriptionType": "SSE"
+                        });
+
+                        let subscription_type = match id.as_str() {
+                            "other" => member.other_type,
+                            _ => member.creates_destination,
+                        };
+
+                        match subscription_type {
+                            Some(subscription_type) => {
+                                body["SubscriptionType"] = json!(subscription_type)
+                            }
+                            None => {
+                                body.as_object_mut()
+                                    .expect("JSON object")
+                                    .remove("SubscriptionType");
+                            }
+                        }
+
+                        Json(body)
+                    })
+                    .merge(delete(|| async { StatusCode::NO_CONTENT })),
+                )
+                .route(
+                    "/events",
+                    get(move || async move {
+                        sse.opened.store(true, Ordering::SeqCst);
+
+                        (sse.sse, [("content-type", "text/event-stream")], "")
+                    }),
+                )
+        }
+    }
+
+    #[tokio::test]
+    async fn a_leaked_subscription_warns_once_per_interval_until_the_cap_clears() {
+        use bmc_mock::test_support::{dell_poweredge_r750_router_with_event_limits, serve_https};
+        use bmc_mock::{EventServiceConfig, EventServiceLimits};
+        use carbide_instrument::testing::MetricsCapture;
+
+        let metrics = MetricsCapture::start();
+
+        let limits = EventServiceConfig::try_from(EventServiceLimits {
+            max_subscribers: 1,
+            reap_on_close: false,
+            heartbeat: None,
+            ..Default::default()
+        })
+        .expect("valid limits");
+
+        let (router, state) = dell_poweredge_r750_router_with_event_limits(limits);
+        let events = Arc::clone(state.event_service.as_ref().expect("event service"));
+        let (mut server, base_url) = serve_https("health-sse-cap", router);
+        let mut collector = sse_collector(&base_url, Duration::from_secs(5));
+        let bmc = Arc::clone(&collector.bmc);
+
+        tokio::time::timeout(Duration::from_secs(30), async {
+            for leak in 1..=2 {
+                // Dropping the stream without `disconnect` leaks its subscription.
+                assert!(matches!(
+                    collector.connect().await,
+                    Ok(StreamingConnectResult::Connected(_))
+                ));
+
+                while events.stats().streams != 0 {
+                    tokio::task::yield_now().await;
+                }
+
+                for _ in 0..2 {
+                    assert!(collector.connect().await.is_err());
+                }
+
+                assert_eq!(
+                    metrics.counter_delta(CAPACITY_EXHAUSTED, &[]),
+                    f64::from(leak)
+                );
+
+                let event_service = ServiceRoot::new(Arc::clone(&bmc))
+                    .await
+                    .expect("service root")
+                    .event_service()
+                    .await
+                    .expect("event service")
+                    .expect("event service exists");
+
+                for leaked in event_service.subscriptions().await.expect("listing") {
+                    let _ = leaked.delete().await.expect("leaked subscription deletes");
+                }
+            }
+        })
+        .await
+        .expect("the leak cycles finish within their deadline");
+
+        server.stop().await.expect("server stops");
+    }
+
+    #[tokio::test]
+    async fn only_a_refused_sse_open_while_the_bmc_lists_sse_destinations_warns() {
+        use bmc_mock::test_support::serve_https;
+        use carbide_instrument::testing::MetricsCapture;
+
+        let unavailable = StatusCode::SERVICE_UNAVAILABLE;
+
+        let cases = [
+            (
+                "SSE open refused with 503",
+                CapacityBmc {
+                    sse: unavailable,
+                    ..Default::default()
+                },
+                1.0,
+            ),
+            (
+                "SSE open fails with 500",
+                CapacityBmc {
+                    sse: StatusCode::INTERNAL_SERVER_ERROR,
+                    ..Default::default()
+                },
+                0.0,
+            ),
+            (
+                "ServiceRoot answers 503",
+                CapacityBmc {
+                    service_root: unavailable,
+                    sse: unavailable,
+                    ..Default::default()
+                },
+                0.0,
+            ),
+            (
+                "the listing answers 503",
+                CapacityBmc {
+                    listing: unavailable,
+                    sse: unavailable,
+                    ..Default::default()
+                },
+                0.0,
+            ),
+            (
+                "the only destination is RedfishEvent",
+                CapacityBmc {
+                    other_type: Some("RedfishEvent"),
+                    sse: unavailable,
+                    ..Default::default()
+                },
+                0.0,
+            ),
+            (
+                "the only destination omits SubscriptionType",
+                CapacityBmc {
+                    other_type: None,
+                    sse: unavailable,
+                    ..Default::default()
+                },
+                0.0,
+            ),
+        ];
+
+        for (name, bmc, expected) in cases {
+            let metrics = MetricsCapture::start();
+            let (mut server, base_url) = serve_https("health-sse-refused", bmc.router());
+            let mut collector = sse_collector(&base_url, Duration::from_secs(5));
+
+            let connected = tokio::time::timeout(Duration::from_secs(10), collector.connect())
+                .await
+                .expect("connect finishes within its deadline");
+
+            assert!(connected.is_err(), "{name}");
+
+            assert_eq!(
+                metrics.counter_delta(CAPACITY_EXHAUSTED, &[]),
+                expected,
+                "{name}"
+            );
+
+            drop(metrics);
+            server.stop().await.expect("server stops");
+        }
+    }
+
+    #[tokio::test]
+    async fn only_an_early_empty_end_after_an_open_that_created_nothing_warns() {
+        use bmc_mock::test_support::serve_https;
+        use carbide_instrument::testing::MetricsCapture;
+
+        let early = CloseReason::Ended {
+            received: false,
+            connected_for: Duration::from_secs(1),
+        };
+
+        let cases = [
+            ("an early empty end", None, early, 1),
+            (
+                "an empty end after the window",
+                None,
+                CloseReason::Ended {
+                    received: false,
+                    connected_for: EARLY_END_WINDOW,
+                },
+                0,
+            ),
+            (
+                "an early empty end after the open created our destination",
+                Some("SSE"),
+                early,
+                0,
+            ),
+            (
+                "an early empty end after the open created a destination of another type",
+                Some("RedfishEvent"),
+                early,
+                0,
+            ),
+            ("cancellation", None, CloseReason::Cancelled, 0),
+        ];
+
+        for (name, creates_destination, reason, expected) in cases {
+            let metrics = MetricsCapture::start();
+
+            let bmc = CapacityBmc {
+                creates_destination,
+                ..Default::default()
+            };
+
+            let listings = Arc::clone(&bmc.listings);
+            let (mut server, base_url) = serve_https("health-sse-early-end", bmc.router());
+            let mut collector = sse_collector(&base_url, Duration::from_secs(5));
+
+            tokio::time::timeout(Duration::from_secs(10), async {
+                assert!(matches!(
+                    collector.connect().await,
+                    Ok(StreamingConnectResult::Connected(_))
+                ));
+
+                let listed_before = listings.load(Ordering::SeqCst);
+                collector.disconnect(reason).await;
+
+                assert_eq!(
+                    listings.load(Ordering::SeqCst) - listed_before,
+                    expected,
+                    "{name}: listings during disconnect"
+                );
+            })
+            .await
+            .expect("connect and disconnect finish within their deadline");
+
+            assert_eq!(
+                metrics.counter_delta(CAPACITY_EXHAUSTED, &[]),
+                expected as f64,
+                "{name}"
+            );
+
+            drop(metrics);
+            server.stop().await.expect("server stops");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stalled_listing_ends_the_diagnosis_at_close_timeout() {
+        use bmc_mock::test_support::serve_https;
+        use carbide_instrument::testing::MetricsCapture;
+
+        let metrics = MetricsCapture::start();
+        let close_timeout = Duration::from_millis(300);
+
+        // `connect` lists before and after the open; the diagnosis listing never answers.
+        let bmc = CapacityBmc {
+            listings_answered: 2,
+            ..Default::default()
+        };
+
+        let (mut server, base_url) = serve_https("health-sse-stalled", bmc.router());
+        let mut collector = sse_collector(&base_url, close_timeout);
+
+        assert!(matches!(
+            collector.connect().await,
+            Ok(StreamingConnectResult::Connected(_))
+        ));
+
+        let disconnecting = Instant::now();
+
+        tokio::time::timeout(
+            close_timeout * 10,
+            collector.disconnect(CloseReason::Ended {
+                received: false,
+                connected_for: Duration::ZERO,
+            }),
+        )
+        .await
+        .expect("disconnect returns once the diagnosis deadline passes");
+
+        assert!(disconnecting.elapsed() >= close_timeout);
+        assert_eq!(metrics.counter_delta(CAPACITY_EXHAUSTED, &[]), 0.0);
 
         server.stop().await.expect("server stops");
     }
