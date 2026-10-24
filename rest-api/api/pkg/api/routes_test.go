@@ -80,7 +80,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"run":                       8,
 		"domain":                    6,
 		"rack":                      16,
-		"tray":                      12,
+		"tray":                      13,
 		"stats":                     4,
 		"identity-config":           3,
 		"identity-token-delegation": 3,
@@ -160,6 +160,9 @@ func TestNewAPIRoutes(t *testing.T) {
 			assertRouteExists(t, got, http.MethodGet, rackHealthReportPath)
 			assertRouteExists(t, got, http.MethodPut, rackHealthReportPath)
 			assertRouteExists(t, got, http.MethodDelete, rackHealthReportPath+"/:source")
+			trayPowerPath := "/org/:orgName/" + cfg.GetAPIName() + "/tray/:id/power"
+			assertRouteExists(t, got, http.MethodGet, trayPowerPath)
+			assertRouteExists(t, got, http.MethodPatch, trayPowerPath)
 			trayHealthReportPath := "/org/:orgName/" + cfg.GetAPIName() + "/tray/:id/health-report"
 			assertRouteExists(t, got, http.MethodGet, trayHealthReportPath)
 			assertRouteExists(t, got, http.MethodPut, trayHealthReportPath)

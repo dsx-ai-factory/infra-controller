@@ -1427,6 +1427,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 		},
 		{
 			Path:    apiPathPrefix + "/tray/:id/power",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetTrayPowerDetailsHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/tray/:id/power",
 			Method:  http.MethodPatch,
 			Handler: apiHandler.NewUpdateTrayPowerStateHandler(dbSession, tc, scp, cfg),
 		},

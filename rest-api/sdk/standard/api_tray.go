@@ -1274,6 +1274,244 @@ func (a *TrayAPIService) GetTrayExecute(r ApiGetTrayRequest) (*Tray, *http.Respo
 	return localVarReturnValue, localVarHTTPResponse, nil
 }
 
+type ApiGetTrayPowerDetailsRequest struct {
+	ctx        context.Context
+	ApiService *TrayAPIService
+	siteId     *string
+	org        string
+	id         string
+}
+
+// ID of the Site that owns the tray.
+func (r ApiGetTrayPowerDetailsRequest) SiteId(siteId string) ApiGetTrayPowerDetailsRequest {
+	r.siteId = &siteId
+	return r
+}
+
+func (r ApiGetTrayPowerDetailsRequest) Execute() (*TrayPowerDetails, *http.Response, error) {
+	return r.ApiService.GetTrayPowerDetailsExecute(r)
+}
+
+/*
+GetTrayPowerDetails Get Tray power details
+
+Read actual power, stored desired policy, tracked power actions, and outstanding power tasks for a compute tray, NVLink switch, or power shelf. Accepts the same component ID or BMC/PMC MAC selector as tray inventory. These passive reads retrieve state without issuing power commands.
+
+Org must have an Infrastructure Provider entity and the user must have the Provider Admin role. The Site must belong to that Provider and have Flow enabled.
+
+Each section is independent: a failed hardware read does not hide desired policy or outstanding work. A successful `Unknown` hardware observation differs from a null state with an error. Desired policy applies to compute trays; managed switches and shelves report `NotApplicable`. Observations, stored policy, actions and tasks can describe different instants; a `Running` task does not prove hardware dispatch or correlate to an `Active` action.
+
+Live observations are supported by the Core Redfish compute reader and by RMS for compute trays, switches, and shelves. Standalone hosts (no rack association and no MNNVL capability) use Core's direct Redfish reader; rack-scale hosts use the configured compute reader. Switches and shelves use their configured readers. NSM, PSM, and mock backends report `Unsupported` for live observations; policy, actions, and Flow tasks remain independently available.
+
+All response fields are present. Null indicates unavailable or inapplicable information as documented on each field; successful empty action/task lists are arrays with a null error. More than 256 outstanding power tasks across the rack makes `operations.tasks` unavailable with `LimitExceeded`, before filtering for this tray. The separate waiting-context limit is 256 nonterminal tasks of all kinds across the rack; exceeding it sets `waitingContext.error` to `LimitExceeded` while retaining the power tasks.
+
+Flow also limits the encoded proxy response to 1,991,680 bytes; this is not an HTTP response-body limit. When that allowance is exceeded, Flow first clears nonempty waiting-context lists that have no error and sets their `waitingContext.error` to `LimitExceeded`, retaining the power tasks. Empty contexts and existing context errors are unchanged. If the response still exceeds the allowance, Flow removes the complete task section and reports `operations.tasks.error: LimitExceeded`, without truncating target lists. If the remaining encoded response is still too large, the request returns HTTP 429.
+
+	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
+	@param org Name of the Org
+	@param id Component ID or component MAC address
+	@return ApiGetTrayPowerDetailsRequest
+*/
+func (a *TrayAPIService) GetTrayPowerDetails(ctx context.Context, org string, id string) ApiGetTrayPowerDetailsRequest {
+	return ApiGetTrayPowerDetailsRequest{
+		ApiService: a,
+		ctx:        ctx,
+		org:        org,
+		id:         id,
+	}
+}
+
+// Execute executes the request
+//
+//	@return TrayPowerDetails
+func (a *TrayAPIService) GetTrayPowerDetailsExecute(r ApiGetTrayPowerDetailsRequest) (*TrayPowerDetails, *http.Response, error) {
+	var (
+		localVarHTTPMethod  = http.MethodGet
+		localVarPostBody    interface{}
+		formFiles           []formFile
+		localVarReturnValue *TrayPowerDetails
+	)
+
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "TrayAPIService.GetTrayPowerDetails")
+	if err != nil {
+		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+	}
+
+	localVarPath := localBasePath + "/v2/org/{org}/nico/tray/{id}/power"
+	localVarPath = strings.Replace(localVarPath, "{"+"org"+"}", url.PathEscape(parameterValueToString(r.org, "org")), -1)
+	localVarPath = strings.Replace(localVarPath, "{"+"id"+"}", url.PathEscape(parameterValueToString(r.id, "id")), -1)
+
+	localVarHeaderParams := make(map[string]string)
+	localVarQueryParams := url.Values{}
+	localVarFormParams := url.Values{}
+	if r.siteId == nil {
+		return localVarReturnValue, nil, reportError("siteId is required and must be specified")
+	}
+
+	parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+	// to determine the Content-Type header
+	localVarHTTPContentTypes := []string{}
+
+	// set Content-Type header
+	localVarHTTPContentType := selectHeaderContentType(localVarHTTPContentTypes)
+	if localVarHTTPContentType != "" {
+		localVarHeaderParams["Content-Type"] = localVarHTTPContentType
+	}
+
+	// to determine the Accept header
+	localVarHTTPHeaderAccepts := []string{"application/json"}
+
+	// set Accept header
+	localVarHTTPHeaderAccept := selectHeaderAccept(localVarHTTPHeaderAccepts)
+	if localVarHTTPHeaderAccept != "" {
+		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
+	}
+	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
+	if err != nil {
+		return localVarReturnValue, nil, err
+	}
+
+	localVarHTTPResponse, err := a.client.callAPI(req)
+	if err != nil || localVarHTTPResponse == nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
+	localVarHTTPResponse.Body.Close()
+	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
+	if err != nil {
+		return localVarReturnValue, localVarHTTPResponse, err
+	}
+
+	if localVarHTTPResponse.StatusCode >= 300 {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 403 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 412 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 429 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 500 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 501 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 502 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 503 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 504 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+	if err != nil {
+		newErr := &GenericOpenAPIError{
+			body:  localVarBody,
+			error: err.Error(),
+		}
+		return localVarReturnValue, localVarHTTPResponse, newErr
+	}
+
+	return localVarReturnValue, localVarHTTPResponse, nil
+}
+
 type ApiGetTrayTasksRequest struct {
 	ctx           context.Context
 	ApiService    *TrayAPIService

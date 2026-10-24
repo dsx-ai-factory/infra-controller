@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/openapi"
@@ -1648,6 +1649,95 @@ func TestNewApp_MachineValidationReadCommandsExecuteRESTRequests(t *testing.T) {
 			assert.Equal(t, http.MethodGet, method)
 			assert.Equal(t, tt.expectedPath, path)
 			assert.Equal(t, "Bearer test-token", authorization)
+		})
+	}
+}
+
+// TestNewApp_TrayPowerCommands keeps the generated details command separate
+// from the existing mutation alias, so inspecting power cannot change it.
+func TestNewApp_TrayPowerCommands(t *testing.T) {
+	clearAllNicoEnv(t)
+	previousConfigPath := configOverridePath
+	SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
+	t.Cleanup(func() { SetConfigPath(previousConfigPath) })
+
+	const siteID = "550e8400-e29b-41d4-a716-446655440000"
+	const trayID = "aa:bb:cc:dd:ee:ff"
+	tests := []struct {
+		name      string
+		command   []string
+		args      []string
+		method    string
+		wantQuery string
+		wantBody  string
+	}{
+		{
+			// The OpenAPI getter must produce an executable command with a
+			// site selector in the query, without a mutation request body.
+			name:      "read power details",
+			command:   []string{"tray", "power-details", "get"},
+			args:      []string{"--site-id", siteID, trayID},
+			method:    http.MethodGet,
+			wantQuery: "siteId=" + siteID,
+		},
+		{
+			// Adding a getter at the same REST path must preserve the
+			// existing power command's PATCH method and body flags.
+			name:     "change power",
+			command:  []string{"tray", "power"},
+			args:     []string{"--site-id", siteID, "--state", "On", trayID},
+			method:   http.MethodPatch,
+			wantBody: `{"siteId":"550e8400-e29b-41d4-a716-446655440000","state":"On"}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var requestCount atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				assert.Equal(t, test.method, request.Method)
+				assert.Equal(t, "/v2/org/test-org/nico/tray/"+trayID+"/power", request.URL.Path)
+				assert.Equal(t, test.wantQuery, request.URL.RawQuery)
+				body, err := io.ReadAll(request.Body)
+				assert.NoError(t, err)
+				if test.wantBody == "" {
+					assert.Empty(t, body)
+				} else {
+					assert.JSONEq(t, test.wantBody, string(body))
+				}
+				requestCount.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, err = w.Write([]byte(`{}`))
+				assert.NoError(t, err)
+			}))
+			t.Cleanup(server.Close)
+
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+			children := app.Commands
+			var command *cli.Command
+			for _, name := range test.command {
+				command = nil
+				for _, candidate := range children {
+					if candidate.HasName(name) {
+						command = candidate
+						break
+					}
+				}
+				require.NotNilf(t, command, "missing command %q", name)
+				children = command.Subcommands
+			}
+			require.NotNil(t, command.Action, "the command must execute, not only appear in help")
+
+			args := []string{
+				"nicocli", "--base-url", server.URL, "--org", "test-org", "--token", "test-token",
+			}
+			args = append(args, test.command...)
+			args = append(args, test.args...)
+			err = app.Run(args)
+
+			require.NoError(t, err)
+			assert.EqualValues(t, 1, requestCount.Load(), "each command must send exactly one request")
 		})
 	}
 }
