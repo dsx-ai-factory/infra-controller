@@ -448,6 +448,7 @@ pub struct ApiEndpointSource {
 
 #[derive(Clone)]
 struct CachedBmcClient {
+    addr: BmcAddr,
     client: Arc<BmcClient>,
     kind: ApiCredentialKind,
     system_uuid: SharedSystemUuid,
@@ -981,7 +982,7 @@ impl ApiEndpointSource {
         });
         let cached = {
             let mut cache = self.bmc_client_cache.lock().expect("cache mutex poisoned");
-            cache_or_create_bmc_client(&mut cache, mac, credential_kind, |kind| {
+            cache_or_create_bmc_client(&mut cache, &addr, credential_kind, |kind| {
                 let provider: Arc<dyn CredentialProvider> = Arc::new(ApiCredentialProvider {
                     client: self.api.client.clone(),
                     kind,
@@ -1014,10 +1015,14 @@ impl ApiEndpointSource {
 
 fn cache_or_create_bmc_client(
     cache: &mut HashMap<MacAddress, CachedBmcClient>,
-    mac: MacAddress,
+    addr: &BmcAddr,
     credential_kind: ApiCredentialKind,
     make_client: impl FnOnce(ApiCredentialKind) -> Result<Arc<BmcClient>, HealthError>,
 ) -> Result<CachedBmcClient, HealthError> {
+    let mac = addr.mac.ok_or_else(|| {
+        HealthError::GenericError(format!("API endpoint {} has no BMC MAC address", addr.ip))
+    })?;
+
     if let Some(existing) = cache.get(&mac) {
         if existing.kind != credential_kind {
             return Err(HealthError::GenericError(format!(
@@ -1028,14 +1033,25 @@ fn cache_or_create_bmc_client(
                 credential_kind.tag(),
             )));
         }
-        return Ok(existing.clone());
+
+        if existing.addr == *addr {
+            return Ok(existing.clone());
+        }
     }
 
+    // Build before replacing so a construction failure leaves the current transport usable.
     let client = make_client(credential_kind.clone())?;
+
+    let system_uuid = cache
+        .get(&mac)
+        .map(|entry| entry.system_uuid.clone())
+        .unwrap_or_default();
+
     let cached = CachedBmcClient {
+        addr: addr.clone(),
         client,
         kind: credential_kind,
-        system_uuid: SharedSystemUuid::default(),
+        system_uuid,
     };
     cache.insert(mac, cached.clone());
     Ok(cached)
@@ -1645,14 +1661,14 @@ mod tests {
         let factory_calls = AtomicUsize::new(0);
 
         let first =
-            cache_or_create_bmc_client(&mut cache, test_mac(), ApiCredentialKind::Bmc, |kind| {
+            cache_or_create_bmc_client(&mut cache, &test_addr(), ApiCredentialKind::Bmc, |kind| {
                 factory_calls.fetch_add(1, Ordering::SeqCst);
                 make_test_client(kind)
             })
             .expect("first insert");
 
         let second =
-            cache_or_create_bmc_client(&mut cache, test_mac(), ApiCredentialKind::Bmc, |kind| {
+            cache_or_create_bmc_client(&mut cache, &test_addr(), ApiCredentialKind::Bmc, |kind| {
                 factory_calls.fetch_add(1, Ordering::SeqCst);
                 make_test_client(kind)
             })
@@ -1679,6 +1695,162 @@ mod tests {
             1,
             "factory must only be called on cache miss"
         );
+    }
+
+    #[tokio::test]
+    async fn address_change_replaces_cached_transport() {
+        let source = ApiEndpointSource::new(
+            Arc::new(ApiClientWrapper::new(
+                "test-ca.pem".to_string(),
+                "test-client.pem".to_string(),
+                "test-client-key.pem".to_string(),
+                &Url::parse("https://127.0.0.1:1079").expect("valid API URL"),
+            )),
+            reqwest(),
+            None,
+            10,
+            None,
+        );
+
+        let original = source
+            .endpoint_for(test_addr(), None, None, ApiCredentialKind::Bmc)
+            .expect("original endpoint");
+
+        let unchanged = source
+            .endpoint_for(test_addr(), None, None, ApiCredentialKind::Bmc)
+            .expect("unchanged endpoint");
+
+        assert!(Arc::ptr_eq(&original.bmc, &unchanged.bmc));
+
+        for addr in [
+            BmcAddr {
+                ip: "10.0.0.2".parse().expect("valid IP"),
+                ..test_addr()
+            },
+            BmcAddr {
+                port: Some(9443),
+                ..test_addr()
+            },
+        ] {
+            let replacement = source
+                .endpoint_for(addr.clone(), None, None, ApiCredentialKind::Bmc)
+                .expect("replacement endpoint");
+
+            assert!(!Arc::ptr_eq(&original.bmc, &replacement.bmc));
+            assert_eq!(replacement.addr, addr);
+        }
+    }
+
+    #[tokio::test]
+    async fn address_change_routes_requests_and_preserves_uuid() {
+        use axum::Router;
+        use axum::routing::get;
+        use bmc_mock::test_support::serve_https;
+        use nv_redfish::core::{Bmc, ODataId};
+        use nv_redfish::schema::service_root::ServiceRoot;
+
+        let mut servers = Vec::new();
+        let mut addresses = Vec::new();
+        let counts = [Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0))];
+
+        for count in &counts {
+            let count = Arc::clone(count);
+
+            let app = Router::new().route("/redfish/v1", get(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+
+                async { r##"{"@odata.id":"/redfish/v1","@odata.type":"#ServiceRoot.v1_15_0.ServiceRoot","Id":"RootService","Name":"Root Service","Links":{"Sessions":{"@odata.id":"/redfish/v1/SessionService/Sessions"}},"RedfishVersion":"1.15.0"}"## }
+            }));
+            let (server, url) = serve_https("health-cache-address", app);
+
+            addresses.push(BmcAddr {
+                ip: "127.0.0.1".parse().expect("loopback IP"),
+                port: url.port(),
+                mac: Some(test_mac()),
+            });
+
+            servers.push(server);
+        }
+
+        let make_client = |addr: &BmcAddr| {
+            let provider = Arc::new(FixedCredentialProvider::new(BmcCredentials::SessionToken {
+                token: "synthetic-token".to_string(),
+            }));
+
+            BmcClient::new(
+                reqwest(),
+                addr.clone(),
+                provider,
+                None,
+                0,
+                NonZeroUsize::MIN,
+                None,
+            )
+            .map(Arc::new)
+        };
+
+        let mut cache = HashMap::new();
+
+        let original =
+            cache_or_create_bmc_client(&mut cache, &addresses[0], ApiCredentialKind::Bmc, |_| {
+                make_client(&addresses[0])
+            })
+            .expect("original client");
+
+        original
+            .client
+            .get::<ServiceRoot>(&ODataId::from("/redfish/v1".to_string()))
+            .await
+            .expect("original request");
+
+        let uuid = uuid::uuid!("4c4c4544-0044-4710-8052-cac04f4b4632");
+        original
+            .system_uuid
+            .get_or_try_init(|| async { Ok::<_, std::convert::Infallible>(Some(uuid)) })
+            .await
+            .expect("UUID initialization");
+
+        let replacement =
+            cache_or_create_bmc_client(&mut cache, &addresses[1], ApiCredentialKind::Bmc, |_| {
+                make_client(&addresses[1])
+            })
+            .expect("replacement client");
+
+        replacement
+            .client
+            .get::<ServiceRoot>(&ODataId::from("/redfish/v1".to_string()))
+            .await
+            .expect("replacement request");
+
+        let unchanged =
+            cache_or_create_bmc_client(&mut cache, &addresses[1], ApiCredentialKind::Bmc, |_| {
+                panic!("unchanged address must reuse transport")
+            })
+            .expect("unchanged client");
+
+        let failure =
+            cache_or_create_bmc_client(&mut cache, &addresses[0], ApiCredentialKind::Bmc, |_| {
+                Err(HealthError::GenericError(
+                    "synthetic construction failure".to_string(),
+                ))
+            });
+
+        for server in &mut servers {
+            server.stop().await.expect("BMC server shutdown");
+        }
+
+        assert_eq!(
+            counts.each_ref().map(|count| count.load(Ordering::SeqCst)),
+            [1, 1]
+        );
+
+        assert!(!Arc::ptr_eq(&original.client, &replacement.client));
+        assert!(Arc::ptr_eq(&replacement.client, &unchanged.client));
+        assert_eq!(replacement.system_uuid, original.system_uuid);
+        assert_eq!(replacement.system_uuid.get(), Some(uuid));
+        assert!(failure.is_err());
+        assert!(Arc::ptr_eq(&cache[&test_mac()].client, &replacement.client));
+        assert_eq!(cache[&test_mac()].addr, addresses[1]);
     }
 
     #[test]
@@ -1728,7 +1900,7 @@ mod tests {
 
         cache_or_create_bmc_client(
             &mut cache,
-            test_mac(),
+            &test_addr(),
             ApiCredentialKind::Bmc,
             make_test_client,
         )
@@ -1736,7 +1908,10 @@ mod tests {
 
         let err = cache_or_create_bmc_client(
             &mut cache,
-            test_mac(),
+            &BmcAddr {
+                port: Some(9443),
+                ..test_addr()
+            },
             ApiCredentialKind::SwitchNvosAdmin {
                 switch_id: test_switch_id(),
             },
@@ -1891,7 +2066,7 @@ mod tests {
 
             cache_or_create_bmc_client(
                 &mut cache,
-                test_mac(),
+                &test_addr(),
                 ApiCredentialKind::Bmc,
                 make_test_client,
             )
