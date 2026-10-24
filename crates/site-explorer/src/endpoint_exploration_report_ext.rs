@@ -24,60 +24,35 @@ use model::site_explorer::{
 
 /// Host inventory operations used for host/DPU matching.
 pub(super) trait EndpointExplorationReportExt {
-    /// Returns PCIe DPU candidates with unique, trimmed, nonempty serials in report order.
+    /// Returns PCIe and chassis DPU candidates with unique, trimmed, nonempty serials.
     ///
     /// Devices are included regardless of their part number. When copies of a
     /// serial disagree, prefer the first record with a BlueField part number;
-    /// otherwise keep the first record. This retains the part number used to
-    /// select the DPU's target mode without attaching duplicate devices.
-    fn pcie_devices_dpu_candidates(&self) -> Vec<HostDpuCandidate<'_>>;
+    /// otherwise keep the first record. PCIe records precede chassis records,
+    /// so PCIe wins when both sources supply conflicting BlueField part numbers.
+    fn dpu_candidates(&self) -> Vec<HostDpuCandidate<'_>>;
 
-    /// Counts PCIe DPUs identified by a BlueField part number or the serial predicate.
+    /// Counts PCIe and chassis DPUs identified by a BlueField part number or
+    /// the serial predicate.
     ///
-    /// A trimmed, nonempty serial counts once. Each BlueField record without a
-    /// usable serial counts separately because its identity cannot be deduplicated.
-    fn pcie_devices_dpu_count(&self, is_dpu_serial: impl Fn(&str) -> bool) -> usize;
-
-    /// Returns chassis DPU candidates with unique, trimmed, nonempty serials.
-    ///
-    /// A BlueField chassis with a usable serial supplies its own identity;
-    /// otherwise its network adapters supply the devices. Preserve report order,
-    /// preferring a BlueField part number when records for one serial disagree.
-    fn chassis_devices_dpu_candidates(&self) -> Vec<HostDpuCandidate<'_>>;
-
-    /// Counts DPUs across PCIe and chassis inventory when chassis fallback is used.
-    ///
-    /// Uses the same part-number or serial-predicate detection as the PCIe count.
-    /// Each usable serial counts once across both sources. BlueField records
-    /// without usable serials count separately.
-    fn pcie_and_chassis_devices_dpu_count(&self, is_dpu_serial: impl Fn(&str) -> bool) -> usize;
+    /// A trimmed, nonempty serial counts once across both sources. Each BlueField
+    /// record without a usable serial counts separately because its identity
+    /// cannot be deduplicated.
+    fn dpu_count(&self, is_dpu_serial: impl Fn(&str) -> bool) -> usize;
 }
 
 impl EndpointExplorationReportExt for EndpointExplorationReport {
-    fn pcie_devices_dpu_candidates(&self) -> Vec<HostDpuCandidate<'_>> {
+    fn dpu_candidates(&self) -> Vec<HostDpuCandidate<'_>> {
         let devices = self
             .systems
             .iter()
             .flat_map(|system| &system.pcie_devices)
-            .map(HostDpuCandidate::from);
+            .map(HostDpuCandidate::from)
+            .chain(self.chassis.iter().flat_map(host_dpu_inventory_records));
         devices_with_unique_serials(devices)
     }
 
-    fn pcie_devices_dpu_count(&self, is_dpu_serial: impl Fn(&str) -> bool) -> usize {
-        let devices = self
-            .systems
-            .iter()
-            .flat_map(|system| &system.pcie_devices)
-            .map(HostDpuCandidate::from);
-        count_dpus(devices, is_dpu_serial)
-    }
-
-    fn chassis_devices_dpu_candidates(&self) -> Vec<HostDpuCandidate<'_>> {
-        let devices = self.chassis.iter().flat_map(host_dpu_inventory_records);
-        devices_with_unique_serials(devices)
-    }
-
-    fn pcie_and_chassis_devices_dpu_count(&self, is_dpu_serial: impl Fn(&str) -> bool) -> usize {
+    fn dpu_count(&self, is_dpu_serial: impl Fn(&str) -> bool) -> usize {
         let devices = self
             .systems
             .iter()
@@ -228,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn chassis_serials_and_combined_dpu_count() {
+    fn chassis_serials_and_reported_dpu_count() {
         struct Case {
             name: &'static str,
             pcie_devices: &'static [(Option<&'static str>, Option<&'static str>)],
@@ -323,19 +298,41 @@ mod tests {
                 serials: &[("UNEXPLORED", Some(BLUEFIELD)), ("READY", Some(BLUEFIELD))],
                 count: 4,
             },
+            Case {
+                name: "distinct PCIe and chassis serials are combined in source order",
+                pcie_devices: &[(Some(BLUEFIELD), Some(" PCIE "))],
+                chassis: vec![chassis(None, None, &[(None, Some("CHASSIS"))])],
+                dpu_serials: &["PCIE", "CHASSIS"],
+                serials: &[("PCIE", Some(BLUEFIELD)), ("CHASSIS", None)],
+                count: 2,
+            },
+            Case {
+                name: "PCIe wins when both sources have conflicting BlueField part numbers",
+                pcie_devices: &[(Some("900-9D3B4-00EN-EA0"), Some(" DPU "))],
+                chassis: vec![chassis(Some(BLUEFIELD), Some("DPU"), &[])],
+                dpu_serials: &["DPU"],
+                serials: &[("DPU", Some("900-9D3B4-00EN-EA0"))],
+                count: 1,
+            },
+            Case {
+                name: "chassis supplies the BlueField part number missing from PCIe",
+                pcie_devices: &[(None, Some(" DPU "))],
+                chassis: vec![chassis(Some(BLUEFIELD), Some("DPU"), &[])],
+                dpu_serials: &[],
+                serials: &[("DPU", Some(BLUEFIELD))],
+                count: 1,
+            },
         ] {
             let mut report = report(case.pcie_devices);
             report.chassis = case.chassis;
             let serials = report
-                .chassis_devices_dpu_candidates()
+                .dpu_candidates()
                 .into_iter()
                 .map(|device| (device.serial_number().unwrap(), device.part_number))
                 .collect::<Vec<_>>();
             assert_eq!(serials, case.serials, "{}: serials", case.name);
             assert_eq!(
-                report.pcie_and_chassis_devices_dpu_count(|serial| {
-                    case.dpu_serials.contains(&serial)
-                }),
+                report.dpu_count(|serial| { case.dpu_serials.contains(&serial) }),
                 case.count,
                 "{}: count",
                 case.name
@@ -416,13 +413,13 @@ mod tests {
         ] {
             let report = report(case.devices);
             let serials = report
-                .pcie_devices_dpu_candidates()
+                .dpu_candidates()
                 .into_iter()
                 .map(|device| (device.serial_number().unwrap(), device.part_number))
                 .collect::<Vec<_>>();
             assert_eq!(serials, case.serials, "{}: serials", case.name);
             assert_eq!(
-                report.pcie_devices_dpu_count(|serial| case.dpu_serials.contains(&serial)),
+                report.dpu_count(|serial| case.dpu_serials.contains(&serial)),
                 case.count,
                 "{}: count",
                 case.name

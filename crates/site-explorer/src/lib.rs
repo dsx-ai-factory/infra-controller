@@ -1367,40 +1367,12 @@ impl SiteExplorer {
         metrics: &mut SiteExplorationMetrics,
     ) -> Option<Vec<ExploredDpu>> {
         let HostDpuMatches {
-            inventory: dpu_inventory,
-            inventory_matches,
-            fallback_matches,
-            expected_fallback_count,
+            expected_total,
+            matched_dpus,
         } = matches;
-        let needs_expected_serial_fallback =
-            inventory_matches.is_empty() || dpu_inventory.has_unmatched_reported_dpu;
-        let matched_total = inventory_matches.len();
+        let cfg_status = self.configure_matched_dpus(ep, matched_dpus, metrics).await;
 
-        let inventory_cfg_status = self
-            .configure_matched_dpus(ep, inventory_matches, metrics)
-            .await;
-        let fallback_cfg_status = self
-            .configure_matched_dpus(ep, fallback_matches, metrics)
-            .await;
-
-        let has_unready_matches = matched_total
-            > inventory_cfg_status.running_as_dpu.len() + inventory_cfg_status.running_as_nic_total;
-
-        let host_reported_dpus_total = dpu_inventory.reported_total;
-
-        let incomplete_dpu_exploration = needs_expected_serial_fallback
-            || has_unready_matches
-            || inventory_cfg_status.running_as_dpu.is_empty()
-            || inventory_cfg_status.running_as_dpu.len()
-                != host_reported_dpus_total
-                    .saturating_sub(inventory_cfg_status.running_as_nic_total);
-
-        let host_reported_dpus_nic_mode_total =
-            inventory_cfg_status.running_as_nic_total + fallback_cfg_status.running_as_nic_total;
-        let configuration_requests = inventory_cfg_status.configuration_requests
-            + fallback_cfg_status.configuration_requests;
-
-        if configuration_requests > 0 {
+        if cfg_status.configuration_requests > 0 {
             // A queued `set_nic_mode` only takes effect after a host
             // power cycle, so drive one for every vendor --
             // `redfish_powercycle` issues `PowerCycle` and falls back
@@ -1452,71 +1424,48 @@ impl SiteExplorer {
             return None;
         }
 
-        // Every selected fallback serial must be discovered and ready, whether
-        // the DPU is managed or intentionally runs as a NIC.
-        if fallback_cfg_status.running_as_dpu.len() + fallback_cfg_status.running_as_nic_total
-            != expected_fallback_count
-        {
+        // Every DPU reported by PCIe/chassis or listed in ExpectedMachine must
+        // be discovered and ready, whether managed or intentionally in NIC mode.
+        if cfg_status.running_as_dpu.len() + cfg_status.running_as_nic_total != expected_total {
+            tracing::warn!(
+                bmc_ip_address = %ep.address,
+                discovered_dpu_count = cfg_status.running_as_dpu.len(),
+                expected_managed_dpu_count = expected_total
+                    .saturating_sub(cfg_status.running_as_nic_total),
+                all_dpus_configured_properly_in_host = cfg_status.configuration_requests == 0,
+                "cannot identify managed host because the site explorer has not discovered all attached DPUs"
+            );
             return None;
         }
 
-        // The site explorer should only create a managed host after exploring all of the DPUs attached to the host.
-        // If a host reports that it has two DPUs, the site explorer must wait until **both** DPUs have made the DHCP request.
-        // If only one of the two DPUs have made the DHCP request, the site explorer must wait until it has explored the latter DPU's BMC
-        // (ensuring that the second DPU has also made the DHCP request).
-        if incomplete_dpu_exploration && fallback_cfg_status.running_as_dpu.is_empty() {
-            // Net DPUs still expected to pair: reported DPU minus those
-            // confirmed to be running as plain NICs.
-            let expected_managed_dpus_total =
-                host_reported_dpus_total.saturating_sub(host_reported_dpus_nic_mode_total);
-            if expected_managed_dpus_total > 0 || has_unready_matches {
-                if expected_managed_dpus_total > 0 {
-                    tracing::warn!(
-                        bmc_ip_address = %ep.address,
-                        discovered_dpu_count = inventory_cfg_status.running_as_dpu.len(),
-                        expected_managed_dpu_count = expected_managed_dpus_total,
-                        all_dpus_configured_properly_in_host = configuration_requests == 0,
-                        "cannot identify managed host because the site explorer has not discovered all attached DPUs"
-                    );
-                }
-
-                return None;
-            } else if host_dpu_policy.expects_managed_dpus() {
-                // No DPUs remain available for management, and the
-                // effective policy is `Manage` --
-                // i.e. neither per-host `ExpectedMachine.dpu_policy`
-                // nor site-wide `[site_explorer] dpu_policy` declared
-                // this host as zero-DPU. We expect DPUs but found none --
-                // probably a misconfiguration or a DPU-discovery
-                // bug. Skip ingestion this cycle; site-explorer
-                // will retry on the next iteration, giving the
-                // operator a chance to either fix the host, select
-                // `HostDpuPolicy::Nic` for installed BlueFields
-                // that should run as NICs, or select
-                // `HostDpuPolicy::Ignore` for a host with no usable DPU
-                // hardware.
-                //
-                // `Ignore` hosts are handled before this method is called;
-                // `Nic` hosts can return an empty DPU list.
-                tracing::warn!(
-                    bmc_ip_address = %ep.address,
-                    exploration_report = ?ep,
-                    ?host_dpu_policy,
-                    "cannot identify managed host: site explorer found no DPUs available for management while the effective DPU policy is `Manage`; use `dpu_policy = \"nic\"` for installed BlueFields that should run as NICs, or `dpu_policy = \"ignore\"` for a host with no usable DPU hardware",
-                );
-                metrics
-                    .increment_host_dpu_pairing_blocker(PairingBlockerReason::NoDpuReportedByHost);
-                return None;
-            }
+        if cfg_status.running_as_dpu.is_empty() && host_dpu_policy.expects_managed_dpus() {
+            // No DPUs remain available for management, and the
+            // effective policy is `Manage` --
+            // i.e. neither per-host `ExpectedMachine.dpu_policy`
+            // nor site-wide `[site_explorer] dpu_policy` declared
+            // this host as zero-DPU. We expect DPUs but found none --
+            // probably a misconfiguration or a DPU-discovery
+            // bug. Skip ingestion this cycle; site-explorer
+            // will retry on the next iteration, giving the
+            // operator a chance to either fix the host, select
+            // `HostDpuPolicy::Nic` for installed BlueFields
+            // that should run as NICs, or select
+            // `HostDpuPolicy::Ignore` for a host with no usable DPU
+            // hardware.
+            //
+            // `Ignore` hosts are handled before this method is called;
+            // `Nic` hosts can return an empty DPU list.
+            tracing::warn!(
+                bmc_ip_address = %ep.address,
+                exploration_report = ?ep,
+                ?host_dpu_policy,
+                "cannot identify managed host: site explorer found no DPUs available for management while the effective DPU policy is `Manage`; use `dpu_policy = \"nic\"` for installed BlueFields that should run as NICs, or `dpu_policy = \"ignore\"` for a host with no usable DPU hardware",
+            );
+            metrics.increment_host_dpu_pairing_blocker(PairingBlockerReason::NoDpuReportedByHost);
+            return None;
         }
 
-        // Expected serials replace inventory DPUs only after a ready DPU match.
-        // An empty or all-NIC fallback keeps the inventory DPU list.
-        if fallback_cfg_status.running_as_dpu.is_empty() {
-            Some(inventory_cfg_status.running_as_dpu)
-        } else {
-            Some(fallback_cfg_status.running_as_dpu)
-        }
+        Some(cfg_status.running_as_dpu)
     }
 
     /// Applies the selected target modes and records each matched DPU's outcome.
@@ -3643,7 +3592,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::host_dpu_matches::matched_pcie_dpu;
+    use crate::host_dpu_matches::matched_inventory_dpu;
     use crate::test_support::{bf2_dpu, explored_endpoint};
 
     #[test]
@@ -4826,12 +4775,12 @@ mod tests {
         let host = explored_endpoint(load_dell_ep_report());
         // Mode already correct (`Ok(true)`) -> attach as a managed DPU.
         assert!(matches!(
-            classify_matched_dpu(&matched_pcie_dpu(&dpu), &host, Some(Ok(true))),
+            classify_matched_dpu(&matched_inventory_dpu(&dpu), &host, Some(Ok(true))),
             DiscoveredDpu::RunningAsDpu(_)
         ));
         // A skipped mode check (`None`) behaves the same.
         assert!(matches!(
-            classify_matched_dpu(&matched_pcie_dpu(&dpu), &host, None),
+            classify_matched_dpu(&matched_inventory_dpu(&dpu), &host, None),
             DiscoveredDpu::RunningAsDpu(_)
         ));
     }
@@ -4841,7 +4790,7 @@ mod tests {
         let dpu = bf2_dpu(Some(BlueFieldOperatingMode::Nic));
         let host = explored_endpoint(load_dell_ep_report());
         assert!(matches!(
-            classify_matched_dpu(&matched_pcie_dpu(&dpu), &host, Some(Ok(true))),
+            classify_matched_dpu(&matched_inventory_dpu(&dpu), &host, Some(Ok(true))),
             DiscoveredDpu::RunningAsNic
         ));
     }
@@ -4852,7 +4801,7 @@ mod tests {
         let dpu = bf2_dpu(Some(BlueFieldOperatingMode::Nic));
         let host = explored_endpoint(load_dell_ep_report());
         assert!(matches!(
-            classify_matched_dpu(&matched_pcie_dpu(&dpu), &host, Some(Ok(false))),
+            classify_matched_dpu(&matched_inventory_dpu(&dpu), &host, Some(Ok(false))),
             DiscoveredDpu::NeedsReconfig
         ));
     }
@@ -4863,7 +4812,7 @@ mod tests {
         let host = explored_endpoint(load_dell_ep_report());
         let err = SiteExplorerError::InvalidArgument("boom".to_string());
         assert!(matches!(
-            classify_matched_dpu(&matched_pcie_dpu(&dpu), &host, Some(Err(err))),
+            classify_matched_dpu(&matched_inventory_dpu(&dpu), &host, Some(Err(err))),
             DiscoveredDpu::ModeCheckFailed(_)
         ));
     }
