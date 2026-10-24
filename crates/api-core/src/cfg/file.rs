@@ -34,7 +34,8 @@ use carbide_ib_fabric::config::{IBFabricConfig, IbFabricDefinition};
 use carbide_machine_controller::config::power_manager::default_power_options;
 use carbide_machine_controller::config::{
     BomValidationConfig, FirmwareGlobal, MachineStateControllerConfig,
-    MachineStateHandlerSiteConfig, MachineValidationConfig, PowerManagerOptions, TimePeriod,
+    MachineStateHandlerSiteConfig, MachineValidationConfig, NamedBiosProfile, PowerManagerOptions,
+    TimePeriod,
 };
 use carbide_network::ip::prefix::{IpNet, aggregate};
 use carbide_nvlink_manager::config::NvLinkConfig;
@@ -740,6 +741,9 @@ pub struct CarbideConfig {
     /// per-model override exists.
     #[serde(default)]
     pub selected_profile: libredfish::BiosProfileType,
+
+    #[serde(default)]
+    pub named_bios_profiles: HashMap<String, NamedBiosProfile>,
 
     /// Vendor-specific iDRAC/BMC manager attributes applied during machine_setup,
     /// before BMC lockdown. Keyed by vendor → model → profile → attribute name.
@@ -1471,6 +1475,7 @@ impl CarbideConfig {
 
             selected_profile: self.selected_profile,
             bios_profiles: self.bios_profiles.clone(),
+            named_bios_profiles: self.named_bios_profiles.clone(),
             oem_manager_profiles: self.oem_manager_profiles.clone(),
 
             ewethers_enabled: self.is_ewethers_enabled(),
@@ -8155,6 +8160,42 @@ additional_managed_sf = 2
                 // Slots may be provisioned before any endpoint admission is enabled.
                 "service_vpc_slot_count = 5" => (5, 0),
             }
+        );
+    }
+
+    #[test]
+    fn deserialize_named_bios_profiles() {
+        let toml = r#"
+[named_bios_profiles.gpu-perf]
+vendor = "Dell"
+model = "PowerEdge_XE9680"
+
+[named_bios_profiles.gpu-perf.attributes]
+LogicalProc = "Disabled"
+SysProfile = "PerfOptimized"
+"#;
+
+        let config: CarbideConfig = Figment::new()
+            .merge(Toml::file(format!("{TEST_DATA_DIR}/full_config.toml")))
+            .merge(Toml::string(toml))
+            .extract()
+            .unwrap();
+
+        assert_eq!(
+            config
+                .machine_state_handler_site_config()
+                .named_bios_profiles,
+            HashMap::from([(
+                "gpu-perf".to_string(),
+                NamedBiosProfile {
+                    vendor: libredfish::model::service_root::RedfishVendor::Dell,
+                    model: "PowerEdge_XE9680".to_string(),
+                    attributes: HashMap::from([
+                        ("LogicalProc".to_string(), serde_json::json!("Disabled")),
+                        ("SysProfile".to_string(), serde_json::json!("PerfOptimized")),
+                    ]),
+                },
+            )])
         );
     }
 
