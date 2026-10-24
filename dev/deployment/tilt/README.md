@@ -26,12 +26,6 @@ Start a local Docker runtime and select its Docker context. Run the shared
 cluster helper with Docker, kind, `kubectl` and `jq` on `PATH`. The runtime must
 provide Linux AMD64 or ARM64 containers through a local Docker Unix socket.
 
-The optional vfkit lab for BMC-controlled guests, bridged networking and an IPv6
-gateway is separate work tracked in
-[#8124](https://github.com/dsx-ai-factory/infra-controller/issues/8124). It is not a
-prerequisite for this cluster setup. The Ubuntu host preparation script remains
-responsible for Linux package installation and host configuration.
-
 From the repository root:
 
 ```bash
@@ -54,11 +48,9 @@ export KUBECONFIG="$HOME/.kube/kind-nico-dual.yaml"
 kubectl --context kind-nico-dual get nodes -o wide
 ```
 
-Both architectures use the same helper and configuration. Dual stack requires
-IPv6 support in the container runtime's Linux kernel and Docker network, but not
-Internet IPv6.
-It configures Kubernetes pod/service networking; it does not configure NICo
-underlays, tenant prefixes, DHCPv6, SLAAC or instance networking.
+Both architectures use the same helper and configuration. Dual stack configures
+Kubernetes pod/service networking and requires IPv6 support in the container
+runtime's Linux kernel and Docker network, but not Internet IPv6.
 
 The helper accepts these options; repeated options use the last value:
 
@@ -104,13 +96,9 @@ On macOS these limits belong to the container runtime, not macOS sysctl. Follow
 [kind's inotify troubleshooting](https://kind.sigs.k8s.io/docs/user/known-issues/#pod-errors-due-to-too-many-open-files)
 to diagnose and size those Linux limits through the runtime; the helper does not
 change sysctls.
-Image imports with Docker's containerd image store can require
-[kind's native-platform archive workaround](https://kind.sigs.k8s.io/docs/user/known-issues/#unable-to-kind-load-docker-images).
 
-This step installs no NICo services, host packages, registry workarounds or BMC
-targets, and does not modify the Docker daemon configuration. The DevSpace host
-bootstrap calls the same helper, then applies its existing node TLS settings and
-continues its own deployment workflow.
+The DevSpace host bootstrap calls the same helper, then applies its existing
+node TLS settings and continues its deployment workflow.
 
 ## Start
 
