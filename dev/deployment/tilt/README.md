@@ -90,13 +90,6 @@ The helper does not delete/recreate preexisting clusters or repair incompatible
 settings. Choose another name or explicitly remove an unused
 cluster through kind after accounting for its workloads and data.
 
-When adding a second cluster, kubelet/containerd errors about "too many open
-files" can indicate exhausted inotify resources in the runtime's Linux kernel.
-On macOS these limits belong to the container runtime, not macOS sysctl. Follow
-[kind's inotify troubleshooting](https://kind.sigs.k8s.io/docs/user/known-issues/#pod-errors-due-to-too-many-open-files)
-to diagnose and size those Linux limits through the runtime; the helper does not
-change sysctls.
-
 The DevSpace host bootstrap calls the same helper, then applies its existing
 node TLS settings and continues its deployment workflow.
 
