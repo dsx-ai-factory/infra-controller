@@ -26,8 +26,10 @@ type InstanceUpdateRequest struct {
 	Name NullableString `json:"name,omitempty"`
 	// Updated description of the Instance
 	Description NullableString `json:"description,omitempty"`
-	// Trigger power cycle for Instance
+	// Request an Instance reboot. Requires Tenant Admin authorization. Omitted or null rebootMode retains the existing hard reboot. Success reports request acceptance with status Rebooting, not completion of the operating system restart. Inventory reconciliation sets BootCompleted when Core reports READY after the stale-inventory protection window; it does not verify that a reboot occurred. An ignored graceful request can therefore appear completed. If inventory is unavailable or does not report READY, Rebooting may persist; there is no dedicated reboot-completion timeout.
 	TriggerReboot NullableBool `json:"triggerReboot,omitempty"`
+	// Reboot mode; omitted or null means Hard. A non-null value requires triggerReboot true. A reboot request cannot be combined with other Instance attribute updates, including userData, in any mode. Graceful requests an OS-coordinated host restart with no hard-reset fallback and requires Site support, an Assigned/Ready Instance, and a supported host platform. It cannot be combined with rebootWithCustomIpxe true, applyUpdatesOnReboot true, or an Instance configured with alwaysBootWithCustomIpxe true. Missing discovery or insufficient platform identifiers are rejected, as are known platforms requiring IPMI reset instead of Redfish restart. Passing this guard does not guarantee uninterrupted DPU power on every platform. A Site without support returns 409; Core precondition failures are returned as 412.
+	RebootMode NullableString `json:"rebootMode,omitempty"`
 	// When specified along with triggerReboot, the Instance will boot using the custom iPXE specified by OS. If Instance has alwaysBootWithCustomIpxe flag set then this value will be ignored.
 	RebootWithCustomIpxe NullableBool `json:"rebootWithCustomIpxe,omitempty"`
 	// When specified, pending Instance updates such as DPU reprovisioning are applied on reboot
@@ -210,6 +212,49 @@ func (o *InstanceUpdateRequest) SetTriggerRebootNil() {
 // UnsetTriggerReboot ensures that no value is present for TriggerReboot, not even an explicit nil
 func (o *InstanceUpdateRequest) UnsetTriggerReboot() {
 	o.TriggerReboot.Unset()
+}
+
+// GetRebootMode returns the RebootMode field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *InstanceUpdateRequest) GetRebootMode() string {
+	if o == nil || IsNil(o.RebootMode.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.RebootMode.Get()
+}
+
+// GetRebootModeOk returns a tuple with the RebootMode field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *InstanceUpdateRequest) GetRebootModeOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.RebootMode.Get(), o.RebootMode.IsSet()
+}
+
+// HasRebootMode returns a boolean if a field has been set.
+func (o *InstanceUpdateRequest) HasRebootMode() bool {
+	if o != nil && o.RebootMode.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetRebootMode gets a reference to the given NullableString and assigns it to the RebootMode field.
+func (o *InstanceUpdateRequest) SetRebootMode(v string) {
+	o.RebootMode.Set(&v)
+}
+
+// SetRebootModeNil sets the value for RebootMode to be an explicit nil
+func (o *InstanceUpdateRequest) SetRebootModeNil() {
+	o.RebootMode.Set(nil)
+}
+
+// UnsetRebootMode ensures that no value is present for RebootMode, not even an explicit nil
+func (o *InstanceUpdateRequest) UnsetRebootMode() {
+	o.RebootMode.Unset()
 }
 
 // GetRebootWithCustomIpxe returns the RebootWithCustomIpxe field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -916,6 +961,9 @@ func (o InstanceUpdateRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if o.TriggerReboot.IsSet() {
 		toSerialize["triggerReboot"] = o.TriggerReboot.Get()
+	}
+	if o.RebootMode.IsSet() {
+		toSerialize["rebootMode"] = o.RebootMode.Get()
 	}
 	if o.RebootWithCustomIpxe.IsSet() {
 		toSerialize["rebootWithCustomIpxe"] = o.RebootWithCustomIpxe.Get()

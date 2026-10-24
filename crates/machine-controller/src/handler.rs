@@ -13922,20 +13922,9 @@ async fn needs_ipmi_restart(
         return Ok(false);
     };
 
-    Ok(match ep.report.vendor {
-        // Lenovo SR650 V4s kill power to DPUs on Redfish ForceRestart/GracefulRestart,
-        // causing PXE boot failures. IPMI chassis reset avoids this.
-        // https://github.com/NVIDIA/bare-metal-manager-core/issues/347
-        Some(bmc_vendor::BMCVendor::Lenovo) => {
-            let model = ep.report.model.as_deref().unwrap_or("");
-            model.contains("SR650 V4")
-        }
-        Some(bmc_vendor::BMCVendor::Nvidia) => {
-            ep.report.systems.iter().any(|s| s.id == "DGX")
-                && ep.report.managers.iter().any(|m| m.id == "BMC")
-        }
-        _ => false,
-    })
+    // Preserve the controller's existing fallback for incomplete discovery.
+    // Graceful restart instead requires a conclusive platform classification.
+    Ok(ep.report.requires_ipmi_restart().unwrap_or(false))
 }
 
 /// Perform an IPMI chassis power reset for the given machine

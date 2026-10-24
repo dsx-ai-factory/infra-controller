@@ -56,10 +56,18 @@ func TestInvokeInstancePower(t *testing.T) {
 			wantCode: codes.OK,
 		},
 		{
+			name: "graceful restart existing instance",
+			request: &corev1.InstancePowerRequest{
+				InstanceId: &corev1.InstanceId{Value: instanceID},
+				Operation:  corev1.InstancePowerRequest_POWER_GRACEFUL_RESTART,
+			},
+			wantCode: codes.OK,
+		},
+		{
 			name: "invalid operation for existing instance",
 			request: &corev1.InstancePowerRequest{
 				InstanceId: &corev1.InstanceId{Value: instanceID},
-				Operation:  corev1.InstancePowerRequest_Operation(1),
+				Operation:  corev1.InstancePowerRequest_Operation(99),
 			},
 			wantCode:    codes.InvalidArgument,
 			wantMessage: "Invalid operation in request",

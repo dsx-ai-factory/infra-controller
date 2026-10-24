@@ -1974,6 +1974,8 @@ message VersionRequest {
 enum BuildCapability {
   BUILD_CAPABILITY_UNSPECIFIED = 0;
   BUILD_CAPABILITY_VPC_SLAAC = 1;
+  // InvokeInstancePower supports POWER_GRACEFUL_RESTART without a hard-reset fallback.
+  BUILD_CAPABILITY_INSTANCE_GRACEFUL_RESTART = 2;
 }
 
 message BuildInfo {
@@ -3553,6 +3555,12 @@ message InstancePowerRequest {
 
   enum Operation {
     POWER_RESET = 0;
+    // Request an OS-coordinated host restart. Callers must first check for
+    // BUILD_CAPABILITY_INSTANCE_GRACEFUL_RESTART: older Core builds ignore
+    // operation and perform a hard reset. Requires an Assigned/Ready instance,
+    // no custom-iPXE boot or pending-update approval, and a supported platform.
+    // Failure never falls back to POWER_RESET.
+    POWER_GRACEFUL_RESTART = 1;
   }
   Operation operation = 2;
 

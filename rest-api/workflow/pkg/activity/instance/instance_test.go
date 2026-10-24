@@ -822,6 +822,69 @@ func TestManageInstance_clearMachineIsAssigned(t *testing.T) {
 	}
 }
 
+// Reboot status follows inventory readiness; no observed reboot is required.
+func TestManageInstance_RebootStatusInventory(t *testing.T) {
+	ctx := context.Background()
+	dbSession := util.TestInitDB(t)
+	t.Cleanup(dbSession.Close)
+	util.TestSetupSchema(t, dbSession)
+	user := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{"reboot-test-org"}, []string{"FORGE_PROVIDER_ADMIN", "FORGE_TENANT_ADMIN"})
+	ip := util.TestBuildInfrastructureProvider(t, dbSession, "provider", "reboot-test-org", user)
+	tenant := util.TestBuildTenant(t, dbSession, "tenant", "reboot-test-org", nil, user)
+	site := util.TestBuildSite(t, dbSession, ip, "site", cdbm.SiteStatusRegistered, nil, user)
+	vpc := util.TestBuildVpc(t, dbSession, ip, site, tenant, "vpc")
+	instanceType := util.TestBuildInstanceType(t, dbSession, ip, site, "type")
+	os := util.TestBuildOperatingSystem(t, dbSession, "os")
+	instance := util.TestBuildInstance(t, dbSession, "instance", tenant.ID, ip.ID, site.ID, instanceType.ID, vpc.ID, nil, os.ID, cdbm.InstanceStatusReady)
+	instance.ControllerInstanceID = cutil.GetPtr(uuid.New())
+	instance.PowerStatus = cutil.GetPtr(cdbm.InstancePowerStatusRebooting)
+	util.TestUpdateInstance(t, dbSession, instance)
+	pool := testTemporalSiteClientPool(t)
+	pool.IDClientMap[site.ID.String()] = &tmocks.Client{}
+	manager := NewManageInstance(dbSession, pool, &tmocks.Client{}, config.GetTestConfig())
+	dao := cdbm.NewInstanceDAO(dbSession)
+
+	for _, tc := range []struct {
+		name            string
+		recent          bool
+		inventoryStatus corev1.InventoryStatus
+		tenantState     corev1.TenantState
+		wantPowerStatus string
+	}{
+		{"recent request ignores potentially stale READY", true, corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, corev1.TenantState_READY, cdbm.InstancePowerStatusRebooting},
+		{"failed inventory does not clear reboot status", false, corev1.InventoryStatus_INVENTORY_STATUS_FAILED, corev1.TenantState_READY, cdbm.InstancePowerStatusRebooting},
+		{"non-ready inventory does not clear reboot status", false, corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, corev1.TenantState_CONFIGURING, cdbm.InstancePowerStatusRebooting},
+		{"READY clears reboot status without a reboot transition", false, corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, corev1.TenantState_READY, cdbm.InstancePowerStatusBootCompleted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			updated := time.Now()
+			if !tc.recent {
+				updated = updated.Add(-2 * cutil.DefaultInventoryReceiptInterval)
+			}
+			_, err := dbSession.DB.Exec("UPDATE instance SET status = ?, power_status = ?, updated = ? WHERE id = ?", cdbm.InstanceStatusReady, cdbm.InstancePowerStatusRebooting, updated, instance.ID)
+			require.NoError(t, err)
+			before, err := dao.GetByID(ctx, nil, instance.ID, nil)
+			require.NoError(t, err)
+			require.Equal(t, cdbm.InstanceStatusReady, before.Status)
+			require.Equal(t, cdbm.InstancePowerStatusRebooting, *before.PowerStatus)
+			_, err = manager.UpdateInstancesInDB(ctx, site.ID, &corev1.InstanceInventory{
+				InventoryStatus: tc.inventoryStatus,
+				Timestamp:       timestamppb.Now(),
+				Instances: []*corev1.Instance{{
+					Id:     &corev1.InstanceId{Value: instance.ControllerInstanceID.String()},
+					Config: &corev1.InstanceConfig{},
+					Status: &corev1.InstanceStatus{Tenant: &corev1.InstanceTenantStatus{State: tc.tenantState}},
+				}},
+			})
+			require.NoError(t, err)
+			persisted, err := dao.GetByID(ctx, nil, instance.ID, nil)
+			require.NoError(t, err)
+			require.NotNil(t, persisted.PowerStatus)
+			assert.Equal(t, tc.wantPowerStatus, *persisted.PowerStatus)
+		})
+	}
+}
+
 func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	ctx := context.Background()
 
@@ -1170,7 +1233,7 @@ func TestManageInstance_UpdateInstancesInDB(t *testing.T) {
 	_, err = dbSession.DB.Exec("UPDATE instance SET updated = ? WHERE id = ?", time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), instance8.ID.String())
 	assert.NoError(t, err)
 
-	// Instance 9 is in Ready state and power status is Rebooting, gets set to BootCompleted
+	// Instance 9 is Ready with no power status; inventory initializes it to BootCompleted.
 	instance9, err := instanceDAO.Create(
 		ctx, nil,
 		cdbm.InstanceCreateInput{

@@ -9592,7 +9592,7 @@ paths:
           description: A resource conflict prevents the update.
           $ref: '#/components/responses/GenericHttpError'
         '412':
-          description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted.
+          description: The Site's `dpsPowerManagement` capability is `false`, so a non-empty power profile cannot be accepted. Also returned when a graceful reboot precondition (Instance readiness, boot configuration, sufficient platform discovery, or host platform) is not met.
           $ref: '#/components/responses/GenericHttpError'
         '429':
           $ref: '#/components/responses/ResourceExhaustedError'
@@ -9608,6 +9608,11 @@ paths:
             schema:
               $ref: '#/components/schemas/InstanceUpdateRequest'
             examples:
+              graceful-reboot:
+                summary: Request a graceful host reboot
+                value:
+                  triggerReboot: true
+                  rebootMode: Graceful
               example-1:
                 value:
                   name: spark-monitor-1
@@ -25387,7 +25392,14 @@ components:
           type:
             - boolean
             - 'null'
-          description: Trigger power cycle for Instance
+          description: 'Request an Instance reboot. Requires Tenant Admin authorization. Omitted or null rebootMode retains the existing hard reboot. Success reports request acceptance with status Rebooting, not completion of the operating system restart. Inventory reconciliation sets BootCompleted when Core reports READY after the stale-inventory protection window; it does not verify that a reboot occurred. An ignored graceful request can therefore appear completed. If inventory is unavailable or does not report READY, Rebooting may persist; there is no dedicated reboot-completion timeout.'
+        rebootMode:
+          type:
+            - string
+            - 'null'
+          enum: [Hard, Graceful, null]
+          description: 'Reboot mode; omitted or null means Hard. A non-null value requires triggerReboot true. A reboot request cannot be combined with other Instance attribute updates, including userData, in any mode. Graceful requests an OS-coordinated host restart with no hard-reset fallback and requires Site support, an Assigned/Ready Instance, and a supported host platform. It cannot be combined with rebootWithCustomIpxe true, applyUpdatesOnReboot true, or an Instance configured with alwaysBootWithCustomIpxe true. Missing discovery or insufficient platform identifiers are rejected, as are known platforms requiring IPMI reset instead of Redfish restart. Passing this guard does not guarantee uninterrupted DPU power on every platform. A Site without support returns 409; Core precondition failures are returned as 412.'
+          examples: [Graceful]
         rebootWithCustomIpxe:
           type:
             - boolean

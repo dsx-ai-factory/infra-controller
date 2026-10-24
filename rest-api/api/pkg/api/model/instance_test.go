@@ -2283,6 +2283,7 @@ func TestAPIInstanceUpdateRequest_Validate(t *testing.T) {
 		Description              *string
 		Labels                   map[string]string
 		TriggerReboot            *bool
+		RebootMode               *string
 		RebootWithCustomIpxe     *bool
 		ApplyUpdatesOnReboot     *bool
 		OperatingSystemID        *string
@@ -2303,7 +2304,16 @@ func TestAPIInstanceUpdateRequest_Validate(t *testing.T) {
 		fields            fields
 		wantErr           bool
 		wantUpdateRequest *bool
+		wantErrMessage    string
 	}{
+		{name: "graceful reboot", fields: fields{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(InstanceRebootModeGraceful)}, wantErr: false},
+		{name: "explicit hard reboot with updates", fields: fields{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(InstanceRebootModeHard), ApplyUpdatesOnReboot: cutil.GetPtr(true)}, wantErr: false},
+		{name: "unknown reboot mode", fields: fields{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr("graceful")}, wantErr: true, wantErrMessage: "`rebootMode` must be Hard or Graceful"},
+		{name: "mode without reboot", fields: fields{RebootMode: cutil.GetPtr(InstanceRebootModeGraceful)}, wantErr: true, wantErrMessage: "`rebootMode` requires `triggerReboot: true`"},
+		{name: "mode with false reboot", fields: fields{TriggerReboot: cutil.GetPtr(false), RebootMode: cutil.GetPtr(InstanceRebootModeHard)}, wantErr: true, wantErrMessage: "`rebootMode` requires `triggerReboot: true`"},
+		{name: "graceful custom ipxe rejected", fields: fields{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(InstanceRebootModeGraceful), RebootWithCustomIpxe: cutil.GetPtr(true)}, wantErr: true},
+		{name: "graceful update approval rejected", fields: fields{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(InstanceRebootModeGraceful), ApplyUpdatesOnReboot: cutil.GetPtr(true)}, wantErr: true},
+		{name: "graceful config edit rejected", fields: fields{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(InstanceRebootModeGraceful), UserData: cutil.GetPtr("changed")}, wantErr: true},
 		{
 			name: "test valid Instance config update request",
 			fields: fields{
@@ -2526,6 +2536,7 @@ func TestAPIInstanceUpdateRequest_Validate(t *testing.T) {
 				Description:              tt.fields.Description,
 				Labels:                   tt.fields.Labels,
 				TriggerReboot:            tt.fields.TriggerReboot,
+				RebootMode:               tt.fields.RebootMode,
 				RebootWithCustomIpxe:     tt.fields.RebootWithCustomIpxe,
 				ApplyUpdatesOnReboot:     tt.fields.ApplyUpdatesOnReboot,
 				OperatingSystemID:        tt.fields.OperatingSystemID,
@@ -2544,6 +2555,11 @@ func TestAPIInstanceUpdateRequest_Validate(t *testing.T) {
 			err := itur.Validate()
 			if tt.wantErr {
 				assert.Error(t, err)
+				if tt.wantErrMessage != "" {
+					var fieldErrors validation.Errors
+					require.ErrorAs(t, err, &fieldErrors)
+					assert.EqualError(t, fieldErrors["rebootMode"], tt.wantErrMessage)
+				}
 				if tt.wantUpdateRequest != nil {
 					assert.Equal(t, *tt.wantUpdateRequest, itur.IsUpdateRequest())
 				}
