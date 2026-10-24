@@ -357,8 +357,16 @@ exclude_services = ["Journal"]
 [collectors.logs.sse]
 initial_backoff = "1s"
 max_backoff = "30s"
-# Deadline for deleting the BMC subscription a closed stream opened.
+# Deadline for deleting the BMC subscription a closed stream opened, and for each
+# cap diagnosis: listing the BMC's subscriptions plus any reap_on_cap sweep.
 close_timeout = "5s"
+# Delete every SSE destination on a BMC at its cap. Enable only where hw-health
+# is the BMC's sole SSE consumer. Not yet effective on BMCs that drop a capped
+# SSE open without an HTTP response (LiteOn). Each BMC is swept at most once per
+# 30 minutes, and recovery does not reset that interval. The DELETEs run one at a
+# time within close_timeout, so a sweep can stop before reaching every
+# destination; the rest wait for the next sweep.
+reap_on_cap = false
 
 # Required when mode = "periodic"; ignored when mode = "sse".
 [collectors.logs.periodic]

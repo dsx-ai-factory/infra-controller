@@ -1540,9 +1540,21 @@ pub struct SseLogConfig {
     #[serde(with = "humantime_serde")]
     pub max_backoff: Duration,
 
-    /// Deadline for deleting the BMC subscription a closed stream opened.
+    /// Deadline for deleting the BMC subscription a closed stream opened, and for
+    /// each cap diagnosis: listing the BMC's subscriptions plus any `reap_on_cap`
+    /// sweep.
     #[serde(with = "humantime_serde")]
     pub close_timeout: Duration,
+
+    /// Delete every SSE destination on a BMC at its cap. Enable only where
+    /// hw-health is the BMC's sole SSE consumer. Not yet effective on BMCs that
+    /// drop a capped SSE open without an HTTP response (LiteOn).
+    ///
+    /// Each BMC is swept at most once per 30 minutes, and recovery does not
+    /// reset that interval. The DELETEs run one at a time within `close_timeout`,
+    /// so a sweep can stop before reaching every destination; the rest wait for
+    /// the next sweep.
+    pub reap_on_cap: bool,
 }
 
 impl Default for SseLogConfig {
@@ -1551,6 +1563,7 @@ impl Default for SseLogConfig {
             initial_backoff: Duration::from_secs(1),
             max_backoff: Duration::from_secs(30),
             close_timeout: Duration::from_secs(5),
+            reap_on_cap: false,
         }
     }
 }
