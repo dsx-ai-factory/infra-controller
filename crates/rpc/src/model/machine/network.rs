@@ -206,3 +206,34 @@ impl From<rpc::ManagedHostQuarantineMode> for ManagedHostQuarantineMode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Case;
+    use carbide_test_support::Outcome::Yields;
+
+    use super::*;
+
+    #[test]
+    fn malformed_machine_network_version_is_absent() {
+        Case {
+            scenario: "a malformed machine network version is treated as unobserved",
+            input: rpc::DpuNetworkStatus {
+                dpu_machine_id: Some(
+                    "fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80"
+                        .parse()
+                        .expect("valid fixture DPU ID"),
+                ),
+                observed_at: Some(std::time::UNIX_EPOCH.into()),
+                network_config_version: Some("invalid-version".to_string()),
+                ..Default::default()
+            },
+            expect: Yields(None),
+        }
+        .check(|status| {
+            MachineNetworkStatusObservation::try_from(status)
+                .map(|observation| observation.network_config_version)
+                .map_err(drop)
+        });
+    }
+}
