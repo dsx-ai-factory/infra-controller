@@ -1112,15 +1112,17 @@ mod tests {
                 expected_nads
             );
             for (name, nad) in &rendered_nads {
-                let expected_bridge = if name == "service-vpc-dhcp-slot0" {
-                    "br-svc-0"
-                } else {
-                    "br-sfc"
+                // Verify each NAD retains the bridge and MTU assigned by its service contract.
+                let (expected_bridge, expected_mtu) = match name.as_str() {
+                    "service-vpc-dhcp-slot0" => ("br-svc-0", carbide_dpf::SERVICE_VPC_MTU),
+                    DHCP_SERVER_SERVICE_NAD_NAME => ("br-sfc", DHCP_SERVER_SERVICE_MTU),
+                    FMDS_SERVICE_NAD_NAME => ("br-sfc", FMDS_SERVICE_MTU),
+                    _ => unreachable!("rendered NAD names were checked above"),
                 };
                 assert_eq!(nad.metadata.name.as_deref(), Some(name.as_str()));
                 assert_eq!(nad.spec.bridge.as_deref(), Some(expected_bridge));
                 assert_eq!(nad.spec.ipam, Some(false));
-                assert_eq!(nad.spec.service_mtu, Some(1500));
+                assert_eq!(nad.spec.service_mtu, Some(expected_mtu));
                 assert!(matches!(
                     nad.spec.resource_type,
                     carbide_dpf::crds::dpuservicenads_generated::DpuServiceNadResourceType::Sf
