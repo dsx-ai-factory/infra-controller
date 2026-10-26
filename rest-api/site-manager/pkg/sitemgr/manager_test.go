@@ -8,9 +8,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,6 +42,7 @@ func TestNewCertManagerClient(t *testing.T) {
 		name             string
 		scheme           string
 		wrongHostname    bool
+		inheritedProxy   bool
 		caContent        string
 		unsetCA          bool
 		emptyCA          bool
@@ -53,6 +56,7 @@ func TestNewCertManagerClient(t *testing.T) {
 		wantStatus       int
 	}{
 		{name: "verified TLS sends client certificate", scheme: "https", wantStatus: http.StatusOK},
+		{name: "ignores inherited proxy for in-cluster issuance", scheme: "https", inheritedProxy: true, wantStatus: http.StatusOK},
 		{name: "old chart without client identity", scheme: "https", noIdentity: true, wantStatus: http.StatusOK},
 		{name: "partial client identity", scheme: "https", partialIdentity: true, wantInitError: true},
 		{name: "wrong TLS identity", scheme: "https", wrongHostname: true, wantRequestError: true},
@@ -66,6 +70,15 @@ func TestNewCertManagerClient(t *testing.T) {
 		{name: "redirect does not forward identity", scheme: "https", redirect: true, wantStatus: http.StatusTemporaryRedirect},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.inheritedProxy {
+				original := http.DefaultTransport
+				transport := original.(*http.Transport).Clone()
+				transport.Proxy = func(_ *http.Request) (*url.URL, error) {
+					return nil, fmt.Errorf("in-cluster issuance must bypass proxy")
+				}
+				http.DefaultTransport = transport
+				t.Cleanup(func() { http.DefaultTransport = original })
+			}
 			var calls atomic.Int32
 			target := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)

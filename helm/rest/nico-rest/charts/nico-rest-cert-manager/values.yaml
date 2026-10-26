@@ -67,5 +67,8 @@ authorization:
   # -- Empty generates the default Site Manager URI in the release namespace.
   # Override when Site Manager has a different name, namespace, or client URI.
   allowedIdentities: []
-  # -- Empty trusts the effective signing CA. Otherwise mount a client CA bundle here.
+  # -- Secret containing ca.crt for a separate client issuer; mounted read-only.
+  # Mutually exclusive with clientCaFile. Empty trusts the effective signing CA.
+  clientCaSecretName: ""
+  # -- Path to a bundle in an existing mount; use clientCaSecretName for a separate CA.
   clientCaFile: ""

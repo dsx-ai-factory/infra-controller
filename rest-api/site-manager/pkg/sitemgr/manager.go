@@ -164,6 +164,7 @@ func newCertManagerClient(ctx context.Context, o Options) (*http.Client, error) 
 		tlsConfig = dynamic.ClientCfg()
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
 	transport.TLSClientConfig = tlsConfig
 	client := &http.Client{Timeout: vaultTimeout, Transport: otelhttp.NewTransport(transport, otelhttp.WithSpanNameFormatter(func(_ string, _ *http.Request) string { return certMgrClientName }))}
 	context.AfterFunc(ctx, client.CloseIdleConnections)

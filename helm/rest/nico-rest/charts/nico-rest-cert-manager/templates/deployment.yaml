@@ -1,3 +1,6 @@
+{{- if and .Values.authorization.clientCaSecretName .Values.authorization.clientCaFile }}
+{{- fail "authorization.clientCaSecretName and clientCaFile are mutually exclusive" }}
+{{- end }}
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -80,7 +83,7 @@ spec:
             - name: CERT_AUTH_ALLOWED_IDENTITIES
               value: {{ include "nico-rest-cert-manager.allowedIdentities" . | fromYamlArray | join "," | quote }}
             - name: CERT_AUTH_CLIENT_CA_FILE
-              value: {{ .Values.authorization.clientCaFile | quote }}
+              value: {{ ternary "/etc/pki/client-ca/ca.crt" .Values.authorization.clientCaFile (not (empty .Values.authorization.clientCaSecretName)) | quote }}
           {{- with .Values.extraEnv }}
             {{- range $k, $v := . }}
             - name: {{ $k }}
@@ -88,6 +91,11 @@ spec:
             {{- end }}
           {{- end }}
           volumeMounts:
+            {{- if .Values.authorization.clientCaSecretName }}
+            - name: client-ca
+              mountPath: /etc/pki/client-ca
+              readOnly: true
+            {{- end }}
             - name: ca-signing-secret
               mountPath: /etc/pki/ca
               readOnly: true
@@ -108,6 +116,14 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 15
       volumes:
+        {{- if .Values.authorization.clientCaSecretName }}
+        - name: client-ca
+          secret:
+            secretName: {{ .Values.authorization.clientCaSecretName | quote }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
         - name: ca-signing-secret
           secret:
             secretName: {{ .Values.secrets.caSigningSecret }}
