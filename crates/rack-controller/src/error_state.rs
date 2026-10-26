@@ -71,12 +71,6 @@ pub async fn handle_error(
     }
 
     if recovery_policy == RackErrorRecoveryPolicy::MaintenanceRequestRequired {
-        tracing::error!(
-            rack_id = %id,
-            cause = %cause,
-            "Rack maintenance failed; a new maintenance request is required",
-        );
-
         return Ok(StateHandlerOutcome::wait(format!(
             "rack maintenance failed: {cause}"
         )));
@@ -91,11 +85,6 @@ pub async fn handle_error(
         return Ok(StateHandlerOutcome::transition(RackState::Ready).with_txn(txn));
     }
 
-    tracing::error!(
-        rack_id = %id,
-        cause = %cause,
-        "Rack is in error state",
-    );
     Ok(StateHandlerOutcome::wait(format!(
         "rack in error state: {}",
         cause
