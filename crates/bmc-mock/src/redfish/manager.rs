@@ -25,12 +25,17 @@ use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::bmc_state::BmcState;
 use crate::json::JsonExt;
 use crate::redfish::ModelExt;
-use crate::{Callbacks, http, redfish};
+use crate::{ActionError, Callbacks, DeviceEffect, http, redfish};
+
+#[cfg(test)]
+#[path = "manager_reset_tests.rs"]
+mod reset_defaults_tests;
 
 pub(super) fn collection() -> redfish::Collection<'static> {
     redfish::Collection {
@@ -52,6 +57,13 @@ fn resource<'a>(manager_id: &'a str) -> redfish::Resource<'a> {
 
 pub(super) fn reset_target(manager_id: &str) -> String {
     format!("{}/Actions/Manager.Reset", resource(manager_id).odata_id)
+}
+
+fn reset_defaults_target(manager_id: &str) -> String {
+    format!(
+        "{}/Actions/Manager.ResetToDefaults",
+        resource(manager_id).odata_id
+    )
 }
 
 fn oem_patch(oem: &Oem, manager_id: &str) -> serde_json::Value {
@@ -123,6 +135,10 @@ pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcStat
             get(get_serial_interface::<C>),
         )
         .route(&reset_target(MGR_ID), post(post_reset_manager::<C>))
+        .route(
+            &reset_defaults_target(MGR_ID),
+            post(post_reset_defaults::<C>),
+        )
         .route(
             &redfish::manager_network_protocol::manager_resource(MGR_ID).odata_id,
             get(get_network_protocol::<C>).patch(patch_network_protocol::<C>),
@@ -241,6 +257,23 @@ impl ManagerState {
 
     pub(crate) fn find(&self, manager_id: &str) -> Option<&SingleManagerState> {
         self.managers.iter().find(|c| c.id == manager_id)
+    }
+
+    pub(crate) fn reset_to_defaults(&self) {
+        for manager in &self.managers {
+            *manager.overrides.lock().expect("mutex poisoned") = json!({});
+            manager
+                .host_interface_overrides
+                .lock()
+                .expect("mutex poisoned")
+                .clear();
+            *manager.ntp.lock().expect("mutex poisoned") = NtpState::default();
+            // The configured simulator endpoint determines the factory IPMI default.
+            manager.ipmi_enabled.store(
+                manager.ipmi_port.lock().expect("mutex poisoned").is_some(),
+                atomic::Ordering::Relaxed,
+            );
+        }
     }
 
     pub fn set_ipmi_endpoint(&self, port: Option<u16>) {
@@ -465,9 +498,24 @@ async fn get_manager<C: Callbacks>(
     )
     .date_time(Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00").to_string());
     // Bound actions are not emitted by the server schema generator yet.
-    let document = model.into_json().patch(json!({
-        "Actions": {"#Manager.Reset": {"target": reset_target(&manager_id)}}
+    let mut document = model.into_json().patch(json!({
+        "Actions": {
+            "#Manager.Reset": {"target": reset_target(&manager_id)}
+        }
     }));
+    if state
+        .callbacks
+        .as_ref()
+        .is_some_and(|callbacks| callbacks.supports_bmc_factory_reset())
+    {
+        document = document.patch(json!({"Actions": {
+            "#Manager.ResetToDefaults": {
+                "target": reset_defaults_target(&manager_id),
+                "ResetType@Redfish.AllowableValues": ["ResetAll"],
+                "ResetToDefaultsType@Redfish.AllowableValues": ["ResetAll"]
+            }
+        }}));
+    }
     let document = if let Some(oem) = &config.oem {
         document.patch(oem_patch(oem, &manager_id))
     } else {
@@ -664,6 +712,68 @@ async fn post_reset_manager<C: Callbacks>(
         "BMC self-reset"
     );
     json!({}).into_ok_response()
+}
+
+#[derive(Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum ResetToDefaultsRequest {
+    Standard {
+        #[serde(rename = "ResetType")]
+        value: ResetAll,
+    },
+    Defaults {
+        #[serde(rename = "ResetToDefaultsType")]
+        value: ResetAll,
+    },
+}
+
+#[derive(Deserialize)]
+enum ResetAll {
+    ResetAll,
+}
+
+async fn post_reset_defaults<C: Callbacks>(
+    State(state): State<BmcState<C>>,
+    Path(manager_id): Path<String>,
+    request: Result<Json<ResetToDefaultsRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if state.manager.find(&manager_id).is_none() {
+        return http::not_found();
+    }
+    let Ok(Json(request)) = request else {
+        return http::redfish_error(StatusCode::BAD_REQUEST, "invalid ResetAll request");
+    };
+    let ResetAll::ResetAll = match request {
+        ResetToDefaultsRequest::Standard { value } | ResetToDefaultsRequest::Defaults { value } => {
+            value
+        }
+    };
+    let Some(callbacks) = &state.callbacks else {
+        return http::redfish_error(StatusCode::BAD_REQUEST, "BMC reset backend is unavailable");
+    };
+    let update = state.factory_reset_update().await;
+    match callbacks
+        .device_effect(DeviceEffect::ResetBmcToDefaults(update))
+        .await
+    {
+        Ok(()) => {
+            state.record_log(redfish::log_service::LogEntryDraft::manager_resetting(
+                &resource(&manager_id).odata_id,
+                "Manager.ResetToDefaults",
+            ));
+            json!({}).into_ok_response()
+        }
+        Err(ActionError::BadRequest(error)) => {
+            http::redfish_error(StatusCode::BAD_REQUEST, &error.to_string())
+        }
+        Err(ActionError::Internal(error)) => {
+            tracing::error!(%error, "BMC factory reset failed");
+            http::redfish_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "BMC factory reset failed",
+            )
+        }
+    }
 }
 
 async fn get_log_services() -> Response {

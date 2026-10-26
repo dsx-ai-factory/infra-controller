@@ -95,7 +95,15 @@ pub mod test_support;
 pub mod tls;
 
 pub use bmc_state::{BmcEvent, BmcState};
-pub use carbide_axum_utils::authority_router::authority_router as combined_router;
+/// Builds the authority-based router from shared device routes.
+/// Registry wrappers can retain ownership metadata while exposing these routes.
+pub fn combined_router(
+    routes: impl Into<
+        std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, axum::Router>>>,
+    >,
+) -> axum::Router {
+    carbide_axum_utils::authority_router::authority_router(routes.into())
+}
 pub use carbide_axum_utils::injection;
 pub use combined_server::{CombinedServer, ListenerOrAddress};
 pub use http::redfish_error_envelope;
@@ -120,6 +128,9 @@ pub use rack_info::RackInfo;
 pub use redfish::account_service::AccountServiceState;
 pub use redfish::event_service::{
     EventServiceConfig, EventServiceError, EventServiceLimits, EventServiceState, EventServiceStats,
+};
+pub use redfish::update_service::{
+    BmcTaskState, DpuOsImage, DpuOsStatus, DpuOsStatusSource, UnknownBmcTaskState,
 };
 pub use redfish::virtual_media::{
     DeviceConfig as VirtualMediaDeviceConfig, VirtualMediaContents, VirtualMediaUpdate,
@@ -255,12 +266,85 @@ pub enum ActionError {
 // Simulate a 5-second power cycle
 pub const POWER_CYCLE_DELAY: Duration = Duration::from_secs(5);
 
+/// A physical effect that a BMC action has on the device behind the BMC, beyond the
+/// Redfish state the BMC itself serves.
+///
+/// This is the contract between bmc-mock and the backend that owns the simulated
+/// device (for example machine-a-tron's power actors). bmc-mock validates the
+/// request and reports the effect through [`Callbacks::device_effect`]. The backend
+/// applies it to everything the real action would reach, and the BMC then serves
+/// the observed result back through its usual state, such as the system `PowerState`.
+///
+/// Add a variant for each action whose effect leaves the BMC. The enum is not
+/// `non_exhaustive`: a new variant must fail to compile in every backend until it
+/// decides what the effect means for its device.
+#[derive(Debug)]
+pub enum DeviceEffect {
+    /// Chassis AC power cycle (`NvidiaChassis.AuxPowerReset` with `ResetType`
+    /// `AuxPowerCycle`). It drops all power to the compute tray, so the host and
+    /// every DPU in it lose power together. The backend applies it whatever the
+    /// current power state is, and it leaves the device `Off`: the BMC has no power
+    /// restore policy of its own, and the controller powers the host on again.
+    AuxPowerCycle,
+    /// Restore BMC factory accounts and restart BMC DHCP without changing system power.
+    /// The backend owns the update and admits DHCP recovery before reporting success.
+    ResetBmcToDefaults(BmcResetUpdate),
+}
+
+/// An owned, serialized BMC factory reset. Dropping it before commit changes no state.
+/// Transfer it to the device actor so an HTTP cancellation cannot interrupt publication.
+pub struct BmcResetUpdate {
+    apply: futures::future::BoxFuture<'static, Result<Duration, ActionError>>,
+}
+
+impl fmt::Debug for BmcResetUpdate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BmcResetUpdate").finish_non_exhaustive()
+    }
+}
+
+impl BmcResetUpdate {
+    /// Synchronizes attached password backends, restores accounts, invalidates sessions
+    /// and starts the BMC outage. Returns the delay before BMC DHCP should resume.
+    pub async fn commit(self) -> Result<Duration, ActionError> {
+        self.apply.await
+    }
+}
+
 /// Backend operations for one BMC, selected by the router's concrete callback type.
 pub trait Callbacks: Send + Sync + 'static {
+    /// Whether this backend models BMC factory reset through [`Self::device_effect`].
+    /// Only supporting backends advertise `Manager.ResetToDefaults`.
+    fn supports_bmc_factory_reset(&self) -> bool {
+        false
+    }
+
+    /// Whether this backend models an auxiliary power cycle through [`Self::device_effect`].
+    /// Only supporting backends advertise NVIDIA `AuxPowerReset`.
+    fn supports_aux_power_cycle(&self) -> bool {
+        false
+    }
+
     fn computer_system_reset(
         &self,
         reset_type: ResourceResetType,
     ) -> impl Future<Output = Result<(), ActionError>> + Send;
+
+    /// Accepts a [`DeviceEffect`] into the owning device's execution path.
+    /// Chassis power may complete asynchronously after acceptance. Factory reset
+    /// must publish BMC state and admit actor-owned DHCP recovery before reporting
+    /// success. Callers observe the result through the state the BMC serves.
+    ///
+    /// The default rejects every effect, so a backend that does not model the
+    /// device fails the action instead of answering success without an effect.
+    fn device_effect(
+        &self,
+        effect: DeviceEffect,
+    ) -> impl Future<Output = Result<(), ActionError>> + Send {
+        std::future::ready(Err(ActionError::BadRequest(eyre::eyre!(
+            "bmc-mock: backend does not support device effect {effect:?}"
+        ))))
+    }
 
     /// Applies one virtual-media operation before reporting success.
     ///

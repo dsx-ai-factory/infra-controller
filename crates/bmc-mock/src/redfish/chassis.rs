@@ -148,6 +148,8 @@ pub(crate) struct SingleChassisConfig {
     pub(crate) assembly: Option<serde_json::Value>,
     pub(crate) power_supplies: Option<Vec<redfish::power_supply::PowerSupply>>,
     pub(crate) oem: Option<AdditionalProperties>,
+    /// Whether the chassis serves the NVIDIA `AuxPowerReset` AC power cycle action.
+    pub(crate) aux_power_reset: bool,
 }
 
 impl SingleChassisConfig {
@@ -170,6 +172,7 @@ impl SingleChassisConfig {
             assembly: None,
             power_supplies: None,
             oem: None,
+            aux_power_reset: false,
         }
     }
 }
@@ -338,7 +341,18 @@ async fn get_chassis<C: Callbacks>(
             chassis_type: config.chassis_type,
         })
     };
-    model.into_json().into_ok_response()
+    let mut document = model.into_json();
+    if config.aux_power_reset
+        && state
+            .callbacks
+            .as_ref()
+            .is_some_and(|callbacks| callbacks.supports_aux_power_cycle())
+    {
+        document = document.patch(redfish::oem::nvidia::chassis::aux_power_reset_action(
+            &chassis_id,
+        ));
+    }
+    document.into_ok_response()
 }
 
 async fn get_chassis_network_adapters<C: Callbacks>(

@@ -19,11 +19,10 @@ use axum::Router;
 use axum::extract::{Path, State};
 use axum::response::Response;
 use axum::routing::get;
-use serde_json::json;
 
-use crate::Callbacks;
 use crate::bmc_state::BmcState;
 use crate::json::JsonExt;
+use crate::{Callbacks, http};
 
 pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
     r.route(
@@ -32,37 +31,18 @@ pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcStat
     )
 }
 
-/// Return a task by ID.
-///
-/// Live tasks (created by upload handlers) are looked up in `UpdateServiceState`.
-/// For any unknown ID (pruned tasks, legacy hard-coded IDs, DPU BFB task IDs that
-/// get pruned on PowerOn) return a synthetic completed task.  Treating unknown IDs
-/// as Completed is safe: carbide poll loops interpret Completed as "proceed" and
-/// only hard-fail on explicit error responses.
+/// Return a task by ID: a live task or one from the BMC's bounded history of
+/// finished tasks. Any other ID (never issued by this BMC instance, issued
+/// before an unsaved simulator restart, or evicted from the history) is 404.
+/// Saved DPU BFB tasks retain their IDs across a restart. A poll
+/// loop cannot read completion of work the mock did not do.
 async fn get_task<C: Callbacks>(
     State(state): State<BmcState<C>>,
     Path(task_id): Path<String>,
 ) -> Response {
-    if let Some(task_json) = state.update_service_state.find_task(&task_id) {
-        return task_json.into_ok_response();
-    }
-
-    // Return synthetic Completed for any unknown ID — pruned firmware tasks and
-    // DPU BFB task IDs both end up here; treating them as Completed is safe.
-    json!({
-        "@odata.id": format!("/redfish/v1/TaskService/Tasks/{task_id}"),
-        "@odata.type": "#Task.v1_4_3.Task",
-        "Id": task_id,
-        "PercentComplete": 100,
-        "StartTime": "2024-01-30T09:00:52+00:00",
-        "TaskMonitor": format!("/redfish/v1/TaskService/Tasks/{task_id}/Monitor"),
-        "TaskState": "Completed",
-        "TaskStatus": "OK",
-        "Messages": [{
-            "MessageId": "Update.1.0.OperationTransitionedToJob",
-            "Message": "Firmware staged; version will be applied after the next power-cycle.",
-            "Severity": "OK"
-        }]
-    })
-    .into_ok_response()
+    state
+        .update_service_state
+        .find_task(&task_id)
+        .map(|task_json| task_json.into_ok_response())
+        .unwrap_or_else(http::not_found)
 }
