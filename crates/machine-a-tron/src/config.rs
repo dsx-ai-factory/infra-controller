@@ -603,14 +603,35 @@ pub struct MachineATronConfig {
 
     /// The hosted RMS mock. Unlike the UFM mock this has no `enabled`
     /// flag: the services are always mounted, and NICo reaches them only when
-    /// it is configured with an `rms.api_url` pointing here.
-    #[serde(default)]
+    /// it is configured with an `rms.api_url` pointing here. MAT defaults
+    /// `max_terminal_jobs` to 100,000, including when only other RMS fields are set.
+    #[serde(
+        default = "default_rms_mock_config",
+        deserialize_with = "deserialize_rms_mock_config"
+    )]
     pub rms_mock: RmsMockConfig,
 
     /// The hosted NMX-C mock, always mounted like the RMS mock. NICo reaches
     /// it at a simulated switch's NVOS address, so nothing here names it.
     #[serde(default)]
     pub nmxc_mock: NmxcMockConfig,
+}
+
+fn default_rms_mock_config() -> RmsMockConfig {
+    RmsMockConfig {
+        max_terminal_jobs: 100_000,
+        ..RmsMockConfig::default()
+    }
+}
+
+fn deserialize_rms_mock_config<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<RmsMockConfig, D::Error> {
+    let mut fields = serde_json::Map::deserialize(deserializer)?;
+    fields
+        .entry("max_terminal_jobs".to_string())
+        .or_insert(serde_json::Value::from(100_000));
+    serde_json::from_value(serde_json::Value::Object(fields)).map_err(serde::de::Error::custom)
 }
 
 impl MachineATronConfig {
@@ -1183,6 +1204,42 @@ scout_run_interval = "5s"
     "#,
         )
         .expect("Could not parse config")
+    }
+
+    #[test]
+    fn rms_retention_defaults_allow_partial_configuration_and_explicit_overrides() {
+        check_values(
+            [
+                Check {
+                    scenario: "no RMS table",
+                    input: None,
+                    expect: 100_000,
+                },
+                Check {
+                    scenario: "partial RMS table",
+                    input: Some("version_string = 'custom'"),
+                    expect: 100_000,
+                },
+                Check {
+                    scenario: "explicit count target",
+                    input: Some("max_terminal_jobs = 17"),
+                    expect: 17,
+                },
+            ],
+            |rms_table| {
+                let mut table = toml::Table::try_from(rack_config()).unwrap();
+                table.remove("rms_mock");
+                if let Some(rms_table) = rms_table {
+                    table.insert(
+                        "rms_mock".to_string(),
+                        toml::Value::Table(toml::from_str(rms_table).unwrap()),
+                    );
+                }
+                let config: MachineATronConfig = table.try_into().unwrap();
+                assert_eq!(config.rms_mock.min_terminal_retention_secs, 3_600);
+                config.rms_mock.max_terminal_jobs
+            },
+        );
     }
 
     #[test]

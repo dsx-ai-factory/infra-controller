@@ -32,6 +32,7 @@ use librms::protos::rack_manager::{
 use librms::protos::rack_manager_v2::ConfigureScaleUpFabricManagerRequest;
 use librms::protos::rack_manager_v2::rack_manager_v2_client::RackManagerV2Client;
 use mat_protocol_gateway::{ExitReason, RMS_VERSION};
+use rms_mock::RmsMockConfig;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tonic::Code;
@@ -459,6 +460,81 @@ async fn rms_requests_are_routed_by_rack_and_batches_split_across_instances_are_
         "{status}"
     );
 
+    shutdown.cancel();
+    assert_eq!(finished(running).await, ExitReason::Shutdown);
+}
+
+/// A known gateway id cannot turn a backend's missing job into completion,
+/// whether it names one backend or an aggregate whose other part still exists.
+#[tokio::test]
+async fn known_gateway_jobs_preserve_backend_not_found() {
+    let mat_a = FakeMachineATron::start_with_rms(
+        "mat-a",
+        &[GUID_A],
+        &["rack-001"],
+        devices_a(),
+        RmsMockConfig {
+            max_terminal_jobs: 0,
+            min_terminal_retention_secs: 0,
+            ..RmsMockConfig::default()
+        },
+    )
+    .await;
+    let mat_b =
+        FakeMachineATron::start_with_racks("mat-b", &[GUID_B], &["rack-002"], devices_b()).await;
+    let controller = FakeController::new(vec![mat_a.source(), mat_b.source()], 1);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listen = listener.local_addr().unwrap();
+    let shutdown = CancellationToken::new();
+    let running = spawn_run(
+        gateway_config(controller.serve().await, listen),
+        shutdown.clone(),
+        listener,
+    );
+    wait_until_ready(&reqwest::Client::new(), listen).await;
+    let mut rms = rms_client(listen).await;
+    let mut jobs = Vec::new();
+    for switches in [
+        vec![node("s1", "rack-001", SWITCH_A)],
+        vec![
+            node("s1", "rack-001", SWITCH_A),
+            node("s2", "rack-002", SWITCH_B),
+        ],
+    ] {
+        let batch = rms
+            .configure_switch_certificate(certificate_batch(switches))
+            .await
+            .unwrap()
+            .into_inner();
+        let job_id = batch.response.unwrap().job_id;
+        assert!(job_id.starts_with("gw-"));
+        for expected in [JobExecutionState::Running, JobExecutionState::Completed] {
+            let response = rms
+                .get_job_status(GetJobStatusRequest {
+                    job_id: job_id.clone(),
+                    include_child_job_states: true,
+                })
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(response.job_states[0].execution_state, expected as i32);
+        }
+        jobs.push(job_id);
+    }
+    // mat-a immediately evicts terminal records, but gateway mappings remain
+    // present and mat-b still retains the aggregate's other completed part.
+    for job_id in jobs {
+        let status = rms
+            .get_job_status(GetJobStatusRequest {
+                job_id,
+                include_child_job_states: true,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), Code::NotFound);
+        assert!(status.message().contains("mat-a"), "{status}");
+        assert!(status.message().contains("not found"), "{status}");
+    }
     shutdown.cancel();
     assert_eq!(finished(running).await, ExitReason::Shutdown);
 }

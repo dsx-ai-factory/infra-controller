@@ -259,6 +259,16 @@ impl DeviceHandle {
         }
     }
 
+    /// Restores a switch's NVOS factory credentials without resetting its BMC.
+    pub(crate) fn reset_nvos(&self) -> eyre::Result<()> {
+        match &self.0 {
+            DeviceHandleInner::Switch(handle) => handle.reset_nvos(),
+            DeviceHandleInner::Machine(_) | DeviceHandleInner::PowerShelf(_) => {
+                eyre::bail!("only a switch has an NVOS to reset")
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn for_control_test(dpus: Vec<DpuMachineHandle>, ipmi_port: Option<u16>) -> Self {
         Self::machine(MachineHandle::for_control_test(dpus, ipmi_port))
