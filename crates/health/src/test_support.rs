@@ -19,10 +19,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::HealthError;
-use crate::collectors::catalogue_samples;
+use crate::collectors::{catalogue_samples, emit_catalogue_samples};
 use crate::config::MetricsConfig;
 use crate::endpoint::BmcAddr;
 use crate::metrics::MetricsManager;
@@ -33,12 +33,16 @@ use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample, Promethe
 /// `hardware_metric_exposition` exports source fixtures through `PrometheusSink`
 /// and checks Prometheus and OTLP metadata separately.
 /// The returned text feeds the generated catalogue in `test_integration`.
-/// Redfish decoding and exporter failures return `HealthError`. Unexpected
-/// source families or exporter metadata panic.
+/// Metrics setup, Redfish decoding and forwarding, and text export failures
+/// return `HealthError`. Inventory or exporter metadata mismatches panic,
+/// including missing gNMI samples after logged sink failures.
 pub fn hardware_metric_exposition() -> Result<String, HealthError> {
     let prefix = MetricsConfig::default().prefix;
     let manager = Arc::new(MetricsManager::new(&prefix)?);
-    let sink = PrometheusSink::new(manager.clone(), &prefix)?;
+    let sink = Arc::new(CatalogueSink {
+        prometheus: PrometheusSink::new(manager.clone(), &prefix)?,
+        samples: Mutex::default(),
+    });
     let context = EventContext {
         endpoint_key: "catalogue".to_string(),
         addr: BmcAddr {
@@ -52,13 +56,18 @@ pub fn hardware_metric_exposition() -> Result<String, HealthError> {
         labels: Default::default(),
     };
 
-    let samples = catalogue_samples()?
-        .into_iter()
-        .map(|sample| (context.clone(), sample))
-        .collect::<Vec<_>>();
-    for (context, sample) in &samples {
-        sink.try_handle_event(context, &CollectorEvent::Metric(Box::new(sample.clone())))?;
+    for sample in catalogue_samples()? {
+        sink.try_handle_event(&context, &CollectorEvent::Metric(Box::new(sample)))?;
     }
+    emit_catalogue_samples(
+        sink.clone(),
+        EventContext {
+            collector_type: "nvue_gnmi",
+            ..context
+        },
+    );
+
+    let samples = sink.samples.lock().expect("catalogue samples mutex");
     let name = |sample: &MetricSample| {
         format!(
             "{prefix}_{}_{}_{}",
@@ -117,6 +126,34 @@ pub fn hardware_metric_exposition() -> Result<String, HealthError> {
     Ok(exposition)
 }
 
+/// `CatalogueSink` forwards samples to Prometheus and retains accepted samples
+/// for source inventory and exporter checks.
+struct CatalogueSink {
+    prometheus: PrometheusSink,
+    samples: Mutex<Vec<(EventContext, MetricSample)>>,
+}
+
+impl DataSink for CatalogueSink {
+    fn sink_type(&self) -> &'static str {
+        "catalogue"
+    }
+
+    fn try_handle_event(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+    ) -> Result<(), HealthError> {
+        self.prometheus.try_handle_event(context, event)?;
+        if let CollectorEvent::Metric(sample) = event {
+            self.samples
+                .lock()
+                .expect("catalogue samples mutex")
+                .push((context.clone(), sample.as_ref().clone()));
+        }
+        Ok(())
+    }
+}
+
 fn assert_prometheus_family(exposition: &str, name: &str, ty: &str, help: &str) {
     assert!(
         exposition
@@ -138,7 +175,7 @@ fn assert_prometheus_family(exposition: &str, name: &str, ty: &str, help: &str) 
     );
 }
 
-const EXPECTED_SOURCE_NAMES: [&str; 14] = [
+const EXPECTED_SOURCE_NAMES: [&str; 31] = [
     "hw_metric_pcie_correctable_errors_count",
     "hw_metric_pcie_non_fatal_errors_count",
     "hw_metric_pcie_fatal_errors_count",
@@ -153,4 +190,21 @@ const EXPECTED_SOURCE_NAMES: [&str; 14] = [
     "hw_metric_pcie_flow_control_timeout_count",
     "hw_metric_power_limit_throttle_seconds",
     "hw_metric_thermal_limit_throttle_seconds",
+    "nvue_gnmi_interface_in_errors_count",
+    "nvue_gnmi_interface_out_errors_count",
+    "nvue_gnmi_interface_out_discards_count",
+    "nvue_gnmi_interface_in_octets_bytes",
+    "nvue_gnmi_interface_out_octets_bytes",
+    "nvue_gnmi_interface_in_packets_count",
+    "nvue_gnmi_interface_out_packets_count",
+    "nvue_gnmi_interface_link_downed_count",
+    "nvue_gnmi_interface_link_error_recovery_count",
+    "nvue_gnmi_interface_rcv_remote_physical_errors_count",
+    "nvue_gnmi_interface_rcv_switch_relay_errors_count",
+    "nvue_gnmi_interface_rcv_constraint_errors_count",
+    "nvue_gnmi_interface_local_link_integrity_errors_count",
+    "nvue_gnmi_interface_port_buffer_overrun_errors_count",
+    "nvue_gnmi_interface_qp1_dropped_count",
+    "nvue_gnmi_interface_vl15_dropped_count",
+    "nvue_gnmi_interface_port_xmit_wait_count",
 ];
