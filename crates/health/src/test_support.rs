@@ -27,8 +27,10 @@ use crate::config::MetricsConfig;
 use crate::endpoint::BmcAddr;
 use crate::metrics::MetricsManager;
 use crate::otlp::convert::build_metrics_export_request;
-use crate::otlp::metrics::metric;
-use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample, PrometheusSink};
+use crate::otlp::metrics::{AggregationTemporality, metric};
+use crate::sink::{
+    CollectorEvent, DataSink, EventContext, MetricSample, MetricSemantics, PrometheusSink,
+};
 
 /// `hardware_metric_exposition` exports source fixtures through `PrometheusSink`
 /// and checks Prometheus and OTLP metadata separately.
@@ -87,7 +89,7 @@ pub fn hardware_metric_exposition() -> Result<String, HealthError> {
         .flat_map(|scope| &scope.metrics)
         .map(|metric| (metric.name.as_str(), metric))
         .collect::<BTreeMap<_, _>>();
-    let expected_metric_count = samples.len();
+    let mut expected_metric_count = samples.len();
 
     for (_, sample) in samples.iter() {
         let legacy_name = name(sample);
@@ -104,6 +106,31 @@ pub fn hardware_metric_exposition() -> Result<String, HealthError> {
             panic!("{legacy_name} must remain an OTLP gauge");
         };
         assert_eq!(gauge.data_points.len(), 1, "{legacy_name}");
+
+        if let MetricSemantics::CumulativeCounter { description, .. } = sample.semantics {
+            assert!(!description.trim().is_empty(), "{legacy_name}");
+            let alias_name = format!("{legacy_name}_total");
+            assert_prometheus_family(&exposition, &alias_name, "counter", description);
+            let counter = otlp_metrics[alias_name.as_str()];
+            assert_eq!(counter.description, description, "{alias_name}");
+            assert_eq!(counter.unit, sample.unit, "{alias_name}");
+            let Some(metric::Data::Sum(sum)) = &counter.data else {
+                panic!("{alias_name} must be an OTLP sum");
+            };
+            assert_eq!(sum.data_points.len(), 1, "{alias_name}");
+            assert_eq!(sum.data_points[0].start_time_unix_nano, 0, "{alias_name}");
+            assert_eq!(
+                sum.data_points[0].attributes,
+                gauge.data_points[0].attributes
+            );
+            assert!(sum.is_monotonic, "{alias_name}");
+            assert_eq!(
+                sum.aggregation_temporality,
+                AggregationTemporality::Cumulative as i32,
+                "{alias_name}",
+            );
+            expected_metric_count += 1;
+        }
     }
 
     assert_eq!(otlp_metrics.len(), expected_metric_count);

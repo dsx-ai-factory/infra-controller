@@ -35,12 +35,23 @@ use crate::collectors::inventory::{DiscoveredEntity, SharedInventory};
 use crate::collectors::runtime::{IterationResult, PeriodicCollector};
 use crate::endpoint::BmcEndpoint;
 use crate::metrics::MetricLabel;
-use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample};
+use crate::sink::MetricSemantics::Gauge;
+use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample, MetricSemantics};
+
+// Redfish `PCIeErrors` does not report when counting began, so leave
+// `start_time` unknown; collector startup does not establish it.
+fn device_total(description: &'static str) -> MetricSemantics {
+    MetricSemantics::CumulativeCounter {
+        description,
+        start_time: None,
+    }
+}
 
 struct MetricField {
     metric_type: Cow<'static, str>,
     unit: &'static str,
     value: f64,
+    semantics: MetricSemantics,
 }
 
 impl MetricField {
@@ -51,21 +62,26 @@ impl MetricField {
             metric_type: self.metric_type.into_owned(),
             unit: self.unit.to_string(),
             value: self.value,
-            semantics: crate::sink::MetricSemantics::Gauge,
+            semantics: self.semantics,
             labels,
             context: None,
         }
     }
 }
 
-/// Push a scalar `Option<Option<T: Into<f64>>>` field if present
+/// Push a scalar `Option<Option<T>>` field if present, defaulting to `Gauge`
+/// unless a `MetricSemantics` argument is supplied.
 macro_rules! scalar {
     ($out:expr, $src:expr, $field:ident, $mt:literal, $unit:literal) => {
+        scalar!($out, $src, $field, $mt, $unit, Gauge);
+    };
+    ($out:expr, $src:expr, $field:ident, $mt:literal, $unit:literal, $semantics:expr) => {
         if let Some(Some(value)) = $src.$field {
             $out.push(MetricField {
                 metric_type: Cow::Borrowed($mt),
                 unit: $unit,
                 value: value as f64,
+                semantics: $semantics,
             });
         }
     };
@@ -86,6 +102,7 @@ macro_rules! excerpt {
                         metric_type: Cow::Borrowed($mt),
                         unit: $unit,
                         value,
+                        semantics: Gauge,
                     });
                 }
             }
@@ -101,6 +118,7 @@ macro_rules! duration_seconds {
                 metric_type: Cow::Borrowed($mt),
                 unit: "seconds",
                 value: duration.as_f64_seconds(),
+                semantics: Gauge,
             });
         }
     };
@@ -117,59 +135,113 @@ macro_rules! boolean {
                 metric_type: Cow::Borrowed($mt),
                 unit: "bool",
                 value: if value { 1.0 } else { 0.0 },
+                semantics: Gauge,
             });
         }
     };
 }
 
 fn pcie_error_fields(out: &mut Vec<MetricField>, pcie: &PcieErrors) {
+    // Redfish defines these properties as total event counts.
     scalar!(
         out,
         pcie,
         correctable_error_count,
         "pcie_correctable_errors",
-        "count"
+        "count",
+        device_total("Number of PCIe correctable errors reported by the device")
     );
     scalar!(
         out,
         pcie,
         non_fatal_error_count,
         "pcie_non_fatal_errors",
-        "count"
+        "count",
+        device_total("Number of PCIe non-fatal errors reported by the device")
     );
-    scalar!(out, pcie, fatal_error_count, "pcie_fatal_errors", "count");
+    scalar!(
+        out,
+        pcie,
+        fatal_error_count,
+        "pcie_fatal_errors",
+        "count",
+        device_total("Number of PCIe fatal errors reported by the device")
+    );
     scalar!(
         out,
         pcie,
         l0to_recovery_count,
         "pcie_l0_to_recovery",
-        "count"
+        "count",
+        device_total("Number of PCIe link transitions from L0 to recovery for the device")
     );
-    scalar!(out, pcie, replay_count, "pcie_replay", "count");
+    scalar!(
+        out,
+        pcie,
+        replay_count,
+        "pcie_replay",
+        "count",
+        device_total("Number of PCIe replays issued by the device")
+    );
     scalar!(
         out,
         pcie,
         replay_rollover_count,
         "pcie_replay_rollover",
-        "count"
+        "count",
+        device_total("Number of PCIe replay rollovers issued by the device")
     );
-    scalar!(out, pcie, nak_sent_count, "pcie_nak_sent", "count");
-    scalar!(out, pcie, nak_received_count, "pcie_nak_received", "count");
+    scalar!(
+        out,
+        pcie,
+        nak_sent_count,
+        "pcie_nak_sent",
+        "count",
+        device_total("Number of PCIe negative acknowledgements sent by the device")
+    );
+    scalar!(
+        out,
+        pcie,
+        nak_received_count,
+        "pcie_nak_received",
+        "count",
+        device_total("Number of PCIe negative acknowledgements received by the device")
+    );
     scalar!(
         out,
         pcie,
         unsupported_request_count,
         "pcie_unsupported_request",
-        "count"
+        "count",
+        device_total("Number of unsupported PCIe requests received by the device")
     );
-    scalar!(out, pcie, bad_tlp_count, "pcie_bad_tlp", "count");
-    scalar!(out, pcie, bad_dllp_count, "pcie_bad_dllp", "count");
+    scalar!(
+        out,
+        pcie,
+        bad_tlp_count,
+        "pcie_bad_tlp",
+        "count",
+        device_total(
+            "Number of bad PCIe transaction layer packets issued on the PCIe link by the receiver"
+        )
+    );
+    scalar!(
+        out,
+        pcie,
+        bad_dllp_count,
+        "pcie_bad_dllp",
+        "count",
+        device_total(
+            "Number of bad PCIe data link layer packets issued on the PCIe link by the receiver"
+        )
+    );
     scalar!(
         out,
         pcie,
         flow_control_timeout_errors,
         "pcie_flow_control_timeout",
-        "count"
+        "count",
+        device_total("Number of PCIe flow control credit timeouts reported by the device")
     );
 }
 
@@ -514,6 +586,7 @@ macro_rules! nvidia_common_processor_fields {
                 metric_type: Cow::Borrowed("nvidia_throttle_reasons"),
                 unit: "count",
                 value: active as f64,
+                semantics: Gauge,
             });
         }
     }};
@@ -546,6 +619,7 @@ fn nvidia_processor_metric_fields(m: &NvidiaProcessorMetrics) -> Vec<MetricField
             metric_type: Cow::Borrowed("nvidia_integer_activity_utilization"),
             unit: "percent",
             value,
+            semantics: Gauge,
         });
     }
 
@@ -701,6 +775,7 @@ fn nvidia_memory_metric_fields(m: &NvidiaMemoryMetrics) -> Vec<MetricField> {
                     metric_type: Cow::Borrowed($mt),
                     unit: "count",
                     value: value as f64,
+                    semantics: Gauge,
                 });
             }
         };
@@ -1053,7 +1128,114 @@ mod tests {
     use crate::collectors::inventory::EntityInventory;
     use crate::collectors::projection_test_support::{ProjectionFixture, TestBmc, TestEntity};
     use crate::endpoint::test_support::{mac, test_endpoint};
-    use crate::sink::MetricSemantics;
+
+    #[test]
+    fn source_totals_stay_absolute_in_prometheus_and_otlp_conversion() {
+        use crate::metrics::MetricsManager;
+        use crate::otlp::convert::build_metrics_export_request;
+        use crate::otlp::metrics::{metric, number_data_point};
+        use crate::sink::PrometheusSink;
+
+        let manager = Arc::new(MetricsManager::new("service").expect("metrics manager"));
+        let sink = PrometheusSink::new(manager.clone(), "custom").expect("Prometheus sink");
+        let context = EventContext::from_endpoint(
+            &test_endpoint(mac("00:11:22:33:44:55")),
+            "metrics_collector",
+        );
+        const PCIE_COUNTER: &str = "custom_hw_metric_pcie_correctable_errors_count_total";
+        const PCIE_GAUGE: &str = "custom_hw_metric_pcie_correctable_errors_count";
+        const BANDWIDTH_GAUGE: &str = "custom_hw_metric_bandwidth_percent";
+
+        // One persistent Prometheus sink and stateless OTLP conversion preserve
+        // repeated totals, decreases, and later increases without adding offsets.
+        for (step, total, bandwidth) in [
+            ("initial", 10, 9),
+            ("repeated", 10, 8),
+            ("increased", 13, 7),
+            ("lower", 2, 6),
+            ("zero", 0, 5),
+            ("increased from zero", 1, 4),
+        ] {
+            let source = serde_json::from_value(json!({
+                "@odata.id": "/redfish/v1/Systems/1/Processors/CPU0/ProcessorMetrics",
+                "Id": "ProcessorMetrics",
+                "Name": "Processor Metrics",
+                "BandwidthPercent": bandwidth,
+                "PCIeErrors": { "CorrectableErrorCount": total }
+            }))
+            .expect("processor metrics");
+            let batch: Vec<_> = processor_metric_fields(&source)
+                .into_iter()
+                .map(|field| {
+                    let sample = field.into_sample(
+                        "CPU0",
+                        vec![(Cow::Borrowed("processor_id"), "CPU0".to_string())],
+                    );
+                    (context.clone(), sample)
+                })
+                .collect();
+            sink.try_handle_event(&context, &CollectorEvent::MetricCollectionStart)
+                .expect("start metric collection");
+            for (context, sample) in &batch {
+                sink.try_handle_event(context, &CollectorEvent::Metric(sample.clone().into()))
+                    .expect("record source sample");
+            }
+            sink.try_handle_event(&context, &CollectorEvent::MetricCollectionEnd)
+                .expect("end metric collection");
+
+            let prometheus = manager.export_telemetry().expect("export telemetry");
+            for (name, kind, value) in [
+                (PCIE_GAUGE, "gauge", total),
+                (PCIE_COUNTER, "counter", total),
+                (BANDWIDTH_GAUGE, "gauge", bandwidth),
+            ] {
+                assert!(
+                    prometheus.contains(&format!("# TYPE {name} {kind}\n")),
+                    "{step}: {name} type"
+                );
+                let row = prometheus
+                    .lines()
+                    .find(|line| line.starts_with(&format!("{name}{{")))
+                    .expect("metric row");
+                assert_eq!(
+                    row.rsplit_once(' ').expect("metric value").1,
+                    value.to_string(),
+                    "{step}: {name} value"
+                );
+            }
+
+            let request = build_metrics_export_request(&batch, 100, "custom");
+            let metrics = &request.resource_metrics[0].scope_metrics[0].metrics;
+            assert_eq!(metrics.len(), 3, "{step}: OTLP metric count");
+            for (name, value) in [
+                (PCIE_GAUGE, total),
+                (PCIE_COUNTER, total),
+                (BANDWIDTH_GAUGE, bandwidth),
+            ] {
+                let exported = metrics
+                    .iter()
+                    .find(|metric| metric.name == name)
+                    .expect("OTLP metric");
+                let points = match exported.data.as_ref().expect("metric data") {
+                    metric::Data::Sum(sum) => {
+                        assert_eq!(name, PCIE_COUNTER, "{step}: OTLP Sum");
+                        &sum.data_points
+                    }
+                    metric::Data::Gauge(gauge) => {
+                        assert_ne!(name, PCIE_COUNTER, "{step}: OTLP Gauge");
+                        &gauge.data_points
+                    }
+                    _ => panic!("unexpected metric type"),
+                };
+                assert_eq!(points.len(), 1, "{step}: {name} point count");
+                assert_eq!(
+                    points[0].value,
+                    Some(number_data_point::Value::AsDouble(value as f64)),
+                    "{step}: {name} OTLP value"
+                );
+            }
+        }
+    }
 
     #[derive(Clone, Copy)]
     enum Projection {
@@ -1074,7 +1256,30 @@ mod tests {
         metrics: serde_json::Value,
     }
 
-    type ProjectedMetric = (String, &'static str, f64);
+    const COUNTER: MetricSemantics = MetricSemantics::CumulativeCounter {
+        description: "",
+        start_time: None,
+    };
+
+    // Compare classifications independently of HELP wording; the catalogue
+    // check verifies that descriptions propagate unchanged.
+    fn observed_semantics(semantics: MetricSemantics) -> MetricSemantics {
+        match semantics {
+            Gauge => Gauge,
+            MetricSemantics::CumulativeCounter {
+                description,
+                start_time,
+            } => {
+                assert!(!description.is_empty(), "counter description");
+                MetricSemantics::CumulativeCounter {
+                    description: "",
+                    start_time,
+                }
+            }
+        }
+    }
+
+    type ProjectedMetric = (String, &'static str, f64, MetricSemantics);
 
     fn sort_projected_metrics(mut fields: Vec<ProjectedMetric>) -> Vec<ProjectedMetric> {
         fields.sort_by(|left, right| {
@@ -1123,7 +1328,14 @@ mod tests {
         sort_projected_metrics(
             fields
                 .into_iter()
-                .map(|field| (field.metric_type.into_owned(), field.unit, field.value))
+                .map(|field| {
+                    (
+                        field.metric_type.into_owned(),
+                        field.unit,
+                        field.value,
+                        observed_semantics(field.semantics),
+                    )
+                })
                 .collect(),
         )
     }
@@ -1131,10 +1343,22 @@ mod tests {
     fn expected(
         fields: impl IntoIterator<Item = (&'static str, &'static str, f64)>,
     ) -> Vec<ProjectedMetric> {
+        expected_with_semantics(
+            fields
+                .into_iter()
+                .map(|(metric_type, unit, value)| (metric_type, unit, value, Gauge)),
+        )
+    }
+
+    fn expected_with_semantics(
+        fields: impl IntoIterator<Item = (&'static str, &'static str, f64, MetricSemantics)>,
+    ) -> Vec<ProjectedMetric> {
         sort_projected_metrics(
             fields
                 .into_iter()
-                .map(|(metric_type, unit, value)| (metric_type.to_string(), unit, value))
+                .map(|(metric_type, unit, value, semantics)| {
+                    (metric_type.to_string(), unit, value, semantics)
+                })
                 .collect(),
         )
     }
@@ -1163,15 +1387,15 @@ mod tests {
                             "ThermalLimitThrottleDuration": "PT1M30S"
                         }),
                     },
-                    expect: expected([
-                        ("bandwidth", "percent", 42.5),
-                        ("operating_speed", "mhz", 3200.0),
-                        ("correctable_core_errors", "count", 7.0),
-                        ("uncorrectable_core_errors", "count", 0.0),
-                        ("power_limit_throttle", "seconds", 0.0),
-                        ("thermal_limit_throttle", "seconds", 90.0),
-                        ("pcie_correctable_errors", "count", 3.0),
-                        ("pcie_fatal_errors", "count", 1.0),
+                    expect: expected_with_semantics([
+                        ("bandwidth", "percent", 42.5, Gauge),
+                        ("operating_speed", "mhz", 3200.0, Gauge),
+                        ("correctable_core_errors", "count", 7.0, Gauge),
+                        ("uncorrectable_core_errors", "count", 0.0, Gauge),
+                        ("power_limit_throttle", "seconds", 0.0, Gauge),
+                        ("thermal_limit_throttle", "seconds", 90.0, Gauge),
+                        ("pcie_correctable_errors", "count", 3.0, COUNTER),
+                        ("pcie_fatal_errors", "count", 1.0, COUNTER),
                     ]),
                 },
                 Check {
@@ -1236,28 +1460,28 @@ mod tests {
                             }
                         }),
                     },
-                    expect: expected([
-                        ("average_frequency", "mhz", 2800.5),
-                        ("throttling", "celsius", 95.0),
-                        ("temperature", "celsius", 65.0),
-                        ("consumed_power", "watts", 250.0),
-                        ("frequency_ratio", "ratio", 0.75),
-                        ("local_memory_bandwidth", "bytes", 1000.0),
-                        ("remote_memory_bandwidth", "bytes", 2000.0),
-                        ("kernel_time", "percent", 4.5),
-                        ("user_time", "percent", 10.5),
-                        ("correctable_other_errors", "count", 2.0),
-                        ("uncorrectable_other_errors", "count", 3.0),
-                        ("pcie_non_fatal_errors", "count", 1.0),
-                        ("pcie_l0_to_recovery", "count", 2.0),
-                        ("pcie_replay", "count", 3.0),
-                        ("pcie_replay_rollover", "count", 4.0),
-                        ("pcie_nak_sent", "count", 5.0),
-                        ("pcie_nak_received", "count", 6.0),
-                        ("pcie_unsupported_request", "count", 7.0),
-                        ("pcie_bad_tlp", "count", 8.0),
-                        ("pcie_bad_dllp", "count", 9.0),
-                        ("pcie_flow_control_timeout", "count", 10.0),
+                    expect: expected_with_semantics([
+                        ("average_frequency", "mhz", 2800.5, Gauge),
+                        ("throttling", "celsius", 95.0, Gauge),
+                        ("temperature", "celsius", 65.0, Gauge),
+                        ("consumed_power", "watts", 250.0, Gauge),
+                        ("frequency_ratio", "ratio", 0.75, Gauge),
+                        ("local_memory_bandwidth", "bytes", 1000.0, Gauge),
+                        ("remote_memory_bandwidth", "bytes", 2000.0, Gauge),
+                        ("kernel_time", "percent", 4.5, Gauge),
+                        ("user_time", "percent", 10.5, Gauge),
+                        ("correctable_other_errors", "count", 2.0, Gauge),
+                        ("uncorrectable_other_errors", "count", 3.0, Gauge),
+                        ("pcie_non_fatal_errors", "count", 1.0, COUNTER),
+                        ("pcie_l0_to_recovery", "count", 2.0, COUNTER),
+                        ("pcie_replay", "count", 3.0, COUNTER),
+                        ("pcie_replay_rollover", "count", 4.0, COUNTER),
+                        ("pcie_nak_sent", "count", 5.0, COUNTER),
+                        ("pcie_nak_received", "count", 6.0, COUNTER),
+                        ("pcie_unsupported_request", "count", 7.0, COUNTER),
+                        ("pcie_bad_tlp", "count", 8.0, COUNTER),
+                        ("pcie_bad_dllp", "count", 9.0, COUNTER),
+                        ("pcie_flow_control_timeout", "count", 10.0, COUNTER),
                     ]),
                 },
                 Check {

@@ -139,17 +139,29 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_gpus_usable_count</td><td>gauge</td><td>Number of remaining GPUs in the NICo deployment available for immediate instance creation</td></tr>
 <tr><td>carbide_hardware_health_component_inventory_info</td><td>gauge</td><td>Authoritative NICo component inventory for the current rack-ingestion session</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_pcie_bad_dllp_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_bad_dllp_count_total</td><td>counter</td><td>Number of bad PCIe data link layer packets issued on the PCIe link by the receiver</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_pcie_bad_tlp_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_bad_tlp_count_total</td><td>counter</td><td>Number of bad PCIe transaction layer packets issued on the PCIe link by the receiver</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_pcie_correctable_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_correctable_errors_count_total</td><td>counter</td><td>Number of PCIe correctable errors reported by the device</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_pcie_fatal_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_fatal_errors_count_total</td><td>counter</td><td>Number of PCIe fatal errors reported by the device</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_pcie_flow_control_timeout_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_flow_control_timeout_count_total</td><td>counter</td><td>Number of PCIe flow control credit timeouts reported by the device</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_pcie_l0_to_recovery_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_l0_to_recovery_count_total</td><td>counter</td><td>Number of PCIe link transitions from L0 to recovery for the device</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_pcie_nak_received_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_nak_received_count_total</td><td>counter</td><td>Number of PCIe negative acknowledgements received by the device</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_pcie_nak_sent_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_nak_sent_count_total</td><td>counter</td><td>Number of PCIe negative acknowledgements sent by the device</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_pcie_non_fatal_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_non_fatal_errors_count_total</td><td>counter</td><td>Number of PCIe non-fatal errors reported by the device</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_pcie_replay_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_replay_count_total</td><td>counter</td><td>Number of PCIe replays issued by the device</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_pcie_replay_rollover_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_replay_rollover_count_total</td><td>counter</td><td>Number of PCIe replay rollovers issued by the device</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_pcie_unsupported_request_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_pcie_unsupported_request_count_total</td><td>counter</td><td>Number of unsupported PCIe requests received by the device</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_power_limit_throttle_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_thermal_limit_throttle_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
 <tr><td>carbide_hardware_health_inventory_last_success_time_seconds</td><td>gauge</td><td>Unix timestamp of the last successful NICo inventory reconciliation</td></tr>
