@@ -60,6 +60,14 @@ fn uefi_creds(password: &str) -> Credentials {
 /// Build a Ready pool host on the shared Redfish sim and return its BMC MAC (the
 /// key for host UEFI rotation bookkeeping).
 async fn ready_host(env: &Env, pool: &PgPool) -> (TestManagedHost, MacAddress) {
+    ready_host_with_config(env, pool, ManagedHostConfig::default()).await
+}
+
+async fn ready_host_with_config(
+    env: &Env,
+    pool: &PgPool,
+    config: ManagedHostConfig,
+) -> (TestManagedHost, MacAddress) {
     let domain = env.test_harness.test_domain().await;
     let network_controller = env.test_harness.network_controller();
     let underlay_segment = network_controller.create_underlay_segment(&domain).await;
@@ -68,7 +76,7 @@ async fn ready_host(env: &Env, pool: &PgPool) -> (TestManagedHost, MacAddress) {
     let mh = env
         .test_harness
         .managed_host_builder(&site_explorer, underlay_segment)
-        .with_config(ManagedHostConfig::default())
+        .with_config(config)
         .build()
         .await
         .0;
@@ -98,6 +106,51 @@ async fn ready_host(env: &Env, pool: &PgPool) -> (TestManagedHost, MacAddress) {
         .mac
         .expect("fixture host should have a BMC MAC");
     (mh, host_mac)
+}
+
+#[sqlx_test]
+async fn lenovo_uefi_rotation_unlocks_and_restores_bmc_lockdown(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut env = Env::builder(pool.clone())
+        .configure_runtime(|c| c.uefi_rotation_enabled = true)
+        .build()
+        .await;
+    let (mh, mac) = ready_host_with_config(
+        &env,
+        &pool,
+        ManagedHostConfig {
+            vendor: Some(bmc_vendor::BMCVendor::Lenovo),
+            ..ManagedHostConfig::default()
+        },
+    )
+    .await;
+    stage_lagging_host_uefi(&env, &pool, mac).await?;
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Enabled);
+    env.run_single_iteration().await;
+    assert!(matches!(
+        mh.host.machine().await.state.value,
+        ManagedHostState::RotatingHostUefi { .. }
+    ));
+    env.run_single_iteration().await;
+    assert!(
+        env.redfish_sim
+            .lockdown_states()
+            .contains(&libredfish::EnabledDisabled::Disabled)
+    );
+    run_until_ready(&mut env, &mh).await;
+    assert!(
+        env.redfish_sim
+            .lockdown_states()
+            .iter()
+            .all(|state| *state == libredfish::EnabledDisabled::Enabled)
+    );
+    let status = device_rotation_status(&mut *pool.acquire().await?, HOST_UEFI, mac)
+        .await?
+        .unwrap();
+    assert!(status.converged);
+    Ok(())
 }
 
 /// Stage a site-wide host UEFI rotation to version 1 with the host lagging at the

@@ -421,13 +421,12 @@ async fn set_rotating_host_uefi_password(
     }
 }
 
-/// Re-enable the Dell BMC System Lockdown that the `UnlockHost` step disabled to
+/// Re-enable the BMC lockdown that the `UnlockHost` step disabled to
 /// apply the UEFI password, so a rotated host returns to `Ready` with the same
 /// lockdown posture it had before. Mirrors the unlock exactly -- `lockdown_bmc`,
-/// Dell only -- and honors the `disable_lockdown` host profile (a host
-/// configured to stay unlocked is left unlocked, matching the ingestion
-/// `WaitingForLockdown`/`SetLockdown` guard). Unlike the ingestion re-lock, BMC
-/// lockdown is a live manager attribute, so no reboot is required here.
+/// for BMCs that can lock BIOS settings -- and honors the `disable_lockdown`
+/// host profile (a host configured to stay unlocked is left unlocked, matching the ingestion
+/// `WaitingForLockdown`/`SetLockdown` guard).
 async fn reenable_host_bmc_lockdown_after_rotation(
     state: &ManagedHostStateSnapshot,
     redfish_client: &dyn Redfish,
