@@ -20,59 +20,32 @@
 //! site-health-probe runs synthetic probes against a NICo site's APIs and
 //! exposes the results as Prometheus metrics (issue #5360).
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the state readers are wired in later")
-)]
 mod api;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the state readers are wired in later")
-)]
 mod census;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the state readers are wired in later")
-)]
 mod clock;
 mod config;
+#[cfg(test)]
+mod e2e_tests;
 mod framework;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the state readers are wired in later")
-)]
 mod gate;
 mod logging;
 mod metrics;
-#[expect(dead_code, reason = "the state readers are wired in later")]
 mod nico;
 mod probes;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the state readers are wired in later")
-)]
 mod readers;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the state readers are wired in later")
-)]
 mod rest;
-#[expect(dead_code, reason = "the state readers are wired in later")]
 mod snapshot;
-#[expect(dead_code, reason = "the state readers are wired in later")]
+#[cfg(test)]
+mod soak_tests;
 mod state;
-#[expect(dead_code, reason = "the state readers are wired in later")]
 mod state_metrics;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the state readers are wired in later")
-)]
 mod store;
-#[expect(dead_code, reason = "the state readers are wired in later")]
 mod summary;
 
 use std::sync::Arc;
+use std::time::SystemTime;
 
+use carbide_site_health_probe_api::Family;
 use clap::Parser;
 use eyre::{WrapErr, eyre};
 use tokio::signal::unix::{SignalKind, signal};
@@ -103,6 +76,8 @@ async fn run() -> eyre::Result<()> {
     let cfg = config::Config::load(&args.config).wrap_err("configuration")?;
     let listen_addr = cfg.listen_addr()?;
 
+    let process_start = SystemTime::now();
+
     // The global meter stays unset on purpose: instrumented clients in linked
     // crates would otherwise add series beyond the probe's documented set.
     let metrics_setup = metrics_endpoint::new_metrics_setup("site-health-probe", "nico", false)?;
@@ -123,7 +98,32 @@ async fn run() -> eyre::Result<()> {
             )
             .build(),
     );
-    let enabled = build_probes(&cfg, &gates).wrap_err("build probes")?;
+    let store = Arc::new(state::store::SnapshotStore::new(&cfg.state.paging));
+    if cfg.state.enabled {
+        metrics_setup
+            .registry
+            .register(Box::new(state_metrics::StateCollector::new(
+                Arc::clone(&store),
+                process_start,
+                cfg.state.nico_api.host_read,
+            )))
+            .wrap_err("register state metrics")?;
+    }
+    let state_sink = Arc::new(state_metrics::CountingSink::new(
+        Arc::clone(&store),
+        &metrics_setup.meter,
+    ));
+
+    let mut enabled = build_probes(&cfg, &gates).wrap_err("build probes")?;
+    let (readers, families) = build_readers(
+        &cfg,
+        &gates,
+        state_sink,
+        Arc::clone(&store) as _,
+        process_start,
+    )
+    .wrap_err("build state readers")?;
+    enabled.extend(readers);
     if enabled.is_empty() {
         return Err(eyre!(
             "no probes enabled — refusing to run a monitor that monitors nothing"
@@ -132,11 +132,39 @@ async fn run() -> eyre::Result<()> {
     let names: Vec<&str> = enabled.iter().map(|p| p.name()).collect();
     tracing::info!(probes = ?names, metrics_listen = %listen_addr, "starting");
 
-    // Two shutdown stages: probes stop and drain first, the metrics endpoint
-    // last — so the final results of a shutdown still land in /metrics-served
-    // state for as long as the endpoint lives.
+    // Three shutdown stages: probes and readers stop and drain first, then
+    // the /v1 API, the metrics endpoint last — so the final results of a
+    // shutdown still land in /metrics-served state for as long as the
+    // endpoint lives.
     let stop_probes = CancellationToken::new();
+    let stop_api = CancellationToken::new();
     let stop_server = CancellationToken::new();
+
+    let mut api_server = if cfg.state.enabled {
+        let api_addr = cfg.api_listen_addr()?;
+        let listener = bind(api_addr).await.wrap_err("bind the /v1 API")?;
+        tracing::info!(api_listen = %listener.local_addr()?, "serving /v1");
+        let metrics_store = store::PromStore::new(
+            rest::client::new_http_client("")?,
+            &cfg.state.metrics_store.url,
+            Arc::clone(&gates.metrics_store),
+        )?;
+        let summaries = summary::SummaryState::new(
+            Arc::new(metrics_store),
+            &cfg.state.metrics_store,
+            Arc::new(clock::now),
+        );
+        let router =
+            api::router(api::ApiState::new(Arc::clone(&store), &cfg.state).with_summary(summaries));
+        let stop_api = stop_api.clone();
+        Some(tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(stop_api.cancelled_owned())
+                .await
+        }))
+    } else {
+        None
+    };
 
     let mut server = tokio::spawn({
         let endpoint_config = metrics_endpoint::MetricsEndpointConfig {
@@ -158,12 +186,24 @@ async fn run() -> eyre::Result<()> {
     let (results, loops) = framework::start(enabled, stop_probes.clone());
     let mut scheduler = tokio::spawn(framework::join_loops(loops));
     let collector = tokio::spawn(framework::collect(results, sink));
-    metrics_setup.health_controller.set_ready(true);
+    // With state readers on, the pod is ready once each has published one
+    // complete sweep of every family, and it stays ready: a later failed
+    // read keeps that family's last snapshot.
+    let readiness = tokio::spawn({
+        let health = metrics_setup.health_controller.clone();
+        let all_ready = store.wait_all_ready(&families);
+        async move {
+            all_ready.await;
+            health.set_ready(true);
+            tracing::info!("ready");
+        }
+    });
 
     let mut sigterm = signal(SignalKind::terminate()).wrap_err("install SIGTERM handler")?;
     let mut sigint = signal(SignalKind::interrupt()).wrap_err("install SIGINT handler")?;
 
     let mut scheduler_ended = false;
+    let mut api_ended = false;
     let mut server_ended = false;
     let failure = tokio::select! {
         _ = sigterm.recv() => None,
@@ -177,6 +217,19 @@ async fn run() -> eyre::Result<()> {
                 Err(err) => eyre!("probe supervisor task: {err}"),
             })
         }
+        joined = async {
+            match api_server.as_mut() {
+                Some(task) => task.await,
+                None => std::future::pending().await,
+            }
+        } => {
+            api_ended = true;
+            Some(match joined {
+                Ok(Ok(())) => eyre!("/v1 API server exited unexpectedly"),
+                Ok(Err(err)) => eyre!("/v1 API server: {err}"),
+                Err(err) => eyre!("/v1 API server task: {err}"),
+            })
+        }
         joined = &mut server => {
             server_ended = true;
             Some(match joined {
@@ -188,10 +241,11 @@ async fn run() -> eyre::Result<()> {
     };
 
     // Shutdown in dependency order: probes stop and drain first, then the
-    // endpoint is cancelled and joined, so the final results still land in
-    // served /metrics state and no task is left mid-shutdown. Tasks that
-    // already ended in the select above must not be polled again.
+    // API, then the endpoint is cancelled and joined, so the final results
+    // still land in served /metrics state and no task is left mid-shutdown.
+    // Tasks that already ended in the select above must not be polled again.
     tracing::info!("shutting down");
+    readiness.abort();
     metrics_setup.health_controller.set_ready(false);
     stop_probes.cancel();
     let mut shutdown: eyre::Result<()> = Ok(());
@@ -208,6 +262,17 @@ async fn run() -> eyre::Result<()> {
     {
         shutdown = Err(eyre!("collector task: {err}"));
     }
+    stop_api.cancel();
+    if !api_ended
+        && let Some(task) = api_server
+        && let Err(err) = task
+            .await
+            .map_err(|e| eyre!("/v1 API server task: {e}"))
+            .and_then(|joined| joined.map_err(|e| eyre!("/v1 API server shutdown: {e}")))
+        && shutdown.is_ok()
+    {
+        shutdown = Err(err);
+    }
     stop_server.cancel();
     if !server_ended
         && let Err(err) = server
@@ -222,6 +287,20 @@ async fn run() -> eyre::Result<()> {
     match failure {
         Some(err) => Err(err),
         None => shutdown,
+    }
+}
+
+/// Binds the /v1 API. A bare-port address is the IPv6 wildcard, which falls
+/// back to IPv4 where the node has no IPv6, like the metrics listener.
+async fn bind(addr: std::net::SocketAddr) -> eyre::Result<tokio::net::TcpListener> {
+    match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => Ok(listener),
+        Err(err) if addr.ip() == std::net::Ipv6Addr::UNSPECIFIED => {
+            tracing::warn!(error = %err, "no IPv6 wildcard, binding IPv4");
+            let v4 = std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, addr.port()));
+            Ok(tokio::net::TcpListener::bind(v4).await?)
+        }
+        Err(err) => Err(err.into()),
     }
 }
 
@@ -253,6 +332,70 @@ fn build_probes(
         )?));
     }
     Ok(out)
+}
+
+/// A set of scheduled probes and readers.
+type ProbeSet = Vec<Arc<dyn framework::Probe>>;
+
+/// Builds the enabled state readers, publishing into `sink`, starts their
+/// families' sweep counters at 0 and lists the families readiness waits for. Each API's readers share its gate with the
+/// latency probes.
+fn build_readers(
+    cfg: &config::Config,
+    gates: &gate::Gates,
+    sink: Arc<state_metrics::CountingSink>,
+    census: Arc<dyn snapshot::CensusView>,
+    process_start: SystemTime,
+) -> eyre::Result<(ProbeSet, Vec<Family>)> {
+    use readers::devices::{DEVICE_FAMILIES, DevicesReader};
+    use readers::rest_inventory::{Inventory, RestInventoryReader};
+    use rest::auth::Auth;
+    use rest::client::{RestClient, new_http_client};
+
+    let mut out: ProbeSet = Vec::new();
+    let mut families = Vec::new();
+    let state = &cfg.state;
+    if !state.enabled {
+        return Ok((out, families));
+    }
+    let schedule = &state.readers;
+
+    let nico: Arc<dyn nico::NicoConnector> =
+        Arc::new(nico::grpc::GrpcConnector::new(state.nico_api.clone()));
+    if schedule.devices.enabled {
+        out.push(Arc::new(DevicesReader::new(
+            schedule.devices.clone(),
+            state.nico_api.batch_size,
+            Arc::clone(&nico),
+            Arc::clone(&gates.nico_api),
+            Arc::clone(&sink) as _,
+            process_start,
+        )));
+        families.extend(DEVICE_FAMILIES);
+    }
+    if schedule.rest_inventory.enabled {
+        let rest = &state.rest;
+        let http = new_http_client(&rest.ca)?;
+        out.push(Arc::new(RestInventoryReader::new(
+            schedule.rest_inventory.clone(),
+            Arc::new(RestClient::new(
+                http.clone(),
+                &rest.target,
+                Arc::clone(&gates.rest),
+            )?),
+            Inventory {
+                provider_auth: Arc::new(Auth::new(&rest.provider.auth, http)),
+                provider_org: rest.provider.org.clone(),
+                site_id: state.site_id.clone(),
+            },
+            census,
+            Arc::clone(&sink) as _,
+            process_start,
+        )));
+        families.extend([Family::RestTotals, Family::RestSiteMatch]);
+    }
+    sink.start_counters(&families);
+    Ok((out, families))
 }
 
 #[cfg(test)]
@@ -323,5 +466,74 @@ mod tests {
                     .collect::<Vec<_>>()
             },
         );
+    }
+
+    /// Each enabled reader is built, readiness waits for all of its
+    /// families, and only those families' sweep counters start, at 0.
+    #[test]
+    fn build_readers_follow_the_schedule() {
+        let mut cfg = Config::default();
+        cfg.state.enabled = true;
+        cfg.state.rest.target = "https://nico-rest-api:8388".to_string();
+        let gates = gate::Gates::new(&cfg.state.caps);
+        let store = Arc::new(state::store::SnapshotStore::new(&cfg.state.paging));
+        let names = |cfg: &Config| {
+            let setup = metrics_endpoint::new_metrics_setup("site-health-probe", "test", false)
+                .expect("metrics setup");
+            let sink = Arc::new(state_metrics::CountingSink::new(
+                Arc::clone(&store),
+                &setup.meter,
+            ));
+            let (readers, families) = build_readers(
+                cfg,
+                &gates,
+                sink,
+                Arc::clone(&store) as _,
+                SystemTime::now(),
+            )
+            .expect("readers build");
+            let names: Vec<&str> = readers.iter().map(|r| r.name()).collect();
+            // (family, result) of every sweep counter series, all at 0.
+            let mut sweeps = Vec::new();
+            for family in setup.registry.gather() {
+                if family.name() != "carbide_site_health_probe_sweeps_total" {
+                    continue;
+                }
+                for metric in family.get_metric() {
+                    assert_eq!(metric.counter.value(), 0.0);
+                    let label = |name: &str| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .find(|l| l.name() == name)
+                            .map(|l| l.value().to_string())
+                            .expect("label")
+                    };
+                    sweeps.push((label("family"), label("result")));
+                }
+            }
+            sweeps.sort();
+            let mut want: Vec<(String, String)> = families
+                .iter()
+                .flat_map(|f| {
+                    let family = serde_json::to_value(f)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_string))
+                        .expect("family name");
+                    ["complete", "incomplete"].map(|r| (family.clone(), r.to_string()))
+                })
+                .collect();
+            want.sort();
+            assert_eq!(sweeps, want, "two zero series per enabled family only");
+            (names, families.len())
+        };
+        assert_eq!(names(&cfg), (vec!["devices", "rest_inventory"], 10));
+        cfg.state.readers.rest_inventory.enabled = false;
+        assert_eq!(names(&cfg), (vec!["devices"], 8));
+        cfg.state.readers.rest_inventory.enabled = true;
+        cfg.state.readers.devices.enabled = false;
+        assert_eq!(names(&cfg), (vec!["rest_inventory"], 2));
+        cfg.state.enabled = false;
+        assert_eq!(names(&cfg), (vec![], 0));
     }
 }

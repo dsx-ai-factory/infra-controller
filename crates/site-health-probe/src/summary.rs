@@ -2213,6 +2213,7 @@ mod tests {
                 )))
                 .expect("register");
             let sink = crate::state_metrics::CountingSink::new(store, &setup.meter);
+            sink.start_counters(&[Family::Host, Family::RestTotals]);
             Self { setup, sink }
         }
 
@@ -2406,6 +2407,37 @@ mod tests {
         // The only scrape after the end lands 2.75 s after the request,
         // between two polls 2.5 s apart.
         final_poll_finds(|site| site.scrape(2.75, 2.0, -5.3, &[])).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn first_failure_of_a_long_running_process_counts() {
+        let site = site();
+        let at = |offset: f64| site.at(offset);
+        let scrape = |probe: &ProbeProcess, offset: f64| {
+            probe.scrape(&site.store, at(offset), "replica-a");
+            probe.scrape(&site.store, at(offset + 2.0), "replica-b");
+        };
+        // The run is (-300, -60]. Process a started long before it and only
+        // completed sweeps; its first failure is in the run.
+        let a = ProbeProcess::start(at(-10_000.0));
+        a.sweep(1, at(-320.0), 2);
+        scrape(&a, -315.0);
+        a.fail();
+        scrape(&a, -200.0);
+        scrape(&a, -55.0);
+
+        let reply = summarize(
+            &site.state,
+            &spec(READY),
+            &site.params(-300.0, -60.0, 0, 2, Direction::Up),
+            INTERVAL,
+        )
+        .await
+        .expect("summary");
+        assert_eq!(
+            reply.incomplete_sweeps, 1,
+            "counted from the 0 scraped before the run"
+        );
     }
 
     #[tokio::test(start_paused = true)]

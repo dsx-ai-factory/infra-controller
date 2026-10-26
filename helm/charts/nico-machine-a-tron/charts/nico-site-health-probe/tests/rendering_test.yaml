@@ -7,6 +7,7 @@ templates:
   - templates/certificate.yaml
   - templates/configmap.yaml
   - templates/service.yaml
+  - templates/service-api.yaml
   - templates/service-monitor.yaml
 values:
   - ../values.yaml
@@ -310,3 +311,332 @@ tests:
       - equal:
           path: metadata.namespace
           value: some-release-ns
+
+  - it: keeps state off by default
+    templates:
+      - templates/configmap.yaml
+      - templates/deployment.yaml
+      - templates/service-api.yaml
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: '(?m)^state:'
+        template: templates/configmap.yaml
+      - lengthEqual:
+          path: spec.template.spec.containers[0].ports
+          count: 1
+        template: templates/deployment.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/service-api.yaml
+
+  - it: renders api port and api Service
+    templates:
+      - templates/deployment.yaml
+      - templates/service-api.yaml
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+        metricsStore:
+          url: http://prometheus:9090
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: api
+            containerPort: 9010
+            protocol: TCP
+        template: templates/deployment.yaml
+      - equal:
+          path: metadata.name
+          value: nico-site-health-probe-api
+        template: templates/service-api.yaml
+      - equal:
+          path: spec.ports[0].targetPort
+          value: api
+        template: templates/service-api.yaml
+      - equal:
+          path: spec.publishNotReadyAddresses
+          value: true
+        template: templates/service-api.yaml
+
+  - it: renders state config with reader schedules
+    template: templates/configmap.yaml
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+        metricsStore:
+          url: http://prometheus:9090
+        readers:
+          devices:
+            enabled: true
+            interval: 20s
+            timeout: 600s
+        paging:
+          maxKeptSnapshots: 16
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'api_listen: ":9010"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'site_id: "site-1"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'devices:\n\s+enabled: true\n\s+interval: "20s"\n\s+timeout: "600s"'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'max_kept_snapshots: 16'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'scrape_interval: "5s"'
+
+  - it: uses admin cert secret instead of SPIFFE when set
+    templates:
+      - templates/configmap.yaml
+      - templates/deployment.yaml
+      - templates/certificate.yaml
+    set:
+      probes:
+        grpcMachines:
+          enabled: false
+      state:
+        enabled: true
+        siteId: site-1
+        metricsStore:
+          url: http://prometheus:9090
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'cert: /var/run/secrets/nico-admin/tls\.crt'
+        template: templates/configmap.yaml
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nico-admin-tls
+            secret:
+              secretName: nico-admin-cert
+        template: templates/deployment.yaml
+      # config + nico-admin-tls; no SPIFFE certificate or volume.
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 2
+        template: templates/deployment.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/certificate.yaml
+
+  - it: REST-only state deployment needs no core certificate
+    templates:
+      - templates/certificate.yaml
+      - templates/deployment.yaml
+      - templates/configmap.yaml
+    set:
+      probes:
+        grpcMachines:
+          enabled: false
+      state:
+        enabled: true
+        siteId: site-1
+        metricsStore:
+          url: http://prometheus:9090
+        rest:
+          target: https://nico-rest-api:8388
+          provider:
+            org: provider-org
+            auth:
+              tokenUrl: https://keycloak/token
+              clientId: probe
+              existingSecret:
+                name: provider-secret
+        readers:
+          devices:
+            enabled: false
+            interval: 120s
+            timeout: 600s
+          restInventory:
+            enabled: true
+            interval: 120s
+            timeout: 600s
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/certificate.yaml
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: spiffe-tls
+            secret:
+              secretName: nico-site-health-probe-tls
+        template: templates/deployment.yaml
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: spiffe-tls
+            mountPath: /var/run/secrets/spiffe.io
+            readOnly: true
+        template: templates/deployment.yaml
+      # config + state-provider
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 2
+        template: templates/deployment.yaml
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'devices:\n\s+enabled: false'
+        template: templates/configmap.yaml
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'client_secret_path: "/var/secrets/state-provider/client-secret"'
+        template: templates/configmap.yaml
+
+  - it: requires siteId and metricsStore.url when state is enabled
+    # The failure surfaces through deployment.yaml, whose config-checksum
+    # annotation renders the configmap first.
+    template: templates/deployment.yaml
+    set:
+      state:
+        enabled: true
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - failedTemplate:
+          errorMessage: state.siteId is required when state is enabled
+
+  - it: requires metricsStore.url when state is enabled
+    # The failure surfaces through deployment.yaml, whose config-checksum
+    # annotation renders the configmap first.
+    template: templates/deployment.yaml
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - failedTemplate:
+          errorMessage: state.metricsStore.url is required when state is enabled
+
+  - it: requires the admin cert when a nico-api reader is on
+    # The failure surfaces through deployment.yaml, whose config-checksum
+    # annotation renders the configmap first.
+    template: templates/deployment.yaml
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+        metricsStore:
+          url: http://prometheus:9090
+    asserts:
+      - failedTemplate:
+          errorPattern: nicoApiClientCert.existingSecret is required while a nico-api state reader is on
+
+  - it: rejects a scrape interval over half the fastest reader interval
+    # The failure surfaces through deployment.yaml, whose config-checksum
+    # annotation renders the configmap first.
+    template: templates/deployment.yaml
+    set:
+      serviceMonitor:
+        interval: 61s
+      state:
+        enabled: true
+        siteId: site-1
+        metricsStore:
+          url: http://prometheus:9090
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - failedTemplate:
+          errorPattern: serviceMonitor.interval \(61s\) must be at most half of state.readers.devices.interval
+
+  - it: default selector has job and namespace
+    template: templates/configmap.yaml
+    release:
+      namespace: site-ns
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+        metricsStore:
+          url: http://prometheus:9090
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'selector:\n\s+job: "nico-site-health-probe-metrics"\n\s+namespace: "site-ns"'
+
+  - it: mounts a bearer token secret as the REST token file
+    templates:
+      - templates/configmap.yaml
+      - templates/deployment.yaml
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+        metricsStore:
+          url: http://prometheus:9090
+        rest:
+          target: https://nico-rest-api:8388
+          provider:
+            org: provider-org
+            auth:
+              existingSecret:
+                name: provider-token
+                key: token
+        readers:
+          restInventory:
+            enabled: true
+            interval: 120s
+            timeout: 600s
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'token_file: "/var/secrets/state-provider/token"'
+        template: templates/configmap.yaml
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: state-provider
+            secret:
+              secretName: provider-token
+        template: templates/deployment.yaml
+
+  - it: renders ServiceMonitor interval
+    template: templates/service-monitor.yaml
+    set:
+      serviceMonitor:
+        enabled: true
+        interval: 7s
+    asserts:
+      - equal:
+          path: spec.endpoints[0].interval
+          value: 7s
+
+  - it: keeps the REST readers off by default
+    template: templates/configmap.yaml
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+        metricsStore:
+          url: http://prometheus:9090
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'rest_inventory:\n\s+enabled: false'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'devices:\n\s+enabled: true'

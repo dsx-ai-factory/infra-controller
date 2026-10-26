@@ -450,7 +450,6 @@ impl Config {
 
     /// `api_listen_addr` resolves `api_listen` like [`Config::listen_addr`],
     /// defaulting to `:9010`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the /v1 API listens on it"))]
     pub(crate) fn api_listen_addr(&self) -> eyre::Result<SocketAddr> {
         resolve_listen("api_listen", &self.api_listen, ":9010")
     }
@@ -1159,6 +1158,201 @@ state:
             let err = load_str(yaml).expect_err(scenario).to_string();
             assert!(err.contains(want), "{scenario}: {err:?} lacks {want:?}");
         }
+    }
+
+    /// The config.yaml the chart renders with the state section filled in
+    /// (helm template with every state input set). Keep it in step with
+    /// templates/configmap.yaml.
+    const CHART_RENDERED: &str = r#"
+metrics_listen: ":9009"
+api_listen: ":9010"
+probes:
+  grpc_machines:
+    enabled: true
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    interval: "10s"
+    timeout: "5s"
+    page_size: 50
+    tls:
+      ca: /var/run/secrets/spiffe.io/ca.crt
+      cert: /var/run/secrets/spiffe.io/tls.crt
+      key: /var/run/secrets/spiffe.io/tls.key
+  rest_machines:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-machines/client-secret
+    ca: "/var/secrets/rest-ca/ca.crt"
+  rest_instances:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-instances/client-secret
+    ca: "/var/secrets/rest-ca/ca.crt"
+state:
+  enabled: true
+  site_id: "site-1"
+  caps:
+    calls_per_second: 2
+    call_timeout: "5s"
+    max_backoff: "30s"
+  nico_api:
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    host_read: full
+    batch_size: 100
+    max_decoding_message_size: 67108864
+    tls:
+      ca: /var/run/secrets/nico-admin/ca.crt
+      cert: /var/run/secrets/nico-admin/tls.crt
+      key: /var/run/secrets/nico-admin/tls.key
+  rest:
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    ca: "/var/secrets/rest-ca/ca.crt"
+    provider:
+      org: "provider-org"
+      auth:
+        token_url: "https://keycloak.example.com/realms/nico/protocol/openid-connect/token"
+        client_id: "probe"
+        client_secret_path: "/var/secrets/state-provider/client-secret"
+  readers:
+    devices:
+      enabled: true
+      interval: "120s"
+      timeout: "600s"
+    rest_inventory:
+      enabled: true
+      interval: "120s"
+      timeout: "600s"
+  metrics_store:
+    url: "http://prometheus.monitoring.svc:9090"
+    selector:
+      job: "nico-site-health-probe-metrics"
+      namespace: "default"
+    max_window: "48h"
+    summary_deadline: "90s"
+    scrape_interval: "5s"
+  paging:
+    keep_seconds: 300
+    max_kept_snapshots: 6
+"#;
+
+    /// The config.yaml the parent chart renders with only the required
+    /// state inputs (`state.enabled`, `siteId`, `metricsStore.url` and the
+    /// admin certificate). Keep it in step with templates/configmap.yaml.
+    const CHART_MINIMAL: &str = r#"
+metrics_listen: ":9009"
+api_listen: ":9010"
+probes:
+  grpc_machines:
+    enabled: true
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    interval: "10s"
+    timeout: "5s"
+    page_size: 50
+    tls:
+      ca: /var/run/secrets/spiffe.io/ca.crt
+      cert: /var/run/secrets/spiffe.io/tls.crt
+      key: /var/run/secrets/spiffe.io/tls.key
+  rest_machines:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-machines/client-secret
+  rest_instances:
+    enabled: false
+    target: "https://nico-rest-api.nico-rest.svc.cluster.local:8388"
+    interval: "10s"
+    timeout: "5s"
+    org: ""
+    auth:
+      token_url: ""
+      client_id: "nico-site-health-probe"
+      client_secret_path: /var/secrets/keycloak-instances/client-secret
+state:
+  enabled: true
+  site_id: "s"
+  caps:
+    calls_per_second: 2
+    call_timeout: "5s"
+    max_backoff: "30s"
+  nico_api:
+    target: "nico-api.nico-system.svc.cluster.local:1079"
+    host_read: full
+    batch_size: 100
+    max_decoding_message_size: 67108864
+    tls:
+      ca: /var/run/secrets/nico-admin/ca.crt
+      cert: /var/run/secrets/nico-admin/tls.crt
+      key: /var/run/secrets/nico-admin/tls.key
+  rest:
+    target: ""
+    provider:
+      org: ""
+      auth:
+        token_url: ""
+        client_id: ""
+  readers:
+    devices:
+      enabled: true
+      interval: "120s"
+      timeout: "600s"
+    rest_inventory:
+      enabled: false
+      interval: "120s"
+      timeout: "600s"
+  metrics_store:
+    url: "http://p:9090"
+    selector:
+      job: "nico-site-health-probe-metrics"
+      namespace: "default"
+    max_window: "48h"
+    summary_deadline: "90s"
+    scrape_interval: "5s"
+  paging:
+    keep_seconds: 300
+    max_kept_snapshots: 6
+"#;
+
+    #[test]
+    fn chart_minimal_state_config_passes_validation() {
+        let cfg = load_str(CHART_MINIMAL).expect("the minimal rendering passes validation");
+        let readers = &cfg.state.readers;
+        assert!(readers.devices.enabled);
+        assert!(
+            !readers.rest_inventory.enabled,
+            "the REST reader stays off until its inputs exist"
+        );
+    }
+
+    #[test]
+    fn chart_rendered_state_config_loads() {
+        let cfg = load_str(CHART_RENDERED).expect("the chart's rendering loads");
+        assert!(cfg.state.enabled);
+        assert_eq!(cfg.state.rest.provider.org, "provider-org");
+        assert_eq!(
+            cfg.state
+                .metrics_store
+                .selector
+                .get("job")
+                .map(String::as_str),
+            Some("nico-site-health-probe-metrics")
+        );
+        assert_eq!(cfg.api_listen_addr().expect("api").port(), 9010);
     }
 
     #[test]
