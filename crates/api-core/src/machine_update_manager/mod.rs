@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use carbide_machine_controller::config::FirmwareGlobal;
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_utils::managed_loop::{self, LoopManager};
 use carbide_utils::periodic_timer::PeriodicTimer;
@@ -312,4 +313,15 @@ impl MachineUpdateManager {
 
         Ok(())
     }
+}
+
+/// Whether `host_disable_autoupdate` lists the host. The list holds host IDs.
+pub(crate) fn host_on_disable_list(
+    firmware_global: &FirmwareGlobal,
+    host_id: &HostMachineId,
+) -> bool {
+    firmware_global
+        .host_disable_autoupdate
+        .iter()
+        .any(|listed| *listed == host_id.to_string())
 }
