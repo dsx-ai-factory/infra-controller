@@ -736,7 +736,7 @@ async fn get_managed_host_network_config_inner(
     .into_iter()
     .collect::<Result<Vec<_>, _>>()?;
 
-    let astra_config = get_astra_config(api, &snapshot).await?;
+    let astra_config = get_astra_config(api, &snapshot, dpu_machine_id).await?;
 
     let resp = rpc::ManagedHostNetworkConfigResponse {
         // TODO(Service VPC): Populate these fields for the authenticated receiving
