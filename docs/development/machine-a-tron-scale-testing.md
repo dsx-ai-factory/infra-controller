@@ -200,14 +200,17 @@ needs no `NICO_RMS_IMAGE_TAG`.
    `setup.sh` resolves `--core-values` against `helm-prereqs/`, so it runs
    from there in a subshell. For a registry that needs credentials, create
    the pull Secret before `make deploy` and keep the `PULL_SECRET` argument.
-   Otherwise drop the two `kubectl` commands and the argument:
+   Otherwise drop the two `kubectl` commands and the argument. The Secret is
+   built from a process substitution fed by the shell's `printf` builtin, the
+   pattern `setup.sh` uses, so the token never appears in a process argument:
 
    ```bash
    kubectl create namespace dpf-operator-system --dry-run=client -o yaml | kubectl apply -f -
-   kubectl -n dpf-operator-system create secret docker-registry dpf-sim-pull \
-     --docker-server="${NICO_IMAGE_REGISTRY%%/*}" \
-     --docker-username="${REGISTRY_PULL_USERNAME:-\$oauthtoken}" \
-     --docker-password="${REGISTRY_PULL_SECRET}" \
+   kubectl -n dpf-operator-system create secret generic dpf-sim-pull \
+     --type=kubernetes.io/dockerconfigjson \
+     --from-file=.dockerconfigjson=<(printf '{"auths":{"%s":{"username":"%s","password":"%s","auth":"%s"}}}' \
+       "${NICO_IMAGE_REGISTRY%%/*}" "${REGISTRY_PULL_USERNAME:-\$oauthtoken}" "${REGISTRY_PULL_SECRET}" \
+       "$(printf '%s:%s' "${REGISTRY_PULL_USERNAME:-\$oauthtoken}" "${REGISTRY_PULL_SECRET}" | base64 | tr -d '\n')") \
      --dry-run=client -o yaml | kubectl apply -f -
    make -C dev/k8s/dpf-sim-controller deploy \
      IMG="${NICO_IMAGE_REGISTRY}/dpf-sim-controller:${DPF_SIM_IMAGE_TAG}" PULL_SECRET=dpf-sim-pull
@@ -226,10 +229,11 @@ needs no `NICO_RMS_IMAGE_TAG`.
    ```bash
    kubectl create namespace nico-mat --dry-run=client -o yaml | kubectl apply -f -
    kubectl label namespace nico-mat nico.nvidia.com/managed=true --overwrite
-   kubectl -n nico-mat create secret docker-registry machine-a-tron-pull \
-     --docker-server="${NICO_IMAGE_REGISTRY%%/*}" \
-     --docker-username="${REGISTRY_PULL_USERNAME:-\$oauthtoken}" \
-     --docker-password="${REGISTRY_PULL_SECRET}" \
+   kubectl -n nico-mat create secret generic machine-a-tron-pull \
+     --type=kubernetes.io/dockerconfigjson \
+     --from-file=.dockerconfigjson=<(printf '{"auths":{"%s":{"username":"%s","password":"%s","auth":"%s"}}}' \
+       "${NICO_IMAGE_REGISTRY%%/*}" "${REGISTRY_PULL_USERNAME:-\$oauthtoken}" "${REGISTRY_PULL_SECRET}" \
+       "$(printf '%s:%s' "${REGISTRY_PULL_USERNAME:-\$oauthtoken}" "${REGISTRY_PULL_SECRET}" | base64 | tr -d '\n')") \
      --dry-run=client -o yaml | kubectl apply -f -
    python3 helm-prereqs/check-mat-service-cidr.py helm-prereqs/values/machine-a-tron-556racks.yaml \
      --site-config helm-prereqs/values/nico-core-10k-hosts.site.yaml &&
