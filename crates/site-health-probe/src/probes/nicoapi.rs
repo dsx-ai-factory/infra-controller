@@ -22,7 +22,8 @@
 //! TODO(#5360-followup): the site-stats probe family (host-ingestion progress,
 //! firmware-update tracking) belongs here as further read-only gRPC probes.
 
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use eyre::eyre;
 use forge_tls::client_config::ClientCert;
@@ -31,18 +32,21 @@ use rpc::forge_tls_client::{ForgeClientConfig, ForgeTlsClient};
 
 use crate::config;
 use crate::framework::{ObservationRecorder, Probe};
+use crate::gate::{CallGate, classify_grpc};
 
 /// Probes nico-api with the two read-only calls behind `machine show`:
 /// FindMachineIds (the lightest DB-touching read) and FindMachinesByIds on the
 /// first page (the full read path: handler + machine and interface joins).
-/// Both operations are observed separately.
+/// Both operations are observed separately, and both pass the nico-api gate
+/// shared with the state readers.
 pub(crate) struct MachinesProbe {
     cfg: config::GrpcProbe,
+    gate: Arc<CallGate>,
 }
 
 impl MachinesProbe {
-    pub(crate) fn new(cfg: config::GrpcProbe) -> Self {
-        Self { cfg }
+    pub(crate) fn new(cfg: config::GrpcProbe, gate: Arc<CallGate>) -> Self {
+        Self { cfg, gate }
     }
 }
 
@@ -53,7 +57,7 @@ impl Probe for MachinesProbe {
     }
 
     fn api(&self) -> &'static str {
-        "nico-api"
+        self.gate.api()
     }
 
     fn interval(&self) -> Duration {
@@ -99,12 +103,16 @@ impl Probe for MachinesProbe {
             .await
             .map_err(|e| eyre!("dial: {e}"))?;
 
-        let start = Instant::now();
-        let ids = client
-            .find_machine_ids(MachineSearchConfig::default())
+        let ids = self
+            .gate
+            .call(recorder, "find_machine_ids", || async {
+                client
+                    .find_machine_ids(MachineSearchConfig::default())
+                    .await
+                    .map_err(|e| classify_grpc(&e))
+            })
             .await
             .map_err(|e| eyre!("FindMachineIds: {e}"))?;
-        recorder.record("find_machine_ids", start.elapsed());
 
         let mut page = ids.into_inner().machine_ids;
         if page.is_empty() {
@@ -114,22 +122,25 @@ impl Probe for MachinesProbe {
         }
         page.truncate(self.cfg.effective_page_size());
 
-        let start = Instant::now();
-        client
-            .find_machines_by_ids(MachinesByIdsRequest {
-                machine_ids: page,
-                include_history: false,
+        self.gate
+            .call(recorder, "find_machines_by_ids", || async {
+                client
+                    .find_machines_by_ids(MachinesByIdsRequest {
+                        machine_ids: page,
+                        include_history: false,
+                    })
+                    .await
+                    .map_err(|e| classify_grpc(&e))
             })
             .await
             .map_err(|e| eyre!("FindMachinesByIds: {e}"))?;
-        recorder.record("find_machines_by_ids", start.elapsed());
         Ok(())
     }
 }
 
 /// Fails with the offending path when the CA bundle is missing or contains no
 /// parseable certificate.
-async fn preflight_ca(path: &str) -> eyre::Result<()> {
+pub(crate) async fn preflight_ca(path: &str) -> eyre::Result<()> {
     let pem = tokio::fs::read(path)
         .await
         .map_err(|e| eyre!("read CA: {e}"))?;
@@ -178,14 +189,20 @@ mod tests {
         };
         let recorder = ObservationRecorder::default();
 
-        let err = MachinesProbe::new(cfg.clone())
+        let gate = Arc::new(CallGate::new(
+            "nico-api",
+            2.0,
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+        ));
+        let err = MachinesProbe::new(cfg.clone(), Arc::clone(&gate))
             .run(&recorder)
             .await
             .expect_err("missing CA fails");
         assert!(err.to_string().contains("read CA"), "got: {err:#}");
 
         std::fs::write(&cfg.tls.ca, "garbage").expect("write garbage ca");
-        let err = MachinesProbe::new(cfg)
+        let err = MachinesProbe::new(cfg, gate)
             .run(&recorder)
             .await
             .expect_err("garbage CA fails");

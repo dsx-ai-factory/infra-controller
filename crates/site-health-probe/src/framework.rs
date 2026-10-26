@@ -136,6 +136,12 @@ pub(crate) trait Probe: Send + Sync {
     fn interval(&self) -> Duration;
     fn timeout(&self) -> Duration;
     async fn run(&self, recorder: &ObservationRecorder) -> eyre::Result<()>;
+    /// Called when a run ran past its timeout: after the timeout dropped
+    /// it, or when the watchdog gave up on a run blocked in a poll (then
+    /// possibly again from the run's own timeout, so it must be idempotent
+    /// per run). Shutdown cancelling a run does not call it: an interrupted
+    /// run is not a measurement.
+    fn timed_out(&self) {}
 }
 
 /// Consumes results. Delivery is serialized by [`collect`]'s single consumer.
@@ -276,6 +282,7 @@ async fn run_once(probe: &Arc<dyn Probe>, cancel: &CancellationToken) -> Disposi
         }
         () = tokio::time::sleep(probe.timeout() * 2) => {
             tracing::error!(probe = probe.name(), timeout = ?probe.timeout(), "{WEDGED_ERROR}");
+            probe.timed_out();
             // Best effort: an abort only lands once the blocked poll returns,
             // at which point the task ends and the loop stops re-reporting.
             run.abort();
@@ -286,7 +293,13 @@ async fn run_once(probe: &Arc<dyn Probe>, cancel: &CancellationToken) -> Disposi
 
 fn spawn_run(probe: Arc<dyn Probe>, recorder: ObservationRecorder) -> RunHandle {
     let timeout = probe.timeout();
-    tokio::spawn(async move { tokio::time::timeout(timeout, probe.run(&recorder)).await })
+    tokio::spawn(async move {
+        let result = tokio::time::timeout(timeout, probe.run(&recorder)).await;
+        if result.is_err() {
+            probe.timed_out();
+        }
+        result
+    })
 }
 
 fn wedged_result(probe: &dyn Probe) -> ProbeResult {
