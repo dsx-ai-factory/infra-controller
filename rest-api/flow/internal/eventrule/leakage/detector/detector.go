@@ -48,21 +48,14 @@ func newOccurrenceKey(
 	)
 }
 
-type observedSource struct {
-	resourceType  string
-	description   string
-	resourceKind  eventrule.ResourceKind
-	componentType flowtypes.ComponentType
-	load          func(context.Context) ([]string, error)
-}
-
 type occurrence struct {
 	externalID string
 	sourceKey  string
 }
 
 func (o occurrence) envelope(
-	source observedSource,
+	resourceKind eventrule.ResourceKind,
+	componentType flowtypes.ComponentType,
 	observedAt time.Time,
 ) eventrule.Envelope {
 	return eventrule.Envelope{
@@ -70,9 +63,9 @@ func (o occurrence) envelope(
 		Type:     leakage.TypeHardwareLeakDetected,
 		Severity: eventrule.SeverityCritical,
 		Resource: eventrule.Resource{
-			Kind:              source.resourceKind,
+			Kind:              resourceKind,
 			ExternalID:        o.externalID,
-			ComponentTypeHint: source.componentType,
+			ComponentTypeHint: componentType,
 		},
 		ObservedAt: observedAt,
 	}
@@ -121,7 +114,13 @@ func (d *Detector) Collect(ctx context.Context, ingest IngestFunc) error {
 
 	var collectErr error
 
-	sources := []observedSource{
+	sources := []struct {
+		resourceType  string
+		description   string
+		resourceKind  eventrule.ResourceKind
+		componentType flowtypes.ComponentType
+		load          func(context.Context) ([]string, error)
+	}{
 		{
 			resourceType: "rack",
 			description:  "racks",
@@ -158,7 +157,9 @@ func (d *Detector) Collect(ctx context.Context, ingest IngestFunc) error {
 
 		err = d.ingestEvents(
 			ctx,
-			source,
+			source.resourceType,
+			source.resourceKind,
+			source.componentType,
 			ids,
 			ingest,
 		)
@@ -178,13 +179,15 @@ func (d *Detector) Collect(ctx context.Context, ingest IngestFunc) error {
 
 func (d *Detector) ingestEvents(
 	ctx context.Context,
-	source observedSource,
+	resourceType string,
+	resourceKind eventrule.ResourceKind,
+	componentType flowtypes.ComponentType,
 	externalIDs []string,
 	ingest IngestFunc,
 ) error {
 	var terminalErr error
 
-	occurrences := d.buildOccurrences(source.resourceType, externalIDs)
+	occurrences := d.buildOccurrences(resourceType, externalIDs)
 	if len(occurrences) == 0 {
 		return nil
 	}
@@ -192,7 +195,7 @@ func (d *Detector) ingestEvents(
 	observedAt := d.now()
 
 	for _, occurrence := range occurrences {
-		envelope := occurrence.envelope(source, observedAt)
+		envelope := occurrence.envelope(resourceKind, componentType, observedAt)
 		err := ingest(ctx, envelope)
 		if err != nil {
 			// A dependency may return its own error after cancellation. Preserve the
@@ -207,7 +210,7 @@ func (d *Detector) ingestEvents(
 
 			err = fmt.Errorf(
 				"ingest leaking %s resource %q: %w",
-				source.resourceType,
+				resourceType,
 				occurrence.externalID,
 				err,
 			)
