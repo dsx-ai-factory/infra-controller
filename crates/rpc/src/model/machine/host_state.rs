@@ -17,14 +17,19 @@
 
 //! Projection of the compact host read, `FindHostStatesByIds`.
 
+use model::firmware::ComponentInventory;
 use model::host_machine_update::{HostUpdateGateRow, UpdateBlockingReason};
 use model::machine::ManagedHostStateSnapshot;
 use model::site_explorer::EndpointExplorationError;
 
 use crate as rpc;
 
-/// The explored report of a gate row. `None` when the row has no report.
-pub fn explored_firmware(row: &HostUpdateGateRow) -> Option<rpc::forge::HostExploredFirmware> {
+/// The explored report of a gate row, with its installed inventory matched to
+/// the catalog. `None` when the row has no report.
+pub fn explored_firmware(
+    row: &HostUpdateGateRow,
+    inventory: Option<Vec<ComponentInventory>>,
+) -> Option<rpc::forge::HostExploredFirmware> {
     let report_version = row.report_version?;
     let versions = row.report_versions.as_ref().map(|versions| &versions.0);
     Some(rpc::forge::HostExploredFirmware {
@@ -37,6 +42,23 @@ pub fn explored_firmware(row: &HostUpdateGateRow) -> Option<rpc::forge::HostExpl
         report_version: report_version.version_string(),
         last_exploration_error: row.report_error.as_ref().map(|error| error_text(&error.0)),
         waiting_for_explorer_refresh: row.waiting_for_explorer_refresh,
+        firmware_inventory: inventory.map(|groups| rpc::forge::HostFirmwareInventory {
+            components: groups
+                .into_iter()
+                .map(|group| rpc::forge::HostFirmwareComponentInventory {
+                    component: group.component.slug().to_string(),
+                    entries: group
+                        .entries
+                        .into_iter()
+                        .map(|entry| rpc::forge::HostFirmwareInventoryEntry {
+                            service_id: entry.service_id,
+                            inventory_id: entry.inventory_id,
+                            version: entry.version,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }),
     })
 }
 
@@ -136,6 +158,7 @@ mod tests {
                 .into(),
             ),
             report_error: None,
+            report_service: None,
             has_target: true,
             stable_host: true,
             versions_differ: Some(true),
@@ -198,7 +221,7 @@ mod tests {
     #[test]
     fn explored_firmware_maps_json_null_and_missing_key_to_none() {
         value_scenarios!(
-            run = |row: HostUpdateGateRow| explored_firmware(&row).map(|explored| (
+            run = |row: HostUpdateGateRow| explored_firmware(&row, None).map(|explored| (
                 explored.bmc_version,
                 explored.uefi_version,
                 explored.last_exploration_error,
@@ -230,10 +253,13 @@ mod tests {
                 ..Default::default()
             });
         value_scenarios!(
-            run = |stored: serde_json::Value| explored_firmware(&HostUpdateGateRow {
-                report_error: Some(stored.into()),
-                ..report_row()
-            })
+            run = |stored: serde_json::Value| explored_firmware(
+                &HostUpdateGateRow {
+                    report_error: Some(stored.into()),
+                    ..report_row()
+                },
+                None,
+            )
             .and_then(|explored| explored.last_exploration_error);
             "a decodable error matches the full read" {
                 serde_json::to_value(&error).unwrap() => full_read.last_exploration_error,
@@ -247,10 +273,13 @@ mod tests {
     #[test]
     fn vendor_is_display_and_unknown_is_none() {
         value_scenarios!(
-            run = |report_vendor: Option<&str>| explored_firmware(&HostUpdateGateRow {
-                report_vendor: report_vendor.map(str::to_string),
-                ..report_row()
-            })
+            run = |report_vendor: Option<&str>| explored_firmware(
+                &HostUpdateGateRow {
+                    report_vendor: report_vendor.map(str::to_string),
+                    ..report_row()
+                },
+                None,
+            )
             .and_then(|explored| explored.vendor);
             "known vendors use the full read's Display form" {
                 Some("Dell") => Some("dell".to_string()),

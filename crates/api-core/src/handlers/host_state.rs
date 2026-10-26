@@ -115,7 +115,21 @@ pub(crate) async fn find_host_states_by_ids(
             let explored = rows
                 .iter()
                 .find(|row| bmc_ip.is_some() && row.bmc_address == bmc_ip)
-                .and_then(explored_firmware);
+                .and_then(|row| {
+                    // The model entry the updater uses for this report.
+                    let inventory = row
+                        .vendor()
+                        .zip(row.report_model.as_deref())
+                        .and_then(|(vendor, model)| catalog.find(vendor, model))
+                        .and_then(|firmware| {
+                            firmware.installed_inventory(
+                                row.report_service
+                                    .as_ref()
+                                    .map_or(&[], |services| &services.0),
+                            )
+                        });
+                    explored_firmware(row, inventory)
+                });
             Some(host_state_from_snapshot(
                 snapshot,
                 explored,

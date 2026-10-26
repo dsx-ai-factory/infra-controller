@@ -23,6 +23,8 @@ use config_version::ConfigVersion;
 use sqlx::FromRow;
 use sqlx::types::Json;
 
+use crate::site_explorer::Service;
+
 #[derive(Debug, FromRow)]
 pub struct HostMachineUpdate {
     pub id: HostMachineId,
@@ -41,6 +43,7 @@ pub struct HostUpdateGateRow {
     pub report_model: Option<String>,
     pub report_versions: Option<Json<BTreeMap<String, String>>>,
     pub report_error: Option<Json<serde_json::Value>>,
+    pub report_service: Option<Json<Vec<Service>>>,
     pub has_target: bool,
     pub stable_host: bool,
     /// `None` when the report or the target has no versions to compare.
@@ -188,6 +191,7 @@ mod tests {
             report_model: Some("PowerEdge R750".to_string()),
             report_versions: None,
             report_error: None,
+            report_service: None,
             has_target: true,
             stable_host: true,
             versions_differ: Some(true),

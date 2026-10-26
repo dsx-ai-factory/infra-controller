@@ -31,12 +31,15 @@ use db::ConditionalWrite;
 use health_report::{HealthAlertClassification, HealthProbeAlert, HealthReport};
 use itertools::Itertools;
 use model::expected_machine::ExpectedMachineData;
-use model::firmware::FirmwareComponentType;
+use model::firmware::{FirmwareComponent, FirmwareComponentType};
 use model::hardware_info::HardwareInfo;
 use model::machine::{LoadSnapshotOptions, ManagedHostState, ManagedHostStateSnapshot};
 use model::machine_boot_interface::{BootInterfaceSelectionSource, MachineBootInterfaceTarget};
-use model::site_explorer::{EndpointExplorationError, EndpointExplorationReport, ExploredEndpoint};
+use model::site_explorer::{
+    EndpointExplorationError, EndpointExplorationReport, ExploredEndpoint, Inventory,
+};
 use model::test_support::ManagedHostConfig;
+use regex::Regex;
 use rpc::forge::forge_server::Forge;
 use tonic::Request;
 
@@ -797,4 +800,76 @@ async fn compact_read_error_returns_no_partial_batch(pool: sqlx::PgPool) {
             .len(),
         1
     );
+}
+
+#[crate::sqlx_test]
+async fn compact_inventory_through_handler(pool: sqlx::PgPool) {
+    // The R750 catalog entry also covers CX7 cards, which report one entry per card.
+    let mut config = get_config();
+    let cx7 = Regex::new("^CX7_").unwrap();
+    for firmware in config.host_models.values_mut() {
+        if firmware.model == "PowerEdge R750" {
+            let component = FirmwareComponent {
+                current_version_reported_as: Some(cx7.clone()),
+                ..Default::default()
+            };
+            firmware
+                .components
+                .insert(FirmwareComponentType::Cx7, component);
+        }
+    }
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let host = create_managed_host(&env).await;
+    let read = async || host_state(&env, host.id.into()).await.explored.unwrap();
+    let address: IpAddr = read().await.address.parse().unwrap();
+    let entry = |id: &str, version: &str| (id.to_string(), Some(version.to_string()));
+
+    for cards in [
+        [("CX7_0", "28.2"), ("CX7_1", "28.1")],
+        [("CX7_1", "28.1"), ("CX7_0", "28.2")],
+    ] {
+        let mut endpoint = stored_endpoint(&env, address).await;
+        let inventories = &mut endpoint.report.service[0].inventories;
+        inventories.retain(|inventory| !inventory.id.starts_with("CX7_"));
+        inventories.extend(cards.map(|(id, version)| Inventory {
+            id: id.to_string(),
+            version: Some(version.to_string()),
+            ..Default::default()
+        }));
+        let mut conn = env.pool.acquire().await.unwrap();
+        let version = endpoint.report_version;
+        let write = db::explored_endpoints::try_update(
+            address,
+            version,
+            &endpoint.report,
+            false,
+            &mut conn,
+        );
+        assert_eq!(write.await.unwrap(), ConditionalWrite::Applied(()));
+
+        let inventory: Vec<_> = read()
+            .await
+            .firmware_inventory
+            .unwrap()
+            .components
+            .into_iter()
+            .map(|group| {
+                let entries = group
+                    .entries
+                    .into_iter()
+                    .map(|entry| (entry.inventory_id, entry.version));
+                (group.component, entries.collect::<Vec<_>>())
+            })
+            .collect();
+        let expected = [
+            ("bmc", vec![entry("Installed-__iDRACz", "5.10.20")]),
+            ("cx7", vec![entry("CX7_0", "28.2"), entry("CX7_1", "28.1")]),
+            (
+                "uefi",
+                vec![entry("Current-159-1.13.2__BIOS.Setup.1-1", "1.12.0")],
+            ),
+        ]
+        .map(|(component, entries)| (component.to_string(), entries));
+        assert_eq!(inventory, expected, "{cards:?}");
+    }
 }

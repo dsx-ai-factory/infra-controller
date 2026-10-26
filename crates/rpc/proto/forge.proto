@@ -13189,6 +13189,10 @@ message HostExploredFirmware {
   // True when the report was rewritten without a fresh exploration, so the
   // versions may be stale.
   optional bool waiting_for_explorer_refresh = 9;
+  // Installed inventory matched to the configured components of the report's
+  // vendor and model, as the update manager matches it. Unset when the catalog
+  // has no entry for them, or a configured component is unknown.
+  HostFirmwareInventory firmware_inventory = 10;
 }
 
 message HostUpdateEligibility {
@@ -13202,4 +13206,23 @@ message HostUpdateEligibility {
   // window are ignored.
   optional bool firmware_policy_eligible = 3;
   optional string firmware_policy_blocking_reason = 4;
+}
+
+message HostFirmwareInventory {
+  // One group per configured component, sorted by component name.
+  repeated HostFirmwareComponentInventory components = 1;
+}
+
+message HostFirmwareComponentInventory {
+  // The component's serde name, for example bmc or cx7.
+  string component = 1;
+  // Every matching inventory entry, sorted by service, inventory and version.
+  // Empty when nothing matches.
+  repeated HostFirmwareInventoryEntry entries = 2;
+}
+
+message HostFirmwareInventoryEntry {
+  string service_id = 1;
+  string inventory_id = 2;
+  optional string version = 3;
 }
