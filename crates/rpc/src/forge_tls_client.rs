@@ -153,6 +153,10 @@ pub struct ForgeClientConfig {
     /// from the dpu-agent's local API (`SocketTokenSource`). Independent of
     /// mTLS: the channel may present a client cert, a token, or both.
     pub node_token_provider: Option<Arc<dyn NodeTokenProvider>>,
+    /// Fail the connection when the configured client certificate or key
+    /// does not load, instead of connecting without a client certificate.
+    /// Off by default. See [`ForgeClientConfig::require_client_cert`].
+    pub require_client_cert: bool,
 }
 
 impl ForgeClientConfig {
@@ -208,6 +212,7 @@ impl ForgeClientConfig {
             connect_retries_max: Some(3),
             connect_retries_interval: Some(Duration::from_secs(20)),
             node_token_provider: None,
+            require_client_cert: false,
         }
     }
 
@@ -228,6 +233,16 @@ impl ForgeClientConfig {
     #[must_use]
     pub fn require_tls_enforcement(mut self) -> Self {
         self.enforce_tls = std::env::var("DISABLE_TLS_ENFORCEMENT").is_err();
+        self
+    }
+
+    /// Makes every connection present the configured client certificate.
+    /// The certificate and key are read again for each connection, and by
+    /// default a pair that does not load connects without a client
+    /// certificate. With this set, such a connection fails instead.
+    #[must_use]
+    pub fn require_client_cert(mut self) -> Self {
+        self.require_client_cert = true;
         self
     }
 
@@ -727,6 +742,8 @@ impl<'a> ForgeTlsClient<'a> {
                 builder()
                     .with_client_auth_cert(certs, key)
                     .map_err(ConfigurationError::InvalidClientCert)?
+            } else if self.forge_client_config.require_client_cert {
+                return Err(ConfigurationError::ClientCertNotLoaded.into());
             } else {
                 builder().with_no_client_auth()
             }
@@ -951,6 +968,8 @@ pub enum ConfigurationError {
     BearerTokenWithoutTlsEnforcement { uri_string: String },
     #[error("invalid client cert: {0}")]
     InvalidClientCert(rustls::Error),
+    #[error("the required client certificate and key do not load")]
+    ClientCertNotLoaded,
     #[error("error configuring resolver: {0}")]
     Resolver(#[from] ResolverError),
 }
@@ -977,6 +996,45 @@ mod tests {
     use tracing::Instrument as _;
 
     use super::*;
+
+    /// A client whose certificate or key no longer loads connects without a
+    /// client certificate by default, and refuses to when it requires one.
+    #[tokio::test]
+    async fn required_client_cert_that_does_not_load_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| dir.path().join(name).display().to_string();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::default()
+            .self_signed(&key)
+            .unwrap();
+        std::fs::write(path("ca.crt"), cert.pem()).unwrap();
+        std::fs::write(path("tls.crt"), cert.pem()).unwrap();
+        std::fs::write(path("tls.key"), key.serialize_pem()).unwrap();
+        let mut config = ForgeClientConfig::new(
+            path("ca.crt"),
+            Some(ClientCert {
+                cert_path: path("tls.crt"),
+                key_path: path("tls.key"),
+            }),
+        );
+        config.enforce_tls = true;
+        let required = config.clone().require_client_cert();
+        let url = "https://127.0.0.1:1";
+        let build =
+            |config| async move { ForgeTlsClient::new(config).build_https_client(url).await };
+
+        assert!(build(&required).await.is_ok(), "the pair loads");
+        std::fs::remove_file(path("tls.key")).unwrap();
+        assert!(
+            build(&config).await.is_ok(),
+            "by default it would connect without a client certificate"
+        );
+        let refused = build(&required).await.err().unwrap();
+        assert_eq!(
+            refused.to_string(),
+            "configuration error: the required client certificate and key do not load"
+        );
+    }
 
     /// A connection task spawned while a call's span is current runs outside
     /// it, where a task spawned in the current span, as hyper-util's
