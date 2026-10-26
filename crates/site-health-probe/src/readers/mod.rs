@@ -20,6 +20,8 @@
 //! and the latency histogram, and publishes family snapshots through a
 //! [`SnapshotSink`](crate::snapshot::SnapshotSink).
 
+pub(crate) mod devices;
+
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
 

@@ -22,6 +22,9 @@
 pub(crate) mod grpc;
 pub(crate) mod host_read;
 
+#[cfg(test)]
+pub(crate) mod fake;
+
 use std::sync::Arc;
 
 use carbide_uuid::instance::InstanceId;

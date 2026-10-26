@@ -20,9 +20,15 @@
 //! site-health-probe runs synthetic probes against a NICo site's APIs and
 //! exposes the results as Prometheus metrics (issue #5360).
 
-#[expect(dead_code, reason = "the state readers are wired in later")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the state readers are wired in later")
+)]
 mod census;
-#[expect(dead_code, reason = "the state readers are wired in later")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the state readers are wired in later")
+)]
 mod clock;
 mod config;
 mod framework;
@@ -36,7 +42,10 @@ mod metrics;
 #[expect(dead_code, reason = "the state readers are wired in later")]
 mod nico;
 mod probes;
-#[expect(dead_code, reason = "the state readers are wired in later")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the state readers are wired in later")
+)]
 mod readers;
 #[expect(dead_code, reason = "the state readers are wired in later")]
 mod snapshot;
