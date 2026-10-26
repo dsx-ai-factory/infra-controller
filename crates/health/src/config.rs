@@ -2776,8 +2776,9 @@ impl<P: Provider> Provider for CanonicalNicoApiProvider<P> {
 }
 
 impl Config {
-    /// Loads defaults, an optional TOML file, and `CARBIDE_HEALTH__` environment
-    /// overrides, in that order, then validates the resulting configuration.
+    /// Loads defaults, an optional TOML file, `CARBIDE_HEALTH__` environment
+    /// overrides, and `NICO_HEALTH__` environment overrides, in that order, then
+    /// validates the resulting configuration.
     /// Malformed enabled sections return an error instead of falling back to defaults.
     pub fn load(config_path: Option<&Path>) -> Result<Self, String> {
         let mut figment = Figment::new().merge(Serialized::defaults(Config::default()));
@@ -2786,17 +2787,24 @@ impl Config {
             figment = figment.merge(CanonicalNicoApiProvider(Toml::file(path)));
         }
 
-        figment = figment.merge(CanonicalNicoApiProvider(
-            Env::prefixed("CARBIDE_HEALTH__").split("__"),
-        ));
+        // Dual-prefix for the carbide->nico transition; NICO_HEALTH__ wins if both set.
+        figment = figment
+            .merge(CanonicalNicoApiProvider(
+                Env::prefixed("CARBIDE_HEALTH__").split("__"),
+            ))
+            .merge(CanonicalNicoApiProvider(
+                Env::prefixed("NICO_HEALTH__").split("__"),
+            ));
 
         let config: Config = figment.extract().map_err(|error| {
             let sources = match config_path {
                 Some(path) => format!(
-                    "{} and CARBIDE_HEALTH__ environment variables",
+                    "{} and CARBIDE_HEALTH__/NICO_HEALTH__ environment variables",
                     path.display()
                 ),
-                None => "defaults and CARBIDE_HEALTH__ environment variables".to_string(),
+                None => {
+                    "defaults and CARBIDE_HEALTH__/NICO_HEALTH__ environment variables".to_string()
+                }
             };
 
             let location = if error.path.is_empty() {
@@ -4571,6 +4579,80 @@ reload_interval = "30s"
                 (&[][..], &["CARBIDE_API", "NICO_API"][..]) => "https://nico-api.example:1079/".to_string(),
             }
         );
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)] // Figment controls the error representation.
+    fn env_prefixes_layer_over_defaults() {
+        // Loads the config inside a jail with only the given environment variables set.
+        let load_with = |vars: &[(&str, &str)]| {
+            let mut config = None;
+            figment::Jail::expect_with(|jail| {
+                jail.clear_env();
+                for (key, value) in vars {
+                    jail.set_env(key, value);
+                }
+                config = Some(Config::load(None).expect("config should load"));
+                Ok(())
+            });
+            config.expect("config should be produced")
+        };
+        let nico_api_url = |config: &Config| {
+            config
+                .endpoint_sources
+                .carbide_api
+                .as_option()
+                .expect("NICo API source should stay enabled")
+                .api_url
+                .to_string()
+        };
+
+        // 1. Nothing set: compiled-in defaults.
+        let config = load_with(&[]);
+        assert_eq!(config.cache_size, 100);
+        assert_eq!(config.shards_count, 1);
+        assert_eq!(config.bmc_proxy_url, None);
+        assert_eq!(
+            nico_api_url(&config),
+            "https://nico-api.nico-system.svc.cluster.local:1079/"
+        );
+
+        // 2. Legacy CARBIDE_HEALTH__ prefix overrides the defaults.
+        let legacy = [
+            ("CARBIDE_HEALTH__CACHE_SIZE", "250"),
+            ("CARBIDE_HEALTH__SHARDS_COUNT", "3"),
+            (
+                "CARBIDE_HEALTH__BMC_PROXY_URL",
+                "https://legacy-proxy.example/",
+            ),
+            (
+                "CARBIDE_HEALTH__ENDPOINT_SOURCES__CARBIDE_API__API_URL",
+                "https://carbide-api.example:1079/",
+            ),
+        ];
+        let config = load_with(&legacy);
+        assert_eq!(config.cache_size, 250);
+        assert_eq!(config.shards_count, 3);
+        assert_eq!(
+            config.bmc_proxy_url.as_ref().map(ToString::to_string),
+            Some("https://legacy-proxy.example/".to_string())
+        );
+        assert_eq!(nico_api_url(&config), "https://carbide-api.example:1079/");
+
+        // 3. NICO_HEALTH__ overrides one legacy key; the other legacy keys still apply.
+        let mut both = legacy.to_vec();
+        both.push(("NICO_HEALTH__CACHE_SIZE", "999"));
+        let config = load_with(&both);
+        assert_eq!(
+            config.cache_size, 999,
+            "NICO_HEALTH__ should win over CARBIDE_HEALTH__"
+        );
+        assert_eq!(config.shards_count, 3);
+        assert_eq!(
+            config.bmc_proxy_url.as_ref().map(ToString::to_string),
+            Some("https://legacy-proxy.example/".to_string())
+        );
+        assert_eq!(nico_api_url(&config), "https://carbide-api.example:1079/");
     }
 
     #[test]
