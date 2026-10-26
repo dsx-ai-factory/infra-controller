@@ -711,6 +711,51 @@ func TestGetKeyFromJWKS_NoKidWithAlgorithm(t *testing.T) {
 	}
 }
 
+// TestJwksConfig_ValidateTokenRequiresExpiration guards that a correctly
+// signed token without exp is rejected, rather than staying valid until its
+// signing key is rotated out.
+func TestJwksConfig_ValidateTokenRequiresExpiration(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	jwksServer := createMockJWKSServerWithKeys(t, []testKeyInfo{
+		{key: privateKey.Public(), keyId: "rsa-key-1", algorithm: "RS256", use: "sig"},
+	})
+	defer jwksServer.Close()
+	jwksConfig := NewJwksConfig("test-config", jwksServer.URL, "test-issuer", TokenOriginKasSsa, false, nil, nil)
+	require.NoError(t, jwksConfig.UpdateJWKS())
+
+	tests := []struct {
+		name    string
+		claims  jwt.MapClaims
+		wantErr error
+	}{
+		{
+			name:    "signed token without exp is rejected",
+			claims:  jwt.MapClaims{"iss": "test-issuer", "sub": "test-subject"},
+			wantErr: jwt.ErrTokenRequiredClaimMissing,
+		},
+		{
+			name:   "signed token with a future exp is accepted",
+			claims: jwt.MapClaims{"iss": "test-issuer", "sub": "test-subject", "exp": time.Now().Add(time.Hour).Unix()},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			unsigned := jwt.NewWithClaims(jwt.SigningMethodRS256, tt.claims)
+			unsigned.Header["kid"] = "rsa-key-1"
+			tokenString, err := unsigned.SignedString(privateKey)
+			require.NoError(t, err)
+
+			_, err = jwksConfig.ValidateToken(tokenString, jwt.MapClaims{})
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 // testKeyInfo represents key information for testing
 type testKeyInfo struct {
 	key       interface{}
