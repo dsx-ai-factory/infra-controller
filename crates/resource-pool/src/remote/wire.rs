@@ -230,7 +230,8 @@ fn route_target_policy(
             .into_iter()
             .map(|target| RouteTargetConfig {
                 asn: target.asn,
-                vni: target.vni,
+                vni: Some(target.vni),
+                vni_self: false,
             })
             .collect()
     };
@@ -432,7 +433,11 @@ mod tests {
         let expected = |values: &[u32]| {
             values
                 .iter()
-                .map(|&vni| RouteTargetConfig { asn: 64512, vni })
+                .map(|&vni| RouteTargetConfig {
+                    asn: 64512,
+                    vni: Some(vni),
+                    vni_self: false,
+                })
                 .collect()
         };
         check_cases(

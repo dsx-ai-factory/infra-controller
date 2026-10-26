@@ -253,30 +253,40 @@ impl NvueClientContext {
     }
 }
 
-/// Converts an RPC routing profile into the NVUE renderer model.
-impl From<&rpc::RoutingProfile> for nvue::RoutingProfile {
-    fn from(profile: &rpc::RoutingProfile) -> Self {
+/// Converts one concrete RPC route target while preserving legacy absent-VNI zero behavior.
+fn route_target_from_rpc(
+    target: &::rpc::common::RouteTarget,
+) -> eyre::Result<nvue::RouteTargetConfig> {
+    eyre::ensure!(
+        !target.vni_self,
+        "received unresolved route target with vni_self set"
+    );
+    Ok(nvue::RouteTargetConfig {
+        asn: target.asn,
+        vni: target.vni.unwrap_or_default(),
+    })
+}
+
+/// Converts a concrete RPC routing profile while rejecting Core-owned symbolic values.
+impl TryFrom<&rpc::RoutingProfile> for nvue::RoutingProfile {
+    type Error = eyre::Report;
+
+    fn try_from(profile: &rpc::RoutingProfile) -> Result<Self, Self::Error> {
         // Preserve the API-provided routing policy without applying template concerns here.
-        nvue::RoutingProfile {
+        Ok(nvue::RoutingProfile {
             leak_default_route_from_underlay: profile.leak_default_route_from_underlay,
             leak_tenant_host_routes_to_underlay: profile.leak_tenant_host_routes_to_underlay,
             tenant_leak_communities_accepted: profile.tenant_leak_communities_accepted,
             route_target_imports: profile
                 .route_target_imports
                 .iter()
-                .map(|rt| nvue::RouteTargetConfig {
-                    asn: rt.asn,
-                    vni: rt.vni,
-                })
-                .collect(),
+                .map(route_target_from_rpc)
+                .collect::<eyre::Result<_>>()?,
             route_targets_on_exports: profile
                 .route_targets_on_exports
                 .iter()
-                .map(|rt| nvue::RouteTargetConfig {
-                    asn: rt.asn,
-                    vni: rt.vni,
-                })
-                .collect(),
+                .map(route_target_from_rpc)
+                .collect::<eyre::Result<_>>()?,
             accepted_leaks_from_underlay: profile
                 .accepted_leaks_from_underlay
                 .iter()
@@ -287,7 +297,7 @@ impl From<&rpc::RoutingProfile> for nvue::RoutingProfile {
                 .iter()
                 .map(|p| p.prefix.to_owned())
                 .collect(),
-        }
+        })
     }
 }
 
@@ -609,7 +619,8 @@ pub(super) async fn update_nvue(
                 routing_profile: admin_interface
                     .vpc_routing_profile
                     .as_ref()
-                    .map(nvue::RoutingProfile::from),
+                    .map(nvue::RoutingProfile::try_from)
+                    .transpose()?,
                 interface_routing_profile: admin_interface
                     .interface_routing_profile
                     .as_ref()
@@ -691,7 +702,8 @@ pub(super) async fn update_nvue(
                 routing_profile: net
                     .vpc_routing_profile
                     .as_ref()
-                    .map(nvue::RoutingProfile::from),
+                    .map(nvue::RoutingProfile::try_from)
+                    .transpose()?,
                 interface_routing_profile: net
                     .interface_routing_profile
                     .as_ref()
@@ -774,20 +786,16 @@ pub(super) async fn update_nvue(
         loopback_ip_v6,
         asn: nc.asn,
         datacenter_asn: nc.datacenter_asn,
-        common_internal_route_target: nc.common_internal_route_target.map(|rt| {
-            nvue::RouteTargetConfig {
-                asn: rt.asn,
-                vni: rt.vni,
-            }
-        }),
+        common_internal_route_target: nc
+            .common_internal_route_target
+            .as_ref()
+            .map(route_target_from_rpc)
+            .transpose()?,
         additional_route_target_imports: nc
             .additional_route_target_imports
             .iter()
-            .map(|rt| nvue::RouteTargetConfig {
-                asn: rt.asn,
-                vni: rt.vni,
-            })
-            .collect(),
+            .map(route_target_from_rpc)
+            .collect::<eyre::Result<_>>()?,
         dpu_hostname: hostname.hostname,
         dpu_search_domain: hostname.search_domain,
         hbn_version: Some(hbn_version),
@@ -824,7 +832,11 @@ pub(super) async fn update_nvue(
         ct_l3_vni: nc.vpc_vni,
         ct_vrf_loopback: "FNN".to_string(),
         l3_domains: vec![],
-        ct_routing_profile: nc.routing_profile.as_ref().map(nvue::RoutingProfile::from),
+        ct_routing_profile: nc
+            .routing_profile
+            .as_ref()
+            .map(nvue::RoutingProfile::try_from)
+            .transpose()?,
         bgp_leaf_session_password: nc.bgp_leaf_session_password.clone(),
     };
 
@@ -2129,6 +2141,93 @@ mod tests {
         InterfaceState, ServiceAddresses, needed_interface_state,
     };
     use crate::{HBNDeviceNames, dhcp, nvue};
+
+    /// Verifies the agent preserves legacy zero while rejecting symbolic values
+    /// that only Core can resolve.
+    #[test]
+    fn route_target_conversion_handles_legacy_and_unresolved_values() {
+        use carbide_test_support::Outcome::*;
+        use carbide_test_support::scenarios;
+
+        scenarios!(run = |target| {
+            route_target_from_rpc(&target).map_err(|error| error.to_string())
+        };
+            "agent compatibility" {
+                // Older Core versions can omit proto3 field 2 to represent zero.
+                rpc_common::RouteTarget {
+                    asn: 65_000,
+                    vni: None, // Exercise legacy omission rather than explicit zero.
+                    vni_self: false,
+                } => Yields(nvue::RouteTargetConfig {
+                    asn: 65_000,
+                    vni: 0,
+                }),
+
+                // VPC-derived values must never be guessed by the DPU agent.
+                rpc_common::RouteTarget {
+                    asn: 429_000_000,
+                    vni: None,
+                    vni_self: true, // Core must resolve this before agent delivery.
+                } => Fails,
+            }
+        );
+    }
+
+    /// Verifies unresolved Core-owned route targets stop `update_nvue` before
+    /// publication, preventing the DPU from guessing the missing VNI.
+    #[tokio::test]
+    async fn unresolved_route_target_stops_nvue_before_publication() -> eyre::Result<()> {
+        // Make only the response-level export target unresolved.
+        let mut network_config = netconf(
+            VpcVirtualizationType::Fnn,
+            32,
+            24,
+            false,
+            None,
+            false,
+            false,
+        );
+        let unresolved_target = network_config
+            .routing_profile
+            .as_mut()
+            .expect("fixture response-level routing profile")
+            .route_targets_on_exports
+            .first_mut()
+            .expect("fixture export route target");
+        // Remove the literal value so only the symbolic source remains.
+        unresolved_target.vni = None;
+        unresolved_target.vni_self = true;
+
+        // Precreate every destination directory so publication could succeed.
+        let tempdir = tempfile::tempdir()?;
+        let hbn_root = tempdir.path();
+        fs::create_dir_all(hbn_root.join("var/support"))?;
+        fs::create_dir_all(hbn_root.join("etc/cumulus/acl/policy.d"))?;
+
+        // Render through the complete response-to-NVUE update path.
+        let error = super::update_nvue(
+            VpcVirtualizationType::Fnn,
+            NvueUpdateFlavor::StartupFile {
+                hbn_root,
+                skip_post: true,
+            },
+            &network_config,
+            &test_service_addresses(),
+            HBNDeviceNames::hbn_23(),
+            None,
+            None,
+        )
+        .await
+        .expect_err("unresolved route target must stop NVUE publication");
+
+        // Rejection must precede both configuration and ACL publication.
+        assert!(
+            format!("{error:#}").contains("received unresolved route target with vni_self set")
+        );
+        assert!(!hbn_root.join(nvue::PATH).exists());
+        assert!(!hbn_root.join(nvue::PATH_ACL).exists());
+        Ok(())
+    }
 
     /// Supplies stable service discovery results to NVUE tests so RDNSS and
     /// DHCPv6 can be compared against one agent-local source.
@@ -4407,11 +4506,13 @@ esac
                     }],
                     route_target_imports: vec![rpc_common::RouteTarget {
                         asn: 44444,
-                        vni: 55555,
+                        vni: Some(55555),
+                        vni_self: false,
                     }],
                     route_targets_on_exports: vec![rpc_common::RouteTarget {
                         asn: 77415,
-                        vni: 800,
+                        vni: Some(800),
+                        vni_self: false,
                     }],
                 }),
                 interface_routing_profile: None,
@@ -4610,11 +4711,13 @@ esac
                     }],
                     route_target_imports: vec![rpc_common::RouteTarget {
                         asn: 44444,
-                        vni: 55555,
+                        vni: Some(55555),
+                        vni_self: false,
                     }],
                     route_targets_on_exports: vec![rpc_common::RouteTarget {
                         asn: 77415,
-                        vni: 800,
+                        vni: Some(800),
+                        vni_self: false,
                     }],
                 }),
                 interface_routing_profile: None,
@@ -4652,11 +4755,13 @@ esac
             tenant_host_asn: Some(65100),
             common_internal_route_target: Some(rpc_common::RouteTarget {
                 asn: 11415,
-                vni: 200,
+                vni: Some(200),
+                vni_self: false,
             }),
             additional_route_target_imports: vec![rpc_common::RouteTarget {
                 asn: 11111,
-                vni: 22222,
+                vni: Some(22222),
+                vni_self: false,
             }],
 
             // This should be ignored because we've defined the routing profile on the "flat interface" config.
@@ -4676,11 +4781,13 @@ esac
                 }],
                 route_target_imports: vec![rpc_common::RouteTarget {
                     asn: 34444,
-                    vni: 85555,
+                    vni: Some(85555),
+                    vni_self: false,
                 }],
                 route_targets_on_exports: vec![rpc_common::RouteTarget {
                     asn: 67415,
-                    vni: 8000,
+                    vni: Some(8000),
+                    vni_self: false,
                 }],
             }),
 
@@ -5488,11 +5595,13 @@ esac
             datacenter_asn: 11414,
             common_internal_route_target: Some(rpc_common::RouteTarget {
                 asn: 11415,
-                vni: 200,
+                vni: Some(200),
+                vni_self: false,
             }),
             additional_route_target_imports: vec![rpc_common::RouteTarget {
                 asn: 11111,
-                vni: 22222,
+                vni: Some(22222),
+                vni_self: false,
             }],
 
             anycast_site_prefixes: vec!["5.255.255.0/24".to_string()],
@@ -5507,11 +5616,13 @@ esac
                 }],
                 route_target_imports: vec![rpc_common::RouteTarget {
                     asn: 44444,
-                    vni: 55555,
+                    vni: Some(55555),
+                    vni_self: false,
                 }],
                 route_targets_on_exports: vec![rpc_common::RouteTarget {
                     asn: 77415,
-                    vni: 800,
+                    vni: Some(800),
+                    vni_self: false,
                 }],
             }),
 

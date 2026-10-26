@@ -396,6 +396,9 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
     // Validate that admin-UI tool entries have unique names.
     config.validate_web_ui_sidebar_tools()?;
     config.validate_service_vpc_slots()?;
+    if let Some(fnn) = &config.fnn {
+        fnn.validate_route_targets()?;
+    }
     // Reject endpoints with embedded secrets before tracing the configuration.
     config.validate_resource_pool_backends()?;
     config.api_admission_control.validate()?;
@@ -545,6 +548,51 @@ request_timeout_seconds = 5"#
                         => FailsWith(
                             "invalid firmware_global.downloads configuration: max_concurrent_downloads must be between 1 and 16".to_string(),
                         ),
+                }
+            );
+            Ok(())
+        })
+    }
+
+    /// Verifies production configuration loading traverses both admin and named
+    /// profiles so invalid route targets cannot survive startup.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn route_targets_are_validated_during_startup_loading() {
+        figment::Jail::expect_with(|jail| {
+            scenarios!(
+                run = |(name, settings)| {
+                    // Parse each invalid profile through the same deferred loader used at startup.
+                    let path = format!("{name}.toml");
+                    jail.create_file(
+                        &path,
+                        &format!("{}\n{settings}\n", include_str!("test_data/min_config.toml")),
+                    )
+                    .expect("write test configuration");
+                    parse_carbide_config_with_deferred_diagnostics(Path::new(&path), None)
+                        .map(drop)
+                        .map_err(|error| format!("{error:#}"))
+                };
+                "route-target startup validation" {
+                    // Admin profiles must not bypass semantic validation during startup.
+                    (
+                        "admin-profile",
+                        r#"[fnn.admin_vpc]
+enabled = true
+
+[fnn.admin_vpc.routing_profile]
+route_target_imports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
+                    ) => FailsWith(
+                        "fnn.admin_vpc.routing_profile.route_target_imports[0] is invalid: route target cannot specify both vni and vni_self".to_string(),
+                    ),
+                    // Every named profile entry must be visited, including export targets.
+                    (
+                        "named-profile",
+                        r#"[fnn.routing_profiles.INVALID]
+            route_targets_on_exports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
+                    ) => FailsWith(
+                        "fnn.routing_profiles.INVALID.route_targets_on_exports[0] is invalid: route target cannot specify both vni and vni_self".to_string(),
+                    ),
                 }
             );
             Ok(())

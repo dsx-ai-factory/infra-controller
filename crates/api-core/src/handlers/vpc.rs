@@ -30,7 +30,7 @@ use db::{self, ConditionalWrite, ObjectColumnFilter, network_security_group};
 use model::resource_pool;
 use model::tenant::{InvalidTenantOrg, Tenant};
 use model::vpc::{
-    ChangeVpcRoutingProfile, NewVpc, UpdateVpc, UpdateVpcVirtualization,
+    ChangeVpcRoutingProfile, NewVpc, RouteTargetConfigError, UpdateVpc, UpdateVpcVirtualization,
     VpcRoutingProfileOverrides, VpcStatus, VpcVirtualizationTypeCapabilities,
 };
 use sqlx::PgConnection;
@@ -132,6 +132,12 @@ pub(crate) async fn create(
 
     let requested_profile_type = vpc_creation_request.routing_profile_type.clone();
     let mut new_vpc = NewVpc::try_from(request.into_inner())?;
+    let resolution_source = if new_vpc.vni.is_some() {
+        RouteTargetResolutionSource::Request
+    } else {
+        RouteTargetResolutionSource::ServerState
+    };
+    let requested_routing_profile_overrides = new_vpc.routing_profile_overrides.clone();
 
     let ResolvedVpcRouting {
         profile_type: resolved_profile_type,
@@ -160,7 +166,16 @@ pub(crate) async fn create(
 
     let vpc = db::vpc::persist(new_vpc, VpcStatus { vni }, &mut txn).await?;
 
-    let rpc_out = vpc_to_rpc(vpc, api.runtime_config.fnn.as_ref());
+    validate_requested_route_targets(
+        requested_routing_profile_overrides.as_ref(),
+        route_target_vpc_vni(&vpc)?,
+        resolution_source,
+    )?;
+    let rpc_out = vpc_to_rpc(
+        vpc,
+        api.runtime_config.fnn.as_ref(),
+        EffectiveProfileErrorPolicy::Reject(resolution_source),
+    )?;
 
     txn.commit().await?;
 
@@ -274,11 +289,27 @@ pub(crate) async fn update(
     }
     vpc_update.if_version_match = Some(current_vpc.version);
     let vpc = db::vpc::update(&vpc_update, &mut txn).await?;
+    validate_requested_route_targets(
+        vpc_update.routing_profile_overrides.as_ref(),
+        route_target_vpc_vni(&vpc)?,
+        RouteTargetResolutionSource::Request,
+    )?;
+
+    // Routing-policy replacements must produce a valid candidate, while
+    // unrelated updates keep retained incompatible VPCs manageable.
+    let effective_profile_error_policy = if vpc_update.routing_profile_overrides.is_some() {
+        EffectiveProfileErrorPolicy::Reject(RouteTargetResolutionSource::ServerState)
+    } else {
+        EffectiveProfileErrorPolicy::OmitRetained
+    };
+    let rpc_vpc = vpc_to_rpc(
+        vpc,
+        api.runtime_config.fnn.as_ref(),
+        effective_profile_error_policy,
+    )?;
     txn.commit().await?;
 
-    Ok(Response::new(rpc::VpcUpdateResult {
-        vpc: Some(vpc_to_rpc(vpc, api.runtime_config.fnn.as_ref())),
-    }))
+    Ok(Response::new(rpc::VpcUpdateResult { vpc: Some(rpc_vpc) }))
 }
 
 async fn find_vpc_update_nsg(
@@ -557,6 +588,28 @@ pub(crate) async fn change_routing_profile(
     // A pool can contain values that inspection supports but cleanup cannot
     // release. Reject them here, rolling back any newly allocated value.
     validate_transition_vni(destination_vni)?;
+    // Resolve the destination profile before the final write so an unencodable
+    // newly allocated VNI rolls back with the surrounding transaction.
+    let mut destination_config = vpc.config.clone();
+    destination_config.routing_profile_type = destination.profile_type;
+    let destination_vni_for_profile = u32::try_from(destination_vni).map_err(|_| {
+        CarbideError::internal(format!(
+            "destination VNI `{destination_vni}` cannot be represented by the routing profile"
+        ))
+    })?;
+    fnn.resolve_vpc_routing_profile(&destination_config)?
+        .to_rpc(Some(destination_vni_for_profile))
+        .map_err(|error| {
+            route_target_resolution_error(
+                error,
+                if change.vni.is_some() {
+                    RouteTargetResolutionSource::Request
+                } else {
+                    RouteTargetResolutionSource::ServerState
+                },
+            )
+        })
+        .map(drop)?;
     let updated = db::vpc::change_routing_profile(&change, &mut txn, destination_vni).await?;
     let state = vpc_routing_state(
         updated,
@@ -709,10 +762,15 @@ pub(crate) async fn release_inactive_vni(
             })?;
     vpc.version = db::vpc::increment_vpc_version(&mut txn, vpc_id, expected_version).await?;
 
+    let rpc_vpc = vpc_to_rpc(
+        vpc,
+        api.runtime_config.fnn.as_ref(),
+        EffectiveProfileErrorPolicy::OmitRetained,
+    )?;
     txn.commit().await?;
 
     Ok(Response::new(rpc::VpcReleaseInactiveVniResult {
-        vpc: Some(vpc_to_rpc(vpc, api.runtime_config.fnn.as_ref())),
+        vpc: Some(rpc_vpc),
         released_inactive_vni,
     }))
 }
@@ -1132,16 +1190,17 @@ pub(crate) async fn find_by_ids(
     )
     .await;
 
-    let result = db_vpcs
-        .map(|vpc| rpc::VpcList {
-            vpcs: vpc
-                .into_iter()
-                .map(|vpc| vpc_to_rpc(vpc, api.runtime_config.fnn.as_ref()))
-                .collect(),
+    let vpcs = db_vpcs?
+        .into_iter()
+        .map(|vpc| {
+            vpc_to_rpc(
+                vpc,
+                api.runtime_config.fnn.as_ref(),
+                EffectiveProfileErrorPolicy::OmitRetained,
+            )
         })
-        .map(Response::new)?;
-
-    Ok(result)
+        .collect::<Result<Vec<_>, CarbideError>>()?;
+    Ok(Response::new(rpc::VpcList { vpcs }))
 }
 
 pub(crate) async fn get_routing_state(
@@ -1202,23 +1261,118 @@ fn vpc_routing_state(
     })
 }
 
+/// Identifies whether request data or server state supplied the values used to
+/// resolve `vni_self`.
+#[derive(Clone, Copy)]
+enum RouteTargetResolutionSource {
+    Request,
+    ServerState,
+}
+
+/// Keeps new routing state strict while allowing retained incompatible VPCs
+/// to remain readable and manageable.
+#[derive(Clone, Copy)]
+enum EffectiveProfileErrorPolicy {
+    Reject(RouteTargetResolutionSource),
+    OmitRetained,
+}
+
+/// Maps route-target failures according to the source of the values that made
+/// the target unencodable.
+fn route_target_resolution_error(
+    error: RouteTargetConfigError,
+    source: RouteTargetResolutionSource,
+) -> CarbideError {
+    match source {
+        // A caller-selected value is invalid request input.
+        RouteTargetResolutionSource::Request => CarbideError::InvalidArgument(error.to_string()),
+        // An allocated or persisted value is incompatible server state.
+        RouteTargetResolutionSource::ServerState => {
+            CarbideError::FailedPrecondition(error.to_string())
+        }
+    }
+}
+
+/// Resolves route targets supplied by the current mutation and classifies
+/// failures by whether the request or Core selected the resolved VNI.
+fn validate_requested_route_targets(
+    overrides: Option<&VpcRoutingProfileOverrides>,
+    vpc_vni: Option<u32>,
+    source: RouteTargetResolutionSource,
+) -> Result<(), CarbideError> {
+    let Some(overrides) = overrides else {
+        return Ok(());
+    };
+
+    // Validate only caller-supplied lists so inherited policy remains server state.
+    for targets in [
+        overrides.route_target_imports.as_deref(),
+        overrides.route_targets_on_exports.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for target in targets {
+            target
+                .resolve(vpc_vni)
+                .map_err(|error| route_target_resolution_error(error, source))?;
+        }
+    }
+    Ok(())
+}
+
+/// Converts a persisted VPC's allocated VNI for route-target resolution while
+/// rejecting negative database state.
+fn route_target_vpc_vni(vpc: &model::vpc::Vpc) -> Result<Option<u32>, CarbideError> {
+    vpc.status
+        .vni
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| CarbideError::Internal {
+            message: format!("VPC {} has a negative allocated VNI", vpc.id),
+        })
+}
+
 /// Converts a persisted VPC to RPC and populates its runtime-derived effective routing profile.
 ///
-/// The effective profile is omitted when routing profiles are unsupported, FNN is disabled, or
-/// the named runtime profile cannot be resolved.
-fn vpc_to_rpc(vpc: model::vpc::Vpc, fnn_config: Option<&FnnConfig>) -> rpc::Vpc {
+/// The effective profile is omitted when routing profiles are unsupported, FNN
+/// is disabled, the named profile is missing, or retained policy is incompatible
+/// and the caller permits omission.
+fn vpc_to_rpc(
+    vpc: model::vpc::Vpc,
+    fnn_config: Option<&FnnConfig>,
+    error_policy: EffectiveProfileErrorPolicy,
+) -> Result<rpc::Vpc, CarbideError> {
     let effective_routing_profile = if vpc
         .config
         .network_virtualization_type
         .supports_routing_profiles()
     {
-        fnn_config.and_then(|fnn| {
+        if let Some(profile) = fnn_config.and_then(|fnn| {
             // A persisted VPC can outlive its named runtime profile. In that
             // case the status remains available without an effective profile.
-            fnn.resolve_vpc_routing_profile(&vpc.config)
-                .ok()
-                .map(|profile| rpc::VpcEffectiveRoutingProfile::from(profile.as_ref()))
-        })
+            fnn.resolve_vpc_routing_profile(&vpc.config).ok()
+        }) {
+            match profile.to_effective_rpc(route_target_vpc_vni(&vpc)?) {
+                Ok(profile) => Some(profile),
+                Err(error) => match error_policy {
+                    EffectiveProfileErrorPolicy::Reject(source) => {
+                        return Err(route_target_resolution_error(error, source));
+                    }
+                    EffectiveProfileErrorPolicy::OmitRetained => {
+                        tracing::warn!(
+                            vpc_id = %vpc.id,
+                            routing_profile_type = ?vpc.config.routing_profile_type,
+                            %error,
+                            "omitting incompatible effective routing profile from VPC response"
+                        );
+                        None
+                    }
+                },
+            }
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -1228,7 +1382,7 @@ fn vpc_to_rpc(vpc: model::vpc::Vpc, fnn_config: Option<&FnnConfig>) -> rpc::Vpc 
         .status
         .get_or_insert_default()
         .effective_routing_profile = effective_routing_profile;
-    rpc_vpc
+    Ok(rpc_vpc)
 }
 
 /// `allocate_vpc_vni` allocates from the selected internal or external VNI pool.
@@ -1577,6 +1731,54 @@ mod tests {
             access_tier: Some(access_tier),
             ..Default::default()
         }
+    }
+
+    /// Verifies effective-profile conversion rejects a retained negative VNI
+    /// before generic RPC conversion can wrap corrupt database state.
+    #[test]
+    fn vpc_to_rpc_rejects_negative_vni_before_effective_profile_conversion() {
+        // Make the negative status the only invalid value while selecting a
+        // resolvable FNN profile needed to reach effective-profile conversion.
+        let vpc_id = VpcId::new();
+        let fnn_config = fnn_with_profiles(&[("INTERNAL", profile(true, 1))]);
+        let retained_vpc = model::vpc::Vpc {
+            id: vpc_id,
+            version: ConfigVersion::initial(),
+            config: model::vpc::VpcConfig {
+                tenant_organization_id: "test-org".to_string(),
+                tenant_keyset_id: None,
+                network_virtualization_type: VpcVirtualizationType::Fnn,
+                network_security_group_id: None,
+                default_nvlink_logical_partition_id: None,
+                vni: None,
+                routing_profile_type: Some("INTERNAL".to_string()),
+                routing_profile_overrides: None,
+                power_resource_group: None,
+                slaac_enabled: false,
+            },
+            status: VpcStatus {
+                vni: Some(-1), // Drives the defensive signed-to-unsigned conversion.
+            },
+            metadata: Metadata::new_with_default_name(),
+            created: chrono::Utc::now(),
+            updated: chrono::Utc::now(),
+            deleted: None,
+        };
+
+        // Convert the retained row through the effective-profile response path.
+        let error = vpc_to_rpc(
+            retained_vpc,
+            Some(&fnn_config),
+            EffectiveProfileErrorPolicy::OmitRetained,
+        )
+        .expect_err("negative retained VNI must be rejected");
+
+        // Return a data-integrity error instead of publishing a wrapped status.
+        assert!(matches!(
+            error,
+            CarbideError::Internal { message }
+                if message == format!("VPC {vpc_id} has a negative allocated VNI")
+        ));
     }
 
     struct RoutingResolutionInput {

@@ -21656,7 +21656,7 @@ components:
     VpcRouteTarget:
       title: VpcRouteTarget
       type: object
-      description: BGP route target represented by an autonomous system number and VNI.
+      description: BGP route target represented by an autonomous system number and either a literal local-administrator value or the VPC's current L3 VNI.
       properties:
         asn:
           type: integer
@@ -21665,11 +21665,17 @@ components:
           maximum: 4294967295
           description: Autonomous system number.
         vni:
-          type: integer
+          type:
+            - integer
+            - 'null'
           format: uint32
           minimum: 0
           maximum: 4294967295
-          description: Route-target VNI.
+          description: Literal route-target local-administrator value. A numeric value, including zero, cannot be combined with `vniSelf: true`; omit this field or set it to null for symbolic resolution. When `vniSelf` is false, omission or null retains legacy literal-zero behavior.
+        vniSelf:
+          type: boolean
+          default: false
+          description: Resolve the route-target VNI from the current VPC's L3 VNI when true. Literal targets and effective routing profiles return false.
     VpcRoutingProfileOverrides:
       title: VpcRoutingProfileOverrides
       type: object

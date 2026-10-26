@@ -12402,6 +12402,7 @@ func (x *PrefixFilterPolicyEntries) GetValues() []*PrefixFilterPolicyEntry {
 
 // Routing-profile properties set directly on a VPC. Present properties
 // override its named routing profile; omitted properties inherit from it.
+// Route targets retain symbolic `vni_self` values in this stored definition.
 // `internal` and `access_tier` are intentionally not exposed because allocation
 // and access controls must always come from the named base profile.
 type VpcRoutingProfileOverrides struct {
@@ -12496,9 +12497,9 @@ func (x *VpcRoutingProfileOverrides) GetAllowedAnycastPrefixes() *PrefixFilterPo
 	return nil
 }
 
-// The fully resolved routing profile currently applied to an FNN VPC.
-// Unlike VpcRoutingProfileOverrides, this includes the protected properties
-// inherited from the named base profile and has no presence-aware fields.
+// The fully resolved routing profile applied to an FNN VPC. Unlike
+// VpcRoutingProfileOverrides, this includes protected base-profile properties,
+// and every route target has a present concrete `vni` with `vni_self` cleared.
 type VpcEffectiveRoutingProfile struct {
 	state                          protoimpl.MessageState     `protogen:"open.v1"`
 	RouteTargetImports             []*RouteTarget             `protobuf:"bytes,1,rep,name=route_target_imports,json=routeTargetImports,proto3" json:"route_target_imports,omitempty"`
@@ -29063,10 +29064,12 @@ type ManagedHostNetworkConfigResponse struct {
 	// tenant routes, reducing the coordination needed
 	// between nico and GNI.  We'll double-tag our
 	// internal tenant routes with this tag.
+	// This global target is always literal and has `vni_self` false.
 	CommonInternalRouteTarget *RouteTarget `protobuf:"bytes,109,opt,name=common_internal_route_target,json=commonInternalRouteTarget,proto3,oneof" json:"common_internal_route_target,omitempty"`
 	// Additional RTs that we can import if needed for additional services,
 	// or to make it easier to handle GNI changes, such as a swap
 	// in the default-route RT.
+	// These global targets are always literal and have `vni_self` false.
 	AdditionalRouteTargetImports []*RouteTarget `protobuf:"bytes,110,rep,name=additional_route_target_imports,json=additionalRouteTargetImports,proto3" json:"additional_route_target_imports,omitempty"`
 	// Rules to be inserted before any other NSG rules.Action
 	// This should land in a separate policy on the DPU that is
@@ -61238,6 +61241,8 @@ func (x *PrefixFilterPolicyEntry) GetPrefix() string {
 	return ""
 }
 
+// A concrete per-VPC profile sent to the DPU. Every route target has a present
+// `vni` and `vni_self` false.
 type RoutingProfile struct {
 	state                          protoimpl.MessageState `protogen:"open.v1"`
 	RouteTargetImports             []*RouteTarget         `protobuf:"bytes,1,rep,name=route_target_imports,json=routeTargetImports,proto3" json:"route_target_imports,omitempty"`

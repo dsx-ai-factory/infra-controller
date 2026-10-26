@@ -70,8 +70,8 @@ use model::network_security_group::{
 use model::network_segment::NetworkDefinition;
 use model::resource_pool::define::ResourcePoolConfig;
 use model::tenant::identity_config::SigningAlgorithm;
-use model::vpc::VpcConfig;
 pub use model::vpc::{PrefixFilterPolicyEntry, RouteTargetConfig};
+use model::vpc::{RouteTargetConfigError, VpcConfig};
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -3346,6 +3346,51 @@ impl FnnRoutingProfileConfig {
 }
 
 impl FnnConfig {
+    /// Validates global and configured routing-profile targets before the API starts serving.
+    pub(crate) fn validate_route_targets(&self) -> eyre::Result<()> {
+        let validate_profile =
+            |path: &str, profile: &FnnRoutingProfileConfig| -> eyre::Result<()> {
+                for (field, targets) in [
+                    (
+                        "route_target_imports",
+                        profile.route_target_imports.as_deref(),
+                    ),
+                    (
+                        "route_targets_on_exports",
+                        profile.route_targets_on_exports.as_deref(),
+                    ),
+                ] {
+                    for (index, target) in targets.unwrap_or_default().iter().enumerate() {
+                        target
+                            .validate()
+                            .wrap_err_with(|| format!("{path}.{field}[{index}] is invalid"))?;
+                    }
+                }
+                Ok(())
+            };
+
+        // Global targets have no VPC context and therefore accept literals only.
+        if let Some(target) = &self.common_internal_route_target {
+            target
+                .resolve(None)
+                .wrap_err("fnn.common_internal_route_target is invalid")?;
+        }
+        for (index, target) in self.additional_route_target_imports.iter().enumerate() {
+            target.resolve(None).wrap_err_with(|| {
+                format!("fnn.additional_route_target_imports[{index}] is invalid")
+            })?;
+        }
+
+        if let Some(admin_vpc) = &self.admin_vpc {
+            validate_profile("fnn.admin_vpc.routing_profile", &admin_vpc.routing_profile)?;
+        }
+        for (name, profile) in &self.routing_profiles {
+            validate_profile(&format!("fnn.routing_profiles.{name}"), profile)?;
+        }
+
+        Ok(())
+    }
+
     /// Resolves the named routing profile and applies properties set on the VPC.
     pub(crate) fn resolve_vpc_routing_profile(
         &self,
@@ -3404,19 +3449,31 @@ impl FnnConfig {
     }
 }
 
-impl From<&FnnRoutingProfileConfig> for rpc::forge::RoutingProfile {
-    fn from(profile: &FnnRoutingProfileConfig) -> Self {
-        Self {
-            tenant_leak_communities_accepted: profile
+impl FnnRoutingProfileConfig {
+    /// Resolves route targets against one VPC while constructing the concrete DPU routing profile.
+    pub(crate) fn to_rpc(
+        &self,
+        vpc_vni: Option<u32>,
+    ) -> Result<rpc::forge::RoutingProfile, RouteTargetConfigError> {
+        let resolve_route_targets = |targets: Option<&[RouteTargetConfig]>| {
+            targets
+                .unwrap_or_default()
+                .iter()
+                .map(|target| target.resolve(vpc_vni).map(rpc::common::RouteTarget::from))
+                .collect::<Result<Vec<_>, RouteTargetConfigError>>()
+        };
+
+        Ok(rpc::forge::RoutingProfile {
+            tenant_leak_communities_accepted: self
                 .tenant_leak_communities_accepted
                 .unwrap_or_default(),
-            leak_default_route_from_underlay: profile
+            leak_default_route_from_underlay: self
                 .leak_default_route_from_underlay
                 .unwrap_or_default(),
-            leak_tenant_host_routes_to_underlay: profile
+            leak_tenant_host_routes_to_underlay: self
                 .leak_tenant_host_routes_to_underlay
                 .unwrap_or_default(),
-            accepted_leaks_from_underlay: profile
+            accepted_leaks_from_underlay: self
                 .accepted_leaks_from_underlay
                 .as_deref()
                 .unwrap_or_default()
@@ -3425,7 +3482,7 @@ impl From<&FnnRoutingProfileConfig> for rpc::forge::RoutingProfile {
                     prefix: entry.prefix.to_string(),
                 })
                 .collect(),
-            allowed_anycast_prefixes: profile
+            allowed_anycast_prefixes: self
                 .allowed_anycast_prefixes
                 .as_deref()
                 .unwrap_or_default()
@@ -3434,34 +3491,20 @@ impl From<&FnnRoutingProfileConfig> for rpc::forge::RoutingProfile {
                     prefix: entry.prefix.to_string(),
                 })
                 .collect(),
-            route_target_imports: profile
-                .route_target_imports
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .map(|route_target| rpc::common::RouteTarget {
-                    asn: route_target.asn,
-                    vni: route_target.vni,
-                })
-                .collect(),
-            route_targets_on_exports: profile
-                .route_targets_on_exports
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .map(|route_target| rpc::common::RouteTarget {
-                    asn: route_target.asn,
-                    vni: route_target.vni,
-                })
-                .collect(),
-        }
+            route_target_imports: resolve_route_targets(self.route_target_imports.as_deref())?,
+            route_targets_on_exports: resolve_route_targets(
+                self.route_targets_on_exports.as_deref(),
+            )?,
+        })
     }
-}
 
-impl From<&FnnRoutingProfileConfig> for rpc::forge::VpcEffectiveRoutingProfile {
-    fn from(profile: &FnnRoutingProfileConfig) -> Self {
-        let routing_profile = rpc::forge::RoutingProfile::from(profile);
-        Self {
+    /// Resolves the API effective profile with the same concrete route targets sent to DPUs.
+    pub(crate) fn to_effective_rpc(
+        &self,
+        vpc_vni: Option<u32>,
+    ) -> Result<rpc::forge::VpcEffectiveRoutingProfile, RouteTargetConfigError> {
+        let routing_profile = self.to_rpc(vpc_vni)?;
+        Ok(rpc::forge::VpcEffectiveRoutingProfile {
             route_target_imports: routing_profile.route_target_imports,
             route_targets_on_exports: routing_profile.route_targets_on_exports,
             leak_default_route_from_underlay: routing_profile.leak_default_route_from_underlay,
@@ -3470,9 +3513,9 @@ impl From<&FnnRoutingProfileConfig> for rpc::forge::VpcEffectiveRoutingProfile {
             tenant_leak_communities_accepted: routing_profile.tenant_leak_communities_accepted,
             accepted_leaks_from_underlay: routing_profile.accepted_leaks_from_underlay,
             allowed_anycast_prefixes: routing_profile.allowed_anycast_prefixes,
-            internal: profile.internal.unwrap_or_default(),
-            access_tier: profile.access_tier.unwrap_or_default(),
-        }
+            internal: self.internal.unwrap_or_default(),
+            access_tier: self.access_tier.unwrap_or_default(),
+        })
     }
 }
 
@@ -5687,14 +5730,18 @@ path = "credentials.yaml"
         );
     }
 
-    /// Verifies existing routing-profile TOML values deserialize unchanged
-    /// after the fields become presence-aware.
+    /// Verifies numeric TOML remains compatible while symbolic targets retain
+    /// their unresolved VPC dependency.
     #[test]
     fn fnn_routing_profile_options_accept_existing_toml_syntax() {
+        // Parse one numeric target and one target requiring VPC-time resolution.
         let profile: FnnRoutingProfileConfig = Figment::new()
             .merge(Toml::string(
                 r#"
-                    route_target_imports = [{ asn = 64512, vni = 10 }]
+                    route_target_imports = [
+                        { asn = 64512, vni = 10 },
+                        { asn = 429000000, vni_self = true },
+                    ]
                     route_targets_on_exports = []
                     internal = true
                     leak_default_route_from_underlay = false
@@ -5708,14 +5755,23 @@ path = "credentials.yaml"
             .extract()
             .expect("existing routing-profile syntax must remain valid");
 
+        // Preserve every optional value while retaining both target representations.
         assert_eq!(
             profile,
             FnnRoutingProfileConfig {
                 tenant_prefix_overlap_eligible: false,
-                route_target_imports: Some(vec![RouteTargetConfig {
-                    asn: 64512,
-                    vni: 10,
-                }]),
+                route_target_imports: Some(vec![
+                    RouteTargetConfig {
+                        asn: 64512,
+                        vni: Some(10),
+                        vni_self: false,
+                    },
+                    RouteTargetConfig {
+                        asn: 429_000_000,
+                        vni: None,
+                        vni_self: true,
+                    },
+                ]),
                 route_targets_on_exports: Some(vec![]),
                 internal: Some(true),
                 leak_default_route_from_underlay: Some(false),
@@ -5726,6 +5782,66 @@ path = "credentials.yaml"
                 }]),
                 allowed_anycast_prefixes: Some(vec![]),
                 access_tier: Some(2),
+            }
+        );
+    }
+
+    /// Verifies only per-VPC profiles accept symbolic targets because global
+    /// settings have no unambiguous VPC VNI.
+    #[test]
+    fn fnn_route_target_validation_rejects_symbolic_global_settings() {
+        // Reuse one symbolic target so only its configuration location varies.
+        let symbolic_target = RouteTargetConfig {
+            asn: 429_000_000,
+            vni: None,
+            vni_self: true,
+        };
+
+        scenarios!(run = |config: FnnConfig| {
+            config.validate_route_targets().map_err(|error| error.to_string())
+        };
+            "unsupported global settings" {
+                // The common internal tag is shared by every VPC.
+                FnnConfig {
+                    admin_vpc: None,
+                    common_internal_route_target: Some(symbolic_target.clone()),
+                    additional_route_target_imports: vec![],
+                    routing_profiles: HashMap::new(),
+                    use_vpc_vrf_loopback: false,
+                } => Fails,
+
+                // Additional imports have no single VPC VNI for symbolic resolution.
+                FnnConfig {
+                    admin_vpc: None,
+                    common_internal_route_target: None,
+                    additional_route_target_imports: vec![symbolic_target.clone()],
+                    routing_profiles: HashMap::new(),
+                    use_vpc_vrf_loopback: false,
+                } => Fails,
+            }
+
+            "per-VPC profiles" {
+                // Named and admin profiles are resolved only after their VPC is known.
+                FnnConfig {
+                    admin_vpc: Some(AdminFnnConfig {
+                        enabled: true,
+                        vpc_vni: None,
+                        routing_profile: FnnRoutingProfileConfig {
+                            route_targets_on_exports: Some(vec![symbolic_target.clone()]),
+                            ..Default::default()
+                        },
+                    }),
+                    common_internal_route_target: None,
+                    additional_route_target_imports: vec![],
+                    routing_profiles: HashMap::from([(
+                        "SYMBOLIC".to_string(),
+                        FnnRoutingProfileConfig {
+                            route_target_imports: Some(vec![symbolic_target]),
+                            ..Default::default()
+                        },
+                    )]),
+                    use_vpc_vrf_loopback: false,
+                } => Yields(()),
             }
         );
     }
@@ -5784,13 +5900,21 @@ path = "credentials.yaml"
     #[test]
     fn vpc_routing_profile_overrides_are_presence_aware() {
         // Build a complete base and an override containing explicit default values.
-        let inherited_export = RouteTargetConfig { asn: 1, vni: 2 };
+        let inherited_export = RouteTargetConfig {
+            asn: 1,
+            vni: Some(2),
+            vni_self: false,
+        };
         let inherited_anycast = PrefixFilterPolicyEntry {
             prefix: "192.0.2.0/24".parse().expect("valid test prefix"),
         };
         let base = FnnRoutingProfileConfig {
             tenant_prefix_overlap_eligible: true,
-            route_target_imports: Some(vec![RouteTargetConfig { asn: 3, vni: 4 }]),
+            route_target_imports: Some(vec![RouteTargetConfig {
+                asn: 3,
+                vni: Some(4),
+                vni_self: false,
+            }]),
             route_targets_on_exports: Some(vec![inherited_export.clone()]),
             internal: Some(true),
             leak_default_route_from_underlay: Some(true),

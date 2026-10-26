@@ -271,9 +271,21 @@ async fn saved_request_and_result_survive_entity_rollback(pool: PgPool) -> eyre:
             imports: None,
             exports: Some(vec![]),
             peer_identity: vec![
-                RouteTargetConfig { asn: 64512, vni: 9 },
-                RouteTargetConfig { asn: 64512, vni: 3 },
-                RouteTargetConfig { asn: 64512, vni: 9 },
+                RouteTargetConfig {
+                    asn: 64512,
+                    vni: Some(9),
+                    vni_self: false,
+                },
+                RouteTargetConfig {
+                    asn: 64512,
+                    vni: Some(3),
+                    vni_self: false,
+                },
+                RouteTargetConfig {
+                    asn: 64512,
+                    vni: Some(9),
+                    vni_self: false,
+                },
             ],
         }),
         ..assignment()
@@ -1647,9 +1659,21 @@ async fn entity_deletion_commits_release_work_for_later_cleanup(pool: PgPool) ->
         route_target_policy: Some(ProviderRouteTargetPolicy {
             mode: ProviderRouteTargetMode::Replace,
             imports: Some(vec![
-                RouteTargetConfig { asn: 64512, vni: 9 },
-                RouteTargetConfig { asn: 64512, vni: 3 },
-                RouteTargetConfig { asn: 64512, vni: 9 },
+                RouteTargetConfig {
+                    asn: 64512,
+                    vni: Some(9),
+                    vni_self: false,
+                },
+                RouteTargetConfig {
+                    asn: 64512,
+                    vni: Some(3),
+                    vni_self: false,
+                },
+                RouteTargetConfig {
+                    asn: 64512,
+                    vni: Some(9),
+                    vni_self: false,
+                },
             ]),
             exports: Some(vec![]),
             peer_identity: vec![],
