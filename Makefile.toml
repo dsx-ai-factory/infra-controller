@@ -293,6 +293,44 @@ docker run --rm \
   cargo ${CARGO_ARGS}
 '''
 
+[tasks.clippy-docker]
+category = "CI"
+description = "Run clippy over the whole workspace, carbide-dhcp included, inside the carbide-build-x86_64 Docker container, for hosts whose Kea headers are older than carbide-dhcp requires. Builds the container image first."
+workspace = false
+dependencies = ["check-cargo-home-set", "build-cargo-docker-image"]
+script = '''
+set -e
+if [ -z "$CARGO_HOME" ]; then CARGO_HOME="$HOME/.cargo"; fi
+docker run --rm \
+  -v "${REPO_ROOT}":/code \
+  -v "${CARGO_HOME}":/cargo \
+  -w /code \
+  -u $(id -u):$(id -g) \
+  -e CARGO_HOME=/cargo \
+  carbide-build-x86_64 \
+  cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+'''
+
+[tasks.carbide-lints-docker]
+category = "CI"
+description = "Run carbide-lints inside the carbide-build-x86_64 Docker container, for hosts whose Kea headers are older than carbide-dhcp requires. Builds the container image first and needs a Linux host, since the lint driver installed by setup-carbide-lints is built on the host and runs in the container."
+workspace = false
+dependencies = ["check-cargo-home-set", "build-cargo-docker-image", "setup-carbide-lints"]
+script = '''
+set -e
+if [ -z "$CARGO_HOME" ]; then CARGO_HOME="$HOME/.cargo"; fi
+# Name the nightly toolchain: the stable cargo's library path would leave the
+# lint driver unable to load the nightly compiler's librustc_driver.
+docker run --rm \
+  -v "${REPO_ROOT}":/code \
+  -v "${CARGO_HOME}":/cargo \
+  -w /code \
+  -u $(id -u):$(id -g) \
+  -e CARGO_HOME=/cargo \
+  carbide-build-x86_64 \
+  cargo +${RUST_NIGHTLY} carbide-lints
+'''
+
 [tasks.test-dhcp-docker]
 category = "Test"
 description = "Run DHCP integration tests in the pinned Bookworm/Kea build environment."
@@ -616,6 +654,24 @@ dependencies = [
   "generate-rest-core-proto",
   "clippy-flow",
   "carbide-lints",
+  "lint-error-messages",
+  "check-format-nightly",
+  "check-event-names",
+  "check-workspace-deps",
+  "check-metric-docs",
+  "check-licenses",
+  "check-bans",
+]
+
+[tasks.pre-commit-verify-workspace-docker]
+workspace = false
+description = "pre-commit-verify-workspace for a host whose Kea headers are too old to build carbide-dhcp: clippy and carbide-lints run in the build container, so carbide-dhcp is linted too. Builds the container image first, via clippy-docker."
+category = "CI"
+# Keep in step with the dependencies of pre-commit-verify-workspace, which CI uses.
+dependencies = [
+  "generate-rest-core-proto",
+  "clippy-docker",
+  "carbide-lints-docker",
   "lint-error-messages",
   "check-format-nightly",
   "check-event-names",

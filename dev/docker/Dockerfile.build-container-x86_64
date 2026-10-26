@@ -90,7 +90,7 @@ RUN if [ ! -f /usr/include/kea/dhcpsrv/cfg_globals.h ]; then \
 # make LLVM's linker lld the default, because ld crashes using too much memory
 RUN update-alternatives --install /usr/bin/ld ld /usr/bin/lld 50
 
-RUN rustup component add rustfmt
+RUN rustup component add rustfmt clippy
 
 # Install a nightly toolchain just for running cargo fmt
 RUN rustup toolchain install ${RUST_NIGHTLY} --profile minimal
