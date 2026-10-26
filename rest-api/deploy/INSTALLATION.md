@@ -631,7 +631,8 @@ associated environment variables, then the binary defaults:
 | `--client-ca-file` | `CERT_AUTH_CLIENT_CA_FILE` | Empty uses the effective signing CA, including its configured primary/alternate fallback; otherwise a readable PEM CA bundle is required |
 
 Helm sets these through `nico-rest-cert-manager.authorization.mode`,
-`authorization.allowedIdentities`, and `authorization.clientCaFile`, using
+`authorization.allowedIdentities`, and `authorization.clientCaFile` (or the
+Secret-backed `authorization.clientCaSecretName` described below), using
 **environment variables**, so an older image can ignore the new settings.
 An empty chart identity list generates
 `spiffe://<global.spiffeTrustDomain>/<release-namespace>/sa/nico-rest-site-manager`.
@@ -662,7 +663,8 @@ without a client identity, for compatibility with older charts in `AUDIT`.
 `DynTLSCfg` polls the configured client certificate and key every 30 seconds;
 valid replacements are used on new TLS connections. A client CA bundle change
 still requires a restart. Site Manager requires an HTTPS endpoint, verifies the
-URL hostname, and refuses redirects.
+URL hostname, and refuses redirects. The endpoint must be directly routable;
+Site Manager ignores proxy environment variables for this client.
 
 Helm's `credsManagerCa.secretName` defaults to `ca-signing-secret`, with key
 `tls.crt`, mounted as `ca.crt`; only the public CA is mounted. Its Role no longer
@@ -690,7 +692,8 @@ CA bundle under `ca.crt` and set `authorization.clientCaSecretName` to its name.
 The chart mounts that bundle read-only at `/etc/pki/client-ca/ca.crt` and configures
 authorization to use it. A missing Secret or `ca.crt` key prevents the pod from
 starting. This setting is mutually exclusive with `authorization.clientCaFile`,
-which selects a bundle in an existing mount.
+which selects a bundle in an existing mount. Certificate Manager reads the client
+CA bundle at startup; restart its pods after rotating this Secret or bundle.
 The default ClusterIssuer uses automatic approval: a principal able to request
 certificates from it can request the allowed URI. Constrain certificate issuance
 with approval policy or use a dedicated client CA whose issuance is restricted.
@@ -707,7 +710,11 @@ credentials, accept 1–2160 hours. An empty `app`, used by Site Manager's fallb
 serving-certificate request, accepts 1–8760 hours (365 days). Values outside
 these ranges return HTTP 400. The `app` distinction is caller-supplied, not an
 additional authorization boundary; every issuance is bounded by one year.
-Certificate Manager's own serving certificate is also limited to one year.
+Certificate Manager's own serving certificate is also limited to one year. It
+renews the in-memory keypair on the first TLS handshake within seven days of
+expiry. Failed renewals retain a still-valid certificate and retry on a handshake
+after one hour; expired certificates are rejected until renewal succeeds.
+Renewal uses the in-memory signing CA; rotating that CA requires a restart.
 Existing certificates are not revoked by these checks. Site Agent bootstrap
 still requires an existing Site in `AwaitHandshake` and its correct, unexpired OTP.
 
