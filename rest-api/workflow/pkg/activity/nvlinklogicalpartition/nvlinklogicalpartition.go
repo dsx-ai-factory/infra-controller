@@ -130,7 +130,10 @@ func (mnlp ManageNVLinkLogicalPartition) UpdateNVLinkLogicalPartitionsInDB(ctx c
 			if siteName != nvllp.Name {
 				// Adopt the Site name only if the API would accept it. Otherwise this would undo the
 				// name chosen during recovery, or fail validation and block the rest of this update.
-				usable := isValidNVLinkLogicalPartitionName(siteName)
+				siteNameLen := utf8.RuneCountInString(siteName)
+				usable := siteNameLen >= cdbm.NVLinkLogicalPartitionNameMinLength &&
+					siteNameLen <= cdbm.NVLinkLogicalPartitionNameMaxLength &&
+					strings.TrimSpace(siteName) == siteName
 				if usable {
 					sameNameNvllps, _, terr := nvlinklogicalpartitionDAO.GetAll(ctx, nil, cdbm.NVLinkLogicalPartitionFilterInput{
 						Names:     []string{siteName},
@@ -419,7 +422,10 @@ func (mnlp ManageNVLinkLogicalPartition) createOrUpdateNVLinkLogicalPartitionFro
 		}
 
 		baseName := reportedNvllp.Name
-		if !isValidNVLinkLogicalPartitionName(baseName) {
+		baseNameLen := utf8.RuneCountInString(baseName)
+		if baseNameLen < cdbm.NVLinkLogicalPartitionNameMinLength ||
+			baseNameLen > cdbm.NVLinkLogicalPartitionNameMaxLength ||
+			strings.TrimSpace(baseName) != baseName {
 			baseName = "recovered-" + controllerNvllpID.String()[:8]
 		}
 
@@ -524,16 +530,6 @@ func (mnlp ManageNVLinkLogicalPartition) createOrUpdateNVLinkLogicalPartitionFro
 	}
 
 	return nvllp
-}
-
-// isValidNVLinkLogicalPartitionName reports whether name passes the length and whitespace
-// rules that the NVLink Logical Partition DAO enforces.
-func isValidNVLinkLogicalPartitionName(name string) bool {
-	nameLen := utf8.RuneCountInString(name)
-
-	return nameLen >= cdbm.NVLinkLogicalPartitionNameMinLength &&
-		nameLen <= cdbm.NVLinkLogicalPartitionNameMaxLength &&
-		strings.TrimSpace(name) == name
 }
 
 // NewManageNVLinkLogicalPartition returns a new ManageNVLinkLogicalPartition activity
