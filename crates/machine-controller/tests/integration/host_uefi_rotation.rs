@@ -125,6 +125,17 @@ async fn lenovo_uefi_rotation_unlocks_and_restores_bmc_lockdown(
         },
     )
     .await;
+    // The controller reads the vendor from Scout discovery, not exploration.
+    let mut hardware_info = mh.host.hardware_info();
+    hardware_info.dmi_data.as_mut().unwrap().sys_vendor = "Lenovo".to_string();
+    let mut txn = pool.begin().await?;
+    db::machine_topology::set_topology_update_needed(&mut txn, &mh.host.id.into(), true).await?;
+    db::machine_topology::create_or_update(&mut txn, &mh.host.id.into(), &hardware_info).await?;
+    txn.commit().await?;
+    assert_eq!(
+        mh.host.machine().await.bmc_vendor(),
+        bmc_vendor::BMCVendor::Lenovo
+    );
     stage_lagging_host_uefi(&env, &pool, mac).await?;
     env.redfish_sim
         .set_lockdown(libredfish::EnabledDisabled::Enabled);

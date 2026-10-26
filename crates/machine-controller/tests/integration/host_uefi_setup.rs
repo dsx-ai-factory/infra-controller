@@ -78,8 +78,24 @@ async fn setup_host_with_vendor(env: &Env, vendor: bmc_vendor::BMCVendor) -> Tes
 
 #[sqlx_test]
 async fn lenovo_uefi_setup_unlocks_supported_bmc_controls(pool: PgPool) {
-    let mut env = Env::builder(pool).build().await;
+    let mut env = Env::builder(pool.clone()).build().await;
     let mh = setup_host_with_vendor(&env, bmc_vendor::BMCVendor::Lenovo).await;
+
+    // The controller reads the vendor from Scout discovery, not exploration.
+    let mut hardware_info = mh.host.hardware_info();
+    hardware_info.dmi_data.as_mut().unwrap().sys_vendor = "Lenovo".to_string();
+    let mut txn = pool.begin().await.unwrap();
+    db::machine_topology::set_topology_update_needed(&mut txn, &mh.host.id.into(), true)
+        .await
+        .unwrap();
+    db::machine_topology::create_or_update(&mut txn, &mh.host.id.into(), &hardware_info)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    assert_eq!(
+        mh.host.machine().await.bmc_vendor(),
+        bmc_vendor::BMCVendor::Lenovo
+    );
 
     // The legacy firmware's BMC-only unlock is a no-op. Both paths must
     // advance, while firmware with the new controls actually unlocks.
