@@ -1273,7 +1273,7 @@ func testDeleteSiteComponentsFromDBDeletedSiteResources(t *testing.T) {
 	siteDAO := cdbm.NewSiteDAO(dbSession)
 	err := siteDAO.Delete(ctx, nil, site1Resources.site.ID)
 	require.NoError(t, err)
-	_, err = siteDAO.GetByID(ctx, nil, site1Resources.site.ID, nil, false)
+	_, err = siteDAO.GetByID(ctx, nil, site1Resources.site.ID, nil, false, false)
 	require.Equal(t, cdb.ErrDoesNotExist, err)
 
 	// Model inventory admitted before Site deletion writing after the early
