@@ -67,7 +67,7 @@ func NormalizeAPIVpcRoutingProfileFromSite(routingProfile string) string {
 // APIVpcRouteTarget identifies a literal or VPC-relative BGP route target.
 type APIVpcRouteTarget struct {
 	ASN     uint32  `json:"asn"`
-	VNI     *uint32 `json:"vni"`
+	VNI     *uint32 `json:"vni,omitempty"`
 	VniSelf bool    `json:"vniSelf"`
 }
 

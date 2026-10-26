@@ -813,10 +813,10 @@ func TestNewAPIVpc(t *testing.T) {
 		assert.Nil(t, desiredTarget.VNI)
 		assert.True(t, desiredTarget.VniSelf)
 
-		// Symbolic responses expose null instead of conflating absence with literal zero.
+		// Symbolic responses omit vni instead of conflating absence with literal zero.
 		encodedTarget, err := json.Marshal(desiredTarget)
 		require.NoError(t, err)
-		assert.JSONEq(t, `{"asn":64512,"vni":null,"vniSelf":true}`, string(encodedTarget))
+		assert.JSONEq(t, `{"asn":64512,"vniSelf":true}`, string(encodedTarget))
 
 		assert.Nil(t, unprivileged.EffectiveRoutingProfile)
 		unprivilegedJSON, err := json.Marshal(unprivileged)

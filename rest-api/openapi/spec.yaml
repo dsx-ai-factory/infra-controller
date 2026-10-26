@@ -21665,13 +21665,11 @@ components:
           maximum: 4294967295
           description: Autonomous system number.
         vni:
-          type:
-            - integer
-            - 'null'
+          type: integer
           format: uint32
           minimum: 0
           maximum: 4294967295
-          description: Literal route-target local-administrator value. A numeric value, including zero, cannot be combined with `vniSelf: true`; omit this field or set it to null for symbolic resolution. When `vniSelf` is false, omission or null retains legacy literal-zero behavior.
+          description: 'Literal route-target local-administrator value. A numeric value, including zero, cannot be combined with `vniSelf: true`; omit this field for symbolic resolution. When `vniSelf` is false, omission retains legacy literal-zero behavior.'
         vniSelf:
           type: boolean
           default: false
