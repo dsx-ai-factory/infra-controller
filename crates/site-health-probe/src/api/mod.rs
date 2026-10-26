@@ -185,6 +185,12 @@ impl ApiError {
         )
     }
 
+    /// The reply status, for tests.
+    #[cfg(test)]
+    pub(crate) fn status(&self) -> StatusCode {
+        self.status
+    }
+
     fn snapshot_expired() -> Self {
         Self::new(
             StatusCode::CONFLICT,
