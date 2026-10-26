@@ -451,6 +451,7 @@ mod tests {
         let processor = LeakEventProcessor::new(1);
         let metric_event = CollectorEvent::Metric(
             crate::sink::MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: "k".to_string(),
                 name: "n".to_string(),
                 metric_type: "gauge".to_string(),

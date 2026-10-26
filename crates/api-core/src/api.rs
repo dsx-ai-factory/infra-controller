@@ -66,6 +66,7 @@ use crate::cfg::file::CarbideConfig;
 use crate::dynamic_settings::DynamicSettings;
 use crate::ethernet_virtualization::EthVirtData;
 use crate::logging::log_limiter::LogLimiter;
+use crate::resource_pool::ResourcePoolMonitor;
 use crate::scout_stream::ConnectionRegistry;
 use crate::{CarbideError, CarbideResult};
 
@@ -90,6 +91,8 @@ pub struct Api {
     pub(crate) common_pools: Arc<CommonPools>,
     /// Pool backends resolved at startup; runtime lookups also see later growth.
     pub(crate) resource_pool_registry: ResourcePoolRegistry,
+    /// Shared inventory and provider observations for admin inspection and metrics.
+    pub(crate) resource_pool_monitor: ResourcePoolMonitor,
     pub(crate) ib_fabric_manager: Arc<dyn IBFabricManager>,
     // `pub` (not `pub(crate)`): read by the `carbide-api-web` admin UI for config-derived display.
     pub runtime_config: Arc<CarbideConfig>,

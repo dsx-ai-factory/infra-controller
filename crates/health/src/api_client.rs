@@ -1337,6 +1337,7 @@ mod tests {
                 let context = EventContext::from_endpoint(&endpoint, "nvue_gnmi");
 
                 let sample = MetricSample {
+                    semantics: crate::sink::MetricSemantics::Gauge,
                     key: "temperature".to_string(),
                     name: "nvue_gnmi".to_string(),
                     metric_type: "temperature".to_string(),

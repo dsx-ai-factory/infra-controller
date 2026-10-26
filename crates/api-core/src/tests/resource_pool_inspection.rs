@@ -2,14 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use carbide_instrument::testing::MetricsCapture;
 use carbide_resource_pool_api::v1;
 use carbide_resource_pool_api::v1::resource_pool_server::{ResourcePool, ResourcePoolServer};
 use chrono::Utc;
+use db::test_support::postgres::wait_for_blocked_query;
+use futures::StreamExt;
 use ipnetwork::Ipv6Network;
 use model::resource_pool::binding::INTEGRATED_AUTHORITY_ID;
+use model::resource_pool::common::{LOOPBACK_IP_V6, VPC_VNI, ib_pkey_pool_name};
 use model::resource_pool::registration::ResourcePoolRegistration;
 use model::resource_pool::{
     OwnerType, ResourcePool as TypedPool, ResourcePoolBackendKind, ResourcePoolSelection,
@@ -19,6 +24,7 @@ use prost::Message;
 use rpc::forge;
 use rpc::forge::forge_server::Forge;
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -28,6 +34,11 @@ use tonic::{Code, Request, Response, Status};
 use uuid::Uuid;
 
 use crate::cfg::resource_pool::ResourcePoolBackendConfig;
+use crate::logging::service_health_metrics::{
+    ServiceHealthContext, start_export_service_health_metrics,
+};
+use crate::resource_pool::ResourcePoolMonitor;
+use crate::resource_pool::metrics::{PoolStats, start_pool_stats};
 use crate::test_support::default_config;
 use crate::tests::common::api_fixtures::{
     TestEnvOverrides, create_test_env, create_test_env_with_overrides,
@@ -274,26 +285,19 @@ async fn inspection_keeps_remote_status_and_saved_identity(database: PgPool) -> 
     let requests = Arc::new(Mutex::new(Vec::new()));
     let calls = Arc::new(Mutex::new(Vec::new()));
     let provider = StatsProvider {
-        replies: cases
-            .iter()
-            .map(|(name, reply, _)| ((*name).to_owned(), *reply))
-            .collect(),
+        replies: Arc::new(Mutex::new(
+            cases
+                .iter()
+                .map(|(name, reply, _)| ((*name).to_owned(), StatsReply::Ready(*reply)))
+                .collect(),
+        )),
         requests: requests.clone(),
         calls: calls.clone(),
     };
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let endpoint = format!("http://{}", listener.local_addr()?).parse()?;
     let shutdown = CancellationToken::new();
     let _shutdown_guard = shutdown.clone().drop_guard();
     let mut tasks = JoinSet::new();
-    tasks.spawn(
-        Server::builder()
-            .add_service(ResourcePoolServer::new(provider))
-            .serve_with_incoming_shutdown(
-                TcpListenerStream::new(listener),
-                shutdown.clone().cancelled_owned(),
-            ),
-    );
+    let (endpoint, _) = start_stats_provider(provider, &mut tasks, shutdown.clone()).await?;
 
     // The fixture starts with only Integrated selections. Saved remote bindings
     // are injected afterward; production startup still rejects such selections.
@@ -484,7 +488,545 @@ async fn inspection_keeps_remote_status_and_saved_identity(database: PgPool) -> 
     Ok(())
 }
 
-/// Save an accepted registration without local inventory so inspection must use
+/// A failed database snapshot hides counts without discarding the last sample.
+/// Shutdown also stops waiting for SQL, and PostgreSQL returns the connection
+/// after its statement limit expires.
+#[crate::sqlx_test]
+async fn polling_retains_samples_after_database_failure_and_cancels_sql(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let env = create_test_env(database.clone()).await;
+    // A shorter operator limit makes PostgreSQL fail before the sampler's
+    // five-second budget. One connection also exposes delayed SQL cleanup.
+    let stats_database = PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                sqlx::query("SET statement_timeout = '1s'")
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(database.connect_options().as_ref().clone())
+        .await?;
+    let monitor = ResourcePoolMonitor::new(stats_database.clone(), &HashMap::new())?;
+    let metrics = MetricsCapture::start();
+    let cancel = CancellationToken::new();
+    let _cancel_guard = cancel.clone().drop_guard();
+    let mut tasks = JoinSet::new();
+    let observations = start_pool_stats(monitor, &env.common_pools, &mut tasks, cancel.clone())?;
+    start_export_service_health_metrics(ServiceHealthContext {
+        meter: env.test_meter.meter(),
+        database_pool: stats_database.clone(),
+        resource_pool_stats: observations.clone(),
+    });
+    let first = wait_for_pool_observation(
+        &observations,
+        VPC_VNI,
+        forge::ResourcePoolStatsStatus::Known,
+    )
+    .await?
+    .expect("first successful database observation");
+
+    let mut blocker = database.begin().await?;
+    sqlx::query("LOCK TABLE resource_pool IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await?;
+    let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+    advance_stats_poll().await;
+    wait_for_blocked_query(&database, blocker_pid, "FROM resource_pool").await;
+
+    assert_eq!(
+        wait_for_pool_observation(
+            &observations,
+            VPC_VNI,
+            forge::ResourcePoolStatsStatus::Unavailable,
+        )
+        .await?,
+        Some(first.clone()),
+        "a failed snapshot must retain both counts and their original timestamp"
+    );
+    assert!(
+        observations
+            .lock()
+            .expect("pool observations")
+            .values()
+            .all(|sample| sample.latest_status == forge::ResourcePoolStatsStatus::Unavailable)
+    );
+    for metric in [
+        "carbide_resourcepool_used_count",
+        "carbide_resourcepool_free_count",
+    ] {
+        assert!(
+            env.test_meter.formatted_metrics(metric).is_empty(),
+            "{metric}"
+        );
+    }
+    assert!(
+        metrics.counter_delta(
+            "carbide_resourcepool_stats_poll_failures_total",
+            &[("backend", "integrated"), ("failure", "database")],
+        ) >= 1.0
+    );
+    blocker.rollback().await?;
+
+    // Removing the lock must allow a later scheduled pass to replace the sample.
+    advance_stats_poll().await;
+    let recovered = wait_for_pool_observation(
+        &observations,
+        VPC_VNI,
+        forge::ResourcePoolStatsStatus::Known,
+    )
+    .await?
+    .expect("database observations recover after the lock is removed");
+    assert_eq!(recovered.stats, first.stats);
+    assert_ne!(recovered.observed_at, first.observed_at);
+
+    let mut blocker = database.begin().await?;
+    sqlx::query("LOCK TABLE resource_pool IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await?;
+    let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+    advance_stats_poll().await;
+    wait_for_blocked_query(&database, blocker_pid, "FROM resource_pool").await;
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_millis(500), async {
+        while let Some(result) = tasks.join_next().await {
+            result.expect("statistics sampler stops without panicking");
+        }
+    })
+    .await?;
+
+    // Dropping the future stops local waiting. PostgreSQL can still be running
+    // the query until its statement timeout releases the only pooled connection.
+    let mut connection =
+        tokio::time::timeout(Duration::from_secs(2), stats_database.acquire()).await??;
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&mut *connection)
+            .await?,
+        1
+    );
+    drop(connection);
+    blocker.rollback().await?;
+    stats_database.close().await;
+    Ok(())
+}
+
+/// A slow provider must not hold up healthy counts. Failed observations keep
+/// their last successful sample, and shutdown stops an RPC already in flight.
+#[crate::sqlx_test]
+async fn polling_keeps_healthy_pools_moving_and_stops_active_calls(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let counts = v1::PoolStats {
+        used: 7,
+        free: 11,
+        auto_assign_used: 7,
+        auto_assign_free: 11,
+        non_auto_assign_used: 0,
+        non_auto_assign_free: 0,
+    };
+    let timed_out_call = Arc::new(StalledStats::default());
+    let replies = Arc::new(Mutex::new(HashMap::from([
+        ("poll-healthy".into(), StatsReply::Ready(Ok(counts))),
+        (
+            "a-poll-stalled".into(),
+            StatsReply::Stall(timed_out_call.clone()),
+        ),
+    ])));
+    let provider = StatsProvider {
+        replies: replies.clone(),
+        requests: Arc::default(),
+        calls: Arc::default(),
+    };
+    let shutdown = CancellationToken::new();
+    let _shutdown_guard = shutdown.clone().drop_guard();
+    let mut provider_tasks = JoinSet::new();
+    let (endpoint, connections) =
+        start_stats_provider(provider, &mut provider_tasks, shutdown.clone()).await?;
+
+    let mut config = default_config::get();
+    config.resource_pool_backends.insert(
+        "poll-provider".into(),
+        ResourcePoolBackendConfig::Grpc {
+            endpoint,
+            tls: None,
+        },
+    );
+    let env =
+        create_test_env_with_overrides(database.clone(), TestEnvOverrides::with_config(config))
+            .await;
+    // Retained local inventory must not become a remote pool's apparent capacity
+    // while its provider is stalled or unavailable.
+    let mut txn = database.begin().await?;
+    db::resource_pool::populate(
+        &TypedPool::<i64>::new("a-poll-stalled".into(), ValueType::Integer),
+        &mut txn,
+        vec![999],
+        true,
+    )
+    .await?;
+    txn.commit().await?;
+    // Add remote bindings after fixture startup, below the production gate
+    // that still requires Integrated selections.
+    for name in ["poll-healthy", "a-poll-stalled"] {
+        save_remote_definition(&database, name, "poll-provider").await?;
+    }
+    let missing_pkey = ib_pkey_pool_name("missing");
+    let common_pools = db::resource_pool::create_common_pools(
+        database.clone(),
+        ["default".to_owned(), "missing".to_owned()].into(),
+    )
+    .await?;
+    let local_counts = db::resource_pool::stats(&database, VPC_VNI).await?;
+    assert!(local_counts.free > 0);
+    assert!(
+        !sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM resource_pool WHERE name = ANY($1))"
+        )
+        .bind(vec![LOOPBACK_IP_V6, missing_pkey.as_str()])
+        .fetch_one(&database)
+        .await?,
+        "both optional local pools must be absent from inventory"
+    );
+    let metrics = MetricsCapture::start();
+    let cancel = CancellationToken::new();
+    let _cancel_guard = cancel.clone().drop_guard();
+    let mut tasks = JoinSet::new();
+    let observations = start_pool_stats(
+        env.api.resource_pool_monitor.clone(),
+        &common_pools,
+        &mut tasks,
+        cancel.clone(),
+    )?;
+
+    // The stalled name sorts first. Healthy counts must arrive before its
+    // ten-second deadline, so serial polling cannot satisfy this assertion.
+    let first = tokio::time::timeout(Duration::from_secs(5), async {
+        timed_out_call.entered.cancelled().await;
+        wait_for_pool_observation(
+            &observations,
+            "poll-healthy",
+            forge::ResourcePoolStatsStatus::Known,
+        )
+        .await
+    })
+    .await??
+    .expect("healthy pool has a successful sample");
+    assert_eq!(first.stats.as_ref().expect("healthy counts").used, 7);
+    assert!(first.observed_at.is_some());
+    assert_eq!(connections.load(Ordering::SeqCst), 1);
+    // Real local counts replace empty defaults, while both absent Ethernet
+    // and configured IB pools retain their known zero counts.
+    assert_eq!(
+        wait_for_pool_observation(
+            &observations,
+            VPC_VNI,
+            forge::ResourcePoolStatsStatus::Known,
+        )
+        .await?
+        .expect("local inventory has known counts")
+        .stats,
+        Some(local_counts.into())
+    );
+    for name in [LOOPBACK_IP_V6, missing_pkey.as_str()] {
+        assert_eq!(
+            wait_for_pool_observation(&observations, name, forge::ResourcePoolStatsStatus::Known)
+                .await?
+                .expect("missing optional local pool has known counts")
+                .stats,
+            Some(forge::ResourcePoolStats::default()),
+            "{name}"
+        );
+    }
+
+    assert!(!timed_out_call.stopped.is_cancelled());
+
+    assert_eq!(
+        wait_for_pool_observation(
+            &observations,
+            "a-poll-stalled",
+            forge::ResourcePoolStatsStatus::Unavailable,
+        )
+        .await?,
+        None,
+        "a failed remote observation must not retain same-name local inventory"
+    );
+    tokio::time::timeout(Duration::from_secs(1), timed_out_call.stopped.cancelled()).await?;
+
+    // Unsupported Stats and temporary failures retain the same successful
+    // sample, but operators need their different status and failure labels.
+    replies
+        .lock()
+        .expect("provider replies")
+        .insert("a-poll-stalled".into(), StatsReply::Ready(Ok(counts)));
+    let mut other_sample = None;
+    for (code, status, failure) in [
+        // A provider without Stats support reports unknown capacity.
+        (
+            Code::Unimplemented,
+            forge::ResourcePoolStatsStatus::Unknown,
+            "unknown",
+        ),
+        // A failed Stats attempt reports unavailable capacity.
+        (
+            Code::Unavailable,
+            forge::ResourcePoolStatsStatus::Unavailable,
+            "unavailable",
+        ),
+    ] {
+        let labels = [("backend", "grpc"), ("failure", failure)];
+        let before =
+            metrics.counter_delta("carbide_resourcepool_stats_poll_failures_total", &labels);
+        replies
+            .lock()
+            .expect("provider replies")
+            .insert("poll-healthy".into(), StatsReply::Ready(Err(code)));
+        advance_stats_poll().await;
+        assert_eq!(
+            wait_for_pool_observation(&observations, "poll-healthy", status).await?,
+            Some(first.clone()),
+            "{code:?}: retain the successful observation unchanged"
+        );
+        assert!(
+            metrics.counter_delta("carbide_resourcepool_stats_poll_failures_total", &labels)
+                > before,
+            "{code:?}: the poller must count the matching failure category"
+        );
+        // Wait for both rows from this pass. Advancing the next interval while
+        // the other RPC is still finishing would also advance its deadline.
+        other_sample = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let sample = wait_for_pool_observation(
+                    &observations,
+                    "a-poll-stalled",
+                    forge::ResourcePoolStatsStatus::Known,
+                )
+                .await?;
+                if sample != other_sample {
+                    return Ok::<_, eyre::Report>(sample);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await??;
+    }
+    env.api
+        .admin_inspect_resource_pools(Request::new(forge::InspectResourcePoolsRequest {}))
+        .await?;
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        1,
+        "successive polls and public inspection must reuse the same provider connection"
+    );
+
+    // A successful retry replaces the retained sample. Stall the other pool
+    // again so shutdown must stop provider I/O, not just an idle interval.
+    let cancelled_call = Arc::new(StalledStats::default());
+    {
+        let mut replies = replies.lock().expect("provider replies");
+        replies.insert(
+            "poll-healthy".into(),
+            StatsReply::Ready(Ok(v1::PoolStats {
+                used: 8,
+                free: 10,
+                auto_assign_used: 8,
+                auto_assign_free: 10,
+                ..counts
+            })),
+        );
+        replies.insert(
+            "a-poll-stalled".into(),
+            StatsReply::Stall(cancelled_call.clone()),
+        );
+    }
+    advance_stats_poll().await;
+    let recovered = wait_for_pool_observation(
+        &observations,
+        "poll-healthy",
+        forge::ResourcePoolStatsStatus::Known,
+    )
+    .await?
+    .expect("successful retry has a sample");
+    assert_eq!(recovered.stats.as_ref().expect("retry counts").used, 8);
+    assert_ne!(recovered.observed_at, first.observed_at);
+
+    tokio::time::timeout(Duration::from_secs(5), cancelled_call.entered.cancelled()).await?;
+    assert!(!cancelled_call.stopped.is_cancelled());
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while let Some(result) = tasks.join_next().await {
+            result.expect("statistics sampler stops without panicking");
+        }
+        cancelled_call.stopped.cancelled().await;
+    })
+    .await?;
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), provider_tasks.join_next())
+        .await?
+        .expect("provider task")??;
+    Ok(())
+}
+
+/// The sampler admits at most eight pool observations at once and reuses a
+/// released slot. Once the pass finishes, cancellation also stops its tick wait.
+#[crate::sqlx_test]
+async fn polling_bounds_active_calls_and_cancels_an_idle_sampler(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let calls: Vec<_> = (0..9).map(|_| Arc::new(StalledStats::default())).collect();
+    let provider = StatsProvider {
+        replies: Arc::new(Mutex::new(
+            calls
+                .iter()
+                .enumerate()
+                .map(|(index, call)| (format!("bounded-{index}"), StatsReply::Stall(call.clone())))
+                .collect(),
+        )),
+        requests: Arc::default(),
+        calls: Arc::default(),
+    };
+    let shutdown = CancellationToken::new();
+    let _shutdown_guard = shutdown.clone().drop_guard();
+    let mut provider_tasks = JoinSet::new();
+    let (endpoint, _) =
+        start_stats_provider(provider, &mut provider_tasks, shutdown.clone()).await?;
+    let mut config = default_config::get();
+    config.resource_pool_backends.insert(
+        "bounded-provider".into(),
+        ResourcePoolBackendConfig::Grpc {
+            endpoint,
+            tls: None,
+        },
+    );
+    let env =
+        create_test_env_with_overrides(database.clone(), TestEnvOverrides::with_config(config))
+            .await;
+    for index in 0..calls.len() {
+        save_remote_definition(&database, &format!("bounded-{index}"), "bounded-provider").await?;
+    }
+    let cancel = CancellationToken::new();
+    let _cancel_guard = cancel.clone().drop_guard();
+    let mut tasks = JoinSet::new();
+    let observations = start_pool_stats(
+        env.api.resource_pool_monitor.clone(),
+        &env.common_pools,
+        &mut tasks,
+        cancel.clone(),
+    )?;
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for call in &calls[..8] {
+            call.entered.cancelled().await;
+        }
+    })
+    .await?;
+    // Keep all eight RPCs blocked while waiting for an unwanted ninth entrant.
+    // This observation window ends well before the client's ten-second limit.
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), calls[8].entered.cancelled())
+            .await
+            .is_err()
+    );
+    assert!(calls[..8].iter().all(|call| !call.stopped.is_cancelled()));
+    calls[0].release.cancel();
+    tokio::time::timeout(Duration::from_secs(2), calls[8].entered.cancelled()).await?;
+    assert!(calls[0].stopped.is_cancelled());
+    assert!(calls[1..].iter().all(|call| !call.stopped.is_cancelled()));
+
+    for call in &calls {
+        call.release.cancel();
+    }
+    for index in 0..calls.len() {
+        wait_for_pool_observation(
+            &observations,
+            &format!("bounded-{index}"),
+            forge::ResourcePoolStatsStatus::Unavailable,
+        )
+        .await?;
+    }
+    // Every response has been published; stopping here protects cancellation
+    // during the sixty-second wait separately from active-RPC cancellation.
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while let Some(result) = tasks.join_next().await {
+            result.expect("idle statistics sampler stops without panicking");
+        }
+    })
+    .await?;
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), provider_tasks.join_next())
+        .await?
+        .expect("provider task")??;
+    Ok(())
+}
+
+/// Wait for the sampler to publish a status, then return its retained success.
+/// Each read releases the mutex before waiting for another attempt.
+async fn wait_for_pool_observation(
+    observations: &PoolStats,
+    name: &str,
+    status: forge::ResourcePoolStatsStatus,
+) -> eyre::Result<Option<forge::ResourcePoolInspection>> {
+    Ok(tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            {
+                let observations = observations.lock().expect("pool observations");
+                if let Some(observation) = observations.get(name)
+                    && observation.latest_status == status
+                {
+                    let mut sample = None;
+                    observation
+                        .last_success
+                        .if_available(|last, _| sample = Some(last.clone()));
+                    return sample;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?)
+}
+
+/// Advance the polling interval, then resume real time before waiting on SQL
+/// or gRPC. This does not age the metrics holder's `std::time::Instant`.
+async fn advance_stats_poll() {
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(60)).await;
+    tokio::time::resume();
+}
+
+/// Start the shared fixture on a real listener and count accepted connections.
+/// The caller owns cancellation and joins the server through its task set.
+async fn start_stats_provider(
+    provider: StatsProvider,
+    tasks: &mut JoinSet<Result<(), tonic::transport::Error>>,
+    cancel: CancellationToken,
+) -> eyre::Result<(url::Url, Arc<AtomicUsize>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("http://{}", listener.local_addr()?).parse()?;
+    let connections = Arc::new(AtomicUsize::new(0));
+    let accepted = connections.clone();
+    let incoming = TcpListenerStream::new(listener).inspect(move |connection| {
+        if connection.is_ok() {
+            accepted.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    tasks.spawn(
+        Server::builder()
+            .add_service(ResourcePoolServer::new(provider))
+            .serve_with_incoming_shutdown(incoming, cancel.cancelled_owned()),
+    );
+    Ok((endpoint, connections))
+}
+
+/// Save an accepted registration without adding local inventory, so inspection uses
 /// its provider identity, rather than resolving the configured alias again.
 async fn save_remote_definition(
     database: &PgPool,
@@ -542,9 +1084,25 @@ async fn save_remote_definition(
 /// `StatsProvider` records real gRPC requests and supplies each pool's observation.
 /// Other operations fail so inspection cannot silently register or allocate values.
 struct StatsProvider {
-    replies: HashMap<String, Result<v1::PoolStats, Code>>,
+    replies: Arc<Mutex<HashMap<String, StatsReply>>>,
     requests: Arc<Mutex<Vec<v1::StatsRequest>>>,
     calls: Arc<Mutex<Vec<&'static str>>>,
+}
+
+/// A pool can answer immediately or wait until the test releases its RPC or the
+/// client stops it.
+#[derive(Clone)]
+enum StatsReply {
+    Ready(Result<v1::PoolStats, Code>),
+    Stall(Arc<StalledStats>),
+}
+
+/// Records when a stalled RPC starts and stops, and lets the test release it.
+#[derive(Default)]
+struct StalledStats {
+    entered: CancellationToken,
+    release: CancellationToken,
+    stopped: CancellationToken,
 }
 
 #[tonic::async_trait]
@@ -660,11 +1218,25 @@ impl ResourcePool for StatsProvider {
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("missing pool"))?
             .logical_pool;
-        match self.replies.get(name) {
-            Some(Ok(stats)) => Ok(Response::new(v1::StatsResponse {
-                stats: Some(*stats),
-            })),
-            Some(Err(code)) => Err(Status::new(*code, "provider-private-diagnostic")),
+        let reply = self
+            .replies
+            .lock()
+            .expect("provider replies")
+            .get(name)
+            .cloned();
+        match reply {
+            Some(StatsReply::Ready(Ok(stats))) => {
+                Ok(Response::new(v1::StatsResponse { stats: Some(stats) }))
+            }
+            Some(StatsReply::Ready(Err(code))) => {
+                Err(Status::new(code, "provider-private-diagnostic"))
+            }
+            Some(StatsReply::Stall(call)) => {
+                let _stopped = call.stopped.clone().drop_guard();
+                call.entered.cancel();
+                call.release.cancelled().await;
+                Err(Status::unavailable("test released the stalled request"))
+            }
             None => Err(Status::not_found("unconfigured test pool")),
         }
     }

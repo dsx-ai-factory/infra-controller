@@ -36,6 +36,7 @@ mod machine_creator;
 mod power_shelf_creator;
 mod switch_creator;
 
+pub(super) use machine_creator::ConfiguredIngestionCandidate;
 pub use machine_creator::MachineCreator;
 pub use power_shelf_creator::PowerShelfCreator;
 pub use switch_creator::SwitchCreator;
@@ -122,6 +123,22 @@ impl InventoryCreator {
             metrics.create_machines_latency = Some(create_machines_latency);
             metrics.record_phase_latency("create_machines", create_machines_latency);
             create_machines_res?;
+        } else {
+            // `create_machines` revisits ingested hosts explored this run on
+            // its steady-state path; with it off, revisit them here so a
+            // pending admin address repair is still made.
+            let reconcile_admin_addresses_start = Instant::now();
+            self.machine_creator
+                .reconcile_explored_host_admin_addresses(
+                    identified_hosts,
+                    already_ingested_bmc_ips,
+                    explored_this_run,
+                )
+                .await;
+            metrics.record_phase_latency(
+                "reconcile_explored_host_admin_addresses",
+                reconcile_admin_addresses_start.elapsed(),
+            );
         }
 
         let reconcile_desired_boot_interfaces_start = Instant::now();

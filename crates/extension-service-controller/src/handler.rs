@@ -604,7 +604,7 @@ async fn reconcile_registration(
                 }
                 parent_created = true;
             }
-            Err(error) if is_already_exists(&error) => {
+            Err(error) if error.is_already_exists_or_conflict() => {
                 // Reread only after POST conflict to distinguish an owned create race from a
                 // foreign deterministic-name collision.
                 let existing = match dpf_sdk
@@ -704,7 +704,7 @@ async fn reconcile_registration(
                 }
                 parent_created = true;
             }
-            Err(error) if is_already_exists(&error) => {
+            Err(error) if error.is_already_exists_or_conflict() => {
                 // Reread only after POST conflict to distinguish an owned create race from a
                 // foreign deterministic-name collision.
                 let existing = match dpf_sdk.get_detached_dpu_service_chain(&chain.name).await {
@@ -809,7 +809,7 @@ async fn create_or_verify_dpu_service(
                 error,
             ),
         },
-        Err(error) if is_already_exists(&error) => match dpf_sdk
+        Err(error) if error.is_already_exists_or_conflict() => match dpf_sdk
             .get_dpu_service(&desired.name)
             .await
         {
@@ -1633,13 +1633,6 @@ fn dpf_failure_outcome(
     }
     tracing::warn!(%service_id, %error, operation, "DPF Helm chart reconciliation will retry");
     StateHandlerOutcome::wait(operation.to_string())
-}
-
-/// Recognizes repository and Kubernetes create conflicts that require ownership verification.
-/// Both forms describe a race rather than a terminal request-shape error.
-fn is_already_exists(error: &DpfError) -> bool {
-    matches!(error, DpfError::AlreadyExists { .. })
-        || matches!(error, DpfError::KubeError(kube::Error::Api(status)) if status.is_already_exists() || status.is_conflict())
 }
 
 fn is_not_found(error: &DpfError) -> bool {

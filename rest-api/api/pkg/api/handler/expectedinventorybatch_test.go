@@ -5,6 +5,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -22,9 +24,11 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 	tmocks "go.temporal.io/sdk/mocks"
 )
 
@@ -133,7 +137,149 @@ func testExpectedMachineMutationRejectsCompleteMutationLock(t *testing.T, mutati
 	require.Equal(t, 1, count)
 }
 
-func TestReplaceAllExpectedMachinesRollsBackOnCoreFailure(t *testing.T) {
+type expectedMachineBeforeQueryHook struct {
+	queryPrefix string
+	beforeQuery func()
+	armed       bool
+	fired       bool
+}
+
+func (hook *expectedMachineBeforeQueryHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	if hook.armed && !hook.fired && strings.HasPrefix(event.Query, hook.queryPrefix) {
+		hook.armed = false
+		hook.fired = true
+		hook.beforeQuery()
+	}
+	return ctx
+}
+
+func (*expectedMachineBeforeQueryHook) AfterQuery(context.Context, *bun.QueryEvent) {}
+
+func testExpectedMachineRejectsRecreatedSKU(t *testing.T, mutation string) {
+	t.Helper()
+	dbSession := testExpectedMachineInitDB(t)
+	t.Cleanup(func() { dbSession.Close() })
+	ctx := context.Background()
+	const org = "test-org"
+	provider, site := testExpectedMachineSetupTestData(t, dbSession, org)
+	otherSite := &cdbm.Site{
+		ID: uuid.New(), Name: "other-site", Org: org,
+		InfrastructureProviderID: provider.ID, Status: cdbm.SiteStatusRegistered,
+	}
+	_, err := dbSession.DB.NewInsert().Model(otherSite).Exec(ctx)
+	require.NoError(t, err)
+	user := &cdbm.User{
+		ID: uuid.New(), StarfleetID: cutil.GetPtr("attachment-user"),
+		OrgData: cdbm.OrgData{org: cdbm.Org{Name: org, Roles: []string{"FORGE_PROVIDER_ADMIN"}}},
+	}
+	_, err = dbSession.DB.NewInsert().Model(user).Exec(ctx)
+	require.NoError(t, err)
+	dao := cdbm.NewExpectedMachineDAO(dbSession)
+	original, err := dao.Create(ctx, nil, cdbm.ExpectedMachineCreateInput{
+		ExpectedMachineID: uuid.New(), SiteID: site.ID, BmcMacAddress: "00:11:22:33:44:10",
+		ChassisSerialNumber: "original", Name: cutil.GetPtr("original"),
+		SkuID: cutil.GetPtr("test-sku-uuid-1"), CreatedBy: user.ID,
+	})
+	require.NoError(t, err)
+
+	client := &tmocks.Client{}
+	run := &tmocks.WorkflowRun{}
+	run.On("GetID").Return("attachment-workflow")
+	run.On("Get", mock.Anything, mock.Anything).Return(nil)
+	client.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(run, nil)
+	pool := sc.NewClientPool(nil)
+	pool.IDClientMap[site.ID.String()] = client
+	cfg := common.GetTestConfig()
+
+	const skuID = "test-sku-uuid-2"
+	createBody := fmt.Sprintf(`{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:11","chassisSerialNumber":"created","skuId":%q}`, site.ID.String(), skuID)
+	var method, path, body, id string
+	var handle func(echo.Context) error
+	expectedStatus := http.StatusBadRequest
+	expectedMessage := "the SkuID specified for Expected Machine does not exist in DB: " + skuID
+	switch mutation {
+	case "single create":
+		method, path, body = http.MethodPost, "/v2/org/test-org/nico/expected-machine", createBody
+		handle = NewCreateExpectedMachineHandler(dbSession, pool, cfg).Handle
+		expectedStatus, expectedMessage = http.StatusUnprocessableEntity, "SKU ID specified in request does not exist"
+	case "single update":
+		id = original.ID.String()
+		method, path = http.MethodPatch, "/v2/org/test-org/nico/expected-machine/"+id
+		body = fmt.Sprintf(`{"skuId":%q,"name":"updated"}`, skuID)
+		handle = NewUpdateExpectedMachineHandler(dbSession, pool, cfg).Handle
+		expectedStatus, expectedMessage = http.StatusUnprocessableEntity, "SKU ID specified in request does not exist"
+	case "batch create":
+		method, path, body = http.MethodPost, "/v2/org/test-org/nico/expected-machine/batch", "["+createBody+"]"
+		handle = NewCreateExpectedMachinesHandler(dbSession, pool, cfg).Handle
+	case "batch update":
+		method, path = http.MethodPatch, "/v2/org/test-org/nico/expected-machine/batch"
+		body = fmt.Sprintf(`[{"id":%q,"skuId":%q,"name":"updated"}]`, original.ID.String(), skuID)
+		handle = NewUpdateExpectedMachinesHandler(dbSession, pool, cfg).Handle
+	case "replace all":
+		method, path = http.MethodPut, "/v2/org/test-org/nico/expected-machine/all"
+		body = fmt.Sprintf(`{"siteId":%q,"expectedMachines":[%s]}`, site.ID.String(), createBody)
+		// An invalid SKU must be rejected before resolving a Site client.
+		handle = NewReplaceAllExpectedMachinesHandler(dbSession, nil, cfg).Handle
+		expectedMessage = "SkuID specified for an Expected Machine does not exist on the Site"
+	default:
+		t.Fatalf("unknown Expected Machine mutation %q", mutation)
+	}
+
+	// Recreate an unattached SKU after any pre-transaction validation has run.
+	// The write transaction must validate the replacement row's Site itself.
+	hook := &expectedMachineBeforeQueryHook{
+		queryPrefix: "BEGIN", armed: true,
+		beforeQuery: func() {
+			err := cdb.WithTx(ctx, dbSession, func(tx *cdb.Tx) error {
+				_, deleteErr := cdb.GetIDB(tx, dbSession).NewDelete().Model((*cdbm.SKU)(nil)).Where("id = ?", skuID).Exec(ctx)
+				if deleteErr != nil {
+					return deleteErr
+				}
+				_, insertErr := cdb.GetIDB(tx, dbSession).NewInsert().Model(&cdbm.SKU{ID: skuID, SiteID: otherSite.ID}).Exec(ctx)
+				return insertErr
+			})
+			require.NoError(t, err)
+		},
+	}
+	dbSession.DB.AddQueryHook(hook)
+	request := httptest.NewRequest(method, path, strings.NewReader(body))
+	request.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	recorder := httptest.NewRecorder()
+	echoContext := echo.New().NewContext(request, recorder)
+	echoContext.Set("user", user)
+	echoContext.SetParamNames("orgName", "id")
+	echoContext.SetParamValues(org, id)
+	require.NoError(t, handle(echoContext))
+	require.True(t, hook.fired, "the SKU recreation must happen before the attachment transaction")
+	require.Equal(t, expectedStatus, recorder.Code, recorder.Body.String())
+	require.Contains(t, recorder.Body.String(), expectedMessage)
+	require.Empty(t, client.Calls, "a rejected SKU attachment must not reach Core")
+
+	stored, err := dao.Get(ctx, nil, original.ID, nil, false)
+	require.NoError(t, err)
+	require.Equal(t, original, stored, "rejected attachment must preserve the existing Expected Machine")
+	count, err := dbSession.DB.NewSelect().Model((*cdbm.ExpectedMachine)(nil)).Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, count, "rejected attachment must not create an Expected Machine")
+}
+
+func TestReplaceAllExpectedMachinesHandler_Handle(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "Core failure rolls back replacement", run: testReplaceAllExpectedMachinesRollsBackOnCoreFailure},
+		{name: "requested SKU among larger Site inventory", run: testReplaceAllExpectedMachinesFindsRequestedSKUAmongLargerSiteInventory},
+		{name: "SKU recreated on another Site before attachment", run: func(t *testing.T) {
+			testExpectedMachineRejectsRecreatedSKU(t, "replace all")
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, test.run)
+	}
+}
+
+func testReplaceAllExpectedMachinesRollsBackOnCoreFailure(t *testing.T) {
 	dbSession := testExpectedRackInitDB(t)
 	t.Cleanup(func() { dbSession.Close() })
 	ctx := context.Background()
@@ -176,7 +322,7 @@ func TestReplaceAllExpectedMachinesRollsBackOnCoreFailure(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
-func TestReplaceAllExpectedMachinesFindsRequestedSKUAmongLargerSiteInventory(t *testing.T) {
+func testReplaceAllExpectedMachinesFindsRequestedSKUAmongLargerSiteInventory(t *testing.T) {
 	dbSession := testExpectedRackInitDB(t)
 	t.Cleanup(func() { dbSession.Close() })
 	ctx := context.Background()
@@ -196,6 +342,19 @@ func TestReplaceAllExpectedMachinesFindsRequestedSKUAmongLargerSiteInventory(t *
 		_, err = dbSession.DB.NewInsert().Model(&sku).Exec(ctx)
 		require.NoError(t, err)
 	}
+	connection, err := dbSession.DB.DB.Conn(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, connection.Close()) })
+	var lockError error
+	lockProbe := &expectedMachineBeforeQueryHook{
+		queryPrefix: `INSERT INTO "expected_machine"`, armed: true,
+		beforeQuery: func() {
+			// Probe before the INSERT can acquire its own foreign-key lock.
+			var skuID string
+			lockError = connection.QueryRowContext(ctx, "SELECT id FROM sku WHERE id = $1 FOR UPDATE NOWAIT", "requested-sku").Scan(&skuID)
+		},
+	}
+	dbSession.DB.AddQueryHook(lockProbe)
 
 	client := &tmocks.Client{}
 	run := &tmocks.WorkflowRun{}
@@ -211,6 +370,22 @@ func TestReplaceAllExpectedMachinesFindsRequestedSKUAmongLargerSiteInventory(t *
 	body := fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:01","chassisSerialNumber":"machine-1","skuId":"requested-sku"}]}`, site.ID.String(), site.ID.String())
 	recorder := invokeExpectedInventoryBatchHandler(t, user, org, http.MethodPut, "/v2/org/test-org/nico/expected-machine/all", body, "", NewReplaceAllExpectedMachinesHandler(dbSession, pool, common.GetTestConfig()).Handle)
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	require.True(t, lockProbe.fired, "the lock probe must run before inserting the Expected Machine")
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, lockError, &pgErr, "the handler must retain the SKU lock through the attachment write")
+	require.Equal(t, "55P03", pgErr.Code)
+	var response []model.APIExpectedMachine
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+	require.Len(t, response, 1)
+	require.Equal(t, cutil.GetPtr("requested-sku"), response[0].SkuID)
+	stored, err := cdbm.NewExpectedMachineDAO(dbSession).Get(ctx, nil, response[0].ID, nil, false)
+	require.NoError(t, err)
+	require.Equal(t, response[0].SkuID, stored.SkuID)
+	require.Len(t, client.Calls, 1)
+	var dispatched corev1.ExpectedMachineList
+	testDecodeExpectedComponentPatch(t, client.Calls[0].Arguments.Get(3), site.ID.String(), &dispatched)
+	require.Len(t, dispatched.ExpectedMachines, 1)
+	require.Equal(t, response[0].SkuID, dispatched.ExpectedMachines[0].SkuId)
 }
 
 func TestExpectedInventoryBatchHandlers(t *testing.T) {

@@ -552,6 +552,7 @@ impl GnmiOnChangeProcessor {
         sink.handle_event(
             &self.event_context,
             &CollectorEvent::Metric(Box::new(MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key,
                 name: self.collector_name.clone(),
                 metric_type: "on_change_row".to_string(),

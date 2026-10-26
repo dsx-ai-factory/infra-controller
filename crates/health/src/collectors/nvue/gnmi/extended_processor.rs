@@ -352,6 +352,7 @@ fn metric_sample(
     labels: Vec<MetricLabel>,
 ) -> MetricSample {
     MetricSample {
+        semantics: crate::sink::MetricSemantics::Gauge,
         key,
         name: EXTENDED_GNMI_STREAM_ID.to_string(),
         metric_type: metric_type.to_string(),

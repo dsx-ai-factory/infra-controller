@@ -1254,6 +1254,7 @@ dependencies = [
  "reqwest 0.13.4",
  "reqwest-middleware",
  "reqwest-tracing",
+ "rms-observability",
  "rsa 0.9.10",
  "rumqttc",
  "rustls",
@@ -1396,8 +1397,11 @@ dependencies = [
  "carbide-api-db",
  "carbide-api-model",
  "carbide-api-test-helper",
+ "carbide-dhcp",
+ "carbide-health",
  "carbide-kms-provider",
  "carbide-machine-a-tron",
+ "carbide-nvlink-manager",
  "carbide-resource-pool",
  "carbide-rpc",
  "carbide-secrets",
@@ -1409,7 +1413,9 @@ dependencies = [
  "eyre",
  "futures",
  "itertools 0.14.0",
+ "libnmxc",
  "mac_address",
+ "metrics-endpoint",
  "mqttea",
  "opentelemetry 0.32.0",
  "serde_json",
@@ -1465,7 +1471,6 @@ dependencies = [
  "strum",
  "strum_macros",
  "thiserror 2.0.18",
- "tokio",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "url",
@@ -7843,6 +7848,7 @@ dependencies = [
  "prettytable-rs",
  "prost",
  "reqwest 0.13.4",
+ "rms-observability",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -9982,6 +9988,24 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "rms-observability"
+version = "0.0.0"
+dependencies = [
+ "carbide-test-support",
+ "chrono",
+ "librms",
+ "logfmt",
+ "prost",
+ "prost-reflect",
+ "serde_json",
+ "tonic",
+ "tower",
+ "trace-propagation",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -12289,6 +12313,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-serde"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
+dependencies = [
+ "serde",
+ "tracing-core",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12298,6 +12332,8 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
+ "serde",
+ "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
@@ -12305,6 +12341,7 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+ "tracing-serde",
 ]
 
 [[package]]

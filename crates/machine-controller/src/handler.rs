@@ -85,7 +85,7 @@ use model::machine::{
     DpuDiscoveringState, DpuDiscoveringStates, DpuInitNextStateResolver, DpuInitState, DpuMachine,
     FactoryResetBmcState, FailureCause, FailureDetails, FailureSource, HostMachine,
     HostPlatformConfigurationState, HostReprovisionState, InitialResetPhase, InstallDpuOsState,
-    InstanceNextStateResolver, InstanceState, LockdownInfo, LockdownState,
+    InstanceNextStateResolver, InstanceState, LoadSnapshotOptions, LockdownInfo, LockdownState,
     MAX_FIRMWARE_UPGRADE_RETRIES, Machine, MachineLastRebootRequested,
     MachineLastRebootRequestedMode, MachineNextStateResolver, MachineState,
     MachineValidationContext, ManagedHostState, ManagedHostStateSnapshot, MeasuringState,
@@ -97,11 +97,14 @@ use model::machine::{
     ValidationState, get_display_ids,
 };
 use model::machine_boot_interface::MachineBootInterfaceTarget;
+use model::machine_update_module::AutomaticFirmwareUpdateReference;
 use model::power_manager::PowerHandlingOutcome;
 use model::predicted_machine_interface::PredictedMachineInterface;
 use model::resource_pool::common::CommonPools;
 use model::site_explorer::ExploredEndpoint;
-use sku::{handle_bom_validation_requested, handle_bom_validation_state};
+use sku::{
+    handle_bom_validation_requested, handle_bom_validation_state, is_sku_verification_requested,
+};
 use sqlx::PgConnection;
 use state_controller::CheckApplied as _;
 use state_controller::state_handler::{
@@ -674,6 +677,166 @@ impl MachineStateHandler {
         Ok(())
     }
 
+    /// Locks the host first to serialize allocation, then tries its DPUs without
+    /// waiting on health writers that acquire DPU rows before the host.
+    async fn lock_dpu_reprovision_requests(
+        state: &ManagedHostStateSnapshot,
+        txn: &mut PgConnection,
+    ) -> Result<bool, StateHandlerError> {
+        db::machine::lock_by_id_for_update(txn, &state.host_snapshot.id.into()).await?;
+        for dpu_id in state.dpu_snapshots.iter().map(|dpu| dpu.id).sorted() {
+            if !db::machine::try_lock_by_id_for_update(txn, &dpu_id.into()).await? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Releases rejected automatic admissions without clearing a newer or manual request.
+    async fn defer_dpf_reprovision(
+        state: &ManagedHostStateSnapshot,
+        ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+        reason: String,
+    ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+        let automatic_prefix = format!("{}/", AutomaticFirmwareUpdateReference::REF_NAME);
+        let pending_requests = state
+            .dpu_snapshots
+            .iter()
+            .filter_map(|dpu| {
+                dpu.reprovision_requested
+                    .as_ref()
+                    .filter(|request| {
+                        request.started_at.is_none()
+                            && request.initiator.starts_with(&automatic_prefix)
+                    })
+                    .map(|request| (dpu.id, request))
+            })
+            .collect::<Vec<_>>();
+        if pending_requests.is_empty() {
+            return Ok(StateHandlerOutcome::wait(reason));
+        }
+        let mut txn = ctx.services.db_pool.begin().await?;
+        if !Self::lock_dpu_reprovision_requests(state, txn.as_mut()).await? {
+            txn.rollback().await?;
+            return Ok(StateHandlerOutcome::wait(reason));
+        }
+        for (dpu_id, request) in pending_requests {
+            // Read in a separate statement after the row lock: a request may have
+            // been replaced or started while compatibility was being checked.
+            let current = db::machine::find_one(txn.as_mut(), &dpu_id, Default::default()).await?;
+            if current
+                .as_ref()
+                .and_then(|dpu| dpu.reprovision_requested.as_ref())
+                == Some(request)
+            {
+                db::machine::clear_dpu_reprovisioning_request(txn.as_mut(), &dpu_id, true).await?;
+            }
+        }
+        Ok(StateHandlerOutcome::wait(reason).with_txn(txn))
+    }
+
+    /// Commits the start before hardware work, so Clear cannot cancel the
+    /// request and allocation cannot claim the host during the attempt.
+    /// Returns `None` on DPU lock contention, changed request/host identity or
+    /// routing, or higher-priority work that must precede a new claim.
+    async fn claim_ready_dpf_reprovision(
+        &self,
+        state: &ManagedHostStateSnapshot,
+        reprov_state: &ReprovisionState,
+        ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    ) -> Result<Option<ManagedHostStateSnapshot>, StateHandlerError> {
+        let mut txn = ctx.services.db_pool.begin().await?;
+        if !Self::lock_dpu_reprovision_requests(state, txn.as_mut()).await? {
+            txn.rollback().await?;
+            return Ok(None);
+        }
+        let Some(mut current) = db::managed_host::load_snapshot(
+            txn.as_mut(),
+            &state.host_snapshot.id.into(),
+            LoadSnapshotOptions::default().with_host_health(ctx.services.site_config.host_health),
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+
+        let attached_dpus = |snapshot: &ManagedHostStateSnapshot| {
+            snapshot
+                .host_snapshot
+                .associated_dpu_machine_ids()
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        };
+        if !matches!(current.managed_state, ManagedHostState::Ready)
+            || current.host_snapshot.state.version != state.host_snapshot.state.version
+            || current.instance.is_some()
+            || !current.host_snapshot.config.dpf.used_for_ingestion
+            || current.host_snapshot.status.bmc_info.mac != state.host_snapshot.status.bmc_info.mac
+            || attached_dpus(&current) != attached_dpus(state)
+            || current.dpu_snapshots.len() != state.dpu_snapshots.len()
+            || current.dpu_snapshots.iter().any(|current_dpu| {
+                !state.dpu_snapshots.iter().any(|observed| {
+                    observed.id == current_dpu.id
+                        && observed.reprovision_requested == current_dpu.reprovision_requested
+                })
+            })
+            || ReprovisionState::next_substate_based_on_bfb_support(
+                self.enable_secure_boot,
+                &current,
+                ctx.services.site_config.dpf_enabled,
+            ) != *reprov_state
+        {
+            return Ok(None);
+        }
+
+        let has_unstarted_request = current.dpu_snapshots.iter().any(|dpu| {
+            dpu.reprovision_requested
+                .as_ref()
+                .is_some_and(|request| request.started_at.is_none())
+        });
+        if has_unstarted_request
+            && (current.host_snapshot.decommission_requested
+                || current
+                    .host_snapshot
+                    .machine_maintenance_requested
+                    .is_some()
+                || managed_host_reset_needed(&current)
+                || pending_ready_boot_config_state(&current.host_snapshot).is_some()
+                || (self.host_handler.host_handler_params.bom_validation.enabled
+                    && current.host_snapshot.config.hw_sku.is_some()
+                    && is_sku_verification_requested(&current))
+                || host_reprovisioning_requested(&current)
+                || is_machine_validation_requested(&current))
+        {
+            return Ok(None);
+        }
+
+        let started_at = Utc::now();
+        for dpu in &mut current.dpu_snapshots {
+            if let Some(request) = &mut dpu.reprovision_requested
+                && request.started_at.is_none()
+            {
+                db::machine::update_dpu_reprovision_explicit_start_time(
+                    &dpu.id,
+                    started_at,
+                    txn.as_mut(),
+                )
+                .await?;
+                request.started_at = Some(started_at);
+            }
+        }
+        db::machine::insert_health_report(
+            txn.as_mut(),
+            &current.host_snapshot.id,
+            HealthReportApplyMode::Merge,
+            &create_host_update_health_report_dpufw(),
+            false,
+        )
+        .await?;
+        txn.commit().await?;
+        Ok(Some(current))
+    }
+
     async fn clear_scout_timeout_alert(
         txn: &mut PgConnection,
         host_machine_id: &HostMachineId,
@@ -1133,18 +1296,29 @@ impl MachineStateHandler {
                     return Ok(outcome);
                 }
 
-                // Health and maintenance handling take precedence. The request remains pending
-                // until the host is safely Ready, then is cleared in the state-transition
-                // transaction.
+                // Health and maintenance handling take precedence. A pending request is cleared
+                // in the same transaction that enters Decommissioning. If an instance exists, the
+                // request stays pending and the instance path runs. Decommission then starts after
+                // the instance is released and cleaned up.
                 if mh_snapshot.host_snapshot.decommission_requested {
-                    let mut txn = ctx.services.db_pool.begin().await?;
-                    db::machine::clear_decommission_requested(&mut txn, *host_machine_id).await?;
-                    return Ok(StateHandlerOutcome::transition(
-                        ManagedHostState::Decommissioning {
-                            decommissioning_state: DecommissioningState::SuppressingSiteExplorer,
-                        },
-                    )
-                    .with_txn(txn));
+                    if let Some(instance) = mh_snapshot.instance.as_ref() {
+                        tracing::warn!(
+                            %host_machine_id,
+                            instance_id = %instance.id,
+                            "Deferring decommission while an instance exists",
+                        );
+                    } else {
+                        let mut txn = ctx.services.db_pool.begin().await?;
+                        db::machine::clear_decommission_requested(&mut txn, *host_machine_id)
+                            .await?;
+                        return Ok(StateHandlerOutcome::transition(
+                            ManagedHostState::Decommissioning {
+                                decommissioning_state:
+                                    DecommissioningState::SuppressingSiteExplorer,
+                            },
+                        )
+                        .with_txn(txn));
+                    }
                 }
 
                 // An already-committed instance wins before disruptive boot
@@ -1229,8 +1403,67 @@ impl MachineStateHandler {
                     return Ok(outcome);
                 }
 
-                // Check if DPU reprovisioning is requested
                 if dpu_reprovisioning_needed(&mh_snapshot.dpu_snapshots) {
+                    let reprov_state = ReprovisionState::next_substate_based_on_bfb_support(
+                        self.enable_secure_boot,
+                        mh_snapshot,
+                        ctx.services.site_config.dpf_enabled,
+                    );
+                    // Labels and expected inventory can change after queueing.
+                    let dpf_reprovision = mh_snapshot.host_snapshot.config.dpf.used_for_ingestion
+                        && matches!(reprov_state, ReprovisionState::DpfStates { .. });
+                    if dpf_reprovision {
+                        let already_started = mh_snapshot
+                            .dpu_snapshots
+                            .iter()
+                            .filter_map(|dpu| dpu.reprovision_requested.as_ref())
+                            .all(|request| request.started_at.is_some());
+                        // Resume a committed attempt after restart failure or a crash;
+                        // handle_dpf_state checks labels before deleting the DPU.
+                        if !already_started {
+                            let Some(dpf_sdk) = self.dpu_handler.dpf_sdk.as_deref() else {
+                                return Self::defer_dpf_reprovision(
+                                    mh_snapshot,
+                                    ctx,
+                                    "waiting for the DPF SDK before starting DPU reprovisioning"
+                                        .to_string(),
+                                )
+                                .await;
+                            };
+                            let requested_dpus = mh_snapshot
+                                .dpu_snapshots
+                                .iter()
+                                .filter(|dpu| dpu.reprovision_requested.is_some())
+                                .map(|dpu| dpu.id)
+                                .collect::<Vec<_>>();
+                            if let Err(error) = crate::dpf::validate_reprovision_compatibility(
+                                mh_snapshot,
+                                &requested_dpus,
+                                &ctx.services.db_pool,
+                                &ctx.services.site_config.rack_profiles,
+                                dpf_sdk,
+                            )
+                            .await
+                            {
+                                return Self::defer_dpf_reprovision(
+                                    mh_snapshot,
+                                    ctx,
+                                    format!("deferring DPF reprovisioning before restart: {error}"),
+                                )
+                                .await;
+                            }
+                        }
+                        let Some(current) = self
+                            .claim_ready_dpf_reprovision(mh_snapshot, &reprov_state, ctx)
+                            .await?
+                        else {
+                            return Ok(StateHandlerOutcome::wait(
+                                "DPU reprovision request or host changed during compatibility check"
+                                    .to_string(),
+                            ));
+                        };
+                        *mh_snapshot = current;
+                    }
                     let mut dpus_for_reprov = vec![];
                     for dpu_snapshot in &mh_snapshot.dpu_snapshots {
                         if dpu_snapshot.reprovision_requested.is_some() {
@@ -1240,12 +1473,14 @@ impl MachineStateHandler {
                                 mh_snapshot.host_snapshot.config.dpf.used_for_ingestion,
                             )
                             .await?;
-                            ctx.pending_db_writes.push(
-                                MachineWriteOp::UpdateDpuReprovisionStartTime {
-                                    machine_id: dpu_snapshot.id,
-                                    time: Utc::now(),
-                                },
-                            );
+                            if !dpf_reprovision {
+                                ctx.pending_db_writes.push(
+                                    MachineWriteOp::UpdateDpuReprovisionStartTime {
+                                        machine_id: dpu_snapshot.id,
+                                        time: Utc::now(),
+                                    },
+                                );
+                            }
                             dpus_for_reprov.push(dpu_snapshot);
                         }
                     }
@@ -1254,12 +1489,6 @@ impl MachineStateHandler {
                         ctx.pending_db_writes,
                         &mh_snapshot.host_snapshot,
                         &dpus_for_reprov,
-                    );
-
-                    let reprov_state = ReprovisionState::next_substate_based_on_bfb_support(
-                        self.enable_secure_boot,
-                        mh_snapshot,
-                        ctx.services.site_config.dpf_enabled,
                     );
 
                     let next_state = reprov_state.next_state_with_all_dpus_updated(
@@ -1271,6 +1500,9 @@ impl MachineStateHandler {
                             .collect(),
                     )?;
 
+                    if dpf_reprovision {
+                        return Ok(StateHandlerOutcome::transition(next_state));
+                    }
                     let health_override = create_host_update_health_report_dpufw();
 
                     // Mark the Host as in update.
@@ -2752,47 +2984,11 @@ impl MachineStateHandler {
     }
 }
 
-/// Looks up the `expected_machines` entry for this managed host by the BMC
-/// MAC address recorded in its host snapshot.
-///
-/// Returns `None` when the host has no BMC MAC, when no matching row exists,
-/// or when a DB error occurs (logged); all are treated by callers as "no
-/// expected-machine declaration to act on".
 async fn get_expected_machine_for_mh(
     mh_snapshot: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<Option<model::expected_machine::ExpectedMachine>, StateHandlerError> {
-    // its unlikely we got here without a bmc mac
-    let Some(bmc_mac_address) = mh_snapshot.host_snapshot.status.bmc_info.mac else {
-        tracing::error!(
-            machine_id = %mh_snapshot.host_snapshot.id,
-            "get_expected_machine_for_mh: No BMC MAC address configured"
-        );
-        return Err(StateHandlerError::MissingData {
-            object_id: mh_snapshot.host_snapshot.id.to_string(),
-            missing: "bmc_mac_address",
-        });
-    };
-
-    let mut txn = ctx.services.db_pool.begin().await?;
-
-    // Retrieve the expected_machines table entry for this managed host.
-    let expected_machine =
-        db::expected_machine::find_by_bmc_mac_address(txn.as_mut(), bmc_mac_address)
-            .await
-            .map_err(|err| {
-                tracing::error!(
-                    machine_id = %mh_snapshot.host_snapshot.id,
-                    %bmc_mac_address,
-                    error = %err,
-                    "get_expected_machine_for_mh: Failed to look up expected machine"
-                );
-                StateHandlerError::DBError(Box::new(err))
-            })?;
-
-    txn.commit().await?;
-
-    Ok(expected_machine)
+    crate::dpf::deployment::expected_machine_for_host(mh_snapshot, &ctx.services.db_pool).await
 }
 
 fn is_reprovision_restartable_failure(
@@ -13949,8 +14145,7 @@ fn handle_no_dpu_error(
     }
 }
 
-// Returns true if update_manager flagged this managed host as needing its firmware examined
-async fn is_machine_validation_requested(state: &ManagedHostStateSnapshot) -> bool {
+fn is_machine_validation_requested(state: &ManagedHostStateSnapshot) -> bool {
     let Some(on_demand_machine_validation_request) =
         state.host_snapshot.on_demand_machine_validation_request
     else {

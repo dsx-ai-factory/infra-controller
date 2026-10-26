@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -187,7 +188,7 @@ func TestHTTPServiceStart(t *testing.T) {
 	}
 }
 
-func TestWithRequestMetrics(t *testing.T) {
+func TestNewHTTPMiddleware(t *testing.T) {
 	tests := []struct {
 		name       string
 		serverName string
@@ -195,7 +196,7 @@ func TestWithRequestMetrics(t *testing.T) {
 		want       string
 	}{
 		{
-			name:       "uses the supplied prefix when the environment is unset",
+			name:       "an empty METRICS_NAMESPACE leaves the supplied prefix alone",
 			serverName: "nico_rest_cert_manager",
 			want:       "nico_rest_cert_manager",
 		},
@@ -205,23 +206,45 @@ func TestWithRequestMetrics(t *testing.T) {
 			envValue:   "acme_cert_manager",
 			want:       "acme_cert_manager",
 		},
-		{
-			// An empty value is indistinguishable from unset, and an empty prefix
-			// would expose bare names like "http_duration_seconds".
-			name:       "an empty METRICS_NAMESPACE leaves the supplied prefix alone",
-			serverName: "nico_rest_cert_manager",
-			envValue:   "",
-			want:       "nico_rest_cert_manager",
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(MetricsNamespaceEnv, tt.envValue)
+			previousRegisterer := prometheus.DefaultRegisterer
+			previousGatherer := prometheus.DefaultGatherer
+			t.Cleanup(func() {
+				prometheus.DefaultRegisterer = previousRegisterer
+				prometheus.DefaultGatherer = previousGatherer
+			})
+			registry := prometheus.NewRegistry()
+			prometheus.DefaultRegisterer = registry
+			prometheus.DefaultGatherer = registry
 
-			h := &httpMiddleware{}
-			WithRequestMetrics(tt.serverName)(h)
+			ctx := WithDefaultLogger(context.Background())
+			service := NewHTTPService("")
+			service.AddMetricsRoute(ctx)
+			service.HandleFunc("/sitecreds", func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusCreated)
+			}).Methods(http.MethodPost)
+			service.Use(NewHTTPMiddleware(ctx, WithRequestMetrics(tt.serverName))...)
 
-			assert.Equal(t, tt.want, h.latencyMetricsName)
+			for _, wantCount := range []int{1, 2} {
+				response := httptest.NewRecorder()
+				service.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/sitecreds", nil))
+				require.Equal(t, http.StatusCreated, response.Code)
+				scrape := httptest.NewRecorder()
+				service.ServeHTTP(scrape, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+				require.Equal(t, http.StatusOK, scrape.Code)
+				for _, name := range []string{"http_request_counts", "http_requests_total"} {
+					fullName := tt.want + "_" + name
+					assert.Contains(t, scrape.Body.String(), "# HELP "+fullName+" Counter of HTTP requests.\n")
+					assert.Contains(t, scrape.Body.String(), "# TYPE "+fullName+" counter\n")
+					assert.Contains(t, scrape.Body.String(), fmt.Sprintf("%s{method=\"POST\",path=\"/sitecreds\",status_code=\"201\"} %d\n", fullName, wantCount))
+					if tt.envValue != "" {
+						assert.NotContains(t, scrape.Body.String(), tt.serverName+"_"+name)
+					}
+				}
+			}
 		})
 	}
 }

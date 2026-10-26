@@ -20,9 +20,10 @@ mod dpu_service_sync_release;
 mod happy_path;
 mod reprovisioning;
 mod stale_labels;
+mod update_preflight;
 mod waiting_for_ready;
 
-use carbide_dpf::DpuServiceVersion;
+use carbide_dpf::{DpuPhase, DpuPhaseObservation, DpuServiceVersion};
 use carbide_machine_controller::dpf::MockDpfOperations;
 use model::machine::ManagedHostState;
 
@@ -86,5 +87,13 @@ async fn assert_provisioning_suppressed(env: &TestEnv, mh: &TestManagedHost, exp
             expected,
             "provisioning suppression for {mac}"
         );
+    }
+}
+
+/// Builds an operator observation for fixtures that do not report a failure.
+pub(super) fn phase_observation(phase: DpuPhase) -> DpuPhaseObservation {
+    DpuPhaseObservation {
+        phase,
+        failure: None,
     }
 }

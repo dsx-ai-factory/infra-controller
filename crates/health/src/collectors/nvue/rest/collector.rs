@@ -819,6 +819,7 @@ impl NvueRestCollector {
 
         self.emit_event(CollectorEvent::Metric(
             MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key,
                 name: COLLECTOR_NAME.to_string(),
                 metric_type: metric_type.to_string(),

@@ -26,8 +26,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use carbide_dpf::types::{DpuDeviceSummary, DpuNodeSummary, HostDpfSnapshot};
-use carbide_dpf::{DpfError, DpuDeploymentType, DpuPhase};
-use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
+use carbide_dpf::{
+    DpfError, DpuDeploymentType, DpuFailureObservation, DpuPhase, DpuPhaseObservation, dpu_cr_name,
+    dpu_device_cr_name, dpu_node_cr_name,
+};
+use carbide_machine_controller::dpf::{
+    DpfOperations, MockDpfOperations, validate_reprovision_compatibility,
+};
 use carbide_uuid::machine::{AsMachineId, DpuMachineId, HostMachineId};
 use carbide_uuid::rack::RackId;
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -38,7 +43,7 @@ use rpc::forge::dpu_reprovisioning_request::Mode;
 use rpc::forge::forge_server::Forge;
 use tokio::time::timeout;
 
-use super::{dpf_config, expect_dpf_service_inventory, get_host_state};
+use super::{dpf_config, expect_dpf_service_inventory, get_host_state, phase_observation};
 use crate::test_support::builder::TestApiBuilder;
 use crate::tests::common::api_fixtures::site_explorer::TestRackDbBuilder;
 use crate::tests::common::api_fixtures::{
@@ -73,7 +78,7 @@ fn snapshot_with_crs_present(dpu_count: usize) -> HostDpfSnapshot {
 
 /// Build a `MockDpfOperations` with only the expectations needed for the
 /// initial provisioning flow triggered by `create_managed_host_with_dpf`.
-/// `dpu_ready` controls whether `get_dpu_phase` returns `Ready` or `Provisioning`.
+/// `dpu_ready` controls whether `get_dpu_phase_observation` returns `Ready` or `Provisioning`.
 fn provisioning_mock(dpu_ready: Arc<AtomicBool>) -> MockDpfOperations {
     provisioning_mock_with_dpu_count(dpu_ready, 1)
 }
@@ -94,13 +99,16 @@ fn provisioning_mock_with_dpu_count(
     expect_dpf_service_inventory(&mut mock);
     mock.expect_snapshot_host()
         .returning(move |_| Ok(snapshot_with_crs_present(dpu_count)));
-    mock.expect_get_dpu_phase().returning(move |_, _| {
-        if dpu_ready.load(Ordering::SeqCst) {
-            Ok(DpuPhase::Ready)
-        } else {
-            Ok(DpuPhase::Provisioning("OsInstalling".into()))
-        }
-    });
+    mock.expect_get_dpu_phase_observation()
+        .returning(move |_, _| {
+            if dpu_ready.load(Ordering::SeqCst) {
+                Ok(phase_observation(DpuPhase::Ready))
+            } else {
+                Ok(phase_observation(DpuPhase::Provisioning(
+                    "OsInstalling".into(),
+                )))
+            }
+        });
     mock
 }
 
@@ -142,8 +150,8 @@ async fn test_missing_dpf_credential_retries_registration(pool: sqlx::PgPool) {
             }
         })
     });
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(DpuPhase::Ready));
+    mock.expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(DpuPhase::Ready)));
 
     let mut config = get_config();
     config.dpf = dpf_config();
@@ -205,14 +213,13 @@ async fn test_missing_dpf_credential_retries_registration(pool: sqlx::PgPool) {
 /// Builds a DPF mock whose existing DPUNode still belongs to the generic BF3
 /// deployment while inventory now selects the GB200 deployment.
 fn source_deployment_mock(dpu_count: usize) -> MockDpfOperations {
-    source_deployment_mock_with_verification_observer(dpu_count, |_| {})
+    source_deployment_mock_with_phase_reader(dpu_count, |_| DpuPhase::Ready)
 }
 
-/// Builds a source deployment mock that reports each DPUNode label check to
-/// `observer`.
-fn source_deployment_mock_with_verification_observer(
+/// Builds a source deployment mock with phase responses selected by device ID.
+fn source_deployment_mock_with_phase_reader(
     dpu_count: usize,
-    observer: impl Fn(DpuDeploymentType) + Send + Sync + 'static,
+    phase_reader: impl Fn(&str) -> DpuPhase + Send + Sync + 'static,
 ) -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
     mock.expect_register_dpu_device()
@@ -223,14 +230,11 @@ fn source_deployment_mock_with_verification_observer(
     mock.expect_deployment_type_for_dpu()
         .returning(|_, _| Ok(DpuDeploymentType::Bf3));
     mock.expect_verify_node_labels()
-        .returning(move |_, deployment| {
-            observer(deployment);
-            Ok(deployment == DpuDeploymentType::Bf3)
-        });
+        .returning(|_, deployment| Ok(deployment == DpuDeploymentType::Bf3));
     mock.expect_snapshot_host()
         .returning(move |_| Ok(snapshot_with_crs_present(dpu_count)));
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(DpuPhase::Ready));
+    mock.expect_get_dpu_phase_observation()
+        .returning(move |device_name, _| Ok(phase_observation(phase_reader(device_name))));
     expect_dpf_service_inventory(&mut mock);
     mock
 }
@@ -582,9 +586,8 @@ async fn configure_gb200_b3240_host_in_txn(
 async fn set_started_partial_dpf_reprovision(
     pool: &sqlx::PgPool,
     mh: &TestManagedHost,
-    requested_dpu_index: usize,
+    requested_dpu_id: DpuMachineId,
 ) {
-    let requested_dpu_id = mh.dpu_ids[requested_dpu_index];
     let mut txn = pool.begin().await.unwrap();
     db::machine::trigger_dpu_reprovisioning_request(&requested_dpu_id, txn.as_mut(), "test", true)
         .await
@@ -623,6 +626,7 @@ async fn set_started_partial_dpf_reprovision(
 async fn set_started_complete_dpf_reprovision_with_progress(
     pool: &sqlx::PgPool,
     mh: &TestManagedHost,
+    waiting_dpu_id: DpuMachineId,
 ) {
     let mut txn = pool.begin().await.unwrap();
     for dpu_id in &mh.dpu_ids {
@@ -638,9 +642,8 @@ async fn set_started_complete_dpf_reprovision_with_progress(
     let states = mh
         .dpu_ids
         .iter()
-        .enumerate()
-        .map(|(index, dpu_id)| {
-            let substate = if index == 0 {
+        .map(|dpu_id| {
+            let substate = if *dpu_id == waiting_dpu_id {
                 DpfState::WaitingForReady { phase_detail: None }
             } else {
                 DpfState::Reprovisioning
@@ -854,15 +857,17 @@ fn capturing_mock(
         .returning(move |_| Ok(snapshot_with_crs_present(dpu_count)));
 
     let reprovisioned_for_ready = reprovisioned_devices.clone();
-    mock.expect_get_dpu_phase()
+    mock.expect_get_dpu_phase_observation()
         .returning(move |device_name, _| {
             let ready_global = dpu_ready.load(Ordering::SeqCst);
             let repro = reprovisioned_for_ready.lock().unwrap();
             let ready_if_reprovisioned = repro.iter().any(|d| d == device_name);
             if ready_global || ready_if_reprovisioned {
-                Ok(DpuPhase::Ready)
+                Ok(phase_observation(DpuPhase::Ready))
             } else {
-                Ok(DpuPhase::Provisioning("OsInstalling".into()))
+                Ok(phase_observation(DpuPhase::Provisioning(
+                    "OsInstalling".into(),
+                )))
             }
         });
 
@@ -974,8 +979,8 @@ async fn test_gb200_b3240_pair_uses_specialized_deployment_from_report_or_rack(p
         });
     mock.expect_snapshot_host()
         .returning(|_| Ok(snapshot_with_crs_present(2)));
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(DpuPhase::Ready));
+    mock.expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(DpuPhase::Ready)));
 
     let mut config = get_config_with_rack_profiles();
     config.dpf = dpf_config();
@@ -1135,13 +1140,34 @@ async fn test_runtime_dpf_disable_skips_deployment_migration_probe(pool: sqlx::P
 /// when a host request includes every attached DPU.
 #[crate::sqlx_test]
 async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) {
+    use carbide_test_support::Outcome::FailsWith;
+    use carbide_test_support::{Case, check_cases_async};
+    use model::dpu_machine_update::OutdatedDpfDpu;
+
+    use crate::machine_update_manager::dpu_nic_firmware::DpuNicFirmwareUpdate;
+    use crate::machine_update_manager::machine_update_module::MachineUpdateModule;
+    use crate::tests::dpu_machine_update::get_all_snapshots;
+
+    enum TargetDpuObservation {
+        Missing,
+        Provisioning,
+        Ready,
+        WrongFlavor,
+        Error(Box<DpuFailureObservation>),
+    }
+
     let node_uses_target_labels = Arc::new(AtomicBool::new(false));
-    let target_dpu_phase = Arc::new(AtomicUsize::new(0));
+    let target_dpu_observation = Arc::new(Mutex::new(TargetDpuObservation::Missing));
     let released_holds = Arc::new(AtomicUsize::new(0));
+    let reboot_checks = Arc::new(AtomicUsize::new(0));
     let transferred_deployments = Arc::new(Mutex::new(Vec::new()));
     let deleted_source_devices = Arc::new(Mutex::new(Vec::new()));
+    let outdated = Arc::new(Mutex::new(Vec::<OutdatedDpfDpu>::new()));
 
     let mut mock = MockDpfOperations::new();
+    let outdated_for_mock = outdated.clone();
+    mock.expect_find_outdated_dpus_dpf()
+        .returning(move || Ok(outdated_for_mock.lock().unwrap().clone()));
     expect_dpf_service_inventory(&mut mock);
     mock.expect_register_dpu_device()
         .returning(|_, _, _| Ok(()));
@@ -1151,7 +1177,11 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
         released_holds_for_mock.fetch_add(1, Ordering::SeqCst);
         Ok(())
     });
-    mock.expect_is_reboot_required().returning(|_| Ok(false));
+    let reboot_checks_for_mock = reboot_checks.clone();
+    mock.expect_is_reboot_required().returning(move |_| {
+        reboot_checks_for_mock.fetch_add(1, Ordering::SeqCst);
+        Ok(false)
+    });
     mock.expect_deployment_type_for_dpu()
         .returning(|_, _| Ok(DpuDeploymentType::Bf3));
     let node_uses_target_labels_for_verify = node_uses_target_labels.clone();
@@ -1166,37 +1196,66 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
         });
     mock.expect_snapshot_host()
         .returning(|_| Ok(snapshot_with_crs_present(2)));
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(DpuPhase::Ready));
-    let target_dpu_phase_for_mock = target_dpu_phase.clone();
-    mock.expect_get_dpu_phases_for_deployment_type().returning(
-        move |device_names, _, deployment_type| {
+    mock.expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(DpuPhase::Ready)));
+    let target_dpu_observation_for_mock = target_dpu_observation.clone();
+    mock.expect_get_dpu_phase_observations_for_deployment_type()
+        .returning(move |device_names, node_name, deployment_type| {
             assert_eq!(deployment_type, DpuDeploymentType::Bf3Gb200);
-            match target_dpu_phase_for_mock.load(Ordering::SeqCst) {
-                0 => Ok(None),
-                1 => Ok(Some(
+            let mut observation = target_dpu_observation_for_mock
+                .lock()
+                .expect("lock target DPU observation");
+            match &*observation {
+                TargetDpuObservation::Missing => Ok(None),
+                TargetDpuObservation::Provisioning => Ok(Some(
                     device_names
                         .iter()
                         .map(|name| {
                             (
                                 name.clone(),
-                                DpuPhase::Provisioning("OsInstalling".to_string()),
+                                phase_observation(DpuPhase::Provisioning(
+                                    "OsInstalling".to_string(),
+                                )),
                             )
                         })
                         .collect::<BTreeMap<_, _>>(),
                 )),
-                2 => Ok(Some(
+                TargetDpuObservation::Ready => Ok(Some(
                     device_names
                         .iter()
-                        .map(|name| (name.clone(), DpuPhase::Ready))
+                        .map(|name| (name.clone(), phase_observation(DpuPhase::Ready)))
                         .collect::<BTreeMap<_, _>>(),
                 )),
-                _ => Err(DpfError::InvalidState(
+                TargetDpuObservation::WrongFlavor => Err(DpfError::InvalidState(
                     "target DPU has the wrong flavor".to_string(),
                 )),
+                TargetDpuObservation::Error(failure) => {
+                    assert_eq!(failure.dpu_node_name, node_name);
+                    assert_eq!(
+                        failure.dpu_device_name,
+                        dpu_device_cr_name(&device_names[1])
+                    );
+                    let observations = device_names
+                        .iter()
+                        .enumerate()
+                        .map(|(index, name)| {
+                            let observation = if index == 1 {
+                                DpuPhaseObservation {
+                                    phase: DpuPhase::Error,
+                                    failure: Some(failure.as_ref().clone()),
+                                }
+                            } else {
+                                phase_observation(DpuPhase::Ready)
+                            };
+                            (name.clone(), observation)
+                        })
+                        .collect();
+                    // Migration has only this observation to save the failure.
+                    *observation = TargetDpuObservation::Missing;
+                    Ok(Some(observations))
+                }
             }
-        },
-    );
+        });
     let transferred_deployments_for_mock = transferred_deployments.clone();
     mock.expect_transfer_dpu_node_deployment_labels()
         .returning(move |_, source, target| {
@@ -1226,6 +1285,111 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
         .expect("timed out during initial provisioning");
     configure_gb200_b3240_host(&pool, &mh).await;
     let released_holds_before_migration = released_holds.load(Ordering::SeqCst);
+
+    // The automatic updater can select only the outdated subset, independently
+    // of the admin API's whole-host request validation below.
+    let mut txn = pool.begin().await.unwrap();
+    let snapshot = mh.snapshot(&mut txn).await;
+    txn.commit().await.unwrap();
+    let unattached_dpu_id: DpuMachineId =
+        "fm100dtjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"
+            .parse()
+            .unwrap();
+    assert!(!mh.dpu_ids.contains(&unattached_dpu_id));
+    let mut different_dpu_snapshot = snapshot.clone();
+    different_dpu_snapshot.dpu_snapshots[1].id = unattached_dpu_id;
+    let different_dpu_request = [
+        different_dpu_snapshot.dpu_snapshots[0].id,
+        unattached_dpu_id,
+    ];
+
+    // Equal counts are insufficient: the requested IDs must match both the
+    // attachment IDs and the DPU snapshots used to select the deployment.
+    check_cases_async(
+        [
+            ("outdated subset", &snapshot, &mh.dpu_ids[..1]),
+            (
+                "snapshot contains a different DPU",
+                &different_dpu_snapshot,
+                &mh.dpu_ids[..],
+            ),
+            (
+                "request contains an unattached DPU",
+                &different_dpu_snapshot,
+                &different_dpu_request[..],
+            ),
+        ]
+        .map(|(scenario, snapshot, requested_dpus)| Case {
+            scenario,
+            input: (snapshot, requested_dpus),
+            expect: FailsWith(true),
+        }),
+        |(snapshot, requested_dpus)| {
+            let pool = &pool;
+            let env = &env;
+            async move {
+                validate_reprovision_compatibility(
+                    snapshot,
+                    requested_dpus,
+                    pool,
+                    &env.config.rack_profiles,
+                    env.api.dpf_sdk.as_deref().unwrap(),
+                )
+                .await
+                .map_err(|error| {
+                    error
+                        .to_string()
+                        .contains("requires a complete host request")
+                })
+            }
+        },
+    )
+    .await;
+
+    let updater = DpuNicFirmwareUpdate {
+        reported_wrong_versions: Mutex::new(HashSet::new()),
+        metrics: None,
+        config: env.config.clone(),
+        dpf: env.api.dpf_sdk.clone(),
+    };
+    let snapshots = get_all_snapshots(&env).await;
+    for (outdated_count, admitted) in [(1, false), (2, true)] {
+        *outdated.lock().unwrap() = mh.dpu_ids[..outdated_count]
+            .iter()
+            .map(|dpu_id| OutdatedDpfDpu {
+                dpu_machine_id: *dpu_id,
+                target_source: "updated-bfb".to_string(),
+            })
+            .collect();
+        let started = updater
+            .start_updates(&pool, 1, &HashSet::new(), &snapshots)
+            .await
+            .unwrap();
+        assert_eq!(
+            started,
+            if admitted {
+                HashSet::from([mh.id.into()])
+            } else {
+                HashSet::new()
+            },
+            "{outdated_count} outdated DPUs"
+        );
+        let mut txn = pool.begin().await.unwrap();
+        for dpu in mh.dpu_db_machines(&mut txn).await {
+            assert_eq!(
+                dpu.reprovision_requested.is_some(),
+                admitted,
+                "{outdated_count} outdated DPUs: {}",
+                dpu.id
+            );
+            if admitted {
+                db::machine::clear_dpu_reprovisioning_request(txn.as_mut(), &dpu.id, true)
+                    .await
+                    .unwrap();
+            }
+        }
+        txn.commit().await.unwrap();
+    }
 
     mh.mark_machine_for_updates().await;
     let partial_request_error = env
@@ -1370,7 +1534,7 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
 
     // A source DPU can briefly retain the deterministic name after the
     // selector changes. Keep the complete set parked until target ownership
-    // is observed for every DPU in one snapshot.
+    // is observed for every DPU in one pass.
     timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
         .await
         .expect("timed out while checking a stale source DPU");
@@ -1392,7 +1556,7 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
         "a DPU owned by the source must not release the target deployment's hold"
     );
 
-    target_dpu_phase.store(3, Ordering::SeqCst);
+    *target_dpu_observation.lock().unwrap() = TargetDpuObservation::WrongFlavor;
     timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
         .await
         .expect("timed out while checking target deployment configuration drift");
@@ -1416,10 +1580,100 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
         "a mismatched target DPU must not release the maintenance hold"
     );
 
+    // Restore the parked checkpoint so the next observation belongs to migration.
+    write_host_state(&pool, &mh.id, &parked_state).await;
+
+    let mut txn = pool
+        .begin()
+        .await
+        .expect("begin migration snapshot transaction");
+    let snapshot = mh.snapshot(&mut txn).await;
+    txn.commit()
+        .await
+        .expect("commit migration snapshot transaction");
+    let failed_dpu = &snapshot.dpu_snapshots[1];
+    let failed_device_id = failed_dpu.dpf_id().expect("failed DPU has a DPF ID");
+    let node_id = snapshot.host_snapshot.dpf_id().expect("host has a DPF ID");
+    let failure = DpuFailureObservation {
+        name: Some(dpu_cr_name(&failed_device_id, &node_id)),
+        namespace: Some("dpf-system".to_string()),
+        uid: Some("migration-failed-dpu-uid".to_string()),
+        resource_version: Some("123".to_string()),
+        generation: Some(7),
+        deployment: Some("dpf-system_bf3gb200".to_string()),
+        dpu_node_name: dpu_node_cr_name(&node_id),
+        dpu_device_name: dpu_device_cr_name(&failed_device_id),
+        dpu_flavor: "bf3gb200-flavor".to_string(),
+        bfb: Some("bf3gb200-bfb".to_string()),
+        blue_field_software: None,
+        status: serde_json::from_value(serde_json::json!({
+            "phase": "Error",
+            "previousPhase": "Update Firmware",
+            "redfishTaskId": "42",
+            "conditions": [{
+                "type": "FirmwareReady",
+                "status": "False",
+                "reason": "TaskNotFound",
+                "message": "Redfish task disappeared",
+                "lastTransitionTime": "2026-09-30T01:02:03Z",
+            }],
+        }))
+        .expect("valid migration failure status fixture"),
+    };
+    let expected_diagnostics =
+        serde_json::to_value(&failure).expect("serialize migration failure diagnostics");
+    *target_dpu_observation.lock().unwrap() = TargetDpuObservation::Error(Box::new(failure));
+    let reboot_checks_before_error = reboot_checks.load(Ordering::SeqCst);
+
+    timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
+        .await
+        .expect("timed out while recording target deployment failure");
+
+    let failed_target_state = get_host_state(&env, &mh).await;
+    let ManagedHostState::Failed {
+        details,
+        machine_id,
+        ..
+    } = &failed_target_state
+    else {
+        panic!("expected persisted target DPU failure, got {failed_target_state:?}");
+    };
+    let FailureCause::DpfProvisioning { err } = &details.cause else {
+        panic!("expected DPF provisioning failure, got {:?}", details.cause);
+    };
+    assert_eq!(*machine_id, failed_dpu.id.into());
+    let prefix = format!(
+        "DPU {} entered error phase during DPF provisioning: ",
+        failed_dpu.id
+    );
+    let diagnostics: serde_json::Value = serde_json::from_str(
+        err.strip_prefix(&prefix)
+            .expect("failure retains the failed DPU and provisioning error prefix"),
+    )
+    .expect("failure suffix contains diagnostics JSON");
+    assert_eq!(diagnostics, expected_diagnostics);
+    assert!(
+        matches!(
+            *target_dpu_observation.lock().unwrap(),
+            TargetDpuObservation::Missing
+        ),
+        "the error observation must be consumed during this iteration"
+    );
+    assert_eq!(
+        released_holds.load(Ordering::SeqCst),
+        released_holds_before_migration,
+        "a failed target DPU must not release the maintenance hold"
+    );
+    assert_eq!(
+        reboot_checks.load(Ordering::SeqCst),
+        reboot_checks_before_error,
+        "a failed target DPU must not check for a host reboot"
+    );
+
     // Restore the parked checkpoint to continue exercising the successful path.
     write_host_state(&pool, &mh.id, &parked_state).await;
 
-    target_dpu_phase.store(1, Ordering::SeqCst);
+    *target_dpu_observation.lock().unwrap() = TargetDpuObservation::Provisioning;
     timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
         .await
         .expect("timed out while checking target deployment provisioning");
@@ -1472,7 +1726,7 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
         "a target DPU may release the shared maintenance hold while provisioning"
     );
 
-    target_dpu_phase.store(2, Ordering::SeqCst);
+    *target_dpu_observation.lock().unwrap() = TargetDpuObservation::Ready;
     timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
         .await
         .expect("timed out while checking the target deployment");
@@ -1501,7 +1755,21 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
 #[crate::sqlx_test]
 async fn test_started_partial_migration_continues_under_source_deployment(pool: sqlx::PgPool) {
     let reprovisioned_devices = Arc::new(Mutex::new(Vec::new()));
-    let mut mock = source_deployment_mock(2);
+    let stale_peer_device = Arc::new(Mutex::new(None::<String>));
+    let phase_reads = Arc::new(Mutex::new(Vec::new()));
+    let stale_peer_device_for_mock = stale_peer_device.clone();
+    let phase_reads_for_mock = phase_reads.clone();
+    let mut mock = source_deployment_mock_with_phase_reader(2, move |device_name| {
+        phase_reads_for_mock
+            .lock()
+            .unwrap()
+            .push(device_name.to_string());
+        if stale_peer_device_for_mock.lock().unwrap().as_deref() == Some(device_name) {
+            DpuPhase::Error
+        } else {
+            DpuPhase::Ready
+        }
+    });
     let reprovisioned_devices_for_mock = reprovisioned_devices.clone();
     mock.expect_reprovision_dpu()
         .times(1)
@@ -1524,7 +1792,14 @@ async fn test_started_partial_migration_continues_under_source_deployment(pool: 
         .await
         .expect("timed out during initial provisioning");
     configure_gb200_b3240_host(&pool, &mh).await;
-    set_started_partial_dpf_reprovision(&pool, &mh, 0).await;
+    let mut txn = env.db_txn().await;
+    let snapshot = mh.snapshot(&mut txn).await;
+    let active_dpu = &snapshot.dpu_snapshots[0];
+    let peer_dpu = &snapshot.dpu_snapshots[1];
+    let active_device_name = active_dpu.dpf_id().expect("fixture DPU has a DPF ID");
+    let peer_device_name = peer_dpu.dpf_id().expect("fixture DPU has a DPF ID");
+    txn.commit().await.expect("finish fixture snapshot read");
+    set_started_partial_dpf_reprovision(&pool, &mh, active_dpu.id).await;
 
     timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
         .await
@@ -1536,12 +1811,12 @@ async fn test_started_partial_migration_continues_under_source_deployment(pool: 
             waiting_state,
             ManagedHostState::DPUReprovision { ref dpu_states }
                 if matches!(
-                    dpu_states.states.get(&mh.dpu_ids[0]),
+                    dpu_states.states.get(&active_dpu.id),
                     Some(ReprovisionState::DpfStates {
                         substate: DpfState::WaitingForReady { .. }
                     })
                 ) && matches!(
-                    dpu_states.states.get(&mh.dpu_ids[1]),
+                    dpu_states.states.get(&peer_dpu.id),
                     Some(ReprovisionState::NotUnderReprovision)
                 )
         ),
@@ -1549,6 +1824,9 @@ async fn test_started_partial_migration_continues_under_source_deployment(pool: 
     );
     assert_eq!(reprovisioned_devices.lock().unwrap().len(), 1);
 
+    // `NotUnderReprovision` can retain an old `Error`; it must not be read here.
+    *stale_peer_device.lock().unwrap() = Some(peer_device_name);
+    phase_reads.lock().unwrap().clear();
     timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
         .await
         .expect("timed out while accepting source deployment readiness");
@@ -1559,17 +1837,18 @@ async fn test_started_partial_migration_continues_under_source_deployment(pool: 
             ready_state,
             ManagedHostState::DPUReprovision { ref dpu_states }
                 if matches!(
-                    dpu_states.states.get(&mh.dpu_ids[0]),
+                    dpu_states.states.get(&active_dpu.id),
                     Some(ReprovisionState::DpfStates {
                         substate: DpfState::DeviceReady
                     })
                 ) && matches!(
-                    dpu_states.states.get(&mh.dpu_ids[1]),
+                    dpu_states.states.get(&peer_dpu.id),
                     Some(ReprovisionState::NotUnderReprovision)
                 )
         ),
         "source labels must remain valid until the existing request finishes: {ready_state:?}"
     );
+    assert_eq!(*phase_reads.lock().unwrap(), vec![active_device_name]);
 }
 
 /// A complete request already advanced by an older controller finishes under
@@ -1579,7 +1858,21 @@ async fn test_started_partial_migration_continues_under_source_deployment(pool: 
 async fn test_started_complete_migration_with_progress_continues_under_source_deployment(
     pool: sqlx::PgPool,
 ) {
-    let mut mock = source_deployment_mock(2);
+    let stale_peer_device = Arc::new(Mutex::new(None::<String>));
+    let phase_reads = Arc::new(Mutex::new(Vec::new()));
+    let stale_peer_device_for_mock = stale_peer_device.clone();
+    let phase_reads_for_mock = phase_reads.clone();
+    let mut mock = source_deployment_mock_with_phase_reader(2, move |device_name| {
+        phase_reads_for_mock
+            .lock()
+            .unwrap()
+            .push(device_name.to_string());
+        if stale_peer_device_for_mock.lock().unwrap().as_deref() == Some(device_name) {
+            DpuPhase::Error
+        } else {
+            DpuPhase::Ready
+        }
+    });
     mock.expect_reprovision_dpu().returning(|_, _| Ok(()));
 
     let mut config = get_config_with_rack_profiles();
@@ -1593,8 +1886,18 @@ async fn test_started_complete_migration_with_progress_continues_under_source_de
         .await
         .expect("timed out during initial provisioning");
     configure_gb200_b3240_host(&pool, &mh).await;
-    set_started_complete_dpf_reprovision_with_progress(&pool, &mh).await;
+    let mut txn = env.db_txn().await;
+    let snapshot = mh.snapshot(&mut txn).await;
+    let active_dpu = &snapshot.dpu_snapshots[0];
+    let peer_dpu = &snapshot.dpu_snapshots[1];
+    let active_device_name = active_dpu.dpf_id().expect("fixture DPU has a DPF ID");
+    let peer_device_name = peer_dpu.dpf_id().expect("fixture DPU has a DPF ID");
+    txn.commit().await.expect("finish fixture snapshot read");
+    set_started_complete_dpf_reprovision_with_progress(&pool, &mh, active_dpu.id).await;
 
+    // `Reprovisioning` has not deleted the peer's old CR yet.
+    *stale_peer_device.lock().unwrap() = Some(peer_device_name);
+    phase_reads.lock().unwrap().clear();
     timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
         .await
         .expect("timed out while continuing the progressed request under BF3");
@@ -1603,31 +1906,19 @@ async fn test_started_complete_migration_with_progress_continues_under_source_de
     let ManagedHostState::DPUReprovision { ref dpu_states } = state else {
         panic!("an existing request must remain in DPUReprovision under BF3: {state:?}");
     };
-    let stayed_in_dpf = dpu_states
-        .states
-        .values()
-        .all(|dpu_state| matches!(dpu_state, ReprovisionState::DpfStates { .. }));
-    let reached_device_ready = dpu_states.states.values().any(|dpu_state| {
-        matches!(
-            dpu_state,
-            ReprovisionState::DpfStates {
-                substate: DpfState::DeviceReady
-            }
-        )
-    });
-    let still_reprovisioning = dpu_states.states.values().any(|dpu_state| {
-        matches!(
-            dpu_state,
-            ReprovisionState::DpfStates {
-                substate: DpfState::Reprovisioning
-            }
-        )
-    });
-
-    assert!(
-        stayed_in_dpf && (reached_device_ready || !still_reprovisioning),
-        "an existing request must make progress under BF3 without entering the migration handoff: {state:?}"
+    assert_eq!(
+        dpu_states.states.get(&active_dpu.id),
+        Some(&ReprovisionState::DpfStates {
+            substate: DpfState::DeviceReady,
+        })
     );
+    assert_eq!(
+        dpu_states.states.get(&peer_dpu.id),
+        Some(&ReprovisionState::DpfStates {
+            substate: DpfState::Reprovisioning,
+        })
+    );
+    assert_eq!(*phase_reads.lock().unwrap(), vec![active_device_name]);
 }
 
 /// A mixed DPU pair must enter a terminal failure without starting a DPF registration attempt.
@@ -1669,8 +1960,8 @@ async fn test_mixed_dpu_deployment_types_fail_without_registration(pool: sqlx::P
     mock.expect_verify_node_labels().returning(|_, _| Ok(true));
     mock.expect_snapshot_host()
         .returning(|_| Ok(snapshot_with_crs_present(2)));
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(DpuPhase::Ready));
+    mock.expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(DpuPhase::Ready)));
 
     let mut config = get_config();
     config.dpf = dpf_config();

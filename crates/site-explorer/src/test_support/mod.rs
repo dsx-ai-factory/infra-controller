@@ -18,7 +18,9 @@
 #[cfg(test)]
 use config_version::ConfigVersion;
 #[cfg(test)]
-use model::site_explorer::{EndpointExplorationReport, ExploredEndpoint, PreingestionState};
+use model::site_explorer::{
+    BlueFieldOperatingMode, EndpointExplorationReport, ExploredEndpoint, PreingestionState,
+};
 
 mod mock_endpoint_explorer;
 mod test_site_explorer;
@@ -56,4 +58,17 @@ pub(super) fn explored_endpoint(report: EndpointExplorationReport) -> ExploredEn
         boot_interface_mac: None,
         boot_interface_id: None,
     }
+}
+
+#[cfg(test)]
+/// A BF2 DPU endpoint with its reported NIC mode forced to `nic_mode`.
+pub(super) fn bf2_dpu(nic_mode: Option<BlueFieldOperatingMode>) -> ExploredEndpoint {
+    let mut report = load_bf2_ep_report();
+    report
+        .systems
+        .first_mut()
+        .expect("bf2 report has a system")
+        .attributes
+        .nic_mode = nic_mode;
+    explored_endpoint(report)
 }

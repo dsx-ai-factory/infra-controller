@@ -1453,10 +1453,9 @@ func (handler CreateMachineValidationExternalConfigHandler) Handle(c echo.Contex
 	logger.Info().Str("Workflow ID", createWorkflowID).Msg("completed synchronous create MachineValidationExternalConfig workflow")
 
 	// get newly created test
-	createdExtCfg, err := getMachineValidationExtCfg(ctx, c, logger, temporalClient, apiRequest.Name)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to synchronously execute Temporal workflow to get created MachineValidationExternalConfig")
-		return err
+	createdExtCfg, apiErr := getMachineValidationExtCfg(ctx, logger, temporalClient, apiRequest.Name)
+	if apiErr != nil {
+		return apiErr.Send(c)
 	}
 
 	// Create response
@@ -1560,10 +1559,9 @@ func (handler UpdateMachineValidationExternalConfigHandler) Handle(c echo.Contex
 	}
 
 	// get existing external config
-	currentExtCfgProto, err := getMachineValidationExtCfg(ctx, c, logger, temporalClient, extCfgName)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to synchronously execute Temporal workflow to get existing MachineValidationExternalConfig")
-		return err
+	currentExtCfgProto, apiErr := getMachineValidationExtCfg(ctx, logger, temporalClient, extCfgName)
+	if apiErr != nil {
+		return apiErr.Send(c)
 	}
 
 	// create workflow
@@ -1614,10 +1612,9 @@ func (handler UpdateMachineValidationExternalConfigHandler) Handle(c echo.Contex
 	logger.Info().Str("Workflow ID", updateWorkflowID).Msg("completed synchronous update MachineValidationExternalConfig workflow")
 
 	// get updated external config
-	updatedExtCfgProto, err := getMachineValidationExtCfg(ctx, c, logger, temporalClient, extCfgName)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to synchronously execute Temporal workflow to get updated MachineValidationExternalConfig")
-		return err
+	updatedExtCfgProto, apiErr := getMachineValidationExtCfg(ctx, logger, temporalClient, extCfgName)
+	if apiErr != nil {
+		return apiErr.Send(c)
 	}
 
 	// Create response
@@ -1626,8 +1623,7 @@ func (handler UpdateMachineValidationExternalConfigHandler) Handle(c echo.Contex
 	return c.JSON(http.StatusOK, apiObject)
 }
 
-func getMachineValidationExtCfg(ctx context.Context, echoCtx echo.Context, logger zerolog.Logger, temporalClient tclient.Client, cfgName string) (*corev1.MachineValidationExternalConfig, error) {
-	// get newly created test to be returned
+func getMachineValidationExtCfg(ctx context.Context, logger zerolog.Logger, temporalClient tclient.Client, cfgName string) (*corev1.MachineValidationExternalConfig, *cutil.APIError) {
 	getWorkflowOptions := tclient.StartWorkflowOptions{
 		ID:                       fmt.Sprintf("machine-validation-ext-cfg-get-%s", cfgName),
 		WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
@@ -1649,7 +1645,7 @@ func getMachineValidationExtCfg(ctx context.Context, echoCtx echo.Context, logge
 	getWorkflowRun, err := temporalClient.ExecuteWorkflow(getCtx, getWorkflowOptions, "GetMachineValidationExternalConfigs", getProtoRequest)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to synchronously start Temporal workflow to get MachineValidationExternalConfig")
-		return nil, cutil.NewAPIErrorResponse(echoCtx, http.StatusInternalServerError, fmt.Sprintf("Failed to start sync workflow to get Machine Validation External Config on Site: %s", err), nil)
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to start sync workflow to get Machine Validation External Config on Site: %s", err), nil)
 	}
 
 	getWorkflowID := getWorkflowRun.GetID()
@@ -1660,14 +1656,17 @@ func getMachineValidationExtCfg(ctx context.Context, echoCtx echo.Context, logge
 	err = getWorkflowRun.Get(getCtx, &getProtoResponse)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to synchronously execute Temporal workflow to get MachineValidationExternalConfig")
-		return nil, cutil.NewAPIErrorResponse(echoCtx, http.StatusInternalServerError, fmt.Sprintf("Failed to execute sync workflow to get Machine Validation External Config on Site: %s", err), nil)
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to execute sync workflow to get Machine Validation External Config on Site: %s", err), nil)
 	}
 
 	logger.Info().Str("Workflow ID", getWorkflowID).Msg("completed synchronous get MachineValidationExternalConfig workflow")
 
-	if len(getProtoResponse.Configs) != 1 {
-		logger.Error().Err(err).Msgf("expected to get 1 MachineValidationTest and instead got %d", len(getProtoResponse.Configs))
-		return nil, cutil.NewAPIErrorResponse(echoCtx, http.StatusInternalServerError, fmt.Sprintf("Expected to get 1 Machine Validation External Config from Site and instead got %d", len(getProtoResponse.Configs)), nil)
+	if len(getProtoResponse.Configs) == 0 {
+		return nil, cutil.NewAPIError(http.StatusNotFound, "No Machine Validation External Config found", nil)
+	}
+	if len(getProtoResponse.Configs) > 1 {
+		logger.Error().Msgf("expected to get 1 MachineValidationExternalConfig and instead got %d", len(getProtoResponse.Configs))
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Expected to get 1 Machine Validation External Config from Site and instead got %d", len(getProtoResponse.Configs)), nil)
 	}
 	return getProtoResponse.Configs[0], nil
 }
@@ -1789,6 +1788,11 @@ func (handler DeleteMachineValidationExternalConfigHandler) Handle(c echo.Contex
 			return common.TerminateWorkflowOnTimeOut(c, logger, temporalClient, deleteWorkflowID, err, "MachineValidationExternalConfig", "RemoveMachineValidationExternalConfig")
 		}
 		logger.Error().Err(err).Msg("failed to synchronously execute Temporal workflow to delete MachineValidationExternalConfig")
+		// Only `NotFound` changes the response; other workflow failures stay 500.
+		code, _ := common.UnwrapWorkflowError(err)
+		if code == http.StatusNotFound {
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "No Machine Validation External Config found", nil)
+		}
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to execute sync workflow to delete Machine Validation External Config on Site: %s", err), nil)
 	}
 

@@ -27,9 +27,18 @@ use carbide_dpf::types::{
     DpuServiceInterfaceTemplateDefinition, FMDS_SERVICE_NAME, OTEL_COLLECTOR_SERVICE_NAME,
 };
 use carbide_dpf::{
-    IntOrString, ServiceDefinition, ServiceInterface, ServiceNAD, ServiceNADResourceType,
-    ServiceVpcSlots,
+    DetachedDpuServiceDefinition, DetachedDpuServiceSecurity, DetachedHelmChart, DpfError,
+    DpuServiceObservation, IntOrString, ServiceDefinition, ServiceInterface, ServiceNAD,
+    ServiceNADResourceType, ServiceVpcSlots,
 };
+#[cfg(test)]
+use carbide_dpf::{
+    DpuServiceDaemonSetObservation, DpuServiceHelmChartObservation, DpuServiceSecurityObservation,
+};
+use carbide_extension_service_controller::dpu_service::{
+    dpu_service_mutable_fields_match, dpu_service_mutable_patch,
+};
+use carbide_machine_controller::dpf::DpfOperations;
 
 use crate::cfg::file::{
     DpfBootstrapCaObjectKind, DpfDpuAgentBootstrapCa, DpfExtraService,
@@ -66,6 +75,16 @@ pub(crate) const DHCP_SERVER_SERVICE_HELM_NAME: &str = "nico-dhcp-server";
 pub(crate) const DHCP_SERVER_SERVICE_NAD_NAME: &str = "mybrsfc-dhcp";
 pub(crate) const DHCP_SERVER_SERVICE_MTU: i64 = 1500;
 pub(crate) const DHCP_SERVER_SERVICE_IMAGE_NAME: &str = "forge-dhcp-server";
+
+/// Stable DPUService and Helm release that owns shared service-VPC network resources.
+pub(crate) const PLATFORM_SERVICE_VPC_NAME: &str = "nico-service-vpc";
+/// Fixed IPv4 NAD name referenced by extension-service consumers.
+#[cfg(test)]
+const SERVICE_VPC_IPV4_NAD_NAME: &str = "nico-service-vpc-ipv4";
+/// Label that distinguishes Core's stable platform DPUServices from tenant extension services.
+pub(crate) const PLATFORM_SERVICE_OWNER_LABEL: &str = "carbide.nvidia.com/platform-service";
+/// Ownership value reserved for the shared service-VPC network release.
+pub(crate) const PLATFORM_SERVICE_OWNER_VALUE: &str = "service-vpc";
 
 /// DTS service definitions
 /// (DTS_SERVICE_NAME lives in carbide_dpf::types so the DPF SDK can wire its dependencies.)
@@ -118,7 +137,8 @@ const DOCA_XPLANE_SERVICE_HELM_VERSION: &str = "3.5.0020";
 const DOCA_XPLANE_SERVICE_IMAGE_NAME: &str = "xplane";
 const DOCA_XPLANE_SERVICE_IMAGE_TAG: &str = "3.5.0020";
 
-/// Compile-time helm version (set by CI via VERSION env var). Empty on PR/fork builds.
+/// Compile-time Helm version supplied explicitly or derived from Git; empty only when neither
+/// source is available.
 pub(crate) const COMPILE_TIME_HELM_VERSION: &str = match option_env!("CARBIDE_BUILD_HELM_VERSION") {
     Some(v) => v,
     None => "",
@@ -611,11 +631,8 @@ pub(crate) fn dpu_agent_service(
     }
 }
 
-/// Forge DHCP Server service definition.
-pub(crate) fn dhcp_server_service(
-    cfg: &DpfServiceConfig,
-    dpu_interfaces: &[DpuServiceInterfaceTemplateDefinition],
-) -> ServiceDefinition {
+/// Builds shared DHCP chart values so deployment and platform releases use identical inputs.
+fn dhcp_server_helm_values(cfg: &DpfServiceConfig) -> serde_json::Value {
     let mut helm_values = serde_json::json!({
         "image": {
             "repository": cfg.docker_repo_url,
@@ -623,6 +640,27 @@ pub(crate) fn dhcp_server_service(
         }
     });
     apply_helm_values(&mut helm_values, cfg);
+    helm_values
+}
+
+/// Builds the DHCP service definition for a DPUDeployment, leaving legacy omission unchanged while
+/// preventing an explicitly configured deployment release from rendering the fixed IPv4 NAD.
+pub(crate) fn dhcp_server_service(
+    cfg: &DpfServiceConfig,
+    dpu_interfaces: &[DpuServiceInterfaceTemplateDefinition],
+) -> ServiceDefinition {
+    let mut helm_values = dhcp_server_helm_values(cfg);
+    // Keep `serviceVpcNetworks.ipv4.enabled` absent when the operator omitted it, but replace any
+    // explicit value with `false` so DPUDeployment releases cannot render `nico-service-vpc-ipv4`.
+    if let Some(enabled) = helm_values
+        .get_mut("serviceVpcNetworks")
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|networks| networks.get_mut("ipv4"))
+        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|ipv4| ipv4.get_mut("enabled"))
+    {
+        *enabled = serde_json::json!(false);
+    }
     ServiceDefinition {
         helm_values: Some(helm_values),
 
@@ -645,6 +683,260 @@ pub(crate) fn dhcp_server_service(
             &cfg.helm_chart,
             &cfg.helm_version,
         )
+    }
+}
+
+/// Builds the stable IPv4 service-VPC DPUService only for explicit management, preserving
+/// deployment-only configurations while pinning the network runtime to Core's packaged chart.
+pub(crate) fn platform_service_vpc_ipv4(
+    cfg: &DpfServiceConfig,
+    platform_helm_version: &str,
+) -> Result<Option<DetachedDpuServiceDefinition>, DpfError> {
+    // Omission preserves configurations that predate the stable platform release.
+    let Some(service_vpc_networks) = cfg
+        .extra_helm_values
+        .as_ref()
+        .and_then(|values| values.get("serviceVpcNetworks"))
+    else {
+        return Ok(None);
+    };
+    let service_vpc_networks = service_vpc_networks.as_object().ok_or_else(|| {
+        DpfError::ConfigError(
+            "dpf.services.dhcp_server.extra_helm_values.serviceVpcNetworks must be an object"
+                .to_string(),
+        )
+    })?;
+    let Some(ipv4) = service_vpc_networks.get("ipv4") else {
+        return Ok(None);
+    };
+    let ipv4 = ipv4.as_object().ok_or_else(|| {
+        DpfError::ConfigError(
+            "dpf.services.dhcp_server.extra_helm_values.serviceVpcNetworks.ipv4 must be an object"
+                .to_string(),
+        )
+    })?;
+    let Some(enabled) = ipv4.get("enabled") else {
+        return Ok(None);
+    };
+    if !enabled.is_boolean() {
+        return Err(DpfError::ConfigError(
+            "dpf.services.dhcp_server.extra_helm_values.serviceVpcNetworks.ipv4.enabled must be a Boolean"
+                .to_string(),
+        ));
+    }
+
+    // Explicit management requires the chart packaged with Core because predecessor charts neither
+    // honor DHCP-server suppression nor render the service-VPC network runtime.
+    if platform_helm_version.trim().is_empty() {
+        return Err(DpfError::ConfigError(
+            "the Core build has no Helm chart version for the IPv4 service-VPC platform release"
+                .to_string(),
+        ));
+    }
+
+    let mut helm_values = dhcp_server_helm_values(cfg);
+    // Suppress only the NICo DHCP server after operator overlays so supported DaemonSet placement,
+    // metadata, update, and resource settings continue to configure the DHCP CNI daemon.
+    let service_daemon_set = helm_values
+        .as_object_mut()
+        .expect("generated DHCP Helm values must be an object")
+        .entry("serviceDaemonSet".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    // Preserve the previous fallback for malformed non-object overlays instead of activating them.
+    if !service_daemon_set.is_object() {
+        *service_daemon_set = serde_json::json!({});
+    }
+    service_daemon_set["enabled"] = serde_json::json!(false);
+
+    Ok(Some(DetachedDpuServiceDefinition {
+        name: PLATFORM_SERVICE_VPC_NAME.to_string(),
+        namespace: carbide_dpf::NAMESPACE.to_string(),
+        labels: BTreeMap::from([(
+            PLATFORM_SERVICE_OWNER_LABEL.to_string(),
+            PLATFORM_SERVICE_OWNER_VALUE.to_string(),
+        )]),
+        helm_chart: DetachedHelmChart {
+            repo_url: cfg.helm_repo_url.clone(),
+            chart: DHCP_SERVER_SERVICE_HELM_NAME.to_string(),
+            version: platform_helm_version.to_string(),
+            release_name: PLATFORM_SERVICE_VPC_NAME.to_string(),
+            values: helm_values.as_object().map(|values| {
+                values
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            }),
+        },
+        deploy_in_cluster: Some(false),
+        security: DetachedDpuServiceSecurity {
+            privileged: true,
+            spiffe: false,
+        },
+        service_daemon_set: None,
+        service_id: Some(DHCP_SERVER_SERVICE_NAME.to_string()),
+        interfaces: None,
+    }))
+}
+
+/// Converts the stable platform definition into a Kubernetes-like observation so startup tests
+/// can verify ownership and reconciliation without constructing a Kubernetes client.
+#[cfg(test)]
+pub(crate) fn platform_service_observation(
+    service: &DetachedDpuServiceDefinition,
+) -> DpuServiceObservation {
+    DpuServiceObservation {
+        // Mirror ownership and immutable release fields so tests change only their named conflict.
+        name: Some(service.name.clone()),
+        namespace: Some(service.namespace.clone()),
+        labels: service.labels.clone(),
+        helm_chart: DpuServiceHelmChartObservation {
+            repo_url: service.helm_chart.repo_url.clone(),
+            chart: Some(service.helm_chart.chart.clone()),
+            version: service.helm_chart.version.clone(),
+            release_name: Some(service.helm_chart.release_name.clone()),
+            values: service.helm_chart.values.clone(),
+        },
+        // Omit DPU attachment and DPF DaemonSet overrides because Helm owns the CNI daemon manifest.
+        deploy_in_cluster: service.deploy_in_cluster,
+        dpu_cluster_selector_present: false,
+        interfaces: service.interfaces.clone(),
+        paused: None,
+        security: Some(DpuServiceSecurityObservation {
+            privileged: Some(service.security.privileged),
+            spiffe: service.security.spiffe,
+        }),
+        service_daemon_set: service.service_daemon_set.as_ref().map(|daemon_set| {
+            DpuServiceDaemonSetObservation {
+                node_selector: None,
+                annotations: daemon_set.annotations.clone(),
+                labels: daemon_set.labels.clone(),
+                resources: daemon_set.resources.clone(),
+                update_strategy: None,
+            }
+        }),
+        service_id: service.service_id.clone(),
+        config_ports_present: false,
+        // Provide Kubernetes identifiers used by ownership races and resource-version fencing.
+        uid: Some(format!("uid-{}", service.name)),
+        resource_version: Some("1".to_string()),
+        // Observe an active DPUService so finalization remains an explicit per-test mutation.
+        is_deleting: false,
+    }
+}
+
+/// Validates the stable DPUService identity before Core treats it as the shared IPv4 NAD release.
+fn verify_platform_service_vpc_ipv4(
+    existing: &DpuServiceObservation,
+    desired: &DetachedDpuServiceDefinition,
+) -> Result<(), DpfError> {
+    // The ownership label is checked first because a deterministic name never authorizes adoption.
+    if existing
+        .labels
+        .get(PLATFORM_SERVICE_OWNER_LABEL)
+        .map(String::as_str)
+        != Some(PLATFORM_SERVICE_OWNER_VALUE)
+    {
+        return Err(DpfError::InvalidState(format!(
+            "DPUService {} is not owned by the IPv4 service-VPC platform release",
+            desired.name
+        )));
+    }
+
+    // Refuse immutable identity drift so reconciliation cannot repurpose a same-name DPUService.
+    let immutable_identity_matches = existing.name.as_deref() == Some(desired.name.as_str())
+        && existing.namespace.as_deref() == Some(desired.namespace.as_str())
+        && existing.helm_chart.release_name.as_deref()
+            == Some(desired.helm_chart.release_name.as_str())
+        && existing.deploy_in_cluster == desired.deploy_in_cluster
+        && !existing.dpu_cluster_selector_present
+        && existing.interfaces.is_none()
+        && existing.paused != Some(true)
+        && existing
+            .security
+            .as_ref()
+            .is_some_and(|security| security.privileged == Some(true) && !security.spiffe)
+        && existing.service_daemon_set.is_none()
+        && existing.service_id.as_deref() == desired.service_id.as_deref()
+        && !existing.config_ports_present
+        && !existing.is_deleting;
+    if !immutable_identity_matches {
+        return Err(DpfError::InvalidState(format!(
+            "DPUService {} has conflicting immutable platform-release fields",
+            desired.name
+        )));
+    }
+
+    Ok(())
+}
+
+/// Creates or updates the stable IPv4 network release without adopting a foreign same-name object.
+pub(crate) async fn reconcile_platform_service_vpc_ipv4(
+    dpf_sdk: &dyn DpfOperations,
+    desired: &DetachedDpuServiceDefinition,
+) -> Result<(), DpfError> {
+    // Read the fixed DPUService before writing so a foreign object is never adopted implicitly.
+    let existing = match dpf_sdk.get_dpu_service(&desired.name).await? {
+        Some(existing) => existing,
+        None => match dpf_sdk.create_dpu_service(desired).await {
+            Ok(created) => created,
+            // A concurrent creator won the fixed name, so reread and verify its ownership.
+            Err(error) if error.is_already_exists_or_conflict() => dpf_sdk
+                .get_dpu_service(&desired.name)
+                .await?
+                .ok_or_else(|| {
+                    DpfError::InvalidState(format!(
+                        "DPUService {} disappeared after a create conflict",
+                        desired.name
+                    ))
+                })?,
+            Err(error) => return Err(error),
+        },
+    };
+    verify_platform_service_vpc_ipv4(&existing, desired)?;
+
+    if dpu_service_mutable_fields_match(desired, &existing) {
+        return Ok(());
+    }
+
+    // Fence mutable updates with the verified observation so another writer forces a reread.
+    let resource_version = existing.resource_version.as_deref().ok_or_else(|| {
+        DpfError::InvalidState(format!(
+            "DPUService {} is missing metadata.resourceVersion",
+            desired.name
+        ))
+    })?;
+    let patch = dpu_service_mutable_patch(desired, &existing, resource_version);
+    match dpf_sdk.patch_dpu_service(&desired.name, patch).await {
+        Ok(patched) => {
+            verify_platform_service_vpc_ipv4(&patched, desired)?;
+            if dpu_service_mutable_fields_match(desired, &patched) {
+                Ok(())
+            } else {
+                Err(DpfError::InvalidState(format!(
+                    "DPUService {} did not converge after its platform-release update",
+                    desired.name
+                )))
+            }
+        }
+        // Accept only a concurrent update that converged to the exact desired mutable state.
+        Err(error) if error.is_already_exists_or_conflict() => {
+            let refreshed = dpf_sdk
+                .get_dpu_service(&desired.name)
+                .await?
+                .ok_or_else(|| {
+                    DpfError::InvalidState(format!(
+                        "DPUService {} disappeared after an update conflict",
+                        desired.name
+                    ))
+                })?;
+            verify_platform_service_vpc_ipv4(&refreshed, desired)?;
+            if dpu_service_mutable_fields_match(desired, &refreshed) {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -930,15 +1222,836 @@ mod tests {
         DpuServiceInterfaceTemplateType,
     };
     use carbide_dpf::{
-        build_deployment_dpu_interfaces, build_service_configuration, build_service_interface,
-        build_service_nad, build_service_template,
+        SERVICE_VPC_MTU, build_deployment_dpu_interfaces, build_service_configuration,
+        build_service_interface, build_service_nad, build_service_template,
     };
+    use carbide_machine_controller::dpf::MockDpfOperations;
     use carbide_test_support::value_scenarios;
     use url::Url;
 
     use super::*;
 
     const TEST_NS: &str = "dpf-operator-system";
+    const TEST_PLATFORM_HELM_VERSION: &str = "test-platform-version";
+
+    /// Builds an explicitly managed platform DPUService so reconciliation tests exercise the
+    /// stable-release contract without depending on build-time Helm metadata.
+    fn managed_platform_service(enabled: bool) -> DetachedDpuServiceDefinition {
+        // Supply the explicit control value that distinguishes managed releases from legacy config.
+        let mut config = default_dhcp_server_service();
+        config.extra_helm_values = serde_json::json!({
+            "serviceVpcNetworks": {
+                "ipv4": {
+                    "enabled": enabled,
+                }
+            }
+        })
+        .as_object()
+        .cloned();
+
+        // Use fixed chart metadata so these tests isolate reconciliation behavior.
+        platform_service_vpc_ipv4(&config, TEST_PLATFORM_HELM_VERSION)
+            .expect("managed platform configuration must be valid")
+            .expect("an explicit control value must produce a platform release")
+    }
+
+    /// Verifies every valid IPv4-control omission bypasses packaged-chart validation and preserves
+    /// the network values supplied to DPUDeployment releases, so an unmanaged upgrade introduces no
+    /// platform settings.
+    #[test]
+    fn platform_service_vpc_ipv4_omission_preserves_legacy_configuration() {
+        value_scenarios!(
+            run = |extra_helm_values: Option<serde_json::Map<String, serde_json::Value>>| {
+                // Retain the exact unmanaged network value for comparison with deployment output.
+                let expected_networks = extra_helm_values
+                    .as_ref()
+                    .and_then(|values| values.get("serviceVpcNetworks"))
+                    .cloned();
+                // Simulate a build without Helm metadata so omission must bypass version validation.
+                let mut config = default_dhcp_server_service();
+                config.extra_helm_values = extra_helm_values;
+                let platform_is_unmanaged =
+                    matches!(platform_service_vpc_ipv4(&config, ""), Ok(None));
+                let deployment = dhcp_server_service(&config, &[]);
+                let actual_networks = deployment
+                    .helm_values
+                    .as_ref()
+                    .and_then(|values| values.get("serviceVpcNetworks"))
+                    .cloned();
+
+                platform_is_unmanaged && actual_networks == expected_networks
+            };
+            "valid omission preserves unmanaged configurations" {
+                // Preserve legacy configuration when the complete network block is absent.
+                None => true,
+                // Preserve an IPv6-only overlay because it does not opt into IPv4 platform
+                // management.
+                Some(
+                    serde_json::json!({
+                        "serviceVpcNetworks": {
+                            "ipv6": {
+                                "enabled": true,
+                            }
+                        }
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone()
+                ) => true,
+                // Preserve partial IPv4 values until the Boolean enabled control is supplied.
+                Some(
+                    serde_json::json!({
+                        "serviceVpcNetworks": {
+                            "ipv4": {
+                                "name": SERVICE_VPC_IPV4_NAD_NAME,
+                            }
+                        }
+                    })
+                    .as_object()
+                    .unwrap()
+                    .clone()
+                ) => true,
+            }
+        );
+    }
+
+    /// Verifies explicit management requires packaged chart metadata so Core cannot submit an
+    /// invalid empty chart version to the DPUService CRD.
+    #[test]
+    fn platform_service_vpc_ipv4_rejects_missing_packaged_chart_version() {
+        // Explicitly enable platform management while simulating a build without Helm metadata.
+        let mut config = default_dhcp_server_service();
+        config.extra_helm_values = serde_json::json!({
+            "serviceVpcNetworks": {
+                "ipv4": {
+                    "enabled": true,
+                }
+            }
+        })
+        .as_object()
+        .cloned();
+
+        // Reject the configuration before any Kubernetes reconciliation can begin.
+        let error = platform_service_vpc_ipv4(&config, "")
+            .expect_err("managed platform releases require a packaged chart version");
+        assert!(matches!(error, DpfError::ConfigError(_)));
+    }
+
+    /// Verifies malformed management paths fail locally because treating them as omission could
+    /// silently leave a previously enabled platform NAD unchanged.
+    #[test]
+    fn platform_service_vpc_ipv4_rejects_malformed_management_values() {
+        /// Carries one malformed Helm overlay and the diagnostic path it must identify.
+        struct MalformedValue {
+            extra_helm_values: serde_json::Value,
+            expected_path: &'static str,
+        }
+
+        value_scenarios!(
+            run = |MalformedValue {
+                extra_helm_values,
+                expected_path,
+            }| {
+                // Keep unrelated service fields valid so each row isolates one malformed control.
+                let mut config = default_dhcp_server_service();
+                config.extra_helm_values = Some(
+                    extra_helm_values
+                        .as_object()
+                        .expect("test Helm values must have an object root")
+                        .clone(),
+                );
+
+                // Require the diagnostic to identify the malformed configuration path.
+                matches!(
+                    platform_service_vpc_ipv4(&config, TEST_PLATFORM_HELM_VERSION),
+                    Err(DpfError::ConfigError(message)) if message.contains(expected_path)
+                )
+            };
+            "malformed management values identify their configuration path" {
+                // Reject a scalar network block because it cannot contain the IPv4 control.
+                MalformedValue {
+                    extra_helm_values: serde_json::json!({ "serviceVpcNetworks": true }),
+                    expected_path: "serviceVpcNetworks",
+                } => true,
+                // Reject a scalar IPv4 block because it cannot contain the enablement control.
+                MalformedValue {
+                    extra_helm_values: serde_json::json!({
+                        "serviceVpcNetworks": {
+                            "ipv4": true,
+                        }
+                    }),
+                    expected_path: "serviceVpcNetworks.ipv4",
+                } => true,
+                // Reject a non-Boolean control because truthy coercion would make IPv4 management
+                // ambiguous.
+                MalformedValue {
+                    extra_helm_values: serde_json::json!({
+                        "serviceVpcNetworks": {
+                            "ipv4": {
+                                "enabled": "true",
+                            }
+                        }
+                    }),
+                    expected_path: "serviceVpcNetworks.ipv4.enabled",
+                } => true,
+            }
+        );
+    }
+
+    /// Pins the fixed platform release identity plus its placement, security, service identity, and
+    /// interface fields because Argo ownership and DPF validation depend on exact CR literals.
+    #[test]
+    fn platform_service_vpc_ipv4_has_fixed_cr_contract() {
+        // Construct the managed release through the same builder startup uses.
+        let platform = managed_platform_service(true);
+
+        // Assert the stable identity and exact DPF placement, security, and attachment fields.
+        assert_eq!(platform.name, "nico-service-vpc");
+        assert_eq!(platform.namespace, "dpf-operator-system");
+        assert_eq!(
+            platform.labels,
+            BTreeMap::from([(
+                "carbide.nvidia.com/platform-service".to_string(),
+                "service-vpc".to_string(),
+            )])
+        );
+        assert_eq!(platform.helm_chart.chart, "nico-dhcp-server");
+        assert_eq!(platform.helm_chart.release_name, "nico-service-vpc");
+        assert_eq!(platform.deploy_in_cluster, Some(false));
+        assert!(platform.security.privileged);
+        assert!(!platform.security.spiffe);
+        assert!(platform.service_daemon_set.is_none());
+        assert_eq!(platform.service_id.as_deref(), Some("carbide-dhcp-server"));
+        assert!(platform.interfaces.is_none());
+    }
+
+    /// Verifies lifecycle, placement, DPF workload overrides, ports, security, and service-identity
+    /// drift cannot replace the chart-managed network release that Core constructed.
+    #[test]
+    fn platform_service_vpc_ipv4_verifier_rejects_forbidden_runtime_state() {
+        // Start from a complete owned observation so each mutation isolates one forbidden state.
+        let desired = managed_platform_service(false);
+        let matching = platform_service_observation(&desired);
+
+        // Mark the otherwise matching DPUService as deleting to isolate lifecycle drift.
+        let mut deleting = matching.clone();
+        deleting.is_deleting = true;
+
+        // Add a DPU cluster selector to isolate placement drift from every other field.
+        let mut selected = matching.clone();
+        selected.dpu_cluster_selector_present = true;
+
+        // Pause the otherwise matching DPUService to isolate reconciliation state drift.
+        let mut paused = matching.clone();
+        paused.paused = Some(true);
+
+        // Attach one service interface to isolate DPU attachment drift.
+        let mut attached = matching.clone();
+        attached.interfaces = Some(vec!["unexpected-interface".to_string()]);
+
+        // Add config ports to isolate generated Service configuration drift.
+        let mut configured_ports = matching.clone();
+        configured_ports.config_ports_present = true;
+
+        // Remove privilege to isolate the permission required by the DHCP CNI daemon.
+        let mut unprivileged = matching.clone();
+        unprivileged
+            .security
+            .as_mut()
+            .expect("matching platform observation has security")
+            .privileged = Some(false);
+
+        // Enable SPIFFE to isolate workload identity drift.
+        let mut spiffe_enabled = matching.clone();
+        spiffe_enabled
+            .security
+            .as_mut()
+            .expect("matching platform observation has security")
+            .spiffe = true;
+
+        // Replace the service ID to isolate DPF-generated identity drift.
+        let mut changed_service_id = matching.clone();
+        changed_service_id.service_id = Some("another-service".to_string());
+
+        // Add a DPF DaemonSet override to isolate drift from the chart-owned daemon manifest.
+        let mut daemon_set_override = matching;
+        daemon_set_override.service_daemon_set = Some(DpuServiceDaemonSetObservation {
+            node_selector: None,
+            annotations: None,
+            labels: None,
+            resources: None,
+            update_strategy: None,
+        });
+
+        value_scenarios!(
+            run = |observation| matches!(
+                verify_platform_service_vpc_ipv4(&observation, &desired),
+                Err(DpfError::InvalidState(_))
+            );
+            "forbidden platform-service state is rejected" {
+                // Reject a finalizer-held object because it cannot provide a durable stable release.
+                deleting => true,
+                // Reject a DPU cluster selector because it changes where the fixed release deploys.
+                selected => true,
+                // Reject a paused release because it cannot apply or prune the shared NAD.
+                paused => true,
+                // Reject attached interfaces because the platform release has no DPF attachments.
+                attached => true,
+                // Reject config ports because the platform release exposes no Kubernetes Service.
+                configured_ports => true,
+                // Reject missing privilege because DPF would deny the DHCP CNI daemon.
+                unprivileged => true,
+                // Reject SPIFFE because the platform runtime needs no workload identity.
+                spiffe_enabled => true,
+                // Reject another service ID because it changes DPF's generated service identity.
+                changed_service_id => true,
+                // Reject DPF DaemonSet settings because the chart owns the runtime manifest.
+                daemon_set_override => true,
+            }
+        );
+    }
+
+    /// Verifies the stable platform release preserves the configured repository and sibling
+    /// DaemonSet settings, uses Core's packaged chart, and suppresses only the NICo DHCP server
+    /// while deployment DHCP remains pinned, preventing mirror bypass, deployment drift, and a
+    /// second server without discarding supported DHCP CNI daemon configuration.
+    #[test]
+    fn platform_service_vpc_ipv4_uses_packaged_chart_and_suppresses_workload_overlay() {
+        // Route both releases through a nondefault mirror, pin the deployment chart, and attempt to
+        // enable the stable NAD and DHCP server while supplying one sibling DaemonSet setting.
+        let mut config = default_dhcp_server_service();
+        config.helm_repo_url = "oci://mirror.example.test/nico".to_string();
+        config.helm_chart = "legacy-dhcp-server".to_string();
+        config.helm_version = "legacy-version".to_string();
+        config.extra_helm_values = serde_json::json!({
+            "serviceDaemonSet": {
+                "enabled": true,
+                "annotations": {
+                    "example.com/platform": "retained",
+                },
+            },
+            "serviceVpcNetworks": {
+                "ipv4": {
+                    "enabled": true,
+                }
+            }
+        })
+        .as_object()
+        .cloned();
+
+        // Build both releases from the same top-level service configuration.
+        let deployment = dhcp_server_service(&config, &[]);
+        let platform = platform_service_vpc_ipv4(&config, TEST_PLATFORM_HELM_VERSION)
+            .expect("platform configuration must be valid")
+            .expect("explicit enablement must produce a platform release");
+
+        // Deployment pinning remains intact while the platform release preserves the mirror, uses
+        // the supported chart, retains the DaemonSet annotation, and forces only the DHCP server off.
+        assert_eq!(deployment.helm_chart, "legacy-dhcp-server");
+        assert_eq!(deployment.helm_version, "legacy-version");
+        assert_eq!(platform.helm_chart.repo_url, config.helm_repo_url);
+        assert_eq!(platform.helm_chart.chart, DHCP_SERVER_SERVICE_HELM_NAME);
+        assert_eq!(platform.helm_chart.version, TEST_PLATFORM_HELM_VERSION);
+        let platform_values = platform
+            .helm_chart
+            .values
+            .expect("stable platform Helm values");
+        assert_eq!(platform_values["serviceDaemonSet"]["enabled"], false);
+        assert_eq!(
+            platform_values["serviceDaemonSet"]["annotations"]["example.com/platform"],
+            "retained"
+        );
+    }
+
+    /// Verifies top-level NAD enablement reaches only the stable release because allowing BF3 and
+    /// its GB200 derivative to inherit it would give multiple Argo Applications the fixed name.
+    #[test]
+    fn service_vpc_ipv4_has_one_stable_owner_across_bf3_variants() {
+        // Enable the NAD in the top-level DHCP values that both BF3 variants otherwise inherit.
+        let mut config = crate::cfg::file::DpfConfig::default();
+        config.services.dhcp_server.extra_helm_values = serde_json::json!({
+            "serviceVpcNetworks": {
+                "ipv4": {
+                    "enabled": true,
+                    "name": SERVICE_VPC_IPV4_NAD_NAME,
+                    "mtu": SERVICE_VPC_MTU,
+                }
+            }
+        })
+        .as_object()
+        .cloned();
+
+        // Build the stable release and both deployment-owned DHCP definitions through Core.
+        let platform = platform_service_vpc_ipv4(
+            &config.resolved_mandatory_services().dhcp_server,
+            TEST_PLATFORM_HELM_VERSION,
+        )
+        .expect("platform configuration must be valid")
+        .expect("explicit enablement must produce a platform release");
+        let bf3_services =
+            config.resolved_services_for(&config.deployments.bf3, DpuDeploymentType::Bf3);
+        let bf3_gb200 = config.deployments.bf3.bf3_gb200();
+        let bf3_gb200_services =
+            config.resolved_services_for(&bf3_gb200, DpuDeploymentType::Bf3Gb200);
+        let bf3 = dhcp_server_service(&bf3_services.base.dhcp_server, &[]);
+        let gb200 = dhcp_server_service(&bf3_gb200_services.base.dhcp_server, &[]);
+
+        // The stable release retains explicit IPv4 enablement while suppressing the NICo DHCP
+        // server.
+        let platform_values = platform
+            .helm_chart
+            .values
+            .expect("stable platform Helm values");
+        assert_eq!(
+            platform_values["serviceVpcNetworks"]["ipv4"]["enabled"],
+            true
+        );
+        assert_eq!(platform_values["serviceDaemonSet"]["enabled"], false);
+        // Each deployment-owned release disables the IPv4 enablement switch while preserving its
+        // sibling fixed-name and MTU values.
+        for deployment_values in [
+            // The base BF3 deployment must never render the shared platform NAD.
+            bf3.helm_values.expect("BF3 DHCP Helm values"),
+            // The derived GB200 deployment must not inherit top-level NAD enablement.
+            gb200.helm_values.expect("BF3 GB200 DHCP Helm values"),
+        ] {
+            assert_eq!(
+                deployment_values["serviceVpcNetworks"]["ipv4"]["enabled"],
+                false
+            );
+            assert_eq!(
+                deployment_values["serviceVpcNetworks"]["ipv4"]["name"],
+                SERVICE_VPC_IPV4_NAD_NAME
+            );
+            assert_eq!(
+                deployment_values["serviceVpcNetworks"]["ipv4"]["mtu"],
+                SERVICE_VPC_MTU
+            );
+        }
+    }
+
+    /// Verifies a deployment-local mandatory-service replacement cannot manage or render the
+    /// site-wide IPv4 NAD because only the top-level DHCP configuration can create the stable
+    /// platform release.
+    #[test]
+    fn deployment_service_replacement_cannot_own_platform_service_vpc_ipv4() {
+        // Put the only enablement in BF3's mandatory-service replacement; the cloned defaults keep
+        // every unrelated mandatory service valid.
+        let mut config = crate::cfg::file::DpfConfig::default();
+        let mut deployment_services = (*config.services).clone();
+        deployment_services.dhcp_server.extra_helm_values = serde_json::json!({
+            "serviceVpcNetworks": {
+                "ipv4": {
+                    "enabled": true,
+                    "name": SERVICE_VPC_IPV4_NAD_NAME,
+                    "mtu": SERVICE_VPC_MTU,
+                }
+            }
+        })
+        .as_object()
+        .cloned();
+        config.deployments.bf3.services = Some(Box::new(deployment_services));
+
+        // Resolve the top-level platform release and both deployment releases fed by the BF3
+        // replacement.
+        let platform = platform_service_vpc_ipv4(
+            &config.resolved_mandatory_services().dhcp_server,
+            TEST_PLATFORM_HELM_VERSION,
+        )
+        .expect("top-level platform configuration must remain valid");
+        let bf3_services =
+            config.resolved_services_for(&config.deployments.bf3, DpuDeploymentType::Bf3);
+        let bf3_gb200 = config.deployments.bf3.bf3_gb200();
+        let bf3_gb200_services =
+            config.resolved_services_for(&bf3_gb200, DpuDeploymentType::Bf3Gb200);
+        let bf3 = dhcp_server_service(&bf3_services.base.dhcp_server, &[]);
+        let gb200 = dhcp_server_service(&bf3_gb200_services.base.dhcp_server, &[]);
+
+        // Local enablement must neither create the platform release nor survive deployment
+        // rendering.
+        assert!(platform.is_none());
+        for deployment_values in [
+            // Strip enablement from BF3 because its local replacement cannot configure the
+            // site-wide release.
+            bf3.helm_values.expect("BF3 DHCP Helm values"),
+            // Strip it from GB200 separately because the derived deployment inherits BF3's replacement.
+            gb200.helm_values.expect("BF3 GB200 DHCP Helm values"),
+        ] {
+            assert_eq!(
+                deployment_values["serviceVpcNetworks"]["ipv4"]["enabled"],
+                false
+            );
+        }
+    }
+
+    /// Verifies startup creates the stable platform release when absent because its DPUService must
+    /// exist before Argo can add or later prune the shared NAD.
+    #[tokio::test]
+    async fn platform_service_vpc_ipv4_creates_missing_owner() {
+        // Return no observation and mirror the requested definition from the create operation.
+        let desired = managed_platform_service(false);
+        let mut dpf_sdk = MockDpfOperations::new();
+        dpf_sdk
+            .expect_get_dpu_service()
+            .times(1)
+            .returning(|_| Ok(None));
+        dpf_sdk
+            .expect_create_dpu_service()
+            .times(1)
+            .returning(|service| Ok(platform_service_observation(service)));
+        dpf_sdk.expect_patch_dpu_service().times(0);
+        dpf_sdk.expect_delete_dpu_service().times(0);
+
+        // Reconcile the absent stable release.
+        reconcile_platform_service_vpc_ipv4(&dpf_sdk, &desired)
+            .await
+            .expect("missing platform release must be created");
+    }
+
+    /// Verifies a non-conflict create failure is returned unchanged because startup must not
+    /// continue without the stable platform release when DPF cannot complete its creation.
+    #[tokio::test]
+    async fn platform_service_vpc_ipv4_propagates_non_conflict_create_failure() {
+        // Leave the stable platform release absent and inject a non-conflict failure from its
+        // create.
+        let desired = managed_platform_service(false);
+        let mut dpf_sdk = MockDpfOperations::new();
+        dpf_sdk
+            .expect_get_dpu_service()
+            .times(1)
+            .returning(|_| Ok(None));
+        dpf_sdk.expect_create_dpu_service().times(1).returning(|_| {
+            Err(DpfError::timeout(
+                "create DPUService",
+                "injected platform create failure",
+            ))
+        });
+        dpf_sdk.expect_patch_dpu_service().times(0);
+        dpf_sdk.expect_delete_dpu_service().times(0);
+
+        // Reconcile the missing stable platform release through the failed create.
+        let error = reconcile_platform_service_vpc_ipv4(&dpf_sdk, &desired)
+            .await
+            .expect_err("non-conflict create failure must stop reconciliation");
+
+        // Preserve the write error rather than rereading it as a create conflict.
+        match error {
+            DpfError::Timeout { operation, details } => {
+                assert_eq!(operation, "create DPUService");
+                assert_eq!(details, "injected platform create failure");
+            }
+            other => panic!("expected create timeout, got {other:?}"),
+        }
+    }
+
+    /// Verifies create races accept only a present owned winner so a name collision cannot transfer
+    /// the stable release or let startup continue after the winner disappears.
+    #[tokio::test]
+    async fn platform_service_vpc_ipv4_verifies_create_race_winner() {
+        enum Expected {
+            Accepted,
+            InvalidState,
+        }
+
+        // Build owned and foreign winners with otherwise identical platform-release fields.
+        let desired = managed_platform_service(false);
+        let mut foreign = platform_service_observation(&desired);
+        foreign.labels.insert(
+            PLATFORM_SERVICE_OWNER_LABEL.to_string(),
+            "another-controller".to_string(),
+        );
+
+        for (scenario, race_winner, expected) in [
+            // Accept another Core replica's object because it carries the ownership contract.
+            (
+                "owned winner",
+                Some(platform_service_observation(&desired)),
+                Expected::Accepted,
+            ),
+            // Reject a foreign winner because the failed create does not authorize adoption.
+            ("foreign winner", Some(foreign), Expected::InvalidState),
+            // Reject a vanished winner because startup still lacks the required stable owner.
+            ("winner disappeared", None, Expected::InvalidState),
+        ] {
+            // Return absence first, then expose the object that won the concurrent create.
+            let mut observations = [None, race_winner].into_iter();
+            let conflict_name = desired.name.clone();
+            let mut dpf_sdk = MockDpfOperations::new();
+            dpf_sdk
+                .expect_get_dpu_service()
+                .times(2)
+                .returning(move |_| {
+                    Ok(observations
+                        .next()
+                        .expect("create race requires two DPUService reads"))
+                });
+            dpf_sdk
+                .expect_create_dpu_service()
+                .times(1)
+                .return_once(move |_| Err(DpfError::already_exists("DPUService", conflict_name)));
+            dpf_sdk.expect_patch_dpu_service().times(0);
+            dpf_sdk.expect_delete_dpu_service().times(0);
+
+            // Reconcile through the conflict and check the ownership-specific outcome.
+            let result = reconcile_platform_service_vpc_ipv4(&dpf_sdk, &desired).await;
+            match (expected, result) {
+                (Expected::Accepted, Ok(())) => {}
+                (Expected::InvalidState, Err(DpfError::InvalidState(_))) => {}
+                (Expected::Accepted, Err(error)) => {
+                    panic!("{scenario}: unexpected error: {error}")
+                }
+                (Expected::InvalidState, other) => {
+                    panic!("{scenario}: expected InvalidState, got {other:?}")
+                }
+            }
+        }
+    }
+
+    /// Verifies startup rejects a foreign same-name DPUService without any mutation because a
+    /// deterministic Kubernetes name is not proof that Core owns the release.
+    #[tokio::test]
+    async fn platform_service_vpc_ipv4_refuses_foreign_owner() {
+        // Return the desired immutable fields under a foreign ownership label.
+        let desired = managed_platform_service(false);
+        let mut foreign = platform_service_observation(&desired);
+        foreign.labels.insert(
+            PLATFORM_SERVICE_OWNER_LABEL.to_string(),
+            "another-controller".to_string(),
+        );
+        let mut dpf_sdk = MockDpfOperations::new();
+        dpf_sdk
+            .expect_get_dpu_service()
+            .times(1)
+            .return_once(move |_| Ok(Some(foreign)));
+        dpf_sdk.expect_create_dpu_service().times(0);
+        dpf_sdk.expect_patch_dpu_service().times(0);
+        dpf_sdk.expect_delete_dpu_service().times(0);
+
+        // Reject the collision before any create, patch, or delete can adopt the object.
+        let error = reconcile_platform_service_vpc_ipv4(&dpf_sdk, &desired)
+            .await
+            .expect_err("foreign platform release must be rejected");
+        assert!(matches!(error, DpfError::InvalidState(_)));
+    }
+
+    /// Verifies an owned DPUService with another Helm release name is rejected because the stable
+    /// Kubernetes name must not authorize repurposing a different platform release.
+    #[tokio::test]
+    async fn platform_service_vpc_ipv4_refuses_immutable_identity_drift() {
+        // Retain Core's ownership label while changing the immutable Helm release identity.
+        let desired = managed_platform_service(false);
+        let mut drifted = platform_service_observation(&desired);
+        drifted.helm_chart.release_name = Some("another-platform-release".to_string());
+        let mut dpf_sdk = MockDpfOperations::new();
+        dpf_sdk
+            .expect_get_dpu_service()
+            .times(1)
+            .return_once(move |_| Ok(Some(drifted)));
+        dpf_sdk.expect_create_dpu_service().times(0);
+        dpf_sdk.expect_patch_dpu_service().times(0);
+        dpf_sdk.expect_delete_dpu_service().times(0);
+
+        // Reject the identity drift before any mutation can repurpose the existing DPUService.
+        let error = reconcile_platform_service_vpc_ipv4(&dpf_sdk, &desired)
+            .await
+            .expect_err("immutable platform identity drift must be rejected");
+        assert!(matches!(error, DpfError::InvalidState(_)));
+    }
+
+    /// Verifies disabling IPv4 patches the existing stable release in place so Argo prunes the
+    /// NAD without transferring ownership to a new DPUService.
+    #[tokio::test]
+    async fn platform_service_vpc_ipv4_patches_enabled_release_to_disabled() {
+        // Observe the same owned release with the previously enabled NAD value.
+        let desired = managed_platform_service(false);
+        let mut enabled = platform_service_observation(&desired);
+        enabled
+            .helm_chart
+            .values
+            .as_mut()
+            .expect("observed Helm values")
+            .insert(
+                "serviceVpcNetworks".to_string(),
+                serde_json::json!({
+                    "ipv4": {
+                        "enabled": true,
+                        "name": SERVICE_VPC_IPV4_NAD_NAME,
+                        "mtu": SERVICE_VPC_MTU,
+                    }
+                }),
+            );
+        // Use a nondefault version so the submitted patch must fence the observed generation.
+        enabled.resource_version = Some("17".to_string());
+        let patched = platform_service_observation(&desired);
+        let expected_name = desired.name.clone();
+        let mut dpf_sdk = MockDpfOperations::new();
+        dpf_sdk
+            .expect_get_dpu_service()
+            .times(1)
+            .return_once(move |_| Ok(Some(enabled)));
+        dpf_sdk.expect_create_dpu_service().times(0);
+        dpf_sdk
+            .expect_patch_dpu_service()
+            .times(1)
+            .withf(move |name, patch| {
+                // Inspect the operations directly so the test does not reuse the patch builder.
+                let Some(operations) = patch.as_array() else {
+                    return false;
+                };
+                let fences_observed_version = operations.iter().any(|operation| {
+                    operation.get("op").and_then(|value| value.as_str()) == Some("replace")
+                        && operation.get("path").and_then(|value| value.as_str())
+                            == Some("/metadata/resourceVersion")
+                        && operation.get("value").and_then(|value| value.as_str()) == Some("17")
+                });
+                let disables_ipv4 = operations.iter().any(|operation| {
+                    operation.get("op").and_then(|value| value.as_str()) == Some("add")
+                        && operation.get("path").and_then(|value| value.as_str())
+                            == Some("/spec/helmChart/values")
+                        && operation
+                            .pointer("/value/serviceVpcNetworks/ipv4/enabled")
+                            .and_then(|value| value.as_bool())
+                            == Some(false)
+                });
+                name == expected_name.as_str() && fences_observed_version && disables_ipv4
+            })
+            .return_once(move |_, _| Ok(patched));
+        dpf_sdk.expect_delete_dpu_service().times(0);
+
+        // Patch the stable release using the observed resource-version fence.
+        reconcile_platform_service_vpc_ipv4(&dpf_sdk, &desired)
+            .await
+            .expect("owned platform release must update in place");
+    }
+
+    /// Verifies a non-conflict patch failure is returned unchanged because startup must not accept
+    /// a stale owned release when its required update did not complete.
+    #[tokio::test]
+    async fn platform_service_vpc_ipv4_propagates_non_conflict_patch_failure() {
+        // Return an owned release with mutable chart drift so reconciliation must patch it.
+        let desired = managed_platform_service(false);
+        let mut stale = platform_service_observation(&desired);
+        stale.helm_chart.version = "previous-version".to_string();
+        let mut dpf_sdk = MockDpfOperations::new();
+        dpf_sdk
+            .expect_get_dpu_service()
+            .times(1)
+            .return_once(move |_| Ok(Some(stale)));
+        dpf_sdk.expect_create_dpu_service().times(0);
+        dpf_sdk
+            .expect_patch_dpu_service()
+            .times(1)
+            .returning(|_, _| {
+                Err(DpfError::timeout(
+                    "patch DPUService",
+                    "injected platform patch failure",
+                ))
+            });
+        dpf_sdk.expect_delete_dpu_service().times(0);
+
+        // Reconcile the mutable drift through the failed patch.
+        let error = reconcile_platform_service_vpc_ipv4(&dpf_sdk, &desired)
+            .await
+            .expect_err("non-conflict patch failure must stop reconciliation");
+
+        // Preserve the write error without performing the conflict-only reread.
+        match error {
+            DpfError::Timeout { operation, details } => {
+                assert_eq!(operation, "patch DPUService");
+                assert_eq!(details, "injected platform patch failure");
+            }
+            other => panic!("expected patch timeout, got {other:?}"),
+        }
+    }
+
+    /// Verifies a patch conflict succeeds only when the winning write remains present, owned, and
+    /// converged, preventing startup from accepting an absent, stale, or foreign platform release.
+    #[tokio::test]
+    async fn platform_service_vpc_ipv4_verifies_patch_conflict_reread() {
+        enum Expected {
+            Accepted,
+            InvalidState,
+            PatchConflict,
+        }
+
+        // Build the distinct reread states after another writer wins the fenced update.
+        let desired = managed_platform_service(false);
+        let converged = platform_service_observation(&desired);
+        // Preserve the prior chart version to model a winner that did not apply Core's patch.
+        let mut still_drifted = platform_service_observation(&desired);
+        still_drifted.helm_chart.version = "previous-version".to_string();
+        // Change only the owner label to isolate foreign ownership after the conflicting write.
+        let mut foreign = platform_service_observation(&desired);
+        foreign.labels.insert(
+            PLATFORM_SERVICE_OWNER_LABEL.to_string(),
+            "another-controller".to_string(),
+        );
+
+        for (scenario, refreshed, expected) in [
+            // Accept a winner that completed the exact desired mutable update.
+            ("converged winner", Some(converged), Expected::Accepted),
+            // Preserve the conflict when the winning write leaves mutable drift.
+            (
+                "still-drifted winner",
+                Some(still_drifted),
+                Expected::PatchConflict,
+            ),
+            // Reject a winner that replaced the fixed name under another controller's ownership.
+            ("foreign winner", Some(foreign), Expected::InvalidState),
+            // Reject disappearance because no stable owner remains after the conflicting update.
+            ("winner disappeared", None, Expected::InvalidState),
+        ] {
+            // Start from mutable chart drift, then return the case-specific fresh observation.
+            let mut stale = platform_service_observation(&desired);
+            stale.helm_chart.version = "previous-version".to_string();
+            let mut observations = [Some(stale), refreshed].into_iter();
+            let conflict_name = desired.name.clone();
+            let expected_name = desired.name.clone();
+            let mut dpf_sdk = MockDpfOperations::new();
+            dpf_sdk
+                .expect_get_dpu_service()
+                .times(2)
+                .returning(move |_| {
+                    Ok(observations
+                        .next()
+                        .expect("patch conflict requires two DPUService reads"))
+                });
+            dpf_sdk.expect_create_dpu_service().times(0);
+            dpf_sdk
+                .expect_patch_dpu_service()
+                .times(1)
+                .return_once(move |_, _| {
+                    Err(DpfError::PatchConflict {
+                        kind: "DPUService",
+                        name: conflict_name,
+                    })
+                });
+            dpf_sdk.expect_delete_dpu_service().times(0);
+
+            // Reconcile through the conflict and check the refreshed mutable state.
+            let result = reconcile_platform_service_vpc_ipv4(&dpf_sdk, &desired).await;
+            match (expected, result) {
+                (Expected::Accepted, Ok(())) => {}
+                (Expected::InvalidState, Err(DpfError::InvalidState(_))) => {}
+                (
+                    Expected::PatchConflict,
+                    Err(DpfError::PatchConflict {
+                        kind: "DPUService",
+                        name,
+                    }),
+                ) => assert_eq!(name, expected_name, "{scenario}"),
+                (Expected::Accepted, Err(error)) => {
+                    panic!("{scenario}: unexpected error: {error}")
+                }
+                (Expected::InvalidState, other) => {
+                    panic!("{scenario}: expected InvalidState, got {other:?}")
+                }
+                (Expected::PatchConflict, other) => {
+                    panic!("{scenario}: expected PatchConflict, got {other:?}")
+                }
+            }
+        }
+    }
 
     #[test]
     fn service_upgrade_policies() {
@@ -1117,10 +2230,16 @@ mod tests {
                 } else {
                     "br-sfc"
                 };
+                // Slot listeners use the service-VPC contract while ordinary DHCP and FMDS stay unchanged.
+                let expected_mtu = if name == "service-vpc-dhcp-slot0" {
+                    SERVICE_VPC_MTU
+                } else {
+                    1500
+                };
                 assert_eq!(nad.metadata.name.as_deref(), Some(name.as_str()));
                 assert_eq!(nad.spec.bridge.as_deref(), Some(expected_bridge));
                 assert_eq!(nad.spec.ipam, Some(false));
-                assert_eq!(nad.spec.service_mtu, Some(1500));
+                assert_eq!(nad.spec.service_mtu, Some(expected_mtu));
                 assert!(matches!(
                     nad.spec.resource_type,
                     carbide_dpf::crds::dpuservicenads_generated::DpuServiceNadResourceType::Sf

@@ -197,8 +197,10 @@ This removes the whole report for that source, including all affected GPU
 alerts. If both `Replace` and `Merge` reports use this source name, the command
 removes the replace report first; run it again to remove the merge report.
 
-The monitor re-evaluates on each successful GPU-health query
-(`nvlink_config.monitor_run_interval`, default `60s`). If NMX-C still reports an
+The monitor re-evaluates on each successful GPU-health query, which runs when
+a machine group is checked: every pass (`nvlink_config.monitor_run_interval`,
+default `60s`) for a group whose inputs changed, and otherwise at its full check
+(`nvlink_config.partition_monitor_full_check_interval`, default `10m`). If NMX-C still reports an
 unhealthy GPU matching the host's inventory, the monitor re-asserts the alert
 with a new `in_alert_since` after manual removal. Use removal for resolved
 faults whose alerts the monitor can no longer clear, such as a replaced GPU or

@@ -366,7 +366,8 @@ impl DataSink for PrometheusSink {
                             sample.unit.clone(),
                             sample.value,
                         )
-                        .with_labels(labels),
+                        .with_labels(labels)
+                        .with_semantics(sample.semantics),
                     );
                 }
                 Err(error) => {
@@ -452,6 +453,7 @@ mod tests {
         };
 
         let sample = CollectorEvent::Metric(Box::new(MetricSample {
+            semantics: crate::sink::MetricSemantics::Gauge,
             key: "temperature".to_string(),
             name: "temperature".to_string(),
             metric_type: "sensor".to_string(),
@@ -560,6 +562,7 @@ mod tests {
             sink.try_handle_event(
                 &context,
                 &CollectorEvent::Metric(Box::new(MetricSample {
+                    semantics: crate::sink::MetricSemantics::Gauge,
                     key: "temperature".to_string(),
                     name: "temperature".to_string(),
                     metric_type: "sensor".to_string(),
@@ -785,6 +788,7 @@ mod tests {
         sink.handle_event(
             &context,
             &CollectorEvent::Metric(Box::new(MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: "event:42".to_string(),
                 name: "test_dynamic_labels".to_string(),
                 metric_type: "on_change_row".to_string(),
@@ -828,6 +832,7 @@ mod tests {
 
         for (scenario, names) in collision_cases {
             let sample = CollectorEvent::Metric(Box::new(MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: scenario.to_string(),
                 name: "test_dynamic_labels".to_string(),
                 metric_type: "on_change_row".to_string(),
@@ -876,6 +881,34 @@ mod tests {
 
         let sink = CompositeDataSink::new(vec![Arc::new(prometheus)], manager.clone());
 
+        let assert_interfaces = |expected: &[&str]| {
+            let exposition = manager.export_telemetry().expect("telemetry");
+            for (name, kind) in [
+                ("test_sink_nvue_gnmi_extended_reading_count", "gauge"),
+                (
+                    "test_sink_nvue_gnmi_extended_reading_count_total",
+                    "counter",
+                ),
+            ] {
+                assert!(
+                    exposition.contains(&format!("# TYPE {name} {kind}\n")),
+                    "{name}"
+                );
+                let mut interfaces = exposition
+                    .lines()
+                    .filter(|line| line.starts_with(&format!("{name}{{")))
+                    .map(|line| {
+                        line.split("interface_name=\"")
+                            .nth(1)
+                            .and_then(|suffix| suffix.split('"').next())
+                            .expect("interface label")
+                    })
+                    .collect::<Vec<_>>();
+                interfaces.sort_unstable();
+                assert_eq!(interfaces, expected, "{name}");
+            }
+        };
+
         let context = EventContext {
             endpoint_key: "switch-1".to_string(),
             addr: BmcAddr {
@@ -898,6 +931,10 @@ mod tests {
             sink.handle_event(
                 &context,
                 &CollectorEvent::Metric(Box::new(MetricSample {
+                    semantics: crate::sink::MetricSemantics::CumulativeCounter {
+                        description: "Number of events reported by the interface",
+                        start_time: None,
+                    },
                     key: key.to_string(),
                     name: "nvue_gnmi_extended".to_string(),
                     metric_type: "reading".to_string(),
@@ -912,6 +949,8 @@ mod tests {
             );
         }
 
+        assert_interfaces(&["live", "live", "old", "other"]);
+
         sink.prune_metrics(
             &context,
             Some("reading"),
@@ -923,17 +962,10 @@ mod tests {
             None,
         );
 
-        let exposition = manager.export_telemetry().expect("telemetry");
-
-        assert!(!exposition.contains("interface_name=\"old\""));
-        assert!(exposition.contains("interface_name=\"live\""));
-        assert!(exposition.contains("interface_name=\"other\""));
+        assert_interfaces(&["live", "live", "other"]);
 
         sink.prune_metric_key(&context, "a:live", "reading", "count");
 
-        let exposition = manager.export_telemetry().expect("telemetry");
-
-        assert_eq!(exposition.matches("interface_name=\"live\"").count(), 1);
-        assert!(exposition.contains("interface_name=\"other\""));
+        assert_interfaces(&["live", "other"]);
     }
 }

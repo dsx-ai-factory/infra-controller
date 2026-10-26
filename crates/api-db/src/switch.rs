@@ -654,6 +654,33 @@ pub async fn update_nvlink_domain_uuid_for_rack(
     .map_err(|error| DatabaseError::new("update_nvlink_domain_uuid_for_rack", error))
 }
 
+/// Racks in `expected` with a live switch whose `nvlink_domain_uuid` is
+/// missing or differs from the expected one.
+pub async fn find_racks_with_stale_nvlink_domain_uuid(
+    db: impl DbReader<'_>,
+    expected: &[(RackId, NvLinkDomainId)],
+) -> DatabaseResult<Vec<RackId>> {
+    let (rack_ids, domain_uuids): (Vec<&RackId>, Vec<NvLinkDomainId>) = expected
+        .iter()
+        .map(|(rack_id, domain_uuid)| (rack_id, *domain_uuid))
+        .unzip();
+    sqlx::query_scalar(
+        r#"
+        SELECT DISTINCT s.rack_id
+        FROM switches s
+        JOIN UNNEST($1::text[], $2::uuid[]) AS r(rack_id, nvlink_domain_uuid)
+          ON s.rack_id = r.rack_id
+        WHERE s.deleted IS NULL
+          AND s.nvlink_domain_uuid IS DISTINCT FROM r.nvlink_domain_uuid
+        "#,
+    )
+    .bind(rack_ids)
+    .bind(domain_uuids)
+    .fetch_all(db)
+    .await
+    .map_err(|error| DatabaseError::new("find_racks_with_stale_nvlink_domain_uuid", error))
+}
+
 pub async fn update_slot_and_tray(
     txn: &mut PgConnection,
     switch_id: &SwitchId,
@@ -1828,6 +1855,54 @@ mod tests {
         .await?;
 
         assert_eq!(counts, (2, 1));
+
+        txn.rollback().await?;
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn stale_rack_domain_lookup_flags_live_switches_missing_the_domain(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let expected_domain: NvLinkDomainId = "11111111-1111-1111-1111-111111111111".parse()?;
+        let other_domain: NvLinkDomainId = "22222222-2222-2222-2222-222222222222".parse()?;
+        let mut txn = pool.begin().await?;
+
+        for (rack, seed, stored_domain, deleted) in [
+            ("rack-missing", 31, None, false),
+            ("rack-differing", 32, Some(other_domain), false),
+            ("rack-matching", 33, Some(expected_domain), false),
+            ("rack-deleted", 34, None, true),
+            ("rack-unlisted", 35, None, false),
+        ] {
+            let mut switch = create_seeded_discovered(txn.as_mut(), seed, rack).await?;
+            sqlx::query("UPDATE switches SET rack_id = $1, nvlink_domain_uuid = $2 WHERE id = $3")
+                .bind(RackId::new(rack))
+                .bind(stored_domain)
+                .bind(switch.id)
+                .execute(txn.as_mut())
+                .await?;
+            if deleted {
+                mark_as_deleted(&mut switch, txn.as_mut()).await?;
+            }
+        }
+
+        let expected: Vec<(RackId, NvLinkDomainId)> = [
+            "rack-missing",
+            "rack-differing",
+            "rack-matching",
+            "rack-deleted",
+        ]
+        .into_iter()
+        .map(|rack| (RackId::new(rack), expected_domain))
+        .collect();
+        let mut stale = find_racks_with_stale_nvlink_domain_uuid(txn.as_mut(), &expected).await?;
+        stale.sort();
+        assert_eq!(
+            stale,
+            vec![RackId::new("rack-differing"), RackId::new("rack-missing")]
+        );
 
         txn.rollback().await?;
 

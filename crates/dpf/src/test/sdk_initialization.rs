@@ -884,7 +884,8 @@ async fn unscoped_astra_split_initialization_writes_no_resources() {
 /// Verifies public initialization persists aligned HBN configuration and chain references.
 /// BF3's legacy BFB path and generic BF4's scoped software path must both retain slot wiring.
 /// Complete five-slot DHCP attachments must retain their bridges and MTU while ordinary DHCP/FMDS
-/// NADs keep their existing rendering and deployment-specific references; the flavor must render the configured pool.
+/// NADs keep their existing rendering, ordinary service-chain switches omit MTU overrides, and the
+/// flavor must render the configured pool.
 #[tokio::test]
 async fn service_vpc_initialization_keeps_hbn_configuration_and_chain_aligned() {
     for (deployment_type, sf_pool, sf_bar_size, resource_suffix, interface_suffix) in [
@@ -1026,6 +1027,19 @@ async fn service_vpc_initialization_keeps_hbn_configuration_and_chain_aligned() 
             .service_chains
             .expect("chains exist")
             .switches;
+        // Confirm ordinary chains retain DPF's default because only fixed slot patches qualify for
+        // the jumbo MTU override.
+        assert!(switches.iter().all(|switch| {
+            switch.service_mtu.is_none()
+                || switch.ports.iter().any(|port| {
+                    port.service_interface.as_ref().is_some_and(|interface| {
+                        interface
+                            .match_labels
+                            .get("interface")
+                            .is_some_and(|name| name.starts_with("service-vpc-slot-"))
+                    })
+                })
+        }));
         for (index, listener) in listeners
             .iter()
             .filter(|listener| listener.name.starts_with("d_iface_svc_"))
@@ -1081,16 +1095,19 @@ async fn service_vpc_initialization_keeps_hbn_configuration_and_chain_aligned() 
                     .peer_bridge,
                 format!("br-svc-{index}")
             );
-            assert!(
-                switches
-                    .iter()
-                    .any(|switch| switch.ports.iter().any(|port| {
+            // Every fixed slot switch must retain the qualified 9,000-byte MTU.
+            let slot_switch = switches
+                .iter()
+                .find(|switch| {
+                    switch.ports.iter().any(|port| {
                         port.service.as_ref().is_some_and(|service| {
                             service.name == DOCA_HBN_SERVICE_NAME
                                 && service.interface == format!("iface_svc_{index}")
                         })
-                    }))
-            );
+                    })
+                })
+                .expect("service-VPC chain must reference the HBN interface");
+            assert_eq!(slot_switch.service_mtu, Some(9_000));
         }
 
         // Ordinary service NADs retain their bridge, resource type, IPAM and MTU after the multi-NAD change.
@@ -1293,7 +1310,8 @@ async fn test_create_initialization_objects_bluefield_software() {
 }
 
 /// Verifies every DPF profile consumes one intercept topology while retaining isolated flavors,
-/// interfaces, chains, and selectors so Astra's fixed xplane resources cannot cross-bind.
+/// interfaces, chains, and selectors so Astra's fixed xplane resources cannot cross-bind or inherit
+/// a service-VPC slot MTU.
 #[tokio::test]
 async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
     // Build one SDK so all four deployment classes share the production namespace.
@@ -1699,6 +1717,12 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
     assert_eq!(
         astra_switches.len(),
         astra_chainable_logical_names.len() + astra_xplane_group_ids.len()
+    );
+    // Confirm Astra leaves every switch MTU unset because the profile rejects service-VPC slots.
+    assert!(
+        astra_switches
+            .iter()
+            .all(|switch| switch.service_mtu.is_none())
     );
     // Astra service-to-service chains must select the configured topology logical names while its
     // fixed xplane-to-CX chains remain present.

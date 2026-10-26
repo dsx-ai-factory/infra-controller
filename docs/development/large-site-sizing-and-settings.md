@@ -147,7 +147,9 @@ segment instead.
 
 - All figures come from simulated BMCs with a single nico-api replica.
 - The admin segment advisory lock decides the creation side. Its mean wait grew
-  from 53 ms at controller concurrency 80 to about 100 ms at 120 and 140.
+  from 53 ms at controller concurrency 80 to about 100 ms at 120 and 140. These
+  runs held the lock exclusively on every path. Machine creation and a host's
+  first discovery take it shared on IPv4-only admin segments.
 - The per-machine pipeline (creation to `ready`) is the part that scales with
   the setting. The creation side (site explorer iterations) is what the
   remaining time is made of.

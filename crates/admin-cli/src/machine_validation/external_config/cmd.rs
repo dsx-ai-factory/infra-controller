@@ -81,11 +81,10 @@ fn convert_external_config_to_nice_format(
             &mut lines,
             "\t------------------------------------------------------------------------"
         )?;
-        let timestamp = if config.timestamp.is_some() {
-            "".to_string()
-        } else {
-            config.timestamp.unwrap_or_default().to_string()
-        };
+        let timestamp = config
+            .timestamp
+            .map(|timestamp| timestamp.to_string())
+            .unwrap_or_default();
         let config_string = String::from_utf8(config.config)
             .map_err(|e| CarbideCliError::GenericError(e.to_string()))?;
 
@@ -120,7 +119,10 @@ fn convert_external_config_to_nice_table(
             config.name,
             config.description.unwrap_or_default(),
             config.version,
-            config.timestamp.unwrap_or_default(),
+            config
+                .timestamp
+                .map(|timestamp| timestamp.to_string())
+                .unwrap_or_default(),
         ]);
     }
 

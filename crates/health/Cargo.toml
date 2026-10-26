@@ -123,6 +123,7 @@ tonic-prost-build = { workspace = true }
 
 [features]
 bench-hooks = []
+test-support = []
 
 [dev-dependencies]
 axum = { workspace = true, features = ["http2"] }

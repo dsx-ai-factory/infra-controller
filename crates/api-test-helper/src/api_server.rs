@@ -219,6 +219,8 @@ pub async fn start(
         dpu_wait_time = "1s"
         power_down_wait = "1s"
         failure_retry_time = "1s"
+        # Supermicro DMI selects unlock/reboot; shorten all UEFI waits in this test server.
+        uefi_boot_wait = "1s"
         dpu_up_threshold = "31449600s"
 
         [machine_state_controller.controller]

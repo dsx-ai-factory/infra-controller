@@ -187,25 +187,31 @@ func (bs *BoostrapAPI) Init() {
 		return
 	}
 
-	prometheus.MustRegister(
-		prometheus.NewCounterFunc(prometheus.CounterOpts{
-			Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
-			Name:      MetricCredDnloadAttempt,
-			Help:      "Credentials download attempted for Site Agent",
-		},
-			func() float64 {
-				return float64(ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadAttempted.Load())
-			}))
+	// The canonical counter names end in `_total`. Keep the legacy names
+	// available for existing dashboards and alerts.
+	for _, name := range []string{MetricCredDnloadAttempt, "credentials_download_attempted_total"} {
+		prometheus.MustRegister(
+			prometheus.NewCounterFunc(prometheus.CounterOpts{
+				Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
+				Name:      name,
+				Help:      "Credentials download attempted for Site Agent",
+			},
+				func() float64 {
+					return float64(ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadAttempted.Load())
+				}))
+	}
 
-	prometheus.MustRegister(
-		prometheus.NewCounterFunc(prometheus.CounterOpts{
-			Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
-			Name:      MetricCredDnloadSucc,
-			Help:      "Credentials download succeeded for Site Agent",
-		},
-			func() float64 {
-				return float64(ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadSucceeded.Load())
-			}))
+	for _, name := range []string{MetricCredDnloadSucc, "credentials_download_succeeded_total"} {
+		prometheus.MustRegister(
+			prometheus.NewCounterFunc(prometheus.CounterOpts{
+				Namespace: ManagerAccess.Conf.EB.MetricsNamespace,
+				Name:      name,
+				Help:      "Credentials download succeeded for Site Agent",
+			},
+				func() float64 {
+					return float64(ManagerAccess.Data.EB.Managers.Bootstrap.State.DownloadSucceeded.Load())
+				}))
+	}
 
 	err := newBootstrapConfig(ManagerAccess.Conf.EB.BootstrapSecret)
 	if err != nil {

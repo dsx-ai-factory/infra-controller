@@ -1456,6 +1456,7 @@ mod tests {
         ctx.collectors.gnmi_cache_for(&key).seed_metric(
             "retained",
             MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: "value".into(),
                 name: "nvue_gnmi_extended".into(),
                 metric_type: "retained_scalar".into(),

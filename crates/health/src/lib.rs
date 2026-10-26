@@ -39,6 +39,9 @@ pub mod sharding;
 pub mod sink;
 mod static_credentials;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 mod tls;
 
 pub use config::Config;

@@ -12,6 +12,12 @@ identity_keyfile_path = "/var/run/secrets/spiffe.io/tls.key"
 root_cafile_path = "/var/run/secrets/spiffe.io/ca.crt"
 admin_root_cafile_path = "/etc/forge/carbide-bmc-proxy/site/admin_root_cert_pem"
 
+[carbide_api]
+api_url = "https://{{ .Values.apiServiceName | default "nico-api" }}.{{ include "nico-bmc-proxy.namespace" . }}.svc.cluster.local:1079"
+root_ca = "/var/run/secrets/spiffe.io/ca.crt"
+client_cert = "/var/run/secrets/spiffe.io/tls.crt"
+client_key = "/var/run/secrets/spiffe.io/tls.key"
+
 [auth.trust]
 spiffe_trust_domain = "{{ .Values.global.spiffe.trustDomain }}"
 spiffe_service_base_paths = [

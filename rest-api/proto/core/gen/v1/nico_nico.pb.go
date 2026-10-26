@@ -4228,7 +4228,8 @@ type AstraPhase int32
 const (
 	// PHASE_UNSPECIFIED represents an unspecified phase.
 	AstraPhase_PHASE_UNSPECIFIED AstraPhase = 0
-	// PHASE_PENDING represents a pending phase. it means the object was created but has not been processed.
+	// PHASE_PENDING means the requested configuration has not converged, including
+	// when the observed service state does not yet match it.
 	AstraPhase_PHASE_PENDING AstraPhase = 1
 	// PHASE_READY represents a ready phase. it means the object is ready.
 	AstraPhase_PHASE_READY AstraPhase = 2
@@ -34315,7 +34316,14 @@ type DpuNetworkStatus struct {
 	// Extension service status reported by DPU
 	DpuExtensionServiceVersion *string                                 `protobuf:"bytes,15,opt,name=dpu_extension_service_version,json=dpuExtensionServiceVersion,proto3,oneof" json:"dpu_extension_service_version,omitempty"`
 	DpuExtensionServices       []*DpuExtensionServiceStatusObservation `protobuf:"bytes,16,rep,name=dpu_extension_services,json=dpuExtensionServices,proto3" json:"dpu_extension_services,omitempty"`
-	AstraConfigStatus          *AstraConfigStatus                      `protobuf:"bytes,17,opt,name=astra_config_status,json=astraConfigStatus,proto3,oneof" json:"astra_config_status,omitempty"`
+	// Astra service convergence for this DPU's host. Core processes this field
+	// when ewethers and Astra are enabled; omission preserves prior observations.
+	// Successful processing of a present report replaces Astra observations with `PHASE_READY`
+	// entries for current Astra interfaces whose VNI is zero or identifies one
+	// known partition. An empty report clears Astra readiness. Every report keeps
+	// current SVPC observations and drops observations for absent interfaces.
+	// This reports service state, not hardware cleanup or permission to reuse VNIs.
+	AstraConfigStatus *AstraConfigStatus `protobuf:"bytes,17,opt,name=astra_config_status,json=astraConfigStatus,proto3,oneof" json:"astra_config_status,omitempty"`
 	// LLDP neighbors this DPU sees, attached to the status push rather than sent
 	// on its own RPC. Absent when the agent did not attempt a collection.
 	Lldp          *LldpReport `protobuf:"bytes,18,opt,name=lldp,proto3,oneof" json:"lldp,omitempty"`

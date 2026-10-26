@@ -242,8 +242,13 @@ pub enum NotAllocatableReason {
         "the machine has a pending instance creation request, that has not yet been processed by the state handler"
     )]
     PendingInstanceCreation,
+    #[error("the machine has a pending decommission request")]
+    PendingDecommission,
     #[error("the machine has a pending boot configuration")]
     PendingBootConfiguration,
+    /// A DPU reprovision request has started and must finish before allocation.
+    #[error("the machine has a started DPU reprovision request")]
+    DpuReprovisioningStarted,
     #[error("there are no dpu_snapshots, but associated_dpu_machine_ids is non-empty")]
     NoDpuSnapshots,
     #[error("the machine is in maintenance mode")]
@@ -493,9 +498,11 @@ impl ManagedHostStateSnapshot {
     /// This requires
     /// - the Machine to be in `Ready` state
     /// - the Machine has not yet been target of an instance creation request
+    /// - no pending decommission, even when `allow_unhealthy` is true
     /// - no health alerts which classification `PreventAllocations` to be set
     /// - no pending or operator maintenance, even when `allow_unhealthy` is true
     /// - the desired boot-interface generation to have a matching observation
+    /// - no started DPU reprovision request, even when `allow_unhealthy` is true
     pub fn is_usable_as_instance(&self, allow_unhealthy: bool) -> Result<(), NotAllocatableReason> {
         // TODO: allow other states than Ready when allow_unhealthy=true. Will require changes to state machine (see Matthias).
         if !matches!(self.managed_state, ManagedHostState::Ready) {
@@ -512,6 +519,9 @@ impl ManagedHostStateSnapshot {
         }
 
         let host = &self.host_snapshot;
+        if host.decommission_requested {
+            return Err(NotAllocatableReason::PendingDecommission);
+        }
         if host.machine_maintenance_requested.is_some()
             || host.health_reports.maintenance_override().is_some()
         {
@@ -534,6 +544,17 @@ impl ManagedHostStateSnapshot {
             && !self.host_snapshot.associated_dpu_machine_ids().is_empty()
         {
             return Err(NotAllocatableReason::NoDpuSnapshots);
+        }
+
+        // Reprovisioning records its start before hardware work while the host
+        // can still be Ready. That committed claim must also block allocations
+        // that bypass health alerts.
+        if self.dpu_snapshots.iter().any(|dpu| {
+            dpu.reprovision_requested
+                .as_ref()
+                .is_some_and(|request| request.started_at.is_some())
+        }) {
+            return Err(NotAllocatableReason::DpuReprovisioningStarted);
         }
 
         if !allow_unhealthy
@@ -2813,7 +2834,7 @@ pub enum FactoryResetBmcState {
 }
 
 /// Struct to store information if Reprovision is requested.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReprovisionRequest {
     pub requested_at: DateTime<Utc>,
     pub initiator: String,
@@ -4385,6 +4406,20 @@ mod tests {
     }
 
     #[test]
+    fn pending_decommission_blocks_allocation_even_with_the_health_override() {
+        let mut snapshot = managed_host_state_snapshot();
+        snapshot.host_snapshot.decommission_requested = true;
+        for allow_unhealthy in [false, true] {
+            assert_eq!(
+                snapshot.is_usable_as_instance(allow_unhealthy),
+                Err(NotAllocatableReason::PendingDecommission),
+            );
+        }
+        snapshot.host_snapshot.decommission_requested = false;
+        assert_eq!(snapshot.is_usable_as_instance(false), Ok(()));
+    }
+
+    #[test]
     fn ready_host_with_unverified_boot_interface_is_not_allocatable() {
         let mut snapshot = managed_host_state_snapshot();
         let desired_version = ConfigVersion::new(7);
@@ -4417,6 +4452,35 @@ mod tests {
         assert_eq!(
             snapshot.is_usable_as_instance(false),
             Err(NotAllocatableReason::MaintenanceMode),
+        );
+    }
+
+    #[test]
+    fn dpu_reprovision_start_blocks_allocation() {
+        scenarios!(
+            run = |(started_at, allow_unhealthy)| {
+                let mut snapshot = managed_host_state_snapshot();
+                let dpu = snapshot
+                    .dpu_snapshots
+                    .last_mut()
+                    .expect("fixture has two DPUs");
+                dpu.reprovision_requested = Some(ReprovisionRequest {
+                    requested_at: DateTime::<Utc>::UNIX_EPOCH,
+                    initiator: "test".to_string(),
+                    update_firmware: false,
+                    started_at,
+                    user_approval_received: false,
+                    restart_reprovision_requested_at: DateTime::<Utc>::UNIX_EPOCH,
+                });
+                snapshot.is_usable_as_instance(allow_unhealthy)
+            };
+            "an unstarted request leaves the host eligible for allocation" {
+                (None, false) => Yields(()),
+            }
+            "a started request on any DPU blocks even unhealthy allocation" {
+                (Some(DateTime::<Utc>::UNIX_EPOCH), true) =>
+                    FailsWith(NotAllocatableReason::DpuReprovisioningStarted),
+            }
         );
     }
 

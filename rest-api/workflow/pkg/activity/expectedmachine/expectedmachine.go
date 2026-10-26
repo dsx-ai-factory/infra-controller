@@ -6,6 +6,7 @@ package expectedmachine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"reflect"
 	"slices"
@@ -38,6 +39,8 @@ type ManageExpectedMachine struct {
 // Core supplies inventory values; omitted names, descriptions, and rack IDs
 // preserve the existing Cloud values.
 // Only successful inventory is reconciled; failed or unsupported statuses are skipped.
+// New or changed SKU attachments must belong to this Site; an invalid attachment
+// skips that item. An unchanged legacy attachment does not block other fields.
 // The reconciliation logic is as follows:
 // - UUID existing in NICo but not in DB: create record in DB
 // - UUID existing in both NICo and DB with differences: update record in DB
@@ -188,23 +191,35 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 		// Create a new Expected Machine if it doesn't already exist in DB
 		cur, found := existingByID[emID]
 		if !found {
-			_, cerr := emDAO.Create(ctx, nil, cdbm.ExpectedMachineCreateInput{
-				ExpectedMachineID:        emID,
-				SiteID:                   siteID,
-				BmcMacAddress:            reported.BmcMacAddress,
-				ChassisSerialNumber:      reported.ChassisSerialNumber,
-				Interfaces:               reported.Interfaces,
-				BmcIpAddress:             reported.BmcIpAddress,
-				RackID:                   reported.RackID,
-				Name:                     reported.Name,
-				Description:              reported.Description,
-				SkuID:                    reported.SkuID,
-				MachineID:                reported.MachineID,
-				FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
-				IsDpfEnabled:             reported.IsDpfEnabled,
-				HostLifecycleProfile:     reported.HostLifecycleProfile,
-				Labels:                   reported.Labels,
-				CreatedBy:                siteID, /* This would normally be a user ID, but that isn't something NICo provides */
+			cerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
+				if reported.SkuID != nil {
+					skus, err := cdbm.NewSkuDAO(mei.dbSession).GetForAttachment(ctx, tx, siteID, []string{*reported.SkuID})
+					if err != nil {
+						return err
+					}
+					if len(skus) == 0 {
+						return fmt.Errorf("SKU %q does not exist on Site %s", *reported.SkuID, siteID)
+					}
+				}
+				_, err := emDAO.Create(ctx, tx, cdbm.ExpectedMachineCreateInput{
+					ExpectedMachineID:        emID,
+					SiteID:                   siteID,
+					BmcMacAddress:            reported.BmcMacAddress,
+					ChassisSerialNumber:      reported.ChassisSerialNumber,
+					Interfaces:               reported.Interfaces,
+					BmcIpAddress:             reported.BmcIpAddress,
+					RackID:                   reported.RackID,
+					Name:                     reported.Name,
+					Description:              reported.Description,
+					SkuID:                    reported.SkuID,
+					MachineID:                reported.MachineID,
+					FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
+					IsDpfEnabled:             reported.IsDpfEnabled,
+					HostLifecycleProfile:     reported.HostLifecycleProfile,
+					Labels:                   reported.Labels,
+					CreatedBy:                siteID, /* This would normally be a user ID, but that isn't something NICo provides */
+				})
+				return err
 			})
 			if cerr != nil {
 				logger.Error().Err(cerr).Str("ID", emID.String()).Msg("failed to create ExpectedMachine in DB")
@@ -226,6 +241,14 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 			reported.Labels = cdbm.Labels{}
 		}
 
+		// Leave unchanged associations out of the write so legacy links do not
+		// block unrelated inventory changes. The locked timestamp check below
+		// still rejects any concurrent change to this snapshot.
+		skuID := reported.SkuID
+		if util.PtrsEqual(cur.SkuID, skuID) {
+			skuID = nil
+		}
+
 		// Omitted names, descriptions, and rack IDs preserve Cloud values that may
 		// predate their storage in Core. Compare only fields that `Update` or `Clear`
 		// will write.
@@ -236,13 +259,23 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 			(reported.RackID != nil && !util.PtrsEqual(cur.RackID, reported.RackID)) ||
 			(reported.Name != nil && !util.PtrsEqual(cur.Name, reported.Name)) ||
 			(reported.Description != nil && !util.PtrsEqual(cur.Description, reported.Description)) ||
-			(reported.SkuID != nil && !util.PtrsEqual(cur.SkuID, reported.SkuID)) ||
+			skuID != nil ||
 			(reported.MachineID != nil && !util.PtrsEqual(cur.MachineID, reported.MachineID)) ||
 			(reported.FallbackDpuSerialNumbers != nil && !slices.Equal(cur.FallbackDpuSerialNumbers, reported.FallbackDpuSerialNumbers)) ||
 			(reported.IsDpfEnabled != nil && !util.PtrsEqual(cur.IsDpfEnabled, reported.IsDpfEnabled)) ||
 			(reported.HostLifecycleProfile.DisableLockdown != nil && !util.PtrsEqual(cur.HostLifecycleProfile.DisableLockdown, reported.HostLifecycleProfile.DisableLockdown)) ||
 			!maps.Equal(cur.Labels, reported.Labels) {
 			uerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
+				// Match the handlers: lock a new SKU before the Expected Machine.
+				if skuID != nil {
+					skus, err := cdbm.NewSkuDAO(mei.dbSession).GetForAttachment(ctx, tx, siteID, []string{*skuID})
+					if err != nil {
+						return err
+					}
+					if len(skus) == 0 {
+						return fmt.Errorf("SKU %q does not exist on Site %s", *skuID, siteID)
+					}
+				}
 				// Lock and re-read before writing so an API change after the
 				// initial inventory lookup isn't overwritten by this snapshot.
 				locked, err := emDAO.Get(ctx, tx, cur.ID, nil, true)
@@ -277,7 +310,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 					RackID:                   reported.RackID,
 					Name:                     reported.Name,
 					Description:              reported.Description,
-					SkuID:                    reported.SkuID,
+					SkuID:                    skuID,
 					MachineID:                reported.MachineID,
 					FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
 					Interfaces:               reported.Interfaces,

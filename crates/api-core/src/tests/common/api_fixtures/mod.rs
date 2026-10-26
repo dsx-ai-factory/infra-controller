@@ -324,6 +324,8 @@ pub(crate) struct TestEnv {
     pub(in crate::tests) attestation_enabled: bool,
     pub(in crate::tests) site_explorer: SiteExplorer,
     pub(in crate::tests) nmxc_sim: Arc<dyn NmxcPool>,
+    /// The same simulator as `nmxc_sim`, kept concrete so tests can read its call counters.
+    pub(in crate::tests) nmxc_sim_client: Arc<NmxcSimClient>,
     /// True when the test env uses [`NmxcSimClient::simulator_for_nvlink_config`] (gRPC proxy to a local simulator).
     pub(in crate::tests) nmxc_grpc_simulator: bool,
     pub(in crate::tests) endpoint_explorer: MockEndpointExplorer,
@@ -643,6 +645,16 @@ impl TestEnv {
             .lock()
             .await
             .object_ids_from_database_contains_for_test(machine_id)
+    }
+
+    /// Processes each queued machine once, without requeueing state transitions.
+    pub(in crate::tests) async fn run_machine_state_controller_iteration_without_requeue(&self) {
+        self.machine_state_controller
+            .lock()
+            .await
+            .run_single_iteration_ext(false)
+            .boxed()
+            .await;
     }
 
     /// Runs one iteration of the network state controller handler with the services
@@ -1368,19 +1380,18 @@ async fn create_test_env_with_overrides_inner(
         .unwrap_or_default();
 
     let nmxc_grpc_simulator = overrides.nmxc_simulator == Some(true);
-    let nmxc_sim: Arc<dyn NmxcPool> = if nmxc_grpc_simulator {
-        Arc::new(NmxcSimClient::simulator_for_nvlink_config(
-            &nvlink_for_nmxc_sim,
-        ))
+    let nmxc_sim_client = Arc::new(if nmxc_grpc_simulator {
+        NmxcSimClient::simulator_for_nvlink_config(&nvlink_for_nmxc_sim)
     } else if let Some(n) = overrides.nmxc_fail_after_n_creates {
-        Arc::new(NmxcSimClient::with_fail_after_n_creates(n))
+        NmxcSimClient::with_fail_after_n_creates(n)
     } else if overrides.nmxc_default_partition == Some(true) {
-        Arc::new(NmxcSimClient::with_default_partition())
+        NmxcSimClient::with_default_partition()
     } else if overrides.nmxc_unknown_partition == Some(true) {
-        Arc::new(NmxcSimClient::with_unknown_partition())
+        NmxcSimClient::with_unknown_partition()
     } else {
-        Arc::new(NmxcSimClient::default())
-    };
+        NmxcSimClient::default()
+    });
+    let nmxc_sim: Arc<dyn NmxcPool> = nmxc_sim_client.clone();
 
     let mut config = overrides.config.unwrap_or(get_config());
     if let Some(threshold) = overrides.dpu_agent_version_staleness_threshold {
@@ -1985,6 +1996,7 @@ async fn create_test_env_with_overrides_inner(
         test_meter,
         site_explorer,
         nmxc_sim,
+        nmxc_sim_client,
         nmxc_grpc_simulator,
         endpoint_explorer: fake_endpoint_explorer,
         admin_segments,

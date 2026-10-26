@@ -16,7 +16,7 @@
  */
 
 //! Releasing the DPF maintenance hold that parks a host's DPUs while a changed
-//! DPUService waits to roll out.
+//! DPUDeployment-owned DPUService revision waits to roll out.
 //!
 //! Shared by the two callers that can decide to lift a hold: the `Ready` state
 //! handler, which does it on carbide's own initiative for idle hosts, and the

@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+mod astra;
 mod boot_interface_resolution;
 mod chassis_reset;
 mod client_resolution;

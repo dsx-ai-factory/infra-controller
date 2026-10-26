@@ -362,6 +362,28 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 		return err
 	}
 
+	// Expected Machines reference Machines and SKUs, so remove them before
+	// deleting either parent.
+	deleteExpectedMachines := func() error {
+		ems, _, err := emDAO.GetAll(ctx, nil, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{siteID}}, cdbp.PageInput{Limit: ccu.GetPtr(cdbp.TotalLimit)}, nil)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to retrieve Expected Machines from DB by Site ID")
+			return err
+		}
+		for _, em := range ems {
+			serr := emDAO.Delete(ctx, nil, em.ID)
+			if serr != nil && serr != cdb.ErrDoesNotExist {
+				logger.Error().Err(serr).Str("Expected Machine ID", em.ID.String()).Msg("error deleting Expected Machine record in DB")
+				return serr
+			}
+		}
+		return nil
+	}
+	err = deleteExpectedMachines()
+	if err != nil {
+		return err
+	}
+
 	// Delete Machines
 	// Check if Machines exist
 	mcs, _, err := mDAO.GetAll(ctx, nil, cdbm.MachineFilterInput{SiteIDs: []uuid.UUID{siteID}}, cdbp.PageInput{Limit: ccu.GetPtr(cdbp.TotalLimit)}, nil)
@@ -654,18 +676,11 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 		}
 	}
 
-	// Delete Expected Machines
-	ems, _, err := emDAO.GetAll(ctx, nil, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{siteID}}, cdbp.PageInput{Limit: ccu.GetPtr(cdbp.TotalLimit)}, nil)
+	// Inventory admitted before Site deletion can insert Expected Machines
+	// during cleanup, so remove those rows after the other resource passes.
+	err = deleteExpectedMachines()
 	if err != nil {
-		logger.Error().Err(err).Msg("failed to retrieve Expected Machines from DB by Site ID")
 		return err
-	}
-	for _, em := range ems {
-		serr := emDAO.Delete(ctx, nil, em.ID)
-		if serr != nil && serr != cdb.ErrDoesNotExist {
-			logger.Error().Err(serr).Str("Expected Machine ID", em.ID.String()).Msg("error deleting Expected Machine record in DB")
-			return serr
-		}
 	}
 
 	// Delete Tenant/Site associations

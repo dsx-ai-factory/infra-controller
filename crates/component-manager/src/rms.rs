@@ -264,6 +264,15 @@ fn rms_node_descriptor_config_error(
 /// identity is unavailable; this fallback requires a declared rack. Switch
 /// reads require an ingested switch. Reads pass endpoint details directly to
 /// RMS without registering devices or changing their power state.
+///
+/// # Compute power and firmware commands
+///
+/// If the machine lookup finds a different MAC at a requested BMC IP, the
+/// command returns a failure under the requested IP and MAC with no job ID.
+/// That endpoint is not sent to RMS and its firmware tracking is unchanged;
+/// other valid endpoints can proceed. The check uses the machine ownership
+/// found during lookup, including machines without a rack. It does not check
+/// other inventory kinds or prevent reassignment after the lookup.
 pub struct RmsBackend {
     client: Arc<dyn RmsApi>,
     switch_system_image_client: Option<Arc<dyn RmsSwitchSystemImageStatusApi>>,
@@ -1779,12 +1788,31 @@ struct ComputeTrayRmsIdentity {
 
 /// `ComputeTrayIdentityLookup` keeps every current BMC IP owner alongside the
 /// identities eligible for RMS. A machine without a rack still owns its IP,
-/// so passive reads must check ownership before using expected inventory.
+/// so RMS operations must check ownership before using expected inventory.
 struct ComputeTrayIdentityLookup {
     /// Rack-associated identities accepted by the existing RMS operations.
     rms_identities: HashMap<IpAddr, ComputeTrayRmsIdentity>,
     /// Current BMC MAC for each occupied IP, including machines without a rack.
     current_owners: HashMap<IpAddr, MacAddress>,
+}
+
+impl ComputeTrayIdentityLookup {
+    /// `check_owner` rejects a different known MAC because the IP may have
+    /// changed owners since the endpoint was collected. A matching or unknown
+    /// owner is allowed; a matching owner without a rack can still use expected
+    /// inventory for its RMS identity.
+    fn check_owner(&self, endpoint: &ComputeTrayEndpoint) -> Result<(), String> {
+        if let Some(owner_mac) = self.current_owners.get(&endpoint.bmc_ip)
+            && *owner_mac != endpoint.bmc_mac
+        {
+            return Err(format!(
+                "RMS compute identity for BMC IP {} has MAC {}, expected {}",
+                endpoint.bmc_ip, owner_mac, endpoint.bmc_mac
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 /// A row-less compute tray has no machine id; like a pre-ingestion switch its
@@ -5099,9 +5127,10 @@ impl RmsBackend {
     /// Apply a firmware object to one compute node and record the resulting job.
     ///
     /// Shared by the ingested and pre-ingestion paths of `update_firmware`. The
-    /// resulting backend job id is persisted to `compute_firmware_object_jobs`
-    /// keyed by BMC MAC so status queries survive a nico-api restart, whether or
-    /// not the tray has a `machines` row yet.
+    /// resulting backend job id is persisted to
+    /// `direct_dispatch_firmware_update_jobs` under the BMC MAC and
+    /// `FirmwareJobKind::FirmwareObject`, so status queries survive a nico-api
+    /// restart whether or not the tray has a `machines` row yet.
     async fn apply_compute_firmware_object(
         &self,
         ep: &ComputeTrayEndpoint,
@@ -5249,17 +5278,7 @@ impl ComputeTrayManager for RmsBackend {
             Ok(endpoints
                 .iter()
                 .map(|ep| {
-                    // The IP may have changed owners after the endpoint was
-                    // collected. Even an owner without a rack must prevent us
-                    // from reporting its observation under an expected MAC.
-                    if let Some(owner_mac) = ingested.current_owners.get(&ep.bmc_ip)
-                        && *owner_mac != ep.bmc_mac
-                    {
-                        return Err(format!(
-                            "RMS compute identity for BMC IP {} has MAC {}, expected {}",
-                            ep.bmc_ip, owner_mac, ep.bmc_mac
-                        ));
-                    }
+                    ingested.check_owner(ep)?;
 
                     let identity = ingested
                         .rms_identities
@@ -5284,17 +5303,14 @@ impl ComputeTrayManager for RmsBackend {
         // Ingested trays resolve their RMS identity from the machine row by BMC
         // IP.
         let bmc_ips: Vec<IpAddr> = endpoints.iter().map(|ep| ep.bmc_ip).collect();
-        let ingested = resolve_compute_tray_identities(&self.db, &bmc_ips)
-            .await?
-            .rms_identities;
+        let ingested = resolve_compute_tray_identities(&self.db, &bmc_ips).await?;
 
-        // Trays with no machine row yet (pre-ingestion) fall back to the
-        // expected inventory keyed by BMC MAC. Only rack-scale (RMS-managed)
-        // trays — those with a declared rack_id — resolve here; the BMC MAC
-        // doubles as the RMS node id since no machine id exists.
+        // Trays without a managed rack identity fall back to expected inventory
+        // keyed by BMC MAC, including matching owners without a rack. Expected
+        // inventory must declare a rack; its BMC MAC becomes the RMS node ID.
         let pre_ingestion_macs: Vec<MacAddress> = endpoints
             .iter()
-            .filter(|ep| !ingested.contains_key(&ep.bmc_ip))
+            .filter(|ep| !ingested.rms_identities.contains_key(&ep.bmc_ip))
             .map(|ep| ep.bmc_mac)
             .collect();
         let pre_ingestion = self
@@ -5305,7 +5321,19 @@ impl ComputeTrayManager for RmsBackend {
         let mut results = Vec::with_capacity(endpoints.len());
 
         for ep in endpoints {
+            if let Err(error) = ingested.check_owner(ep) {
+                results.push(ComputeTrayResult {
+                    bmc_ip: ep.bmc_ip,
+                    bmc_mac: ep.bmc_mac,
+                    success: false,
+                    error: Some(error),
+                    backend_job_id: None,
+                });
+                continue;
+            }
+
             let identity = match ingested
+                .rms_identities
                 .get(&ep.bmc_ip)
                 .or_else(|| pre_ingestion.get(&ep.bmc_mac))
             {
@@ -5397,17 +5425,14 @@ impl ComputeTrayManager for RmsBackend {
         // Ingested trays resolve their RMS identity from the machine row by BMC
         // IP.
         let bmc_ips: Vec<IpAddr> = endpoints.iter().map(|ep| ep.bmc_ip).collect();
-        let ingested = resolve_compute_tray_identities(&self.db, &bmc_ips)
-            .await?
-            .rms_identities;
+        let ingested = resolve_compute_tray_identities(&self.db, &bmc_ips).await?;
 
-        // Trays with no machine row yet (pre-ingestion) fall back to the
-        // expected inventory keyed by BMC MAC. Only rack-scale (RMS-managed)
-        // trays — those with a declared rack_id — resolve here; the BMC MAC
-        // doubles as the RMS node id since no machine id exists.
+        // Trays without a managed rack identity fall back to expected inventory
+        // keyed by BMC MAC, including matching owners without a rack. Expected
+        // inventory must declare a rack; its BMC MAC becomes the RMS node ID.
         let pre_ingestion_macs: Vec<MacAddress> = endpoints
             .iter()
-            .filter(|ep| !ingested.contains_key(&ep.bmc_ip))
+            .filter(|ep| !ingested.rms_identities.contains_key(&ep.bmc_ip))
             .map(|ep| ep.bmc_mac)
             .collect();
         let pre_ingestion = self
@@ -5418,11 +5443,24 @@ impl ComputeTrayManager for RmsBackend {
         let mut results = Vec::with_capacity(endpoints.len());
 
         for ep in endpoints {
-            // Ingested trays resolve their RMS identity from the machine row by
-            // BMC IP; pre-ingestion trays fall back to expected inventory by BMC
-            // MAC. Either way the resulting job id is persisted uniformly to
-            // compute_firmware_object_jobs (keyed by BMC MAC).
+            // Reject a stale endpoint before dispatch can replace the job
+            // tracked under its requested MAC.
+            if let Err(error) = ingested.check_owner(ep) {
+                results.push(ComputeTrayResult {
+                    bmc_ip: ep.bmc_ip,
+                    bmc_mac: ep.bmc_mac,
+                    success: false,
+                    error: Some(error),
+                    backend_job_id: None,
+                });
+                continue;
+            }
+
+            // Either identity source persists the resulting job ID to
+            // `direct_dispatch_firmware_update_jobs`, keyed by BMC MAC and
+            // `FirmwareJobKind::FirmwareObject`.
             let identity = match ingested
+                .rms_identities
                 .get(&ep.bmc_ip)
                 .or_else(|| pre_ingestion.get(&ep.bmc_mac))
             {
@@ -7772,6 +7810,59 @@ mod tests {
         for (call, chunk) in calls.iter().zip(nodes.chunks(RMS_POWER_READ_BATCH_SIZE)) {
             assert_eq!(call.nodes.as_ref().expect("request nodes").nodes, chunk);
         }
+    }
+
+    /// TLS client errors may contain private connection details. Keep them out
+    /// of per-device errors and logs while retaining a useful failure warning.
+    #[tokio::test]
+    async fn rms_power_reads_sanitize_tls_errors_in_results_and_logs() {
+        const PRIVATE_PAYLOAD: &str = "power-read-tls-detail-must-not-be-reported";
+        const TLS_ERROR: &str = "RMS power read TLS failed";
+
+        let mock = MockRmsApi::new();
+        let nodes = power_read_nodes(1);
+        // TLS errors can contain private connection details before RMS replies.
+        mock.enqueue_batch_get_power_state(Err(RackManagerError::TlsError(
+            librms::RmsTlsClientError::Connection(PRIVATE_PAYLOAD.to_owned()),
+        )))
+        .await;
+
+        let (results, logs) = capture_logs_async(query_test_power_nodes(
+            &mock,
+            nodes.clone(),
+            Instant::now() + RMS_POWER_READ_TIMEOUT,
+        ))
+        .await;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].mac_address,
+            PS_MAC_1.parse::<MacAddress>().expect("management MAC")
+        );
+        assert_eq!(results[0].power_state, Err(TLS_ERROR.to_owned()));
+
+        // RED must report the failure, but none of the captured fields or
+        // messages may include the original TLS client error.
+        let failure_log = logs
+            .iter()
+            .find(|log| {
+                log.message == "external call failed"
+                    && log.field("operation") == Some("batch_get_power_state")
+            })
+            .expect("RED reports the TLS failure");
+        assert_eq!(failure_log.level, tracing::Level::WARN);
+        assert_eq!(failure_log.field("backend"), Some("rms"));
+        assert_eq!(failure_log.field("error"), Some(TLS_ERROR));
+        assert!(logs.iter().all(|log| {
+            !log.message.contains(PRIVATE_PAYLOAD)
+                && log.fields.iter().all(|(name, value)| {
+                    !name.contains(PRIVATE_PAYLOAD) && !value.contains(PRIVATE_PAYLOAD)
+                })
+        }));
+
+        let calls = mock.batch_get_power_state_calls().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].nodes.as_ref().expect("request nodes").nodes, nodes);
     }
 
     #[tokio::test(start_paused = true)]
@@ -10635,6 +10726,267 @@ mod tests {
     }
 
     // ---- ComputeTrayManager tests ----
+
+    /// A stale MAC must not send a power command to the current IP owner,
+    /// including when expected inventory would otherwise supply an identity.
+    /// Rejecting that endpoint must still allow a healthy peer to proceed,
+    /// including a matching owner that needs expected-inventory fallback.
+    #[carbide_macros::sqlx_test]
+    async fn ct_power_control_rejects_conflicting_ip_owner(pool: sqlx::PgPool) {
+        let (_, _, rack_id, ct1, ct2) = make_compute_tray_backend(&pool).await;
+        let endpoints = [
+            make_ct_endpoint(CT_IP_2, CT_MAC_1),
+            make_ct_endpoint(CT_IP_1, CT_MAC_1),
+        ];
+        let expected_error = format!(
+            "RMS compute identity for BMC IP {CT_IP_2} has MAC {CT_MAC_2}, expected {CT_MAC_1}"
+        );
+
+        for (scenario, owner_rack, healthy_node_id) in [
+            // The IP lookup must not substitute another managed machine.
+            ("rack-associated owner", Some(&rack_id), ct1.to_string()),
+            // Expected inventory must reject the conflict but allow a matching
+            // rackless owner to use its MAC as the RMS node ID.
+            ("rackless owner", None, CT_MAC_1.to_owned()),
+        ] {
+            // Both owners lose their managed rack in the fallback case; the
+            // healthy endpoint must therefore resolve through expected data.
+            let update = sqlx::query("UPDATE machines SET rack_id = $1 WHERE id = $2 OR id = $3")
+                .bind(owner_rack)
+                .bind(ct1)
+                .bind(ct2)
+                .execute(&pool)
+                .await
+                .expect("set the current owners' rack associations");
+            assert_eq!(update.rows_affected(), 2);
+
+            let mock = Arc::new(MockRmsApi::new());
+            let backend = RmsBackend::new(
+                mock.clone(),
+                Some(mock.clone()),
+                pool.clone(),
+                Arc::new(rack_profile_config()),
+                true,
+            );
+
+            // Power responses summarize batch success. Queue enough successes
+            // for even an incorrect dispatch, so an absent mock response cannot
+            // masquerade as the ownership rejection.
+            for _ in &endpoints {
+                mock.enqueue_batch_set_power_state(Ok(MockRmsApi::batch_set_power_state_ok(
+                    &healthy_node_id,
+                )))
+                .await;
+            }
+
+            let results = ComputeTrayManager::power_control(&backend, &endpoints, PowerAction::On)
+                .await
+                .expect("return per-endpoint power results");
+
+            let [rejected, healthy] = results.as_slice() else {
+                panic!("{scenario}: expected one result per endpoint");
+            };
+            assert_eq!(rejected.bmc_ip, endpoints[0].bmc_ip, "{scenario}");
+            assert_eq!(rejected.bmc_mac, endpoints[0].bmc_mac, "{scenario}");
+            assert!(!rejected.success, "{scenario}");
+            assert_eq!(
+                rejected.error.as_deref(),
+                Some(expected_error.as_str()),
+                "{scenario}"
+            );
+            assert_eq!(rejected.backend_job_id, None, "{scenario}");
+            assert_eq!(healthy.bmc_ip, endpoints[1].bmc_ip, "{scenario}");
+            assert_eq!(healthy.bmc_mac, endpoints[1].bmc_mac, "{scenario}");
+            assert!(healthy.success, "{scenario}");
+            assert_eq!(healthy.error, None, "{scenario}");
+
+            // Only the healthy endpoint may reach RMS, even though both
+            // requested endpoints use the same MAC.
+            let calls = mock.batch_set_power_state_calls().await;
+            let [call] = calls.as_slice() else {
+                panic!("{scenario}: expected only the healthy endpoint's command");
+            };
+            assert_eq!(call.operation, rms::PowerOperation::On as i32, "{scenario}");
+            let nodes = &call.nodes.as_ref().expect("power request nodes").nodes;
+            let [node] = nodes.as_slice() else {
+                panic!("{scenario}: expected one healthy node");
+            };
+            assert_eq!(node.node_id, healthy_node_id, "{scenario}");
+            assert_eq!(node.rack_id, rack_id.to_string(), "{scenario}");
+            let interface = node
+                .bmc_endpoint
+                .as_ref()
+                .expect("BMC endpoint")
+                .interface
+                .as_ref()
+                .expect("BMC interface");
+            assert_eq!(interface.ip_address, CT_IP_1, "{scenario}");
+            assert_eq!(interface.mac_address, CT_MAC_1, "{scenario}");
+        }
+    }
+
+    /// A rejected firmware target must preserve its prior in-memory and stored
+    /// jobs. Both managed identity selection and expected-inventory fallback
+    /// must stop before dispatch or replacement of the requested MAC's job,
+    /// while a later valid endpoint can start and track its own update.
+    #[carbide_macros::sqlx_test]
+    async fn ct_update_firmware_rejects_conflicting_ip_owner(pool: sqlx::PgPool) {
+        let (_, _, rack_id, _, ct2) = make_compute_tray_backend(&pool).await;
+        let endpoint = make_ct_endpoint(CT_IP_2, CT_MAC_1);
+        let endpoints = [endpoint.clone(), make_ct_endpoint(CT_IP_2, CT_MAC_2)];
+        let expected_error = format!(
+            "RMS compute identity for BMC IP {CT_IP_2} has MAC {CT_MAC_2}, expected {CT_MAC_1}"
+        );
+
+        for (scenario, owner_rack, unexpected_node_id, endpoints) in [
+            // The stale request must not substitute the IP owner's ID. A later
+            // request using that owner's correct MAC must still succeed.
+            (
+                "rack-associated owner",
+                Some(&rack_id),
+                ct2.to_string(),
+                &endpoints[..],
+            ),
+            // Without a managed rack, it instead selects the requested MAC.
+            ("rackless owner", None, CT_MAC_1.to_owned(), &endpoints[..1]),
+        ] {
+            let update = sqlx::query("UPDATE machines SET rack_id = $1 WHERE id = $2")
+                .bind(owner_rack)
+                .bind(ct2)
+                .execute(&pool)
+                .await
+                .expect("set the current owner's rack association");
+            assert_eq!(update.rows_affected(), 1);
+
+            let mock = Arc::new(MockRmsApi::new());
+            let backend = RmsBackend::new(
+                mock.clone(),
+                Some(mock.clone()),
+                pool.clone(),
+                Arc::new(rack_profile_config()),
+                true,
+            );
+
+            // A command rejected before dispatch must preserve both job stores.
+            // A successful mock for the wrong identity would overwrite them,
+            // so an unrelated RMS error cannot make this regression pass.
+            let existing_jobs = vec![RmsTrackedFirmwareJob::FirmwareObject("existing-job".into())];
+            backend
+                .firmware_jobs
+                .lock()
+                .unwrap()
+                .insert(endpoint.bmc_mac, existing_jobs.clone());
+            db::direct_dispatch_firmware_job::save(
+                &pool,
+                endpoint.bmc_mac,
+                FirmwareJobKind::FirmwareObject,
+                "existing-job",
+            )
+            .await
+            .expect("persist the existing firmware job");
+            for _ in endpoints {
+                mock.enqueue_apply_firmware_object(Ok(MockRmsApi::firmware_object_apply_ok(
+                    &unexpected_node_id,
+                    "new-job",
+                )))
+                .await;
+            }
+
+            let results = ComputeTrayManager::update_firmware(
+                &backend,
+                endpoints,
+                r#"{"Id":"fw-json"}"#,
+                &[ComputeTrayComponent::Bmc],
+                &firmware_update_options(),
+            )
+            .await
+            .expect("return per-endpoint firmware results");
+
+            assert_eq!(results.len(), endpoints.len(), "{scenario}");
+            let rejected = &results[0];
+            assert_eq!(rejected.bmc_ip, endpoint.bmc_ip, "{scenario}");
+            assert_eq!(rejected.bmc_mac, endpoint.bmc_mac, "{scenario}");
+            assert!(!rejected.success, "{scenario}");
+            assert_eq!(
+                rejected.error.as_deref(),
+                Some(expected_error.as_str()),
+                "{scenario}"
+            );
+            assert_eq!(rejected.backend_job_id, None, "{scenario}");
+
+            assert_eq!(
+                backend.firmware_jobs.lock().unwrap().get(&endpoint.bmc_mac),
+                Some(&existing_jobs),
+                "{scenario}"
+            );
+            assert_eq!(
+                db::direct_dispatch_firmware_job::get(
+                    &pool,
+                    endpoint.bmc_mac,
+                    FirmwareJobKind::FirmwareObject,
+                )
+                .await
+                .expect("reload the existing firmware job")
+                .as_deref(),
+                Some("existing-job"),
+                "{scenario}"
+            );
+
+            let calls = mock.apply_firmware_object_calls().await;
+            assert_eq!(calls.len(), endpoints.len() - 1, "{scenario}");
+            if let Some(peer) = endpoints.get(1) {
+                // The only dispatched update belongs to the later, valid MAC.
+                // Its new job must not replace the rejected MAC's existing job.
+                let healthy = &results[1];
+                assert_eq!(healthy.bmc_ip, peer.bmc_ip, "{scenario}");
+                assert_eq!(healthy.bmc_mac, peer.bmc_mac, "{scenario}");
+                assert!(healthy.success, "{scenario}");
+                assert_eq!(healthy.error, None, "{scenario}");
+                assert_eq!(
+                    healthy.backend_job_id.as_deref(),
+                    Some("new-job"),
+                    "{scenario}"
+                );
+
+                let call = &calls[0];
+                assert_eq!(call.rack_id, rack_id.to_string(), "{scenario}");
+                let nodes = &call.nodes.as_ref().expect("firmware request nodes").nodes;
+                let [node] = nodes.as_slice() else {
+                    panic!("{scenario}: expected only the healthy node");
+                };
+                assert_eq!(node.node_id, ct2.to_string(), "{scenario}");
+                let interface = node
+                    .bmc_endpoint
+                    .as_ref()
+                    .expect("BMC endpoint")
+                    .interface
+                    .as_ref()
+                    .expect("BMC interface");
+                assert_eq!(interface.ip_address, CT_IP_2, "{scenario}");
+                assert_eq!(interface.mac_address, CT_MAC_2, "{scenario}");
+
+                assert_eq!(
+                    backend.firmware_jobs.lock().unwrap().get(&peer.bmc_mac),
+                    Some(&vec![RmsTrackedFirmwareJob::FirmwareObject(
+                        "new-job".into()
+                    )]),
+                    "{scenario}"
+                );
+                assert_eq!(
+                    db::direct_dispatch_firmware_job::get(
+                        &pool,
+                        peer.bmc_mac,
+                        FirmwareJobKind::FirmwareObject,
+                    )
+                    .await
+                    .expect("reload the healthy endpoint's firmware job")
+                    .as_deref(),
+                    Some("new-job"),
+                    "{scenario}"
+                );
+            }
+        }
+    }
 
     #[carbide_macros::sqlx_test]
     async fn ct_power_control_success(pool: sqlx::PgPool) {
