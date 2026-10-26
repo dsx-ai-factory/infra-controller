@@ -652,7 +652,10 @@ async fn process(State(mut state): State<ControlRouter>, request: Request<Body>)
 async fn call_inner_router(router: &mut Router, request: Request<Body>) -> Response {
     let (head, body) = request.into_parts();
 
-    let mut rb = Request::builder().uri(&head.uri).method(&head.method);
+    let mut rb = Request::builder()
+        .uri(&head.uri)
+        .method(&head.method)
+        .version(head.version);
     for (key, value) in &head.headers {
         rb = rb.header(key, value);
     }
@@ -668,7 +671,7 @@ mod tests {
 
     use axum::Router;
     use axum::body::{Body, to_bytes};
-    use axum::http::{Method, Request, StatusCode};
+    use axum::http::{Method, Request, StatusCode, Version};
     use axum::routing::get;
     use bmc_mock::mac_address_pool::PoolConfig as MacAddressPoolConfig;
     use bmc_mock::{HardwareType, HostMachineInfo, RackInfo, RackType};
@@ -1327,6 +1330,37 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert_eq!(&body[..], b"bmc");
+    }
+
+    #[tokio::test]
+    async fn authority_misses_preserve_http_version_through_control_router() {
+        let inner = bmc_mock::combined_router(Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )));
+        let router = append(Some(inner), control_state(Vec::new()));
+        for (version, expected) in [(Version::HTTP_11, Some("close")), (Version::HTTP_2, None)] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/redfish/v1")
+                        .header("host", "172.20.0.20")
+                        .version(version)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{version:?}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get("connection")
+                    .map(|v| v.to_str().unwrap()),
+                expected,
+                "{version:?}"
+            );
+        }
     }
 
     #[tokio::test]

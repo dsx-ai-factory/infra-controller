@@ -406,22 +406,15 @@ async fn rms_requests_are_routed_by_rack_and_batches_split_across_instances_are_
         );
     }
 
-    // An id from before a restart is unknown to this process and reported complete by both
-    // status RPCs, as the mock does; a blank id names no job.
-    let states = rms
+    // An id from before a restart is unknown, never proof of completion.
+    let status = rms
         .get_job_status(GetJobStatusRequest {
             job_id: "gw-0-999".to_string(),
             include_child_job_states: true,
         })
         .await
-        .unwrap()
-        .into_inner()
-        .job_states;
-    assert_eq!(job_tree(&states), vec![("gw-0-999", None, Vec::new())]);
-    assert_eq!(
-        states[0].execution_state,
-        JobExecutionState::Completed as i32
-    );
+        .unwrap_err();
+    assert_eq!(status.code(), Code::NotFound);
     let response = rms
         .get_configure_switch_certificate_job_status(
             GetConfigureSwitchCertificateJobStatusRequest {
@@ -431,14 +424,10 @@ async fn rms_requests_are_routed_by_rack_and_batches_split_across_instances_are_
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(
-        (
-            response.status,
-            response.job_id.as_str(),
-            response.state.as_str()
-        ),
-        (ReturnCode::Success as i32, "gw-0-999", "completed")
-    );
+    assert_eq!(response.status, ReturnCode::Failure as i32);
+    assert_eq!(response.job_id, "gw-0-999");
+    assert!(response.state.is_empty());
+    assert_eq!(response.error_message, "job gw-0-999 not found");
     let status = rms
         .get_job_status(GetJobStatusRequest {
             job_id: " ".to_string(),
