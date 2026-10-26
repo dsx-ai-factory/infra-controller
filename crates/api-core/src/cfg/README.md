@@ -437,8 +437,9 @@ different share without allowing it to exceed either global bound.
 
 #### `ApiAdmissionServiceLimitsConfig`
 
-Every field is required for each service override; the nested structure has no
-field-level defaults.
+`max_work_in_flight`, `max_pending`, and `pending_timeout` are required for each
+service override. `max_execution_time` is optional and falls back to the global
+`max_execution_time` when omitted.
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |

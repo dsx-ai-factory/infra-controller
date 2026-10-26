@@ -555,10 +555,13 @@ fn request_route(request: &Request) -> String {
         .unwrap_or_else(|| request.uri().path().to_owned())
 }
 
+// `grpc-timeout` is the client's budget from when it sent the request, so the time the
+// request already spent pending comes out of it. `max_execution_time` caps execution alone.
 fn execution_deadline(
     request: &Request,
     transport: RequestTransport,
     client_limits: ClientLimits,
+    pending: Duration,
 ) -> Duration {
     let max_execution_time = client_limits.max_execution_time();
     if transport != RequestTransport::Grpc {
@@ -570,7 +573,7 @@ fn execution_deadline(
         .and_then(|header| header.to_str().ok())
         .and_then(parse_grpc_timeout)
         .map_or(max_execution_time, |requested| {
-            requested.min(max_execution_time)
+            requested.saturating_sub(pending).min(max_execution_time)
         })
 }
 
@@ -584,11 +587,12 @@ async fn enforce_transport(
     let (client_key, client_limits) = control.client(&request);
     let client_kind = ClientKindLabel::from(client_key);
     let client_id = client_identifier(client_key);
+    let arrived = tokio::time::Instant::now();
     let permit = match control.engine.acquire(client_key, client_limits).await {
         Ok(permit) => permit,
         Err(rejection) => return control.rejection_response(transport, rejection),
     };
-    let deadline = execution_deadline(&request, transport, client_limits);
+    let deadline = execution_deadline(&request, transport, client_limits, arrived.elapsed());
     let in_flight =
         control
             .in_flight
@@ -1315,41 +1319,60 @@ mod tests {
                 "shorter header wins",
                 RequestTransport::Grpc,
                 Some("1S"),
+                Duration::ZERO,
                 Duration::from_secs(1),
             ),
             (
                 "longer header does not",
                 RequestTransport::Grpc,
                 Some("10M"),
+                Duration::ZERO,
                 max_execution_time,
             ),
             (
                 "malformed header falls back",
                 RequestTransport::Grpc,
                 Some("soon"),
+                Duration::ZERO,
                 max_execution_time,
             ),
             (
                 "missing header falls back",
                 RequestTransport::Grpc,
                 None,
+                Duration::ZERO,
                 max_execution_time,
             ),
             (
                 "HTTP ignores the header",
                 RequestTransport::Http,
                 Some("1S"),
+                Duration::from_secs(2),
                 max_execution_time,
             ),
+            (
+                "time spent pending reduces the header budget",
+                RequestTransport::Grpc,
+                Some("10S"),
+                Duration::from_secs(4),
+                Duration::from_secs(6),
+            ),
+            (
+                "pending past the header budget leaves none",
+                RequestTransport::Grpc,
+                Some("1S"),
+                Duration::from_secs(2),
+                Duration::ZERO,
+            ),
         ];
-        for (name, transport, header, expected) in cases {
+        for (name, transport, header, pending, expected) in cases {
             let mut request = Request::builder().uri(::rpc::service_path!("Ready"));
             if let Some(header) = header {
                 request = request.header("grpc-timeout", header);
             }
             let request = request.body(Body::empty()).unwrap();
             assert_eq!(
-                execution_deadline(&request, transport, limits),
+                execution_deadline(&request, transport, limits, pending),
                 expected,
                 "{name}"
             );
