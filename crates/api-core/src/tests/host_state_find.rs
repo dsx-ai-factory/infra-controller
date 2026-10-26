@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 
-use carbide_uuid::machine::{HostMachineId, MachineId};
+use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
 use carbide_uuid::rack::RackId;
 use chrono::Utc;
 use health_report::{HealthAlertClassification, HealthProbeAlert, HealthReport};
@@ -250,4 +250,51 @@ async fn compact_decode_sorts_topology_free_dpus(pool: sqlx::PgPool) {
     );
     assert_eq!(Some(compact.dpu_snapshots[0].id), primary_dpu);
     assert_eq!(compact.dpu_snapshots[0].id, full.dpu_snapshots[0].id);
+}
+async fn find_host_states(
+    env: &TestEnv,
+    host_ids: Vec<MachineId>,
+) -> Result<rpc::forge::HostStateList, tonic::Status> {
+    env.api
+        .find_host_states_by_ids(Request::new(rpc::forge::HostStatesByIdsRequest {
+            host_ids,
+        }))
+        .await
+        .map(tonic::Response::into_inner)
+}
+
+#[crate::sqlx_test]
+async fn find_host_states_rejects_bad_requests(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let host = create_managed_host(&env).await;
+    let host_id = MachineId::from(host.id);
+    let over_max = vec![host_id; env.config.max_find_by_ids as usize + 1];
+
+    for (scenario, host_ids) in [
+        ("no IDs", vec![]),
+        ("more than max_find_by_ids", over_max),
+        ("a DPU ID", vec![host_id, host.dpu_ids[0].into()]),
+    ] {
+        let error = find_host_states(&env, host_ids).await.expect_err(scenario);
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{scenario}");
+    }
+}
+
+#[crate::sqlx_test]
+async fn find_host_states_dedups_sorts_and_omits_missing(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let mut host_ids: Vec<MachineId> = vec![
+        create_managed_host(&env).await.id.into(),
+        create_managed_host(&env).await.id.into(),
+    ];
+    host_ids.sort();
+    let missing = MachineId::new(MachineIdSource::Tpm, [0x77; 32], MachineType::Host);
+
+    let reply = find_host_states(&env, vec![host_ids[1], missing, host_ids[0], host_ids[1]])
+        .await
+        .unwrap();
+
+    let returned: Vec<_> = reply.hosts.iter().filter_map(|host| host.id).collect();
+    assert_eq!(returned, host_ids);
+    assert!(reply.read_at.is_some());
 }

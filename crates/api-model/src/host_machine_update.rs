@@ -52,6 +52,12 @@ pub struct HostUpdateGateRow {
 }
 
 impl HostUpdateGateRow {
+    /// The explored report's vendor. `None` without a report or when unknown.
+    pub fn vendor(&self) -> Option<bmc_vendor::BMCVendor> {
+        let vendor = serde_json::from_value(self.report_vendor.clone()?.into()).ok()?;
+        (vendor != bmc_vendor::BMCVendor::Unknown).then_some(vendor)
+    }
+
     /// Whether `find_upgrade_needed` returns this row.
     pub fn passes_manager_query(&self) -> bool {
         self.first_closed_gate(None).is_none()
