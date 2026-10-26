@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ::db::WithTransaction;
 use ::db::work_lock_manager::WorkLockManagerHandle;
 use carbide_utils::periodic_timer::PeriodicTimer;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
@@ -27,13 +28,16 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use crate::config::IterationConfig;
-use crate::controller::{ControllerIteration, ControllerIterationId, IterationError, db};
+use crate::controller::{
+    ControllerIteration, ControllerIterationId, IterationError, ObjectIdsFromDatabase, db,
+};
 use crate::io::StateControllerIO;
 use crate::per_object::PerObjectStateRecorder;
 
 /// Periodically enqueues state handling tasks for all objects that are managed by the
 /// state controller.
-/// The task is guaranteed to only run on a single carbide instance at a time.
+/// Queue insertion is guaranteed to run on only one carbide instance at a time;
+/// enabled database object-ID reads run on every replica for local metric filtering.
 pub(super) struct PeriodicEnqueuer<IO: StateControllerIO> {
     /// A database connection pool that can be used for additional queries
     pub(super) pool: sqlx::PgPool,
@@ -52,6 +56,9 @@ pub(super) struct PeriodicEnqueuer<IO: StateControllerIO> {
     /// task that was already running when its object was deleted cannot
     /// resurrect the series after the first clear.
     pub(super) pending_clears: HashMap<String, Instant>,
+    /// Publishes complete database object-ID lists for aggregate metric filtering.
+    pub(super) object_ids_from_database:
+        Option<tokio::sync::watch::Sender<Option<ObjectIdsFromDatabase<IO::ObjectId>>>>,
 }
 
 pub(super) struct SingleIterationResult {
@@ -137,7 +144,7 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
         );
 
         let res = self
-            .lock_and_handle_iteration(&mut metrics)
+            .refresh_object_ids_and_handle_iteration(&mut metrics)
             .instrument(controller_span.clone())
             .await;
         metrics.recording_finished_at = std::time::Instant::now();
@@ -170,9 +177,36 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
         iteration_result
     }
 
+    /// Refreshes the optional replica-local database object-ID list before
+    /// competing for the queue lock, so non-winning replicas also filter metrics.
+    async fn refresh_object_ids_and_handle_iteration(
+        &mut self,
+        iteration_metrics: &mut PeriodicEnqueuerMetrics,
+    ) -> Result<ControllerIteration, IterationError> {
+        let object_ids =
+            if let Some(object_ids_from_database_sender) = &self.object_ids_from_database {
+                let object_ids = self
+                    .pool
+                    .with_txn(|txn| self.io.list_objects(txn))
+                    .await??;
+                let object_ids_from_database =
+                    object_ids.iter().cloned().collect::<HashSet<_>>().into();
+                object_ids_from_database_sender.send_replace(Some(object_ids_from_database));
+                Some(object_ids)
+            } else {
+                None
+            };
+
+        // The lock winner reuses the published list instead of issuing another
+        // complete database read.
+        self.lock_and_handle_iteration(iteration_metrics, object_ids)
+            .await
+    }
+
     async fn lock_and_handle_iteration(
         &mut self,
         iteration_metrics: &mut PeriodicEnqueuerMetrics,
+        object_ids: Option<Vec<IO::ObjectId>>,
     ) -> Result<ControllerIteration, IterationError> {
         let locked_controller_iteration = match db::lock_and_start_iteration(
             &self.pool,
@@ -200,7 +234,7 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
         );
         iteration_metrics.iteration_id = Some(locked_controller_iteration.iteration_data.id);
 
-        self.enqueue_objects(iteration_metrics).await?;
+        self.enqueue_objects(iteration_metrics, object_ids).await?;
 
         Ok(locked_controller_iteration.iteration_data)
     }
@@ -210,26 +244,31 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
     async fn enqueue_objects(
         &mut self,
         iteration_metrics: &mut PeriodicEnqueuerMetrics,
+        object_ids: Option<Vec<IO::ObjectId>>,
     ) -> Result<(), IterationError> {
         // We start by grabbing a list of objects that should be active
         // The list might change until we fetch more data. However that should be ok:
-        // The next iteration of the controller would also find objects that
-        // have been added to the system. And no object should ever be removed
-        // outside of the state controller
-        let mut txn = self.pool.begin().await?;
-        let object_ids = self.io.list_objects(&mut txn).await?;
+        // The next iteration also finds objects that were added or whose
+        // identity changed after this observation.
+        let object_ids = match object_ids {
+            Some(object_ids) => object_ids,
+            None => {
+                self.pool
+                    .with_txn(|txn| self.io.list_objects(txn))
+                    .await??
+            }
+        };
 
         let queued_objects: Vec<_> = object_ids
             .iter()
             .map(|object_id| object_id.to_string())
             .collect();
-        txn.commit().await?;
 
-        // Objects that vanished from the live set were deleted outside the
-        // controller, so no handler iteration will ever clear their
-        // per-object series — do it here, where the live set is known. The
-        // known set is rebuilt by moving ids out of the previous one, so the
-        // steady state allocates nothing.
+        // Objects that vanished from the live set were deleted or had their ID
+        // replaced outside the controller, so no handler iteration will ever
+        // clear their per-object series — do it here, where the live set is
+        // known. The known set is rebuilt by moving ids out of the previous one,
+        // so the steady state allocates nothing.
         if let Some(recorder) = &self.per_object_state {
             let now = Instant::now();
             let mut previous = std::mem::take(&mut self.known_object_ids);

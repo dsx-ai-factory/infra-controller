@@ -90,12 +90,15 @@ async fn update_preallocated_expected_machine_interface_inner(
     expected_interface: &ExpectedInterface,
     retained_window: Option<chrono::Duration>,
 ) -> Result<PreallocationSuccess, CarbideError> {
+    let mac_address = expected_interface
+        .require_mac_address()
+        .map_err(|message| CarbideError::InvalidArgument(message.to_string()))?;
     let fixed_ip = expected_interface
         .fixed_reservation_ip()
         .map_err(|message| {
             CarbideError::InvalidArgument(format!(
                 "expected interface {}: {message}",
-                expected_interface.mac_address,
+                expected_interface.identity(),
             ))
         })?;
 
@@ -104,7 +107,7 @@ async fn update_preallocated_expected_machine_interface_inner(
     let mut savepoint = db::Transaction::begin_inner(txn).await?;
     let result = update_preallocated_machine_interface_with_settings(
         savepoint.as_pgconn(),
-        expected_interface.mac_address,
+        mac_address,
         fixed_ip,
         Some(ExpectedInterfaceSettings {
             interface_type: expected_interface.role.interface_type(),
@@ -664,7 +667,7 @@ mod tests {
         txn.commit().await?;
 
         let expected_interface = ExpectedInterface {
-            mac_address,
+            mac_address: Some(mac_address),
             ip_allocation: Some(model::expected_machine::ExpectedInterfaceIpAllocation::Fixed),
             fixed_ip: Some("192.0.2.240".parse()?),
             ..Default::default()

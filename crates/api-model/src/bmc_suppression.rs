@@ -40,6 +40,8 @@ pub enum BmcSuppressionSource {
     BmcCredentialRotation,
     /// Host BMC factory reset during tenant release.
     FactoryResetBmc,
+    /// DPF provisioning, including its requested host reboots.
+    DpfProvisioning,
 }
 
 /// An active suppression request for one BMC MAC address, subsystem, and source.

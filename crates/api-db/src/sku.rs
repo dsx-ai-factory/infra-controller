@@ -37,6 +37,8 @@ use crate::db_read::DbReader;
 use crate::{DatabaseError, ObjectFilter, Transaction, machine};
 
 #[cfg(test)]
+mod test_decode;
+#[cfg(test)]
 mod test_explicit_columns;
 
 /// The current version of the SKU format.  The state machine will create older

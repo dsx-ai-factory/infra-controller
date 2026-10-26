@@ -16,6 +16,7 @@
  */
 use std::collections::HashSet;
 use std::string::ToString;
+use std::time::Duration;
 
 use carbide_instrument::testing::MetricsCapture;
 use carbide_machine_controller::health_report::create_host_update_health_report_dpufw;
@@ -33,6 +34,7 @@ use crate::machine_update_manager::machine_update_module::MachineUpdateModule;
 use crate::tests::common;
 use crate::tests::common::api_fixtures::TestManagedHost;
 use crate::tests::common::api_fixtures::test_managed_host::TestManagedHostSnapshots;
+use crate::tests::common::postgres::wait_for_blocked_query;
 use crate::tests::dpu_machine_update::{get_all_snapshots, update_nic_firmware_version};
 
 #[crate::sqlx_test]
@@ -84,6 +86,78 @@ async fn test_start_updates(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
         let initiator = &dpu.reprovision_requested.as_ref().unwrap().initiator;
         assert!(initiator.starts_with(AutomaticFirmwareUpdateReference::REF_NAME));
     }
+
+    Ok(())
+}
+
+/// A slow classic admission must not consume the DPF compatibility budget and
+/// prevent another classic host from using the remaining update capacity.
+#[crate::sqlx_test]
+async fn test_classic_updates_outlive_dpf_admission_deadline(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let hosts = [
+        create_managed_host(&env).await,
+        create_managed_host(&env).await,
+    ];
+    let mut txn = env.pool.begin().await?;
+    for host in &hosts {
+        host.update_nic_firmware_version(&mut txn).await?;
+    }
+    txn.commit().await?;
+    let updater = DpuNicFirmwareUpdate {
+        reported_wrong_versions: std::sync::Mutex::new(HashSet::new()),
+        metrics: None,
+        config: env.config.clone(),
+        dpf: None,
+    };
+    let snapshots = get_all_snapshots(&env).await;
+
+    // Lock both candidates so the first admission waits regardless of map order.
+    let mut writer = env.pool.begin().await?;
+    for host in &hosts {
+        db::machine::lock_by_id_for_update(writer.as_mut(), &host.dpu().id.into()).await?;
+    }
+    let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(writer.as_mut())
+        .await?;
+    let updating_hosts = HashSet::new();
+    let admission = updater.start_updates(&env.pool, 2, &updating_hosts, &snapshots);
+    tokio::pin!(admission);
+    tokio::select! {
+        result = &mut admission => panic!("classic admission did not wait for the DPU lock: {result:?}"),
+        _ = wait_for_blocked_query(&env.pool, blocker_pid, "SELECT reprovisioning_requested IS NOT NULL") => {}
+    }
+
+    // Resume before releasing the locks or awaiting further database I/O.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(31)).await;
+    tokio::time::resume();
+    writer.commit().await?;
+    let admitted = tokio::time::timeout(Duration::from_secs(30), admission)
+        .await
+        .expect("classic admission must finish after the DPU locks are released")?;
+    assert_eq!(
+        admitted,
+        HashSet::from([hosts[0].id.into(), hosts[1].id.into()])
+    );
+
+    let mut txn = env.pool.begin().await?;
+    for host in &hosts {
+        let dpu = host.dpu().db_machine(&mut txn).await;
+        let request = dpu
+            .reprovision_requested
+            .expect("both classic requests must be persisted");
+        assert!(
+            request
+                .initiator
+                .starts_with(AutomaticFirmwareUpdateReference::REF_NAME)
+        );
+        assert!(request.update_firmware);
+        assert!(request.started_at.is_none());
+    }
+    txn.commit().await?;
 
     Ok(())
 }
@@ -213,9 +287,7 @@ async fn test_check_for_updates(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
         )
         .await;
 
-    let machine_updates = dpu_nic_firmware_update
-        .check_for_updates(&snapshots, 10)
-        .await;
+    let machine_updates = dpu_nic_firmware_update.check_for_updates(&snapshots).await;
     assert_eq!(machine_updates.len(), 2);
 
     Ok(())

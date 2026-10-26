@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,6 +39,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/extra/bundebug"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
@@ -82,7 +84,46 @@ func testSiteInitDB(t *testing.T) *cdb.Session {
 	return dbSession
 }
 
+type testSiteAfterPowerShelfDeleteHook struct {
+	rowID       uuid.UUID
+	afterDelete func()
+}
+
+func (h *testSiteAfterPowerShelfDeleteHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+
+func (h *testSiteAfterPowerShelfDeleteHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if h.afterDelete == nil || event.Err != nil || event.Operation() != "DELETE" ||
+		!strings.Contains(event.Query, `FROM "expected_power_shelf"`) || !strings.Contains(event.Query, h.rowID.String()) {
+		return
+	}
+	afterDelete := h.afterDelete
+	h.afterDelete = nil
+	afterDelete()
+}
+
 func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{
+			name: "Machine deletion modes and missing Site",
+			run:  testDeleteSiteComponentsFromDBMachineDeletion,
+		},
+		{
+			name: "soft-deleted Site cleanup preserves other Sites and is idempotent",
+			run:  testDeleteSiteComponentsFromDBDeletedSiteResources,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, tt.run)
+	}
+}
+
+func testDeleteSiteComponentsFromDBMachineDeletion(t *testing.T) {
+	t.Helper()
 	ctx := context.Background()
 
 	dbSession := testSiteInitDB(t)
@@ -106,6 +147,7 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 	ibpDAO := cdbm.NewInfiniBandPartitionDAO(dbSession)
 	itDAO := cdbm.NewInstanceTypeDAO(dbSession)
 	iDAO := cdbm.NewInstanceDAO(dbSession)
+	emDAO := cdbm.NewExpectedMachineDAO(dbSession)
 
 	// Site 1 that will be deleted normally
 	site := util.TestBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusPending, nil, ipu)
@@ -191,6 +233,14 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 	vpc2 := util.TestBuildVpc(t, dbSession, ip, site2, tenant, "test-vpc-2")
 	machine3 := util.TestBuildMachine(t, dbSession, ip.ID, site2.ID, cutil.GetPtr("mcTypeTest2"), cutil.GetPtr(true), cdbm.MachineStatusReady)
 	machine4 := util.TestBuildMachine(t, dbSession, ip.ID, site2.ID, cutil.GetPtr("mcTypeTest3"), cutil.GetPtr(true), cdbm.MachineStatusReady)
+	// The Machine foreign key must be removed before the purge hard delete.
+	expectedMachine := util.TestBuildExpectedMachine(t, dbSession, site2, "00:11:22:33:44:01", "chassis-purge", ipu)
+	expectedMachine, err = emDAO.Update(ctx, nil, cdbm.ExpectedMachineUpdateInput{
+		ExpectedMachineID: expectedMachine.ID,
+		MachineID:         &machine3.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, &machine3.ID, expectedMachine.MachineID)
 
 	allocation2 := util.TestBuildAllocation(t, dbSession, ip, tenant, site2, "test-allocation-2")
 	instanceType2 := util.TestBuildInstanceType(t, dbSession, ip, site2, "test-instance-type-2")
@@ -272,7 +322,7 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 		want           error
 		wantErr        bool
 		expectDeletion bool
-		checkIPBlocks  func(*testing.T)
+		check          func(*testing.T)
 	}{
 		{
 			name: "test Site delete component activity successfully completed",
@@ -293,7 +343,7 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 			},
 			want:           nil,
 			expectDeletion: true,
-			checkIPBlocks: func(t *testing.T) {
+			check: func(t *testing.T) {
 				var deleted cdbm.IPBlock
 				err := dbSession.DB.NewSelect().Model(&deleted).Where("ipb.id = ?", targetIPBlock.ID).WhereAllWithDeleted().Scan(ctx)
 				require.NoError(t, err)
@@ -301,6 +351,9 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 				active, err := ipBlockDAO.GetByID(ctx, nil, retainedIPBlock.ID, nil)
 				require.NoError(t, err)
 				assert.Equal(t, retainedIPBlock.ID, active.ID)
+				retainedExpectedMachine, err := emDAO.Get(ctx, nil, expectedMachine.ID, nil, false)
+				require.NoError(t, err)
+				require.Equal(t, &machine3.ID, retainedExpectedMachine.MachineID)
 			},
 		},
 		{
@@ -337,6 +390,10 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 			},
 			want:           nil,
 			expectDeletion: true,
+			check: func(t *testing.T) {
+				_, err := emDAO.Get(ctx, nil, expectedMachine.ID, nil, false)
+				assert.Equal(t, cdb.ErrDoesNotExist, err)
+			},
 		},
 	}
 	for _, tt := range tests {
@@ -353,8 +410,8 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			if tt.checkIPBlocks != nil {
-				tt.checkIPBlocks(t)
+			if tt.check != nil {
+				tt.check(t)
 			}
 
 			// Check if the VPC was deleted in the DB
@@ -392,6 +449,11 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 					}
 
 					assert.Equal(t, sql.ErrNoRows, err)
+					if !tt.args.purgeMachines {
+						err = dbSession.DB.NewSelect().Model(&res).Where("m.id = ?", mID).WhereAllWithDeleted().Scan(ctx)
+						require.NoError(t, err)
+						assert.NotNil(t, res.Deleted)
+					}
 				}
 
 				// Check if Instances are deleted from DB
@@ -1033,24 +1095,10 @@ func TestManageSite_DeleteOrphanedSiteTemporalNamespaces_Activity(t *testing.T) 
 	gmockctrl1.Finish()
 }
 
-// TestManageSite_DeleteSiteComponentsFromDB_NewResources covers the additional
-// site-scoped resources that DeleteSiteComponentsFromDB now cleans up
-// (interfaces, vpc prefixes, vpc peerings, NVLink logical partitions,
-// SSH key group site/instance associations, network security groups, DPU
-// extension service deployments, SKUs, expected machine, expected switch, and
-// expected powershelf records).
-//
-// The test builds the same set of records under two sites, runs the cleanup
-// against site 1, and then asserts that:
-//   - every site-1 record is gone (soft-deleted, or hard-deleted for SKU and
-//     the expected_* tables which have no soft_delete column), and
-//   - every site-2 record is still present and active.
-//
-// SSHKeyAssociation is intentionally not asserted on here: the workflow's
-// current call to skaDAO.GetAll filters by sshKeyGroupIDs using the siteID,
-// which is effectively a no-op (no group has a site UUID). It is built so the
-// scenario is realistic but is not part of the cleanup contract being tested.
-func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
+// Cleanup removes the deleted Site's resources, preserves another Site's
+// records, and remains safe to run again after completion.
+func testDeleteSiteComponentsFromDBDeletedSiteResources(t *testing.T) {
+	t.Helper()
 	ctx := context.Background()
 
 	dbSession := testSiteInitDB(t)
@@ -1071,9 +1119,7 @@ func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
 	iDAO := cdbm.NewInstanceDAO(dbSession)
 	operatingSystem := util.TestBuildOperatingSystem(t, dbSession, "test-os")
 
-	// siteResources captures the IDs we expect to verify after the cleanup
-	// runs. Pointer types are used where the underlying ID type isn't
-	// uuid.UUID (NSG, SKU all use string IDs).
+	// siteResources keeps the records and IDs checked after cleanup.
 	type siteResources struct {
 		site               *cdbm.Site
 		instance           *cdbm.Instance
@@ -1160,18 +1206,22 @@ func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
 		sku := util.TestBuildSku(t, dbSession, "sku-"+tag, site)
 
 		// SSH key group + site/instance associations + key + key association.
-		// The site/instance associations are scoped by SiteID; the key
-		// association is intentionally unscoped (see test docstring).
+		// Site cleanup retains SSH key-to-group associations.
 		skg := util.TestBuildSSHKeyGroup(t, dbSession, "skg-"+tag, tenant.Org, nil, tenant.ID, cutil.GetPtr("v1"), cdbm.SSHKeyGroupStatusSynced, ipu.ID)
 		skgsa := util.TestBuildSSHKeyGroupSiteAssociation(t, dbSession, skg.ID, site.ID, cutil.GetPtr("v1"), cdbm.SSHKeyGroupSiteAssociationStatusSynced, ipu.ID)
 		skgia := util.TestBuildSSHKeyGroupInstanceAssociation(t, dbSession, skg.ID, site.ID, instance.ID, ipu.ID)
 		sshKey := util.TestBuildSSHKey(t, dbSession, "key-"+tag, tenant, "ssh-rsa AAAA...", ipu)
 		ska := util.TestBuildSSHKeyAssociation(t, dbSession, skg.ID, sshKey.ID, ipu.ID)
 
-		// Expected records (hard-deleted by the workflow). MAC addresses are
-		// scoped per-tag so the optional (bmc_mac_address, site_id) unique
-		// constraint, if present, will not be tripped across sites.
+		// Expected records are hard-deleted by Site cleanup.
 		em := util.TestBuildExpectedMachine(t, dbSession, site, "00:11:22:33:44:0"+tag, "chassis-"+tag, ipu)
+		// The SKU foreign key requires deleting the Expected Machine first.
+		em, err = cdbm.NewExpectedMachineDAO(dbSession).Update(ctx, nil, cdbm.ExpectedMachineUpdateInput{
+			ExpectedMachineID: em.ID,
+			SkuID:             &sku.ID,
+		})
+		require.NoError(t, err)
+		require.Equal(t, &sku.ID, em.SkuID)
 		es := util.TestBuildExpectedSwitch(t, dbSession, site, "00:11:22:33:55:0"+tag, "switch-"+tag, ipu)
 		eps := util.TestBuildExpectedPowerShelf(t, dbSession, site, "00:11:22:33:66:0"+tag, "shelf-"+tag, ipu)
 
@@ -1218,7 +1268,37 @@ func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
 		siteClientPool: tSiteClientPool,
 	}
 
-	err := mv.DeleteSiteComponentsFromDB(ctx, site1Resources.site.ID, ip.ID, false)
+	// The API soft-deletes the Site before starting resource cleanup.
+	siteDAO := cdbm.NewSiteDAO(dbSession)
+	err := siteDAO.Delete(ctx, nil, site1Resources.site.ID)
+	require.NoError(t, err)
+	_, err = siteDAO.GetByID(ctx, nil, site1Resources.site.ID, nil, false)
+	require.Equal(t, cdb.ErrDoesNotExist, err)
+
+	// Model inventory admitted before Site deletion writing after the early
+	// Expected Machine pass. This checks the later sweep, not writer exclusion.
+	lateExpectedMachineID := uuid.New()
+	var writeErr error
+	hookCalls := 0
+	hook := &testSiteAfterPowerShelfDeleteHook{
+		rowID: site1Resources.expectedShelfID,
+		afterDelete: func() {
+			hookCalls++
+			_, writeErr = cdbm.NewExpectedMachineDAO(dbSession).Create(ctx, nil, cdbm.ExpectedMachineCreateInput{
+				ExpectedMachineID:   lateExpectedMachineID,
+				SiteID:              site1Resources.site.ID,
+				BmcMacAddress:       "00:11:22:33:44:ff",
+				ChassisSerialNumber: "chassis-late-inventory",
+				CreatedBy:           ipu.ID,
+			})
+		},
+	}
+	dbSession.DB.AddQueryHook(hook)
+	defer func() { hook.afterDelete = nil }()
+
+	err = mv.DeleteSiteComponentsFromDB(ctx, site1Resources.site.ID, ip.ID, false)
+	require.Equal(t, 1, hookCalls)
+	require.NoError(t, writeErr)
 	require.NoError(t, err)
 
 	// assertGone checks that a soft-deletable row identified by `id` is no
@@ -1261,6 +1341,7 @@ func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
 	assertGone("dpu_extension_service_deployment", &cdbm.DpuExtensionServiceDeployment{}, "desd.id", site1Resources.dpuDeploymentID)
 	assertGone("sku", &cdbm.SKU{}, "sk.id", site1Resources.skuID)
 	assertGone("expected_machine", &cdbm.ExpectedMachine{}, "em.id", site1Resources.expectedMachineID)
+	assertGone("expected_machine inserted during cleanup", &cdbm.ExpectedMachine{}, "em.id", lateExpectedMachineID)
 	assertGone("expected_switch", &cdbm.ExpectedSwitch{}, "es.id", site1Resources.expectedSwitchID)
 	assertGone("expected_power_shelf", &cdbm.ExpectedPowerShelf{}, "eps.id", site1Resources.expectedShelfID)
 	assertGone("operating_system_site_association (site 1 image OS)", &cdbm.OperatingSystemSiteAssociation{}, "ossa.id", site1Resources.imageOSSAID)
@@ -1292,9 +1373,15 @@ func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
 	assertPresent("operating_system_site_association (site 2 image OS)", &cdbm.OperatingSystemSiteAssociation{}, "ossa.id", site2Resources.imageOSSAID)
 	assertPresent("tenant_site", &cdbm.TenantSite{}, "ts.id", site2Resources.tenantSiteID)
 
-	// SSHKeyAssociation for site 1 should still be present since the
-	// workflow's call effectively no-ops against site IDs (see test docstring).
+	// The key-to-group association is independent of the Site associations.
 	assertPresent("ssh_key_association (intentionally not cleaned)", &cdbm.SSHKeyAssociation{}, "ska.id", site1Resources.sshKeyAssocID)
+
+	err = mv.DeleteSiteComponentsFromDB(ctx, site1Resources.site.ID, ip.ID, false)
+	require.NoError(t, err, "completed Site cleanup must be idempotent")
+	assertGone("sku", &cdbm.SKU{}, "sk.id", site1Resources.skuID)
+	assertGone("expected_machine", &cdbm.ExpectedMachine{}, "em.id", site1Resources.expectedMachineID)
+	assertPresent("sku", &cdbm.SKU{}, "sk.id", site2Resources.skuID)
+	assertPresent("expected_machine", &cdbm.ExpectedMachine{}, "em.id", site2Resources.expectedMachineID)
 }
 
 func TestManageSite_UpdateSiteInDB(t *testing.T) {

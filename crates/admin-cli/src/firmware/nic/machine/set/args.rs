@@ -23,12 +23,12 @@ it restores allocation/site inheritance without clearing saved cards.
 Omitting --cards-file preserves all saved card selections. Supplying it replaces \
 the complete card list in the same request; include every selection you want to \
 keep, or use [] to clear all cards. Removing a card restores inheritance from \
-the requested machine profile, allocation or site selection. A supplied machine \
+the requested machine profile, allocation, or site selection. A supplied machine \
 profile must support newly inheriting devices. Profiles are live, not pinned \
 revisions. Finish upgrading Core before using these configuration commands.
 
 Core validates each supplied card against its latest stored device report. \
-Missing, ambiguous, overlapping, managed-DPU or incompatible devices return \
+Missing, ambiguous, overlapping, managed-DPU, or incompatible devices return \
 FAILED_PRECONDITION. Missing profiles or hosts return NOT_FOUND; a stale \
 machine version returns FAILED_PRECONDITION. Rejection leaves all selections \
 unchanged. Every successful write advances the shared machine edit token, \

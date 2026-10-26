@@ -1232,7 +1232,7 @@ fn vpc_to_rpc(vpc: model::vpc::Vpc, fnn_config: Option<&FnnConfig>) -> rpc::Vpc 
 }
 
 /// `allocate_vpc_vni` allocates from the selected internal or external VNI pool.
-/// A missing pool reports the same exhaustion error as a pool with no free values.
+/// A missing pool rejects both explicit and automatic requests as failed preconditions.
 async fn allocate_vpc_vni(
     api: &Api,
     txn: &mut PgConnection,
@@ -1269,8 +1269,11 @@ async fn allocate_vpc_vni(
                 .await
         }
         // The optional external pool may have neither a binding nor SQL values.
-        // Keep its existing exhaustion error and allocation-failure metric.
-        Ok(None) => Err(resource_pool::ResourcePoolError::Empty.into()),
+        Ok(None) => Err(resource_pool::ResourcePoolError::MissingAllocationRange {
+            pool_name: source_pool.name().to_string(),
+            auto_assign: requested_vni.is_none(),
+        }
+        .into()),
         // Database lookup failures belong to the allocation attempt; unsupported
         // backend selections are configuration errors, before allocation starts.
         Err(ResourcePoolRegistryError::Database(error)) => Err(error.into()),

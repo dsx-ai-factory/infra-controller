@@ -143,6 +143,28 @@ pub enum DpuTarget {
     All,
 }
 
+/// Controls whether the service deploys at creation or through instance attachment.
+/// This choice cannot change after creation because it determines which DPUs run the service.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum ExtensionServiceDeploymentType {
+    /// The service deploys to selected DPUs when attached to an instance.
+    #[default]
+    DemandDriven,
+    /// Creation requests deployment to all DPUs managed by DPF, without instance attachment.
+    Baseline,
+}
+
+impl std::fmt::Display for ExtensionServiceDeploymentType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DemandDriven => write!(f, "demand_driven"),
+            Self::Baseline => write!(f, "baseline"),
+        }
+    }
+}
+
 impl DpuTarget {
     /// Resolves a deterministic target set, rejecting incomplete primary inventory.
     pub fn resolve(
@@ -177,13 +199,23 @@ impl DpuTarget {
 fn read_dpu_target(
     row: &PgRow,
     service_type: &ExtensionServiceType,
+    deployment_type: ExtensionServiceDeploymentType,
 ) -> Result<Option<DpuTarget>, sqlx::Error> {
     let target = row.try_get("dpu_target")?;
-    match (service_type, target) {
-        (ExtensionServiceType::DpfHelmChart, Some(_))
-        | (ExtensionServiceType::KubernetesPod, None) => Ok(target),
+    match (service_type, deployment_type, target) {
+        (
+            ExtensionServiceType::DpfHelmChart,
+            ExtensionServiceDeploymentType::DemandDriven,
+            Some(_),
+        )
+        | (ExtensionServiceType::DpfHelmChart, ExtensionServiceDeploymentType::Baseline, None)
+        | (
+            ExtensionServiceType::KubernetesPod,
+            ExtensionServiceDeploymentType::DemandDriven,
+            None,
+        ) => Ok(target),
         _ => Err(sqlx::Error::Protocol(
-            "inconsistent extension service DPU target; resolve registration migration".into(),
+            "inconsistent extension service type, deployment type, or DPU target".into(),
         )),
     }
 }
@@ -192,7 +224,11 @@ fn read_dpu_target(
 pub struct ExtensionService {
     pub id: ExtensionServiceId,
     pub service_type: ExtensionServiceType,
-    /// Immutable Helm placement policy; absent only for Kubernetes Pod services.
+    /// Whether the service deploys at creation or through instance attachment; immutable
+    #[serde(default)]
+    pub deployment_type: ExtensionServiceDeploymentType,
+    /// Which DPUs on an instance's host run a demand-driven Helm service; immutable.
+    /// Absent for baseline services, which deploy to all DPUs, and Kubernetes Pod services.
     pub dpu_target: Option<DpuTarget>,
     pub name: String,
     pub tenant_organization_id: TenantOrganizationId,
@@ -248,11 +284,13 @@ impl<'r> sqlx::FromRow<'r, PgRow> for ExtensionService {
         let controller_state_outcome: Option<sqlx::types::Json<PersistentStateHandlerOutcome>> =
             row.try_get("controller_state_outcome")?;
 
-        let dpu_target = read_dpu_target(row, &service_type)?;
+        let deployment_type: ExtensionServiceDeploymentType = row.try_get("deployment_type")?;
+        let dpu_target = read_dpu_target(row, &service_type, deployment_type)?;
 
         Ok(ExtensionService {
             id: row.try_get("id")?,
             service_type,
+            deployment_type,
             dpu_target,
             name: row.try_get("name")?,
             tenant_organization_id: tenant_organization_id
@@ -315,7 +353,11 @@ impl<'r> sqlx::FromRow<'r, PgRow> for ExtensionServiceVersionInfo {
 pub struct ExtensionServiceSnapshot {
     pub service_id: ExtensionServiceId,
     pub service_type: ExtensionServiceType,
-    /// Immutable Helm placement policy; absent only for Kubernetes Pod services.
+    /// Whether the service deploys at creation or through instance attachment; cannot be changed.
+    #[serde(default)]
+    pub deployment_type: ExtensionServiceDeploymentType,
+    /// Which DPUs on an instance's host run a demand-driven Helm service; cannot be changed.
+    /// Absent for baseline services, which deploy to all DPUs, and Kubernetes Pod services.
     pub dpu_target: Option<DpuTarget>,
     pub service_name: String,
     pub tenant_organization_id: TenantOrganizationId,
@@ -410,11 +452,13 @@ impl<'r> FromRow<'r, PgRow> for ExtensionServiceSnapshot {
             .map(|state| state.0)
             .ok_or_else(|| sqlx::Error::ColumnNotFound("controller_state".to_string()))?;
 
-        let dpu_target = read_dpu_target(row, &service_type)?;
+        let deployment_type: ExtensionServiceDeploymentType = row.try_get("deployment_type")?;
+        let dpu_target = read_dpu_target(row, &service_type, deployment_type)?;
 
         Ok(ExtensionServiceSnapshot {
             service_id,
             service_type,
+            deployment_type,
             dpu_target,
             service_name,
             tenant_organization_id,

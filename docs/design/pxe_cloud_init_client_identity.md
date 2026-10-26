@@ -63,11 +63,9 @@ manifests:
   also permits `machine-a-tron`, which supplies `client_ip` as an RPC field
   rather than deriving it from a connection. Service authentication therefore
   does not authenticate the booting host or add a routing-domain discriminator.
-- The [Kustomize external PXE Services](../../deploy/nico-system/external-services.yaml)
-  use `LoadBalancer` with `externalTrafficPolicy: Local`. The
-  [optional Helm external Services](../../helm/charts/nico-pxe/templates/external-service.yaml)
-  default to `Local` when enabled, but the chart permits that value to be
-  cleared or changed. No PXE ingress, forwarded-header trust, or
+- The [optional Helm external Services](../../helm/charts/nico-pxe/templates/external-service.yaml)
+  use `LoadBalancer` and default to `externalTrafficPolicy: Local` when
+  enabled, but the chart permits that value to be cleared or changed. No PXE ingress, forwarded-header trust, or
   application-layer proxy is configured by these manifests.
 
 The external Service setting does not prove which address reaches the socket.

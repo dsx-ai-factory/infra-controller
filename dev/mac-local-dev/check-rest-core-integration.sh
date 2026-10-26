@@ -170,12 +170,16 @@ else
     info "Current status: '$SITE_STATUS' → updating to 'Registered' in postgres"
 
     # psql prints the command tag "UPDATE n" to stdout; capture it to verify rows matched.
-    UPDATE_TAG=$(kubectl exec -n "$PG_NAMESPACE" "$PG_STATEFULSET" -- \
+    if ! UPDATE_OUTPUT=$(kubectl exec -n "$PG_NAMESPACE" "$PG_STATEFULSET" -- \
         psql -U "$PG_USER" -d "$PG_DB" -c \
         "UPDATE site SET status = 'Registered', updated = NOW() WHERE id = '$SITE_ID';" \
-        2>&1 | grep -E '^UPDATE' || true)
+        2>&1); then
+        die "DB update failed: $UPDATE_OUTPUT"
+    fi
+    UPDATE_TAG=$(grep -E '^UPDATE' <<<"$UPDATE_OUTPUT" || true)
 
-    [[ -z "$UPDATE_TAG" ]] && die "DB update produced no UPDATE tag — check site ID and postgres connectivity"
+    [[ -z "$UPDATE_TAG" ]] \
+        && die "DB update produced no UPDATE tag: $UPDATE_OUTPUT"
     UPDATED_ROWS=$(echo "$UPDATE_TAG" | awk '{print $2}')
     [[ "$UPDATED_ROWS" -eq 0 ]] && die "DB update matched 0 rows — site id '$SITE_ID' not found in table"
 
@@ -201,12 +205,16 @@ if [[ "$SITE_CAPS" == "true" ]]; then
 else
     info "Enabling image_based_operating_system in site config"
 
-    UPDATE_TAG=$(kubectl exec -n "$PG_NAMESPACE" "$PG_STATEFULSET" -- \
+    if ! UPDATE_OUTPUT=$(kubectl exec -n "$PG_NAMESPACE" "$PG_STATEFULSET" -- \
         psql -U "$PG_USER" -d "$PG_DB" -c \
         "UPDATE site SET config = jsonb_set(COALESCE(config, '{}'), '{image_based_operating_system}', 'true'), updated = NOW() WHERE id = '$SITE_ID';" \
-        2>&1 | grep -E '^UPDATE' || true)
+        2>&1); then
+        die "DB update failed: $UPDATE_OUTPUT"
+    fi
+    UPDATE_TAG=$(grep -E '^UPDATE' <<<"$UPDATE_OUTPUT" || true)
 
-    [[ -z "$UPDATE_TAG" ]] && die "DB update produced no UPDATE tag — check site ID and postgres connectivity"
+    [[ -z "$UPDATE_TAG" ]] \
+        && die "DB update produced no UPDATE tag: $UPDATE_OUTPUT"
     UPDATED_ROWS=$(echo "$UPDATE_TAG" | awk '{print $2}')
     [[ "$UPDATED_ROWS" -eq 0 ]] && die "DB update matched 0 rows — site id '$SITE_ID' not found in table"
 
@@ -272,7 +280,8 @@ VPC=$(api_post "/vpc" "$(jq -n \
     --arg site "$SITE_ID" '{
         name:        "smoke-test-vpc",
         description: "VPC created by test-local-core.sh",
-        siteId:      $site
+        siteId:      $site,
+        networkVirtualizationType: "ETHERNET_VIRTUALIZER"
     }')")
 
 VPC_ID=$(echo "$VPC" | jq -r '.id')

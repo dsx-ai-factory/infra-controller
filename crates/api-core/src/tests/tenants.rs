@@ -1089,6 +1089,27 @@ async fn test_tenant_create_keyset(pool: sqlx::PgPool) {
     );
 
     assert!(keyset.keyset_content.unwrap().public_keys.is_empty());
+
+    let status = env
+        .api
+        .create_tenant_keyset(tonic::Request::new(rpc::forge::CreateTenantKeysetRequest {
+            keyset_identifier: keyset.keyset_identifier,
+            keyset_content: Some(rpc::forge::TenantKeysetContent {
+                public_keys: vec![],
+            }),
+            version: "V2-T1691517639501025".to_string(),
+        }))
+        .await
+        .unwrap_err();
+    let response = status.into_http::<tonic::body::Body>();
+    let status = tonic::Status::from_header_map(response.headers()).unwrap();
+
+    // REST uses this fixed phrase to retry an existing keyset with Update instead of Create.
+    assert_eq!(status.code(), Code::Internal);
+    assert_eq!(
+        status.message(),
+        "internal database error: duplicate key value violates unique constraint"
+    );
 }
 
 #[crate::sqlx_test]

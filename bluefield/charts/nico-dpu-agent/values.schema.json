@@ -138,6 +138,16 @@
         }
       }
     },
+    "fmds": {
+      "type": "object",
+      "properties": {
+        "networkingAddresses": {
+          "type": ["array", "null"],
+          "description": "Complete FMDS address list for the agent's fmds-armos-networking.config.addresses. Null or omission preserves the IPv4-only default; an empty list is written explicitly. In DPF, only fd00:76b9::254/127 enables the IPv6 HBN peer and requires matching nico-fmds interfaceCidrV6 and IPv6 listener settings. Other entries do not change HBN peers or configure addresses in the external FMDS pod. The ConfigMap checksum rolls the agent pod after changes.",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
     "lldpSidecar": {
       "type": "object",
       "description": "Configuration for the LLDP snapshot sidecar",

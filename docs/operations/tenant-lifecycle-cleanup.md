@@ -328,7 +328,7 @@ storage cleanup:
 1. Wait for the Redfish job to complete.
 1. Run Scout host cleanup.
 1. Recreate the BOSS virtual disk as `VD_0`.
-1. Re-enable host lockdown.
+1. Re-enable host lockdown, unless the host lifecycle profile sets `disable_lockdown`.
 1. Continue to post-cleanup validation.
 
 If the Redfish job fails, NICo retries the job path and, if required, power-cycles the host as part of the recovery loop.

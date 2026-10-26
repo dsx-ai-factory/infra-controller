@@ -46,6 +46,8 @@ use crate::{
     FilterableQueryBuilder, ObjectColumnFilter, instance_address,
 };
 
+pub mod nic_firmware;
+
 #[derive(Copy, Clone)]
 pub struct IdColumn;
 
@@ -1624,11 +1626,13 @@ async fn delete_instance_records(
         .map_err(|e| DatabaseError::query(query, e))
 }
 
+/// Marks an instance for release and clears only its `nic_firmware_snapshot`
+/// selection context. This does not delete a firmware operation or its recovery state.
 pub async fn mark_as_deleted(
     instance_id: InstanceId,
     txn: &mut PgConnection,
 ) -> DatabaseResult<()> {
-    let query = "UPDATE instances SET deleted=NOW() WHERE id=$1::uuid RETURNING id";
+    let query = "UPDATE instances SET deleted=NOW(), nic_firmware_snapshot=NULL WHERE id=$1::uuid RETURNING id";
 
     let _id = sqlx::query_as::<_, InstanceId>(query)
         .bind(instance_id)

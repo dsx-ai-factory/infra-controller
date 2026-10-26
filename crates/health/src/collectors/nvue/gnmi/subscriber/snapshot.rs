@@ -322,6 +322,7 @@ mod tests {
             ));
 
             let mut sample = MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: "live".into(),
                 name: "nvue_gnmi".into(),
                 metric_type: "reading".into(),

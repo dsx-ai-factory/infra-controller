@@ -471,8 +471,11 @@ restart the same way. Then delete the rack with
 
 The chart can shard the simulated fleet across several machine-a-tron pods.
 The `mat-k8s-controller` creates a Service for each BMC, publishing the BMC IP
-assigned by NICo DHCP as the Service's `externalIPs`. NICo dials each BMC IP
-directly, with no `bmc_proxy`. Validated profiles live in `helm-prereqs/values/`:
+assigned by NICo DHCP as the Service's `externalIPs`, or, with
+`mat-k8s-controller.config.serviceGranularity: pod`, two Services per pod that
+carry every BMC and every NVOS address of that pod (refer to the chart README
+section Per-pod Services). NICo dials each BMC IP directly, with no
+`bmc_proxy`. Validated profiles live in `helm-prereqs/values/`:
 
 | Values file | Fleet |
 |---|---|
@@ -848,9 +851,36 @@ For a from-scratch reset on a simulation-only site, truncate the machine graph
 directly on the Patroni primary (`psql -d nico_system_nico -v ON_ERROR_STOP=1`).
 Every machine on the cluster is assumed to be simulated. Never run this
 against a site with real inventory. CASCADE does not reach the rack, switch,
-and power-shelf tables, so the list names them. `resource_pool` holds the
-`[pools.*]` allocations without a foreign key to the machine graph, so the
-UPDATE frees them. The `machine_interfaces_deletion` singleton must survive:
+and power-shelf tables, so the list names them.
+
+Use this SQL reset only when no pool allocations belong to VPCs, network
+segments, IB partitions, or SPX partitions. Their owners survive the truncate,
+but the pool UPDATE frees their values too. Remove those resources through
+their normal APIs first, or use the product cleanup path above. To confirm
+that no such allocations remain, run the following query. It must return no
+rows:
+
+```sql
+SELECT state->>'owner_type' AS owner_type, count(*)
+FROM resource_pool
+WHERE state->>'state' = 'allocated' AND state->>'owner_type' <> 'machine'
+GROUP BY 1;
+```
+
+`resource_pool` holds the `[pools.*]` inventory without a foreign key to the
+machine graph. The table lock prevents allocation writers from changing it
+between the DELETE and UPDATE. The DELETE removes allocation records for the
+Integrated backend (NICo's database) before the UPDATE clears `allocated`.
+The next run can then allocate those values again. These steps leave remote
+provider allocations and their retry records alone. The
+`machine_interfaces_deletion` singleton must survive.
+
+The allocation-record DELETE requires the schema from
+[PR #7708](https://github.com/dsx-ai-factory/infra-controller/pull/7708).
+If `\d resource_pool_allocations` reports that the table does not exist, omit
+that DELETE. This reset update is tracked in
+[task #7821](https://github.com/dsx-ai-factory/infra-controller/issues/7821),
+part of [allocation tracking](https://github.com/dsx-ai-factory/infra-controller/issues/7135).
 
 ```sql
 BEGIN;
@@ -859,6 +889,9 @@ TRUNCATE machines, machine_interfaces, explored_endpoints, explored_managed_host
   expected_rack_groups, expected_switches, expected_power_shelves,
   rack_health_history, switch_health_history, power_shelf_health_history
   RESTART IDENTITY CASCADE;
+LOCK TABLE resource_pool IN EXCLUSIVE MODE;
+DELETE FROM resource_pool_allocations USING resource_pool
+WHERE integrated_resource_id = resource_pool.id AND resource_pool.allocated IS NOT NULL;
 UPDATE resource_pool SET allocated = NULL, state = '{"state": "free"}' WHERE allocated IS NOT NULL;
 UPDATE machine_interfaces_deletion SET last_deletion = now() WHERE id = 1;
 INSERT INTO machine_interfaces_deletion (id) VALUES (1) ON CONFLICT (id) DO NOTHING;

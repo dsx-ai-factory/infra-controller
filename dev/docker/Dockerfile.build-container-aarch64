@@ -72,6 +72,17 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update &&  \
 RUN test "$(dpkg-query -W -f='${Version}' kea-dev)" = "${KEA_VERSION}" && \
 	kea-dhcp6 -V
 
+# Debian's Kea 2.2.0-6 development package omits a header required by
+# lease_mgr_factory.h. Restore the upstream declaration without changing Kea.
+RUN if [ ! -f /usr/include/kea/dhcpsrv/cfg_globals.h ]; then \
+	test "${KEA_VERSION}" = "2.2.0-6" && \
+	curl -fsSL https://raw.githubusercontent.com/isc-projects/kea/becddc2abdfba6d2ae305768c5ea334d9dede0de/src/lib/dhcpsrv/cfg_globals.h -o /tmp/kea-cfg_globals.h && \
+	echo 'e536a71235493949d9fc07c1ec1ff69b82c9d215627ba4bd1bfd2e2e6ac5c50e  /tmp/kea-cfg_globals.h' | sha256sum -c - && \
+	install -m 0644 /tmp/kea-cfg_globals.h /usr/include/kea/dhcpsrv/cfg_globals.h && \
+	rm /tmp/kea-cfg_globals.h; \
+	fi && \
+	printf '#include <dhcpsrv/lease_mgr_factory.h>\n' | c++ -x c++ -fsyntax-only -I/usr/include/kea -
+
 # Keep the system linker for non-Rust builds such as iPXE, whose linker script
 # is not accepted by mold. Cargo uses this wrapper even outside the repository.
 RUN printf '#!/bin/sh\nexec clang -fuse-ld=mold "$@"\n' \

@@ -17,7 +17,9 @@ edit version. Every successful clear advances the tenant version, even if no \
 profile is selected. A missing tenant returns NOT_FOUND; a stale token returns \
 FAILED_PRECONDITION.
 
-This removes the tenant's requirement for future selected SPX attachments. \
+This clears the live tenant selection, not saved allocation requirements. \
+Allocations that saved a tenant profile still reject added SPX attachments \
+with FAILED_PRECONDITION. \
 It leaves site, machine, and card selections unchanged and does not flash \
 firmware, edit profile definitions, or change existing instances.
 

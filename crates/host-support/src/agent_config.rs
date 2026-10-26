@@ -21,6 +21,7 @@ use std::string::ToString;
 use forge_dpu_agent_utils::machine_identity::defaults::{
     BURST, REQUESTS_PER_SECOND, SIGN_TIMEOUT_SECS, WAIT_TIMEOUT_SECS,
 };
+use forge_dpu_agent_utils::{FMDS_IPV6_ADDRESS, FMDS_IPV6_GATEWAY};
 use forge_tls::default as tls_default;
 use serde::{Deserialize, Serialize};
 
@@ -176,6 +177,10 @@ pub struct MachineConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataServiceConfig {
+    /// Embedded HTTP listener, defaulting to `0.0.0.0:7777`. With the fixed
+    /// IPv6 metadata endpoint enabled, use `[::]:7777` for both families or
+    /// `[fd00:76b9::254]:7777` for IPv6 only. An exact endpoint bind waits for
+    /// the agent to configure that address on the FMDS interface.
     pub address: String,
 }
 
@@ -414,12 +419,45 @@ pub struct HBNConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DpuNetworkingInterface {
+    /// Complete address list for the DPU OS FMDS attachment. An explicit list
+    /// replaces the IPv4-only default. Including `fd00:76b9::254/127` enables
+    /// its HBN peer and requires an IPv6 metadata listener. Other IPv6 addresses
+    /// can be assigned but do not enable this peer or automatic reply routes.
+    /// In container mode, only the fixed endpoint enables the HBN peer; local
+    /// addresses belong to standalone FMDS and are not assigned by the agent.
     pub addresses: Vec<ipnetwork::IpNetwork>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FmdsDpuNetworkingConfig {
     pub config: DpuNetworkingInterface,
+}
+
+impl FmdsDpuNetworkingConfig {
+    /// Resolves the HBN IPv6 peer for the configured local FMDS endpoint.
+    /// Only the fixed metadata endpoint enables this peer. Other configured
+    /// IPv6 addresses retain their address-assignment behavior without gaining
+    /// an inferred gateway. The endpoint requires `/127` to reach its peer.
+    pub fn ipv6_gateway(&self) -> eyre::Result<Option<ipnetwork::Ipv6Network>> {
+        let mut enabled = false;
+        for address in &self.config.addresses {
+            let ipnetwork::IpNetwork::V6(address) = address else {
+                continue;
+            };
+            if address.ip() != FMDS_IPV6_ADDRESS {
+                continue;
+            }
+            eyre::ensure!(
+                address.prefix() == 127,
+                "unsupported FMDS IPv6 prefix in {address}; use fd00:76b9::254/127 for the HBN metadata peer"
+            );
+            enabled = true;
+        }
+        if !enabled {
+            return Ok(None);
+        }
+        Ok(Some(ipnetwork::Ipv6Network::new(FMDS_IPV6_GATEWAY, 127)?))
+    }
 }
 
 impl Default for FmdsDpuNetworkingConfig {
@@ -531,6 +569,55 @@ mod tests {
     use super::*;
 
     const TEST_DATA_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test");
+
+    /// IPv6 opt-in must select the matching HBN peer without changing IPv4
+    /// overrides or inferring a gateway for unrelated IPv6 addresses.
+    #[test]
+    fn fmds_ipv6_gateway_requires_the_supported_endpoint() {
+        let resolve = |addresses: &[&str]| {
+            FmdsDpuNetworkingConfig {
+                config: DpuNetworkingInterface {
+                    addresses: addresses
+                        .iter()
+                        .map(|address| address.parse().expect("fixture address"))
+                        .collect(),
+                },
+            }
+            .ipv6_gateway()
+            .map_err(|error| error.to_string())
+        };
+        scenarios!(resolve:
+            // Explicit IPv4 overrides must not enable IPv6 implicitly.
+            "IPv4 remains unchanged" {
+                &["192.0.2.10/30"][..] => Yields(None),
+            }
+            // The endpoint enables the peer without replacing a custom IPv4 address.
+            "supported opt-in" {
+                &["192.0.2.10/30", "fd00:76b9::254/127"][..] => Yields(Some(
+                    "fd00:76b9::255/127".parse().expect("fixture peer")
+                )),
+            }
+            // A different prefix would configure the wrong connected network.
+            "unsupported prefix" {
+                &["fd00:76b9::254/64"][..] => FailsWith(
+                    "unsupported FMDS IPv6 prefix in fd00:76b9::254/64; use fd00:76b9::254/127 for the HBN metadata peer".to_string()
+                ),
+            }
+            // Custom addresses do not imply a peer or change the fixed endpoint's peer.
+            "unrelated IPv6 addresses are preserved" {
+                &["2001:db8::2/127"][..] => Yields(None),
+                &["fd00:76b9::254/127", "2001:db8::2/127"][..] => Yields(Some(
+                    "fd00:76b9::255/127".parse().expect("fixture peer")
+                )),
+            }
+        );
+        assert_eq!(
+            FmdsDpuNetworkingConfig::default()
+                .ipv6_gateway()
+                .expect("default FMDS configuration"),
+            None
+        );
+    }
 
     /// PEM file that ships in-tree and parses to at least one certificate.
     const VALID_PEM_PATH: &str = concat!(
@@ -869,6 +956,16 @@ sign-timeout-secs = 9
 
         scenarios!(
             run = |raw| toml::from_str::<AgentConfig>(raw).map(drop).map_err(drop);
+            // The operator's paired settings must parse through the real config type.
+            "IPv6 metadata transport settings parse" {
+                "[metadata-service]\naddress = \"[::]:7777\"\n[fmds-armos-networking.config]\naddresses = [\"169.254.169.254/30\", \"fd00:76b9::254/127\"]\n" => Yields(()),
+            }
+
+            // An explicit attachment section must supply its complete address list.
+            "explicit metadata attachment needs addresses" {
+                "[fmds-armos-networking.config]\n" => Fails,
+            }
+
             "full config parses" {
                 FULL => Yields(()),
             }

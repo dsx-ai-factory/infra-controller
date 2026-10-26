@@ -144,6 +144,7 @@
 #   ./setup.sh --skip-rms               # skip the Rack Manager Service (installed by default otherwise)
 #   ./setup.sh --skip-core --skip-rest  # fully non-interactive infra-only run
 #   ./setup.sh --core-values /path/to/values.yaml      # use site-specific values for Phase 6
+#   ./setup.sh --flow-values /path/to/flow.yaml        # use site-specific NICo Flow values for Phase 7h
 #   ./setup.sh --metallb-config /path/to/metallb.yaml  # use site-specific MetalLB config (file or kustomize dir)
 #   ./setup.sh --install-contour      # install optional Contour/Envoy Ingress controller
 #   ./setup.sh --site-overlay /path/to/kustomize-dir   # kubectl apply -k after Phase 6 (NTP services, etc.)
@@ -156,6 +157,10 @@
 #
 # Notes:
 #   - --core-values supplies site-specific NICo Core Helm values.
+#   - --flow-values supplies site-specific NICo Flow Helm values. Flow
+#     overrides made outside setup.sh are reset on every run unless they
+#     are in this file. The file must not set namespaceOverride: setup.sh
+#     and the site-agent address Flow in the flow namespace.
 #   - --metallb-config supplies site-specific MetalLB resources.
 #   - --debug enables shell tracing and may print secrets; avoid it when
 #     REGISTRY_PULL_SECRET is set unless logs are protected.
@@ -202,6 +207,7 @@ INSTALL_RMS="${NICO_INSTALL_RMS:-true}"
 WITH_OBSERVABILITY="${WITH_OBSERVABILITY:-false}"
 INSTALL_CONTOUR="${NICO_INSTALL_CONTOUR:-false}"
 CORE_VALUES=""
+FLOW_VALUES=""
 METALLB_CONFIG=""
 SITE_OVERLAY=""
 while [[ $# -gt 0 ]]; do
@@ -221,6 +227,11 @@ while [[ $# -gt 0 ]]; do
             CORE_VALUES="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
             [[ ! -f "${CORE_VALUES}" ]] && { echo "Error: --core-values file not found: $2"; exit 1; }
             shift ;;
+        --flow-values)
+            [[ -z "${2:-}" ]] && { echo "Error: --flow-values requires a file path"; exit 1; }
+            FLOW_VALUES="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
+            [[ ! -f "${FLOW_VALUES}" ]] && { echo "Error: --flow-values file not found: $2"; exit 1; }
+            shift ;;
         --metallb-config)
             [[ -z "${2:-}" ]] && { echo "Error: --metallb-config requires a file or directory path"; exit 1; }
             METALLB_CONFIG="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
@@ -231,7 +242,7 @@ while [[ $# -gt 0 ]]; do
             SITE_OVERLAY="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
             [[ ! -d "${SITE_OVERLAY}" ]] && { echo "Error: --site-overlay directory not found: $2"; exit 1; }
             shift ;;
-        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-dpf] [--skip-rms] [--with-observability] [--install-contour] [--core-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
+        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-dpf] [--skip-rms] [--with-observability] [--install-contour] [--core-values <file>] [--flow-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
     esac
     shift
 done
@@ -1984,7 +1995,8 @@ fi
 #    Order of operations:
 #      7a. Resolve NICo REST repo + CA signing secret
 #      7b. NICo REST CA issuer ClusterIssuer (cert-manager.io)
-#      7c. NICo REST postgres (simple StatefulSet — temporal + forge DBs)
+#      7c. NICo REST postgres (deprecated standalone StatefulSet, only while
+#          Temporal or Keycloak still uses it)
 #      7d. Keycloak (dev IdP)
 #      7e. Temporal namespace + TLS certs (issued by the NICo REST CA issuer)
 #      7f. Temporal helm chart
@@ -2017,6 +2029,10 @@ if [[ -z "${NICO_REST_HELM_DIR:-}" ]]; then
     echo "ERROR: NICO_REST_HELM_DIR is unset — preflight didn't resolve helm/rest/. Make sure your checkout contains helm/rest/nico-rest and helm/rest/nico-rest-site-agent."
     exit 1
 fi
+if [[ -z "${_TEMPORAL_USE_HA_POSTGRES:-}" || -z "${_KEYCLOAK_USE_HA_POSTGRES:-}" ]]; then
+    echo "ERROR: preflight couldn't resolve temporal.useHaPostgres and keycloak.useHaPostgres. Fix the preflight errors about them and re-run setup.sh." >&2
+    exit 1
+fi
 echo "NICo REST source: ${NICO_REST_DIR}"
 echo "NICo REST charts: ${NICO_REST_HELM_DIR}"
 
@@ -2039,10 +2055,11 @@ echo "=== [7b/7] NICo REST CA issuer ClusterIssuer ==="
 (cd "${NICO_REST_DIR}" && kubectl apply -k deploy/kustomize/base/cert-manager-io)
 
 # --- 7c. NICo REST postgres --------------------------------------------------------
-# Legacy standalone postgres StatefulSet with pre-initialised databases:
-# nico (orphaned — no live component targets it), temporal, temporal_visibility,
-# keycloak. Still the default target for both — see "Consolidating
-# Temporal/Keycloak onto nico-pg-cluster" in README.md for the opt-in path.
+# Deprecated standalone postgres StatefulSet with pre-initialised databases:
+# nico (orphaned, no live component targets it), temporal, temporal_visibility,
+# keycloak. Applied only while temporal.useHaPostgres or keycloak.useHaPostgres
+# resolves to false (preflight section 8), so a new Site never gets it. See
+# "Consolidating Temporal/Keycloak onto nico-pg-cluster" in README.md.
 #
 # Kubernetes rejects updates to a StatefulSet's volumeClaimTemplates (2.2 raised
 # the data request from 1Gi to 10Gi). When the server dry-run reports that
@@ -2061,11 +2078,42 @@ _recreate_rest_postgres_statefulset() {
     kubectl delete statefulset postgres -n postgres --cascade=orphan
 }
 _SETUP_PHASE="[7c/7] NICo REST postgres"
-echo "=== [7c/7] NICo REST postgres ==="
-(cd "${NICO_REST_DIR}" && _recreate_rest_postgres_statefulset)
-(cd "${NICO_REST_DIR}" && kubectl apply -k deploy/kustomize/base/postgres)
-kubectl rollout status statefulset/postgres -n postgres --timeout=180s
-echo "NICo REST postgres ready"
+if [[ "${_TEMPORAL_USE_HA_POSTGRES}" == "true" && "${_KEYCLOAK_USE_HA_POSTGRES}" == "true" ]]; then
+    echo "=== [7c/7] NICo REST postgres skipped (Temporal and Keycloak use nico-pg-cluster) ==="
+else
+    echo "=== [7c/7] NICo REST postgres (deprecated standalone StatefulSet) ==="
+    (cd "${NICO_REST_DIR}" && _recreate_rest_postgres_statefulset)
+    (cd "${NICO_REST_DIR}" && kubectl apply -k deploy/kustomize/base/postgres)
+    kubectl rollout status statefulset/postgres -n postgres --timeout=180s
+    echo "NICo REST postgres ready"
+fi
+
+# Records where a workload's database lives, so preflight can still tell after
+# the workload is deleted. Every deploy also clears the migration receipt: the
+# workload now runs on nico-pg-cluster, or the copy is stale.
+_record_db_location() {
+    local _component="$1" _location=standalone
+    [[ "$2" != "true" ]] || _location=nico-pg-cluster
+    kubectl get configmap "${_DB_RECORD_CONFIGMAP}" -n postgres >/dev/null 2>&1 \
+        || kubectl create configmap "${_DB_RECORD_CONFIGMAP}" -n postgres >/dev/null
+    kubectl patch configmap "${_DB_RECORD_CONFIGMAP}" -n postgres --type merge \
+        -p "{\"data\":{\"${_component}\":\"${_location}\",\"${_component}-migrated\":null}}" >/dev/null
+}
+
+# Preflight checked each move against the migration receipt when setup.sh
+# started, but phases 1 to 6 ran since. Checking again right before the
+# workload is repointed stops setup if it was restarted in the meantime,
+# instead of moving it onto a stale copy.
+_recheck_db_cutover() {
+    _can_move_db "$1" || return 0
+    BLOCKING_ERRORS=()
+    _check_db_cutover "$1" "$2"
+    if [[ ${#BLOCKING_ERRORS[@]} -gt 0 ]]; then
+        printf 'ERROR: %s\n' "${BLOCKING_ERRORS[@]}" >&2
+        echo "  setup.sh stopped before repointing $1." >&2
+        exit 1
+    fi
+}
 
 # --- 7d. Keycloak (conditional) -----------------------------------------------
 # Only deploy Keycloak if nico-rest.yaml has keycloak.enabled: true.
@@ -2079,22 +2127,24 @@ _KC_ENABLED="$(_yaml_toplevel_value "${SCRIPT_DIR}/values/nico-rest.yaml" keyclo
 if [[ "${_KC_ENABLED}" == "true" ]]; then
     echo "=== [7d/7] Keycloak ==="
 
-    # helm-prereqs/values.yaml::keycloak.useHaPostgres — DB consolidation opt-in,
-    # distinct from nico-rest.yaml's keycloak.enabled (deployed at all) above.
-    _KC_DB_CONSOLIDATED="$(_yaml_toplevel_value "${SCRIPT_DIR}/values.yaml" keycloak useHaPostgres)"
-    [[ "${_KC_DB_CONSOLIDATED}" == "true" ]] || _KC_DB_CONSOLIDATED="false"
+    # keycloak.useHaPostgres, as resolved by preflight section 8, picks the
+    # database. It is distinct from nico-rest.yaml's keycloak.enabled (deployed
+    # at all) above.
     # keycloak.namespace — must match what eso-external-secrets.yaml's
     # nico-keycloak-db-eso targets, so KEYCLOAK_NS (read by keycloak/setup.sh)
     # agrees with it. An operator-supplied KEYCLOAK_NS env var still wins, same
     # as every other script in this feature (keycloak/setup.sh, clean.sh,
     # migrate-temporal-keycloak-db.sh) — don't clobber it with the values.yaml
-    # default.
+    # default. On nico-pg-cluster, preflight requires the two to match.
     if [[ -z "${KEYCLOAK_NS:-}" ]]; then
         export KEYCLOAK_NS="$(_yaml_toplevel_value "${SCRIPT_DIR}/values.yaml" keycloak namespace)"
         export KEYCLOAK_NS="${KEYCLOAK_NS:-nico-rest}"
     fi
 
-    if [[ "${_KC_DB_CONSOLIDATED}" == "true" ]]; then
+    if [[ "${_KEYCLOAK_USE_HA_POSTGRES}" == "true" ]]; then
+        # ESO only syncs into a namespace that exists. Phase 7a creates just
+        # nico-rest, and keycloak/setup.sh creates any other one after this wait.
+        kubectl create namespace "${KEYCLOAK_NS}" 2>/dev/null || true
         echo "Waiting for Keycloak DB credentials to be synced by ESO (nico-keycloak-pg-creds in ${KEYCLOAK_NS})..."
         for _kc_i in $(seq 1 24); do
             if kubectl get secret nico-keycloak-pg-creds -n "${KEYCLOAK_NS}" &>/dev/null; then
@@ -2103,7 +2153,8 @@ if [[ "${_KC_ENABLED}" == "true" ]]; then
             if [[ "${_kc_i}" -eq 24 ]]; then
                 echo "ERROR: nico-keycloak-pg-creds not synced after 120s." >&2
                 echo "  Check: kubectl describe clusterexternalsecret nico-keycloak-db-eso" >&2
-                echo "  Ensure keycloak.useHaPostgres=true in helm-prereqs/values.yaml." >&2
+                echo "  Ensure phase 5 synced nico-prereqs with keycloak.useHaPostgres set to auto or true." >&2
+                echo "  With postgresql.enabled: false, create it yourself, as \"Using an external or out-of-band PostgreSQL\" in helm-prereqs/README.md describes." >&2
                 exit 1
             fi
             echo "  nico-keycloak-pg-creds not yet synced (${_kc_i}/24) — retrying in 5s..."
@@ -2123,9 +2174,16 @@ if [[ "${_KC_ENABLED}" == "true" ]]; then
         export KEYCLOAK_DB_SSLMODE="require"
         export KEYCLOAK_DB_PASSWORD_SECRET_NAME="nico-keycloak-pg-creds"
         export KEYCLOAK_DB_PASSWORD_SECRET_KEY="password"
+    else
+        # keycloak/setup.sh keeps any KEYCLOAK_DB_* it inherits, so clear them
+        # to make it use its standalone defaults.
+        unset KEYCLOAK_DB_HOST KEYCLOAK_DB_NAME KEYCLOAK_DB_USER KEYCLOAK_DB_SSLMODE \
+            KEYCLOAK_DB_PASSWORD_SECRET_NAME KEYCLOAK_DB_PASSWORD_SECRET_KEY
     fi
 
+    _recheck_db_cutover keycloak "${_KEYCLOAK_USE_HA_POSTGRES}"
     "${SCRIPT_DIR}/keycloak/setup.sh"
+    _record_db_location keycloak "${_KEYCLOAK_USE_HA_POSTGRES}"
     echo "Keycloak ready"
 else
     echo "=== [7d/7] Keycloak — skipped (keycloak.enabled is not true in nico-rest.yaml) ==="
@@ -2148,15 +2206,12 @@ kubectl wait --for=condition=Ready certificate/server-site-cert \
 echo "Temporal TLS certs ready"
 
 # --- 7f. Temporal ------------------------------------------------------------
-# helm-prereqs/values.yaml::temporal.useHaPostgres — see README's "Consolidating
-# Temporal/Keycloak onto nico-pg-cluster" for the transition story and
-# helm-prereqs/scripts/migrate-temporal-keycloak-db.sh for moving existing
+# temporal.useHaPostgres, as resolved by preflight section 8, picks the
+# database. See README's "Consolidating Temporal/Keycloak onto nico-pg-cluster"
+# and helm-prereqs/scripts/migrate-temporal-keycloak-db.sh for moving existing
 # workflow history over.
 _SETUP_PHASE="[7f/7] Temporal"
 echo "=== [7f/7] Temporal ==="
-
-_TEMPORAL_DB_CONSOLIDATED="$(_yaml_toplevel_value "${SCRIPT_DIR}/values.yaml" temporal useHaPostgres)"
-[[ "${_TEMPORAL_DB_CONSOLIDATED}" == "true" ]] || _TEMPORAL_DB_CONSOLIDATED="false"
 
 TEMPORAL_CMD=(
     helm upgrade --install temporal "${NICO_REST_DIR}/temporal-helm/temporal"
@@ -2165,7 +2220,7 @@ TEMPORAL_CMD=(
     --timeout 300s --wait
 )
 
-if [[ "${_TEMPORAL_DB_CONSOLIDATED}" == "true" ]]; then
+if [[ "${_TEMPORAL_USE_HA_POSTGRES}" == "true" ]]; then
     echo "Waiting for Temporal DB credentials to be synced by ESO (nico-temporal-pg-creds in temporal)..."
     for _tp_i in $(seq 1 24); do
         if kubectl get secret nico-temporal-pg-creds -n temporal &>/dev/null; then
@@ -2174,7 +2229,8 @@ if [[ "${_TEMPORAL_DB_CONSOLIDATED}" == "true" ]]; then
         if [[ "${_tp_i}" -eq 24 ]]; then
             echo "ERROR: nico-temporal-pg-creds not synced after 120s." >&2
             echo "  Check: kubectl describe clusterexternalsecret nico-temporal-db-eso" >&2
-            echo "  Ensure temporal.useHaPostgres=true in helm-prereqs/values.yaml." >&2
+            echo "  Ensure phase 5 synced nico-prereqs with temporal.useHaPostgres set to auto or true." >&2
+            echo "  With postgresql.enabled: false, create it yourself, as \"Using an external or out-of-band PostgreSQL\" in helm-prereqs/README.md describes." >&2
             exit 1
         fi
         echo "  nico-temporal-pg-creds not yet synced (${_tp_i}/24) — retrying in 5s..."
@@ -2185,7 +2241,7 @@ if [[ "${_TEMPORAL_DB_CONSOLIDATED}" == "true" ]]; then
     # Mirror the nico-rest-workflow worker fix (#3284): override the chart's
     # postgres.postgres defaults at install time rather than editing
     # values-kind.yaml in place, so the legacy target keeps working unchanged
-    # for sites that haven't opted in. nico-temporal-pg-creds (synced by ESO
+    # for Sites still on it. nico-temporal-pg-creds (synced by ESO
     # above) already carries a "password" key, matching the chart's
     # persistence.secretKey default — no need to copy it into another Secret.
     #
@@ -2222,7 +2278,9 @@ EOF
     TEMPORAL_CMD+=(-f "${_TEMPORAL_CREDS_FILE}")
 fi
 
+_recheck_db_cutover temporal "${_TEMPORAL_USE_HA_POSTGRES}"
 "${TEMPORAL_CMD[@]}"
+_record_db_location temporal "${_TEMPORAL_USE_HA_POSTGRES}"
 echo "Temporal ready"
 
 # Create the Temporal namespaces required by NICo REST workers (requires mTLS)
@@ -2446,6 +2504,12 @@ NICO_FLOW_ARGS=(
     --set "global.image.tag=${NICO_REST_IMAGE_TAG}"
 )
 
+# Site-specific Flow values. Every run resets the release to the chart
+# defaults plus the arguments above, so overrides must live in this file.
+if [[ -n "${FLOW_VALUES}" ]]; then
+    NICO_FLOW_ARGS+=(-f "${FLOW_VALUES}")
+fi
+
 # Render the dockerconfigjson for the chart-managed image-pull-secret. Same
 # pattern as the NICo REST common chart - keep the registry credential on
 # the helm command line so the chart template can install it as a
@@ -2462,24 +2526,40 @@ if [[ -n "${REGISTRY_PULL_SECRET:-}" ]]; then
     )
 fi
 
-# Pre-apply Certificates so cert-manager can issue secrets before the pod schedules.
-echo "Pre-applying flow Certificates (SPIFFE + Temporal client)..."
-helm template flow "${NICO_FLOW_CHART}" \
-    "${NICO_FLOW_ARGS[@]}" \
-    --show-only templates/namespace.yaml | kubectl apply -f -
-helm template flow "${NICO_FLOW_CHART}" \
-    "${NICO_FLOW_ARGS[@]}" \
-    --show-only templates/certificate.yaml | kubectl apply -f -
-kubectl annotate certificate/flow-certificate -n "${NICO_FLOW_NAMESPACE}" \
-    "meta.helm.sh/release-name=flow" \
-    "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
-kubectl annotate certificate/temporal-client-certs -n "${NICO_FLOW_NAMESPACE}" \
-    "meta.helm.sh/release-name=flow" \
-    "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
-kubectl label certificate/flow-certificate -n "${NICO_FLOW_NAMESPACE}" \
-    "app.kubernetes.io/managed-by=Helm" --overwrite
-kubectl label certificate/temporal-client-certs -n "${NICO_FLOW_NAMESPACE}" \
-    "app.kubernetes.io/managed-by=Helm" --overwrite
+# Pre-apply the Namespace and Certificates so cert-manager can issue secrets
+# before the pod schedules. Certificate names come from the rendered chart so a
+# values file that renames them is followed. The namespace cannot move: setup.sh
+# and the NICo REST site-agent address flow.flow.svc.cluster.local directly.
+_flow_render() {
+    helm template flow "${NICO_FLOW_CHART}" "${NICO_FLOW_ARGS[@]}" --show-only "templates/$1"
+}
+_flow_namespace_yaml="$(_flow_render namespace.yaml)"
+_flow_certificates_yaml="$(_flow_render certificate.yaml)"
+_flow_namespace_rendered="$(printf '%s\n' "${_flow_namespace_yaml}" | kubectl apply --dry-run=client -f - -o name)"
+if [[ "${_flow_namespace_rendered}" != "namespace/${NICO_FLOW_NAMESPACE}" ]]; then
+    echo "ERROR: the Flow values render namespace '${_flow_namespace_rendered#namespace/}', but setup.sh and the NICo REST site-agent address Flow in namespace '${NICO_FLOW_NAMESPACE}'." >&2
+    echo "  Remove namespaceOverride from the --flow-values file." >&2
+    exit 1
+fi
+if ! _flow_certificates_rendered="$(printf '%s\n' "${_flow_certificates_yaml}" | kubectl apply --dry-run=client -f - -o name)"; then
+    echo "ERROR: could not read the rendered Flow Certificate names." >&2
+    exit 1
+fi
+if [[ -z "${_flow_certificates_rendered}" ]]; then
+    echo "ERROR: the Flow chart rendered no Certificate resources." >&2
+    exit 1
+fi
+mapfile -t _flow_certificates <<< "${_flow_certificates_rendered}"
+echo "Pre-applying flow Namespace and Certificates (${_flow_certificates[*]#*/})..."
+printf '%s\n' "${_flow_namespace_yaml}" | kubectl apply -f -
+printf '%s\n' "${_flow_certificates_yaml}" | kubectl apply -f -
+for _flow_cert in "${_flow_certificates[@]}"; do
+    kubectl annotate "${_flow_cert}" -n "${NICO_FLOW_NAMESPACE}" \
+        "meta.helm.sh/release-name=flow" \
+        "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
+    kubectl label "${_flow_cert}" -n "${NICO_FLOW_NAMESPACE}" \
+        "app.kubernetes.io/managed-by=Helm" --overwrite
+done
 
 # Annotate/label the namespace itself so the Flow release can adopt the
 # namespace created before the main helm install.
@@ -2489,12 +2569,11 @@ kubectl annotate namespace "${NICO_FLOW_NAMESPACE}" \
 kubectl label namespace "${NICO_FLOW_NAMESPACE}" \
     "app.kubernetes.io/managed-by=Helm" --overwrite
 
-echo "Waiting for cert-manager to issue flow-certificate..."
-kubectl wait --for=condition=Ready certificate/flow-certificate \
-    -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
-echo "Waiting for cert-manager to issue temporal-client-certs..."
-kubectl wait --for=condition=Ready certificate/temporal-client-certs \
-    -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
+for _flow_cert in "${_flow_certificates[@]}"; do
+    echo "Waiting for cert-manager to issue ${_flow_cert#*/}..."
+    kubectl wait --for=condition=Ready "${_flow_cert}" \
+        -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
+done
 
 # Wait for the Flow DB credential ESO sync to land. Fail fast if the Secret
 # never appears instead of allowing the helm install to enter an opaque
@@ -2786,6 +2865,12 @@ echo ""
 echo "  Keycloak deep-dive (realm, clients, roles): helm-prereqs/keycloak/README.md"
 if "${_OBSERVABILITY_INSTALLED}"; then
     echo "  Grafana (observability): kubectl -n monitoring port-forward svc/obs-grafana 3000:80"
+fi
+if [[ -n "${_STANDALONE_PG_WORKLOADS:-}" ]]; then
+    echo ""
+    echo "  WARNING: the standalone postgres.postgres StatefulSet still serves ${_STANDALONE_PG_WORKLOADS}."
+    echo "  It is deprecated and support for it will be removed in 2.5."
+    echo "  ${_STANDALONE_PG_HINT}."
 fi
 echo "========================================================================="
 

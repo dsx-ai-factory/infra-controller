@@ -1,6 +1,29 @@
+# HELP carbide_measured_boot_bundles_count Number of measured boot bundles.
+# TYPE carbide_measured_boot_bundles_count gauge
+carbide_measured_boot_bundles_count 4
+# HELP carbide_measured_boot_bundles_per_pcr_value_count Number of measured boot bundles containing a given PCR value at a given PCR index.
+# TYPE carbide_measured_boot_bundles_per_pcr_value_count gauge
+carbide_measured_boot_bundles_per_pcr_value_count{pcr_index="0",pcr_value="aa"} 3
+carbide_measured_boot_bundles_per_pcr_value_count{pcr_index="1",pcr_value="bb"} 1
 # HELP carbide_measured_boot_bundles_total Number of measured boot bundles.
 # TYPE carbide_measured_boot_bundles_total gauge
 carbide_measured_boot_bundles_total 4
+# HELP carbide_measured_boot_machines_count Number of discovered candidate machines, including machines without measurements.
+# TYPE carbide_measured_boot_machines_count gauge
+carbide_measured_boot_machines_count 10
+# HELP carbide_measured_boot_machines_per_bundle_count Number of machines per measured boot bundle.
+# TYPE carbide_measured_boot_machines_per_bundle_count gauge
+carbide_measured_boot_machines_per_bundle_count{bundle_id="33be881e-5871-4519-b7dd-84946f3b758a"} 4
+carbide_measured_boot_machines_per_bundle_count{bundle_id="3e4ec902-f834-448c-9c0d-aca7da84d5d7"} 3
+carbide_measured_boot_machines_per_bundle_count{bundle_id="53008cc3-988e-459c-a4c1-acb0ea44a884"} 2
+carbide_measured_boot_machines_per_bundle_count{bundle_id="f567ae32-690c-4108-8ee8-5116c64ff3f0"} 1
+# HELP carbide_measured_boot_machines_per_bundle_state_count Number of machines per measured boot bundle state.
+# TYPE carbide_measured_boot_machines_per_bundle_state_count gauge
+carbide_measured_boot_machines_per_bundle_state_count{bundle_state="Active"} 1
+carbide_measured_boot_machines_per_bundle_state_count{bundle_state="Obsolete"} 1
+carbide_measured_boot_machines_per_bundle_state_count{bundle_state="Pending"} 1
+carbide_measured_boot_machines_per_bundle_state_count{bundle_state="Retired"} 3
+carbide_measured_boot_machines_per_bundle_state_count{bundle_state="Revoked"} 4
 # HELP carbide_measured_boot_machines_per_bundle_state_total Number of machines per measured boot bundle state.
 # TYPE carbide_measured_boot_machines_per_bundle_state_total gauge
 carbide_measured_boot_machines_per_bundle_state_total{bundle_state="Active"} 1
@@ -14,6 +37,12 @@ carbide_measured_boot_machines_per_bundle_total{bundle_id="33be881e-5871-4519-b7
 carbide_measured_boot_machines_per_bundle_total{bundle_id="3e4ec902-f834-448c-9c0d-aca7da84d5d7"} 3
 carbide_measured_boot_machines_per_bundle_total{bundle_id="53008cc3-988e-459c-a4c1-acb0ea44a884"} 2
 carbide_measured_boot_machines_per_bundle_total{bundle_id="f567ae32-690c-4108-8ee8-5116c64ff3f0"} 1
+# HELP carbide_measured_boot_machines_per_machine_state_count Number of machines per measured boot machine state.
+# TYPE carbide_measured_boot_machines_per_machine_state_count gauge
+carbide_measured_boot_machines_per_machine_state_count{machine_state="Discovered"} 1
+carbide_measured_boot_machines_per_machine_state_count{machine_state="Measured"} 3
+carbide_measured_boot_machines_per_machine_state_count{machine_state="MeasuringFailed"} 4
+carbide_measured_boot_machines_per_machine_state_count{machine_state="PendingBundle"} 2
 # HELP carbide_measured_boot_machines_per_machine_state_total Number of machines per measured boot machine state.
 # TYPE carbide_measured_boot_machines_per_machine_state_total gauge
 carbide_measured_boot_machines_per_machine_state_total{machine_state="Discovered"} 1
@@ -22,8 +51,14 @@ carbide_measured_boot_machines_per_machine_state_total{machine_state="MeasuringF
 carbide_measured_boot_machines_per_machine_state_total{machine_state="PendingBundle"} 2
 # HELP carbide_measured_boot_machines_per_pcr_value_total Number of machines with a given PCR value at a given PCR index.
 # TYPE carbide_measured_boot_machines_per_pcr_value_total gauge
-carbide_measured_boot_machines_per_pcr_value_total{pcr_index="0",pcr_value="aa"} 5
-carbide_measured_boot_machines_per_pcr_value_total{pcr_index="1",pcr_value="bb"} 5
+carbide_measured_boot_machines_per_pcr_value_total{pcr_index="0",pcr_value="aa"} 3
+carbide_measured_boot_machines_per_pcr_value_total{pcr_index="1",pcr_value="bb"} 1
+# HELP carbide_measured_boot_machines_per_profile_count Number of machines per measured boot system profile.
+# TYPE carbide_measured_boot_machines_per_profile_count gauge
+carbide_measured_boot_machines_per_profile_count{profile_id="254542a1-0fb2-4250-91df-b5ecfa52645e"} 2
+carbide_measured_boot_machines_per_profile_count{profile_id="4ed2dea5-c325-4317-aeb3-e9766956d9fc"} 3
+carbide_measured_boot_machines_per_profile_count{profile_id="bf13aaeb-c9e6-4e42-9b2f-5aa525c56124"} 1
+carbide_measured_boot_machines_per_profile_count{profile_id="c5c926f3-a454-497c-95ff-d21647590631"} 4
 # HELP carbide_measured_boot_machines_per_profile_total Number of machines per measured boot system profile.
 # TYPE carbide_measured_boot_machines_per_profile_total gauge
 carbide_measured_boot_machines_per_profile_total{profile_id="254542a1-0fb2-4250-91df-b5ecfa52645e"} 2
@@ -33,6 +68,9 @@ carbide_measured_boot_machines_per_profile_total{profile_id="c5c926f3-a454-497c-
 # HELP carbide_measured_boot_machines_total Number of machines reporting measurements.
 # TYPE carbide_measured_boot_machines_total gauge
 carbide_measured_boot_machines_total 10
+# HELP carbide_measured_boot_profiles_count Number of measured boot profiles.
+# TYPE carbide_measured_boot_profiles_count gauge
+carbide_measured_boot_profiles_count 7
 # HELP carbide_measured_boot_profiles_total Number of measured boot profiles.
 # TYPE carbide_measured_boot_profiles_total gauge
-carbide_measured_boot_profiles_total 10
+carbide_measured_boot_profiles_total 7

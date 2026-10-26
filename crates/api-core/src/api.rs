@@ -66,6 +66,7 @@ use crate::cfg::file::CarbideConfig;
 use crate::dynamic_settings::DynamicSettings;
 use crate::ethernet_virtualization::EthVirtData;
 use crate::logging::log_limiter::LogLimiter;
+use crate::resource_pool::ResourcePoolMonitor;
 use crate::scout_stream::ConnectionRegistry;
 use crate::{CarbideError, CarbideResult};
 
@@ -90,6 +91,8 @@ pub struct Api {
     pub(crate) common_pools: Arc<CommonPools>,
     /// Pool backends resolved at startup; runtime lookups also see later growth.
     pub(crate) resource_pool_registry: ResourcePoolRegistry,
+    /// Shared inventory and provider observations for admin inspection and metrics.
+    pub(crate) resource_pool_monitor: ResourcePoolMonitor,
     pub(crate) ib_fabric_manager: Arc<dyn IBFabricManager>,
     // `pub` (not `pub(crate)`): read by the `carbide-api-web` admin UI for config-derived display.
     pub runtime_config: Arc<CarbideConfig>,
@@ -1382,6 +1385,13 @@ impl Forge for Api {
         request: Request<rpc::GrowResourcePoolRequest>,
     ) -> Result<Response<rpc::GrowResourcePoolResponse>, Status> {
         crate::handlers::resource_pool::grow(self, request).await
+    }
+
+    async fn admin_inspect_resource_pools(
+        &self,
+        request: Request<rpc::InspectResourcePoolsRequest>,
+    ) -> Result<Response<rpc::InspectResourcePoolsResponse>, Status> {
+        crate::handlers::resource_pool::inspect(self, request).await
     }
 
     async fn admin_list_resource_pools(
@@ -4284,9 +4294,7 @@ impl Api {
             let machine = match db::machine::find_one(&mut txn, &machine_id, search_config).await {
                 Err(err) => {
                     tracing::warn!(%machine_id, error = %err, "failed loading machine");
-                    return Err(CarbideError::InvalidArgument(
-                        "err loading machine".to_string(),
-                    ));
+                    return Err(err.into());
                 }
                 Ok(None) => {
                     tracing::info!(%machine_id, "machine not found");

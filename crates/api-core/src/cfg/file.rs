@@ -1795,6 +1795,59 @@ pub enum ProviderConfig {
         #[serde(default)]
         transit_mount: Option<String>,
     },
+    /// A KMIP 1.4 server holding a non-exportable AES-256 KEK per kek_id;
+    /// DEKs are wrapped and unwrapped with the KMIP Encrypt and Decrypt
+    /// operations over mutually authenticated TLS, so KEK material never
+    /// leaves the server. Startup connects and verifies that the server
+    /// lists KMIP 1.4 and both operations and that every key is an Active
+    /// AES-256 key permitted to encrypt and decrypt, probes a wrap and
+    /// unwrap, and fails the boot otherwise.
+    Kmip {
+        /// `host:port` or `[v6-literal]:port` of the KMIP TLS listener; the
+        /// host must be a DNS name or IP address, an IPv6 literal must be
+        /// bracketed, and the port defaults to 5696 when omitted.
+        endpoint: String,
+        /// The name the server certificate must match. A DNS name is also
+        /// sent as SNI; an IP address is matched against the certificate's IP
+        /// SANs without SNI. Defaults to the host part of `endpoint`.
+        #[serde(default)]
+        server_name: Option<String>,
+        /// PEM bundle of the CA certificates trusted to sign the server
+        /// certificate. System roots are never used.
+        ca_bundle: std::path::PathBuf,
+        /// PEM client certificate chain presented to the server.
+        client_cert: std::path::PathBuf,
+        /// PEM private key (PKCS#8, PKCS#1 or SEC1) for `client_cert`.
+        client_key: std::path::PathBuf,
+        /// kek_id to the KMIP Unique Identifier of its key object. At least
+        /// one entry is required.
+        keys: std::collections::HashMap<String, String>,
+        /// Per-attempt bound on reading the TLS files, the TCP connect and
+        /// the TLS handshake together. Defaults to 5s; at most 60s.
+        #[serde(
+            default = "default_kmip_connect_timeout",
+            deserialize_with = "deserialize_duration",
+            serialize_with = "as_std_duration"
+        )]
+        connect_timeout: std::time::Duration,
+        /// Per-attempt bound on writing one request and reading its
+        /// complete response; also bounds waiting for the connection behind
+        /// another caller. Defaults to 10s; at most 120s.
+        #[serde(
+            default = "default_kmip_request_timeout",
+            deserialize_with = "deserialize_duration",
+            serialize_with = "as_std_duration"
+        )]
+        request_timeout: std::time::Duration,
+    },
+}
+
+const fn default_kmip_connect_timeout() -> std::time::Duration {
+    carbide_kmip::DEFAULT_CONNECT_TIMEOUT
+}
+
+const fn default_kmip_request_timeout() -> std::time::Duration {
+    carbide_kmip::DEFAULT_REQUEST_TIMEOUT
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -1962,14 +2015,13 @@ pub struct DpfConfig {
     /// endpoints plus fixed allocations.
     #[serde(default = "default_dpf_pf_total_sf_reserved")]
     pub pf_total_sf_reserved: u32,
-    /// Whether carbide rolls a changed DPUService out on its own, by releasing
-    /// the DPF maintenance hold for hosts it has confirmed are already running
-    /// the software their DPUDeployment declares.
+    /// Whether carbide automatically releases DPF maintenance holds for changed
+    /// DPUDeployment-owned DPUService revisions whose upgrade policy enables NodeEffect.
     ///
-    /// This selects *who* opens the gate, never whether one exists. DPF is
-    /// always configured to park a changed DPUService behind a maintenance hold
-    /// (`upgradePolicy.applyNodeEffect`), so no service update ever reaches a DPU
-    /// without something having checked its side effects first.
+    /// This selects *who* opens an existing gate; it does not add one. NICo sets
+    /// `upgradePolicy.applyNodeEffect=false` for the DPU agent, DHCP server, FMDS, and OTel
+    /// Collector, so this setting does not gate those revisions. HBN, DTS, and extra services use
+    /// the gated default. Direct, detached DPUService objects do not use this setting.
     ///
     /// On by default. Setting it to false does not resume unchecked rollout: it
     /// means the held DPUs wait for an operator to release them deliberately,
@@ -4067,6 +4119,12 @@ pub enum ListenMode {
 pub struct AuthConfig {
     /// Enable permissive mode in the authorization enforcer (for development).
     pub permissive_mode: bool,
+
+    /// Allow the authenticated machine-a-tron service to open ScoutStream RPCs.
+    /// Defaults to false. Only enable in isolated simulation environments: this
+    /// permission does not restrict the machine IDs the simulator may claim.
+    #[serde(default)]
+    pub allow_machineatron_scout_stream: bool,
 
     /// The Casbin policy file (in CSV format).
     pub casbin_policy_file: Option<PathBuf>,
@@ -7176,9 +7234,9 @@ path = "credentials.yaml"
         assert_eq!(overridden.rack_profiles.rack_profiles.len(), profiles.len());
     }
 
-    fn rendered_deployment_site_config() -> String {
+    fn rendered_example_site_config() -> String {
         let mut config =
-            include_str!("../../../../deploy/files/nico-api/nico-api-site-config.toml").to_string();
+            include_str!("../../../../helm/examples/nico-api-site-config.toml").to_string();
         for (placeholder, value) in [
             ("MANAGED_HOST_IPMI_POOL_1_GATEWAY_IP", "203.0.113.1"),
             ("MANAGED_HOST_IPMI_POOL_1", "203.0.113.0/24"),
@@ -7198,28 +7256,25 @@ path = "credentials.yaml"
 
     #[test]
     fn deserialize_shipped_api_configurations() {
-        let repository_root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
-        let deploy_path =
-            format!("{repository_root}/deploy/nico-base/api/config-files/carbide-api-config.toml");
         let docker_config = include_str!("../../../../dev/docker-env/carbide-api-config.toml");
         let webdev_config = include_str!("../../../../dev/webdev-env/carbide-api-config.toml");
-        let site_config = rendered_deployment_site_config();
+        let site_config = rendered_example_site_config();
         let helm_config = rendered_helm_api_config();
 
-        let deploy_config = Figment::new()
-            .merge(Toml::file(&deploy_path))
+        let shipped_config = Figment::new()
+            .merge(Toml::string(&helm_config))
             .extract::<CarbideConfig>()
-            .expect("the shipped deployment config must match the strict schema");
+            .expect("the shipped Helm config must match the strict schema");
         assert_eq!(
-            deploy_config.dpu_config.dpu_nic_firmware_update_versions,
+            shipped_config.dpu_config.dpu_nic_firmware_update_versions,
             [BF2_NIC_VERSION.to_string(), BF3_NIC_VERSION.to_string()]
         );
 
         for (name, figment) in [
             (
-                "deployment base plus site override",
+                "Helm base plus example site override",
                 Figment::new()
-                    .merge(Toml::file(&deploy_path))
+                    .merge(Toml::string(&helm_config))
                     .merge(Toml::string(&site_config)),
             ),
             (
@@ -7233,10 +7288,6 @@ path = "credentials.yaml"
             (
                 "web development",
                 Figment::new().merge(Toml::string(webdev_config)),
-            ),
-            (
-                "rendered Helm",
-                Figment::new().merge(Toml::string(&helm_config)),
             ),
         ] {
             figment.extract::<CarbideConfig>().unwrap_or_else(|error| {
@@ -7788,22 +7839,47 @@ enabled = true
     }
 
     #[test]
-    fn test_max_concurrent_updates() -> eyre::Result<()> {
-        let test = MaxConcurrentUpdates {
-            absolute: Some(10),
-            percent: None,
-        };
-        assert_eq!(test.max_concurrent_updates(1000, 5), Some(10));
-        let test = MaxConcurrentUpdates {
-            absolute: None,
-            percent: Some(10),
-        };
-        assert_eq!(test.max_concurrent_updates(0, 500), Some(50));
-        assert_eq!(test.max_concurrent_updates(7, 500), Some(43));
-        assert_eq!(test.max_concurrent_updates(50, 500), Some(0));
-        assert_eq!(test.max_concurrent_updates(0, 9), Some(1));
+    fn test_max_concurrent_updates() {
+        struct Input {
+            absolute: Option<i32>,
+            percent: Option<i32>,
+            unhealthy: i32,
+            out_of: i32,
+        }
 
-        Ok(())
+        value_scenarios!(
+            run = |Input { absolute, percent, unhealthy, out_of }| {
+                MaxConcurrentUpdates { absolute, percent }.max_concurrent_updates(unhealthy, out_of)
+            };
+            "absolute limit ignores health counts" {
+                Input { absolute: Some(10), percent: None, unhealthy: 1000, out_of: 5 } => Some(10),
+            }
+            "no configured limit" {
+                Input { absolute: None, percent: None, unhealthy: 0, out_of: 500 } => None,
+            }
+            "percentage budget accounts for unhealthy hosts" {
+                Input { absolute: None, percent: Some(10), unhealthy: 0, out_of: 500 } => Some(50),
+                Input { absolute: None, percent: Some(10), unhealthy: 7, out_of: 500 } => Some(43),
+                Input { absolute: None, percent: Some(10), unhealthy: 50, out_of: 500 } => Some(0),
+            }
+            "unhealthy hosts exceeding the budget saturate at zero" {
+                Input { absolute: None, percent: Some(10), unhealthy: 51, out_of: 500 } => Some(0),
+            }
+            "fractional percentage budget rounds up" {
+                Input { absolute: None, percent: Some(10), unhealthy: 0, out_of: 9 } => Some(1),
+            }
+            "nonpositive percentage disables updates despite an absolute limit" {
+                Input { absolute: Some(10), percent: Some(0), unhealthy: 0, out_of: 500 } => Some(0),
+                Input { absolute: Some(10), percent: Some(-1), unhealthy: 0, out_of: 500 } => Some(0),
+            }
+            "empty fleet has no percentage budget" {
+                Input { absolute: Some(10), percent: Some(10), unhealthy: 0, out_of: 0 } => Some(0),
+            }
+            "absolute limit caps the remaining percentage budget" {
+                Input { absolute: Some(20), percent: Some(10), unhealthy: 7, out_of: 500 } => Some(20),
+                Input { absolute: Some(45), percent: Some(10), unhealthy: 7, out_of: 500 } => Some(43),
+            }
+        );
     }
 
     #[test]
@@ -8829,6 +8905,14 @@ helm_repo_url = "oci://registry.example.test/doca"
             type = "transit"
             keys = ["my-transit-key"]
 
+            [secrets.kms.providers.hsm]
+            type = "kmip"
+            endpoint = "kms.example.com:5696"
+            ca_bundle = "/etc/nico/kmip/ca.pem"
+            client_cert = "/etc/nico/kmip/client.pem"
+            client_key = "/etc/nico/kmip/client.key"
+            keys.site-kek-1 = "a1b2c3"
+
             [secrets.routing]
             "/" = "default-key"
             "machines/bmc" = "bmc-key"
@@ -8839,7 +8923,7 @@ helm_repo_url = "oci://registry.example.test/doca"
 
         // Verify KMS config: the `type` field selects the enum variant.
         assert_eq!(secrets.kms.active, "local");
-        assert_eq!(secrets.kms.providers.len(), 2);
+        assert_eq!(secrets.kms.providers.len(), 3);
         assert!(matches!(
             &secrets.kms.providers["local"],
             ProviderConfig::Integrated { keys } if keys.len() == 2
@@ -8847,6 +8931,22 @@ helm_repo_url = "oci://registry.example.test/doca"
         assert!(matches!(
             &secrets.kms.providers["prod-transit"],
             ProviderConfig::Transit { keys, transit_mount: None } if keys == &["my-transit-key"]
+        ));
+        // The KMIP variant takes its defaults for the optional server name and
+        // both deadlines.
+        assert!(matches!(
+            &secrets.kms.providers["hsm"],
+            ProviderConfig::Kmip {
+                endpoint,
+                server_name: None,
+                keys,
+                connect_timeout,
+                request_timeout,
+                ..
+            } if endpoint == "kms.example.com:5696"
+                && keys.get("site-kek-1").map(String::as_str) == Some("a1b2c3")
+                && *connect_timeout == std::time::Duration::from_secs(5)
+                && *request_timeout == std::time::Duration::from_secs(10)
         ));
 
         // Verify routing.
@@ -9063,6 +9163,35 @@ helm_repo_url = "oci://registry.example.test/doca"
 
             [secrets.routing]
             "/" = "default-key"
+        "#;
+
+        assert!(toml::from_str::<Wrapper>(toml_str).is_err());
+    }
+
+    // Verifies that a KMIP provider without its TLS material fails to parse:
+    // the certificate paths are required, not defaulted, so a half-configured
+    // provider cannot reach startup validation.
+    #[test]
+    fn secrets_config_rejects_kmip_without_tls_material() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            #[expect(dead_code)]
+            secrets: SecretsConfig,
+        }
+
+        let toml_str = r#"
+            [secrets.kms]
+            active = "hsm"
+
+            [secrets.kms.providers.hsm]
+            type = "kmip"
+            endpoint = "kms.example.com:5696"
+            client_cert = "/etc/nico/kmip/client.pem"
+            client_key = "/etc/nico/kmip/client.key"
+            keys.site-kek-1 = "a1b2c3"
+
+            [secrets.routing]
+            "/" = "site-kek-1"
         "#;
 
         assert!(toml::from_str::<Wrapper>(toml_str).is_err());

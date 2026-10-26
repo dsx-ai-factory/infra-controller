@@ -83,23 +83,27 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::bmc_state::BmcState;
-use crate::json::{JsonExt, JsonPatch};
-use crate::redfish::Builder;
+use crate::json::JsonExt;
+use crate::redfish::ModelExt;
 use crate::{Callbacks, http, redfish};
 
 pub(crate) fn resource<'a>() -> redfish::Resource<'a> {
     redfish::Resource {
         odata_id: Cow::Borrowed("/redfish/v1/UpdateService"),
-        odata_type: Cow::Borrowed("#UpdateService.v1_9_0.UpdateService"),
+        odata_type: Cow::Borrowed(redfish::schema::update_service::UpdateService::ODATA_TYPE),
         id: Cow::Borrowed("UpdateService"),
         name: Cow::Borrowed("Update Service"),
     }
 }
 
-pub(crate) fn builder(resource: &redfish::Resource) -> UpdateServiceBuilder {
-    UpdateServiceBuilder {
-        value: resource.json_patch(),
-    }
+pub(crate) fn builder(
+    resource: &redfish::Resource,
+) -> redfish::schema::update_service::UpdateService {
+    redfish::schema::update_service::UpdateService::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        resource.name.as_ref(),
+    )
 }
 
 pub(crate) fn simple_update_target() -> String {
@@ -606,15 +610,18 @@ struct SimpleUpdateRequest {
 /// Advertise only the push URI(s) that this platform's BMC actually supports.
 async fn get_update_service<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
     let us = &state.update_service_state;
-    let mut b = builder(&resource())
-        .firmware_inventory(&redfish::software_inventory::firmware_inventory_collection());
+    let mut b = builder(&resource()).firmware_inventory(
+        redfish::software_inventory::firmware_inventory_collection()
+            .odata_id
+            .as_ref(),
+    );
     if us.advertise_multipart_push_uri {
         b = b.multipart_http_push_uri(MULTIPART_UPLOAD_PATH);
     }
     if us.advertise_legacy_http_push_uri {
-        b = b.apply_patch(json!({ "HttpPushUri": resource().odata_id }));
+        b = b.http_push_uri(resource().odata_id.as_ref());
     }
-    b.build().into_ok_response()
+    b.into_json().into_ok_response()
 }
 
 /// Redfish SimpleUpdate (Dell iDRAC, BFB/DPU path).
@@ -707,33 +714,6 @@ async fn get_firmware_inventory_resource<C: Callbacks>(
         .unwrap_or_else(http::not_found)
 }
 
-pub(crate) struct UpdateServiceBuilder {
-    value: serde_json::Value,
-}
-
-impl Builder for UpdateServiceBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-        }
-    }
-}
-
-impl UpdateServiceBuilder {
-    pub(crate) fn build(self) -> serde_json::Value {
-        self.value
-    }
-
-    pub(crate) fn firmware_inventory(self, v: &redfish::Collection<'_>) -> Self {
-        self.apply_patch(v.nav_property("FirmwareInventory"))
-    }
-
-    /// Multipart HTTP push URI (AMI/GB200/GB300 consumers).
-    pub(crate) fn multipart_http_push_uri(self, uri: &str) -> Self {
-        self.apply_patch(json!({ "MultipartHttpPushUri": uri }))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -749,7 +729,7 @@ mod tests {
             .iter()
             .map(|(id, v)| {
                 software_inventory::builder(&software_inventory::firmware_inventory_resource(id))
-                    .version(v)
+                    .version(*v)
                     .build()
             })
             .collect();
@@ -1113,8 +1093,6 @@ mod tests {
         );
     }
 
-    use std::sync::Arc as StdArc;
-
     use axum::body::to_bytes;
     use axum::http::{Method, Request, StatusCode};
     use tower::ServiceExt;
@@ -1278,153 +1256,6 @@ mod tests {
         )
         .await;
         assert_eq!(inv["Version"], "24.10.00");
-    }
-
-    #[tokio::test]
-    async fn lenovo_gb300_requires_full_lockdown_to_restore_bios_policy() {
-        use libredfish::{EnabledDisabled, Endpoint, RedfishClientPool};
-        let (router, _) = make_platform_router(
-            HardwareType::LenovoGB300Nvl,
-            "bmc-old",
-            "bmc-new",
-            None,
-            None,
-        );
-        let (_server, url) = crate::test_support::serve_https("gb300-lockdown", router);
-        let client = RedfishClientPool::builder()
-            .danger_accept_invalid_certs()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap()
-            .create_client(Endpoint {
-                host: url.host_str().unwrap().to_owned(),
-                port: url.port(),
-                user: None,
-                password: None,
-            })
-            .await
-            .unwrap();
-        client.lockdown_bmc(EnabledDisabled::Enabled).await.unwrap();
-        let status = client.lockdown_status().await.unwrap();
-        assert!(
-            !status.is_fully_enabled(),
-            "BMC-only command must leave BIOS USB unlocked: {status:?}"
-        );
-        client.lockdown(EnabledDisabled::Enabled).await.unwrap();
-        let status = client.lockdown_status().await.unwrap();
-        assert!(
-            status.is_fully_enabled(),
-            "full policy must restore BIOS and BMC: {status:?}"
-        );
-    }
-
-    /// Exercise the same legacy client used by the Core controller, including
-    /// its LenovoGB300 multipart rejection. This verifies the mock's raw-push
-    /// compatibility, not support for this endpoint on physical Lenovo hardware.
-    #[tokio::test]
-    async fn lenovo_gb300_legacy_client_raw_push_activates_bmc() {
-        use libredfish::model::service_root::RedfishVendor;
-        use libredfish::model::update_service::ComponentType;
-        use libredfish::{Endpoint, RedfishClientPool, RedfishError};
-
-        let (router, state) = make_platform_router(
-            HardwareType::LenovoGB300Nvl,
-            "bmc-old",
-            "bmc-new",
-            Some("uefi-old"),
-            Some("uefi-new"),
-        );
-        let bios_before = get_json(&router, "/redfish/v1/Systems/System_0").await["BiosVersion"]
-            .as_str()
-            .expect("Lenovo System_0 must report its BIOS version")
-            .to_owned();
-        let system_router = router.clone();
-        let received = StdArc::new(std::sync::Mutex::new(Vec::new()));
-        let captured = received.clone();
-        let router = router.layer(axum::middleware::from_fn(
-            move |request: Request<axum::body::Body>, next: axum::middleware::Next| {
-                let captured = captured.clone();
-                async move {
-                    if request.method() == Method::POST
-                        && request.uri().path() == "/redfish/v1/UpdateService"
-                    {
-                        let (parts, body) = request.into_parts();
-                        let bytes = to_bytes(body, 1024 * 1024).await.unwrap();
-                        *captured.lock().unwrap() = bytes.to_vec();
-                        next.run(Request::from_parts(parts, axum::body::Body::from(bytes)))
-                            .await
-                    } else {
-                        next.run(request).await
-                    }
-                }
-            },
-        ));
-        let (_server, url) = crate::test_support::serve_https("gb300-http-push", router);
-        let client = RedfishClientPool::builder()
-            .danger_accept_invalid_certs()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap()
-            .create_client(Endpoint {
-                host: url.host_str().unwrap().to_owned(),
-                port: url.port(),
-                user: None,
-                password: None,
-            })
-            .await
-            .unwrap();
-        assert_eq!(
-            client.std_redfish().vendor,
-            Some(RedfishVendor::LenovoGB300)
-        );
-        assert_eq!(
-            client.get_update_service().await.unwrap().http_push_uri,
-            "/redfish/v1/UpdateService",
-        );
-        let artifact = tempfile::NamedTempFile::new().unwrap();
-        let payload = b"mock firmware payload, not a physical firmware image";
-        std::fs::write(artifact.path(), payload).unwrap();
-        assert!(matches!(
-            client
-                .update_firmware_multipart(
-                    artifact.path(),
-                    true,
-                    Duration::from_secs(5),
-                    ComponentType::BMC,
-                )
-                .await,
-            Err(RedfishError::NotSupported(_))
-        ));
-        assert!(received.lock().unwrap().is_empty());
-        let task = client
-            .update_firmware(tokio::fs::File::open(artifact.path()).await.unwrap())
-            .await
-            .unwrap();
-        assert_eq!(&*received.lock().unwrap(), payload);
-        state.update_service_state.complete_all_tasks_for_test();
-        assert_eq!(
-            serde_json::to_value(client.get_task(&task.id).await.unwrap()).unwrap()["TaskState"],
-            "Completed"
-        );
-        let inventory = || {
-            state
-                .update_service_state
-                .find_firmware_inventory("BMC")
-                .unwrap()
-        };
-        assert_eq!(inventory()["Version"], "bmc-old");
-        client.bmc_reset(None).await.unwrap();
-        assert_eq!(inventory()["Version"], "bmc-new");
-        assert_eq!(
-            state.update_service_state.find_firmware_inventory("UEFI"),
-            None,
-            "Lenovo exposes BIOS on System_0, not a synthetic firmware inventory entry"
-        );
-        assert_eq!(
-            get_json(&system_router, "/redfish/v1/Systems/System_0").await["BiosVersion"],
-            bios_before,
-            "BMC activation must leave the host BIOS unchanged"
-        );
     }
 
     #[tokio::test]

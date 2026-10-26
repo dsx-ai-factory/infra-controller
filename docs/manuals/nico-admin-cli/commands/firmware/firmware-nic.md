@@ -45,6 +45,10 @@ Print help (see a summary with -h)
 ```sh
 nico-admin-cli firmware nic profile list
 nico-admin-cli --format json firmware nic profile show connectx-production
+nico-admin-cli firmware nic site list
+nico-admin-cli firmware nic tenant show --tenant-org-id fds34511233a
+nico-admin-cli firmware nic machine show fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
+nico-admin-cli firmware nic desired fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
 ```
 
 ## Subcommands
@@ -52,6 +56,10 @@ nico-admin-cli --format json firmware nic profile show connectx-production
 | Subcommand | Description |
 |---|---|
 | [`profile`](./firmware-nic-profile.md) | Manage NIC firmware profile definitions in Core |
+| [`site`](./firmware-nic-site.md) | Manage site-wide NIC firmware selections |
+| [`tenant`](./firmware-nic-tenant.md) | Manage tenant NIC firmware profile selections |
+| [`machine`](./firmware-nic-machine.md) | Manage machine and card NIC firmware configuration |
+| [`desired`](./firmware-nic-desired.md) | Show desired NIC firmware and selection diagnostics |
 
 ---
 

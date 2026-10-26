@@ -1921,9 +1921,29 @@ async fn test_can_not_create_2_instances_with_same_id(_: PgPoolOptions, options:
         )
         .await;
 
-    // TODO: Do not leak the full database error to users
     let err = result.expect_err("Expect instance creation to fail");
-    assert!(err.message().contains("Database Error: error returned from database: duplicate key value violates unique constraint \"instances_pkey\""));
+    assert_eq!(err.code(), tonic::Code::Internal);
+    assert_eq!(
+        err.message(),
+        "internal database error: duplicate key value violates unique constraint"
+    );
+    assert_eq!(
+        err.metadata().get("nico-error-text").unwrap(),
+        "internal database error: duplicate key value violates unique constraint"
+    );
+    let source = std::error::Error::source(&err)
+        .unwrap()
+        .downcast_ref::<crate::errors::CarbideErrorWithLocation>()
+        .unwrap();
+    assert_eq!(source.error.pg_sqlstate().as_deref(), Some("23505"));
+    assert!(!source.error.is_retryable_transaction_error());
+    let crate::errors::CarbideError::DBError(annotated) = &source.error else {
+        panic!("expected the original database error: {source:?}");
+    };
+    let sqlx::Error::Database(database_error) = &annotated.source else {
+        panic!("expected a database constraint error: {annotated:?}");
+    };
+    assert_eq!(database_error.constraint(), Some("instances_pkey"));
 }
 
 #[crate::sqlx_test]
@@ -5869,6 +5889,7 @@ async fn test_combined_service_and_network_update_preserves_deletion_lock_order(
     let service = env
         .api
         .create_dpu_extension_service(Request::new(rpc::forge::CreateDpuExtensionServiceRequest {
+            deployment_type: 0,
             dpu_target: None,
             service_vpc_interfaces: vec![],
             service_id: None,
@@ -8899,7 +8920,14 @@ async fn create_bf4_astra_host(env: &TestEnv, cx9_mac_suffix: u8) -> TestManaged
     // Keep parallel hosts distinct while adding the expected-machine signal used with the
     // persisted BF4 product.
     expected_machine.data.interfaces.push(ExpectedInterface {
-        mac_address: mac_address::MacAddress::from([0x02, 0, 0, 0, 0, cx9_mac_suffix]),
+        mac_address: Some(mac_address::MacAddress::from([
+            0x02,
+            0,
+            0,
+            0,
+            0,
+            cx9_mac_suffix,
+        ])),
         nic_type: Some("CX9".to_string()), // Drives profile classification with the DPU product.
         ..ExpectedInterface::default()
     });
@@ -9339,6 +9367,7 @@ async fn create_networked_dpf_service(
             data: TEST_DPF_HELM_SERVICE_DATA.to_string(),
             credential: None,
             observability: None,
+            deployment_type: 0,
         }))
         .await?
         .into_inner())
@@ -9466,6 +9495,7 @@ async fn test_allocate_instance_with_extension_services(
                 data: create_dpu_extension_service_data("test-service"),
                 credential: None,
                 observability: None,
+                deployment_type: 0,
             },
         ))
         .await?
@@ -9580,6 +9610,7 @@ async fn test_allocate_instance_rejects_networked_service_without_vpc_selection(
             data: TEST_DPF_HELM_SERVICE_DATA.to_string(),
             credential: None,
             observability: None,
+            deployment_type: 0,
         }))
         .await?
         .into_inner();
@@ -9690,6 +9721,7 @@ async fn test_update_instance_rejects_new_networked_attachment_before_reconcilia
             data: TEST_DPF_HELM_SERVICE_DATA.to_string(),
             credential: None,
             observability: None,
+            deployment_type: 0,
         }))
         .await?
         .into_inner();
@@ -10182,6 +10214,7 @@ async fn create_dpu_extension_services(
                 data: create_dpu_extension_service_data("test-service1-v1"),
                 credential: None,
                 observability: None,
+                deployment_type: 0,
             },
         ))
         .await?
@@ -10219,6 +10252,7 @@ async fn create_dpu_extension_services(
                 data: create_dpu_extension_service_data("test-service2-v1"),
                 credential: None,
                 observability: None,
+                deployment_type: 0,
             },
         ))
         .await?
@@ -10238,6 +10272,7 @@ async fn create_dpu_extension_services(
                 data: create_dpu_extension_service_data("test-service3-v1"),
                 credential: None,
                 observability: None,
+                deployment_type: 0,
             },
         ))
         .await?

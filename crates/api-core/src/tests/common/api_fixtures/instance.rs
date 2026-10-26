@@ -225,6 +225,7 @@ pub(in crate::tests) async fn seed_service_vpc_endpoint(
         .api
         .create_dpu_extension_service(tonic::Request::new(
             rpc::forge::CreateDpuExtensionServiceRequest {
+                deployment_type: 0,
                 dpu_target: None,
                 service_vpc_interfaces: vec![],
                 service_id: Some(service_id.to_string()),

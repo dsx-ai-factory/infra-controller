@@ -320,6 +320,10 @@ fn format_markdown_links(md: &str) -> String {
         "[Core PATCH RPCs](https://github.com/dsx-ai-factory/infra-controller/pull/6359)",
     )
     .replace(
+        "https://github.com/dsx-ai-factory/infra-controller/issues/6686",
+        "[issue #6686](https://github.com/dsx-ai-factory/infra-controller/issues/6686)",
+    )
+    .replace(
         "https://host:50051",
         "[https://host:50051](https://host:50051)",
     )
@@ -577,6 +581,8 @@ fn intro(d: CliDomain) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::value_scenarios;
+
     use super::{
         BIN, clean_pandoc_markdown, command_tree, format_markdown_links, replace_synopsis,
         uses_clap_synopsis,
@@ -591,12 +597,20 @@ mod tests {
         );
     }
 
+    /// Known reference URLs become labeled Markdown links.
     #[test]
     fn bare_urls_become_valid_markdown_links() {
-        let markdown = "See https://docs.rs/duration-str/latest/duration_str/, https://grafana.example.com, https://host:50051, or https://github.com/NVIDIA/infra-controller/blob/main/docs/configuration/tenant_management.md#phone-home.";
-        assert_eq!(
-            format_markdown_links(markdown),
-            "See [duration-str documentation](https://docs.rs/duration-str/latest/duration_str/), [https://grafana.example.com](https://grafana.example.com), [https://host:50051](https://host:50051), or [Phone-home](../../../../configuration/tenant_management.md#phone-home)."
+        value_scenarios!(format_markdown_links:
+            // Multiple replacements preserve the surrounding prose and punctuation.
+            "reference URLs in prose" {
+                "See https://docs.rs/duration-str/latest/duration_str/, https://grafana.example.com, https://host:50051, or https://github.com/NVIDIA/infra-controller/blob/main/docs/configuration/tenant_management.md#phone-home." =>
+                    "See [duration-str documentation](https://docs.rs/duration-str/latest/duration_str/), [https://grafana.example.com](https://grafana.example.com), [https://host:50051](https://host:50051), or [Phone-home](../../../../configuration/tenant_management.md#phone-home).".to_string(),
+            }
+            // Parentheses around the issue URL survive its link conversion.
+            "parenthesized issue URL" {
+                "(https://github.com/dsx-ai-factory/infra-controller/issues/6686)" =>
+                    "([issue #6686](https://github.com/dsx-ai-factory/infra-controller/issues/6686))".to_string(),
+            }
         );
     }
 

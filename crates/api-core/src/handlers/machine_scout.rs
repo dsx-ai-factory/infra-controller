@@ -17,12 +17,13 @@
 use ::rpc::forge::ForgeAgentControlResponse;
 use ::rpc::model::machine::get_action_for_dpu_state;
 use ::rpc::{forge as rpc, forge_agent_control_response as fac, scout_firmware_upgrade as sfu};
-use carbide_uuid::machine::{HostOrDpuId, MachineId, MachineIdSubtype};
+use carbide_uuid::machine::{DpuMachineId, HostOrDpuId, MachineId, MachineIdSubtype};
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
     BomValidating, CleanupContext, CleanupState, DecommissioningState, DeconfiguringHostState,
-    FailureCause, FailureDetails, FailureSource, HostReprovisionState, InstanceState, MachineState,
-    MachineValidatingState, ManagedHostState, MeasuringState, StateMachineArea, ValidationState,
+    FailureCause, FailureDetails, FailureSource, HostMachine, HostReprovisionState, InstanceState,
+    MachineState, MachineValidatingState, ManagedHostState, MeasuringState, StateMachineArea,
+    ValidationState,
 };
 use tonic::{Request, Response, Status};
 
@@ -173,35 +174,46 @@ pub(crate) async fn forge_agent_control(
     let machine_id: MachineId =
         convert_and_log_machine_id(request.into_inner().machine_id.as_ref())?;
 
-    let (machine, mut txn) = api
-        .load_machine(&machine_id, MachineSearchConfig::default())
-        .await?;
-
-    let dpu_machine_id = carbide_uuid::machine::DpuMachineId::try_from(machine.id);
-    let host_machine = if let Ok(dpu_machine_id) = &dpu_machine_id {
-        db::machine::find_host_by_dpu_machine_id(&mut txn, dpu_machine_id)
-            .await?
+    let (action, maybe_pending_txn) = if let Ok(dpu_machine_id) = DpuMachineId::try_from(machine_id)
+    {
+        let mut txn = api.txn_begin().await.map_err(CarbideError::from)?;
+        let dpu_machine_id = match db::machine::find_dpu_id(&mut txn, &dpu_machine_id).await {
+            Err(error) => {
+                tracing::warn!(%machine_id, error = %error, "failed loading machine");
+                return Err(CarbideError::from(error).into());
+            }
+            Ok(None) => {
+                tracing::info!(%machine_id, "machine not found");
+                return Err(CarbideError::NotFoundError {
+                    kind: "machine",
+                    id: machine_id.to_string(),
+                }
+                .into());
+            }
+            Ok(Some(id)) => id,
+        };
+        let state = db::machine::lookup_host_state_by_dpu_machine_id(&mut txn, &dpu_machine_id)
+            .await
+            .map_err(CarbideError::from)?
             .ok_or(CarbideError::NotFoundError {
                 kind: "machine",
                 id: machine_id.to_string(),
-            })?
-    } else {
-        db::machine::update_scout_contact_time(&machine_id, &mut txn).await?;
-        machine
-            .clone()
-            .try_into()
-            .map_err(|error| CarbideError::internal(format!("invalid host machine: {error}")))?
-    };
-
-    // Respond based on machine current state
-    let state = host_machine.current_state();
-
-    let (action, maybe_pending_txn) = if let Ok(dpu_machine_id) = &dpu_machine_id {
+            })?;
         (
-            get_action_for_dpu_state(state, dpu_machine_id).map_err(CarbideError::from)?,
+            get_action_for_dpu_state(&state, &dpu_machine_id).map_err(CarbideError::from)?,
             Some(txn),
         )
     } else {
+        let (machine, mut txn) = api
+            .load_machine(&machine_id, MachineSearchConfig::default())
+            .await?;
+        db::machine::update_scout_contact_time(&machine_id, &mut txn)
+            .await
+            .map_err(CarbideError::from)?;
+        let host_machine = HostMachine::try_from(machine.clone())
+            .map_err(|error| CarbideError::internal(format!("invalid host machine: {error}")))?;
+        let state = host_machine.current_state();
+
         match state {
             ManagedHostState::HostInit {
                 machine_state: MachineState::Init,
@@ -451,7 +463,7 @@ pub(crate) async fn forge_agent_control(
     };
 
     tracing::info!(
-        machine_id = %machine.id,
+        %machine_id,
         action = action.as_str_name(),
         "forge agent control",
     );

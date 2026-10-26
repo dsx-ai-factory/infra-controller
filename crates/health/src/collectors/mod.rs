@@ -35,6 +35,8 @@ mod sensors;
 mod telemetry;
 
 pub use discovery::{EntityDiscoveryCollector, EntityDiscoveryCollectorConfig};
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use entity_metrics::catalogue_samples;
 pub use entity_metrics::{MetricsCollector, MetricsCollectorConfig};
 pub use firmware::{FirmwareCollector, FirmwareCollectorConfig};
 pub use gpu_inventory::{GpuInventoryCollector, GpuInventoryCollectorConfig};

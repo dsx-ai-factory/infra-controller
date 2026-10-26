@@ -62,6 +62,7 @@ pub const LABEL_LOCATION_DATACENTER: &str = "location.datacenter";
 pub const LABEL_LOCATION_ROOM: &str = "location.room";
 pub const LABEL_LOCATION_POSITION: &str = "location.position";
 
+/// A managed rack and its persisted controller state.
 #[derive(Debug, Clone)]
 pub struct Rack {
     pub id: RackId,
@@ -350,14 +351,32 @@ pub fn derive_rack_aggregate_health(sources: &HealthReportSources) -> health_rep
     output
 }
 
+/// SQL `NULL` maps to `None` for `controller_state_outcome`,
+/// `firmware_upgrade_job`, and `nvos_update_job`, and to empty `health_reports`.
+/// Only `controller_state_outcome` also accepts exactly `{}` as `None` for legacy
+/// rows. JSON values incompatible with the field's model, including JSON `null`,
+/// return [`sqlx::Error::ColumnDecode`] with the column and deserialization error.
 impl<'r> FromRow<'r, PgRow> for Rack {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         let config: sqlx::types::Json<RackConfig> = row.try_get("config")?;
         let controller_state: sqlx::types::Json<RackState> = row.try_get("controller_state")?;
-        let controller_state_outcome: Option<sqlx::types::Json<PersistentStateHandlerOutcome>> =
-            row.try_get("controller_state_outcome").ok();
+        let controller_state_outcome: Option<sqlx::types::Json<serde_json::Value>> =
+            row.try_get("controller_state_outcome")?;
+        let controller_state_outcome = match controller_state_outcome {
+            None => None,
+            // Older `create_with_group` writers store `{}` without an `outcome`
+            // tag. Keep this exception while those writers can run or stored
+            // `{}` rows remain.
+            Some(sqlx::types::Json(serde_json::Value::Object(object))) if object.is_empty() => None,
+            Some(sqlx::types::Json(value)) => Some(serde_json::from_value(value).map_err(
+                |source| sqlx::Error::ColumnDecode {
+                    index: "\"controller_state_outcome\"".to_string(),
+                    source: Box::new(source),
+                },
+            )?),
+        };
         let health_reports: HealthReportSources = row
-            .try_get::<sqlx::types::Json<HealthReportSources>, _>("health_reports")
+            .try_get::<Option<sqlx::types::Json<HealthReportSources>>, _>("health_reports")?
             .map(|j| j.0)
             .unwrap_or_default();
         let labels: sqlx::types::Json<HashMap<String, String>> = row.try_get("labels")?;
@@ -367,14 +386,10 @@ impl<'r> FromRow<'r, PgRow> for Rack {
             labels: labels.0,
         };
         let firmware_upgrade_job: Option<FirmwareUpgradeJob> = row
-            .try_get::<Option<sqlx::types::Json<FirmwareUpgradeJob>>, _>("firmware_upgrade_job")
-            .ok()
-            .flatten()
+            .try_get::<Option<sqlx::types::Json<FirmwareUpgradeJob>>, _>("firmware_upgrade_job")?
             .map(|j| j.0);
         let nvos_update_job: Option<NvosUpdateJob> = row
-            .try_get::<Option<sqlx::types::Json<NvosUpdateJob>>, _>("nvos_update_job")
-            .ok()
-            .flatten()
+            .try_get::<Option<sqlx::types::Json<NvosUpdateJob>>, _>("nvos_update_job")?
             .map(|j| j.0);
         Ok(Rack {
             id: row.try_get("id")?,
@@ -385,7 +400,7 @@ impl<'r> FromRow<'r, PgRow> for Rack {
                 value: controller_state.0,
                 version: row.try_get("controller_state_version")?,
             },
-            controller_state_outcome: controller_state_outcome.map(|o| o.0),
+            controller_state_outcome,
             firmware_upgrade_job,
             nvos_update_job,
             health_reports,

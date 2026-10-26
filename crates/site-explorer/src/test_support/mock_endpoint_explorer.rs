@@ -86,6 +86,7 @@ pub struct MockEndpointExplorer {
     /// mode) so tests can assert the auto-correct path fired with the
     /// right arguments.
     pub set_nic_mode_calls: Arc<Mutex<Vec<(SocketAddr, BlueFieldOperatingMode)>>>,
+    next_set_nic_mode_error: Arc<Mutex<Option<EndpointExplorationError>>>,
     /// Records each call to `explore_endpoint`.
     pub explore_endpoint_calls: Arc<Mutex<Vec<EndpointExplorationCall>>>,
     next_exploration_blocker: Arc<Mutex<Option<MockEndpointExplorationBlocker>>>,
@@ -105,6 +106,7 @@ impl Default for MockEndpointExplorer {
             redfish_chassis_reset_calls: Arc::default(),
             power_control_failures: Arc::default(),
             set_nic_mode_calls: Arc::default(),
+            next_set_nic_mode_error: Arc::default(),
             explore_endpoint_calls: Arc::default(),
             next_exploration_blocker: Arc::default(),
             redfish_backend: None,
@@ -113,6 +115,11 @@ impl Default for MockEndpointExplorer {
 }
 
 impl MockEndpointExplorer {
+    /// Reject the next mode-setting request with the supplied transient error.
+    pub fn fail_next_set_nic_mode(&self, error: EndpointExplorationError) {
+        *self.next_set_nic_mode_error.lock().unwrap() = Some(error);
+    }
+
     pub fn explore_endpoint_call_count(&self) -> usize {
         self.explore_endpoint_calls.lock().unwrap().len()
     }
@@ -362,6 +369,9 @@ impl AuthenticatedBmc for MockEndpointExplorer {
             .lock()
             .unwrap()
             .push((address, mode));
+        if let Some(error) = self.next_set_nic_mode_error.lock().unwrap().take() {
+            return Err(error);
+        }
         Ok(())
     }
 

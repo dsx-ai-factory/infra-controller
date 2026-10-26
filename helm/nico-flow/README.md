@@ -113,6 +113,14 @@ helm upgrade flow ./helm/nico-flow \
 On Helm 4, add `--force-conflicts` after `--reset-then-reuse-values` when the
 chart version changes.
 
+Overrides applied this way do not survive a `helm-prereqs/setup.sh` re-run.
+Every run resets the release to the chart defaults plus the image and
+pull-secret settings. To keep them, put the overrides in a values file and pass
+it with `setup.sh --flow-values <file>`. That file must not set
+`namespaceOverride`, because `setup.sh` and the NICo REST site-agent address
+Flow in the `flow` namespace. Refer to
+[helm-prereqs/README.md](../../helm-prereqs/README.md#setup-options).
+
 Confirm the rendered file after the rollout:
 
 ```bash

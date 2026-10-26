@@ -145,8 +145,8 @@ async fn initializing_requires_only_the_primary_nvos_port_to_be_associated(
     assert!(matches!(
         switch.controller_state.value,
         SwitchControllerState::Configuring {
-            config_state: ConfiguringState::ConfigureCertificate {
-                configure_certificate: ConfigureCertificateState::Start,
+            config_state: ConfiguringState::DisableMtls {
+                disable_mtls: model::switch::DisableMtlsState::Start,
             },
         }
     ));
@@ -371,7 +371,9 @@ pub(super) async fn run_switch_controller_with_services(
         .state_handler(Arc::new(SwitchStateHandler::default()))
         .build_for_manual_iterations(cancel_token)
         .unwrap();
-    controller.run_single_iteration().await;
+    // Keep intermediate-state assertions independent of task completion order.
+    // Follow-up transitions run on the next explicit iteration.
+    controller.run_single_iteration_ext(false).await;
 }
 
 /// Builds a component manager around the provided NVSwitch manager.
@@ -964,7 +966,9 @@ async fn test_configure_certificate_wait_for_complete_transitions_to_error_on_fa
         .expect("switch should exist");
     assert!(matches!(
         switch.controller_state.value,
-        SwitchControllerState::Error { ref cause } if cause == "cert install failed"
+        SwitchControllerState::Error { ref cause }
+            if cause.contains("cert install failed")
+                && cause.contains("mTLS restoration is incomplete")
     ));
 
     Ok(())
@@ -1090,7 +1094,7 @@ async fn test_switch_deletion_with_state_controller(
 }
 
 /// Tests the entire Switch ControllerState transition flow: Initializing -> Configuring
-/// (ConfigureCertificate) -> Configuring (RotateOsPassword) -> FetchInfo
+/// (DisableMtls) -> Configuring (ConfigureCertificate) -> Configuring (RotateOsPassword) -> FetchInfo
 /// -> Validating (ValidationComplete) -> BomValidating (BomValidationComplete) -> Ready.
 /// state handler performs its transition.
 #[sqlx_test]
@@ -1156,6 +1160,7 @@ async fn test_switch_entire_state_transition_flow(
         .unwrap();
 
     // iterate a few times
+    controller.run_single_iteration().await;
     controller.run_single_iteration().await;
     controller.run_single_iteration().await;
     controller.run_single_iteration().await;

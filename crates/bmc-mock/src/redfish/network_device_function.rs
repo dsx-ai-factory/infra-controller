@@ -17,11 +17,8 @@
 
 use std::borrow::Cow;
 
-use serde_json::json;
-
-use crate::json::{JsonExt, JsonPatch};
+use super::schema::network_device_function::NetworkDeviceFunction as NetworkDeviceFunctionModel;
 use crate::redfish;
-use crate::redfish::Builder;
 
 pub(crate) fn chassis_collection(
     chassis_id: &str,
@@ -49,18 +46,21 @@ pub(crate) fn chassis_resource<'a>(
     );
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
-        odata_type: Cow::Borrowed("#NetworkDeviceFunction.v1_7_0.NetworkDeviceFunction"),
+        odata_type: Cow::Borrowed(
+            redfish::schema::network_device_function::NetworkDeviceFunction::ODATA_TYPE,
+        ),
         id: Cow::Borrowed(function_id),
         name: Cow::Borrowed("NetworkDeviceFunction"),
     }
 }
 
 /// Get builder of the network device function.
-pub(crate) fn builder(resource: &redfish::Resource) -> NetworkDeviceFunctionBuilder {
-    NetworkDeviceFunctionBuilder {
-        id: Cow::Owned(resource.id.to_string()),
-        value: resource.json_patch(),
-    }
+pub(crate) fn builder(resource: &redfish::Resource) -> NetworkDeviceFunctionModel {
+    NetworkDeviceFunctionModel::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        resource.name.as_ref(),
+    )
 }
 
 pub(crate) struct NetworkDeviceFunction {
@@ -74,33 +74,11 @@ impl NetworkDeviceFunction {
     }
 }
 
-pub(crate) struct NetworkDeviceFunctionBuilder {
-    id: Cow<'static, str>,
-    value: serde_json::Value,
-}
-
-impl Builder for NetworkDeviceFunctionBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-            id: self.id,
-        }
-    }
-}
-
-impl NetworkDeviceFunctionBuilder {
-    pub(crate) fn ethernet(self, v: serde_json::Value) -> Self {
-        self.apply_patch(json!({ "Ethernet": v }))
-    }
-
-    pub(crate) fn oem(self, v: serde_json::Value) -> Self {
-        self.apply_patch(json!({ "Oem": v }))
-    }
-
+impl NetworkDeviceFunctionModel {
     pub(crate) fn build(self) -> NetworkDeviceFunction {
         NetworkDeviceFunction {
-            id: self.id,
-            value: self.value,
+            id: Cow::Owned(self.id.clone()),
+            value: serde_json::to_value(self).expect("generated Redfish model is serializable"),
         }
     }
 }

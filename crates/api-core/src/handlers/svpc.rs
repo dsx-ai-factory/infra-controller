@@ -19,6 +19,7 @@ use std::borrow::Cow;
 
 use ::rpc::protos::mlx_device as mlx_device_pb;
 use carbide_host_support::dpa_cmds::{DpaCommand, DpaDeviceCommand, OpCode};
+use carbide_libmlx_model::firmware::operation::{FirmwareOperation, FirmwareOperationState};
 use carbide_uuid::machine::HostMachineId;
 use db::dpa_interface;
 use eyre::eyre;
@@ -26,8 +27,8 @@ use libmlx::device::report::MlxDeviceReport;
 use libmlx::profile::serialization::SerializableProfile;
 use mac_address::MacAddress;
 use model::dpa_interface::{
-    CardState, DpaInterface, DpaInterfaceControllerState, DpaInterfaceType, DpaLockMode,
-    DpaSearchConfig, NewDpaInterface,
+    DpaInterface, DpaInterfaceControllerState, DpaInterfaceType, DpaLockMode, DpaSearchConfig,
+    NewDpaInterface,
 };
 use rpc::forge_agent_control_response as fac;
 use rpc::forge_agent_control_response::MlxDeviceAction;
@@ -396,6 +397,7 @@ fn build_apply_firmware_command<'a>(
     DpaCommand {
         op: OpCode::ApplyFirmware {
             profile: profile.map(Box::new),
+            operation_id: sn.firmware_operation_id(),
         },
     }
 }
@@ -572,17 +574,14 @@ async fn process_mlx_observation(
         )));
     };
 
-    let dpa_search_config = DpaSearchConfig {
-        only_svpc: true,
-        only_astra: false,
-    };
-
-    let dpa_snapshots = db::dpa_interface::find_by_machine_id(
+    // The row locks cover both the read and every dependent write. Each later
+    // observation also merges into this request's accumulated state, not the
+    // snapshot from before its preceding observations were applied.
+    let mut dpa_snapshots = db::dpa_interface::find_svpc_by_machine_id_for_update(
         &mut txn,
         machine_id.try_into().map_err(|error| {
             CarbideError::InvalidArgument(format!("invalid host machine ID: {error}"))
         })?,
-        dpa_search_config,
     )
     .await?;
 
@@ -609,25 +608,52 @@ async fn process_mlx_observation(
         )));
     }
 
+    let mut firmware_attention_changes = Vec::new();
     for obs in rep.observations {
-        let Some(devinfo) = obs.device_info else {
-            tracing::error!(
-                %machine_id,
-                "MLX device observation contains no device info",
-            );
-            continue;
-        };
-
-        let mut dpa = match get_dpa_by_mac(&devinfo, &dpa_snapshots) {
-            Ok(dpa) => dpa,
-            Err(e) => {
-                tracing::error!(
-                    pci_name = %devinfo.pci_name,
-                    mac_address = %devinfo.base_mac,
-                    error = %e,
-                    "DPA interface not found",
+        // The operation ID identifies a card without a device query during a
+        // burn. A stale receipt may still accompany useful device observations.
+        let operation_index = obs.firmware_operation.as_ref().and_then(|operation| {
+            dpa_snapshots
+                .iter()
+                .position(|dpa| dpa.firmware_operation_id() == operation.operation_id)
+        });
+        let dpa = if let Some(index) = operation_index {
+            let dpa = &mut dpa_snapshots[index];
+            // An operation can identify the card without a device query, but
+            // supplied device info must agree before we merge lock/profile data.
+            if let Some(devinfo) = obs.device_info.as_ref()
+                && devinfo.base_mac.parse::<MacAddress>().ok() != Some(dpa.mac_address)
+            {
+                tracing::warn!(
+                    %machine_id,
+                    dpa_interface_id = %dpa.id,
+                    expected_mac_address = %dpa.mac_address,
+                    reported_mac_address = %devinfo.base_mac,
+                    "ignoring MLX observation with conflicting card identities",
                 );
                 continue;
+            }
+            dpa
+        } else {
+            let Some(devinfo) = obs.device_info else {
+                tracing::warn!(
+                    %machine_id,
+                    operation_id = ?obs.firmware_operation.as_ref().map(|operation| &operation.operation_id),
+                    "MLX device observation has neither device info nor a matching firmware attempt",
+                );
+                continue;
+            };
+            match get_dpa_by_mac(&devinfo, &mut dpa_snapshots) {
+                Ok(dpa) => dpa,
+                Err(e) => {
+                    tracing::error!(
+                        pci_name = %devinfo.pci_name,
+                        mac_address = %devinfo.base_mac,
+                        error = %e,
+                        "DPA interface not found",
+                    );
+                    continue;
+                }
             }
         };
 
@@ -642,29 +668,33 @@ async fn process_mlx_observation(
             continue;
         }
 
-        // Use the latest CardState we pulled from the database. If there
-        // isn't one, then initialize an empty one, for which we will now
-        // update with whatever the current observation is.
-        let mut cstate = dpa.card_state.unwrap_or(CardState {
-            lockmode: None,
-            profile: None,
-            profile_synced: None,
-            firmware_report: None,
-        });
+        let lock_status = match obs.lock_status.map(DpaLockMode::try_from).transpose() {
+            Ok(status) => status,
+            Err(error) => {
+                tracing::error!(%error, "Failed to convert DPA lock status");
+                continue;
+            }
+        };
 
-        if let Some(lock_status) = obs.lock_status {
-            let ls = match DpaLockMode::try_from(lock_status) {
-                Ok(ls) => ls,
-                Err(e) => {
-                    tracing::error!(
-                        error = %e,
-                        "Failed to convert DPA lock status",
-                    );
-                    continue;
-                }
-            };
+        let expected_operation_id = dpa.firmware_operation_id();
+        let is_applying_firmware =
+            dpa.controller_state.value == DpaInterfaceControllerState::ApplyFirmware;
+        let cstate = dpa.card_state.get_or_insert_default();
 
-            cstate.lockmode = Some(ls);
+        // A new ApplyFirmware entry cannot inherit an earlier attempt's success.
+        // Later card states retain the completed report for diagnostics.
+        if is_applying_firmware
+            && cstate
+                .firmware_operation
+                .as_ref()
+                .is_some_and(|operation| operation.operation_id != expected_operation_id)
+        {
+            cstate.firmware_operation = None;
+            cstate.firmware_report = None;
+        }
+
+        if let Some(lock_status) = lock_status {
+            cstate.lockmode = Some(lock_status);
         }
 
         if obs.profile_name.is_some() {
@@ -675,27 +705,79 @@ async fn process_mlx_observation(
             cstate.profile_synced = obs.profile_synced;
         }
 
-        // If the observation contains a FirmwareFlashReport update
-        // in it, then merge it into the latest CardState that we
-        // pulled from the database.
-        if let Some(firmware_report) = obs.firmware_report {
-            cstate.firmware_report = Some(firmware_report.into());
-        }
-
-        dpa.card_state = Some(cstate);
-
-        match dpa_interface::update_card_state(&mut txn, dpa).await {
-            Ok(_id) => (),
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "Failed to update DPA card state",
-                );
+        if let Some(operation) = obs.firmware_operation {
+            match FirmwareOperation::try_from(operation) {
+                Ok(operation)
+                    if is_applying_firmware && operation.operation_id == expected_operation_id =>
+                {
+                    let needs_attention = matches!(
+                        operation.state,
+                        FirmwareOperationState::Failed
+                            | FirmwareOperationState::Interrupted
+                            | FirmwareOperationState::ManualIntervention
+                            | FirmwareOperationState::Canceled
+                    ) || (operation.state
+                        == FirmwareOperationState::Complete
+                        && !operation.is_complete());
+                    let unchanged = cstate.firmware_operation.as_ref().is_some_and(|previous| {
+                        previous.operation_id == operation.operation_id
+                            && previous.state == operation.state
+                            && previous.phase == operation.phase
+                            && previous.is_complete() == operation.is_complete()
+                    });
+                    if needs_attention && !unchanged {
+                        firmware_attention_changes.push((dpa.id, operation.clone()));
+                    }
+                    // Older Core readers advance on `flashed` and `reset` alone,
+                    // so a burn cannot imply completion before verification.
+                    // Legacy `flashed` also covers completed no-work requests;
+                    // the nested receipt keeps the actual burn result.
+                    let mut legacy_report = operation.report.clone();
+                    legacy_report.flashed = operation.is_complete();
+                    cstate.firmware_report = Some(legacy_report);
+                    cstate.firmware_operation = Some(operation);
+                }
+                Ok(operation) => tracing::warn!(
+                    dpa_interface_id = %dpa.id,
+                    operation_id = %operation.operation_id,
+                    %expected_operation_id,
+                    "ignoring firmware result from another controller-state entry"
+                ),
+                Err(error) => tracing::warn!(
+                    dpa_interface_id = %dpa.id,
+                    %error,
+                    "ignoring invalid firmware receipt while retaining other observations"
+                ),
+            }
+        } else if cstate.firmware_operation.is_none() {
+            // Legacy reports remain useful until a correlated receipt exists.
+            // They cannot replace its phase evidence or complete ApplyFirmware.
+            if let Some(firmware_report) = obs.firmware_report {
+                cstate.firmware_report = Some(firmware_report.into());
             }
         }
+
+        // A failed statement aborts this transaction; do not acknowledge a
+        // batch whose receipts were not committed.
+        dpa_interface::update_card_state(&mut txn, dpa.clone()).await?;
     }
 
     txn.commit().await?;
+
+    // Report committed transitions, not every poll of the same stopped attempt
+    // or a batch rolled back after a later observation failed to persist.
+    for (dpa_interface_id, operation) in firmware_attention_changes {
+        let operation_phase = operation.phase.map(|phase| format!("{phase:?}"));
+        tracing::warn!(
+            %machine_id,
+            %dpa_interface_id,
+            operation_id = %operation.operation_id,
+            operation_state = ?operation.state,
+            operation_phase = operation_phase.as_deref(),
+            operation_diagnostic = operation.diagnostic.as_deref(),
+            "NIC firmware operation requires operator attention",
+        );
+    }
 
     Ok(())
 }
@@ -908,10 +990,12 @@ pub(crate) async fn publish_mlx_observation_report(
 /// Find the DPA object in the given slice of DPA objects which matches the MAC
 /// address in the device info. Linear search is fine because the slice is
 /// expected to contain fewer than a dozen entries.
-fn get_dpa_by_mac(devinfo: &MlxDeviceInfo, dpas: &[DpaInterface]) -> CarbideResult<DpaInterface> {
-    dpas.iter()
+fn get_dpa_by_mac<'a>(
+    devinfo: &MlxDeviceInfo,
+    dpas: &'a mut [DpaInterface],
+) -> CarbideResult<&'a mut DpaInterface> {
+    dpas.iter_mut()
         .find(|dpa| dpa.mac_address.to_string() == devinfo.base_mac)
-        .cloned()
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "mac_addr",
             id: devinfo.base_mac.to_string(),

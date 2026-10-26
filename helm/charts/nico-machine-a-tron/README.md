@@ -112,7 +112,7 @@ rm -f "$dockerconfig"
 | Mode | Use Case | Real HW Compatible | Network Setup |
 |------|----------|--------------------|---------------|
 | **Override Mode** | Development | No | Simple - single endpoint |
-| **Controller Mode** | Scale testing | Yes | Per-BMC Service, BMC IP as externalIP (controller-managed) |
+| **Controller Mode** | Scale testing | Yes | BMC IPs as Service externalIPs (controller-managed): one Service per BMC, or two per pod with `serviceGranularity: pod` |
 
 **Default:** Override Mode (controller disabled, single pod).
 
@@ -174,7 +174,11 @@ in the gateway README.
 The controller image ships both binaries: `dev/k8s/machine-a-tron-controller/Dockerfile`
 builds the Go controller and `mat-protocol-gateway` from the repository root,
 and the `mat-k8s-controller` image published by this repository's CI is built
-from it. The gateway's listener certificate is issued through
+from it. By default, both containers use that image. To use a separate gateway
+image, set `mat-k8s-controller.gateway.image.repository` and `.tag`; each omitted
+or empty field inherits the corresponding controller image field. Both containers
+use `mat-k8s-controller.image.pullPolicy`. Tilt sets a separate gateway image.
+The gateway's listener certificate is issued through
 `global.certificate.issuerRef`. The gateway re-reads the mounted certificate
 and key every 30 seconds, so a renewed certificate is served without a
 container restart. For its inventory, rack status, and RMS requests to the
@@ -348,7 +352,9 @@ helm upgrade --install nico-machine-a-tron ./helm/charts/nico-machine-a-tron \
 1. Controller discovers machine-a-tron pods via
    `nvidia-infra-controller/mat-service=true` label
 2. Polls `/machines/status` from each discovered machine-a-tron instance
-3. Creates a Service per BMC with the BMC IP in `spec.externalIPs`
+3. Creates a Service per BMC with the BMC IP in `spec.externalIPs`, or with
+   `mat-k8s-controller.config.serviceGranularity: pod` two Services per pod
+   that carry every BMC and every NVOS address of that pod
 4. Services route traffic to correct pod via `nvidia-infra-controller/pod-name`
    selector
 5. Deletes stale Services when machines disappear
@@ -398,6 +404,54 @@ The `targetPort` is the Redfish listen port reported by machine-a-tron, which
 defaults to the configured `service.bmcMock.port` (1266). When IPMI simulation
 is enabled and the BMC reports `bmc.ipmi` in its status, the controller also
 adds a dynamic target UDP port for IPMI access.
+
+#### Per-pod Services
+
+Every Service takes one clusterIP from the cluster ServiceCIDR, so at device
+granularity a GB200 NVL72 rack costs 80 clusterIPs (71 BMCs and 9 switch NVOS
+endpoints) and a `/17` ServiceCIDR holds about 400 racks. With
+`mat-k8s-controller.config.serviceGranularity: pod` the controller publishes
+every BMC address of a pod in one `mat-bmc-pod-<pod>` Service on port 443 and
+every NVOS address in one `mat-nvos-pod-<pod>` Service on ports 9370 and 443,
+two clusterIPs per pod:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: mat-bmc-pod-mat-0
+  labels:
+    app.kubernetes.io/managed-by: mat-k8s-controller
+    nvidia-infra-controller/mat-machine-type: pod-bmc   # pod-nvos on the NVOS Service
+    nvidia-infra-controller/pod-name: mat-0
+  annotations:
+    nvidia-infra-controller/mat-redfish-listen-port: "1266"
+    nvidia-infra-controller/mat-published-addresses: "1775"
+spec:
+  type: ClusterIP
+  externalIPs:        # every leased BMC address of the pod, sorted
+  - 10.200.0.5
+  - 10.200.0.6
+  ports:
+  - name: redfish     # nmxc 9370 and nvue 443 on the NVOS Service
+    port: 443
+    targetPort: 1266
+    protocol: TCP
+  selector:
+    app.kubernetes.io/name: nico-machine-a-tron
+    nvidia-infra-controller/pod-name: mat-0
+```
+
+The data path is unchanged: kube-proxy forwards each address to the pod's
+shared listener and machine-a-tron selects the simulated BMC or rack by the
+authority of each request. The dynamic IPMI and SSH ports are not published
+at pod granularity; set `machineATron.mockBmcSshServer: false` and keep
+`machineATron.enableIpmiSimulation: false` so the pods start no consoles
+nothing can reach, or stay at `device` granularity when a client needs them.
+The controller README section
+[Per-pod Services](../../../dev/k8s/machine-a-tron-controller/README.md#per-pod-services)
+describes the name rules, the lease ramp, duplicate addresses, and the
+granularity switch.
 
 ### Requirements
 
@@ -469,6 +523,11 @@ kubectl -n nico-system logs -l app.kubernetes.io/name=mat-k8s-controller -f
 # List controller-created services
 kubectl -n nico-system get svc -l app.kubernetes.io/managed-by=mat-k8s-controller
 
+# At pod granularity the EXTERNAL-IP column holds every address of a pod;
+# list the Services with their address counts instead
+kubectl -n nico-system get svc -l app.kubernetes.io/managed-by=mat-k8s-controller \
+  -o custom-columns='NAME:.metadata.name,TYPE:.metadata.labels.nvidia-infra-controller/mat-machine-type,ADDRESSES:.metadata.annotations.nvidia-infra-controller/mat-published-addresses'
+
 # Check reconciliation stats
 kubectl -n nico-system logs -l app.kubernetes.io/name=mat-k8s-controller | \
 grep "reconciliation complete"
@@ -492,6 +551,23 @@ pods:
         underlayDhcpRelayAddress: "10.201.0.1"
 ```
 
+### Pod Placement
+
+Each pod is its own single-replica Deployment, so the scheduler sees no
+relation between them and can place most of a fleet on one node. With
+`topologySpread.enabled: true` every Deployment renders one
+`topologySpreadConstraints` entry that selects all pods of the release by the
+shared `app.kubernetes.io/name` and `app.kubernetes.io/component` labels, with
+`maxSkew: 1` on `kubernetes.io/hostname` by default:
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `topologySpread.enabled` | `false` | Render the constraint |
+| `topologySpread.maxSkew` | `1` | Largest allowed difference in pod count between two nodes |
+| `topologySpread.topologyKey` | `kubernetes.io/hostname` | Node label that defines a topology domain |
+| `topologySpread.whenUnsatisfiable` | `DoNotSchedule` | `DoNotSchedule` keeps a pod Pending rather than exceed `maxSkew`; `ScheduleAnyway` only prefers the spread |
+| `topologySpread.nodeTaintsPolicy` | `Honor` | `Honor` leaves tainted nodes, a cordoned one included, out of the skew count; `Ignore` counts them, and a cordon then leaves pods Pending. Needs Kubernetes 1.26 or later; older apiservers drop the field and count tainted nodes |
+
 ### IPMI/SOL Simulation
 
 Enable IPMI/SOL simulation to expose per-BMC IPMI endpoints for IPMI-capable
@@ -512,7 +588,7 @@ simulator's bound port.
 
 | Mode | IPMI Accessible? | Notes |
 |------|------------------|-------|
-| Controller mode (with `mat-k8s-controller`) | Yes | The controller creates per-BMC Services using each simulator's dynamic port. |
+| Controller mode (with `mat-k8s-controller`) | Yes, at `device` granularity | The controller creates per-BMC Services using each simulator's dynamic port; [per-pod Services](#per-pod-services) do not publish it. |
 | Shared-proxy mode (without `mat-k8s-controller`) | No | No per-BMC Services expose the dynamic IPMI ports. |
 
 > **Note:** IPMI ports are only added to Services for host machines with
@@ -765,6 +841,20 @@ recreated once, moving the address from `clusterIP` to `externalIPs`. While the
 BMC network still overlaps the ServiceCIDR, a recreated Service can be allocated
 another published BMC IP as its clusterIP and is recreated again on a later
 pass; the controller logs one warning per pass while this happens.
+
+### Changing the service granularity on a running fleet
+
+Switching `mat-k8s-controller.config.serviceGranularity` replaces every managed
+Service within one reconcile pass. The controller deletes every stale Service
+before it creates the first new one, so each simulated BMC and NVOS address is
+unreachable from its deletion until its replacement exists and kube-proxy has
+synced. NICo retries and recovers. The gap grows with the fleet. The
+controller's API client is limited to 100 requests per second with a burst of
+200, so deleting 20,000 per-device Services alone takes about three minutes
+before the first replacement can be created, and API errors and kube-proxy
+delay add to it. Plan a large cutover as a maintenance window. A pass that
+skipped deletions because a status fetch failed leaves the old Services, and
+their clusterIPs, in place until a clean pass.
 
 ### Invalid Peer Certificate After a Site Reprovision
 

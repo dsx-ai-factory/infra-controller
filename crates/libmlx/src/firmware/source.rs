@@ -20,6 +20,7 @@
 // different locations: local filesystem, HTTPS, and SSH.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use forge_ssh::ssh_client::{AuthConfig, HostKeyVerification, SshClientConfig};
 use tokio::io::AsyncWriteExt;
@@ -27,6 +28,10 @@ use tracing;
 
 use crate::firmware::credentials::Credentials;
 use crate::firmware::error::{FirmwareError, FirmwareResult};
+
+// Administrative network limit per artifact, matching the long firmware-command
+// budget. It includes connection, authentication, and the complete response.
+const SOURCE_TRANSFER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 // FirmwareSource represents a firmware binary location. Supported
 // source types are local filesystem, HTTPS, and SSH/SCP.
@@ -137,16 +142,20 @@ impl FirmwareSource {
         self
     }
 
-    // resolve resolves the firmware to a local file path, downloading
-    // or copying as necessary. The work_dir is used as a staging area
-    // for any files that need to be fetched from remote sources.
+    /// `resolve` returns a local file path, downloading remote artifacts into
+    /// `work_dir`. Each HTTP or SSH transfer has one 30-minute network deadline,
+    /// including connection, authentication, and the complete response, without
+    /// retries. Local disk writes finish outside that deadline because Tokio
+    /// filesystem work can continue after its future is dropped.
     pub async fn resolve(&self, work_dir: &Path) -> FirmwareResult<PathBuf> {
         match self {
             Self::Local { path } => resolve_local(path).await,
             Self::Http { url, credentials } => {
-                resolve_http(url, credentials.as_ref(), work_dir).await
+                resolve_http(url, credentials.as_ref(), work_dir, SOURCE_TRANSFER_TIMEOUT).await
             }
-            Self::Ssh(ssh_source) => resolve_ssh(ssh_source, work_dir, None).await,
+            Self::Ssh(ssh_source) => {
+                resolve_ssh(ssh_source, work_dir, None, SOURCE_TRANSFER_TIMEOUT).await
+            }
         }
     }
 
@@ -182,6 +191,7 @@ async fn resolve_http(
     url: &str,
     credentials: Option<&Credentials>,
     work_dir: &Path,
+    transfer_timeout: Duration,
 ) -> FirmwareResult<PathBuf> {
     // Extract filename from URL, falling back to a generic name.
     let filename = url::Url::parse(url)
@@ -220,23 +230,28 @@ async fn resolve_http(
         };
     }
 
-    let response = request
-        .send()
-        .await
-        .map_err(|e| FirmwareError::HttpError(format!("Failed to download from {url}: {e}")))?;
+    let bytes = tokio::time::timeout(transfer_timeout, async {
+        let response = request
+            .send()
+            .await
+            .map_err(|e| FirmwareError::HttpError(format!("Failed to download from {url}: {e}")))?;
 
-    if !response.status().is_success() {
-        return Err(FirmwareError::HttpError(format!(
-            "HTTP {} from {url}",
-            response.status(),
-        )));
-    }
+        if !response.status().is_success() {
+            return Err(FirmwareError::HttpError(format!(
+                "HTTP {} from {url}",
+                response.status(),
+            )));
+        }
 
-    // Stream the response body to disk.
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| FirmwareError::HttpError(format!("Failed to read response body: {e}")))?;
+        response
+            .bytes()
+            .await
+            .map_err(|e| FirmwareError::HttpError(format!("Failed to read response body: {e}")))
+    })
+    .await
+    .map_err(|_| FirmwareError::SourceTransferTimeout {
+        timeout: transfer_timeout,
+    })??;
 
     let mut file = tokio::fs::File::create(&dest_path)
         .await
@@ -268,6 +283,7 @@ async fn resolve_ssh(
     ssh_source: &SshSource,
     work_dir: &Path,
     known_hosts_file: Option<&Path>,
+    transfer_timeout: Duration,
 ) -> FirmwareResult<PathBuf> {
     let SshSource {
         host,
@@ -302,22 +318,27 @@ async fn resolve_ssh(
         None => HostKeyVerification::DefaultKnownHostsFile,
     };
 
-    let client = SshClientConfig {
-        host,
-        port: *port,
-        username,
-        auth: auth.as_ref(),
-        host_key_verification,
-    }
-    .make_authenticated_client()
-    .await?;
-
     // Transfer the file over SSH using base64 encoding. Base64 keeps the
     // command output text-safe before we decode it back to bytes locally.
     // Use `cat | base64` for portability across Linux (coreutils) and
     // macOS (BSD). Positional file args and the -w0 flag are not portable.
     let command = format!("cat {} | base64", shell_escape(remote_path));
-    let result = client.execute_ssh_command(&command).await?;
+    let result = tokio::time::timeout(transfer_timeout, async {
+        let client = SshClientConfig {
+            host,
+            port: *port,
+            username,
+            auth: auth.as_ref(),
+            host_key_verification,
+        }
+        .make_authenticated_client()
+        .await?;
+        client.execute_ssh_command(&command).await
+    })
+    .await
+    .map_err(|_| FirmwareError::SourceTransferTimeout {
+        timeout: transfer_timeout,
+    })??;
 
     if result.exit_status != 0 {
         return Err(FirmwareError::CommandFailed(format!(
@@ -439,8 +460,63 @@ mod tests {
     use russh::keys::ssh_key::LineEnding;
     use russh::keys::ssh_key::rand_core::UnwrapErr;
     use tempfile::tempdir;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+    use tokio::task::JoinSet;
 
     use super::*;
+
+    /// A successful response header must not leave an unfinished body unbounded.
+    #[tokio::test]
+    async fn http_transfer_deadline_includes_the_response_body() {
+        let directory = tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/image.bin", listener.local_addr().unwrap());
+        let (ready, body_started) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let mut server = JoinSet::new();
+        server.spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            stream
+                .get_mut()
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\n\r\npartial image")
+                .await
+                .unwrap();
+            stream.get_mut().flush().await.unwrap();
+            ready.send(()).unwrap();
+            released.await.unwrap();
+        });
+
+        let transfer_timeout = Duration::from_secs(1);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let transfer = resolve_http(&url, None, directory.path(), transfer_timeout);
+            tokio::pin!(transfer);
+            tokio::select! {
+                started = body_started => started.unwrap(),
+                result = &mut transfer => panic!("transfer finished before the body was held: {result:?}"),
+            }
+            assert!(matches!(
+                transfer.await,
+                Err(FirmwareError::SourceTransferTimeout { timeout })
+                    if timeout == transfer_timeout
+            ));
+            assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+            release.send(()).unwrap();
+            server.join_next().await.unwrap().unwrap();
+        })
+        .await
+        .expect("the transfer deadline settles an incomplete HTTP body");
+    }
 
     #[tokio::test]
     async fn resolve_ssh_fetches_firmware_from_russh_server()
@@ -488,8 +564,13 @@ mod tests {
             )),
         };
 
-        let resolved_path =
-            resolve_ssh(&ssh_source, &work_dir, Some(known_hosts_path.as_path())).await?;
+        let resolved_path = resolve_ssh(
+            &ssh_source,
+            &work_dir,
+            Some(known_hosts_path.as_path()),
+            SOURCE_TRANSFER_TIMEOUT,
+        )
+        .await?;
 
         assert_eq!(resolved_path, work_dir.join("mlx-fw.bin"));
         assert_eq!(tokio::fs::read(resolved_path).await?, firmware);

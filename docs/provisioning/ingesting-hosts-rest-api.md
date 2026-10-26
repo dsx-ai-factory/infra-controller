@@ -66,7 +66,7 @@ Optional flags add metadata or pre-allocate resources:
 | ---- | ------- |
 | `--bmc-ip-address` | Pre-allocate a reserved BMC IP (IPv4 or IPv6) instead of letting DHCP assign one |
 | `--rack-id` | Associate with a rack identifier |
-| `--sku-id` | Assign an existing SKU to the host when it is discovered; refer to [Assign a SKU through the expected machine](sku-validation.md#assign-a-sku-through-the-expected-machine) |
+| `--sku-id` | Assign an existing SKU from the Site selected by `--site-id` to the host when it is discovered; refer to [Assign a SKU through the expected machine](sku-validation.md#assign-a-sku-through-the-expected-machine) for validation and omission behavior |
 | `--manufacturer`, `--model`, `--firmware-version`, `--name`, `--description` | Free-text hardware metadata |
 | `--slot-id`, `--tray-idx`, `--host-id` | Physical placement within a rack/tray |
 
@@ -266,6 +266,10 @@ nicocli expected-machine batch-update --data-file updates.json
 ```
 
 Where `updates.json` is a JSON array of `ExpectedMachineUpdateRequest` objects. Each entry must include the `id` field identifying which Expected Machine to update; other fields are merged onto the existing record.
+
+All items must supply the same set of fields, except that `bmcIpAddress` can be omitted or null to preserve that
+machine's address. To update `skuId`, supply it in every item; the values can differ. To preserve all SKU
+associations, omit `skuId` or set it to `null` in every item.
 
 ### Export
 

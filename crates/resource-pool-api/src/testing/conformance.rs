@@ -42,7 +42,6 @@ pub async fn verify_provider(
 ) {
     let description = provider
         .describe(Request::new(DescribeRequest {
-            site_id: pool.site_id.clone(),
             pool_alias: pool.logical_pool.clone(),
         }))
         .await
@@ -107,6 +106,20 @@ async fn replay_and_release(
     expected_policy: &Option<RouteTargetPolicy>,
     supports_stats: bool,
 ) {
+    let mut invalid_owner = operation(pool, "nul-owner");
+    invalid_owner.owner.as_mut().expect("owner").owner_id = "vpc\0id".into();
+    assert_eq!(
+        provider
+            .allocate(Request::new(AllocateRequest {
+                operation: Some(invalid_owner),
+                requested_value: None,
+            }))
+            .await
+            .expect_err("a fresh allocation rejects NUL in its owner")
+            .code(),
+        Code::InvalidArgument
+    );
+
     let wrong_partition_operation = operation(pool, "wrong-partition");
     let wrong_partition = provider
         .allocate(Request::new(AllocateRequest {
@@ -170,6 +183,8 @@ async fn replay_and_release(
     changed_owner.owner.as_mut().expect("owner").owner_id = "another-vpc".into();
     let mut changed_owner_type = original.clone();
     changed_owner_type.owner.as_mut().expect("owner").owner_type = "machine".into();
+    let mut invalid_owner_type = original.clone();
+    invalid_owner_type.owner.as_mut().expect("owner").owner_type = "machine\0type".into();
     let mut changed_slot = original.clone();
     changed_slot.owner.as_mut().expect("owner").slot = "another-slot".into();
     let mut changed_generation = original.clone();
@@ -185,6 +200,10 @@ async fn replay_and_release(
     for (scenario, changed) in [
         ("owner", changed_owner),
         ("owner type", changed_owner_type),
+        (
+            "invalid owner type still conflicts on replay",
+            invalid_owner_type,
+        ),
         ("slot", changed_slot),
         ("generation", changed_generation),
         ("binding", changed_binding),
@@ -226,6 +245,41 @@ async fn replay_and_release(
             .expect_err("changed allocation method")
             .code(),
         Code::AlreadyExists
+    );
+
+    // Recovery and cancellation must check the binding too; a reused request ID
+    // cannot inspect or cancel another binding's allocation.
+    let original_identity = operation_identity(original);
+    let mut wrong_binding = original_identity.clone();
+    wrong_binding.pool.as_mut().expect("pool").binding_id = "another-binding".into();
+    for (scenario, result) in [
+        (
+            "recover with a changed binding",
+            provider
+                .recover(Request::new(RecoverRequest {
+                    operation_identity: Some(wrong_binding.clone()),
+                }))
+                .await
+                .map(|_| ()),
+        ),
+        (
+            "cancel with a changed binding",
+            provider
+                .cancel(Request::new(CancelRequest {
+                    operation_identity: Some(wrong_binding),
+                }))
+                .await
+                .map(|_| ()),
+        ),
+    ] {
+        assert_eq!(result.expect_err(scenario).code(), Code::AlreadyExists);
+    }
+    assert_eq!(
+        recover(provider, original_identity)
+            .await
+            .expect("a rejected cancellation preserves the original allocation")
+            .state,
+        Some(State::Allocated(first.clone()))
     );
 
     let mut second_operation = operation(pool, "second-slot");
@@ -744,9 +798,12 @@ async fn growth_preserves_prior_definitions(
     changed_mode.eligibility[0].assignment_mode = AssignmentMode::Manual as i32;
     let mut reordered = initial.clone();
     reordered.eligibility.swap(0, 1);
+    let mut changed_binding = initial.clone();
+    changed_binding.pool.as_mut().expect("pool").logical_pool = "another-pool".into();
     for (scenario, changed) in [
         ("revision assignment modes cannot change", changed_mode),
         ("revision declaration order cannot change", reordered),
+        ("revision pool binding cannot change", changed_binding),
     ] {
         assert_eq!(
             provider
@@ -778,9 +835,40 @@ async fn growth_preserves_prior_definitions(
         previous_revision: None,
         ..grown.clone()
     };
-    for (scenario, invalid) in [
-        ("growth removes an earlier declaration", nonadditive),
-        ("growth omits its predecessor", missing_predecessor),
+    let mut changed_pool = grown.clone();
+    changed_pool.pool.as_mut().expect("pool").logical_pool = "another-pool".into();
+    for (scenario, invalid, code) in [
+        (
+            "growth changes the saved pool binding",
+            changed_pool,
+            Code::FailedPrecondition,
+        ),
+        (
+            "growth removes an earlier declaration",
+            nonadditive,
+            Code::FailedPrecondition,
+        ),
+        (
+            "growth omits its predecessor",
+            missing_predecessor,
+            Code::FailedPrecondition,
+        ),
+        (
+            "growth rejects a NUL in the new revision",
+            DefineRequest {
+                eligibility_revision: "grown\0revision".into(),
+                ..grown.clone()
+            },
+            Code::InvalidArgument,
+        ),
+        (
+            "growth rejects a NUL in the predecessor revision",
+            DefineRequest {
+                previous_revision: Some("initial\0revision".into()),
+                ..grown.clone()
+            },
+            Code::InvalidArgument,
+        ),
     ] {
         assert_eq!(
             provider
@@ -788,7 +876,7 @@ async fn growth_preserves_prior_definitions(
                 .await
                 .expect_err(scenario)
                 .code(),
-            Code::FailedPrecondition,
+            code,
             "{scenario}"
         );
     }

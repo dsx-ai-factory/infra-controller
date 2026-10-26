@@ -129,11 +129,12 @@ use std::fmt::{Display, Formatter};
 use std::ops::{Deref, DerefMut};
 use std::panic::Location;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use carbide_instrument::{Event, LabelValue, emit};
 #[cfg(test)]
 pub(crate) use carbide_macros::sqlx_test;
-use carbide_uuid::machine::InvalidMachineType;
+use carbide_uuid::machine::{InvalidMachineType, MachineId};
 use mac_address::MacAddress;
 use model::ConfigValidationError;
 use model::hardware_info::HardwareInfoError;
@@ -340,6 +341,34 @@ impl AnnotatedSqlxError {
             source,
         }
     }
+
+    /// Returns fixed client-facing text without SQL, locations, or driver diagnostics.
+    ///
+    /// REST matches `ErrMsgSiteControllerDuplicateEntryFound` to retry SSH Key Group
+    /// creation as an update. Keep that phrase until REST uses a structured code.
+    pub fn status_message(&self) -> &'static str {
+        if self
+            .source
+            .as_database_error()
+            .is_some_and(|error| error.is_unique_violation())
+        {
+            "internal database error: duplicate key value violates unique constraint"
+        } else {
+            "internal database error"
+        }
+    }
+
+    /// Returns `true` for a Postgres deadlock (`40P01`) or serialization
+    /// failure (`40001`). Postgres has already rolled the transaction back, so
+    /// a fresh attempt is safe.
+    pub fn is_retryable_transaction_error(&self) -> bool {
+        match &self.source {
+            sqlx::Error::Database(database_error) => {
+                matches!(database_error.code().as_deref(), Some("40P01" | "40001"))
+            }
+            _ => false,
+        }
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -422,6 +451,15 @@ pub enum DatabaseError {
     MaxOneInterfaceAssociation,
     #[error("host address allocation failed and can be retried")]
     TryAgain,
+    /// Every read-then-swap of the machine's network config version found
+    /// the version moved by a concurrent writer; a retry can succeed.
+    #[error(
+        "network configuration version of machine {machine_id} changed under the repair after {attempts} attempts"
+    )]
+    NetworkConfigVersionChanged {
+        machine_id: MachineId,
+        attempts: usize,
+    },
     #[error("no site-wide rotation target for credential type: {0:?}")]
     MissingSitewideRotationTarget(crate::credential_rotation::CredentialRotationType),
 }
@@ -477,6 +515,12 @@ impl DatabaseError {
             },
             _ => false,
         }
+    }
+
+    /// Whether the wrapped query error is a Postgres deadlock or serialization
+    /// failure (`AnnotatedSqlxError::is_retryable_transaction_error`).
+    pub(crate) fn is_retryable_transaction_error(&self) -> bool {
+        matches!(self, DatabaseError::Sqlx(error) if error.is_retryable_transaction_error())
     }
 }
 
@@ -565,7 +609,32 @@ impl Error for AnnotatedSqlxError {
     }
 }
 
+// Tonic includes its immediate source's Debug in Status formatting. Keep the
+// direct conversion's diagnostic reachable without exposing it to web callers.
+struct RetainedDatabaseError(DatabaseError);
+
+impl Display for RetainedDatabaseError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("internal database error")
+    }
+}
+
+impl std::fmt::Debug for RetainedDatabaseError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
+impl Error for RetainedDatabaseError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
 impl From<DatabaseError> for tonic::Status {
+    /// Maps database errors to their gRPC codes and messages.
+    /// `Sqlx` failures use fixed `Internal` text; the diagnostic is logged and
+    /// available through `Error::source()`, but omitted from status formatting.
     fn from(from: DatabaseError) -> Self {
         // If env RUST_BACKTRACE is set extract handler and err location
         // If it's not set `Backtrace::capture()` is very cheap to call
@@ -603,6 +672,11 @@ impl From<DatabaseError> for tonic::Status {
         }
 
         match &from {
+            DatabaseError::Sqlx(error) => {
+                let mut status = Status::internal(error.status_message());
+                status.set_source(Arc::new(RetainedDatabaseError(from)));
+                status
+            }
             DatabaseError::AddressParseError(e) => Status::invalid_argument(e.to_string()),
             error @ DatabaseError::AlreadyFoundError { .. } => {
                 Status::failed_precondition(error.to_string())
@@ -619,6 +693,9 @@ impl From<DatabaseError> for tonic::Status {
             error @ DatabaseError::FailedPrecondition(_) => {
                 Status::failed_precondition(error.to_string())
             }
+            DatabaseError::ResourcePoolError(
+                error @ model::resource_pool::ResourcePoolError::MissingAllocationRange { .. },
+            ) => Status::failed_precondition(error.to_string()),
             error @ DatabaseError::Internal { .. } => Status::internal(error.to_string()),
             DatabaseError::InvalidArgument(msg) => Status::invalid_argument(msg),
             DatabaseError::InvalidConfiguration(e) => Status::invalid_argument(e.to_string()),
@@ -926,6 +1003,40 @@ mod tests {
     use super::*;
     use crate::ip_allocator::DhcpError;
 
+    /// Two transactions that request each other's advisory key end in a
+    /// detected deadlock on one side, and that error is the one the
+    /// classifier admits for a retry.
+    #[crate::sqlx_test]
+    async fn retryable_transaction_error_classifies_a_detected_deadlock(
+        pool: PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        async fn lock(conn: &mut sqlx::PgConnection, key: i64) -> DatabaseResult<()> {
+            let query = "SELECT pg_advisory_xact_lock($1)";
+            sqlx::query_scalar::<_, ()>(query)
+                .bind(key)
+                .fetch_one(conn)
+                .await
+                .map_err(|e| DatabaseError::query(query, e))
+        }
+
+        let mut first = pool.begin().await?;
+        let mut second = pool.begin().await?;
+        lock(&mut first, 1).await?;
+        lock(&mut second, 2).await?;
+        let (first_result, second_result) = tokio::join!(lock(&mut first, 2), lock(&mut second, 1));
+        let deadlock = [first_result, second_result]
+            .into_iter()
+            .find_map(Result::err)
+            .expect("one side must be aborted with a deadlock");
+
+        assert!(deadlock.is_retryable_transaction_error(), "{deadlock}");
+        assert!(
+            !DatabaseError::FailedPrecondition("not a lock conflict".to_string())
+                .is_retryable_transaction_error()
+        );
+        Ok(())
+    }
+
     const TRANSACTION_ROLLBACK_FAILURES_METRIC: &str =
         "carbide_database_transaction_rollback_failures_total";
 
@@ -1055,6 +1166,94 @@ mod tests {
         assert_eq!(err.line, line!() - 4);
         assert_eq!(err.file, file!());
         assert!(format!("{err}").contains(DB_QUERY));
+    }
+
+    #[tokio::test]
+    async fn sqlx_status_hides_diagnostics_and_retains_source() {
+        let driver_message = "private diagnostic: duplicate key value violates unique constraint";
+        let error = DatabaseError::query(
+            "SELECT private_column FROM private_table",
+            sqlx::Error::protocol(driver_message),
+        );
+        let diagnostic = error.to_string();
+        let (status, logs) =
+            carbide_instrument::testing::capture_logs_async(async { tonic::Status::from(error) })
+                .await;
+
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(status.message(), "internal database error");
+        assert!(status.metadata().is_empty());
+        for formatted in [status.to_string(), format!("{status:?}")] {
+            assert!(!formatted.contains("private"));
+            assert!(!formatted.contains(file!()));
+        }
+        assert_eq!(
+            format!("{:?}", status.source().unwrap()),
+            "internal database error"
+        );
+        assert!(logs.iter().any(|log| {
+            log.level == tracing::Level::ERROR
+                && log.message == "database error conversion"
+                && log.field("error") == Some(diagnostic.as_str())
+        }));
+
+        let source = status
+            .source()
+            .unwrap()
+            .source()
+            .unwrap()
+            .downcast_ref::<DatabaseError>()
+            .unwrap();
+        assert_eq!(source.to_string(), diagnostic);
+        let DatabaseError::Sqlx(annotated) = source else {
+            panic!("expected the original database error: {source:?}");
+        };
+        assert!(matches!(
+            &annotated.source,
+            sqlx::Error::Protocol(message) if message == driver_message
+        ));
+        assert_eq!(annotated.query, "SELECT private_column FROM private_table");
+        assert_eq!(annotated.file, file!());
+    }
+
+    #[test]
+    fn database_domain_status_messages_are_preserved() {
+        check_values(
+            [
+                Check {
+                    scenario: "missing resource",
+                    input: DatabaseError::NotFoundError {
+                        kind: "machine",
+                        id: "missing-machine".to_string(),
+                    },
+                    expect: tonic::Code::NotFound,
+                },
+                Check {
+                    scenario: "concurrent modification",
+                    input: DatabaseError::ConcurrentModificationError(
+                        "machine",
+                        "old-version".to_string(),
+                    ),
+                    expect: tonic::Code::FailedPrecondition,
+                },
+                Check {
+                    scenario: "non-SQLx internal error",
+                    input: DatabaseError::internal("domain diagnostic".to_string()),
+                    expect: tonic::Code::Internal,
+                },
+                Check {
+                    scenario: "non-SQLx fallback",
+                    input: DatabaseError::NetworkSegmentNotAllocated,
+                    expect: tonic::Code::Internal,
+                },
+            ],
+            |error| {
+                let message = error.to_string();
+                let status = tonic::Status::from(error);
+                assert_eq!(status.message(), message);
+                status.code()
+            },
+        );
     }
 
     #[test]

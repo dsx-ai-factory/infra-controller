@@ -18,8 +18,10 @@ use super::GrpcResourcePoolError::InvalidResponse;
 mod tests;
 
 pub(super) fn describe(response: &DescribeResponse) -> Result<(), GrpcResourcePoolError> {
-    if response.authority_id.is_empty() || response.pool_id.is_empty() {
-        return Err(InvalidResponse("provider and pool identities are required"));
+    if !is_valid_text(&response.authority_id) || !is_valid_text(&response.pool_id) {
+        return Err(InvalidResponse(
+            "provider and pool identities must be nonempty and contain no NUL",
+        ));
     }
     match ValueDomain::try_from(response.value_domain) {
         Ok(ValueDomain::Integer | ValueDomain::IpAddress | ValueDomain::Ipv6Prefix) => Ok(()),
@@ -113,8 +115,10 @@ pub(super) fn recover(
                 ) => {}
                 _ => return Err(InvalidResponse("saved failure code is missing or unknown")),
             }
-            if failure.message.is_empty() {
-                return Err(InvalidResponse("saved failure message is required"));
+            if !is_valid_text(&failure.message) {
+                return Err(InvalidResponse(
+                    "saved failure message must be nonempty and contain no NUL",
+                ));
             }
             Ok(())
         }
@@ -185,20 +189,27 @@ fn validate_allocation(
         .as_ref()
         .ok_or(InvalidResponse("allocation operation is required"))?;
     validate_pool(operation.pool.as_ref())?;
-    if operation.request_id.is_empty() || operation.eligibility_revision.is_empty() {
+    if !is_valid_text(&operation.request_id) || !is_valid_text(&operation.eligibility_revision) {
         return Err(InvalidResponse(
-            "allocation request and revision identities are required",
+            "allocation request and revision identities must be nonempty and contain no NUL",
         ));
     }
     let owner = operation
         .owner
         .as_ref()
         .ok_or(InvalidResponse("allocation owner is required"))?;
-    if owner.owner_type.is_empty() || owner.owner_id.is_empty() || owner.slot.is_empty() {
-        return Err(InvalidResponse("allocation owner fields are required"));
+    if !is_valid_text(&owner.owner_type)
+        || !is_valid_text(&owner.owner_id)
+        || !is_valid_text(&owner.slot)
+    {
+        return Err(InvalidResponse(
+            "allocation owner fields must be nonempty and contain no NUL",
+        ));
     }
-    if allocation.allocation_id.is_empty() {
-        return Err(InvalidResponse("allocation handle is required"));
+    if !is_valid_text(&allocation.allocation_id) {
+        return Err(InvalidResponse(
+            "allocation handle must be nonempty and contain no NUL",
+        ));
     }
     let value = allocation
         .value
@@ -244,8 +255,10 @@ fn validate_echoed_identity<'a>(
 ) -> Result<&'a OperationIdentity, GrpcResourcePoolError> {
     let echoed = echoed.ok_or(InvalidResponse("operation identity is required"))?;
     validate_pool(echoed.pool.as_ref())?;
-    if echoed.request_id.is_empty() {
-        return Err(InvalidResponse("operation request identity is required"));
+    if !is_valid_text(&echoed.request_id) {
+        return Err(InvalidResponse(
+            "operation request identity must be nonempty and contain no NUL",
+        ));
     }
     if Some(echoed) != expected {
         return Err(InvalidResponse("operation identity does not match request"));
@@ -255,13 +268,20 @@ fn validate_echoed_identity<'a>(
 
 fn validate_pool(pool: Option<&PoolBinding>) -> Result<(), GrpcResourcePoolError> {
     let pool = pool.ok_or(InvalidResponse("pool binding is required"))?;
-    if pool.site_id.is_empty()
-        || pool.authority_id.is_empty()
-        || pool.pool_id.is_empty()
-        || pool.binding_id.is_empty()
-        || pool.logical_pool.is_empty()
+    if !is_valid_text(&pool.authority_id)
+        || !is_valid_text(&pool.pool_id)
+        || !is_valid_text(&pool.binding_id)
+        || !is_valid_text(&pool.logical_pool)
     {
-        return Err(InvalidResponse("pool binding identities are required"));
+        return Err(InvalidResponse(
+            "pool binding identities must be nonempty and contain no NUL",
+        ));
     }
     Ok(())
+}
+
+// Provider identities and diagnostics use the same text contract. Do not trim
+// whitespace or otherwise change the provider's spelling.
+fn is_valid_text(value: &str) -> bool {
+    !value.is_empty() && !value.contains('\0')
 }

@@ -18,7 +18,7 @@
 use config_version::ConfigVersion;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::extension_service::{
-    ExtensionServiceLifecycleState, ExtensionServiceObservability,
+    ExtensionServiceDeploymentType, ExtensionServiceLifecycleState, ExtensionServiceObservability,
     ExtensionServiceObservabilityConfig, ExtensionServiceObservabilityConfigType,
     ExtensionServiceObservabilityConfigTypeLogging,
     ExtensionServiceObservabilityConfigTypePrometheus, ExtensionServiceSnapshot,
@@ -54,6 +54,24 @@ impl From<rpc::DpuExtensionServiceType> for ExtensionServiceType {
         match service_type {
             rpc::DpuExtensionServiceType::KubernetesPod => ExtensionServiceType::KubernetesPod,
             rpc::DpuExtensionServiceType::DpfHelmChart => ExtensionServiceType::DpfHelmChart,
+        }
+    }
+}
+
+impl From<ExtensionServiceDeploymentType> for rpc::DpuExtensionServiceDeploymentType {
+    fn from(deployment_type: ExtensionServiceDeploymentType) -> Self {
+        match deployment_type {
+            ExtensionServiceDeploymentType::DemandDriven => Self::DemandDriven,
+            ExtensionServiceDeploymentType::Baseline => Self::Baseline,
+        }
+    }
+}
+
+impl From<rpc::DpuExtensionServiceDeploymentType> for ExtensionServiceDeploymentType {
+    fn from(deployment_type: rpc::DpuExtensionServiceDeploymentType) -> Self {
+        match deployment_type {
+            rpc::DpuExtensionServiceDeploymentType::DemandDriven => Self::DemandDriven,
+            rpc::DpuExtensionServiceDeploymentType::Baseline => Self::Baseline,
         }
     }
 }
@@ -180,6 +198,8 @@ impl From<ExtensionServiceSnapshot> for rpc::DpuExtensionService {
     fn from(snapshot: ExtensionServiceSnapshot) -> Self {
         Self {
             service_id: snapshot.service_id.into(),
+            deployment_type: rpc::DpuExtensionServiceDeploymentType::from(snapshot.deployment_type)
+                as i32,
             dpu_target: snapshot
                 .dpu_target
                 .map(|target| rpc::DpuExtensionServiceDpuTarget::from(target) as i32),

@@ -62,6 +62,10 @@ struct State {
     network_status_reports: Vec<(Instant, bool)>,
     reject_dhcp_update: bool,
     dhcp_updates: Vec<(bool, Bytes)>,
+    include_ipv6_tenant: bool,
+    quarantine_host: bool,
+    post_config_wait_seen: bool,
+    astra_config: Option<rpc::forge::AstraConfig>,
 }
 
 const DHCP_GATE_CONFIG_VERSION: &str = "V1-T1748645613333257";
@@ -92,20 +96,37 @@ async fn test_fnn_l3() -> eyre::Result<()> {
     test_nvue_generic(VpcVirtualizationType::Fnn, expected).await
 }
 
+/// A transient DHCP rejection must leave the desired version pending, then
+/// retry the identical request after the endpoint recovers.
 #[tokio::test(flavor = "multi_thread")]
 async fn dhcp_unavailability_retries_the_same_ipv6_network_configuration() -> eyre::Result<()> {
-    let Ok(repo_root) =
-        std::env::var("REPO_ROOT").or_else(|_| std::env::var("CONTAINER_REPO_ROOT"))
-    else {
-        tracing::warn!(
-            "Either REPO_ROOT or CONTAINER_REPO_ROOT need to be set to run this test. Skipping."
-        );
-        return Ok(());
-    };
-    let repo_root = std::path::PathBuf::from(repo_root);
-    if std::env::var_os("DHCP_RECOVERY_TEST_CHILD").is_none() {
-        // Set the child's environment before its runtime starts. Calling the
-        // shared environment fixture here would race unrelated test threads.
+    network_update_retries_the_same_configuration(false).await
+}
+
+/// Failed IPv6 readiness must not withhold quarantine or its OVS transition.
+/// Readiness and route recovery must retry the same version before acknowledging it.
+#[tokio::test(flavor = "multi_thread")]
+async fn fmds_failure_applies_quarantine_and_retries_the_same_network_configuration()
+-> eyre::Result<()> {
+    network_update_retries_the_same_configuration(true).await
+}
+
+/// An actual Weave failure must reach Core without withholding successful
+/// HBN/DHCP acknowledgements, and the same desired configuration must recover.
+#[tokio::test(flavor = "multi_thread")]
+async fn astra_failure_reports_without_blocking_network_configuration_and_recovers()
+-> eyre::Result<()> {
+    let repo_root = std::env::var("REPO_ROOT")
+        .or_else(|_| std::env::var("CONTAINER_REPO_ROOT"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    eyre::ensure!(
+        repo_root.join("dev/bin/ip").is_file(),
+        "astra recovery test requires repository fixtures; set REPO_ROOT to the checkout"
+    );
+    if std::env::var_os("ASTRA_RECOVERY_TEST_CHILD").is_none() {
+        // Keep fixture commands and environment overrides in a child process
+        // so those overrides cannot affect other tests in the parent process.
         let inherited_path =
             std::env::var_os("PATH").ok_or_else(|| eyre::eyre!("missing test PATH"))?;
         let path = std::env::join_paths(
@@ -116,22 +137,243 @@ async fn dhcp_unavailability_retries_the_same_ipv6_network_configuration() -> ey
         command
             .args([
                 "--exact",
-                "tests::full::dhcp_unavailability_retries_the_same_ipv6_network_configuration",
+                "tests::full::astra_failure_reports_without_blocking_network_configuration_and_recovers",
                 "--nocapture",
             ])
-            .env("DHCP_RECOVERY_TEST_CHILD", "true")
+            .env("ASTRA_RECOVERY_TEST_CHILD", "true")
             .env("DISABLE_TLS_ENFORCEMENT", "true")
             .env("IGNORE_MGMT_VRF", "true")
             .env("NO_DPU_CONTAINERS", "true")
             .env("PATH", path)
             .kill_on_drop(true);
-        // Each of the two status waits allows 60 seconds; also allow startup
-        // and cleanup without leaving a stuck child behind.
-        let output = tokio::time::timeout(Duration::from_secs(150), command.output()).await??;
+        // Both report phases allow 60 seconds, with time for startup and cleanup.
+        let output = tokio::time::timeout(Duration::from_secs(210), command.output()).await??;
         eyre::ensure!(
             output.status.success()
                 && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
-            "DHCP recovery test failed:\n{}\n{}",
+            "astra recovery test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return Ok(());
+    }
+
+    // Keep the desired attachment and revision fixed through both phases.
+    // Recovery must come from retrying Weave, without a new configuration.
+    let expected_attachment = rpc::forge::AstraAttachment {
+        mac_address: "02:aa:bb:cc:dd:ee".to_string(),
+        vni: 100,
+        subnet_ipv4: "192.0.2.0".to_string(),
+        subnet_mask: 24,
+        attachment_type: Some(rpc::forge::SpxAttachmentType::Physical.into()),
+        revision: "test-revision".to_string(),
+        ..Default::default()
+    };
+    let state = Arc::new(Mutex::new(State {
+        virtualization_type: VpcVirtualizationType::EthernetVirtualizer,
+        loopback_ip_override: Some("2001:db8::1"),
+        astra_config: Some(rpc::forge::AstraConfig {
+            astra_attachments: vec![expected_attachment.clone()],
+        }),
+        ..Default::default()
+    }));
+    let (addr, server) = common::run_grpc_server(mock_core(state.clone())).await?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let dhcp_addr = listener.local_addr()?;
+    let dhcp_app = Router::new()
+        .route(
+            "/dhcp_server_control.DhcpServerControl/UpdateAndReloadConfig",
+            post(handle_dhcp_update),
+        )
+        .route(
+            "/dhcp_server_control.DhcpServerControl/GetDhcpTimestamps",
+            post(|| async { common::respond(()) }),
+        )
+        .with_state(state.clone());
+    let dhcp_server = tokio::spawn(async move { axum::serve(listener, dhcp_app).await });
+    let (socket, weave_state, weave_server) =
+        crate::astra_weave::tests::start_recording_weave_ew_vpc_mock_server_for_agent();
+    // Fail the Weave read while Core and DHCP remain available, isolating
+    // Astra failure from the other network configuration work.
+    weave_state.lock().await.reject_network_lists = true;
+
+    // The nested blocks save errors until their agent and server tasks have
+    // been stopped and joined; an early `?` must not skip fixture cleanup.
+    let result = async {
+        let directory = tempfile::tempdir()?;
+        let config_file = tempfile::NamedTempFile::new()?;
+        let mut options =
+            common::setup_agent_run_options(&addr, &directory, &config_file, false, &repo_root)?;
+        let Some(crate::AgentCommand::Run(run)) = options.cmd.as_mut() else {
+            eyre::bail!("test fixture did not configure an agent run");
+        };
+        run.dhcp_grpc_server = Some(format!("http://{dhcp_addr}"));
+        let config = fs::read_to_string(config_file.path())?
+            .replace("main-loop-idle-secs = 30", "main-loop-idle-secs = 1");
+        fs::write(config_file.path(), config)?;
+        fs::create_dir_all(directory.path().join("var/support/forge-dhcp/conf"))?;
+        let startup_path = directory.path().join(crate::nvue::PATH);
+        // A changed startup file proves HBN applied the configuration during
+        // the Weave failure; reported versions alone could miss a skipped write.
+        const PREVIOUS_NETWORK: &str = "previous network configuration\n";
+        fs::write(&startup_path, PREVIOUS_NETWORK)?;
+
+        let socket = socket
+            .to_str()
+            .ok_or_else(|| eyre::eyre!("test weave socket path is not UTF-8"))?
+            .to_string();
+        let agent = tokio::spawn(async move {
+            crate::astra_weave::TEST_WEAVE_EW_VPC_SOCKET_PATH
+                .scope(socket, crate::start(options))
+                .await
+        });
+        let result = async {
+            // First wait for the failed Astra attempt to reach the Core mock.
+            // Its report must still acknowledge the successful HBN/DHCP work.
+            let failed = wait_for_network_status(&state, |status| {
+                status.network_config_error.as_deref().is_some_and(|error| {
+                    error.contains("injected virtual network list failure")
+                })
+            })
+            .await?;
+            eyre::ensure!(
+                failed.astra_config_status == Some(rpc::forge::AstraConfigStatus::default()),
+                "failed astra attempt omitted its explicit unsuccessful report: {failed:?}"
+            );
+            eyre::ensure!(
+                failed.network_config_version.as_deref() == Some(DHCP_GATE_CONFIG_VERSION)
+                    && failed.instance_network_config_version.as_deref()
+                        == Some(DHCP_GATE_CONFIG_VERSION),
+                "astra failure withheld successful HBN/DHCP acknowledgements: {failed:?}"
+            );
+            eyre::ensure!(
+                state.lock().await.dhcp_updates.iter().any(|(rejected, _)| !rejected),
+                "DHCP did not accept the network configuration"
+            );
+            let startup = fs::read_to_string(&startup_path)?;
+            eyre::ensure!(startup != PREVIOUS_NETWORK, "HBN configuration was not applied");
+            serde_yaml::from_str::<Vec<serde_yaml::Value>>(&startup)?;
+
+            // Only the service failure changes. The next ordinary iteration
+            // must retry Astra while retaining the same network acknowledgements.
+            weave_state.lock().await.reject_network_lists = false;
+            let recovered = wait_for_network_status(&state, |status| {
+                status.astra_config_status.as_ref().is_some_and(|astra| {
+                    astra.astra_attachments_status.iter().any(|attachment| {
+                        attachment.status.as_ref().is_some_and(|status| {
+                            status.phase == rpc::forge::AstraPhase::PhaseReady as i32
+                        })
+                    })
+                })
+            })
+            .await?;
+            eyre::ensure!(
+                recovered.network_config_version == failed.network_config_version
+                    && recovered.instance_network_config_version
+                        == failed.instance_network_config_version
+                    && recovered.network_config_error.is_none(),
+                "astra recovery changed network acknowledgements or retained an error: {recovered:?}"
+            );
+            let astra = recovered.astra_config_status.as_ref().unwrap();
+            let [attachment] = astra.astra_attachments_status.as_slice() else {
+                eyre::bail!("unexpected recovered astra attachments: {astra:?}");
+            };
+            eyre::ensure!(
+                attachment.mac_address == expected_attachment.mac_address
+                    && attachment.vni == expected_attachment.vni as i32
+                    && attachment.revision == expected_attachment.revision,
+                "astra recovery did not acknowledge the unchanged attachment: {attachment:?}"
+            );
+            eyre::ensure!(!agent.is_finished(), "agent exited during astra recovery");
+            Ok::<_, eyre::Report>(())
+        }
+        .await;
+        agent.abort();
+        match agent.await {
+            Ok(Err(error)) => return Err(error).wrap_err("agent exited during astra recovery"),
+            Err(error) if !error.is_cancelled() => return Err(error).wrap_err("agent task failed"),
+            _ => {}
+        }
+        result
+    }
+    .await;
+    dhcp_server.abort();
+    server.abort();
+    let (dhcp_result, weave_result, core_result) =
+        tokio::join!(dhcp_server, weave_server.shutdown(), server);
+    match dhcp_result {
+        Ok(result) => result.wrap_err("mock DHCP control server exited")?,
+        Err(error) if !error.is_cancelled() => return Err(error).wrap_err("mock DHCP task failed"),
+        _ => {}
+    }
+    weave_result?;
+    if let Err(error) = core_result
+        && !error.is_cancelled()
+    {
+        return Err(error).wrap_err("mock core task failed");
+    }
+    result
+}
+
+/// Exercise both network failure boundaries through the real agent and Core
+/// status RPCs, with child-local environment overrides instead of global writes.
+async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) -> eyre::Result<()> {
+    let repo_root = std::env::var("REPO_ROOT")
+        .or_else(|_| std::env::var("CONTAINER_REPO_ROOT"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    eyre::ensure!(
+        repo_root.join("dev/bin/ip").is_file(),
+        "network recovery tests require repository fixtures; set REPO_ROOT to the checkout"
+    );
+    if std::env::var_os("NETWORK_RECOVERY_TEST_CHILD").is_none() {
+        // Set the child's environment before its runtime starts. Calling the
+        // shared environment fixture here would race unrelated test threads.
+        let inherited_path =
+            std::env::var_os("PATH").ok_or_else(|| eyre::eyre!("missing test PATH"))?;
+        let fake_network = if fail_fmds_route {
+            Some(fmds_route_failure_commands()?)
+        } else {
+            None
+        };
+        let path = std::env::join_paths(
+            fake_network
+                .iter()
+                .map(|directory| directory.path().to_path_buf())
+                .chain(std::iter::once(repo_root.join("dev/bin")))
+                .chain(std::env::split_paths(&inherited_path)),
+        )?;
+        let mut command = tokio::process::Command::new(std::env::current_exe()?);
+        command
+            .args([
+                "--exact",
+                if fail_fmds_route {
+                    "tests::full::fmds_failure_applies_quarantine_and_retries_the_same_network_configuration"
+                } else {
+                    "tests::full::dhcp_unavailability_retries_the_same_ipv6_network_configuration"
+                },
+                "--nocapture",
+            ])
+            .env("NETWORK_RECOVERY_TEST_CHILD", "true")
+            .env("DISABLE_TLS_ENFORCEMENT", "true")
+            .env("IGNORE_MGMT_VRF", "true")
+            .env("NO_DPU_CONTAINERS", "true")
+            .env("PATH", path)
+            .kill_on_drop(true);
+        if let Some(directory) = &fake_network {
+            command
+                .env("FMDS_TEST_COMMAND_DIR", directory.path())
+                .env("FMDS_TEST_FALLBACK_IP", repo_root.join("dev/bin/ip"))
+                .env_remove("NO_DPU_ARMOS_NETWORK")
+                .env_remove("NO_DPU_ARMOS_INTERFACE");
+        }
+        // Each failure/recovery phase allows 60 seconds; also allow startup
+        // and cleanup without leaving a stuck child behind.
+        let output = tokio::time::timeout(Duration::from_secs(210), command.output()).await??;
+        eyre::ensure!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+            "network recovery test failed:\n{}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
@@ -142,7 +384,9 @@ async fn dhcp_unavailability_retries_the_same_ipv6_network_configuration() -> ey
         virtualization_type: VpcVirtualizationType::EthernetVirtualizer,
         loopback_ip_override: Some("2001:db8::1"),
         reject_next_network_status: true,
-        reject_dhcp_update: true,
+        reject_dhcp_update: !fail_fmds_route,
+        include_ipv6_tenant: fail_fmds_route,
+        quarantine_host: fail_fmds_route,
         ..Default::default()
     }));
     let (addr, server) = common::run_grpc_server(mock_core(state.clone())).await?;
@@ -168,18 +412,43 @@ async fn dhcp_unavailability_retries_the_same_ipv6_network_configuration() -> ey
             eyre::bail!("test fixture did not configure an agent run");
         };
         run.dhcp_grpc_server = Some(format!("http://{dhcp_addr}"));
+        if fail_fmds_route {
+            // Failed FMDS updates can use the idle period when HBN remains
+            // healthy. Keep both periods short without changing desired versions.
+            let config = fs::read_to_string(config_file.path())?
+                .replace("main-loop-idle-secs = 30", "main-loop-idle-secs = 1");
+            fs::write(config_file.path(), config)?;
+            let mut config_file = fs::OpenOptions::new().append(true).open(config_file.path())?;
+            writeln!(config_file, "\n[fmds-armos-networking.config]")?;
+            writeln!(config_file, "addresses = [\"169.254.169.254/30\", \"fd00:76b9::254/127\"]")?;
+        }
         fs::create_dir_all(directory.path().join("var/support/forge-dhcp/conf"))?;
         let startup_path = directory.path().join(crate::nvue::PATH);
         const PREVIOUS_NETWORK: &str = "previous network configuration\n";
         fs::write(&startup_path, PREVIOUS_NETWORK)?;
 
-        let agent = tokio::spawn(crate::start(options));
+        let agent = tokio::spawn(async move {
+            if fail_fmds_route {
+                // Use production command execution, but only the child-local
+                // fake ip binary. No command can modify the host's networking.
+                crate::dpu::REAL_KERNEL_NETWORKING
+                    .scope((), crate::start(options))
+                    .await
+            } else {
+                crate::start(options).await
+            }
+        });
         let result = async {
-            // The configuration can render successfully. Make the DHCP control
-            // endpoint unavailable, so the unchanged NVUE file proves the gate.
+            // DHCP rejection still gates NVUE. FMDS readiness failure must leave
+            // the version pending without withholding the quarantine update.
+            let expected_error = if fail_fmds_route {
+                "duplicate address detection failed for fd00:76b9::254"
+            } else {
+                "injected DHCP rejection"
+            };
             let rejected = wait_for_network_status(&state, |status| {
                 status.network_config_error.as_deref().is_some_and(|error| {
-                    error.contains("IPv6-only network update is waiting for DHCP")
+                    error.contains(expected_error)
                 })
             })
             .await?;
@@ -187,18 +456,40 @@ async fn dhcp_unavailability_retries_the_same_ipv6_network_configuration() -> ey
                 rejected
                     .network_config_error
                     .as_deref()
-                    .is_some_and(|error| { error.contains("injected DHCP rejection") }),
-                "unexpected DHCP rejection: {rejected:?}"
+                    .is_some_and(|error| { error.contains(expected_error) }),
+                "unexpected network rejection: {rejected:?}"
             );
             eyre::ensure!(
                 rejected.network_config_version.is_none()
                     && rejected.instance_network_config_version.is_none(),
                 "rejected configuration was acknowledged: {rejected:?}"
             );
-            eyre::ensure!(
-                fs::read_to_string(&startup_path)? == PREVIOUS_NETWORK,
-                "DHCP rejection overwrote the existing network configuration"
-            );
+            if fail_fmds_route {
+                let startup: Vec<serde_yaml::Value> =
+                    serde_yaml::from_str(&fs::read_to_string(&startup_path)?)?;
+                let config = &startup[1]["set"];
+                assert!(config.is_mapping(), "missing NVUE set document: {startup:#?}");
+                // Check the catch-all deny and its attachment, not merely that
+                // NVUE saved some different configuration while FMDS was failing.
+                let quarantine_acl = "p0004_security_policy_override_ipv6_host_ingress";
+                let acl = &config["acl"][quarantine_acl];
+                let rule = &acl["rule"]["2000"];
+                assert!(rule["action"]["deny"].is_mapping(), "missing quarantine deny: {acl:#?}");
+                assert_eq!(rule["match"]["ip"]["source-ip"].as_str(), Some("::/0"), "quarantine ACL: {acl:#?}");
+                assert_eq!(rule["match"]["ip"]["dest-ip"].as_str(), Some("::/0"), "quarantine ACL: {acl:#?}");
+                assert!(config["interface"]["pf0hpf_if"]["acl"][quarantine_acl]["outbound"].is_mapping(),
+                    "quarantine ACL is not attached: {:#?}", config["interface"]);
+                let directory = std::path::PathBuf::from(std::env::var("FMDS_TEST_COMMAND_DIR")?);
+                assert_eq!(fs::read_to_string(directory.join("ovs-restarts"))?, "restart ovs-vswitchd.service\n");
+                assert!(state.lock().await.post_config_wait_seen,
+                    "an applied NVUE update must retain the post-config health wait after FMDS failure");
+                assert!(!directory.join("attempts").exists(), "DAD failure must precede route application");
+            } else {
+                eyre::ensure!(
+                    fs::read_to_string(&startup_path)? == PREVIOUS_NETWORK,
+                    "DHCP rejection overwrote the existing network configuration"
+                );
+            }
             {
                 let state = state.lock().await;
                 let [(rejected_at, true), (retried_at, false), ..] =
@@ -214,9 +505,54 @@ async fn dhcp_unavailability_retries_the_same_ipv6_network_configuration() -> ey
                 assert!(retried_at.duration_since(*rejected_at) >= Duration::from_secs(1));
             }
 
-            // Clear the transient failure without changing the desired network
-            // or its versions. The next tick must retry the same DHCP request.
-            state.lock().await.reject_dhcp_update = false;
+            let command_directory = if fail_fmds_route {
+                let directory = std::path::PathBuf::from(std::env::var("FMDS_TEST_COMMAND_DIR")?);
+                // Model the operator repairing the duplicate outside the agent.
+                // The agent must not delete the address or bypass DAD itself.
+                fs::remove_file(directory.join("reject-dad"))?;
+                let route_rejected = wait_for_network_status(&state, |status| {
+                    status.network_config_error.as_deref().is_some_and(|error| {
+                        error.contains("injected FMDS route failure")
+                    })
+                }).await?;
+                assert!(route_rejected.network_config_version.is_none()
+                    && route_rejected.instance_network_config_version.is_none());
+                // Wait for a second failed route attempt and its completed status
+                // RPC, so clearing the failure cannot race the fake command itself.
+                let failed_report_count = state.lock().await.network_status_reports.len();
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let attempts = fs::read_to_string(directory.join("attempts"))?;
+                        if attempts.lines().count() >= 2
+                            && state.lock().await.network_status_reports.len() > failed_report_count
+                        {
+                            return Ok::<_, eyre::Report>(());
+                        }
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                }).await??;
+                let attempts = fs::read_to_string(directory.join("attempts"))?;
+                eyre::ensure!(
+                    attempts.lines().count() >= 2,
+                    "FMDS route was not retried: {attempts}"
+                );
+                const EXPECTED_ROUTE: &str = "-6 route add 2001:db8:7176::/64 dev pf0dpu1 via fd00:76b9::255 src fd00:76b9::254";
+                eyre::ensure!(
+                    attempts.lines().all(|request| request == EXPECTED_ROUTE),
+                    "unexpected FMDS route command: {attempts}"
+                );
+                eyre::ensure!(!agent.is_finished(), "agent exited on a transient FMDS error");
+                Some(directory)
+            } else {
+                None
+            };
+
+            // Clear only the injected failure: no configuration or version changes.
+            if let Some(directory) = &command_directory {
+                fs::remove_file(directory.join("reject"))?;
+            } else {
+                state.lock().await.reject_dhcp_update = false;
+            }
             let applied = wait_for_network_status(&state, |status| {
                 status.network_config_version.as_deref() == Some(DHCP_GATE_CONFIG_VERSION)
                     && status.instance_network_config_version.as_deref()
@@ -233,18 +569,39 @@ async fn dhcp_unavailability_retries_the_same_ipv6_network_configuration() -> ey
                 "supported update did not replace the startup file"
             );
             serde_yaml::from_str::<Vec<serde_yaml::Value>>(&startup)?;
-            let state = state.lock().await;
-            let rejected_request = state
-                .dhcp_updates
-                .iter()
-                .find(|(rejected, _)| *rejected)
-                .expect("DHCP received a rejected update");
-            let accepted_request = state
-                .dhcp_updates
-                .iter()
-                .find(|(rejected, _)| !rejected)
-                .expect("DHCP received an accepted retry");
-            assert_eq!(rejected_request.1, accepted_request.1);
+            if let Some(directory) = command_directory {
+                let attempts = fs::read_to_string(directory.join("attempts"))?;
+                let requests: Vec<_> = attempts.lines().collect();
+                eyre::ensure!(
+                    requests.len() >= 3 && requests.iter().all(|request| *request == requests[0]),
+                    "FMDS recovery changed the retried route: {attempts}"
+                );
+                // Once acknowledged, the same version must stop issuing route
+                // commands. Another status RPC proves a later tick ran.
+                let report_count = state.lock().await.network_status_reports.len();
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while state.lock().await.network_status_reports.len() <= report_count {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                })
+                .await?;
+                assert_eq!(fs::read_to_string(directory.join("attempts"))?, attempts);
+                assert_eq!(fs::read_to_string(directory.join("ovs-restarts"))?, "restart ovs-vswitchd.service\n",
+                    "retrying FMDS must not repeat an already-completed OVS transition");
+            } else {
+                let state = state.lock().await;
+                let rejected_request = state
+                    .dhcp_updates
+                    .iter()
+                    .find(|(rejected, _)| *rejected)
+                    .expect("DHCP received a rejected update");
+                let accepted_request = state
+                    .dhcp_updates
+                    .iter()
+                    .find(|(rejected, _)| !rejected)
+                    .expect("DHCP received an accepted retry");
+                assert_eq!(rejected_request.1, accepted_request.1);
+            }
             Ok::<_, eyre::Report>(())
         }
         .await;
@@ -274,6 +631,92 @@ async fn dhcp_unavailability_retries_the_same_ipv6_network_configuration() -> ey
     result
 }
 
+/// Keep networking and service commands child-local while exposing DAD failure,
+/// route failure, and the OVS restart independently to the reconciliation test.
+fn fmds_route_failure_commands() -> eyre::Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir()?;
+    let script = directory.path().join("ip");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+set -eu
+case "$*" in
+    '-j link show'|'-j addr show dev pf0dpu1')
+        if [ -f "$FMDS_TEST_COMMAND_DIR/reject-dad" ]; then
+            cat "$FMDS_TEST_COMMAND_DIR/interface-dadfailed.json"
+        else
+            cat "$FMDS_TEST_COMMAND_DIR/interface.json"
+        fi
+        ;;
+    '-j -4 route show dev pf0dpu1'|'-j -6 route show dev pf0dpu1')
+        route_file="$FMDS_TEST_COMMAND_DIR/route$2"
+        if [ -f "$route_file" ]; then cat "$route_file"; else printf '[]\n'; fi
+        ;;
+    '-4 route add '*|'-6 route add '*)
+        [ "$5" = dev ] && [ "$6" = pf0dpu1 ] && [ "$7" = via ] && [ "$9" = src ] || exit 2
+        if [ "$1" = -6 ]; then
+            printf '%s\n' "$*" >> "$FMDS_TEST_COMMAND_DIR/attempts"
+            if [ -f "$FMDS_TEST_COMMAND_DIR/reject" ]; then
+                printf 'injected FMDS route failure\n' >&2
+                exit 1
+            fi
+        fi
+        printf '[{"dst":"%s","dev":"%s","gateway":"%s","prefsrc":"%s","protocol":"boot","flags":[]}]\n' "$4" "$6" "$8" "${10}" > "$FMDS_TEST_COMMAND_DIR/route$1"
+        ;;
+    *) exec "$FMDS_TEST_FALLBACK_IP" "$@" ;;
+esac
+"#,
+    )?;
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
+    // Never invoke the host's systemctl. The transition restart is observable
+    // even though this fixture intentionally stops at NVUE startup-file output.
+    let systemctl = directory.path().join("systemctl");
+    fs::write(
+        &systemctl,
+        r#"#!/bin/sh
+set -eu
+[ "$*" = 'restart ovs-vswitchd.service' ] || exit 2
+printf '%s\n' "$*" >> "$FMDS_TEST_COMMAND_DIR/ovs-restarts"
+"#,
+    )?;
+    fs::set_permissions(&systemctl, fs::Permissions::from_mode(0o755))?;
+    fs::write(
+        directory.path().join("reject-dad"),
+        "duplicate IPv6 address until operator repair\n",
+    )?;
+    fs::write(
+        directory.path().join("reject"),
+        "reject IPv6 route until recovery\n",
+    )?;
+    let mut interface = serde_json::json!([{
+        "ifindex": 7, "ifname": "pf0dpu1", "flags": ["UP"], "mtu": 1500,
+        "qdisc": "noqueue", "operstate": "UP", "group": "default",
+        "address": "02:00:00:00:00:07", "broadcast": "ff:ff:ff:ff:ff:ff",
+        "addr_info": [
+            {"family": "inet", "local": "169.254.169.254", "prefixlen": 30,
+             "scope": "global", "valid_life_time": 4294967295_u32,
+             "preferred_life_time": 4294967295_u32},
+            {"family": "inet6", "local": "fd00:76b9::254", "prefixlen": 127,
+             "scope": "global", "valid_life_time": 4294967295_u32,
+             "preferred_life_time": 4294967295_u32}
+        ]
+    }]);
+    fs::write(
+        directory.path().join("interface.json"),
+        serde_json::to_vec(&interface)?,
+    )?;
+    // The address exists in both snapshots; only the kernel's DAD result changes
+    // after external repair, so readiness cannot be confused with assignment.
+    interface[0]["addr_info"][1]["dadfailed"] = true.into();
+    fs::write(
+        directory.path().join("interface-dadfailed.json"),
+        serde_json::to_vec(&interface)?,
+    )?;
+    Ok(directory)
+}
+
 async fn handle_dhcp_update(
     AxumState(state): AxumState<Arc<Mutex<State>>>,
     body: Bytes,
@@ -297,6 +740,8 @@ async fn handle_dhcp_update(
     common::respond(()).into_response()
 }
 
+/// Waits for a matching report accepted by the Core mock. A timeout includes
+/// the last report so a missing transition can be diagnosed from the failure.
 async fn wait_for_network_status(
     state: &Arc<Mutex<State>>,
     matches: impl Fn(&rpc::forge::DpuNetworkStatus) -> bool,
@@ -682,9 +1127,21 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
             .num_netconf_fetches
             .fetch_add(1, Ordering::SeqCst);
     }
-    let (virtualization_type, loopback_ip_override) = {
+    let (
+        virtualization_type,
+        loopback_ip_override,
+        include_ipv6_tenant,
+        quarantine_host,
+        astra_config,
+    ) = {
         let state = state.lock().await;
-        (state.virtualization_type, state.loopback_ip_override)
+        (
+            state.virtualization_type,
+            state.loopback_ip_override,
+            state.include_ipv6_tenant,
+            state.quarantine_host,
+            state.astra_config.clone(),
+        )
     };
     let config_version = if loopback_ip_override.is_some() {
         DHCP_GATE_CONFIG_VERSION.to_string()
@@ -748,7 +1205,7 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
 
     let tenant_interface_prefix: IpNetwork = "192.168.1.12/32".parse().unwrap();
 
-    let tenant_interface = rpc::forge::FlatInterfaceConfig {
+    let mut tenant_interface = rpc::forge::FlatInterfaceConfig {
         function_type: rpc::forge::InterfaceFunctionType::Physical.into(),
         vlan_id: 10,
         vni: 10100,
@@ -762,7 +1219,9 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         vpc_peer_vnis,
         prefix: Some("192.168.1.1/32".to_string()),
         fqdn: "host1".to_string(),
-        booturl: None,
+        // The quarantined tenant needs the same explicit IPv6 boot URL as the
+        // admin fixture; its IPv4-only service discovery cannot generate one.
+        booturl: quarantine_host.then(|| "http://[2001:db8::80]/boot.efi".to_string()),
         svi_ip: get_svi_ip(&Some(svi_ip), virtualization_type, false, 28)
             .unwrap()
             .map(|ip| ip.to_string()),
@@ -916,6 +1375,36 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         interface_routing_profile: None,
         addresses: vec![],
     };
+
+    if include_ipv6_tenant {
+        // Keep the existing IPv4 projection while giving FMDS a real canonical
+        // IPv6 tenant prefix to route. Only the FMDS retry case needs this input.
+        tenant_interface.addresses = vec![
+            rpc::forge::InterfaceAddressConfig {
+                address_family: rpc::forge::AddressFamily::V4.into(),
+                ip: tenant_interface.ip.clone().expect("fixture IPv4 address"),
+                interface_prefix: tenant_interface
+                    .interface_prefix
+                    .clone()
+                    .expect("fixture IPv4 interface prefix"),
+                prefix: tenant_interface
+                    .prefix
+                    .clone()
+                    .expect("fixture IPv4 tenant prefix"),
+                gateway: tenant_interface.gateway.clone(),
+                svi_ip: tenant_interface.svi_ip.clone(),
+                tenant_vrf_loopback_ip: tenant_interface.tenant_vrf_loopback_ip.clone(),
+            },
+            rpc::forge::InterfaceAddressConfig {
+                address_family: rpc::forge::AddressFamily::V6.into(),
+                ip: "2001:db8:7176::12".to_string(),
+                interface_prefix: "2001:db8:7176::12/128".to_string(),
+                prefix: "2001:db8:7176::/64".to_string(),
+                svi_ip: Some("2001:db8:7176::1/64".to_string()),
+                ..Default::default()
+            },
+        ];
+    }
 
     let network_security_policy_overrides = vec![
         rpc::forge::ResolvedNetworkSecurityGroupRule {
@@ -1169,10 +1658,13 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         managed_host_config: Some(rpc::forge::ManagedHostNetworkConfig {
             loopback_ip: loopback_ip_override.unwrap_or("127.0.0.1").to_string(),
             loopback_ip_v6: None,
-            quarantine_state: None,
+            quarantine_state: quarantine_host.then(|| rpc::forge::ManagedHostQuarantineState {
+                mode: rpc::forge::ManagedHostQuarantineMode::BlockAllTraffic.into(),
+                reason: Some("quarantine must not wait for metadata readiness".to_string()),
+            }),
         }),
         managed_host_config_version: config_version.clone(),
-        use_admin_network: true,
+        use_admin_network: !quarantine_host,
         admin_interface: Some(admin_interface),
         tenant_interfaces: vec![tenant_interface],
         network_security_policy_overrides,
@@ -1203,8 +1695,10 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         stateful_acls_enabled: true,
         instance: Some(instance),
         dpu_extension_services: vec![],
-        astra_config: None,
-        use_admin_network_changed: None,
+        astra_config,
+        // The FMDS scenario also exercises the required OVS side effect while
+        // entering the quarantined tenant network; retries must not repeat it.
+        use_admin_network_changed: quarantine_host.then_some(true),
     };
     common::respond(netconf)
 }
@@ -1218,6 +1712,12 @@ async fn handle_record_netstat(
         rpc::forge::DpuNetworkStatus::decode(payload).map_err(|_| StatusCode::BAD_REQUEST)?;
     let mut state = state.lock().await;
     state.num_health_reports.fetch_add(1, Ordering::SeqCst);
+    state.post_config_wait_seen |= status.dpu_health.as_ref().is_some_and(|health| {
+        health
+            .alerts
+            .iter()
+            .any(|alert| alert.id == "PostConfigCheckWait")
+    });
     let rejected = std::mem::take(&mut state.reject_next_network_status);
     state
         .network_status_reports

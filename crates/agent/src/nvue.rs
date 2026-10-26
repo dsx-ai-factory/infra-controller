@@ -26,6 +26,7 @@ use carbide_network::sanitized_mac;
 use carbide_network::virtualization::VpcVirtualizationType;
 use eyre::WrapErr;
 use gtmpl_derive::Gtmpl;
+use ipnetwork::Ipv6Network;
 use mac_address::MacAddress;
 use serde::Deserialize;
 
@@ -865,6 +866,14 @@ pub fn build(conf: NvueConfig) -> eyre::Result<String> {
         DPUstorageprefix: "127.7.7.7/32".to_string(),
         IncludeBridge: include_bridge,
         IsDpuOs: is_dpu_os,
+        FmdsIpv6Gateway: conf
+            .fmds_ipv6_gateway
+            .map(|gateway| gateway.to_string())
+            .unwrap_or_default(),
+        FmdsIpv6Prefix: conf
+            .fmds_ipv6_gateway
+            .map(|gateway| format!("{}/{}", gateway.network(), gateway.prefix()))
+            .unwrap_or_default(),
     };
 
     gtmpl::template(template, params).map_err(|e| {
@@ -1311,6 +1320,9 @@ pub struct NvueConfig {
     /// In containerized mode, the vlan ID of the pf0hpf-facing SVI that should
     /// carry 169.254.169.253/30 as the FMDS gateway address.
     pub fmds_gateway_vlan: Option<u16>,
+    /// Optional local FMDS IPv6 peer, resolved from the agent's configured
+    /// endpoint. `None` preserves IPv4-only gateway and export configuration.
+    pub fmds_ipv6_gateway: Option<Ipv6Network>,
     pub vpc_virtualization_type: VpcVirtualizationType,
     pub use_admin_network: bool,
     pub tenancy_enabled: bool,
@@ -1645,6 +1657,8 @@ struct TmplNvue {
     DPUstorageprefix: String, // XXX (Classic, L3)
     IncludeBridge: bool,
     IsDpuOs: bool,
+    FmdsIpv6Gateway: String,
+    FmdsIpv6Prefix: String,
 
     HasBgpLeafSessionPassword: bool,
     /// A password to use for the BGP session with the
@@ -1915,7 +1929,8 @@ struct TmplVni {
 mod tests {
     use std::collections::BTreeSet;
 
-    use carbide_test_support::value_scenarios;
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{scenarios, value_scenarios};
 
     use super::*;
 
@@ -2061,6 +2076,7 @@ mod tests {
             is_fnn: false,
             is_dpu_os: true,
             fmds_gateway_vlan: None,
+            fmds_ipv6_gateway: None,
             vpc_virtualization_type: VpcVirtualizationType::EthernetVirtualizer,
             use_admin_network: false,
             tenancy_enabled: true,
@@ -2862,6 +2878,70 @@ type: ipv6
         );
     }
 
+    /// FMDS's connected prefix must not advertise on-link reachability or
+    /// autoconfiguration to guests. The override belongs only on the container
+    /// attachment that both has the IPv6 peer and sends router advertisements.
+    #[test]
+    fn fmds_ra_prefix_override_stays_on_the_container_attachment() {
+        let peer = Some("fd00:76b9::255/127".parse().expect("FMDS IPv6 peer"));
+        let tenant_ra = concat!(
+            "interface pf0vf0_if vrf vpc_100\n",
+            "ipv6 nd prefix 2001:db8::/127 no-autoconfig"
+        );
+        let metadata_prefix = "ipv6 nd prefix fd00:76b9::254/127 0 0 off-link no-autoconfig";
+
+        scenarios!(run = |conf: NvueConfig| {
+            let output = build(conf).map_err(|error| error.to_string())?;
+            let docs: serde_yaml::Value =
+                serde_yaml::from_str(&output).map_err(|error| error.to_string())?;
+            let snippet = docs.as_sequence().expect("NVUE document sequence")[1]["set"]
+                ["system"]["config"]["snippet"]["frr.conf"]
+                .as_str()
+                .expect("the tenant must retain router advertisements");
+            Ok::<_, String>(snippet.lines()
+                .map(str::trim)
+                .filter(|line| line.starts_with("interface ") || line.starts_with("ipv6 nd prefix "))
+                .collect::<Vec<_>>()
+                .join("\n"))
+        };
+            // The selected routed attachment needs the override beside its tenant PIO.
+            "container peer on the RA interface" {
+                NvueConfig {
+                    is_dpu_os: false,
+                    fmds_gateway_vlan: Some(100),
+                    fmds_ipv6_gateway: peer,
+                    ..dual_stack_fnn_config()
+                } => Yields(format!("{tenant_ra}\n{metadata_prefix}")),
+            }
+            // With no IPv6 opt-in there is no connected metadata prefix to override.
+            "IPv6 peer omitted" {
+                NvueConfig {
+                    is_dpu_os: false,
+                    fmds_gateway_vlan: Some(100),
+                    ..dual_stack_fnn_config()
+                } => Yields(tenant_ra.to_string()),
+            }
+            // A configured peer must not add a PIO to an unrelated tenant interface.
+            "gateway VLAN does not match the RA interface" {
+                NvueConfig {
+                    is_dpu_os: false,
+                    fmds_gateway_vlan: Some(999),
+                    fmds_ipv6_gateway: peer,
+                    ..dual_stack_fnn_config()
+                } => Yields(tenant_ra.to_string()),
+            }
+            // DPU OS places its peer on the private ARM attachment, not this host link.
+            "DPU OS private peer" {
+                NvueConfig {
+                    is_dpu_os: true,
+                    fmds_gateway_vlan: Some(100),
+                    fmds_ipv6_gateway: peer,
+                    ..dual_stack_fnn_config()
+                } => Yields(tenant_ra.to_string()),
+            }
+        );
+    }
+
     #[test]
     fn test_build_fnn_ipv6_only_interface() {
         let mut conf = dual_stack_fnn_config();
@@ -3252,45 +3332,84 @@ type: ipv6
         }
     }
 
-    // In container mode with fmds_gateway_vlan matching the phy port vlan, the
-    // FMDS gateway address should appear in the rendered output.
+    /// Checks each enabled FMDS gateway's exact attachment and the omitted
+    /// IPv6 gateway's absence, so unrelated interfaces cannot hide misplacement.
+    fn assert_fmds_gateway_interface(
+        output: &str,
+        expected_interface: &str,
+        ipv6_gateway: Option<Ipv6Network>,
+    ) {
+        let docs: serde_yaml::Value = serde_yaml::from_str(output).expect("rendered NVUE YAML");
+        let interfaces = docs.as_sequence().expect("NVUE document sequence")[1]["set"]["interface"]
+            .as_mapping()
+            .expect("NVUE interfaces");
+        for (address, expected_owner) in [
+            ("169.254.169.253/30", Some(expected_interface)),
+            (
+                "fd00:76b9::255/127",
+                ipv6_gateway.map(|_| expected_interface),
+            ),
+        ] {
+            let owners: Vec<_> = interfaces
+                .iter()
+                .filter(|(_, interface)| !interface["ip"]["address"][address].is_null())
+                .map(|(name, _)| name.as_str().expect("interface name"))
+                .collect();
+            assert_eq!(
+                owners,
+                expected_owner.into_iter().collect::<Vec<_>>(),
+                "gateway {address}"
+            );
+        }
+    }
+
+    /// Containerized ETV puts FMDS peers on the selected SVI. IPv4 must
+    /// remain available whether or not the operator enables IPv6.
     #[test]
     fn test_fmds_gateway_etv_container_mode_emits_address() {
-        let mut conf = minimal_nvue_config();
-        conf.is_dpu_os = false;
-        conf.fmds_gateway_vlan = Some(274);
-        conf.ct_port_configs = vec![phy_port_config(274)];
-        let output = build(conf).expect("build should succeed");
-        assert!(
-            output.contains("169.254.169.253/30"),
-            "expected FMDS gateway address in output:\n{output}"
+        scenarios!(run = |gateway: Option<Ipv6Network>| {
+            let mut conf = minimal_nvue_config();
+            conf.is_dpu_os = false;
+            conf.fmds_gateway_vlan = Some(274);
+            conf.fmds_ipv6_gateway = gateway;
+            conf.ct_port_configs = vec![phy_port_config(274)];
+            let output = build(conf).map_err(|error| error.to_string())?;
+            assert_fmds_gateway_interface(&output, "vlan274", gateway);
+            Ok::<_, String>(())
+        };
+            // IPv4 placement cannot depend on the optional IPv6 template block.
+            "IPv4 only" { None => Yields(()) }
+            // Enabling IPv6 adds its peer at the same SVI without moving IPv4.
+            "IPv6 enabled" {
+                Some("fd00:76b9::255/127".parse().expect("FMDS peer")) => Yields(()),
+            }
         );
     }
 
-    // In DPU-OS mode the FMDS gateway address must NOT appear on the vlan SVI
-    // (it lives on pf0dpu1_if instead, managed by the startup template).
+    /// DPU OS uses its dedicated ARM attachment for both peers, even when
+    /// a container-mode VLAN is supplied. Neither peer belongs on the host SVI.
     #[test]
-    fn test_fmds_gateway_etv_dpu_os_mode_suppressed() {
+    fn test_fmds_gateway_etv_dpu_os_mode_uses_arm_attachment() {
         let mut conf = minimal_nvue_config();
         conf.is_dpu_os = true;
+        conf.hbn_version = Some("2.3.0-doca2.8.0".into());
+        conf.fmds_ipv6_gateway = Some("fd00:76b9::255/127".parse().expect("FMDS peer"));
         // Even if fmds_gateway_vlan is accidentally set, DPU-OS mode must ignore it.
         conf.fmds_gateway_vlan = Some(274);
         conf.ct_port_configs = vec![phy_port_config(274)];
+        let gateway = conf.fmds_ipv6_gateway;
         let output = build(conf).expect("build should succeed");
-        // The ETV template uses pf0dpu1_if for the gateway in DPU-OS mode, not the vlan SVI.
-        assert!(
-            !output.contains("169.254.169.253/30") || output.contains("pf0dpu1_if"),
-            "DPU-OS mode should not put 169.254.169.253/30 on the vlan SVI"
-        );
+        assert_fmds_gateway_interface(&output, "pf0dpu1_if", gateway);
     }
 
-    // fmds_gateway_vlan pointing at a vlan that does not exist in ct_port_configs
-    // should log an error but still return a valid (if incomplete) config.
+    /// An unmatched FMDS VLAN must not put either peer on an unrelated SVI;
+    /// a warning permits rendering the remaining configuration.
     #[test]
     fn test_fmds_gateway_vlan_not_in_port_configs_still_builds() {
         let mut conf = minimal_nvue_config();
         conf.is_dpu_os = false;
         conf.fmds_gateway_vlan = Some(999); // no port has vlan 999
+        conf.fmds_ipv6_gateway = Some("fd00:76b9::255/127".parse().expect("FMDS peer"));
         conf.ct_port_configs = vec![phy_port_config(274)];
         // Should succeed (just logs an error, does not fail the build).
         let output = build(conf).expect("build should succeed even when vlan is missing");
@@ -3298,6 +3417,7 @@ type: ipv6
             !output.contains("169.254.169.253/30"),
             "mismatched vlan should not produce FMDS address in output"
         );
+        assert!(!output.contains("fd00:76b9::255/127"));
     }
 
     // fmds_gateway_vlan=None should never emit the FMDS gateway address.
@@ -3326,37 +3446,47 @@ type: ipv6
         }
     }
 
-    // Same checks for FNN template.
+    /// Containerized FNN L2 uses the selected SVI for FMDS peers, with IPv4
+    /// available independently of the IPv6 opt-in.
     #[test]
     fn test_fmds_gateway_fnn_container_mode_emits_address() {
-        let mut conf = minimal_nvue_config();
-        conf.is_fnn = true;
-        conf.vpc_virtualization_type = VpcVirtualizationType::Fnn;
-        conf.is_dpu_os = false;
-        conf.fmds_gateway_vlan = Some(274);
-        conf.ct_routing_profile = Some(minimal_fnn_routing_profile());
-        conf.ct_port_configs = vec![phy_port_config(274)];
-        let output = build(conf).expect("build should succeed");
-        assert!(
-            output.contains("169.254.169.253/30"),
-            "expected FMDS gateway address in FNN output:\n{output}"
+        scenarios!(run = |gateway: Option<Ipv6Network>| {
+            let mut conf = minimal_nvue_config();
+            conf.is_fnn = true;
+            conf.vpc_virtualization_type = VpcVirtualizationType::Fnn;
+            conf.is_dpu_os = false;
+            conf.fmds_gateway_vlan = Some(274);
+            conf.fmds_ipv6_gateway = gateway;
+            conf.ct_routing_profile = Some(minimal_fnn_routing_profile());
+            conf.ct_port_configs = vec![phy_port_config(274)];
+            let output = build(conf).map_err(|error| error.to_string())?;
+            assert_fmds_gateway_interface(&output, "vlan274", gateway);
+            Ok::<_, String>(())
+        };
+            // The SVI must retain its IPv4 peer without an IPv6 opt-in.
+            "IPv4 only" { None => Yields(()) }
+            // Both families must use the selected SVI when IPv6 is enabled.
+            "IPv6 enabled" {
+                Some("fd00:76b9::255/127".parse().expect("FMDS peer")) => Yields(()),
+            }
         );
     }
 
+    /// FNN on DPU OS must keep both FMDS peers on the ARM attachment rather
+    /// than the tenant SVI, regardless of a supplied container-mode VLAN.
     #[test]
-    fn test_fmds_gateway_fnn_dpu_os_mode_suppressed() {
+    fn test_fmds_gateway_fnn_dpu_os_mode_uses_arm_attachment() {
         let mut conf = minimal_nvue_config();
         conf.is_fnn = true;
         conf.vpc_virtualization_type = VpcVirtualizationType::Fnn;
         conf.is_dpu_os = true;
         conf.fmds_gateway_vlan = Some(274);
+        conf.fmds_ipv6_gateway = Some("fd00:76b9::255/127".parse().expect("FMDS peer"));
         conf.ct_routing_profile = Some(minimal_fnn_routing_profile());
         conf.ct_port_configs = vec![phy_port_config(274)];
+        let gateway = conf.fmds_ipv6_gateway;
         let output = build(conf).expect("build should succeed");
-        assert!(
-            !output.contains("169.254.169.253/30") || output.contains("pf0dpu1_if"),
-            "DPU-OS mode should not put 169.254.169.253/30 on the vlan SVI in FNN"
-        );
+        assert_fmds_gateway_interface(&output, "pf0dpu1_if", gateway);
     }
 
     fn l3_phy_port_config(vlan: u16) -> PortConfig {
@@ -3367,52 +3497,47 @@ type: ipv6
         }
     }
 
-    // FNN L3 (is_l2_segment=false): in container mode the FMDS gateway address
-    // must appear on the L3 interface's ip block, not an SVI.
+    /// Routed FNN in container mode places FMDS peers on the physical
+    /// interface, since there is no SVI. IPv4 does not require an IPv6 opt-in.
     #[test]
     fn test_fmds_gateway_fnn_l3_container_mode_emits_address() {
-        let mut conf = minimal_nvue_config();
-        conf.is_fnn = true;
-        conf.vpc_virtualization_type = VpcVirtualizationType::Fnn;
-        conf.is_dpu_os = false;
-        conf.fmds_gateway_vlan = Some(274);
-        conf.ct_routing_profile = Some(minimal_fnn_routing_profile());
-        conf.ct_port_configs = vec![l3_phy_port_config(274)];
-        let output = build(conf).expect("build should succeed");
-        assert!(
-            output.contains("169.254.169.253/30"),
-            "expected FMDS gateway address on FNN L3 interface:\n{output}"
+        scenarios!(run = |gateway: Option<Ipv6Network>| {
+            let mut conf = minimal_nvue_config();
+            conf.is_fnn = true;
+            conf.vpc_virtualization_type = VpcVirtualizationType::Fnn;
+            conf.is_dpu_os = false;
+            conf.fmds_gateway_vlan = Some(274);
+            conf.fmds_ipv6_gateway = gateway;
+            conf.ct_routing_profile = Some(minimal_fnn_routing_profile());
+            conf.ct_port_configs = vec![l3_phy_port_config(274)];
+            let output = build(conf).map_err(|error| error.to_string())?;
+            assert_fmds_gateway_interface(&output, "pf0hpf_if", gateway);
+            Ok::<_, String>(())
+        };
+            // The routed host interface needs its IPv4 peer even without IPv6.
+            "IPv4 only" { None => Yields(()) }
+            // IPv6 must use that physical interface rather than creating an SVI.
+            "IPv6 enabled" {
+                Some("fd00:76b9::255/127".parse().expect("FMDS peer")) => Yields(()),
+            }
         );
     }
 
-    // FNN L3 in DPU-OS mode: 169.254.169.253/30 must NOT appear on pf0hpf_if
-    // (the startup template puts it on pf0dpu1_if instead). The naive
-    // `!contains(addr) || contains(pf0dpu1_if)` check is vacuously true because
-    // the FNN template always renders pf0dpu1_if in DPU-OS mode, so we parse the
-    // YAML and assert at the per-interface level.
+    /// Routed FNN on DPU OS still uses the ARM attachment for FMDS. Checking
+    /// exact interface ownership prevents a peer on the host port from passing.
     #[test]
-    fn test_fmds_gateway_fnn_l3_dpu_os_mode_suppressed() {
+    fn test_fmds_gateway_fnn_l3_dpu_os_mode_uses_arm_attachment() {
         let mut conf = minimal_nvue_config();
         conf.is_fnn = true;
         conf.vpc_virtualization_type = VpcVirtualizationType::Fnn;
         conf.is_dpu_os = true;
         conf.fmds_gateway_vlan = Some(274);
+        conf.fmds_ipv6_gateway = Some("fd00:76b9::255/127".parse().expect("FMDS peer"));
         conf.ct_routing_profile = Some(minimal_fnn_routing_profile());
         conf.ct_port_configs = vec![l3_phy_port_config(274)];
+        let gateway = conf.fmds_ipv6_gateway;
         let output = build(conf).expect("build should succeed");
-        let docs: serde_yaml::Value =
-            serde_yaml::from_str(&output).expect("output should be valid YAML");
-        let interfaces = &docs.as_sequence().unwrap()[1]["set"]["interface"];
-        // The L3 interface must not carry the FMDS address.
-        assert!(
-            interfaces["pf0hpf_if"]["ip"]["address"]["169.254.169.253/30"].is_null(),
-            "DPU-OS mode must not put 169.254.169.253/30 on pf0hpf_if:\n{output}"
-        );
-        // The startup-template interface (pf0dpu1_if) must carry it instead.
-        assert!(
-            !interfaces["pf0dpu1_if"]["ip"]["address"]["169.254.169.253/30"].is_null(),
-            "DPU-OS mode must put 169.254.169.253/30 on pf0dpu1_if:\n{output}"
-        );
+        assert_fmds_gateway_interface(&output, "pf0dpu1_if", gateway);
     }
 
     // FNN with an L3 Physical port and a mismatched fmds_gateway_vlan should not
@@ -3430,6 +3555,70 @@ type: ipv6
         assert!(
             !output.contains("169.254.169.253/30"),
             "mismatched vlan should not produce FMDS address on FNN L3 interface:\n{output}"
+        );
+    }
+
+    /// FMDS's connected IPv6 prefix must stay local even when the tenant's
+    /// routing profile permits all IPv6 prefixes. Without the opt-in, IPv4-only
+    /// deployments must not receive an IPv6 FMDS filter.
+    #[test]
+    fn fmds_ipv6_prefix_is_excluded_before_export_permits() {
+        value_scenarios!(run = |gateway: Option<Ipv6Network>| {
+            let mut conf = minimal_nvue_config();
+            conf.is_fnn = true;
+            conf.vpc_virtualization_type = VpcVirtualizationType::Fnn;
+            conf.fmds_ipv6_gateway = gateway;
+            conf.ct_port_configs = vec![l3_phy_port_config(274)];
+            // A broad operator prefix must not make the local FMDS link exportable.
+            conf.ct_routing_profile = Some(RoutingProfile {
+                allowed_anycast_prefixes: vec!["::/0".into()],
+                ..minimal_fnn_routing_profile()
+            });
+            let output = build(conf).expect("render FNN policies");
+            let docs: serde_yaml::Value = serde_yaml::from_str(&output).expect("NVUE YAML");
+            let policy = &docs.as_sequence().expect("NVUE document sequence")[1]["set"]
+                ["router"]["policy"];
+            // The permits remain, but the FMDS denies have lower rule numbers.
+            assert_eq!(
+                policy["route-map"]["leak_to_underlay_ipv6"]["rule"]["65533"]["match"]
+                    ["ip-prefix-list"].as_str(),
+                Some("ALLOW_TO_UNDERLAY_PREFIX_LIST_IPV6")
+            );
+            assert!(
+                policy["route-map"]["dpu_to_evpn"]["rule"]["11"]["action"]
+                    ["permit"].is_mapping()
+            );
+            serde_json::json!({
+                "prefix": policy["prefix-list"]["FMDS_LOCAL_PREFIX_LIST_IPV6"],
+                "evpn": policy["route-map"]["dpu_to_evpn"]["rule"]["8"],
+                "underlay": policy["route-map"]["leak_to_underlay_ipv6"]["rule"]["65532"],
+            })
+        };
+            // No opt-in means no policy or connected metadata route changes.
+            "IPv6 omitted" {
+                None => serde_json::json!({"prefix": null, "evpn": null, "underlay": null}),
+            }
+            // Match the whole /127 and either /128 before broad prefix/tag permits.
+            "IPv6 enabled" {
+                Some("fd00:76b9::255/127".parse().expect("FMDS peer")) => serde_json::json!({
+                    "prefix": {"type": "ipv6", "rule": {
+                        "10": {"action": "permit", "match": {
+                            "fd00:76b9::254/127": {"max-prefix-len": 128}
+                        }},
+                        "65535": {"action": "deny", "match": {"any": {}}}
+                    }},
+                    "evpn": {
+                        "action": {"deny": {}},
+                        "match": {"type": "ipv6", "evpn-route-type": "ip-prefix",
+                            "ip-prefix-list": "FMDS_LOCAL_PREFIX_LIST_IPV6"}
+                    },
+                    "underlay": {
+                        "action": {"deny": {}},
+                        "match": {"type": "ipv6",
+                            "ip-prefix-list": "FMDS_LOCAL_PREFIX_LIST_IPV6"}
+                    }
+                }),
+            }
         );
     }
 

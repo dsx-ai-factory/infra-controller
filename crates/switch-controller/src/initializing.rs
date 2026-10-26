@@ -20,7 +20,7 @@
 use carbide_uuid::switch::SwitchId;
 use model::machine_interface_address::MachineInterfaceAssociation;
 use model::switch::{
-    ConfigureCertificateState, ConfiguringState, InitializingState, Switch, SwitchControllerState,
+    ConfiguringState, DisableMtlsState, InitializingState, Switch, SwitchControllerState,
 };
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -189,8 +189,8 @@ async fn handle_wait_for_os_machine_interface(
         );
         Ok(StateHandlerOutcome::transition(
             SwitchControllerState::Configuring {
-                config_state: ConfiguringState::ConfigureCertificate {
-                    configure_certificate: ConfigureCertificateState::Start,
+                config_state: ConfiguringState::DisableMtls {
+                    disable_mtls: DisableMtlsState::Start,
                 },
             },
         ))

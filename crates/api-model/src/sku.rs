@@ -29,6 +29,10 @@ use super::hardware_info::CpuInfo;
 #[derive(Clone, Debug, Deserialize, Serialize, carbide_macros::DbTable)]
 #[db_table(name = "machine_skus")]
 pub struct Sku {
+    /// `schema_version` identifies the SKU format. Database reads preserve all
+    /// nonnegative stored versions, including historical ones; negative values
+    /// return [`sqlx::Error::ColumnDecode`]. Creation and replacement separately
+    /// require the current SKU version.
     pub schema_version: u32,
     pub id: String,
     pub description: String,
@@ -39,7 +43,13 @@ pub struct Sku {
 
 impl<'r> FromRow<'r, PgRow> for Sku {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
-        let schema_version: u32 = row.try_get::<i32, &str>("schema_version")? as u32;
+        let schema_version =
+            u32::try_from(row.try_get::<i32, _>("schema_version")?).map_err(|error| {
+                sqlx::Error::ColumnDecode {
+                    index: "schema_version".to_string(),
+                    source: Box::new(error),
+                }
+            })?;
         let id: String = row.try_get("id")?;
         let description: String = row.try_get("description")?;
         let created: DateTime<Utc> = row.try_get("created")?;

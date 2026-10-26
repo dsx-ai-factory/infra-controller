@@ -8,7 +8,6 @@ use wire::operation_status::State;
 
 fn pool() -> wire::PoolBinding {
     wire::PoolBinding {
-        site_id: "site".into(),
         authority_id: "authority".into(),
         pool_id: "pool".into(),
         binding_id: "binding".into(),
@@ -60,8 +59,8 @@ fn status(state: State) -> wire::OperationStatus {
 #[test]
 fn describe_requires_identity_and_recognized_domain() {
     let valid = wire::DescribeResponse {
-        authority_id: " opaque authority ".into(),
-        pool_id: " opaque pool ".into(),
+        authority_id: " opaque authority Δ ".into(),
+        pool_id: " opaque pool 池 ".into(),
         value_domain: wire::ValueDomain::Integer.into(),
         supports_stats: false,
     };
@@ -76,6 +75,10 @@ fn describe_requires_identity_and_recognized_domain() {
         "missing identity" {
             wire::DescribeResponse { authority_id: String::new(), ..valid.clone() } => Fails,
             wire::DescribeResponse { pool_id: String::new(), ..valid.clone() } => Fails,
+        }
+        "identities cannot contain NUL" {
+            wire::DescribeResponse { authority_id: "authority\0id".into(), ..valid.clone() } => Fails,
+            wire::DescribeResponse { pool_id: "pool\0id".into(), ..valid.clone() } => Fails,
         }
         "domain must be supplied and recognized" {
             wire::DescribeResponse { value_domain: 0, ..valid.clone() } => Fails,
@@ -118,6 +121,11 @@ fn allocation_requires_complete_assignment() {
             Some(changed_allocation(|a| a.operation.as_mut().unwrap().owner = None)) => Fails,
             Some(changed_allocation(|a| a.operation.as_mut().unwrap().owner.as_mut().unwrap().slot.clear())) => Fails,
             Some(changed_allocation(|a| a.operation.as_mut().unwrap().eligibility_revision.clear())) => Fails,
+        }
+        "returned operation text cannot contain NUL" {
+            Some(changed_allocation(|a| a.operation.as_mut().unwrap().request_id = "request\0id".into())) => Fails,
+            Some(changed_allocation(|a| a.operation.as_mut().unwrap().owner.as_mut().unwrap().owner_id = "owner\0id".into())) => Fails,
+            Some(changed_allocation(|a| a.operation.as_mut().unwrap().eligibility_revision = "revision\0id".into())) => Fails,
         }
         "delegates malformed values to the wire validator" {
             Some(changed_allocation(|a| a.value = Some(wire::Value { kind: Some(wire::value::Kind::Ipv4(vec![127])) }))) => Fails,
@@ -271,6 +279,38 @@ fn recover_requires_echo_and_status() {
 }
 
 #[test]
+fn recover_checks_text_even_when_identity_matches() {
+    let valid = wire::OperationIdentity {
+        request_id: " request Δ ".into(),
+        pool: Some(wire::PoolBinding {
+            pool_id: " pool 池 ".into(),
+            ..pool()
+        }),
+    };
+    scenarios!(run = |identity: wire::OperationIdentity| {
+        let request = wire::RecoverRequest {
+            operation_identity: Some(identity.clone()),
+        };
+        let response = wire::RecoverResponse {
+            operation_identity: Some(identity),
+            operation_status: Some(status(State::Pending(wire::Empty {}))),
+        };
+        super::recover(&request, &response).map_err(drop)
+    };
+        "matching Unicode and whitespace remain valid" {
+            valid.clone() => Yields(()),
+        }
+        "matching NUL text is still invalid" {
+            wire::OperationIdentity { request_id: "request\0id".into(), ..valid.clone() } => Fails,
+            wire::OperationIdentity {
+                pool: Some(wire::PoolBinding { pool_id: "pool\0id".into(), ..pool() }),
+                ..valid
+            } => Fails,
+        }
+    );
+}
+
+#[test]
 fn recover_validates_allocated_identity_and_saved_failure() {
     let request = wire::RecoverRequest {
         operation_identity: Some(identity()),
@@ -284,20 +324,22 @@ fn recover_validates_allocated_identity_and_saved_failure() {
         "a saved invalid-argument rejection is a valid observation" {
             State::Failed(wire::Failure {
                 code: wire::FailureCode::InvalidArgument.into(),
-                message: "malformed allocation request".into(),
+                message: " malformed allocation request Δ ".into(),
             }) => Yields(()),
         }
         "saved allocation requires a handle" {
             State::Allocated(changed_allocation(|a| a.allocation_id.clear())) => Fails,
+            State::Allocated(changed_allocation(|a| a.allocation_id = "allocation\0id".into())) => Fails,
         }
         "nested assignment must belong to the queried identity" {
             State::Allocated(changed_allocation(|a| a.operation.as_mut().unwrap().request_id = "other-request".into())) => Fails,
-            State::Allocated(changed_allocation(|a| a.operation.as_mut().unwrap().pool.as_mut().unwrap().site_id = "other-site".into())) => Fails,
+            State::Allocated(changed_allocation(|a| a.operation.as_mut().unwrap().pool.as_mut().unwrap().binding_id = "other-binding".into())) => Fails,
         }
         "failure must have a recognized definite code and diagnostic" {
             State::Failed(wire::Failure { code: 0, message: "rejected".into() }) => Fails,
             State::Failed(wire::Failure { code: i32::MAX, message: "rejected".into() }) => Fails,
             State::Failed(wire::Failure { code: wire::FailureCode::InvalidArgument.into(), message: String::new() }) => Fails,
+            State::Failed(wire::Failure { code: wire::FailureCode::InvalidArgument.into(), message: "provider\0diagnostic".into() }) => Fails,
         }
     );
 }

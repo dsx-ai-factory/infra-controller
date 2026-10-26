@@ -6,7 +6,7 @@ use std::error::Error;
 use std::future::Future;
 use std::net::Ipv4Addr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -19,10 +19,10 @@ use carbide_resource_pool_api::v1::resource_pool_server::{ResourcePool, Resource
 use carbide_resource_pool_api::v1::{
     AllocateExactRequest, AllocateExactResponse, AllocateRequest, AllocateResponse, Allocation,
     AllocationOperation, AssignmentMode, CancelRequest, CancelResponse, DefineRequest,
-    DefineResponse, DescribeRequest, DescribeResponse, Eligibility, Empty, LookupRequest,
-    LookupResponse, Owner, PoolBinding, RecoverRequest, RecoverResponse, ReleaseRequest,
-    ReleaseResponse, RouteTarget, RouteTargetMode, RouteTargetPolicy, RouteTargets, StatsRequest,
-    StatsResponse, ValueDomain, ValueRange,
+    DefineResponse, DescribeRequest, DescribeResponse, Eligibility, Empty, Failure, FailureCode,
+    LookupRequest, LookupResponse, OperationStatus, Owner, PoolBinding, RecoverRequest,
+    RecoverResponse, ReleaseRequest, ReleaseResponse, RouteTarget, RouteTargetMode,
+    RouteTargetPolicy, RouteTargets, StatsRequest, StatsResponse, ValueDomain, ValueRange,
 };
 use http_body::Frame;
 use http_body_util::BodyExt;
@@ -43,15 +43,15 @@ pub(in crate::grpc) const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `TestServer` runs a provider on a loopback port and owns its server task.
 /// Tests call `stop` to cancel and join that task before returning.
-pub(in crate::grpc) struct TestServer {
-    pub(in crate::grpc) endpoint: Url,
+pub(crate) struct TestServer {
+    pub(crate) endpoint: Url,
     pub(in crate::grpc) accepted_connections: Arc<AtomicUsize>,
     shutdown: CancellationToken,
     task: JoinHandle<Result<(), tonic::transport::Error>>,
 }
 
 impl TestServer {
-    pub(super) async fn start(provider: impl ResourcePool) -> Self {
+    pub(crate) async fn start(provider: impl ResourcePool) -> Self {
         Self::start_service(ResourcePoolServer::new(provider), None).await
     }
 
@@ -128,7 +128,7 @@ impl TestServer {
         }
     }
 
-    pub(in crate::grpc) async fn stop(mut self) {
+    pub(crate) async fn stop(mut self) {
         self.shutdown.cancel();
         match tokio::time::timeout(TEST_TIMEOUT, &mut self.task).await {
             Ok(result) => result
@@ -150,12 +150,15 @@ impl TestServer {
 
 /// `Gate` signals a provider call's arrival through `entered`, then waits for
 /// `release`. `dropped` signals that the wait completed or was cancelled.
+/// For delayed allocation, `allocation_finished` signals handler completion or
+/// cancellation, including any provider work after the gate opens.
 #[derive(Default)]
-pub(in crate::grpc) struct Gate {
-    pub(super) calls: AtomicUsize,
-    pub(in crate::grpc) entered: Notify,
-    pub(in crate::grpc) release: Notify,
-    pub(super) dropped: Arc<Notify>,
+pub(crate) struct Gate {
+    pub(crate) calls: AtomicUsize,
+    pub(crate) entered: Notify,
+    pub(crate) release: Notify,
+    pub(crate) dropped: Arc<Notify>,
+    pub(crate) allocation_finished: Arc<Notify>,
 }
 
 impl Gate {
@@ -176,13 +179,48 @@ impl Drop for NotifyOnDrop {
 }
 
 #[derive(Clone)]
-pub(in crate::grpc) enum Fault {
+pub(crate) enum Fault {
     None,
+    // On the first Define attempt, lose a successful reply after acceptance.
+    DefineReplyUnavailableOnce,
+    // Hold Define before provider work so tests can inspect Core's committed intent.
+    StallDefine(Arc<Gate>),
+    // Wait after allocation commits, before delivering the reply.
     WithholdAllocation(Arc<Gate>),
     AllocationUnavailable,
+    AllocationInternal,
+    RecoverUnavailableOnce,
+    RecoverStatus(Code),
+    RecoverUnknownOnce,
+    RecoverNotFoundOnce,
+    StallRecovery(Arc<Gate>),
+    // Keep one request blocked across repeated scanner passes.
+    StallRecoveryForRequest {
+        request_id: String,
+        gate: Arc<Gate>,
+    },
+    RecoveredOwnerMismatch,
+    RecoveredPolicyMismatchOnce,
+    RecoveredWrongDomain,
+    RecoveredIneligibleAllocation,
+    RecoveredFailureWithNul,
+    // Fail the first `Cancel` before cleanup; the flag completes later pending
+    // cleanup immediately before `Recover` reads its status.
+    CancelUnavailableOnce {
+        complete_before_recover: Arc<AtomicBool>,
+    },
+    // Lose the first reply after the provider has completed `Cancel`.
+    CancelReplyUnavailableOnce,
+    // Fail before the provider releases the reservation.
+    ReleaseUnavailableOnce,
+    // Lose the first reply after the provider has released the reservation.
+    ReleaseReplyUnavailableOnce,
+    ReleaseNotAppliedOnce,
+    // Wait before allocation so a terminal `Cancel` can arrive first.
     DelayAllocation(Arc<Gate>),
     StallDescription(Arc<Gate>),
     MismatchedOperation,
+    IneligibleAllocation,
     Malformed(MalformedResponse),
     Description(DescribeResponse),
     LookupUnimplemented,
@@ -190,7 +228,7 @@ pub(in crate::grpc) enum Fault {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(in crate::grpc) enum MalformedResponse {
+pub(crate) enum MalformedResponse {
     Describe,
     AllocateExact,
     Recover,
@@ -202,23 +240,34 @@ pub(in crate::grpc) enum MalformedResponse {
 /// `FaultProvider` wraps the shared provider with one selected delivery or reply
 /// fault. Its observations let tests distinguish provider work from client waiting.
 #[derive(Clone)]
-pub(in crate::grpc) struct FaultProvider {
-    pub(super) provider: LocalProvider,
+pub(crate) struct FaultProvider {
+    pub(crate) provider: LocalProvider,
     fault: Fault,
-    pub(super) allocation_calls: Arc<AtomicUsize>,
-    pub(super) committed: Arc<Mutex<Option<Allocation>>>,
+    pub(crate) define_requests: Arc<Mutex<Vec<DefineRequest>>>,
+    pub(crate) describe_requests: Arc<Mutex<Vec<DescribeRequest>>>,
+    /// Counts both `Allocate` and `AllocateExact` requests.
+    pub(crate) allocation_calls: Arc<AtomicUsize>,
+    pub(crate) recover_calls: Arc<AtomicUsize>,
+    pub(crate) cancel_calls: Arc<AtomicUsize>,
+    pub(crate) release_calls: Arc<AtomicUsize>,
+    pub(crate) committed: Arc<Mutex<Option<Allocation>>>,
     pub(super) stats_calls: Arc<AtomicUsize>,
     pub(super) traceparent: Arc<Mutex<Option<String>>>,
     pub(super) grpc_timeout: Arc<Mutex<Option<String>>>,
-    pub(super) describe_calls: Arc<AtomicUsize>,
+    pub(crate) describe_calls: Arc<AtomicUsize>,
 }
 
 impl FaultProvider {
-    pub(in crate::grpc) fn new(provider: LocalProvider, fault: Fault) -> Self {
+    pub(crate) fn new(provider: LocalProvider, fault: Fault) -> Self {
         Self {
             provider,
             fault,
+            define_requests: Arc::default(),
+            describe_requests: Arc::default(),
             allocation_calls: Arc::default(),
+            recover_calls: Arc::default(),
+            cancel_calls: Arc::default(),
+            release_calls: Arc::default(),
             committed: Arc::default(),
             stats_calls: Arc::default(),
             traceparent: Arc::default(),
@@ -235,6 +284,10 @@ impl ResourcePool for FaultProvider {
         request: Request<DescribeRequest>,
     ) -> Result<Response<DescribeResponse>, Status> {
         self.describe_calls.fetch_add(1, Ordering::SeqCst);
+        self.describe_requests
+            .lock()
+            .expect("description requests lock")
+            .push(request.get_ref().clone());
         *self.grpc_timeout.lock().expect("timeout header lock") = request
             .metadata()
             .get("grpc-timeout")
@@ -261,17 +314,37 @@ impl ResourcePool for FaultProvider {
         &self,
         request: Request<DefineRequest>,
     ) -> Result<Response<DefineResponse>, Status> {
-        self.provider.define(request).await
+        let first_call = {
+            let mut requests = self
+                .define_requests
+                .lock()
+                .expect("definition requests lock");
+            let first_call = requests.is_empty();
+            requests.push(request.get_ref().clone());
+            first_call
+        };
+        if let Fault::StallDefine(gate) = &self.fault {
+            gate.wait().await;
+        }
+        let response = self.provider.define(request).await?;
+        if first_call && matches!(self.fault, Fault::DefineReplyUnavailableOnce) {
+            return Err(Status::unavailable("definition reply unavailable"));
+        }
+        Ok(response)
     }
 
     async fn allocate(
         &self,
         request: Request<AllocateRequest>,
     ) -> Result<Response<AllocateResponse>, Status> {
-        self.allocation_calls.fetch_add(1, Ordering::SeqCst);
-        if let Fault::DelayAllocation(gate) = &self.fault {
+        let first_call = self.allocation_calls.fetch_add(1, Ordering::SeqCst) == 0;
+        let _finished = if first_call && let Fault::DelayAllocation(gate) = &self.fault {
+            let finished = NotifyOnDrop(gate.allocation_finished.clone());
             gate.wait().await;
-        }
+            Some(finished)
+        } else {
+            None
+        };
         let mut response = self.provider.allocate(request).await?;
         *self.committed.lock().expect("committed allocation lock") =
             response.get_ref().allocation.clone();
@@ -279,6 +352,9 @@ impl ResourcePool for FaultProvider {
             Fault::WithholdAllocation(gate) => gate.wait().await,
             Fault::AllocationUnavailable => {
                 return Err(Status::unavailable("allocation reply unavailable"));
+            }
+            Fault::AllocationInternal => {
+                return Err(Status::internal("allocation reply interrupted"));
             }
             Fault::MismatchedOperation => {
                 response
@@ -291,6 +367,14 @@ impl ResourcePool for FaultProvider {
                     .expect("provider operation")
                     .request_id = "another-request".into();
             }
+            Fault::IneligibleAllocation => {
+                response
+                    .get_mut()
+                    .allocation
+                    .as_mut()
+                    .expect("provider allocation")
+                    .value = Some(99.into());
+            }
             _ => {}
         }
         Ok(response)
@@ -300,7 +384,13 @@ impl ResourcePool for FaultProvider {
         &self,
         request: Request<AllocateExactRequest>,
     ) -> Result<Response<AllocateExactResponse>, Status> {
+        self.allocation_calls.fetch_add(1, Ordering::SeqCst);
         let mut response = self.provider.allocate_exact(request).await?;
+        *self.committed.lock().expect("committed allocation lock") =
+            response.get_ref().allocation.clone();
+        if let Fault::WithholdAllocation(gate) = &self.fault {
+            gate.wait().await;
+        }
         if matches!(
             self.fault,
             Fault::Malformed(MalformedResponse::AllocateExact)
@@ -319,7 +409,64 @@ impl ResourcePool for FaultProvider {
         &self,
         request: Request<RecoverRequest>,
     ) -> Result<Response<RecoverResponse>, Status> {
+        let first_call = self.recover_calls.fetch_add(1, Ordering::SeqCst) == 0;
+        match &self.fault {
+            Fault::StallRecovery(gate) => gate.wait().await,
+            Fault::StallRecoveryForRequest { request_id, gate }
+                if request
+                    .get_ref()
+                    .operation_identity
+                    .as_ref()
+                    .is_some_and(|identity| &identity.request_id == request_id) =>
+            {
+                gate.wait().await;
+            }
+            _ => {}
+        }
+        match self.fault {
+            Fault::RecoverStatus(code) => {
+                return Err(Status::new(code, "injected recovery status"));
+            }
+            Fault::RecoverUnavailableOnce if first_call => {
+                return Err(Status::unavailable("recovery unavailable"));
+            }
+            Fault::RecoverUnknownOnce if first_call => {
+                return Ok(Response::new(RecoverResponse {
+                    operation_identity: request.into_inner().operation_identity,
+                    operation_status: Some(OperationStatus {
+                        state: Some(State::Unknown(Empty {})),
+                    }),
+                }));
+            }
+            Fault::RecoverNotFoundOnce if first_call => {
+                return Err(Status::not_found("recovery not found"));
+            }
+            _ => {}
+        }
+        if let Fault::CancelUnavailableOnce {
+            complete_before_recover,
+        } = &self.fault
+            && complete_before_recover.swap(false, Ordering::SeqCst)
+        {
+            // Finish the provider's actual cleanup after its `Pending` reply,
+            // so this `Recover` reports the resulting terminal state.
+            self.provider.complete_cleanup(
+                request
+                    .get_ref()
+                    .operation_identity
+                    .as_ref()
+                    .expect("recovery identity"),
+            )?;
+        }
         let mut response = self.provider.recover(request).await?;
+        if matches!(self.fault, Fault::RecoveredFailureWithNul) {
+            response.get_mut().operation_status = Some(OperationStatus {
+                state: Some(State::Failed(Failure {
+                    code: FailureCode::FailedPrecondition.into(),
+                    message: "provider\0diagnostic".into(),
+                })),
+            });
+        }
         if matches!(self.fault, Fault::Malformed(MalformedResponse::Recover)) {
             response
                 .get_mut()
@@ -328,6 +475,40 @@ impl ResourcePool for FaultProvider {
                 .expect("recovered identity")
                 .request_id = "another-request".into();
         }
+        if let Some(State::Allocated(allocation)) = response
+            .get_mut()
+            .operation_status
+            .as_mut()
+            .and_then(|status| status.state.as_mut())
+        {
+            match self.fault {
+                Fault::RecoveredOwnerMismatch => {
+                    allocation
+                        .operation
+                        .as_mut()
+                        .expect("recovered allocation operation")
+                        .owner
+                        .as_mut()
+                        .expect("recovered allocation owner")
+                        .owner_id = "another-owner".into();
+                }
+                Fault::RecoveredPolicyMismatchOnce if first_call => {
+                    allocation
+                        .route_target_policy
+                        .as_mut()
+                        .expect("recovered allocation policy")
+                        .peer_identity
+                        .clear();
+                }
+                Fault::RecoveredWrongDomain => {
+                    allocation.value = Some(Ipv4Addr::new(192, 0, 2, 1).into());
+                }
+                Fault::RecoveredIneligibleAllocation => {
+                    allocation.value = Some(99.into());
+                }
+                _ => {}
+            }
+        }
         Ok(response)
     }
 
@@ -335,7 +516,14 @@ impl ResourcePool for FaultProvider {
         &self,
         request: Request<CancelRequest>,
     ) -> Result<Response<CancelResponse>, Status> {
+        let first_call = self.cancel_calls.fetch_add(1, Ordering::SeqCst) == 0;
+        if first_call && matches!(self.fault, Fault::CancelUnavailableOnce { .. }) {
+            return Err(Status::unavailable("cancellation unavailable"));
+        }
         let mut response = self.provider.cancel(request).await?;
+        if first_call && matches!(self.fault, Fault::CancelReplyUnavailableOnce) {
+            return Err(Status::unavailable("cancellation reply unavailable"));
+        }
         if matches!(self.fault, Fault::Malformed(MalformedResponse::Cancel)) {
             response
                 .get_mut()
@@ -370,7 +558,18 @@ impl ResourcePool for FaultProvider {
         &self,
         request: Request<ReleaseRequest>,
     ) -> Result<Response<ReleaseResponse>, Status> {
-        self.provider.release(request).await
+        let first_call = self.release_calls.fetch_add(1, Ordering::SeqCst) == 0;
+        if first_call && matches!(self.fault, Fault::ReleaseUnavailableOnce) {
+            return Err(Status::unavailable("release unavailable"));
+        }
+        if first_call && matches!(self.fault, Fault::ReleaseNotAppliedOnce) {
+            return Ok(Response::new(ReleaseResponse { applied: false }));
+        }
+        let response = self.provider.release(request).await?;
+        if first_call && matches!(self.fault, Fault::ReleaseReplyUnavailableOnce) {
+            return Err(Status::unavailable("release reply unavailable"));
+        }
+        Ok(response)
     }
 
     async fn stats(
@@ -445,15 +644,14 @@ impl http_body::Body for StalledBody {
     }
 }
 
-pub(in crate::grpc) async fn bounded<T>(future: impl Future<Output = T>) -> T {
+pub(crate) async fn bounded<T>(future: impl Future<Output = T>) -> T {
     tokio::time::timeout(TEST_TIMEOUT, future)
         .await
         .expect("provider test operation completed within five seconds")
 }
 
-pub(in crate::grpc) fn pool() -> PoolBinding {
+pub(crate) fn pool() -> PoolBinding {
     PoolBinding {
-        site_id: "test-site".into(),
         authority_id: "test-provider".into(),
         pool_id: "provider-vnis".into(),
         binding_id: "vpc-binding".into(),
@@ -461,7 +659,7 @@ pub(in crate::grpc) fn pool() -> PoolBinding {
     }
 }
 
-pub(in crate::grpc) fn provider() -> LocalProvider {
+pub(crate) fn provider() -> LocalProvider {
     LocalProvider::new(
         pool(),
         ValueDomain::Integer,

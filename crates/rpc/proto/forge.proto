@@ -89,6 +89,11 @@ service Forge {
   rpc GetVpcRoutingState(VpcRoutingStateRequest) returns (VpcRoutingState);
 
   rpc CreateSpxPartition(SpxPartitionCreationRequest) returns (SpxPartition);
+  // Marks the partition deleted and releases its VNI if the partition still owns
+  // that reservation, committing both changes together. Repeating the request
+  // for a deleted, unreferenced partition succeeds. Returns FailedPrecondition
+  // while any instance, including a terminating one, still references it.
+  // An omitted id returns InvalidArgument; an unknown partition returns Internal.
   rpc DeleteSpxPartition(SpxPartitionDeletionRequest) returns (SpxPartitionDeletionResult);
   rpc FindSpxPartitionIds(SpxPartitionSearchFilter) returns (SpxPartitionIdList);
   rpc FindSpxPartitionsByIds(SpxPartitionsByIdsRequest) returns (SpxPartitionList);
@@ -359,6 +364,9 @@ service Forge {
   // picks up the freshly persisted report for downstream processing (pairing,
   // remediation, audit). Returns AlreadyExists
   // if a concurrent refresh or periodic probe is already in progress.
+  // During DPF provisioning, queues exploration and returns the cached report
+  // with exploration_requested=true. The queued refresh runs after all Site
+  // Explorer suppressions are cleared. Non-DPF suppressions alone return FailedPrecondition.
   rpc RefreshEndpointReport(RefreshEndpointReportRequest) returns (site_explorer.ExploredEndpoint);
   // Delete an explored endpoint from the database
   rpc DeleteExploredEndpoint(DeleteExploredEndpointRequest) returns (DeleteExploredEndpointResponse);
@@ -417,8 +425,12 @@ service Forge {
   // Starts the managed host decommissioning workflow. The host must be Ready.
   rpc DecommissionManagedHost(DecommissionManagedHostRequest) returns (DecommissionManagedHostResponse);
 
-  // List existing resource pools and their stats
+  // Lists local inventory counts and bounds, including IPv6 prefixes with their lengths.
+  // Any saved gRPC binding makes the whole call fail with FailedPrecondition;
+  // use AdminInspectResourcePools to inspect every backend.
   rpc AdminListResourcePools(ListResourcePoolsRequest) returns (ResourcePools);
+  // Inspects local and remote pools without treating unknown capacity as zero.
+  rpc AdminInspectResourcePools(InspectResourcePoolsRequest) returns (InspectResourcePoolsResponse);
 
   // Add capacity to a resource pool
   rpc AdminGrowResourcePool(GrowResourcePoolRequest) returns (GrowResourcePoolResponse);
@@ -1082,6 +1094,11 @@ service Forge {
   rpc SignMachineIdentity(MachineIdentityRequest) returns (MachineIdentityResponse);
   // Get, set, or delete per-org tenant identity configuration (issuer, audiences, TTL, signing key)
   rpc GetTenantIdentityConfiguration(GetTenantIdentityConfigRequest) returns (TenantIdentityConfigResponse);
+  // Creates or updates the per-org tenant identity configuration.
+  // Concurrent creation can return ALREADY_EXISTS, leaving the stored configuration
+  // and tenant version unchanged. Read it before retrying, since a retry can update it.
+  // An explicit rotate_key request can instead rotate a concurrently created
+  // configuration found during the write.
   rpc SetTenantIdentityConfiguration(SetTenantIdentityConfigRequest) returns (TenantIdentityConfigResponse);
   rpc DeleteTenantIdentityConfiguration(GetTenantIdentityConfigRequest) returns (google.protobuf.Empty);
   // Token delegation: get, set, or delete per-org token exchange config
@@ -2950,6 +2967,10 @@ message ExpectedPowerShelf {
   string bmc_username = 2;
   string bmc_password = 3;
   string shelf_serial_number = 4;
+  // BMC IPv4 or IPv6 address; malformed values fail INVALID_ARGUMENT when applied.
+  // Empty or omitted means no inventory address on add, full update, or
+  // replace-all. Masked updates apply this field only when selected.
+  // Clearing the inventory address does not remove existing interface addresses.
   string bmc_ip_address = 5;
   // Metadata that will automatically get associated with a newly created PowerShelf
   Metadata metadata = 6;
@@ -3208,6 +3229,10 @@ message ExpectedSwitch {
   // changed from string to message.
   reserved 10;
   reserved "nvos_mac_addresses";
+  // BMC IPv4 or IPv6 address; malformed values fail INVALID_ARGUMENT when applied.
+  // Empty or omitted means no inventory address on add, full update, or
+  // replace-all. Masked updates apply this field only when selected.
+  // Clearing the inventory address does not remove existing interface addresses.
   string bmc_ip_address = 11;
   // When true, site-explorer skips BMC password rotation and stores the
   // factory-default credentials in Vault as-is.
@@ -3977,6 +4002,9 @@ message InstanceConfigUpdateRequest {
   // documented on that field), the server does not merge omitted fields.
   // Read-modify-write clients must preserve fields and oneof variants they do
   // not intend to change.
+  // Allocation-time NIC firmware requirements are stored separately and are not
+  // replaced here. SPX edits must preserve captured target bindings; see
+  // SetTenantNicFirmwareConfigRequest for attachment restrictions.
   InstanceConfig config = 3;
   // New Metadata to be utilized by the instance
   Metadata metadata = 4;
@@ -6380,7 +6408,11 @@ message ForgeAgentControlResponse {
       MlxDeviceLock lock = 3;
       MlxDeviceUnlock unlock = 4;
       MlxDeviceApplyProfile apply_profile = 5;
+      // Legacy uncorrelated firmware command. Scouts supporting durable firmware
+      // operations reject this command before executing it.
       MlxDeviceApplyFirmware apply_firmware = 6;
+      // Durable firmware work uses a distinct tag so older Scouts ignore it.
+      MlxDeviceApplyFirmwareOperation apply_firmware_operation = 7;
     }
   }
 
@@ -6401,6 +6433,18 @@ message ForgeAgentControlResponse {
 
   message MlxDeviceApplyFirmware {
     optional mlx_device.FirmwareFlasherProfile profile = 1;
+  }
+
+  // Submit or observe one durable firmware operation. This command is omitted
+  // from the legacy JSON projection because older Scouts cannot deduplicate it.
+  message MlxDeviceApplyFirmwareOperation {
+    // Selected target; omission records a successful operation without a burn.
+    optional mlx_device.FirmwareFlasherProfile profile = 1;
+    // Stable identifier containing 1-256 printable nonspace ASCII bytes for one
+    // persisted ApplyFirmware state entry. Repeated polls reuse this value even
+    // when profile is absent; a later state entry receives a different value.
+    // Omitted or empty values are rejected.
+    string operation_id = 2;
   }
 
   message FirmwareUpgrade {
@@ -6640,6 +6684,13 @@ message DpuNetworkStatus {
   // Extension service status reported by DPU
   optional string dpu_extension_service_version = 15;
   repeated DpuExtensionServiceStatusObservation dpu_extension_services = 16;
+  // Astra service convergence for this DPU's host. Core processes this field
+  // when ewethers and Astra are enabled; omission preserves prior observations.
+  // Successful processing of a present report replaces Astra observations with `PHASE_READY`
+  // entries for current Astra interfaces whose VNI is zero or identifies one
+  // known partition. An empty report clears Astra readiness. Every report keeps
+  // current SVPC observations and drops observations for absent interfaces.
+  // This reports service state, not hardware cleanup or permission to reuse VNIs.
   optional AstraConfigStatus astra_config_status = 17;
   // LLDP neighbors this DPU sees, attached to the status push rather than sent
   // on its own RPC. Absent when the agent did not attempt a collection.
@@ -7549,7 +7600,7 @@ message IpxeTemplateList {
 message ExpectedHostNic {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
-  string mac_address = 1;
+  optional string mac_address = 1;
   // Legacy free-form segment hint (bf3, onboard, oob, ...). Kept for backward
   // compatibility; declare `network_segment_type` instead, which wins.
   optional string nic_type = 2;
@@ -7590,6 +7641,12 @@ message ExpectedHostNic {
   // the legacy Host case leaves `network_segment_type` as a first-DHCP
   // selection hint.
   optional ExpectedInterfaceIpAllocation ip_allocation = 9;
+  // Physical interface identifier (for example C1-1-L1), as named in the
+  // Cerebro database.
+  // At least one of mac_address or physical_ifname must be supplied.
+  optional string physical_ifname = 10;
+  // Optional logical interface name; stored for inventory consumers.
+  optional string logical_ifname = 11;
 }
 
 // Forge RPC representation of the per-host policy for how NICo treats DPU
@@ -7702,6 +7759,10 @@ message ExpectedMachine {
   // host_nics, including `[]`; older clients leave it false so an unknown
   // nested HostBmc is not removed by a read-modify-write.
   bool replace_host_nics = 19;
+  // The server_name field is optional and is used to identify the machine. This
+  // name will be presented to the switches in LLDP responses and is potentially
+  // used for cable validation, etc.
+  optional string server_name = 20;
 }
 
 message ExpectedMachineRequest {
@@ -7898,9 +7959,12 @@ message  GetMachineValidationExternalConfigResponse {
 }
 
 message GetMachineValidationExternalConfigsRequest {
+  // Exact configuration names to return. Omitted or empty names list all stored
+  // configurations. Names with no stored configuration contribute no entries.
   repeated string names = 1;
 }
 message  GetMachineValidationExternalConfigsResponse {
+  // Each selected configuration appears once. The order is unspecified.
   repeated MachineValidationExternalConfig configs = 1;
 }
 
@@ -9158,7 +9222,10 @@ message PowerOptions {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   PowerState desired_state = 1;
   google.protobuf.Timestamp desired_state_updated_at = 2;
+  // PowerManagerDisabled when desired_state disables observation; otherwise the
+  // last fetched power state. Disabling does not overwrite the stored observation.
   PowerState actual_state = 3;
+  // Last power-state fetch time, retained while the power manager is disabled.
   google.protobuf.Timestamp actual_state_updated_at = 4;
   common.MachineId host_id = 5 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
   string desired_power_state_version = 6;
@@ -9574,7 +9641,8 @@ enum AstraPhase {
   option (carbide.codegen.v1.enum_derive) = "serde::Serialize";
   // PHASE_UNSPECIFIED represents an unspecified phase.
   PHASE_UNSPECIFIED = 0;
-  // PHASE_PENDING represents a pending phase. it means the object was created but has not been processed.
+  // PHASE_PENDING means the requested configuration has not converged, including
+  // when the observed service state does not yet match it.
   PHASE_PENDING = 1;
   // PHASE_READY represents a ready phase. it means the object is ready.
   PHASE_READY = 2;
@@ -10066,6 +10134,16 @@ enum DpuExtensionServiceType {
   DPF_HELM_CHART = 1;
 }
 
+// Immutable policy controlling when and where an extension service is deployed.
+enum DpuExtensionServiceDeploymentType {
+  option (carbide.codegen.v1.enum_derive) = "serde::Serialize";
+  option (carbide.codegen.v1.enum_derive) = "serde::Deserialize";
+  // Default: deploy through instance attachment.
+  DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_DEMAND_DRIVEN = 0;
+  // DPF Helm charts only: creation requests deployment to all DPUs managed by DPF.
+  DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_BASELINE = 1;
+}
+
 // Enumerates the lifecycle states of an extension service registration.
 //
 // This is distinct from DpuExtensionServiceDeploymentStatus, which describes
@@ -10143,13 +10221,19 @@ message DpuExtensionService {
   // independent from deployment status on individual instances.
   LifecycleStatus lifecycle_status = 11;
 
-  // Required primary/all-active/all policy for Helm; absent for Kubernetes Pod services.
+  // Required primary/all-active/all policy for demand-driven Helm; absent for
+  // baseline Helm and Kubernetes Pod services.
   optional DpuExtensionServiceDpuTarget dpu_target = 12;
 
   // Service-facing interface requirements in ordinal order. Empty means the
   // service has no service network. The current API supports at most one
   // requirement.
   repeated ServiceVpcInterfaceRequirement service_vpc_interfaces = 13;
+
+  // Baseline Helm services deploy to all DPUs managed by DPF at creation time.
+  // Demand-driven services deploy through instance attachment. This choice
+  // cannot change after creation.
+  DpuExtensionServiceDeploymentType deployment_type = 14;
 }
 
 // Address family required by a service-facing interface.
@@ -10187,14 +10271,22 @@ message CreateDpuExtensionServiceRequest {
   // metrics collection service that runs on the DPU.
   optional DpuExtensionServiceObservability observability = 8;
 
-  // Required for Helm: PRIMARY, ALL_ACTIVE, or ALL. Immutable; forbidden for Kubernetes Pod.
+  // Required for demand-driven Helm: PRIMARY, ALL_ACTIVE, or ALL. Immutable;
+  // forbidden for baseline Helm and Kubernetes Pod services.
   optional DpuExtensionServiceDpuTarget dpu_target = 9;
 
   // Service-facing interface requirements. Omitted or empty means no
   // service network. The current API accepts at most one requirement and only
-  // for a DPF Helm chart service. A nonempty declaration is accepted but remains
+  // for a demand-driven DPF Helm chart service. A nonempty declaration remains
   // in retryable Creating state until service VPC reconciliation is available.
   repeated ServiceVpcInterfaceRequirement service_vpc_interfaces = 10;
+
+  // Choose deployment at creation to all DPUs managed by DPF (BASELINE), or
+  // deployment through instance attachment (DEMAND_DRIVEN, the default).
+  // BASELINE is valid only for DPF Helm charts with no dpu_target or service VPC
+  // requirements; baseline services cannot be attached to instances. Unknown
+  // enum values are rejected. This choice cannot change after creation.
+  DpuExtensionServiceDeploymentType deployment_type = 11;
 }
 
 // Complete service-facing interface requirements supplied during an update.
@@ -10233,7 +10325,8 @@ message UpdateDpuExtensionServiceRequest {
   // API rejects a change while any active or terminating instance attachment
   // references the service. Without attachments, a change is eligible under
   // the existing service-type and lifecycle update rules. The current API
-  // accepts at most one requirement and only for a DPF Helm chart service.
+  // accepts at most one requirement and only for a demand-driven DPF Helm
+  // chart service.
   optional ServiceVpcInterfaceRequirements service_vpc_interfaces = 8;
 }
 
@@ -12556,10 +12649,16 @@ message GetTenantNicFirmwareConfigResponse {
 // intent without updating hardware or changing existing allocations. Until NIC
 // firmware preparation is implemented (https://github.com/dsx-ai-factory/infra-controller/issues/6686),
 // Core rejects allocations with nonempty SPX attachments for a tenant with a
-// selected profile, and rejects attachment additions or changes that leave a
-// nonempty SPX list on its existing allocations. Unchanged or cleared attachments
-// remain allowed. Each attempt uses the selection visible to the guard's database
-// read; an attempt already past that read may finish after a selection is committed.
+// selected profile. Allocation captures the tenant selection, profile contents
+// and selected attachment bindings together before commit. Later selection or
+// profile edits affect future allocations, not those captured requirements.
+// An allocation that captured a profile cannot add attachments, even after the
+// live selection is cleared. Without a captured profile, additions retain their
+// existing firmware baseline. Edits must preserve allocation-time attachment
+// bindings; a changed DPA row, host, MAC or PCI address returns FAILED_PRECONDITION.
+// Removing attachments retains the captured bindings until release. Partition
+// edits are allowed when bindings still match. Instances without a captured
+// snapshot use the live selection check for changed, nonempty attachment lists.
 // Complete the Core upgrade before using tenant selections, and do not roll back
 // to allocators that ignore them. Ordinary tenant updates preserve the selection.
 message SetTenantNicFirmwareConfigRequest {
@@ -12728,4 +12827,96 @@ message ExpectedNvLinkDomainsByIdsRequest {
 message ExpectedNvLinkDomainList {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   repeated ExpectedNvLinkDomain domains = 1;
+}
+
+// `InspectResourcePoolsRequest` selects every pool with local inventory or a saved binding.
+message InspectResourcePoolsRequest {
+}
+
+// `InspectResourcePoolsResponse` keeps unavailable pools alongside healthy ones.
+message InspectResourcePoolsResponse {
+  // Pools ordered by their NICo name; an empty list means no pools were found.
+  repeated ResourcePoolInspection pools = 1;
+}
+
+// `ResourcePoolInspection` identifies a pool and reports the counts its backend can provide.
+message ResourcePoolInspection {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // NICo's logical pool name, e.g. vpc-vni.
+  string name = 1;
+  // Implementation selected for this pool; local inventory without a binding is Integrated.
+  ResourcePoolBackendKind backend_kind = 2;
+  // Configured backend name when bound; absent for the default Integrated backend.
+  optional string backend_name = 3;
+  // Saved binding UUID; absent for local inventory that has not been bound.
+  optional string binding_id = 4;
+  // Allocator identity; Integrated uses local-db within this deployment's database.
+  string authority_id = 5;
+  // Configured provider lookup name; defaults to the NICo pool name.
+  string remote_pool = 6;
+  // Provider's stable pool ID from the accepted registration; absent for Integrated
+  // and when no accepted remote registration can be read.
+  optional string provider_pool_id = 7;
+  // Accepted provider eligibility revision; absent for Integrated and when no
+  // accepted remote registration can be read.
+  optional string accepted_revision = 8;
+  // Smallest value in local inventory; absent for remote pools or empty local inventory.
+  // Integers use signed decimal text, IP addresses omit host-prefix suffixes,
+  // and IPv6 prefixes retain their CIDR prefix lengths.
+  optional string min = 9;
+  // Largest value in local inventory; absent for remote pools or empty local inventory.
+  // Uses the same value format as min.
+  optional string max = 10;
+  // Present only with KNOWN status. Absence never means an empty pool.
+  ResourcePoolStats stats = 11;
+  // Whether counts were obtained, unsupported, or could not be read.
+  ResourcePoolStatsStatus stats_status = 12;
+  // Explanation for UNKNOWN or UNAVAILABLE; absent when counts are known.
+  optional string stats_message = 13;
+  // NICo's time of receiving successful counts; absent when counts are not known.
+  // This is not a provider clock or a guarantee that capacity remains available.
+  google.protobuf.Timestamp observed_at = 14;
+}
+
+// `ResourcePoolBackendKind` names the allocator implementation used by a pool.
+enum ResourcePoolBackendKind {
+  // No implementation supplied; inspection never returns this value.
+  RESOURCE_POOL_BACKEND_KIND_UNSPECIFIED = 0;
+  // Allocation uses resource rows in the nico-api database.
+  RESOURCE_POOL_BACKEND_KIND_INTEGRATED = 1;
+  // Allocation uses a remote gRPC resource pool service.
+  RESOURCE_POOL_BACKEND_KIND_GRPC = 2;
+}
+
+// `ResourcePoolStatsStatus` distinguishes unavailable information from zero capacity.
+enum ResourcePoolStatsStatus {
+  // No observation status supplied; clients must treat counts as unavailable.
+  RESOURCE_POOL_STATS_STATUS_UNSPECIFIED = 0;
+  // All six counts and their total fit in uint64; stats and observed_at are present.
+  RESOURCE_POOL_STATS_STATUS_KNOWN = 1;
+  // The Stats RPC returned Unimplemented; stats and observed_at are absent.
+  // This can also indicate that the endpoint does not serve the expected RPC.
+  RESOURCE_POOL_STATS_STATUS_UNKNOWN = 2;
+  // Reading or validating counts failed, including a missing accepted registration
+  // or numeric overflow; stats and observed_at are absent.
+  RESOURCE_POOL_STATS_STATUS_UNAVAILABLE = 3;
+}
+
+// `ResourcePoolStats` reports the same six counts as the resource pool provider API.
+// Used and free each equal the sum of their automatic and manual partitions.
+// For remote pools, only values within the accepted eligibility revision count.
+message ResourcePoolStats {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Allocated values, including allocations held by other bindings when eligible here.
+  uint64 used = 1;
+  // Values available for allocation; unavailable values are excluded from both totals.
+  uint64 free = 2;
+  // Allocated values in the automatic partition.
+  uint64 auto_assign_used = 3;
+  // Available values in the automatic partition.
+  uint64 auto_assign_free = 4;
+  // Allocated values in the manual partition.
+  uint64 non_auto_assign_used = 5;
+  // Available values in the manual partition.
+  uint64 non_auto_assign_free = 6;
 }

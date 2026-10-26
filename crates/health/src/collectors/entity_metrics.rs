@@ -34,12 +34,28 @@ use crate::HealthError;
 use crate::collectors::inventory::{DiscoveredEntity, SharedInventory};
 use crate::collectors::runtime::{IterationResult, PeriodicCollector};
 use crate::endpoint::BmcEndpoint;
+use crate::metrics::MetricLabel;
 use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample};
 
 struct MetricField {
     metric_type: Cow<'static, str>,
     unit: &'static str,
     value: f64,
+}
+
+impl MetricField {
+    fn into_sample(self, entity_key: &str, labels: Vec<MetricLabel>) -> MetricSample {
+        MetricSample {
+            key: format!("{entity_key}/{}", self.metric_type),
+            name: "hw_metric".to_string(),
+            metric_type: self.metric_type.into_owned(),
+            unit: self.unit.to_string(),
+            value: self.value,
+            semantics: crate::sink::MetricSemantics::Gauge,
+            labels,
+            context: None,
+        }
+    }
 }
 
 /// Push a scalar `Option<Option<T: Into<f64>>>` field if present
@@ -776,6 +792,45 @@ fn power_supply_metric_fields(m: &PowerSupplyMetrics) -> Vec<MetricField> {
     out
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn catalogue_samples() -> Result<Vec<MetricSample>, HealthError> {
+    use serde_json::json;
+
+    let processor = processor_metric_fields(&serde_json::from_value(json!({
+        "@odata.id": "/redfish/v1/Systems/1/Processors/CPU0/ProcessorMetrics",
+        "Id": "ProcessorMetrics",
+        "Name": "Processor Metrics",
+        "PowerLimitThrottleDuration": "PT1S",
+        "ThermalLimitThrottleDuration": "PT2S",
+        "PCIeErrors": {
+            "CorrectableErrorCount": 1,
+            "NonFatalErrorCount": 2,
+            "FatalErrorCount": 3,
+            "L0ToRecoveryCount": 4,
+            "ReplayCount": 5,
+            "ReplayRolloverCount": 6,
+            "NAKSentCount": 7,
+            "NAKReceivedCount": 8,
+            "UnsupportedRequestCount": 9,
+            "BadTLPCount": 10,
+            "BadDLLPCount": 11,
+            "FlowControlTimeoutErrors": 12
+        }
+    }))?);
+    Ok(processor
+        .into_iter()
+        .map(|field| {
+            field.into_sample(
+                "/redfish/v1/Systems/1/Processors/CPU0",
+                vec![
+                    (Cow::Borrowed("processor_id"), "CPU0".to_string()),
+                    (Cow::Borrowed("system_id"), "1".to_string()),
+                ],
+            )
+        })
+        .collect())
+}
+
 pub struct MetricsCollectorConfig<B: Bmc> {
     pub data_sink: Option<Arc<dyn DataSink>>,
     pub(crate) shared: SharedInventory<B>,
@@ -955,16 +1010,7 @@ impl<B: Bmc + 'static> MetricsCollector<B> {
         let count = fields.len();
         for field in fields {
             self.emit_event(CollectorEvent::Metric(
-                MetricSample {
-                    key: format!("{entity_key}/{}", field.metric_type),
-                    name: "hw_metric".to_string(),
-                    metric_type: field.metric_type.to_string(),
-                    unit: field.unit.to_string(),
-                    value: field.value,
-                    labels: base.clone(),
-                    context: None,
-                }
-                .into(),
+                field.into_sample(&entity_key, base.clone()).into(),
             ));
         }
         count
@@ -1007,6 +1053,7 @@ mod tests {
     use crate::collectors::inventory::EntityInventory;
     use crate::collectors::projection_test_support::{ProjectionFixture, TestBmc, TestEntity};
     use crate::endpoint::test_support::{mac, test_endpoint};
+    use crate::sink::MetricSemantics;
 
     #[derive(Clone, Copy)]
     enum Projection {
@@ -1578,6 +1625,7 @@ mod tests {
         metric_type: String,
         unit: String,
         value: f64,
+        semantics: MetricSemantics,
         labels: Vec<(String, String)>,
         has_context: bool,
     }
@@ -1616,6 +1664,7 @@ mod tests {
                     metric_type: sample.metric_type.clone(),
                     unit: sample.unit.clone(),
                     value: sample.value,
+                    semantics: sample.semantics,
                     labels: sample
                         .labels
                         .iter()
@@ -1686,6 +1735,7 @@ mod tests {
             metric_type: metric_type.to_string(),
             unit: unit.to_string(),
             value,
+            semantics: MetricSemantics::Gauge,
             labels: labels
                 .iter()
                 .map(|(key, value)| ((*key).to_string(), (*value).to_string()))

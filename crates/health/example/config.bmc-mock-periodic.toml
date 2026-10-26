@@ -20,12 +20,14 @@
 # collection and demonstrates the collectors.logs.periodic.exclude_services
 # option (see the [collectors.logs.periodic] section at the bottom).
 
+[endpoint_sources]
+static_credentials_file = "crates/health/example/credentials.bmc-mock.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "127.0.0.1"
 port = 1266
 mac = "aa:bb:cc:dd:ee:ff"
-username = "admin"
-password = "secret"
+credentials_profile = "mock"
 rack_id = "RACK_1"
 machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "MN-001", slot_number = 15, tray_index = 5, nvlink_domain_uuid = "00000000-0000-0000-0000-000000000000" }
 

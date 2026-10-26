@@ -167,6 +167,21 @@ server:
               clientCaFiles:
                 - /var/secrets/temporal/certs/server-interservice/ca.crt
 
+  dynamicConfig:
+    # A failed workflow start leaves history without a workflow. The history
+    # scanner deletes it once it's older than this, instead of the default 60
+    # days. 72h matches the namespace retention.
+    worker.historyScannerDataMinAge:
+      - value: 72h
+    # Batch jobs in the site namespace, such as the hourly cleanup of
+    # successful inventory workflows, run at up to 50 operations per second by
+    # default. A lower rate spreads out the cleanup's deletes, so the database
+    # stays responsive for other workflows.
+    worker.batcherRPS:
+      - value: 20
+        constraints:
+          namespace: site
+
   frontend:
     replicaCount: 1
     service:

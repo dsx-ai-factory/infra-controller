@@ -529,7 +529,8 @@ func NewDeleteSpectrumXPartitionHandler(dbSession *cdb.Session, scp *sc.ClientPo
 
 // Handle godoc
 // @Summary Delete a SpectrumXPartition
-// @Description Delete a SpectrumXPartition
+// @Description Delete a SpectrumXPartition. Returns 400 while the API lists an attached Instance and 412 when the Site reports remaining attachments, including on terminating Instances.
+// @Description A rejected deletion leaves the Partition and its status history unchanged. Retry after removing active attachments and waiting for terminating Instances to finish deleting.
 // @Tags SpectrumXPartition
 // @Accept json
 // @Produce json

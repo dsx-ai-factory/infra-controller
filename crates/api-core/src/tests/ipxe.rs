@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use std::collections::HashMap;
+use std::error::Error;
 
 use carbide_host_support::bootstrap_ca::BootstrapCaSource;
 use carbide_uuid::machine::{MachineId, MachineInterfaceId};
@@ -736,6 +737,97 @@ async fn test_cloud_init_url_overrides_for_external_host(pool: sqlx::PgPool) {
         Some("http://10.99.0.1:8080"),
         "expected pxe_url_override for external host cloud-init"
     );
+}
+
+#[crate::sqlx_test]
+async fn test_boot_instructions_reject_static_assignment_decode_failure(pool: sqlx::PgPool) {
+    let env = create_env_with_external_urls(pool).await;
+    let (_, ip) = preallocate_external_interface(&env, "AA:BB:CC:DD:EE:04", "10.99.0.52").await;
+
+    // Corrupt the anchor after allocation so both requests reach the URL lookup.
+    // Decoding leaves the transaction usable, so omitting overrides can look successful.
+    sqlx::query("UPDATE network_segments SET allocation_strategy = 'unsupported' WHERE name = $1")
+        .bind(db::network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+    for (operation, result) in [
+        (
+            "PXE",
+            env.api
+                .get_pxe_instructions(tonic::Request::new(rpc::forge::PxeInstructionRequest {
+                    arch: rpc::forge::MachineArchitecture::X86 as i32,
+                    client_ip: Some(ip.clone()),
+                    ..Default::default()
+                }))
+                .await
+                .map(|_| ()),
+        ),
+        (
+            "cloud-init",
+            env.api
+                .get_cloud_init_instructions(tonic::Request::new(CloudInitInstructionsRequest {
+                    ip,
+                }))
+                .await
+                .map(|_| ()),
+        ),
+    ] {
+        let status = result.expect_err("a failed anchor lookup must reject boot instructions");
+        assert_eq!(
+            status.code(),
+            tonic::Code::Internal,
+            "{operation}: {status}"
+        );
+        let error = status
+            .source()
+            .and_then(|source| source.downcast_ref::<crate::errors::CarbideErrorWithLocation>())
+            .expect("boot-instruction failure should preserve its source");
+        let crate::CarbideError::DBError(annotated) = &error.error else {
+            panic!("{operation}: expected DBError, got {error:?}");
+        };
+        assert!(
+            matches!(&annotated.source, sqlx::Error::ColumnDecode { index, .. }
+                if index == "\"allocation_strategy\""),
+            "{operation}: {error:?}"
+        );
+    }
+}
+
+#[crate::sqlx_test]
+async fn test_boot_instructions_without_static_assignments_omit_url_overrides(pool: sqlx::PgPool) {
+    let env = create_env_with_external_urls(pool).await;
+    let (interface_id, ip) =
+        preallocate_external_interface(&env, "AA:BB:CC:DD:EE:05", "10.99.0.53").await;
+
+    // Keep the interface's segment, but remove the well-known anchor name.
+    sqlx::query("UPDATE network_segments SET name = 'legacy-static' WHERE name = $1")
+        .bind(db::network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+
+    let pxe = get_pxe_instructions(
+        &env,
+        interface_id,
+        rpc::forge::MachineArchitecture::X86,
+        None,
+    )
+    .await;
+    assert_eq!(pxe.api_url_override, None);
+    assert_eq!(pxe.pxe_url_override, None);
+    assert_eq!(pxe.static_pxe_url_override, None);
+
+    let cloud_init = env
+        .api
+        .get_cloud_init_instructions(tonic::Request::new(CloudInitInstructionsRequest { ip }))
+        .await
+        .expect("an absent anchor must allow cloud-init instructions")
+        .into_inner();
+    assert!(cloud_init.discovery_instructions.is_some());
+    assert_eq!(cloud_init.api_url_override, None);
+    assert_eq!(cloud_init.pxe_url_override, None);
 }
 
 #[crate::sqlx_test]

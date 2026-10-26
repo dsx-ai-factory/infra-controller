@@ -883,6 +883,10 @@
                 </li>
 
                 <li>
+                  <a href="#v1.PowerTaskWaitingContext"><span class="badge">M</span>PowerTaskWaitingContext</a>
+                </li>
+
+                <li>
                   <a href="#v1.PurgeComponentRequest"><span class="badge">M</span>PurgeComponentRequest</a>
                 </li>
 
@@ -960,6 +964,10 @@
 
                 <li>
                   <a href="#v1.Task"><span class="badge">M</span>Task</a>
+                </li>
+
+                <li>
+                  <a href="#v1.TaskBrief"><span class="badge">M</span>TaskBrief</a>
                 </li>
 
                 <li>
@@ -1145,6 +1153,10 @@
 
                 <li>
                   <a href="#v1.TaskExecutorType"><span class="badge">E</span>TaskExecutorType</a>
+                </li>
+
+                <li>
+                  <a href="#v1.TaskKind"><span class="badge">E</span>TaskKind</a>
                 </li>
 
                 <li>
@@ -7355,6 +7367,14 @@ Absent when no targets were recorded. </p></td>
                   <td><p> </p></td>
                 </tr>
 
+                <tr>
+                  <td>waiting_context</td>
+                  <td><a href="#v1.PowerTaskWaitingContext">PowerTaskWaitingContext</a></td>
+                  <td></td>
+                  <td><p>Populated for Waiting tasks; absent for Pending/Running (not applicable).
+On a Waiting task, absence means the service did not provide context. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -7363,7 +7383,7 @@ Absent when no targets were recorded. </p></td>
 
 
         <h3 id="v1.PowerTaskDetailsList">PowerTaskDetailsList</h3>
-        <p>Outstanding power tasks for the tray's current Flow rack, ordered by created_at,</p><p>then task ID, ascending. Missing rack assignment returns NotLinked. Tasks from</p><p>a former rack are excluded. Only recorded selections or power-shelf tasks</p><p>affecting this rack are included; tasks with no recorded targets are excluded.</p><p>More than 256 outstanding rack power tasks makes this entire section unavailable,</p><p>even if fewer target this tray. Error is absent on success, including empty;</p><p>entries is empty on failure. Non-power tasks and execution reports are excluded.</p>
+        <p>Outstanding power tasks for the tray's current Flow rack, ordered by created_at,</p><p>then task ID, ascending. Missing rack assignment returns NotLinked. Tasks from</p><p>a former rack are excluded. Only recorded selections or power-shelf tasks</p><p>affecting this rack are included; tasks with no recorded targets are excluded.</p><p>More than 256 outstanding rack power tasks makes this entire section unavailable,</p><p>even if fewer target this tray. Error is absent on success, including empty;</p><p>entries is empty on failure. Entries contain only power tasks; other task kinds</p><p>can appear as brief waiting-context references. Execution reports are excluded.</p>
 
 
           <table class="field-table">
@@ -7384,6 +7404,48 @@ Absent when no targets were recorded. </p></td>
                   <td><a href="#v1.PowerDetailsReadError">PowerDetailsReadError</a></td>
                   <td>optional</td>
                   <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.PowerTaskWaitingContext">PowerTaskWaitingContext</h3>
+        <p>Nearby work observed for a Waiting power task, not a saved reason for waiting.</p><p>Tasks can change between the power-task read and this metadata read. Both lists</p><p>are ordered by creation time, then ID, ascending. Error is absent on success,</p><p>including empty lists; lists are empty on failure. More than 256 nonterminal</p><p>tasks in the rack makes context unavailable without discarding power tasks.</p><p>If a tray response exceeds its byte limit, populated context lists are replaced</p><p>with LimitExceeded before the complete task section can be discarded.</p><p>A task can also wait for linked inventory; this context is not a readiness check.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>active_conflicts</td>
+                  <td><a href="#v1.TaskBrief">TaskBrief</a></td>
+                  <td>repeated</td>
+                  <td><p>Pending or Running tasks that match Flow&#39;s current conflict rules. </p></td>
+                </tr>
+
+                <tr>
+                  <td>earlier_waiting</td>
+                  <td><a href="#v1.TaskBrief">TaskBrief</a></td>
+                  <td>repeated</td>
+                  <td><p>Waiting tasks of any kind in the same rack with strictly earlier creation times.
+Equal timestamps are excluded. These references do not establish exact
+blockers, queue position, historical causes, or execution order. </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.PowerDetailsReadError">PowerDetailsReadError</a></td>
+                  <td>optional</td>
+                  <td><p>Absent on success. LimitExceeded means the metadata row limit was exceeded
+or context references were removed to fit the response byte limit.
+DeadlineExceeded or ReadFailed means the metadata could not be read. </p></td>
                 </tr>
 
             </tbody>
@@ -8165,6 +8227,44 @@ Defaults to &#34;UTC&#34;. Ignored for interval and one-time specs. </p></td>
 
 
 
+        <h3 id="v1.TaskBrief">TaskBrief</h3>
+        <p>A task reference without its operation payload, report, or description.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p>The stored Flow task UUID, not a Core action or component identity. </p></td>
+                </tr>
+
+                <tr>
+                  <td>kind</td>
+                  <td><a href="#v1.TaskKind">TaskKind</a></td>
+                  <td></td>
+                  <td><p>Unspecified when the stored task type has no known API kind. </p></td>
+                </tr>
+
+                <tr>
+                  <td>status</td>
+                  <td><a href="#v1.TaskStatus">TaskStatus</a></td>
+                  <td></td>
+                  <td><p>Pending or Running in active_conflicts; Waiting in earlier_waiting. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.TaskOperation">TaskOperation</h3>
         <p>TaskOperation is the typed, target-independent operation definition used by</p><p>new APIs. Existing operation APIs retain their established request messages.</p>
 
@@ -8398,7 +8498,7 @@ e.g. &#34;Power Reset (forced)&#34; or &#34;Upgrade Firmware to v2.3.1&#34;. </p
 
 
         <h3 id="v1.TrayPowerDetails">TrayPowerDetails</h3>
-        <p>Flow inventory identity remains usable before a managed Core ID exists.</p><p>Every section is populated with either its value or a categorized error.</p><p>Inventory and both child reads share at most 30 seconds from RPC entry, capped</p><p>at one second before a caller deadline. Completed sections survive another</p><p>section's failure. Core hardware, policy, and actions may describe different</p><p>instants from Flow tasks; Running tasks do not imply active Core actions.</p><p>The encoded proxy response is limited to 1,991,680 bytes (1945 KiB).</p><p>An oversized task section is replaced with LimitExceeded; if the rest exceeds the</p><p>limit, the RPC returns ResourceExhausted. No task targets are truncated.</p>
+        <p>Flow inventory identity remains usable before a managed Core ID exists.</p><p>Every section is populated with either its value or a categorized error.</p><p>Inventory and both child reads share at most 30 seconds from RPC entry, capped</p><p>at one second before a caller deadline. Completed sections survive another</p><p>section's failure. Core hardware, policy, and actions may describe different</p><p>instants from Flow tasks; Running tasks do not imply active Core actions.</p><p>The encoded proxy response is limited to 1,991,680 bytes (1945 KiB).</p><p>If the response is oversized, populated waiting-context lists are replaced</p><p>with context-level LimitExceeded first. If it still exceeds the limit, the</p><p>entire task section is replaced with LimitExceeded. If the rest still exceeds</p><p>the limit, the RPC returns ResourceExhausted. No task targets are truncated.</p>
 
 
           <table class="field-table">
@@ -9961,7 +10061,8 @@ value, or task data that cannot be converted to the declared operation.</p></td>
               <tr>
                 <td>POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED</td>
                 <td>7</td>
-                <td><p>The rack task count or encoded response exceeded its documented bound.</p></td>
+                <td><p>The rack power-task count, waiting-context task count, or encoded response
+exceeded its documented bound.</p></td>
               </tr>
 
           </tbody>
@@ -10119,6 +10220,53 @@ value, or task data that cannot be converted to the declared operation.</p></td>
                 <td>TASK_EXECUTOR_TYPE_TEMPORAL</td>
                 <td>1</td>
                 <td><p></p></td>
+              </tr>
+
+          </tbody>
+        </table>
+
+        <h3 id="v1.TaskKind">TaskKind</h3>
+        <p>Task kinds include rack lifecycle work not represented by OperationType.</p>
+        <table class="enum-table">
+          <thead>
+            <tr><td>Name</td><td>Number</td><td>Description</td></tr>
+          </thead>
+          <tbody>
+
+              <tr>
+                <td>TASK_KIND_UNSPECIFIED</td>
+                <td>0</td>
+                <td><p>The stored task type has no known API kind.</p></td>
+              </tr>
+
+              <tr>
+                <td>TASK_KIND_POWER_CONTROL</td>
+                <td>1</td>
+                <td><p>Power control for selected rack components.</p></td>
+              </tr>
+
+              <tr>
+                <td>TASK_KIND_FIRMWARE_CONTROL</td>
+                <td>2</td>
+                <td><p>Firmware control for selected rack components.</p></td>
+              </tr>
+
+              <tr>
+                <td>TASK_KIND_BRING_UP</td>
+                <td>3</td>
+                <td><p>Rack bring-up work.</p></td>
+              </tr>
+
+              <tr>
+                <td>TASK_KIND_DECOMMISSION</td>
+                <td>4</td>
+                <td><p>Rack decommissioning work.</p></td>
+              </tr>
+
+              <tr>
+                <td>TASK_KIND_INJECT_EXPECTATION</td>
+                <td>5</td>
+                <td><p>Installing expected inventory for a rack.</p></td>
               </tr>
 
           </tbody>

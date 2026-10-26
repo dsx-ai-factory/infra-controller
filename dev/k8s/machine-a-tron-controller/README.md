@@ -19,6 +19,9 @@ Services for mock BMC endpoints.
   publishing the NVOS IP as `spec.externalIPs` under the same network
   requirements as the BMC IPs and forwarding the NMX-C port (TCP 9370) and the
   NVUE REST API port (TCP 443) to machine-a-tron's bmc-mock listener
+- Optionally publishes all BMC addresses of a pod in one Service and all its
+  NVOS addresses in another (`--service-granularity=pod`), so a pod takes two
+  clusterIPs instead of one per device (see [Per-pod Services](#per-pod-services))
 - Multi-pod deployments with pod-specific routing
 - Automatic cleanup of stale Services
 - Publishes the discovered machine-a-tron identities over a pod-local
@@ -49,6 +52,7 @@ kind load docker-image mat-k8s-controller:latest --name <cluster>
 | `--health-addr` | `HEALTH_ADDR` | `:8091` | Listen address for the liveness endpoint `GET /healthz` on the pod network (empty disables it) |
 | `--health-stale-after` | `HEALTH_STALE_AFTER` | `10m` | How long the reconcile loop may go without completing a pass before `/healthz` reports a stall (`0` disables the check) |
 | `--enable-state-annotations` | `ENABLE_STATE_ANNOTATIONS` | `false` | Include machine state annotations (`mat-api-state`, `mat-power-state`) on Services; causes frequent updates in large deployments |
+| `--service-granularity` | `SERVICE_GRANULARITY` | `device` | `device` publishes one Service per BMC and per switch NVOS endpoint; `pod` publishes all BMC addresses of a pod in one Service and all NVOS addresses in another, without IPMI or SSH ports (see [Per-pod Services](#per-pod-services)). Any other value is rejected at startup |
 
 An environment variable that is set is the flag's default, an empty value
 included: `SOURCE_LIST_ADDR=""` disables the source list endpoint just like
@@ -195,7 +199,8 @@ Created Services have:
 
 - `app.kubernetes.io/managed-by: mat-k8s-controller`
 - `nvidia-infra-controller/mat-id: <uuid>`
-- `nvidia-infra-controller/mat-machine-type: host|dpu|nvos`
+- `nvidia-infra-controller/mat-machine-type: host|dpu|nvos`, or
+  `pod-bmc|pod-nvos` on [per-pod Services](#per-pod-services)
 - `nvidia-infra-controller/pod-name: <pod>` (multi-pod)
 
 **Annotations:**
@@ -206,6 +211,7 @@ Created Services have:
 - `nvidia-infra-controller/mat-hardware-type`
 - `nvidia-infra-controller/mat-ipmi-listen-port` (when `bmc.ipmi` reported in status)
 - `nvidia-infra-controller/mat-ssh-listen-port` (when `bmc.ssh` reported in status)
+- `nvidia-infra-controller/mat-published-addresses` (per-pod Services only)
 
 **Ports:**
 
@@ -235,6 +241,56 @@ answer on its bmc-mock listener, selecting the rack or switch by the address
 the request was sent to.
 The NVOS (underlay) network must therefore satisfy the same requirements as
 the BMC network: outside the ServiceCIDR, the pod CIDR, and the node network.
+
+### Per-pod Services
+
+With `--service-granularity=pod` the controller builds two Services per
+machine-a-tron pod instead of one per device:
+
+| Service | `mat-machine-type` label | Ports | `externalIPs` |
+|---------|--------------------------|------|---------------|
+| `mat-bmc-pod-<pod>` | `pod-bmc` | `redfish`, TCP `reachable_port` (443) to the Redfish listen port | every leased BMC address of the pod (hosts, DPUs, switch BMCs, power shelves) |
+| `mat-nvos-pod-<pod>` | `pod-nvos` | `nmxc`, TCP 9370, and `nvue`, TCP 443, to the Redfish listen port | every leased NVOS address of the pod's switches |
+
+`<pod>` is the `nvidia-infra-controller/pod-name` label value, lower-cased
+and with characters outside `[a-z0-9-]` replaced; a rewritten or over-long
+name is shortened to its first 12 characters plus a hash, and the suffix is
+omitted when the instance carries no pod name. Both Services carry the
+`app.kubernetes.io/managed-by`, `mat-machine-type` and `pod-name` labels, the
+`mat-redfish-listen-port` annotation, and `mat-published-addresses`, the
+number of addresses in `externalIPs`. The list is sorted; a device without a
+lease is left out and added in place once DHCP assigns one, as with per-device
+Services. The same data path applies: kube-proxy forwards each address to the
+pod's shared listener, and machine-a-tron selects the simulated BMC or rack by
+the authority (`Forwarded` host, `Host` header, or URI authority) of each
+request, which kube-proxy's DNAT leaves intact.
+
+A device whose Redfish `reachable_port` and `listen_port` differ from the
+pair most devices of the pod report keeps a per-device Service, and the
+controller logs a warning naming it. The dynamic IPMI and SSH ports are not
+published at pod granularity; keep `device` granularity when a client needs
+them.
+
+An address two pods both report stays with the Service first by name and is
+withdrawn from the other Service's list alone, reported as a reconciliation
+error, so the rest of that pod stays reachable. Changing the granularity
+replaces the Services within one pass: every stale Service is deleted before
+the first new one is created, so each address of the fleet is unreachable from
+its deletion until its replacement exists and kube-proxy has synced. That gap
+grows with the fleet. The controller's API client is limited to 100 requests
+per second with a burst of 200, so deleting 20,000 per-device Services alone
+takes about three minutes before the first replacement can be created, and API
+errors and kube-proxy delay add to it. Plan a large cutover as a maintenance
+window. A pass that skipped deletions after a status-fetch failure leaves the
+stale Services in place until a clean pass.
+
+The `EXTERNAL-IP` column of `kubectl get svc` joins every address of a pod
+Service on one line. List the Services without it:
+
+```bash
+kubectl -n nico-system get svc -l app.kubernetes.io/managed-by=mat-k8s-controller \
+  -o custom-columns='NAME:.metadata.name,TYPE:.metadata.labels.nvidia-infra-controller/mat-machine-type,ADDRESSES:.metadata.annotations.nvidia-infra-controller/mat-published-addresses'
+```
 
 ## Development
 

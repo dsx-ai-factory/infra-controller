@@ -72,7 +72,7 @@ pub struct Tenant {
 
 /// The tenant's operator-managed NIC firmware selection, returned separately
 /// from ordinary tenant configuration but sharing its version.
-#[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct TenantNicFirmwareConfig {
     /// Tenant organization whose NIC firmware selection is being read or changed.
     pub organization_id: TenantOrganizationId,

@@ -21,7 +21,7 @@ The IPv6 LoadBalancer Service uses `externalTrafficPolicy: Local` to preserve re
 
 ## Prepare the Managed Network
 
-For a new segment, add the following definition to the existing TOML in `nico-api.siteConfig.nicoApiSiteConfig` (Helm), or `deploy/files/nico-api/nico-api-site-config.toml` (Kustomize). Retain the rest of the site's TOML. A Helm string override replaces the entire value. Replace the segment name and addresses with unused site allocations before the segment is first created:
+For a new segment, add the following definition to the existing TOML in `nico-api.siteConfig.nicoApiSiteConfig`. Retain the rest of the site's TOML. A Helm string override replaces the entire value. Replace the segment name and addresses with unused site allocations before the segment is first created:
 
 ```toml
 [networks.underlay_dual_stack]
@@ -107,19 +107,7 @@ nico-dhcp:
       metallb.universe.tf/loadBalancerIPs: "2001:db8:10::67"
 ```
 
-Apply through the site's normal Helm upgrade workflow. Stored values from a chart without the `dhcp` and `v6ExternalService` maps are supported with `--reuse-values`. A chart-only upgrade preserves an older pinned Core image's IPv4 listener defaults. DSX, hardware-health, and PXE adopt their dual-stack defaults when the Core image is upgraded, unless an explicit listener configuration overrides them. Setting `dhcp.v6Enabled: false` removes the v6 resources while preserving the v4 pod template. The v6 Deployment uses `Recreate` so old and replacement v6 pods do not serve simultaneously.
-
-## Kustomize
-
-The documented root, `deploy/kustomization.yaml`, generates both DHCP ConfigMaps in `nico-system`. IPv6 stays inactive until `components/dhcp6` is added to that root's `components` list.
-
-Before enabling the component, replace `{{ NICO_DHCPV6_SERVER_IDENTIFIER }}` in `deploy/files/kea-dhcp6-carbide.conf` and `{{ NICO_DHCPV6_EXTERNAL_IP }}` in `deploy/components/dhcp6/service.yaml`. Set the DNS and NTP hook strings in the IPv6 config as needed. For HTTP boot, set `hook-provisioning-server-ipv6` as described in [HTTP Boot Options](#http-boot-options). These strings default to empty. The component uses `eth0`, port 1089, and a 900-second decline quarantine. Like the raw IPv4 Deployment, it inherits the namespace's default ServiceAccount and mounts `nico-dhcp-certificate`. To change the interface, update both the config's interface prefix and the Deployment's `DHCP_INTERFACE` environment value. To change the metrics port, update the hook endpoint, Deployment port/readiness URL, and metrics Service together. The `__NICO_DHCPV6_ADDRESS__` token is resolved at pod startup.
-
-Both raw configurations use the portable image path `/usr/lib/kea/hooks/libdhcp.so`. Before applying this configuration with a pinned older or custom image, verify that it provides this path. The DHCPv4 ConfigMap changes even with DHCPv6 disabled. An active Reloader watching it can restart DHCPv4. The IPv6 pod references the `imagepullsecret` registry Secret in `nico-system`, matching the IPv4 workload. Supply the complete root's [site files and rendering prerequisites](https://github.com/NVIDIA/infra-controller/blob/main/deploy/README.md#files-inputs-deployfiles), including the encrypted SSH host-key Secret, its decryption credentials, and Unbound's base forwarders file. With standalone `kustomize` and `ksops` on `PATH`, render from the repository root before applying it:
-
-```bash
-kustomize build deploy --enable-alpha-plugins --enable-exec
-```
+Apply through the site's normal Helm upgrade workflow, using the Core image and chart from the same repository revision as required by the [image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration). When upgrading from a revision without the `dhcp` and `v6ExternalService` maps, update both the chart and Core image. DSX, hardware-health, and PXE use their dual-stack listener defaults unless an explicit listener configuration overrides them. Setting `dhcp.v6Enabled: false` removes the v6 resources while preserving the v4 pod template. The v6 Deployment uses `Recreate` so old and replacement v6 pods do not serve simultaneously.
 
 ## HTTP Boot Options
 
@@ -127,7 +115,7 @@ HTTP boot option support is unreleased and is not included in NICo v2.2.1. For s
 
 Set `dhcp.v6ProvisioningServer` to the provisioning server's IPv6 address, without brackets, a port, a CIDR suffix, or surrounding whitespace. An empty or whitespace-only value disables generated URLs. Other values that are not IPv6 literals fail hook initialization.
 
-Provisioning-address changes take effect after the DHCPv6 pod restarts. Helm upgrades trigger a rollout through the configuration checksum. Kustomize copies configuration at startup. After updating the ConfigMap, an active Stakater Reloader watching the DHCPv6 Deployment restarts it. Otherwise, restart the Deployment manually.
+Provisioning-address changes take effect after the DHCPv6 pod restarts. Helm upgrades trigger a rollout through the configuration checksum.
 
 The following rules control options added by the hook. The hook adds boot options only for SOLICIT, REQUEST, RENEW, REBIND, and INFORMATION-REQUEST, not CONFIRM, RELEASE, or DECLINE. Stateful replies that refuse address allocation receive no hook-added boot options. Options-only requests remain eligible.
 

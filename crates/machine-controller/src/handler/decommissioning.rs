@@ -348,7 +348,7 @@ pub(super) async fn handle_deconfiguring_host(
             )
         }
         DeconfiguringHostState::ClearSuperNicLockdown => {
-            let super_nics = state
+            let mut super_nics = state
                 .dpa_interface_snapshots
                 .iter()
                 .filter(|interface| interface.interface_type == DpaInterfaceType::Svpc)
@@ -363,6 +363,9 @@ pub(super) async fn handle_deconfiguring_host(
                 ));
             }
 
+            // Observation merging locks the same rows by ID; match that order
+            // so concurrent reports cannot reverse this multi-card lock sequence.
+            super_nics.sort_by_key(|interface| interface.id);
             let mut txn = ctx.services.db_pool.begin().await?;
             for interface in super_nics {
                 db::dpa_interface::try_update_controller_state(

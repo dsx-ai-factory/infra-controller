@@ -2077,6 +2077,7 @@ func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Inter
 		apiInstance.DpuExtensionServiceDeployments = append(apiInstance.DpuExtensionServiceDeployments, *NewAPIDpuExtensionServiceDeployment(&curdesd))
 	}
 
+	apiInstance.SSHKeyGroupIDs = []string{}
 	apiInstance.SSHKeyGroups = []APISSHKeyGroupSummary{}
 	for _, dbskg := range dbskgs {
 		skg := dbskg

@@ -16,9 +16,9 @@
  */
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::rack::RackId;
@@ -404,6 +404,7 @@ impl GnmiSampleProcessor {
         self.emit_sample(
             source,
             MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key,
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
                 metric_type: metric_type.to_string(),
@@ -599,6 +600,7 @@ impl GnmiSampleProcessor {
         self.emit_sample(
             source,
             MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: metric_type.to_string(),
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
                 metric_type: metric_type.to_string(),
@@ -623,6 +625,7 @@ impl GnmiSampleProcessor {
         self.emit_sample(
             source,
             MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: metric_type.to_string(),
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
                 metric_type: metric_type.to_string(),
@@ -653,6 +656,7 @@ impl GnmiSampleProcessor {
         self.emit_sample(
             source,
             MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key,
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
                 metric_type: metric_type.to_string(),
@@ -692,6 +696,7 @@ impl GnmiSampleProcessor {
             self.emit_sample(
                 source,
                 MetricSample {
+                    semantics: crate::sink::MetricSemantics::Gauge,
                     key,
                     name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
                     metric_type: metric_type.to_string(),
@@ -716,6 +721,157 @@ impl GnmiSampleProcessor {
             &CollectorEvent::Metric(Box::new(sample)),
         );
     }
+}
+
+/// `InterfaceCounterEpochs` keeps each interface's supplied `last-clear` for
+/// `MetricSemantics::CumulativeCounter`. `observed_at` is `Notification.timestamp`
+/// in Unix nanoseconds. Starts after their metadata observation are discarded;
+/// the accepted observation is retained. Counters observed before the metadata
+/// receive no start.
+///
+/// Positive timestamp ties allow replacement unless a nonpositive timestamp
+/// invalidated the epoch. Keyed deletes retain a tombstone to reject older replay.
+///
+/// Nonpositive timestamps (including the proto3 default) invalidate known starts
+/// and require newer metadata. An untimed covering delete uses the maximum retained
+/// interface and deletion history as a conservative floor for every interface.
+/// Without retained history, it cannot establish a replay boundary.
+#[allow(
+    dead_code,
+    reason = "Activated with the complete notification and reconnect lifecycle in https://github.com/dsx-ai-factory/infra-controller/issues/8014"
+)]
+#[derive(Default)]
+struct InterfaceCounterEpochs {
+    interfaces: HashMap<String, CounterEpoch>,
+    deleted_at: Option<i64>,
+    invalidated_through: Option<i64>,
+}
+
+#[allow(
+    dead_code,
+    reason = "Activated with the complete notification and reconnect lifecycle in https://github.com/dsx-ai-factory/infra-controller/issues/8014"
+)]
+struct CounterEpoch {
+    observed_at: i64,
+    start_time: Option<SystemTime>,
+    requires_newer_observation: bool,
+}
+
+#[allow(
+    dead_code,
+    reason = "Activated with the complete notification and reconnect lifecycle in https://github.com/dsx-ai-factory/infra-controller/issues/8014"
+)]
+impl InterfaceCounterEpochs {
+    fn record(&mut self, interface: &str, observed_at: i64, start_time: Option<SystemTime>) {
+        if observed_at <= 0 {
+            if let Some(previous) = self.interfaces.get_mut(interface) {
+                previous.start_time = None;
+                previous.requires_newer_observation = true;
+            }
+            return;
+        }
+
+        if self.deleted_at.is_some_and(|deleted| observed_at < deleted)
+            || self
+                .invalidated_through
+                .is_some_and(|invalidated| observed_at <= invalidated)
+            || self.interfaces.get(interface).is_some_and(|previous| {
+                observed_at < previous.observed_at
+                    || (previous.requires_newer_observation && observed_at == previous.observed_at)
+            })
+        {
+            return;
+        }
+
+        let observation =
+            SystemTime::UNIX_EPOCH.checked_add(Duration::from_nanos(observed_at as u64));
+
+        self.interfaces.insert(
+            interface.to_string(),
+            CounterEpoch {
+                observed_at,
+                start_time: start_time.filter(|start| observation.is_some_and(|end| *start <= end)),
+                requires_newer_observation: false,
+            },
+        );
+    }
+
+    fn delete(&mut self, path: &[&PathElem], observed_at: i64) {
+        if !delete_covers_metric(
+            path,
+            ["interfaces", "interface", "state", "counters", "last-clear"],
+        ) {
+            return;
+        }
+
+        if let Some(interface) =
+            find_elem_key_ref(path, "interface", "name").filter(|name| *name != "*")
+        {
+            self.record(interface, observed_at, None);
+            return;
+        }
+
+        // An unusable delete time cannot permit replay of the observations
+        // it invalidates, including replay at their exact timestamps.
+        if observed_at <= 0 {
+            if let Some(latest) = self
+                .interfaces
+                .values()
+                .map(|epoch| epoch.observed_at)
+                .chain(self.deleted_at)
+                .max()
+            {
+                self.invalidated_through = Some(
+                    self.invalidated_through
+                        .map_or(latest, |old| old.max(latest)),
+                );
+            }
+            self.interfaces.clear();
+            return;
+        }
+        let deleted_at = self
+            .deleted_at
+            .map_or(observed_at, |old| old.max(observed_at));
+        self.deleted_at = Some(deleted_at);
+        self.interfaces.retain(|_, epoch| {
+            epoch.observed_at > observed_at
+                || (epoch.requires_newer_observation && epoch.observed_at == observed_at)
+        });
+    }
+
+    fn start_time(&self, interface: &str, observed_at: i64) -> Option<SystemTime> {
+        let epoch = self.interfaces.get(interface)?;
+        (epoch.observed_at <= observed_at)
+            .then_some(epoch.start_time)
+            .flatten()
+    }
+}
+
+/// `last_clear_time` decodes OpenConfig `last-clear` Unix nanoseconds exactly.
+#[allow(
+    dead_code,
+    reason = "Activated with the complete notification and reconnect lifecycle in https://github.com/dsx-ai-factory/infra-controller/issues/8014"
+)]
+fn last_clear_time(value: &proto::TypedValue) -> Option<SystemTime> {
+    use proto::typed_value::Value;
+
+    // Unix nanoseconds exceed f64's exact integer range. Decode the source
+    // integer directly before constructing its accumulation timestamp.
+    let nanos = match value.value.as_ref()? {
+        Value::UintVal(value) => Some(*value),
+        Value::IntVal(value) => u64::try_from(*value).ok(),
+        Value::StringVal(value) => value.parse().ok(),
+        Value::JsonVal(value) | Value::JsonIetfVal(value) => {
+            match serde_json::from_slice::<serde_json::Value>(value).ok()? {
+                serde_json::Value::Number(value) => value.as_u64(),
+                serde_json::Value::String(value) => value.parse().ok(),
+                _ => None,
+            }
+        }
+        _ => None,
+    }?;
+
+    SystemTime::UNIX_EPOCH.checked_add(Duration::from_nanos(nanos))
 }
 
 fn find_elem_key_ref<'a>(
@@ -1458,6 +1614,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
+    use carbide_test_support::{Check, check_values, value_scenarios};
     use carbide_uuid::rack::RackId;
     use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
 
@@ -1604,6 +1761,318 @@ mod tests {
         proto::TypedValue {
             value: Some(proto::typed_value::Value::UintVal(v)),
         }
+    }
+
+    #[test]
+    fn last_clear_decodes_exact_nanoseconds() {
+        use proto::typed_value::Value;
+
+        let nanos = 1_700_000_000_000_000_123_u64;
+        let start = Some(SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos));
+
+        value_scenarios! {
+            run = |value| last_clear_time(&proto::TypedValue { value });
+            "exact source integers" {
+                Some(Value::UintVal(nanos)) => start,
+                Some(Value::IntVal(nanos as i64)) => start,
+                Some(Value::StringVal(nanos.to_string())) => start,
+                Some(Value::JsonVal(nanos.to_string().into_bytes())) => start,
+                Some(Value::JsonIetfVal(format!("\"{nanos}\"").into_bytes())) => start,
+                Some(Value::UintVal(0)) => Some(SystemTime::UNIX_EPOCH),
+            }
+            "missing or invalid encoding" {
+                None => None,
+                Some(Value::IntVal(-1)) => None,
+                Some(Value::JsonVal(b"1.25".to_vec())) => None,
+                Some(Value::JsonVal(b"\"123".to_vec())) => None,
+                Some(Value::JsonIetfVal(b"\"abc\"".to_vec())) => None,
+                Some(Value::JsonVal(b"true".to_vec())) => None,
+                Some(Value::DoubleVal(nanos as f64)) => None,
+            }
+            "decimal beyond u64" {
+                Some(Value::StringVal("18446744073709551616".into())) => None,
+            }
+        }
+    }
+
+    #[test]
+    fn last_clear_epochs_reject_stale_and_invalidated_metadata() {
+        enum Action {
+            Record(&'static str, i64, Option<SystemTime>),
+            Delete(i64, Vec<PathElem>),
+        }
+
+        let start = |nanos| Some(SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos));
+        let metadata = |timestamp, value: Option<u64>| {
+            Action::Record("swp1", timestamp, value.and_then(start))
+        };
+        let path = |interface: &str, tail: &[&str]| {
+            [
+                make_path_elem("interfaces", &[]),
+                make_path_elem("interface", &[("name", interface)]),
+            ]
+            .into_iter()
+            .chain(tail.iter().map(|name| make_path_elem(name, &[])))
+            .collect::<Vec<_>>()
+        };
+        let swp1_path = |tail: &[&str]| path("swp1", tail);
+        let delete = |timestamp, path| Action::Delete(timestamp, path);
+
+        // Every row starts with swp1 cleared at 100 and observed at 200.
+        check_values(
+            [
+                Check {
+                    scenario: "older metadata cannot replace newer epoch",
+                    input: (
+                        vec![metadata(300, Some(250)), metadata(250, Some(150))],
+                        "swp1",
+                        400,
+                    ),
+                    expect: start(250),
+                },
+                Check {
+                    scenario: "older counter cannot borrow newer metadata",
+                    input: (vec![metadata(300, Some(250))], "swp1", 250),
+                    expect: None,
+                },
+                Check {
+                    scenario: "keyed ancestor deletion rejects older metadata",
+                    input: (
+                        vec![delete(300, swp1_path(&[])), metadata(250, Some(150))],
+                        "swp1",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "wildcard interface deletion rejects older metadata",
+                    input: (
+                        vec![delete(200, path("*", &[])), metadata(199, Some(50))],
+                        "swp1",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "metadata at root deletion time establishes a new epoch",
+                    input: (
+                        vec![delete(300, Vec::new()), metadata(300, Some(250))],
+                        "swp1",
+                        400,
+                    ),
+                    expect: start(250),
+                },
+                Check {
+                    scenario: "keyed deletion preserves another interface epoch",
+                    input: (vec![delete(300, path("swp2", &[]))], "swp1", 400),
+                    expect: start(100),
+                },
+                Check {
+                    scenario: "root delete without a timestamp rejects old and exact replay",
+                    input: (
+                        vec![
+                            Action::Record("swp2", 300, start(250)),
+                            delete(0, Vec::new()),
+                            Action::Record("swp2", 299, start(250)),
+                            Action::Record("swp2", 300, start(250)),
+                        ],
+                        "swp2",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "untimed covering delete retains the previous deletion boundary",
+                    input: (
+                        vec![
+                            metadata(300, Some(250)),
+                            delete(300, Vec::new()),
+                            delete(0, Vec::new()),
+                            metadata(300, Some(250)),
+                        ],
+                        "swp1",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "negative covering delete rejects exact replay",
+                    input: (
+                        vec![delete(-1, Vec::new()), metadata(200, Some(100))],
+                        "swp1",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "negative metadata timestamp rejects old and exact replay",
+                    input: (
+                        vec![
+                            metadata(-1, Some(50)),
+                            metadata(199, Some(50)),
+                            metadata(200, Some(100)),
+                        ],
+                        "swp1",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "covering delete preserves a keyed exclusive replay boundary",
+                    input: (
+                        vec![
+                            delete(0, swp1_path(&[])),
+                            metadata(199, Some(50)),
+                            delete(200, Vec::new()),
+                            metadata(200, Some(100)),
+                        ],
+                        "swp1",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "newer metadata recovers after an unusable record timestamp",
+                    input: (
+                        vec![metadata(0, None), metadata(201, Some(150))],
+                        "swp1",
+                        400,
+                    ),
+                    expect: start(150),
+                },
+                Check {
+                    scenario: "newer metadata recovers after an unusable covering delete timestamp",
+                    input: (
+                        vec![
+                            metadata(300, Some(250)),
+                            delete(300, Vec::new()),
+                            delete(-1, Vec::new()),
+                            metadata(301, Some(250)),
+                        ],
+                        "swp1",
+                        400,
+                    ),
+                    expect: start(250),
+                },
+                Check {
+                    scenario: "counter leaf deletion leaves sibling metadata",
+                    input: (
+                        vec![delete(300, swp1_path(&["state", "counters", "in-errors"]))],
+                        "swp1",
+                        400,
+                    ),
+                    expect: start(100),
+                },
+                Check {
+                    scenario: "replacement follows deletion at the same positive timestamp",
+                    input: (
+                        vec![
+                            delete(300, swp1_path(&["state", "counters", "last-clear"])),
+                            metadata(300, Some(250)),
+                        ],
+                        "swp1",
+                        400,
+                    ),
+                    expect: start(250),
+                },
+                Check {
+                    scenario: "exact last-clear deletion rejects older metadata",
+                    input: (
+                        vec![
+                            delete(300, swp1_path(&["state", "counters", "last-clear"])),
+                            metadata(250, Some(150)),
+                        ],
+                        "swp1",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "delayed keyed deletion preserves newer metadata",
+                    input: (vec![delete(150, swp1_path(&[]))], "swp1", 400),
+                    expect: start(100),
+                },
+                Check {
+                    scenario: "delayed covering deletion preserves newer metadata",
+                    input: (
+                        vec![
+                            delete(300, Vec::new()),
+                            metadata(300, Some(250)),
+                            delete(250, Vec::new()),
+                        ],
+                        "swp1",
+                        400,
+                    ),
+                    expect: start(250),
+                },
+                Check {
+                    scenario: "delayed covering deletion cannot weaken the replay boundary",
+                    input: (
+                        vec![
+                            delete(300, Vec::new()),
+                            delete(250, Vec::new()),
+                            Action::Record("swp2", 270, start(150)),
+                        ],
+                        "swp2",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "start and counter may equal the metadata observation",
+                    input: (vec![metadata(300, Some(300))], "swp1", 300),
+                    expect: start(300),
+                },
+                Check {
+                    scenario: "valid keyed deletion rejects replay for an unseen interface",
+                    input: (
+                        vec![
+                            delete(300, path("swp2", &[])),
+                            Action::Record("swp2", 250, start(150)),
+                        ],
+                        "swp2",
+                        400,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "interface observation ordering is independent",
+                    input: (
+                        vec![
+                            metadata(300, Some(250)),
+                            Action::Record("swp2", 250, start(150)),
+                        ],
+                        "swp2",
+                        400,
+                    ),
+                    expect: start(150),
+                },
+                Check {
+                    scenario: "future clear advances observation ordering without a start",
+                    input: (
+                        vec![metadata(300, Some(350)), metadata(250, Some(150))],
+                        "swp1",
+                        400,
+                    ),
+                    expect: None,
+                },
+            ],
+            |(actions, interface, observed_at)| {
+                let mut epochs = InterfaceCounterEpochs::default();
+                epochs.record("swp1", 200, start(100));
+                for action in actions {
+                    match action {
+                        Action::Record(interface, timestamp, start_time) => {
+                            epochs.record(interface, timestamp, start_time);
+                        }
+                        Action::Delete(timestamp, path) => {
+                            epochs.delete(&path.iter().collect::<Vec<_>>(), timestamp);
+                        }
+                    }
+                }
+                epochs.start_time(interface, observed_at)
+            },
+        );
     }
 
     fn test_processor() -> GnmiSampleProcessor {

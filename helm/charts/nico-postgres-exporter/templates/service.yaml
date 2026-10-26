@@ -1,0 +1,16 @@
+{{- if and .Values.enabled .Values.exporter.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nico-postgres-exporter.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nico-postgres-exporter.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "nico-postgres-exporter.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+{{- end }}

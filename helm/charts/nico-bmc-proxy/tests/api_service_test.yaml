@@ -1,0 +1,21 @@
+suite: NICo API endpoint (apiServiceName) default nico, override carbide
+templates:
+  - configmap.yaml
+release:
+  namespace: forge-system
+tests:
+  - it: dials nico-api in the release namespace by default
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: '\[carbide_api\]\napi_url = "https://nico-api\.forge-system\.svc\.cluster\.local:1079"'
+
+  - it: apiServiceName overrides the API host to carbide-api
+    documentIndex: 0
+    set:
+      apiServiceName: carbide-api
+    asserts:
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: '\[carbide_api\]\napi_url = "https://carbide-api\.forge-system\.svc\.cluster\.local:1079"'

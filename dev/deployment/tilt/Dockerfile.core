@@ -1,0 +1,145 @@
+# syntax=docker/dockerfile:1.7
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+FROM build-container-localdev AS source
+
+ENV CARGO_HOME=/cargo-home
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
+ENV CARGO_TARGET_DIR=/cargo-target
+ENV CARGO_PROFILE_DEV_DEBUG=line-tables-only
+ENV CARGO_PROFILE_RELEASE_DEBUG=line-tables-only
+
+WORKDIR /workspace
+COPY . .
+
+FROM source AS api-builder
+
+RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+    cargo build --locked \
+    -p carbide-api --bin carbide-api \
+    -p nico-admin-cli --bin nico-admin-cli \
+    && mkdir -p /out \
+    && cp /cargo-target/debug/carbide-api /out/carbide-api \
+    && cp /cargo-target/debug/nico-admin-cli /out/nico-admin-cli
+
+FROM source AS bmc-proxy-builder
+
+RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+    cargo build --locked -p carbide-bmc-proxy --bin carbide-bmc-proxy \
+    && mkdir -p /out \
+    && cp /cargo-target/debug/carbide-bmc-proxy /out/carbide-bmc-proxy
+
+FROM source AS dhcp-builder
+
+RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+    cargo build --locked -p carbide-dhcp --lib \
+    && mkdir -p /out \
+    && cp /cargo-target/debug/libdhcp.so /out/libdhcp.so
+
+FROM source AS machine-a-tron-builder
+
+RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+    cargo build --locked -p carbide-machine-a-tron --bin machine-a-tron \
+    && mkdir -p /out \
+    && cp /cargo-target/debug/machine-a-tron /out/machine-a-tron
+
+FROM source AS ssh-console-builder
+
+RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+    cargo build --locked -p carbide-ssh-console --bin ssh-console \
+    && mkdir -p /out \
+    && cp /cargo-target/debug/ssh-console /out/ssh-console
+
+FROM source AS mat-protocol-gateway-builder
+
+RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+    cargo build --locked --release -p carbide-mat-protocol-gateway --bin mat-protocol-gateway \
+    && mkdir -p /out \
+    && cp /cargo-target/release/mat-protocol-gateway /out/mat-protocol-gateway
+
+FROM source AS nico-postgres-exporter-builder
+
+RUN --mount=type=cache,id=nico-tilt-cargo-home,target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-tilt-cargo-target,target=/cargo-target,sharing=locked \
+    cargo build --locked --release -p nico-postgres-exporter --bin nico-postgres-exporter \
+    && mkdir -p /out \
+    && cp /cargo-target/release/nico-postgres-exporter /out/nico-postgres-exporter
+
+FROM nico-tilt-runtime-base AS api
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  curl \
+  ipmitool \
+  iproute2 \
+  iputils-ping \
+  libudev1 \
+  tpm2-tools \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/carbide /opt/carbide/firmware /mnt/persistence /var/run/kea
+
+COPY --from=api-builder /out/carbide-api /opt/carbide/carbide-api
+COPY --from=api-builder /out/nico-admin-cli /opt/carbide/nico-admin-cli
+COPY crates/api/casbin-policy.csv /opt/carbide/casbin-policy.csv
+
+ENV CASBIN_POLICY_FILE=/opt/carbide/casbin-policy.csv
+ENV PATH /opt/carbide:$PATH
+
+FROM nico-tilt-runtime-base AS bmc-proxy
+
+RUN mkdir -p /opt/carbide /mnt/persistence
+
+COPY --from=bmc-proxy-builder /out/carbide-bmc-proxy /opt/carbide/carbide-bmc-proxy
+
+FROM nico-tilt-runtime-base AS dhcp
+
+ARG KEA_VERSION
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  kea-dhcp4-server=${KEA_VERSION} \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /usr/lib/x86_64-linux-gnu/kea/hooks /var/lib/kea /var/run/kea
+
+COPY --from=dhcp-builder /out/libdhcp.so /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so
+
+FROM nico-tilt-runtime-base AS machine-a-tron
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  ipmitool \
+  iproute2 \
+  iputils-ping \
+  libssl3 \
+  libudev1 \
+  openipmi \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/machine-a-tron/bin /tmp/machine-a-tron-data
+
+COPY --from=machine-a-tron-builder /out/machine-a-tron /opt/machine-a-tron/bin/machine-a-tron
+COPY crates/bmc-mock/dell_poweredge_r750.tar.gz /opt/machine-a-tron/dell_poweredge_r750.tar.gz
+COPY crates/bmc-mock/nvidia_dpu.tar.gz /opt/machine-a-tron/nvidia_dpu.tar.gz
+
+FROM nico-tilt-runtime-base AS ssh-console
+
+RUN apt-get update && apt-get install -y --no-install-recommends ipmitool libudev1 libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ssh-console-builder /out/ssh-console /opt/carbide/ssh-console
+
+FROM nico-tilt-runtime-base AS mat-protocol-gateway
+
+COPY --from=mat-protocol-gateway-builder /out/mat-protocol-gateway /mat-protocol-gateway
+
+FROM nico-tilt-runtime-base AS nico-postgres-exporter
+COPY --from=nico-postgres-exporter-builder /out/nico-postgres-exporter /usr/local/bin/nico-postgres-exporter
+
+USER 65534:65534

@@ -69,13 +69,13 @@ fn machine(id: Uuid, suffix: u8) -> forge::ExpectedMachine {
         }),
         host_nics: vec![
             forge::ExpectedInterface {
-                mac_address: bmc_mac_address,
+                mac_address: Some(bmc_mac_address),
                 role: Some(forge::ExpectedInterfaceRole::HostBmc as i32),
                 ip_allocation: Some(forge::ExpectedInterfaceIpAllocation::Retained as i32),
                 ..Default::default()
             },
             forge::ExpectedInterface {
-                mac_address: format!("02:00:00:01:59:{suffix:02x}"),
+                mac_address: Some(format!("02:00:00:01:59:{suffix:02x}")),
                 role: Some(forge::ExpectedInterfaceRole::DpuOs as i32),
                 ip_allocation: Some(forge::ExpectedInterfaceIpAllocation::Dynamic as i32),
                 ..Default::default()
@@ -326,6 +326,67 @@ async fn patch_expected_machine_preserves_unselected_fields(pool: PgPool) {
 }
 
 #[crate::sqlx_test]
+async fn patch_expected_machine_sets_preserves_and_clears_server_name(pool: PgPool) {
+    let env = create_test_env(pool).await;
+    let id = Uuid::new_v4();
+    env.api
+        .add_expected_machine(Request::new(machine(id, 1)))
+        .await
+        .unwrap();
+    let mut expected = machine_row(&env.pool, id).await;
+    // The fixture does not supply a server name, so it starts absent.
+    assert_eq!(expected["server_name"], json!(null));
+
+    // Selecting server_name applies the supplied value.
+    env.api
+        .patch_expected_machine(Request::new(forge::PatchExpectedMachineRequest {
+            expected_machine: Some(forge::ExpectedMachine {
+                id: rpc_id(id),
+                server_name: Some("lldp-name".to_string()),
+                ..Default::default()
+            }),
+            update_mask: mask(&["server_name"]),
+        }))
+        .await
+        .unwrap();
+    expected["server_name"] = json!("lldp-name");
+    assert_eq!(machine_row(&env.pool, id).await, expected);
+
+    // An unrelated patch that omits server_name from the mask preserves it.
+    env.api
+        .patch_expected_machine(Request::new(forge::PatchExpectedMachineRequest {
+            expected_machine: Some(forge::ExpectedMachine {
+                id: rpc_id(id),
+                metadata: Some(forge::Metadata {
+                    name: "renamed".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            update_mask: mask(&["metadata.name"]),
+        }))
+        .await
+        .unwrap();
+    expected["metadata_name"] = json!("renamed");
+    assert_eq!(machine_row(&env.pool, id).await, expected);
+
+    // Selecting server_name with an absent value clears it.
+    env.api
+        .patch_expected_machine(Request::new(forge::PatchExpectedMachineRequest {
+            expected_machine: Some(forge::ExpectedMachine {
+                id: rpc_id(id),
+                server_name: None,
+                ..Default::default()
+            }),
+            update_mask: mask(&["server_name"]),
+        }))
+        .await
+        .unwrap();
+    expected["server_name"] = json!(null);
+    assert_eq!(machine_row(&env.pool, id).await, expected);
+}
+
+#[crate::sqlx_test]
 async fn patch_expected_machine_sets_and_clears_nested_host_bmc_address(pool: PgPool) {
     let env = create_test_env(pool).await;
     let id = Uuid::new_v4();
@@ -473,7 +534,7 @@ async fn patch_expected_machine_replaces_interfaces_and_applies_selected_bmc_fie
                         ..Default::default()
                     },
                     forge::ExpectedInterface {
-                        mac_address: bmc_mac.clone(),
+                        mac_address: Some(bmc_mac.clone()),
                         ..Default::default()
                     },
                 ],
@@ -487,7 +548,7 @@ async fn patch_expected_machine_replaces_interfaces_and_applies_selected_bmc_fie
             name: "replacement changes nested allocation and ignores unselected top-level value",
             patch: forge::ExpectedMachine {
                 host_nics: vec![forge::ExpectedInterface {
-                    mac_address: bmc_mac.clone(),
+                    mac_address: Some(bmc_mac.clone()),
                     role: Some(forge::ExpectedInterfaceRole::HostBmc as i32),
                     ip_allocation: Some(forge::ExpectedInterfaceIpAllocation::Dynamic as i32),
                     ..Default::default()
@@ -503,7 +564,7 @@ async fn patch_expected_machine_replaces_interfaces_and_applies_selected_bmc_fie
             name: "selected top-level allocation overrides the list even when unchanged",
             patch: forge::ExpectedMachine {
                 host_nics: vec![forge::ExpectedInterface {
-                    mac_address: bmc_mac.clone(),
+                    mac_address: Some(bmc_mac.clone()),
                     role: Some(forge::ExpectedInterfaceRole::HostBmc as i32),
                     ip_allocation: Some(forge::ExpectedInterfaceIpAllocation::Retained as i32),
                     ..Default::default()
@@ -519,7 +580,7 @@ async fn patch_expected_machine_replaces_interfaces_and_applies_selected_bmc_fie
             name: "explicit allocation reset ignores an unselected interface list",
             patch: forge::ExpectedMachine {
                 host_nics: vec![forge::ExpectedInterface {
-                    mac_address: "invalid unselected MAC".to_string(),
+                    mac_address: Some("invalid unselected MAC".to_string()),
                     ..Default::default()
                 }],
                 bmc_ip_allocation: Some(forge::BmcIpAllocationType::Unspecified as i32),
@@ -533,7 +594,7 @@ async fn patch_expected_machine_replaces_interfaces_and_applies_selected_bmc_fie
             name: "nested address ignores an unselected top-level address",
             patch: forge::ExpectedMachine {
                 host_nics: vec![forge::ExpectedInterface {
-                    mac_address: bmc_mac.clone(),
+                    mac_address: Some(bmc_mac.clone()),
                     role: Some(forge::ExpectedInterfaceRole::HostBmc as i32),
                     fixed_ip: Some("192.0.2.245".to_string()),
                     ..Default::default()
@@ -559,7 +620,7 @@ async fn patch_expected_machine_replaces_interfaces_and_applies_selected_bmc_fie
             name: "selected empty top-level address clears a new nested address",
             patch: forge::ExpectedMachine {
                 host_nics: vec![forge::ExpectedInterface {
-                    mac_address: bmc_mac,
+                    mac_address: Some(bmc_mac),
                     role: Some(forge::ExpectedInterfaceRole::HostBmc as i32),
                     fixed_ip: Some("192.0.2.245".to_string()),
                     ..Default::default()

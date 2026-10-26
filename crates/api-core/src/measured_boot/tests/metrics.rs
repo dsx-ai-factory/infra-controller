@@ -43,7 +43,7 @@ fn test_metrics_collector() {
         ("3e4ec902-f834-448c-9c0d-aca7da84d5d7".parse().unwrap(), 3),
         ("33be881e-5871-4519-b7dd-84946f3b758a".parse().unwrap(), 4),
     ]);
-    metrics.num_profiles = 10;
+    metrics.num_profiles = 7;
     metrics.num_machines_per_profile = HashMap::from([
         ("bf13aaeb-c9e6-4e42-9b2f-5aa525c56124".parse().unwrap(), 1),
         ("254542a1-0fb2-4250-91df-b5ecfa52645e".parse().unwrap(), 2),
@@ -57,20 +57,20 @@ fn test_metrics_collector() {
         (MeasurementBundleState::Retired, 3),
         (MeasurementBundleState::Revoked, 4),
     ]);
-    metrics.num_machines_per_pcr_value = HashMap::from([
+    metrics.num_bundles_per_pcr_value = HashMap::from([
         (
             PcrRegisterValue {
                 pcr_register: 0,
                 sha_any: "aa".to_string(),
             },
-            5,
+            3,
         ),
         (
             PcrRegisterValue {
                 pcr_register: 1,
                 sha_any: "bb".to_string(),
             },
-            5,
+            1,
         ),
     ]);
 

@@ -2663,6 +2663,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_rotation_refreshes_gnmi_cache_after_authentication_failure() {
+        use crate::static_credentials::test_support::{
+            provider_for_credentials_file, wait_for_password, write_credentials,
+        };
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        write_credentials(file.path(), "first");
+        let addr = test_addr();
+        let provider = provider_for_credentials_file(addr.clone(), file.path().to_owned()).await;
+        let cache = GnmiCredentialCache::new(provider.clone(), addr.clone());
+        let (first, generation) = cache.ensure().await.unwrap();
+        assert_eq!(first.password.as_deref(), Some("first"));
+        assert_eq!(cache.ensure().await.unwrap().1, generation);
+        write_credentials(file.path(), "second");
+        wait_for_password(&*provider, &addr, "second").await;
+        assert_eq!(
+            cache.ensure().await.unwrap().0.password.as_deref(),
+            Some("first")
+        );
+        cache
+            .refresh(
+                generation,
+                &HealthError::GnmiStatus(tonic::Status::unauthenticated("rotated credentials")),
+            )
+            .await
+            .unwrap();
+        let (second, updated) = cache.ensure().await.unwrap();
+        assert_eq!(second.password.as_deref(), Some("second"));
+        assert_eq!(updated, generation + 1);
+    }
+
+    #[tokio::test]
     async fn gnmi_credential_fetch_cases() {
         check_cases_async(
             [

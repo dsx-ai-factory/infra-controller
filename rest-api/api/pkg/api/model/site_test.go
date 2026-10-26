@@ -4,16 +4,57 @@
 package model
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 	"time"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	"github.com/NVIDIA/infra-controller/rest-api/openapi"
 	"github.com/google/uuid"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
+
+func TestAPISite_OpenAPISchema(t *testing.T) {
+	var document map[string]any
+	require.NoError(t, yaml.Unmarshal(openapi.Spec, &document))
+	compiler := jsonschema.NewCompiler()
+	compiler.DefaultDraft(jsonschema.Draft2020)
+	require.NoError(t, compiler.AddResource("site-response.json", document))
+	schema, err := compiler.Compile("site-response.json#/components/schemas/Site")
+	require.NoError(t, err)
+
+	unset := NewAPISite(cdbm.Site{Name: "test-site", Status: cdbm.SiteStatusPending}, nil, nil)
+	populated := unset
+	populated.Location = &APISiteLocation{City: "San Jose", State: "CA", Country: "USA"}
+	populated.Contact = &APISiteContact{Email: "contact@example.com"}
+	populated.MachineStats = NewAPISiteMachineStats()
+	populated.GpuStats = &[]APIMachineGPUStats{{Name: "NVIDIA GB200", GPUs: 4, Machines: 1}}
+	emptyGPU := populated
+	emptyGPU.GpuStats = &[]APIMachineGPUStats{}
+
+	tests := []struct {
+		name string
+		site APISite
+	}{
+		{name: "unset location and contact with stats not requested", site: unset},
+		{name: "populated optional fields", site: populated},
+		{name: "GPU stats requested with no GPUs", site: emptyGPU},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := json.Marshal(tt.site)
+			require.NoError(t, err)
+			var response map[string]any
+			require.NoError(t, json.Unmarshal(data, &response))
+			require.NoError(t, schema.Validate(response))
+		})
+	}
+}
 
 func TestNewAPISite(t *testing.T) {
 	type args struct {

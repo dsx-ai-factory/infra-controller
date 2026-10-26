@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+mod astra;
 mod boot_interface_resolution;
 mod chassis_reset;
 mod client_resolution;
@@ -85,6 +86,7 @@ mod rack_health;
 mod rack_state_controller;
 mod redfish_actions;
 mod resource_pool;
+mod resource_pool_inspection;
 mod site_explorer;
 mod site_prefix;
 mod sku;

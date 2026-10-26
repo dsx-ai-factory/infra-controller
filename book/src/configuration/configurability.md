@@ -1059,6 +1059,7 @@ overrides.
 | `max_uploads` | `4` | Concurrent firmware uploads in flight. |
 | `concurrency_limit` | `16` | Concurrent firmware flashing operations across the fleet. |
 | `firmware_directory` | auto-detect (`/opt/nico/firmware` then `/opt/carbide/firmware`) | Where firmware binaries live on the API pod. Override to pin one location explicitly. |
+| `downloads` | See linked defaults | [Firmware download settings](https://docs.nvidia.com/infra-controller/documentation/operations-day-2/firmware-updates/configure-firmware-versions#firmware-downloads): worker, HTTP timeout, and response-size limits for each Core process. Requires a supporting Core build as described in the linked reference. |
 | `host_firmware_upgrade_retry_interval` | `60m` | Backoff between retries on failed host upgrades. |
 | `instance_updates_manual_tagging` | `true` | Require explicit instance tagging before instance-attached firmware upgrades fire. |
 | `no_reset_retries` | `false` | Disable retry logic after BMC resets during firmware ops. |
@@ -1138,6 +1139,8 @@ NvLink partitioning via NMX-C is gated on `[nvlink_config]`:
 [nvlink_config]
 enabled = true
 monitor_run_interval = "60s"
+partition_monitor_max_concurrent_groups = 16 # racks or chassis reconciled in parallel per pass, documented range 1 to 256, larger values are accepted with a startup warning
+partition_monitor_full_check_interval = "10m" # racks and chassis whose inputs are unchanged and whose instances are synced are skipped between full checks, GPU health on them refreshes at this interval, "0s" checks every pass
 nmxc_endpoint = "https://nmxc.example.com"
 # Plus auth + retry settings — see the canonical reference.
 ```
@@ -1176,8 +1179,8 @@ override:
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `envConfig.DB_ADDR` | `postgres.postgres.svc.cluster.local` | Postgres host (the REST-side cluster, separate from NICo Core's). |
-| `envConfig.DB_DATABASE` | `elektratest` | Database name. |
+| `envConfig.DB_ADDR` | `nico-pg-cluster.postgres.svc.cluster.local` | Postgres host (`nico-pg-cluster`, shared with NICo REST and NICo Core). |
+| `envConfig.DB_DATABASE` | `nico_rest` | Database name. |
 | `envConfig.DEV_MODE` | `"true"` | **Production must set to `"false"`.** |
 | `envConfig.NICO_SEC_OPT` | `"2"` | Security mode: `0` insecure, `1` TLS, `2` mTLS. Production requires `2`. |
 | `CLUSTER_ID` | — (set by `setup.sh`) | Site UUID (`NICO_SITE_UUID`). |
@@ -1194,10 +1197,13 @@ for the value table and an override example.
 
 ### REST-side PostgreSQL
 
-NICo REST runs its own simple StatefulSet Postgres in the `nico-rest`
-namespace (not the HA Patroni cluster used by NICo Core). It hosts the
-Temporal, Keycloak (when enabled), and site-manager databases. The
-StatefulSet is templated by `setup.sh` and configurable via `nico-rest.yaml`.
+The NICo REST database, `nico_rest`, lives on `nico-pg-cluster` in the
+`postgres` namespace, next to the NICo Core databases. The Temporal and
+Keycloak databases live there too, unless `temporal.useHaPostgres` or
+`keycloak.useHaPostgres` in `helm-prereqs/values.yaml` keeps a Site on the
+deprecated standalone `postgres` StatefulSet. Refer to
+[Consolidating Temporal/Keycloak onto nico-pg-cluster](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#consolidating-temporalkeycloak-onto-nico-pg-cluster)
+for these values and the migration guide.
 
 ### Temporal
 

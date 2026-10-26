@@ -30,7 +30,10 @@ type ExpectedMachine struct {
 
 // ExpectedMachineInterface is expected host NIC information forwarded to NICo Core.
 type ExpectedMachineInterface struct {
-	MacAddress         string  `json:"macAddress"`
+	Identifier *ExpectedMachineInterfaceIdentifier `json:"identifier"`
+	// Deprecated: Use Identifier.MacAddress instead. Responses still return the
+	// interface's MAC address here when it has one.
+	MacAddress         *string `json:"macAddress"`
 	NicType            *string `json:"nicType"`
 	FixedIP            *string `json:"fixedIp"`
 	FixedMask          *string `json:"fixedMask"`
@@ -39,6 +42,20 @@ type ExpectedMachineInterface struct {
 	NetworkSegmentType *string `json:"networkSegmentType"`
 	Role               *string `json:"role"`
 	IPAllocation       *string `json:"ipAllocation"`
+}
+
+// ExpectedMachineInterfaceIdentifier identifies an Expected Machine interface.
+// Exactly one of MacAddress or Astra must be set.
+type ExpectedMachineInterfaceIdentifier struct {
+	MacAddress *string                                  `json:"macAddress"`
+	Astra      *ExpectedMachineInterfaceAstraIdentifier `json:"astra"`
+}
+
+// ExpectedMachineInterfaceAstraIdentifier holds the names Cerebro assigns to an
+// interface on an Astra host.
+type ExpectedMachineInterfaceAstraIdentifier struct {
+	PhysicalName string  `json:"physicalName"`
+	LogicalName  *string `json:"logicalName"`
 }
 
 // ExpectedMachineCreateRequest represents a request to create an Expected Machine
@@ -70,8 +87,8 @@ type ExpectedMachineUpdateRequest struct {
 func expectedMachineInterfacesFromStandard(interfaces []standard.ExpectedMachineInterface) []ExpectedMachineInterface {
 	result := make([]ExpectedMachineInterface, 0, len(interfaces))
 	for _, expectedInterface := range interfaces {
-		result = append(result, ExpectedMachineInterface{
-			MacAddress:         expectedInterface.MacAddress,
+		converted := ExpectedMachineInterface{
+			MacAddress:         expectedInterface.MacAddress.Get(),
 			NicType:            expectedInterface.NicType.Get(),
 			FixedIP:            expectedInterface.FixedIp.Get(),
 			FixedMask:          expectedInterface.FixedMask.Get(),
@@ -80,7 +97,19 @@ func expectedMachineInterfacesFromStandard(interfaces []standard.ExpectedMachine
 			NetworkSegmentType: expectedInterface.NetworkSegmentType.Get(),
 			Role:               expectedInterface.Role.Get(),
 			IPAllocation:       expectedInterface.IpAllocation.Get(),
-		})
+		}
+		identifier := expectedInterface.Identifier.Get()
+		if identifier != nil {
+			converted.Identifier = &ExpectedMachineInterfaceIdentifier{MacAddress: identifier.MacAddress.Get()}
+			astra := identifier.Astra.Get()
+			if astra != nil {
+				converted.Identifier.Astra = &ExpectedMachineInterfaceAstraIdentifier{
+					PhysicalName: astra.PhysicalName,
+					LogicalName:  astra.LogicalName.Get(),
+				}
+			}
+		}
+		result = append(result, converted)
 	}
 	return result
 }
@@ -91,7 +120,24 @@ func expectedMachineInterfacesToStandard(interfaces []ExpectedMachineInterface) 
 	}
 	result := make([]standard.ExpectedMachineInterface, 0, len(interfaces))
 	for _, expectedInterface := range interfaces {
-		converted := standard.ExpectedMachineInterface{MacAddress: expectedInterface.MacAddress}
+		converted := standard.ExpectedMachineInterface{}
+		if expectedInterface.Identifier != nil {
+			identifier := standard.ExpectedMachineInterfaceIdentifier{}
+			if expectedInterface.Identifier.MacAddress != nil {
+				identifier.MacAddress.Set(expectedInterface.Identifier.MacAddress)
+			}
+			if expectedInterface.Identifier.Astra != nil {
+				astra := standard.NewExpectedMachineInterfaceAstraIdentifier(expectedInterface.Identifier.Astra.PhysicalName)
+				if expectedInterface.Identifier.Astra.LogicalName != nil {
+					astra.LogicalName.Set(expectedInterface.Identifier.Astra.LogicalName)
+				}
+				identifier.Astra.Set(astra)
+			}
+			converted.Identifier.Set(&identifier)
+		}
+		if expectedInterface.MacAddress != nil {
+			converted.MacAddress.Set(expectedInterface.MacAddress)
+		}
 		if expectedInterface.NicType != nil {
 			converted.NicType.Set(expectedInterface.NicType)
 		}

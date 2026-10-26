@@ -1651,24 +1651,29 @@ fn assert_metadata_equals(actual: &rpc::forge::Metadata, expected: &rpc::forge::
     assert_eq!(actual, expected);
 }
 
-/// Exercises tenant preparation checks through public updates, including
-/// preserving existing bindings and removing attachments after selection.
+/// Legacy allocations without a snapshot retain the live tenant preparation
+/// guard, including its unchanged-intent and clear-all exceptions.
 #[crate::sqlx_test]
-async fn tenant_nic_firmware_selection_guards_spx_config_updates(pool: sqlx::PgPool) {
+async fn tenant_nic_firmware_selection_guards_legacy_spx_config_updates(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let host = create_managed_host(&env).await;
     let profile_id = "spx-config-update-profile";
-    set_tenant_nic_firmware_profile(&env, Some(profile_id)).await;
 
-    // Reach Ready before discovering the DPA. Adding an attachment later must
-    // apply the same tenant requirement as allocation with that attachment.
+    // Reach Ready before discovering the DPA, then represent an allocation
+    // created before snapshot capture existed.
     let instance = host
         .instance_builer(&env)
         .tenant_org(FIXTURE_TENANT_ORG_ID)
         .single_interface_network_config(segment_id)
         .build()
         .await;
+    sqlx::query("UPDATE instances SET nic_firmware_snapshot = NULL WHERE id = $1")
+        .bind(instance.id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    set_tenant_nic_firmware_profile(&env, Some(profile_id)).await;
     let allocation = create_spx_allocation_request(&env, &host, segment_id).await;
     let requested_spx = allocation.config.unwrap().spxconfig.unwrap();
     let before = db::instance::find_by_id(&env.pool, instance.id)
@@ -1676,6 +1681,7 @@ async fn tenant_nic_firmware_selection_guards_spx_config_updates(pool: sqlx::PgP
         .unwrap()
         .unwrap();
     assert!(before.config.spxconfig.spx_attachments.is_empty());
+    assert!(before.nic_firmware_snapshot.is_none());
     let initial = instance.rpc_instance().await.into_inner();
     let mut requested_config = initial.config.unwrap();
     requested_config.spxconfig = Some(requested_spx);
@@ -1783,7 +1789,7 @@ async fn tenant_nic_firmware_selection_guards_spx_config_updates(pool: sqlx::PgP
     assert_eq!(rejected.config_version, bound.config_version);
 
     // Retry the exact replacement after clearing the requirement to prove the
-    // partition change is valid and still binds the same physical device.
+    // partition change is valid and still binds the same DPA row.
     set_tenant_nic_firmware_profile(&env, None).await;
     let replacement_response = env
         .api
@@ -1839,6 +1845,10 @@ async fn tenant_nic_firmware_selection_guards_spx_config_updates(pool: sqlx::PgP
     assert_eq!(preserved.spx_config_version, replaced.spx_config_version);
     assert_eq!(preserved.metadata.description, metadata.description);
     assert_eq!(
+        preserved.nic_firmware_snapshot,
+        before.nic_firmware_snapshot
+    );
+    assert_eq!(
         preserved.config_version.version_nr(),
         replaced.config_version.version_nr() + 1
     );
@@ -1862,6 +1872,7 @@ async fn tenant_nic_firmware_selection_guards_spx_config_updates(pool: sqlx::PgP
         .unwrap()
         .unwrap();
     assert!(cleared.config.spxconfig.spx_attachments.is_empty());
+    assert_eq!(cleared.nic_firmware_snapshot, before.nic_firmware_snapshot);
     assert_eq!(
         cleared.spx_config_version.version_nr(),
         preserved.spx_config_version.version_nr() + 1
@@ -1869,6 +1880,380 @@ async fn tenant_nic_firmware_selection_guards_spx_config_updates(pool: sqlx::PgP
     assert_eq!(
         cleared.config_version.version_nr(),
         preserved.config_version.version_nr() + 1
+    );
+}
+
+/// Clearing a live tenant selection cannot erase the requirement captured by an
+/// existing allocation, even if that allocation initially had no attachments.
+#[crate::sqlx_test]
+async fn frozen_nic_firmware_requirement_prevents_later_attachment(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let host = create_managed_host(&env).await;
+    set_tenant_nic_firmware_profile(&env, Some("captured-before-attachment")).await;
+    let instance = host
+        .instance_builer(&env)
+        .tenant_org(FIXTURE_TENANT_ORG_ID)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+    let allocation = create_spx_allocation_request(&env, &host, segment_id).await;
+    let before = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let frozen = before.nic_firmware_snapshot.as_ref().unwrap();
+    assert!(frozen.targets.is_empty());
+    assert_eq!(
+        frozen
+            .tenant
+            .as_ref()
+            .unwrap()
+            .profile_id
+            .as_ref()
+            .unwrap()
+            .to_string(),
+        "captured-before-attachment"
+    );
+
+    // This removes the existing live-selection guard from the rejection path.
+    // Only the allocation's saved requirement can prevent the new attachment.
+    set_tenant_nic_firmware_profile(&env, None).await;
+    let current = instance.rpc_instance().await.into_inner();
+    let mut requested = current.config.unwrap();
+    requested.spxconfig = allocation.config.unwrap().spxconfig;
+    let error = env
+        .api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(instance.id),
+            if_version_match: Some(before.config_version.to_string()),
+            config: Some(requested),
+            metadata: current.metadata,
+        }))
+        .await
+        .expect_err("captured requirement still applies after the live setting is cleared");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("frozen NIC firmware requirement"));
+    let after = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.config.spxconfig, before.config.spxconfig);
+    assert_eq!(after.spx_config_version, before.spx_config_version);
+    assert_eq!(after.config_version, before.config_version);
+    assert_eq!(after.nic_firmware_snapshot, before.nic_firmware_snapshot);
+
+    let current = instance.rpc_instance().await.into_inner();
+    let mut metadata = current.metadata.unwrap();
+    metadata.description = "metadata-only update with a frozen requirement".to_string();
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(instance.id),
+            if_version_match: Some(after.config_version.to_string()),
+            config: current.config,
+            metadata: Some(metadata.clone()),
+        }))
+        .await
+        .expect("captured requirement permits a metadata-only update");
+    let updated = db::instance::find_by_id(&env.pool, instance.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&updated.config).unwrap(),
+        serde_json::to_value(&before.config).unwrap()
+    );
+    assert_eq!(updated.spx_config_version, before.spx_config_version);
+    assert_eq!(updated.nic_firmware_snapshot, before.nic_firmware_snapshot);
+    assert_eq!(updated.metadata.description, metadata.description);
+    assert_eq!(
+        updated.config_version.version_nr(),
+        after.config_version.version_nr() + 1
+    );
+}
+
+/// Frozen absence governs later SPX edits despite a live tenant selection, and
+/// retained binding evidence still rejects drift after partial or full removal.
+#[crate::sqlx_test]
+async fn frozen_nic_firmware_binding_survives_spx_clear_and_inventory_drift(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let host = create_managed_host(&env).await;
+    let request = create_spx_allocation_request(&env, &host, segment_id).await;
+    let added_mac = "02:11:22:33:44:66";
+    env.api
+        .create_dpa_interface(Request::new(rpc::forge::DpaInterfaceCreationRequest {
+            mac_addr: added_mac.to_string(),
+            machine_id: Some(*host.host().id),
+            device_type: "ConnectX7".to_string(),
+            pci_name: "0000:dd:00.0".to_string(),
+            device_description: Some("NVIDIA ConnectX-7".to_string()),
+            interface_type: rpc::forge::DpaInterfaceType::Svpc.into(),
+        }))
+        .await
+        .unwrap();
+    let pci_name = "0000:cc:00.0";
+    let observed = rpc::protos::mlx_device::MlxDeviceInfo {
+        pci_name: pci_name.to_string(),
+        device_type: "ConnectX7".to_string(),
+        psid: "MT_0000000838".to_string(),
+        device_description: "NVIDIA ConnectX-7".to_string(),
+        part_number: "MCX75310AAS-NEAT".to_string(),
+        fw_version_current: "28.43.1014".to_string(),
+        base_mac: TENANT_FIRMWARE_DPA_MAC.to_string(),
+        base_guid: Some("0011223344556677".to_string()),
+        ..Default::default()
+    }
+    .try_into()
+    .expect("valid DPA device report");
+    let mut txn = env.db_txn().await;
+    db::dpa_interface::update_device_info(txn.as_mut(), *host.host().id, pci_name, &observed)
+        .await
+        .unwrap();
+    let observed_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "SELECT device_info_ts FROM dpa_interfaces WHERE machine_id = $1 AND pci_name = $2",
+    )
+    .bind(host.host().id)
+    .bind(pci_name)
+    .fetch_one(txn.as_mut())
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    let allocated = env
+        .api
+        .allocate_instance(Request::new(request))
+        .await
+        .unwrap()
+        .into_inner();
+    let instance_id = allocated.id.unwrap();
+
+    // Exercise the public configuration writer in its supported state.
+    let mut txn = env.db_txn().await;
+    db::machine::update_state(
+        txn.as_mut(),
+        &host.host().id,
+        &ManagedHostState::Assigned {
+            instance_state: InstanceState::Ready,
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    let before = db::instance::find_by_id(&env.pool, instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let frozen = before.nic_firmware_snapshot.as_ref().unwrap();
+    assert!(frozen.tenant.is_none());
+    assert_eq!(frozen.targets.len(), 1);
+    assert_eq!(
+        frozen.targets[0].mac_address.to_string(),
+        TENANT_FIRMWARE_DPA_MAC
+    );
+    assert!(!frozen.targets[0].blocked_reason.is_empty());
+    assert_eq!(frozen.targets[0].observed_device.as_ref(), Some(&observed));
+    assert_eq!(frozen.targets[0].observed_at, Some(observed_at));
+
+    // The live selection cannot replace captured absence. The additional target
+    // keeps its baseline; neither it nor a new firmware requirement is frozen.
+    set_tenant_nic_firmware_profile(&env, Some("selected-after-allocation")).await;
+    let partition = env
+        .api
+        .create_spx_partition(Request::new(rpc::forge::SpxPartitionCreationRequest {
+            metadata: Some(rpc::forge::Metadata {
+                name: "same-binding-partition".to_string(),
+                ..Default::default()
+            }),
+            tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .unwrap();
+    let mut addition = allocated.config.clone().unwrap();
+    let attachments = &mut addition.spxconfig.as_mut().unwrap().spx_attachments;
+    let mut additional_attachment = attachments[0].clone();
+    additional_attachment.device_instance = 1;
+    attachments.push(additional_attachment);
+    let mut partition_change = addition.clone();
+    partition_change.spxconfig.as_mut().unwrap().spx_attachments[0].spx_partition_id =
+        Some(partition);
+    let mut partial_removal = partition_change.clone();
+    partial_removal
+        .spxconfig
+        .as_mut()
+        .unwrap()
+        .spx_attachments
+        .retain(|attachment| attachment.device_instance == 0);
+
+    let mut expected_addition = before.config.spxconfig.clone();
+    let mut additional_attachment = expected_addition.spx_attachments[0].clone();
+    additional_attachment.device_instance = 1;
+    additional_attachment.mac_address = Some(added_mac.to_string());
+    expected_addition
+        .spx_attachments
+        .insert(0, additional_attachment);
+    let mut expected_partition_change = expected_addition.clone();
+    expected_partition_change.spx_attachments[1].spx_partition_id = partition;
+    let mut expected_partial_removal = expected_partition_change.clone();
+    expected_partial_removal.spx_attachments.remove(0);
+
+    let mut current = before.clone();
+    for (name, config, expected) in [
+        // Captured absence, not the later live selection, governs new selectors.
+        ("baseline-only addition", addition, expected_addition),
+        // A partition change retains the original target's DPA binding.
+        (
+            "same-binding partition change",
+            partition_change,
+            expected_partition_change,
+        ),
+        // Removal stays valid even when another attachment remains requested.
+        ("partial removal", partial_removal, expected_partial_removal),
+    ] {
+        env.api
+            .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+                instance_id: Some(instance_id),
+                if_version_match: Some(current.config_version.to_string()),
+                config: Some(config),
+                metadata: allocated.metadata.clone(),
+            }))
+            .await
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let updated = db::instance::find_by_id(&env.pool, instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.config.spxconfig, expected, "{name}");
+        assert_eq!(
+            updated.nic_firmware_snapshot, before.nic_firmware_snapshot,
+            "{name}"
+        );
+        assert_eq!(
+            updated.config_version.version_nr(),
+            current.config_version.version_nr() + 1,
+            "{name}"
+        );
+        assert_eq!(
+            updated.spx_config_version.version_nr(),
+            current.spx_config_version.version_nr() + 1,
+            "{name}"
+        );
+        current = updated;
+    }
+
+    // Sorting now puts a different DPA at device_instance 0. The ordinary mapper
+    // can bind it, so the frozen-binding guard must distinguish the two rows.
+    env.api
+        .create_dpa_interface(Request::new(rpc::forge::DpaInterfaceCreationRequest {
+            mac_addr: "02:11:22:33:44:77".to_string(),
+            machine_id: Some(*host.host().id),
+            device_type: "ConnectX7".to_string(),
+            pci_name: "0000:aa:00.0".to_string(),
+            device_description: Some("NVIDIA ConnectX-7".to_string()),
+            interface_type: rpc::forge::DpaInterfaceType::Svpc.into(),
+        }))
+        .await
+        .unwrap();
+    let partition = env
+        .api
+        .create_spx_partition(Request::new(rpc::forge::SpxPartitionCreationRequest {
+            metadata: Some(rpc::forge::Metadata {
+                name: "binding-drift-partition".to_string(),
+                ..Default::default()
+            }),
+            tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .unwrap();
+    let mut replacement = allocated.config.unwrap();
+    replacement.spxconfig.as_mut().unwrap().spx_attachments[0].spx_partition_id = Some(partition);
+    let error = env
+        .api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(instance_id),
+            if_version_match: Some(current.config_version.to_string()),
+            config: Some(replacement.clone()),
+            metadata: allocated.metadata.clone(),
+        }))
+        .await
+        .expect_err("partition edit must not silently choose a different DPA row");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        error
+            .message()
+            .contains("frozen NIC firmware target binding")
+    );
+    let rejected = db::instance::find_by_id(&env.pool, instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rejected.config.spxconfig, current.config.spxconfig);
+    assert_eq!(rejected.config_version, current.config_version);
+    assert_eq!(rejected.spx_config_version, current.spx_config_version);
+    assert_eq!(rejected.nic_firmware_snapshot, before.nic_firmware_snapshot);
+
+    // Removal is still possible, but it does not discard the evidence needed
+    // to detect the same remapping on a later reattachment.
+    let mut empty = replacement.clone();
+    empty.spxconfig.as_mut().unwrap().spx_attachments.clear();
+    env.api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(instance_id),
+            if_version_match: Some(current.config_version.to_string()),
+            config: Some(empty),
+            metadata: allocated.metadata.clone(),
+        }))
+        .await
+        .unwrap();
+    let cleared = db::instance::find_by_id(&env.pool, instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(cleared.config.spxconfig.spx_attachments.is_empty());
+    assert_eq!(cleared.nic_firmware_snapshot, before.nic_firmware_snapshot);
+    assert_eq!(
+        cleared.config_version.version_nr(),
+        current.config_version.version_nr() + 1
+    );
+    assert_eq!(
+        cleared.spx_config_version.version_nr(),
+        current.spx_config_version.version_nr() + 1
+    );
+    let error = env
+        .api
+        .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
+            instance_id: Some(instance_id),
+            if_version_match: Some(cleared.config_version.to_string()),
+            config: Some(replacement),
+            metadata: allocated.metadata,
+        }))
+        .await
+        .expect_err("clearing attachments must not permit changed frozen binding on reattachment");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        error.message(),
+        "invalid value: SPX attachment for device NVIDIA ConnectX-7 instance 0 would change its frozen NIC firmware target binding"
+    );
+    let final_instance = db::instance::find_by_id(&env.pool, instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(final_instance.config.spxconfig.spx_attachments.is_empty());
+    assert_eq!(final_instance.config_version, cleared.config_version);
+    assert_eq!(
+        final_instance.spx_config_version,
+        cleared.spx_config_version
+    );
+    assert_eq!(
+        final_instance.nic_firmware_snapshot,
+        before.nic_firmware_snapshot
     );
 }
 

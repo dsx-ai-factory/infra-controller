@@ -24,8 +24,10 @@ use carbide_api_core::cfg::file::{
     SecretsConfig, UfmCredentialSource,
 };
 use carbide_api_core::secrets::{PostgresCredentialManager, SecretRouting, SecretsContext};
+use carbide_kmip::KmipClientConfig;
 use carbide_kms_provider::{
-    DEFAULT_TRANSIT_MOUNT, IntegratedKmsProvider, KmsBackend, MultiKmsProvider, TransitKmsProvider,
+    DEFAULT_TRANSIT_MOUNT, IntegratedKmsProvider, KmipKmsProvider, KmsBackend, MultiKmsProvider,
+    TransitKmsProvider,
 };
 use carbide_secrets::certificates::{Certificate, CertificateProvider};
 use carbide_secrets::chained_reader::{
@@ -190,7 +192,8 @@ pub(crate) async fn setup_resources(
             &routing,
             join_set,
             cancel_token,
-        )?;
+        )
+        .await?;
         let pg_manager = Arc::new(PostgresCredentialManager::new(
             db_pool.clone(),
             routing.clone(),
@@ -611,7 +614,7 @@ fn credential_writer_with_local_source_policies(
 /// named provider, check the routed KEKs against them, and combine them so
 /// the active provider wraps DEKs for new writes while any provider can
 /// unwrap rows recorded with its kek_ids.
-fn build_kms_backend(
+async fn build_kms_backend(
     config: &SecretsConfig,
     vault_config: &VaultConfig,
     routing: &SecretRouting,
@@ -658,6 +661,34 @@ fn build_kms_backend(
                     .build_task()
                     .name("transit_kms_token_renewal")
                     .spawn(provider.run_token_renewal(cancel_token.clone()))?;
+                Arc::new(provider)
+            }
+            ProviderConfig::Kmip {
+                endpoint,
+                server_name,
+                ca_bundle,
+                client_cert,
+                client_key,
+                keys,
+                connect_timeout,
+                request_timeout,
+            } => {
+                let client_config = KmipClientConfig {
+                    endpoint: endpoint.clone(),
+                    server_name: server_name.clone(),
+                    ca_bundle: ca_bundle.clone(),
+                    client_cert: client_cert.clone(),
+                    client_key: client_key.clone(),
+                    connect_timeout: *connect_timeout,
+                    request_timeout: *request_timeout,
+                };
+                // Connects now and verifies the server and every key before
+                // any DEK is wrapped; an unreachable server or an unqualified
+                // key fails the boot with a message that names the field.
+                let provider = KmipKmsProvider::connect(client_config, keys.clone())
+                    .await
+                    .map_err(eyre::Report::new)
+                    .wrap_err_with(|| format!("KMS provider {name:?}"))?;
                 Arc::new(provider)
             }
         };

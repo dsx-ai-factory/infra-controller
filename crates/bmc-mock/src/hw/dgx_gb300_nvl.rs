@@ -61,7 +61,7 @@ impl DgxGB300Nvl<'_> {
             redfish::component_integrity::ComponentIntegrity {
                 id: id.into(),
                 target_component_uri: target_component_uri.into(),
-                integrity_type: "SPDM".into(),
+                integrity_type: redfish::schema::component_integrity::ComponentIntegrityType::Spdm,
                 enabled: true,
             }
         };
@@ -98,15 +98,15 @@ impl DgxGB300Nvl<'_> {
                     id: bmc_manager_id,
                     eth_interfaces: Some(vec![
                         bmc_eth_builder("eth0")
-                            .mac_address(self.bmc_mac_address_eth0)
+                            .mac_address((self.bmc_mac_address_eth0).to_string())
                             .interface_enabled(true)
                             .build(),
                         bmc_eth_builder("eth1")
-                            .mac_address(self.bmc_mac_address_eth1)
+                            .mac_address((self.bmc_mac_address_eth1).to_string())
                             .interface_enabled(true)
                             .build(),
                         bmc_eth_builder("usb0")
-                            .mac_address(self.bmc_mac_address_usb0)
+                            .mac_address((self.bmc_mac_address_usb0).to_string())
                             .interface_enabled(true)
                             .build(),
                     ]),
@@ -128,7 +128,7 @@ impl DgxGB300Nvl<'_> {
                         redfish::ethernet_interface::builder(
                             &redfish::ethernet_interface::manager_resource("HGX_BMC_0", "usb0"),
                         )
-                        .mac_address(self.hgx_bmc_mac_address_usb0)
+                        .mac_address((self.hgx_bmc_mac_address_usb0).to_string())
                         .interface_enabled(true)
                         .build(),
                     ]),
@@ -148,13 +148,10 @@ impl DgxGB300Nvl<'_> {
     ) -> redfish::computer_system::Config<C> {
         let system_id = "System_0";
         let boot_options = std::iter::once(
-            redfish::boot_option::builder(
-                &redfish::boot_option::resource(system_id, "Boot0002"),
-                BootOptionKind::Disk,
-            )
-            .boot_option_reference("Boot0002")
-            .display_name("ubuntu")
-            .build(),
+            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, "Boot0002"))
+                .boot_option_reference("Boot0002")
+                .display_name("ubuntu")
+                .build(BootOptionKind::Disk),
         )
         .chain(
             [&self.embedded_1g_nic.ethernet_nic(), &self.dpu.host_nic()]
@@ -163,21 +160,18 @@ impl DgxGB300Nvl<'_> {
                 .map(|(n, nic)| {
                     let id = format!("Boot{:04X}", n + 3); // Starting with 0003
                     let pci_path = "PciRoot(0x0)/Pci(0x10,0x0)/Pci(0x0,0x0)";
-                    redfish::boot_option::builder(
-                        &redfish::boot_option::resource(system_id, &id),
-                        BootOptionKind::Network,
-                    )
-                    .boot_option_reference(&id)
-                    .display_name(&format!(
-                        "UEFI HTTPv4 (MAC:{})",
-                        nic.mac_address.to_string().replace(":", ""),
-                    ))
-                    .uefi_device_path(&format!(
-                        "{pci_path}/MAC({},0x1)\
+                    redfish::boot_option::builder(&redfish::boot_option::resource(system_id, &id))
+                        .boot_option_reference(&id)
+                        .display_name(format!(
+                            "UEFI HTTPv4 (MAC:{})",
+                            nic.mac_address.to_string().replace(":", ""),
+                        ))
+                        .uefi_device_path(format!(
+                            "{pci_path}/MAC({},0x1)\
                              /IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()",
-                        nic.mac_address.to_string().replace(":", "")
-                    ))
-                    .build()
+                            nic.mac_address.to_string().replace(":", "")
+                        ))
+                        .build(BootOptionKind::Network)
                 }),
         )
         .collect::<Vec<_>>();
@@ -190,7 +184,7 @@ impl DgxGB300Nvl<'_> {
                     system_id,
                     &format!("EthernetInterface{index}"),
                 ))
-                .mac_address(nic.mac_address)
+                .mac_address((nic.mac_address).to_string())
                 .interface_enabled(false)
                 .build()
             })
@@ -250,7 +244,7 @@ impl DgxGB300Nvl<'_> {
             let nic = bf3.host_nic();
             redfish::chassis::SingleChassisConfig {
                 id: chassis_id.into(),
-                chassis_type: "Component".into(),
+                chassis_type: redfish::schema::chassis::ChassisType::Component,
                 manufacturer: Some("Nvidia".into()),
                 part_number: nic.part_number.map(|v| format!("{v}           ",).into()),
                 model: Some("BlueField-3 DPU".into()),
@@ -272,7 +266,7 @@ impl DgxGB300Nvl<'_> {
                 })
                 .chain(std::iter::once(redfish::chassis::SingleChassisConfig {
                     id: "Chassis_0".into(),
-                    chassis_type: "RackMount".into(),
+                    chassis_type: redfish::schema::chassis::ChassisType::RackMount,
                     // DGX GB300: NVIDIA host chassis (vs Lenovo). Part number from the scrape.
                     manufacturer: Some("NVIDIA".into()),
                     part_number: Some("699-25859-0331-RC2".into()),
@@ -305,6 +299,13 @@ impl DgxGB300Nvl<'_> {
                     let id = format!("IO_Board_{n}");
                     ioboard.as_chassis(id.into())
                 }))
+                // The BMC's own ERoT, which the real tray lists too.
+                .chain(std::iter::once(redfish::chassis::SingleChassisConfig {
+                    id: "ERoT_BMC_0".into(),
+                    chassis_type: redfish::schema::chassis::ChassisType::Component,
+                    manufacturer: Some("NVIDIA".into()),
+                    ..redfish::chassis::SingleChassisConfig::defaults()
+                }))
                 .chain(std::iter::once(dpu_chassis(
                     "Riser_Slot1_BlueField_3_Card",
                     &self.dpu,
@@ -323,9 +324,7 @@ impl DgxGB300Nvl<'_> {
 
 fn base_bios(system_id: &str) -> serde_json::Value {
     // DGX GB300 carries the NVIDIA EmbeddedUefiShell knob (confirmed in the scrape).
-    redfish::bios::builder(&redfish::bios::resource(system_id))
-        .attributes(json!({
-            "EmbeddedUefiShell": "Enabled"
-        }))
-        .build()
+    redfish::bios::builder(&redfish::bios::resource(system_id)).with_attributes(json!({
+        "EmbeddedUefiShell": "Enabled"
+    }))
 }

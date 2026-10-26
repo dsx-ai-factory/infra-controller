@@ -17,25 +17,35 @@
 
 //! Tests for the WaitingForReady DPF state handler.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use carbide_dpf::{DpfError, DpuDeploymentType, DpuPhase};
+use carbide_dpf::{
+    DpfError, DpuDeploymentType, DpuFailureObservation, DpuPhase, DpuPhaseObservation,
+    dpu_device_cr_name,
+};
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
 use carbide_redfish::libredfish::RedfishClientPool;
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use db::TransactionVending;
 use libredfish::SystemPowerControl;
-use model::machine::{DpfState, DpuInitState, ManagedHostState, PerformPowerOperation};
+use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
+use model::controller_outcome::PersistentStateHandlerOutcome;
+use model::machine::{
+    DpfState, DpuInitState, FailureCause, FailureDetails, ManagedHostState, PerformPowerOperation,
+};
 use tokio::time::timeout;
 
-use super::{dpf_config, expect_dpf_service_inventory, get_host_state};
+use super::{
+    assert_provisioning_suppressed, dpf_config, expect_dpf_service_inventory, get_host_state,
+    phase_observation,
+};
 use crate::tests::common::api_fixtures::{
-    TestEnvOverrides, create_managed_host, create_managed_host_with_dpf,
-    create_test_env_with_overrides, get_config, reboot_completed,
+    TestEnvOverrides, create_managed_host, create_managed_host_multi_dpu,
+    create_managed_host_with_dpf, create_test_env_with_overrides, get_config, reboot_completed,
 };
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -53,10 +63,11 @@ fn dpf_left_operator_provisioning_substates(host: &ManagedHostState) -> bool {
 }
 
 /// Set up the initial provisioning expectations shared by all WaitingForReady tests.
-/// Does NOT set up `get_dpu_phase` -- each test configures it to control the
+/// Does NOT set up `get_dpu_phase_observation` -- each test configures it to control the
 /// DPU CR phase (the authoritative readiness signal).
 fn expect_provisioning(mock: &mut MockDpfOperations) {
-    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_device()
+        .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_deployment_type_for_dpu()
         .returning(move |__, _| Ok(DpuDeploymentType::Bf3));
@@ -64,22 +75,33 @@ fn expect_provisioning(mock: &mut MockDpfOperations) {
     expect_dpf_service_inventory(mock);
 }
 
-/// Persists one DPU's DPF substate directly so tests can isolate a handler
+/// Persists the DPUs' DPF substate directly so tests can isolate a handler
 /// transition without replaying the preceding operator workflow.
 async fn reset_host_to_dpf_state(
     pool: &sqlx::PgPool,
     host_id: &HostMachineId,
-    dpu_id: &DpuMachineId,
+    dpu_ids: &[DpuMachineId],
     dpf_state: DpfState,
 ) {
     let state = ManagedHostState::DPUInit {
         dpu_states: model::machine::DpuInitStates {
-            states: HashMap::from([(*dpu_id, DpuInitState::DpfStates { state: dpf_state })]),
+            states: dpu_ids
+                .iter()
+                .map(|id| {
+                    (
+                        *id,
+                        DpuInitState::DpfStates {
+                            state: dpf_state.clone(),
+                        },
+                    )
+                })
+                .collect(),
         },
     };
     let state_json = serde_json::to_value(&state).unwrap();
     let version = format!("V999-T{}", chrono::Utc::now().timestamp_micros());
 
+    let mut txn = pool.begin().await.unwrap();
     sqlx::query(
         "UPDATE machines SET \
             controller_state = $1, \
@@ -93,9 +115,37 @@ async fn reset_host_to_dpf_state(
     .bind(sqlx::types::Json(&state_json))
     .bind(&version)
     .bind(host_id)
-    .execute(pool)
+    .execute(txn.as_mut())
     .await
     .unwrap();
+    if state.suppresses_exploration_for_dpf() {
+        let host = db::machine::find_one(txn.as_mut(), host_id, Default::default())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut macs = vec![host.status.bmc_info.mac.unwrap()];
+        for dpu_id in dpu_ids {
+            let dpu = db::machine::find_one(txn.as_mut(), dpu_id, Default::default())
+                .await
+                .unwrap()
+                .unwrap();
+            macs.push(dpu.status.bmc_info.mac.unwrap());
+        }
+        for mac in macs {
+            db::bmc_suppression::upsert(
+                txn.as_mut(),
+                &NewBmcSuppression {
+                    bmc_mac_address: mac,
+                    subsystem: BmcSuppressionSubsystem::SiteExplorer,
+                    source: BmcSuppressionSource::DpfProvisioning,
+                    reason: "provisioning fixture".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+    }
+    txn.commit().await.unwrap();
 }
 
 /// Restores WaitingForReady so tests can replay operator readiness and reboot
@@ -108,10 +158,222 @@ async fn reset_host_to_waiting_for_ready(
     reset_host_to_dpf_state(
         pool,
         host_id,
-        dpu_id,
+        std::slice::from_ref(dpu_id),
         DpfState::WaitingForReady { phase_detail: None },
     )
     .await;
+}
+
+fn failure_observation() -> DpuFailureObservation {
+    DpuFailureObservation {
+        name: Some("failed-dpu".to_string()),
+        namespace: Some("dpf-system".to_string()),
+        uid: Some("failed-uid".to_string()),
+        resource_version: Some("123".to_string()),
+        generation: Some(7),
+        deployment: Some("dpf-system_astra".to_string()),
+        dpu_node_name: "failed-node".to_string(),
+        dpu_device_name: "failed-device".to_string(),
+        dpu_flavor: "astra-flavor".to_string(),
+        bfb: None,
+        blue_field_software: Some("bf-software-123".to_string()),
+        status: serde_json::from_value(serde_json::json!({
+            "phase": "Error",
+            "previousPhase": "Update Firmware",
+            "redfishTaskId": "42",
+            "conditions": [{
+                "type": "FirmwareReady",
+                "status": "False",
+                "reason": "TaskNotFound",
+                "message": "Redfish task disappeared",
+                "lastTransitionTime": "2026-09-30T01:02:03Z",
+            }],
+        }))
+        .expect("valid failure status fixture"),
+    }
+}
+
+/// Persist the observed failure and history without hold or reboot calls.
+#[crate::sqlx_test]
+async fn test_waiting_for_ready_preserves_failure_diagnostics(pool: sqlx::PgPool) {
+    let failure = failure_observation();
+    let expected_diagnostics =
+        serde_json::to_value(&failure).expect("serialize expected failure diagnostics");
+    let mut mock = MockDpfOperations::new();
+    mock.expect_deployment_type_for_dpu()
+        .returning(|_, _| Ok(DpuDeploymentType::Bf3));
+    mock.expect_verify_node_labels().returning(|_, _| Ok(true));
+    mock.expect_get_dpu_phase_observation()
+        .times(1)
+        .return_once(move |_, _| {
+            Ok(DpuPhaseObservation {
+                phase: DpuPhase::Error,
+                failure: Some(failure),
+            })
+        });
+    mock.expect_release_maintenance_hold().never();
+    mock.expect_is_reboot_required().never();
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::default().with_dpf_sdk(Arc::new(mock)),
+    )
+    .await;
+    let mh = create_managed_host(&env).await;
+    reset_host_to_waiting_for_ready(&pool, &mh.id, &mh.dpu_ids[0]).await;
+    assert_provisioning_suppressed(&env, &mh, true).await;
+
+    env.run_machine_state_controller_iteration().await;
+    let host = get_host_state(&env, &mh).await;
+    let ManagedHostState::Failed {
+        details:
+            FailureDetails {
+                cause: FailureCause::DpfProvisioning { ref err },
+                ..
+            },
+        machine_id,
+        ..
+    } = host
+    else {
+        panic!("expected persisted DPF failure, got {host:?}")
+    };
+    assert_eq!(machine_id, mh.dpu_ids[0].into());
+    let prefix = format!(
+        "DPU {} entered error phase during DPF provisioning: ",
+        mh.dpu_ids[0]
+    );
+    let diagnostics: serde_json::Value = serde_json::from_str(
+        err.strip_prefix(&prefix)
+            .expect("failure should retain the provisioning error prefix"),
+    )
+    .expect("failure suffix should contain diagnostics JSON");
+    assert_eq!(diagnostics, expected_diagnostics);
+    assert_provisioning_suppressed(&env, &mh, false).await;
+
+    let mut txn = env.db_txn().await;
+    let history = db::state_history::for_object(
+        txn.as_mut(),
+        db::state_history::StateHistoryTableId::Machine,
+        &mh.id,
+    )
+    .await
+    .unwrap();
+    assert!(history.iter().any(|record| {
+        serde_json::from_str::<ManagedHostState>(&record.state).unwrap() == host
+    }));
+}
+
+async fn assert_peer_failure_before_shared_actions(
+    pool: sqlx::PgPool,
+    deployment_type: DpuDeploymentType,
+) {
+    let scenario = format!("{deployment_type:?}");
+    let mut failure = failure_observation();
+    let mut expected_diagnostics =
+        serde_json::to_value(&failure).expect("serialize expected failure diagnostics");
+    let mut mock = MockDpfOperations::new();
+    mock.expect_deployment_type_for_dpu()
+        .returning(move |_, _| Ok(deployment_type));
+    mock.expect_verify_node_labels().returning(|_, _| Ok(true));
+    mock.expect_release_maintenance_hold().never();
+    mock.expect_is_reboot_required().never();
+
+    if deployment_type == DpuDeploymentType::Bf3 {
+        mock.expect_get_dpu_phase_observation()
+            .times(1)
+            .return_once(|_, _| Ok(phase_observation(DpuPhase::Ready)));
+        mock.expect_get_dpu_phase_observation()
+            .times(1)
+            .return_once(move |device_name, _| {
+                failure.dpu_device_name = dpu_device_cr_name(device_name);
+                Ok(DpuPhaseObservation {
+                    phase: DpuPhase::Error,
+                    failure: Some(failure),
+                })
+            });
+        mock.expect_get_dpu_phase_observations_for_deployment_type()
+            .never();
+    } else {
+        mock.expect_get_dpu_phase_observation().never();
+        mock.expect_get_dpu_phase_observations_for_deployment_type()
+            .times(1)
+            .return_once(move |device_names, _, _| {
+                let mut observations = device_names
+                    .iter()
+                    .map(|name| (name.clone(), phase_observation(DpuPhase::Ready)))
+                    .collect::<BTreeMap<_, _>>();
+                let failed_device = device_names.get(1).expect("two DPU fixture");
+                failure.dpu_device_name = dpu_device_cr_name(failed_device);
+                observations.insert(
+                    failed_device.clone(),
+                    DpuPhaseObservation {
+                        phase: DpuPhase::Error,
+                        failure: Some(failure),
+                    },
+                );
+                Ok(Some(observations))
+            });
+    }
+
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::default().with_dpf_sdk(Arc::new(mock)),
+    )
+    .await;
+    let mh = create_managed_host_multi_dpu(&env, 2).await;
+    let mut txn = env.db_txn().await;
+    let snapshot = mh.snapshot(&mut txn).await;
+    let failed_dpu = &snapshot.dpu_snapshots[1];
+    let failed_dpu_id = failed_dpu.id;
+    expected_diagnostics["dpuDeviceName"] = serde_json::Value::String(dpu_device_cr_name(
+        &failed_dpu.dpf_id().expect("fixture DPU has a DPF ID"),
+    ));
+    txn.commit().await.expect("finish fixture snapshot read");
+    reset_host_to_dpf_state(
+        &pool,
+        &mh.id,
+        &mh.dpu_ids,
+        DpfState::WaitingForReady { phase_detail: None },
+    )
+    .await;
+
+    // The first DPU is healthy; its host actions must wait for the peer read.
+    env.run_machine_state_controller_iteration().await;
+
+    let host = get_host_state(&env, &mh).await;
+    let ManagedHostState::Failed {
+        details:
+            FailureDetails {
+                cause: FailureCause::DpfProvisioning { ref err },
+                ..
+            },
+        machine_id,
+        ..
+    } = host
+    else {
+        panic!("{scenario}: expected persisted peer failure, got {host:?}");
+    };
+    assert_eq!(machine_id, failed_dpu_id.into(), "{scenario}");
+    let prefix = format!("DPU {failed_dpu_id} entered error phase during DPF provisioning: ");
+    let diagnostics: serde_json::Value = serde_json::from_str(
+        err.strip_prefix(&prefix)
+            .expect("failure should identify the failed peer"),
+    )
+    .expect("failure suffix should contain diagnostics JSON");
+    assert_eq!(diagnostics, expected_diagnostics, "{scenario}");
+}
+
+#[crate::sqlx_test]
+async fn test_direct_waiting_for_ready_records_peer_failure_before_shared_actions(
+    pool: sqlx::PgPool,
+) {
+    assert_peer_failure_before_shared_actions(pool, DpuDeploymentType::Bf3).await;
+}
+
+#[crate::sqlx_test]
+async fn test_scoped_waiting_for_ready_records_peer_failure_before_shared_actions(
+    pool: sqlx::PgPool,
+) {
+    assert_peer_failure_before_shared_actions(pool, DpuDeploymentType::Bf3Gb200).await;
 }
 
 /// WaitingForReady with reboot required:
@@ -122,8 +384,8 @@ async fn test_waiting_for_ready_reboot_flow(pool: sqlx::PgPool) {
     let mut mock = MockDpfOperations::new();
     expect_provisioning(&mut mock);
 
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(DpuPhase::Ready));
+    mock.expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(DpuPhase::Ready)));
     mock.expect_release_maintenance_hold()
         .times(1..)
         .returning(|_| Ok(()));
@@ -169,6 +431,8 @@ async fn test_waiting_for_ready_reboot_flow(pool: sqlx::PgPool) {
     .await
     .expect("timed out during state controller iterations");
 
+    assert_provisioning_suppressed(&env, &mh, true).await;
+
     let actions = env
         .redfish_sim
         .actions_since(&redfish_timepoint)
@@ -201,6 +465,7 @@ async fn test_waiting_for_ready_reboot_flow(pool: sqlx::PgPool) {
         "Host should have left DPF operator substates after DeviceReady, got: {:?}",
         host
     );
+    assert_provisioning_suppressed(&env, &mh, false).await;
 }
 
 /// WaitingForReady without reboot: enters maintenance, releases hold,
@@ -212,13 +477,16 @@ async fn test_waiting_for_ready_no_reboot(pool: sqlx::PgPool) {
 
     let dpu_ready = Arc::new(AtomicBool::new(true));
     let dr = dpu_ready.clone();
-    mock.expect_get_dpu_phase().returning(move |_, _| {
-        if dr.load(Ordering::SeqCst) {
-            Ok(DpuPhase::Ready)
-        } else {
-            Ok(DpuPhase::Provisioning("OsInstalling".into()))
-        }
-    });
+    mock.expect_get_dpu_phase_observation()
+        .returning(move |_, _| {
+            if dr.load(Ordering::SeqCst) {
+                Ok(phase_observation(DpuPhase::Ready))
+            } else {
+                Ok(phase_observation(DpuPhase::Provisioning(
+                    "OsInstalling".into(),
+                )))
+            }
+        });
     mock.expect_release_maintenance_hold()
         .times(1..)
         .returning(|_| Ok(()));
@@ -257,6 +525,41 @@ async fn test_waiting_for_ready_no_reboot(pool: sqlx::PgPool) {
         host
     );
 
+    assert_provisioning_suppressed(&env, &mh, true).await;
+
+    // A wait must not recreate suppression removed by another writer.
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let version_before_wait = host.state.version;
+    db::bmc_suppression::delete_many_for_source(
+        txn.as_mut(),
+        &[
+            host.status.bmc_info.mac.unwrap(),
+            dpu.status.bmc_info.mac.unwrap(),
+        ],
+        BmcSuppressionSubsystem::SiteExplorer,
+        BmcSuppressionSource::DpfProvisioning,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    assert_eq!(host.state.version, version_before_wait);
+    assert!(
+        matches!(
+            &host.controller_state_outcome,
+            Some(PersistentStateHandlerOutcome::Wait { reason, .. })
+                if reason == "Waiting for DPU to reach Ready phase"
+        ),
+        "unexpected outcome: {:?}",
+        host.controller_state_outcome
+    );
+    txn.commit().await.unwrap();
+    assert_provisioning_suppressed(&env, &mh, false).await;
+
     dpu_ready.store(true, Ordering::SeqCst);
 
     timeout(TEST_TIMEOUT, async {
@@ -272,11 +575,12 @@ async fn test_waiting_for_ready_no_reboot(pool: sqlx::PgPool) {
         "Host should have left DPF operator substates after DeviceReady, got: {:?}",
         host
     );
+    assert_provisioning_suppressed(&env, &mh, false).await;
 }
 
 /// Regression for the reprovision race: after `reprovision_dpu` deletes the DPU
 /// CR, the old CR lingers (finalizer) with a `deletionTimestamp` while its
-/// `status.phase` is still `Ready`. `get_dpu_phase` surfaces that as
+/// `status.phase` is still `Ready`. `get_dpu_phase_observation` surfaces that as
 /// `DpuPhase::Deleting`; WaitingForReady must keep waiting instead of reading the
 /// stale `Ready` and short-circuiting to `DeviceReady`. Once the fresh CR reports
 /// `Ready`, it advances.
@@ -289,13 +593,14 @@ async fn test_waiting_for_ready_waits_while_dpu_deleting(pool: sqlx::PgPool) {
     // terminating old CR observed right after a reprovision delete.
     let dpu_ready = Arc::new(AtomicBool::new(true));
     let dr = dpu_ready.clone();
-    mock.expect_get_dpu_phase().returning(move |_, _| {
-        if dr.load(Ordering::SeqCst) {
-            Ok(DpuPhase::Ready)
-        } else {
-            Ok(DpuPhase::Deleting)
-        }
-    });
+    mock.expect_get_dpu_phase_observation()
+        .returning(move |_, _| {
+            if dr.load(Ordering::SeqCst) {
+                Ok(phase_observation(DpuPhase::Ready))
+            } else {
+                Ok(phase_observation(DpuPhase::Deleting))
+            }
+        });
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));
 
@@ -352,7 +657,7 @@ async fn test_waiting_for_ready_waits_while_dpu_deleting(pool: sqlx::PgPool) {
 }
 
 /// After the operator removes the old DPU CR and before it recreates the new one,
-/// `get_dpu_phase` returns `NotFound`. WaitingForReady must treat that window as a
+/// `get_dpu_phase_observation` returns `NotFound`. WaitingForReady must treat that window as a
 /// wait, not an error, and advance once the fresh CR reports `Ready`.
 #[crate::sqlx_test]
 async fn test_waiting_for_ready_waits_when_dpu_not_found(pool: sqlx::PgPool) {
@@ -363,13 +668,14 @@ async fn test_waiting_for_ready_waits_when_dpu_not_found(pool: sqlx::PgPool) {
     // between the old CR being removed and the new CR being created.
     let dpu_ready = Arc::new(AtomicBool::new(true));
     let dr = dpu_ready.clone();
-    mock.expect_get_dpu_phase().returning(move |_, _| {
-        if dr.load(Ordering::SeqCst) {
-            Ok(DpuPhase::Ready)
-        } else {
-            Err(DpfError::not_found("DPU", "node-dpu-001-device-dpu-001"))
-        }
-    });
+    mock.expect_get_dpu_phase_observation()
+        .returning(move |_, _| {
+            if dr.load(Ordering::SeqCst) {
+                Ok(phase_observation(DpuPhase::Ready))
+            } else {
+                Err(DpfError::not_found("DPU", "node-dpu-001-device-dpu-001"))
+            }
+        });
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));
 
@@ -433,13 +739,16 @@ async fn test_waiting_for_ready_idempotent_reboot(pool: sqlx::PgPool) {
     // Starts true so initial provisioning completes, flipped to false for the test phase.
     let dpu_ready = Arc::new(AtomicBool::new(true));
     let dr = dpu_ready.clone();
-    mock.expect_get_dpu_phase().returning(move |_, _| {
-        if dr.load(Ordering::SeqCst) {
-            Ok(DpuPhase::Ready)
-        } else {
-            Ok(DpuPhase::Provisioning("OsInstalling".into()))
-        }
-    });
+    mock.expect_get_dpu_phase_observation()
+        .returning(move |_, _| {
+            if dr.load(Ordering::SeqCst) {
+                Ok(phase_observation(DpuPhase::Ready))
+            } else {
+                Ok(phase_observation(DpuPhase::Provisioning(
+                    "OsInstalling".into(),
+                )))
+            }
+        });
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
 
     // Starts false so initial provisioning completes, flipped to true for the test phase.
@@ -557,7 +866,7 @@ async fn test_reboot_persists_on_intent_before_power_command(pool: sqlx::PgPool)
     reset_host_to_dpf_state(
         &pool,
         &managed_host.id,
-        &managed_host.dpu_ids[0],
+        &managed_host.dpu_ids,
         DpfState::HandleReboot {
             op: PerformPowerOperation::Off,
             retry_count: 0,
@@ -611,8 +920,8 @@ async fn test_waiting_for_ready_host_already_off(pool: sqlx::PgPool) {
     let mut mock = MockDpfOperations::new();
     expect_provisioning(&mut mock);
 
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(DpuPhase::Ready));
+    mock.expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(DpuPhase::Ready)));
     mock.expect_release_maintenance_hold()
         .times(1..)
         .returning(|_| Ok(()));
@@ -752,8 +1061,8 @@ async fn write_unknown_dpf_init_state(
 async fn test_unknown_dpf_state_transitions_to_provisioning(pool: sqlx::PgPool) {
     let mut mock = MockDpfOperations::new();
     expect_provisioning(&mut mock);
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(DpuPhase::Ready));
+    mock.expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(DpuPhase::Ready)));
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));
 

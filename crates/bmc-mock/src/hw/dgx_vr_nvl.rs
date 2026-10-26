@@ -54,7 +54,7 @@ impl DgxVrNvl<'_> {
                 id: bmc_manager_id,
                 eth_interfaces: Some(vec![
                     bmc_eth_builder("eth0")
-                        .mac_address(self.bmc_mac_address_eth0)
+                        .mac_address((self.bmc_mac_address_eth0).to_string())
                         .interface_enabled(true)
                         .build(),
                 ]),
@@ -72,13 +72,10 @@ impl DgxVrNvl<'_> {
     ) -> redfish::computer_system::Config<C> {
         let system_id = "System_0";
         let boot_options = std::iter::once(
-            redfish::boot_option::builder(
-                &redfish::boot_option::resource(system_id, "0002"),
-                BootOptionKind::Disk,
-            )
-            .boot_option_reference("Boot0002")
-            .display_name("ubuntu")
-            .build(),
+            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, "0002"))
+                .boot_option_reference("Boot0002")
+                .display_name("ubuntu")
+                .build(BootOptionKind::Disk),
         )
         .chain(
             [&self.dpu.host_nic()]
@@ -87,21 +84,18 @@ impl DgxVrNvl<'_> {
                 .map(|(n, nic)| {
                     let id = format!("{:04X}", n + 3); // Starting with 0003
                     let pci_path = "PciRoot(0x0)/Pci(0x10,0x0)/Pci(0x0,0x0)";
-                    redfish::boot_option::builder(
-                        &redfish::boot_option::resource(system_id, &id),
-                        BootOptionKind::Network,
-                    )
-                    .boot_option_reference(&format!("Boot{id}"))
-                    .display_name(&format!(
-                        "[SlotFFFF]: PXE IPv4 Some Network Adapter - {}",
-                        nic.mac_address
-                    ))
-                    .uefi_device_path(&format!(
-                        "{pci_path}/MAC({},0x1)\
+                    redfish::boot_option::builder(&redfish::boot_option::resource(system_id, &id))
+                        .boot_option_reference(format!("Boot{id}"))
+                        .display_name(format!(
+                            "[SlotFFFF]: PXE IPv4 Some Network Adapter - {}",
+                            nic.mac_address
+                        ))
+                        .uefi_device_path(format!(
+                            "{pci_path}/MAC({},0x1)\
                              /IPv4(0.0.0.0,0x0,DHCP,0.0.0.0,0.0.0.0,0.0.0.0)/Uri()",
-                        nic.mac_address.to_string().replace(":", "")
-                    ))
-                    .build()
+                            nic.mac_address.to_string().replace(":", "")
+                        ))
+                        .build(BootOptionKind::Network)
                 }),
         )
         .collect::<Vec<_>>();
@@ -132,7 +126,9 @@ impl DgxVrNvl<'_> {
                             "GPU_0",
                             "/redfish/v1/Chassis/HGX_Chassis_0/Sensors/Voltage_1",
                             &redfish::processor::GpuIdentity {
-                                uuid: "e523fe23-8f32-41d9-97e6-cd5f09d50434",
+                                uuid: "e523fe23-8f32-41d9-97e6-cd5f09d50434"
+                                    .parse()
+                                    .expect("fixture GPU UUID"),
                                 serial_number: "1821526A74089",
                                 model: "Vera Rubin GPU",
                             },
@@ -171,7 +167,7 @@ impl DgxVrNvl<'_> {
             chassis: vec![
                 redfish::chassis::SingleChassisConfig {
                     id: "Chassis_0".into(),
-                    chassis_type: "RackMount".into(),
+                    chassis_type: redfish::schema::chassis::ChassisType::RackMount,
                     manufacturer: Some("NVIDIA".into()),
                     part_number: None,
                     model: Some("VR NVL72".into()),
@@ -183,7 +179,7 @@ impl DgxVrNvl<'_> {
                 self.bluefield_chassis_config(),
                 redfish::chassis::SingleChassisConfig {
                     id: "HGX_Chassis_0".into(),
-                    chassis_type: "Zone".into(),
+                    chassis_type: redfish::schema::chassis::ChassisType::Zone,
                     manufacturer: Some("NVIDIA".into()),
                     part_number: None,
                     model: Some("VR NVL144".into()),
@@ -200,7 +196,7 @@ impl DgxVrNvl<'_> {
         let bf4 = self.dpu.host_nic();
         redfish::chassis::SingleChassisConfig {
             id: Self::BLUEFIELD_CHASSIS_ID.into(),
-            chassis_type: "Component".into(),
+            chassis_type: redfish::schema::chassis::ChassisType::Component,
             manufacturer: Some("NVIDIA".into()),
             model: bf4.model.clone(),
             part_number: bf4.part_number.clone(),
@@ -214,7 +210,7 @@ impl DgxVrNvl<'_> {
                     ),
                     &bf4,
                 )
-                .status(redfish::resource::Status::Ok)
+                .status(redfish::resource::Status::Ok.into())
                 .build(),
             ]),
             sensors: None,
@@ -242,15 +238,14 @@ impl DgxVrNvl<'_> {
             Self::BLUEFIELD_CHASSIS_ID,
             Self::BLUEFIELD_NIC_ID,
         ))
-        .network_device_functions(
+        .status(redfish::resource::Status::Ok.into())
+        .build_with_functions(
             &redfish::network_device_function::chassis_collection(
                 Self::BLUEFIELD_CHASSIS_ID,
                 Self::BLUEFIELD_NIC_ID,
             ),
             network_device_functions,
         )
-        .status(redfish::resource::Status::Ok)
-        .build()
     }
 
     pub(crate) fn update_service_config(&self) -> redfish::update_service::UpdateServiceConfig {
@@ -262,9 +257,7 @@ impl DgxVrNvl<'_> {
 }
 
 fn base_bios(system_id: &str) -> serde_json::Value {
-    redfish::bios::builder(&redfish::bios::resource(system_id))
-        .attributes(json!({
-            "EmbeddedUefiShell": "Enabled"
-        }))
-        .build()
+    redfish::bios::builder(&redfish::bios::resource(system_id)).with_attributes(json!({
+        "EmbeddedUefiShell": "Enabled"
+    }))
 }

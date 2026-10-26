@@ -4499,6 +4499,26 @@ paths:
         '409':
           description: An Expected Machine with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
+        '422':
+          description: The supplied `skuId` does not identify a SKU at this Expected Machine's Site. REST checks your access to the Site before looking up the SKU.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              example:
+                source: nico
+                message: SKU ID specified in request does not exist
+                data: null
+        '500':
+          description: Unexpected server error, including a database error while looking up the supplied `skuId`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              example:
+                source: nico
+                message: Failed to validate SKU ID in request data due to DB error
+                data: null
       tags:
         - Expected Machine
     get:
@@ -4522,6 +4542,7 @@ paths:
             enum:
               - Site
               - Sku
+              - Machine
           in: query
           name: includeRelation
           description: Related entity to expand
@@ -4827,6 +4848,7 @@ paths:
             enum:
               - Site
               - Sku
+              - Machine
           in: query
           name: includeRelation
           description: Related entity to expand
@@ -4892,6 +4914,26 @@ paths:
         '409':
           description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Machine update is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
+        '422':
+          description: The supplied `skuId` does not identify a SKU at this Expected Machine's Site. REST checks your access to the Site before looking up the SKU.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              example:
+                source: nico
+                message: SKU ID specified in request does not exist
+                data: null
+        '500':
+          description: Unexpected server error, including a database error while looking up the supplied `skuId`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              example:
+                source: nico
+                message: Failed to validate SKU ID in request data due to DB error
+                data: null
       tags:
         - Expected Machine
     delete:
@@ -7377,12 +7419,20 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Site still has Instance attachments, including attachments on terminating Instances. The Partition and its status history remain unchanged. Retry after removing active attachments and waiting for terminating Instances to finish deleting.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
       description: |-
         Delete a specific SpectrumX Partition by ID.
 
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
 
-        Tenant must own the Partition. The request is rejected while any Instance is still attached to the Partition. The Partition moves to `Deleting` and its record is removed once the Site stops reporting it.
+        Tenant must own the Partition. The request is rejected with `400` while the API lists an attached Instance and `412` when the Site reports remaining attachments, including on terminating Instances. A rejected deletion leaves the Partition and its status history unchanged. Retry after removing active attachments and waiting for terminating Instances to finish deleting.
+
+        Once deletion is accepted, the Partition moves to `Deleting` and its record is removed once the Site stops reporting it.
       tags:
         - SpectrumX Partition
   '/v2/org/{org}/nico/nvlink-logical-partition':
@@ -8721,6 +8771,7 @@ paths:
                 With iPXE override and Ethernet/InfiniBand Interfaces:
                   value:
                     id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                    networkSecurityGroupPropagationDetails: null
                     name: spark-monitor-1
                     description: Node for monitoring Spark
                     tenantId: f97df110-f4de-492e-8849-4a6af68026b0
@@ -8808,6 +8859,7 @@ paths:
                 With DPU Extension Service Deployments:
                   value:
                     id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                    networkSecurityGroupPropagationDetails: null
                     name: spark-monitor-1
                     description: Node for monitoring Spark
                     tenantId: f97df110-f4de-492e-8849-4a6af68026b0
@@ -9092,6 +9144,7 @@ paths:
                 Batch created Instances:
                   value:
                     - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                      networkSecurityGroupPropagationDetails: null
                       name: worker-abc123
                       description: Worker node for distributed training
                       tenantId: f97df110-f4de-492e-8849-4a6af68026b0
@@ -9106,6 +9159,7 @@ paths:
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
                     - id: 85c5e7b2-89f1-4e32-9d3a-8e1f5a2c7d90
+                      networkSecurityGroupPropagationDetails: null
                       name: worker-def456
                       description: Worker node for distributed training
                       tenantId: f97df110-f4de-492e-8849-4a6af68026b0
@@ -9415,6 +9469,7 @@ paths:
                 example-1:
                   value:
                     id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                    networkSecurityGroupPropagationDetails: null
                     name: spark-monitor-2
                     description: Spark Monitor Node 1
                     tenantId: f97df110-f4de-492e-8849-4a6af68026b0
@@ -11422,6 +11477,11 @@ paths:
                           numaNode: 1
                           description: 'MT28908 Family [ConnectX-6]'
                           slot: '0000:ca:00.0'
+                      lifecycleState:
+                        value: Ready
+                        isAboveSLA: false
+                        updated: '2026-01-15T12:00:00Z'
+                        slaSeconds: 300
                       lldpNeighbors:
                         - macAddress: '02:00:00:00:01:b0'
                           localPort: enp1s0np0
@@ -17903,6 +17963,11 @@ paths:
         call, `200 OK` on subsequent updates. See the Tenant Identity tag
         description for upsert semantics and the `enabled` vs DELETE
         distinction.
+
+        Concurrent creation can return `409 Conflict`, leaving the stored
+        configuration and tenant version unchanged. Read it before retrying,
+        since a retry can update it. An explicit `rotateKey: true` request can
+        instead rotate a concurrently created configuration found during the write.
       requestBody:
         required: true
         content:
@@ -17928,6 +17993,16 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: The configuration was created concurrently. The stored configuration and tenant version are unchanged; read it before retrying an update.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              example:
+                source: nico
+                message: Failed to create or update Tenant Identity Config
+                data: null
         '500':
           description: Internal server error while loading the Tenant or Site, contacting the Core gRPC API, starting the configuration workflow, or after the workflow timed out and was terminated.
           $ref: '#/components/responses/GenericHttpError'
@@ -20749,22 +20824,30 @@ components:
           description: 'Date/time when the Site was last updated'
           format: date-time
         location:
-          $ref: '#/components/schemas/SiteLocation'
-          description: 'Site location information'
+          oneOf:
+            - $ref: '#/components/schemas/SiteLocation'
+            - type: 'null'
+          description: 'Site location information. Null when unset'
         contact:
-          $ref: '#/components/schemas/SiteContact'
-          description: 'Site contact information'
+          oneOf:
+            - $ref: '#/components/schemas/SiteContact'
+            - type: 'null'
+          description: 'Site contact information. Null when unset'
         capabilities:
           $ref: '#/components/schemas/SiteCapabilities'
           description: 'Site capabilities used for feature availability and configuration'
         machineStats:
-          $ref: '#/components/schemas/SiteMachineStats'
-          description: 'Machine counts by status for the Site'
+          oneOf:
+            - $ref: '#/components/schemas/SiteMachineStats'
+            - type: 'null'
+          description: 'Machine counts by status for the Site. Populated on Site list requests when includeMachineStats is true; null otherwise. Sites with no Machines or Allocations return zeroed statistics when requested'
         gpuStats:
-          type: array
+          type:
+            - array
+            - 'null'
           items:
             $ref: '#/components/schemas/MachineGPUStats'
-          description: 'GPU counts grouped by GPU type for the Site. Populated when includeGpuStats is set'
+          description: 'GPU counts grouped by GPU type for the Site. Populated on Site list requests when includeGpuStats is true; null otherwise. Sites without GPUs return an empty array when requested'
     SiteSummary:
       title: SiteSummary
       type: object
@@ -23474,7 +23557,8 @@ components:
             whole disk, preferring one with an EFI partition to break a size tie.
             Partition aliases ending in `-part<digits>` are rejected.
             An empty stored value means the Site prefers a disk with an EFI partition,
-            then falls back to `/dev/nvme0n1` or `/dev/sda`.
+            then falls back to the first `/dev/nvme<controller>n<namespace>`,
+            `/dev/sd<letters>`, or `/dev/vd<letters>` whole disk in device-name order.
         rootFsId:
           type:
             - string
@@ -23864,8 +23948,9 @@ components:
             selects the smallest enumerated whole disk, preferring one with an EFI
             partition to break a size tie. Partition aliases ending in
             `-part<digits>` are rejected. When omitted, null, or empty on creation,
-            the Site prefers a disk with an EFI partition, then falls back to
-            `/dev/nvme0n1` or `/dev/sda`.
+            the Site prefers a disk with an EFI partition, then falls back to the first
+            `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, or
+            `/dev/vd<letters>` whole disk in device-name order.
         rootFsId:
           type:
             - string
@@ -23993,7 +24078,8 @@ components:
             `-part<digits>` are rejected. Omitting this field or sending null preserves
             the current value. Sending an explicit empty string clears the value and
             restores automatic selection: prefer a disk with an EFI partition, then
-            fall back to `/dev/nvme0n1` or `/dev/sda`.
+            fall back to the first `/dev/nvme<controller>n<namespace>`,
+            `/dev/sd<letters>`, or `/dev/vd<letters>` whole disk in device-name order.
         rootFsId:
           type:
             - string
@@ -24390,6 +24476,9 @@ components:
     Instance:
       title: Instance
       type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - networkSecurityGroupPropagationDetails
       description: Instance is a baremetal Machine that has been provisioned for a Tenant
       examples:
         - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
@@ -24513,6 +24602,7 @@ components:
           controllerInstanceId: null
           ipxeScript: null
           alwaysBootWithCustomIpxe: false
+          networkSecurityGroupPropagationDetails: null
           userData: null
           labels:
             region: portland
@@ -24639,8 +24729,10 @@ components:
             - 'null'
           description: External power provisioning profile associated with the Instance.
         networkSecurityGroupPropagationDetails:
-          $ref: '#/components/schemas/NetworkSecurityGroupPropagationDetails'
-          description: Propagation details for the attached Network Security Group
+          oneOf:
+            - $ref: '#/components/schemas/NetworkSecurityGroupPropagationDetails'
+            - type: 'null'
+          description: Network Security Group propagation details. Null when no details are available, including when no Network Security Group is attached or inherited.
         networkSecurityGroupInherited:
           type: boolean
           description: Indicates if the Network Security Group is inherited from VPC
@@ -24745,6 +24837,8 @@ components:
           description: 'Date/time when the Instance was last updated'
           format: date-time
           readOnly: true
+      required:
+        - networkSecurityGroupPropagationDetails
     InstanceStatus:
       title: InstanceStatus
       type: string
@@ -29007,7 +29101,20 @@ components:
     MachineMetadata:
       title: MachineMetadata
       type: object
-      description: Describes metadata for various Machine components
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - dmiData
+        - bmcInfo
+        - lifecycleState
+      description: Describes metadata for various Machine components. Every field is present; unavailable DMI, BMC, and lifecycle data is null, while unavailable inventory and LLDP collections are empty arrays.
+      required:
+        - dmiData
+        - bmcInfo
+        - gpus
+        - networkInterfaces
+        - infinibandInterfaces
+        - lifecycleState
+        - lldpNeighbors
       examples:
         - dmiData:
             boardName: 7Z23CTOLWB
@@ -29069,10 +29176,14 @@ components:
                 model: BlueField-3 DPU
       properties:
         dmiData:
-          $ref: '#/components/schemas/MachineDMIData'
+          oneOf:
+            - $ref: '#/components/schemas/MachineDMIData'
+            - type: 'null'
           description: 'DMI data of the machine'
         bmcInfo:
-          $ref: '#/components/schemas/MachineBMCInfo'
+          oneOf:
+            - $ref: '#/components/schemas/MachineBMCInfo'
+            - type: 'null'
           description: 'BMC Info of the machine'
         gpus:
           type: array
@@ -29758,16 +29869,31 @@ components:
       type: object
       description: Expected interface declaration. Each supplied list entry replaces the corresponding declaration, so preserve all returned attributes when editing it. Core validates role, primary selection, and allocation against the Site configuration.
       examples:
-        - macAddress: '02:00:00:00:00:10'
+        - identifier:
+            macAddress: '02:00:00:00:00:10'
           nicType: CX9
           fixedIp: '192.0.2.10'
           primary: true
           role: Host
+        - identifier:
+            astra:
+              physicalName: C1-1-L1
+              logicalName: eth_r0_p0
+          nicType: CX9
+          fixedIp: '192.0.2.11'
       properties:
+        identifier:
+          oneOf:
+            - $ref: '#/components/schemas/ExpectedMachineInterfaceIdentifier'
+            - type: 'null'
+          description: Identifies the interface by MAC address or by its Astra names. Required unless the deprecated `macAddress` is supplied.
         macAddress:
-          type: string
+          type:
+            - string
+            - 'null'
           pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
-          description: MAC address of the expected interface. Accepts six colon- or hyphen-separated octets in either case; stored and returned in uppercase colon-separated form, for example AA:BB:CC:DD:EE:FF. The same MAC may have separate IPv4 and IPv6 declarations.
+          deprecated: true
+          description: Deprecated in favor of `identifier.macAddress`. Identifies the interface by MAC address when `identifier` is omitted. When supplied alongside `identifier.macAddress`, both must name the same MAC address. This field may also accompany `identifier.astra` to preserve a MAC address alongside the Astra names. Responses return the interface's MAC address here when it has one, in uppercase colon-separated form.
         nicType:
           type:
             - string
@@ -29801,8 +29927,50 @@ components:
           type: [string, 'null']
           enum: [Unspecified, Dynamic, Fixed, Retained, null]
           description: On create, omission, null, or Unspecified infers Fixed from fixedIp, otherwise Retained for HostBmc and Dynamic for other roles. On update, omission or null preserves a matching stored policy while fixedIp presence is unchanged; Unspecified resets inference. Fixed requires fixedIp; Dynamic and Retained forbid it. Explicit Fixed, inferred DPU Fixed, and inferred HostBmc Fixed with a segment constraint require a containing managed prefix; legacy Host or inferred HostBmc Fixed without a constraint may use static assignments. Retained keeps a DHCP-allocated address for the interface row lifetime.
+    ExpectedMachineInterfaceIdentifier:
+      title: ExpectedMachineInterfaceIdentifier
+      type: object
+      description: Identifies an Expected Machine interface. Exactly one of `macAddress` or `astra` must be set.
+      examples:
+        - macAddress: '02:00:00:00:00:10'
+        - astra:
+            physicalName: C1-1-L1
+            logicalName: eth_r0_p0
+      properties:
+        macAddress:
+          type:
+            - string
+            - 'null'
+          pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
+          description: MAC address of the interface. Accepts six colon- or hyphen-separated octets in either case; stored and returned in uppercase colon-separated form, for example AA:BB:CC:DD:EE:FF. The same MAC may have separate IPv4 and IPv6 declarations.
+        astra:
+          oneOf:
+            - $ref: '#/components/schemas/ExpectedMachineInterfaceAstraIdentifier'
+            - type: 'null'
+          description: Cerebro names of an interface on an Astra host.
+    ExpectedMachineInterfaceAstraIdentifier:
+      title: ExpectedMachineInterfaceAstraIdentifier
+      type: object
+      description: Names that Cerebro assigns to an interface on an Astra host.
+      examples:
+        - physicalName: C1-1-L1
+          logicalName: eth_r0_p0
+      properties:
+        physicalName:
+          type: string
+          minLength: 1
+          pattern: '^[A-Za-z0-9_.:-]+$'
+          description: Physical interface name as recorded in Cerebro, for example `C1-1-L1`. May contain only ASCII letters, digits, `_`, `.`, `:`, and `-`.
+        logicalName:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          maxLength: 127
+          pattern: '^[A-Za-z0-9_.-]+$'
+          description: Optional logical interface name, for example `eth_r0_p0`. May contain only ASCII letters, digits, `_`, `.`, and `-`. Omission or null clears it when replacing the declaration.
       required:
-        - macAddress
+        - physicalName
     ExpectedMachine:
       title: ExpectedMachine
       type: object
@@ -29820,9 +29988,20 @@ components:
             - DPU-001
             - DPU-002
           interfaces:
-            - macAddress: '02:00:00:00:00:10'
+            - identifier:
+                macAddress: '02:00:00:00:00:10'
+                astra: null
+              macAddress: '02:00:00:00:00:10'
               nicType: CX9
               fixedIp: '192.0.2.10'
+            - identifier:
+                macAddress: null
+                astra:
+                  physicalName: C1-1-L1
+                  logicalName: eth_r0_p0
+              macAddress: null
+              nicType: CX9
+              fixedIp: '192.0.2.11'
           skuId: lenovo.sr650v2.cpu.1
           machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
           rackId: rack-01
@@ -29865,18 +30044,20 @@ components:
           type:
             - string
             - 'null'
-          description: Optional ID of the SKU associated with this Expected Machine
+          description: Stored SKU ID for this Expected Machine, or null when no association is stored. The ID can belong to another Site, including when inventory synchronization imports an entry configured directly in Core.
         sku:
           $ref: '#/components/schemas/Sku'
-          description: SKU information for this Expected Machine (populated when includeRelation=Sku is specified)
+          description: |-
+            SKU information included when `includeRelation=Sku` is specified and the associated SKU belongs to this Expected Machine's Site. For an association to another Site's SKU, REST omits `sku` and returns the stored `skuId`.
         machineId:
           type:
             - string
             - 'null'
-          description: Optional ID of the Machine associated with this Expected Machine
+          description: Stored Machine ID for this Expected Machine, or null when no association is stored. The ID can belong to another Site.
         machine:
           $ref: '#/components/schemas/MachineSummary'
-          description: Machine information for this Expected Machine (populated when includeRelation=Machine is specified)
+          description: |-
+            Machine information included when `includeRelation=Machine` is specified and the associated Machine is found at this Expected Machine's Site. For an association to another Site's Machine, REST omits `machine` and returns the stored `machineId`.
         rackId:
           type:
             - string
@@ -29907,6 +30088,11 @@ components:
             - string
             - 'null'
           description: Description of this component
+        serverName:
+          type:
+            - string
+            - 'null'
+          description: Optional server name advertised to connected switches in LLDP responses and used for cable validation.
         slotId:
           type:
             - integer
@@ -29965,9 +30151,16 @@ components:
             - DPU-001
             - DPU-002
           interfaces:
-            - macAddress: '02:00:00:00:00:10'
+            - identifier:
+                macAddress: '02:00:00:00:00:10'
               nicType: CX9
               fixedIp: '192.0.2.10'
+            - identifier:
+                astra:
+                  physicalName: C1-1-L1
+                  logicalName: eth_r0_p0
+              nicType: CX9
+              fixedIp: '192.0.2.11'
           skuId: lenovo.sr650v2.cpu.1
           rackId: rack-01
           isDpfEnabled: true
@@ -30019,7 +30212,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional ID of the SKU to associate with this Expected Machine
+          description: Optional ID of an existing SKU at this Expected Machine's Site. Omission or null leaves the SKU association unset. REST rejects an empty string with HTTP 400.
         rackId:
           type:
             - string
@@ -30050,6 +30243,12 @@ components:
             - string
             - 'null'
           description: Description of this component
+        serverName:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Optional server name advertised to connected switches in LLDP responses and used for cable validation.
         slotId:
           type:
             - integer
@@ -30133,7 +30332,8 @@ components:
           rackId: rack-02
           isDpfEnabled: false
           interfaces:
-            - macAddress: '02:00:00:00:00:10'
+            - identifier:
+                macAddress: '02:00:00:00:00:10'
               nicType: CX9
               fixedIp: '192.0.2.10'
           manufacturer: Lenovo
@@ -30200,7 +30400,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional ID of the SKU to associate with this Expected Machine
+          description: Optional ID of an existing SKU at this Expected Machine's Site. Omission or null preserves the current SKU association in single and batch PATCH requests. REST rejects an empty string with HTTP 400. PATCH cannot remove the SKU association.
         rackId:
           type:
             - string
@@ -30232,6 +30432,11 @@ components:
             - string
             - 'null'
           description: Description of this component
+        serverName:
+          type:
+            - string
+            - 'null'
+          description: Optional server name advertised to connected switches in LLDP responses and used for cable validation. An empty string clears the current value. Omission or null preserves it.
         slotId:
           type:
             - integer

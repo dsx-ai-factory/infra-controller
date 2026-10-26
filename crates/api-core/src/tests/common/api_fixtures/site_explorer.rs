@@ -1403,11 +1403,13 @@ impl<'a> MockExploredHost<'a> {
         }
     }
 
-    /// Site-explorer ingestion steps shared by [`new_mock_host`].
+    /// Site-explorer ingestion up to the host's first discovery, shared by
+    /// [`new_mock_host_awaiting_discovery`]: the DPUs have registered and the
+    /// host is a predicted machine whose primary admin link has leased.
     ///
     /// Each step is awaited separately so the async state machine does not accumulate the full
-    /// chain on the stack (see comment in [`new_mock_host`]).
-    async fn finish_standard_ingestion_flow(mut self) -> eyre::Result<Self> {
+    /// chain on the stack (see comment in [`new_mock_host_awaiting_discovery`]).
+    async fn ingest_until_host_discovery(mut self) -> eyre::Result<Self> {
         self = self.discover_dhcp_host_bmc(|_, _| Ok(())).boxed().await?;
         self = self.insert_site_exploration_results()?;
         self = self.run_site_explorer_iteration().boxed().await;
@@ -1418,6 +1420,11 @@ impl<'a> MockExploredHost<'a> {
             .boxed()
             .await?;
         self = self.dpu_state_controller_iterations().boxed().await;
+        Ok(self)
+    }
+
+    /// Ingestion from the host's first discovery to a ready host.
+    async fn ingest_from_host_discovery(mut self) -> eyre::Result<Self> {
         self = self.discover_machine(|_, _| Ok(())).boxed().await?;
         self = self.run_site_explorer_iteration().boxed().await;
         self = self.host_state_controller_iterations().boxed().await;
@@ -1609,6 +1616,19 @@ pub(in crate::tests) async fn new_mock_host(
     env: &'_ TestEnv,
     config: ManagedHostConfig,
 ) -> eyre::Result<MockExploredHost<'_>> {
+    new_mock_host_awaiting_discovery(env, config)
+        .await?
+        .ingest_from_host_discovery()
+        .await
+}
+
+/// Ingests `config` up to the host's first discovery: the DPUs have
+/// registered and the host is a predicted machine whose primary admin link
+/// has leased.
+pub(in crate::tests) async fn new_mock_host_awaiting_discovery(
+    env: &'_ TestEnv,
+    config: ManagedHostConfig,
+) -> eyre::Result<MockExploredHost<'_>> {
     // Make the IB ports visible in Mock-UFM
     let mock_ib_fabric = env.ib_fabric_manager.get_mock_manager();
     for ib_guid in config.ib_guids.iter() {
@@ -1638,10 +1658,10 @@ pub(in crate::tests) async fn new_mock_host(
             .await;
     }
 
-    // NOTE: Calling `.boxed()` on each future in `finish_standard_ingestion_flow` decreases the
-    // amount of stack space used by these futures. Prior to this we were hitting stack space
-    // limits (going over 2MB in stack) in unit tests.
-    mock_explored_host.finish_standard_ingestion_flow().await
+    // NOTE: Calling `.boxed()` on each future in the ingestion steps decreases the amount of
+    // stack space used by these futures. Prior to this we were hitting stack space limits
+    // (going over 2MB in stack) in unit tests.
+    mock_explored_host.ingest_until_host_discovery().await
 }
 
 /// Use this function to make a new managed host with a given number of DPUs, using site-explorer

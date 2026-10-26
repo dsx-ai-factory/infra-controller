@@ -301,6 +301,8 @@ async fn test_lookup_by_mac(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
         .expect("the switch we just created should be findable by its BMC MAC");
     assert_eq!(found.bmc_mac_address, switches[0].bmc_mac_address);
     assert_eq!(found.serial_number, switches[0].serial_number);
+    assert_eq!(found.bmc_ip_address, None);
+    assert_eq!(found.nvos_ip_address, None);
 
     // 0xff is past the six switches the fixture creates.
     let unknown_mac = mac_address::MacAddress::new([0x44, 0x44, 0x11, 0x11, 0x00, 0xff]);
@@ -310,6 +312,51 @@ async fn test_lookup_by_mac(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
             .is_none()
     );
 
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn expected_switch_lookup_rejects_non_host_prefixes(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (column, query) in [
+        (
+            "bmc_ip_address",
+            "UPDATE expected_switches SET bmc_ip_address = '192.0.2.1/24'::inet
+             WHERE expected_switch_id = $1",
+        ),
+        (
+            "nvos_ip_address",
+            "UPDATE expected_switches SET nvos_ip_address = '192.0.2.1/24'::inet
+             WHERE expected_switch_id = $1",
+        ),
+    ] {
+        let mut txn = pool.begin().await?;
+        let switch = create_expected_switch(&mut txn, 0).await;
+        let id = switch.expected_switch_id.expect("created switch has an ID");
+
+        // PostgreSQL accepts this prefix, but SQLx decodes `IpAddr` only with
+        // a /32 (IPv4) or /128 (IPv6) prefix.
+        sqlx::query(query).bind(id).execute(&mut *txn).await?;
+        let error = find_by_id(&mut txn, id).await.map(|_| ()).expect_err(
+            "a non-host prefix must fail decoding rather than become an absent address",
+        );
+        let DatabaseError::Sqlx(annotated) = &error else {
+            panic!("{column}: expected Sqlx, got {error:?}");
+        };
+        let sqlx::Error::ColumnDecode { index, source } = &annotated.source else {
+            panic!("{column}: expected ColumnDecode, got {error:?}");
+        };
+        assert_eq!(index, &format!("{column:?}"));
+        assert_eq!(source.to_string(), "lossy decode from inet/cidr");
+        assert!(
+            annotated
+                .query
+                .contains("FROM expected_switches WHERE expected_switch_id=$1"),
+            "{error:?}"
+        );
+        txn.rollback().await?;
+    }
     Ok(())
 }
 

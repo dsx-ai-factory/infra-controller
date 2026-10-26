@@ -14,7 +14,8 @@
 {{- $supplementalCmKey := default "supplemental.json" (get $supplementalNetworkConfig "key") -}}
 {{- /* The agent's config.toml is needed by any section that sets a key in it. */ -}}
 {{- $prometheusDisabled := eq (toString .Values.prometheusEnabled) "false" -}}
-{{- $agentConfigEnabled := or .Values.fmds.sign_proxy_url $supplementalCmName .Values.metricsPort $prometheusDisabled -}}
+{{- $fmdsNetworkingConfigured := ne .Values.fmds.networkingAddresses nil -}}
+{{- $agentConfigEnabled := or .Values.fmds.sign_proxy_url $supplementalCmName .Values.metricsPort $prometheusDisabled $fmdsNetworkingConfigured -}}
 {{- $podAnnotations := .Values.serviceDaemonSet.annotations -}}
 {{- if $agentConfigEnabled -}}
 {{- $podAnnotations = omit $podAnnotations "checksum/machine-identity-config" -}}

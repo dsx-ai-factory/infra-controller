@@ -121,6 +121,97 @@ async fn test_add_expected_switch(pool: sqlx::PgPool) {
 }
 
 #[crate::sqlx_test()]
+async fn expected_switch_writes_reject_invalid_bmc_ip_without_mutation(pool: sqlx::PgPool) {
+    #[derive(Debug)]
+    enum Operation {
+        Add,
+        ReplaceAll,
+        Update,
+        MaskedUpdate,
+    }
+
+    let env = create_test_env(pool).await;
+    env.api
+        .add_expected_switch(tonic::Request::new(rpc::forge::ExpectedSwitch {
+            bmc_mac_address: "02:00:00:fe:01:01".to_string(),
+            nvos_interfaces: nvos_ifaces(&["02:00:00:fe:01:02"]),
+            bmc_username: "ADMIN".into(),
+            bmc_password: "PASS".into(),
+            switch_serial_number: "BMC-IP-VALIDATION".into(),
+            bmc_ip_address: "192.0.2.10".into(),
+            ..Default::default()
+        }))
+        .await
+        .expect("add baseline switch");
+    let before = env
+        .api
+        .get_all_expected_switches(tonic::Request::new(()))
+        .await
+        .expect("read baseline switches")
+        .into_inner();
+
+    for operation in [
+        Operation::Add,
+        Operation::ReplaceAll,
+        Operation::Update,
+        Operation::MaskedUpdate,
+    ] {
+        let mut invalid = before.expected_switches[0].clone();
+        invalid.bmc_ip_address = "not-an-ip".to_string();
+        invalid.switch_serial_number = "MUST-NOT-PERSIST".to_string();
+        let result = match operation {
+            Operation::Add => {
+                invalid.expected_switch_id = None;
+                invalid.bmc_mac_address = "02:00:00:fe:01:03".to_string();
+                invalid.nvos_interfaces = nvos_ifaces(&["02:00:00:fe:01:04"]);
+                env.api
+                    .add_expected_switch(tonic::Request::new(invalid))
+                    .await
+            }
+            Operation::ReplaceAll => {
+                let mut valid = before.expected_switches[0].clone();
+                valid.switch_serial_number = "REPLACEMENT-MUST-NOT-PERSIST".to_string();
+                invalid.expected_switch_id = None;
+                invalid.bmc_mac_address = "02:00:00:fe:01:03".to_string();
+                invalid.nvos_interfaces = nvos_ifaces(&["02:00:00:fe:01:04"]);
+                env.api
+                    .replace_all_expected_switches(tonic::Request::new(ExpectedSwitchList {
+                        expected_switches: vec![valid, invalid],
+                    }))
+                    .await
+            }
+            Operation::Update => {
+                env.api
+                    .update_expected_switch(tonic::Request::new(invalid))
+                    .await
+            }
+            Operation::MaskedUpdate => {
+                let mut request = tonic::Request::new(invalid);
+                request.metadata_mut().insert(
+                    EXPECTED_SWITCH_UPDATE_MASK_HEADER,
+                    "bmc_ip_address,switch_serial_number".parse().unwrap(),
+                );
+                env.api.update_expected_switch(request).await
+            }
+        };
+        let error = result.expect_err("malformed BMC IP must be rejected");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{operation:?}");
+        assert_eq!(
+            error.message(),
+            "IP address not-an-ip is not valid",
+            "{operation:?}"
+        );
+        let after = env
+            .api
+            .get_all_expected_switches(tonic::Request::new(()))
+            .await
+            .expect("read switches after rejected write")
+            .into_inner();
+        assert_eq!(after, before, "{operation:?} must not alter inventory");
+    }
+}
+
+#[crate::sqlx_test()]
 async fn test_add_expected_switch_validates_nvos_credentials_pair(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
 
@@ -511,11 +602,15 @@ async fn test_update_expected_switch(pool: sqlx::PgPool) {
 }
 
 #[crate::sqlx_test()]
-async fn test_sparse_update_expected_switch_preserves_omitted_fields(pool: sqlx::PgPool) {
+async fn test_sparse_update_expected_switch_preserves_unselected_fields(pool: sqlx::PgPool) {
     let env = create_test_env(pool.clone()).await;
 
     let mut txn = env.pool.begin().await.unwrap();
-    let switches = create_expected_switches(&mut txn).await;
+    let mut switches = create_expected_switches(&mut txn).await;
+    switches[1].bmc_ip_address = Some("192.0.2.10".parse().unwrap());
+    db::expected_switch::update(&mut txn, &switches[1])
+        .await
+        .expect("seed expected switch BMC address");
 
     txn.commit().await.unwrap();
 
@@ -525,6 +620,9 @@ async fn test_sparse_update_expected_switch_preserves_omitted_fields(pool: sqlx:
 
     let mut request = tonic::Request::new(rpc::forge::ExpectedSwitch {
         bmc_mac_address: bmc_mac_address.to_string(),
+        // The mask leaves this field unselected, so malformed input must
+        // be ignored.
+        bmc_ip_address: "invalid unselected address".to_string(),
         nvos_username: Some("nvos_upd_user".into()),
         nvos_password: Some("nvos_upd_pass".into()),
         ..Default::default()
@@ -551,6 +649,7 @@ async fn test_sparse_update_expected_switch_preserves_omitted_fields(pool: sqlx:
         .into_inner();
 
     assert_eq!(updated.switch_serial_number, original_serial_number);
+    assert_eq!(updated.bmc_ip_address, "192.0.2.10");
 
     assert_eq!(
         updated

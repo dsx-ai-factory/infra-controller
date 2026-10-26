@@ -61,15 +61,15 @@ type Site struct {
 	Created *time.Time `json:"created,omitempty"`
 	// Date/time when the Site was last updated
 	Updated *time.Time `json:"updated,omitempty"`
-	// Site location information
-	Location *SiteLocation `json:"location,omitempty"`
-	// Site contact information
-	Contact *SiteContact `json:"contact,omitempty"`
+	// Site location information. Null when unset
+	Location NullableSiteLocation `json:"location,omitempty"`
+	// Site contact information. Null when unset
+	Contact NullableSiteContact `json:"contact,omitempty"`
 	// Site capabilities used for feature availability and configuration
 	Capabilities *SiteCapabilities `json:"capabilities,omitempty"`
-	// Machine counts by status for the Site
-	MachineStats *SiteMachineStats `json:"machineStats,omitempty"`
-	// GPU counts grouped by GPU type for the Site. Populated when includeGpuStats is set
+	// Machine counts by status for the Site. Populated on Site list requests when includeMachineStats is true; null otherwise. Sites with no Machines or Allocations return zeroed statistics when requested
+	MachineStats NullableSiteMachineStats `json:"machineStats,omitempty"`
+	// GPU counts grouped by GPU type for the Site. Populated on Site list requests when includeGpuStats is true; null otherwise. Sites without GPUs return an empty array when requested
 	GpuStats []MachineGPUStats `json:"gpuStats,omitempty"`
 }
 
@@ -786,68 +786,90 @@ func (o *Site) SetUpdated(v time.Time) {
 	o.Updated = &v
 }
 
-// GetLocation returns the Location field value if set, zero value otherwise.
+// GetLocation returns the Location field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Site) GetLocation() SiteLocation {
-	if o == nil || IsNil(o.Location) {
+	if o == nil || IsNil(o.Location.Get()) {
 		var ret SiteLocation
 		return ret
 	}
-	return *o.Location
+	return *o.Location.Get()
 }
 
 // GetLocationOk returns a tuple with the Location field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Site) GetLocationOk() (*SiteLocation, bool) {
-	if o == nil || IsNil(o.Location) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Location, true
+	return o.Location.Get(), o.Location.IsSet()
 }
 
 // HasLocation returns a boolean if a field has been set.
 func (o *Site) HasLocation() bool {
-	if o != nil && !IsNil(o.Location) {
+	if o != nil && o.Location.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetLocation gets a reference to the given SiteLocation and assigns it to the Location field.
+// SetLocation gets a reference to the given NullableSiteLocation and assigns it to the Location field.
 func (o *Site) SetLocation(v SiteLocation) {
-	o.Location = &v
+	o.Location.Set(&v)
 }
 
-// GetContact returns the Contact field value if set, zero value otherwise.
+// SetLocationNil sets the value for Location to be an explicit nil
+func (o *Site) SetLocationNil() {
+	o.Location.Set(nil)
+}
+
+// UnsetLocation ensures that no value is present for Location, not even an explicit nil
+func (o *Site) UnsetLocation() {
+	o.Location.Unset()
+}
+
+// GetContact returns the Contact field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Site) GetContact() SiteContact {
-	if o == nil || IsNil(o.Contact) {
+	if o == nil || IsNil(o.Contact.Get()) {
 		var ret SiteContact
 		return ret
 	}
-	return *o.Contact
+	return *o.Contact.Get()
 }
 
 // GetContactOk returns a tuple with the Contact field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Site) GetContactOk() (*SiteContact, bool) {
-	if o == nil || IsNil(o.Contact) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Contact, true
+	return o.Contact.Get(), o.Contact.IsSet()
 }
 
 // HasContact returns a boolean if a field has been set.
 func (o *Site) HasContact() bool {
-	if o != nil && !IsNil(o.Contact) {
+	if o != nil && o.Contact.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetContact gets a reference to the given SiteContact and assigns it to the Contact field.
+// SetContact gets a reference to the given NullableSiteContact and assigns it to the Contact field.
 func (o *Site) SetContact(v SiteContact) {
-	o.Contact = &v
+	o.Contact.Set(&v)
+}
+
+// SetContactNil sets the value for Contact to be an explicit nil
+func (o *Site) SetContactNil() {
+	o.Contact.Set(nil)
+}
+
+// UnsetContact ensures that no value is present for Contact, not even an explicit nil
+func (o *Site) UnsetContact() {
+	o.Contact.Unset()
 }
 
 // GetCapabilities returns the Capabilities field value if set, zero value otherwise.
@@ -882,41 +904,52 @@ func (o *Site) SetCapabilities(v SiteCapabilities) {
 	o.Capabilities = &v
 }
 
-// GetMachineStats returns the MachineStats field value if set, zero value otherwise.
+// GetMachineStats returns the MachineStats field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Site) GetMachineStats() SiteMachineStats {
-	if o == nil || IsNil(o.MachineStats) {
+	if o == nil || IsNil(o.MachineStats.Get()) {
 		var ret SiteMachineStats
 		return ret
 	}
-	return *o.MachineStats
+	return *o.MachineStats.Get()
 }
 
 // GetMachineStatsOk returns a tuple with the MachineStats field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Site) GetMachineStatsOk() (*SiteMachineStats, bool) {
-	if o == nil || IsNil(o.MachineStats) {
+	if o == nil {
 		return nil, false
 	}
-	return o.MachineStats, true
+	return o.MachineStats.Get(), o.MachineStats.IsSet()
 }
 
 // HasMachineStats returns a boolean if a field has been set.
 func (o *Site) HasMachineStats() bool {
-	if o != nil && !IsNil(o.MachineStats) {
+	if o != nil && o.MachineStats.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetMachineStats gets a reference to the given SiteMachineStats and assigns it to the MachineStats field.
+// SetMachineStats gets a reference to the given NullableSiteMachineStats and assigns it to the MachineStats field.
 func (o *Site) SetMachineStats(v SiteMachineStats) {
-	o.MachineStats = &v
+	o.MachineStats.Set(&v)
 }
 
-// GetGpuStats returns the GpuStats field value if set, zero value otherwise.
+// SetMachineStatsNil sets the value for MachineStats to be an explicit nil
+func (o *Site) SetMachineStatsNil() {
+	o.MachineStats.Set(nil)
+}
+
+// UnsetMachineStats ensures that no value is present for MachineStats, not even an explicit nil
+func (o *Site) UnsetMachineStats() {
+	o.MachineStats.Unset()
+}
+
+// GetGpuStats returns the GpuStats field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Site) GetGpuStats() []MachineGPUStats {
-	if o == nil || IsNil(o.GpuStats) {
+	if o == nil {
 		var ret []MachineGPUStats
 		return ret
 	}
@@ -1013,19 +1046,19 @@ func (o Site) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.Updated) {
 		toSerialize["updated"] = o.Updated
 	}
-	if !IsNil(o.Location) {
-		toSerialize["location"] = o.Location
+	if o.Location.IsSet() {
+		toSerialize["location"] = o.Location.Get()
 	}
-	if !IsNil(o.Contact) {
-		toSerialize["contact"] = o.Contact
+	if o.Contact.IsSet() {
+		toSerialize["contact"] = o.Contact.Get()
 	}
 	if !IsNil(o.Capabilities) {
 		toSerialize["capabilities"] = o.Capabilities
 	}
-	if !IsNil(o.MachineStats) {
-		toSerialize["machineStats"] = o.MachineStats
+	if o.MachineStats.IsSet() {
+		toSerialize["machineStats"] = o.MachineStats.Get()
 	}
-	if !IsNil(o.GpuStats) {
+	if o.GpuStats != nil {
 		toSerialize["gpuStats"] = o.GpuStats
 	}
 	return toSerialize, nil
