@@ -26,8 +26,9 @@ use crate::{
     machine_validation, managed_host, managed_switch, mlx, network_devices, network_security_group,
     network_segment, nvl_domain, nvl_logical_partition, nvl_partition, nvlink_nmxc_endpoints,
     operating_system, os_image, ping, power_shelf, rack, redfish, resource_pool, rms, route_server,
-    scout_stream, secrets, set, site_explorer, site_prefix, sku, spx_maintenance, spx_partition,
-    ssh, switch, tenant, tenant_keyset, tpm_ca, trim_table, version, vpc, vpc_peering, vpc_prefix,
+    routing_profile, scout_stream, secrets, set, site_explorer, site_prefix, sku, spx_maintenance,
+    spx_partition, ssh, switch, tenant, tenant_keyset, tpm_ca, trim_table, version, vpc,
+    vpc_peering, vpc_prefix,
 };
 
 const MAX_INTERNAL_PAGE_SIZE: usize = 100;
@@ -384,6 +385,8 @@ pub(crate) enum CliCommand {
     Rms(rms::args::RmsAction),
     #[clap(about = "Route server handling", subcommand)]
     RouteServer(route_server::Cmd),
+    #[clap(about = "Inspect site-configured named routing profiles", subcommand)]
+    RoutingProfile(routing_profile::Cmd),
     #[clap(about = "Scout Stream Connection Handling", subcommand)]
     ScoutStream(scout_stream::ScoutStreamAction),
     #[clap(about = "Set carbide-api dynamic features", subcommand)]

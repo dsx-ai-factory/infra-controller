@@ -642,7 +642,8 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub machine_updater: MachineUpdater,
 
-    /// Maximum number of IDs accepted by `find_*_by_ids` APIs and
+    /// Maximum number of IDs accepted by `find_*_by_ids` APIs,
+    /// routing profile names accepted by `FindRoutingProfilesByNames`, and
     /// card selections accepted by `SetMachineNicFirmwareConfig`.
     /// Default is 100.
     #[serde(default = "default_max_find_by_ids")]

@@ -570,6 +570,8 @@ const (
 	Forge_GetOperatingSystemCachableIpxeTemplateArtifacts_FullMethodName    = "/forge.Forge/GetOperatingSystemCachableIpxeTemplateArtifacts"
 	Forge_UpdateOperatingSystemCachableIpxeTemplateArtifacts_FullMethodName = "/forge.Forge/UpdateOperatingSystemCachableIpxeTemplateArtifacts"
 	Forge_ReWrapSecrets_FullMethodName                                      = "/forge.Forge/ReWrapSecrets"
+	Forge_FindRoutingProfileNames_FullMethodName                            = "/forge.Forge/FindRoutingProfileNames"
+	Forge_FindRoutingProfilesByNames_FullMethodName                         = "/forge.Forge/FindRoutingProfilesByNames"
 )
 
 // ForgeClient is the client API for Forge service.
@@ -1662,6 +1664,17 @@ type ForgeClient interface {
 	UpdateOperatingSystemCachableIpxeTemplateArtifacts(ctx context.Context, in *UpdateOperatingSystemIpxeTemplateArtifactRequest, opts ...grpc.CallOption) (*IpxeTemplateArtifactList, error)
 	// Secrets management
 	ReWrapSecrets(ctx context.Context, in *ReWrapSecretsRequest, opts ...grpc.CallOption) (*ReWrapSecretsResponse, error)
+	// Lists names from this server's loaded fnn.routing_profiles configuration,
+	// sorted lexicographically. All supplied filters must match. No FNN
+	// configuration or no matches returns an empty list. This is site inventory,
+	// not a tenant's permitted profiles, and excludes the inline admin VPC profile.
+	FindRoutingProfileNames(ctx context.Context, in *RoutingProfileSearchFilter, opts ...grpc.CallOption) (*RoutingProfileNameList, error)
+	// Retrieves configured definitions by exact, case-sensitive name. Unknown
+	// names are omitted; duplicates appear once; results are sorted by name.
+	// Empty requests or more than max_find_by_ids names return InvalidArgument.
+	// Each call reads this server's loaded configuration, without a snapshot
+	// guarantee across list and fetch calls or between server replicas.
+	FindRoutingProfilesByNames(ctx context.Context, in *RoutingProfilesByNamesRequest, opts ...grpc.CallOption) (*NamedRoutingProfileList, error)
 }
 
 type forgeClient struct {
@@ -7161,6 +7174,26 @@ func (c *forgeClient) ReWrapSecrets(ctx context.Context, in *ReWrapSecretsReques
 	return out, nil
 }
 
+func (c *forgeClient) FindRoutingProfileNames(ctx context.Context, in *RoutingProfileSearchFilter, opts ...grpc.CallOption) (*RoutingProfileNameList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RoutingProfileNameList)
+	err := c.cc.Invoke(ctx, Forge_FindRoutingProfileNames_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) FindRoutingProfilesByNames(ctx context.Context, in *RoutingProfilesByNamesRequest, opts ...grpc.CallOption) (*NamedRoutingProfileList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(NamedRoutingProfileList)
+	err := c.cc.Invoke(ctx, Forge_FindRoutingProfilesByNames_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ForgeServer is the server API for Forge service.
 // All implementations should embed UnimplementedForgeServer
 // for forward compatibility.
@@ -8251,6 +8284,17 @@ type ForgeServer interface {
 	UpdateOperatingSystemCachableIpxeTemplateArtifacts(context.Context, *UpdateOperatingSystemIpxeTemplateArtifactRequest) (*IpxeTemplateArtifactList, error)
 	// Secrets management
 	ReWrapSecrets(context.Context, *ReWrapSecretsRequest) (*ReWrapSecretsResponse, error)
+	// Lists names from this server's loaded fnn.routing_profiles configuration,
+	// sorted lexicographically. All supplied filters must match. No FNN
+	// configuration or no matches returns an empty list. This is site inventory,
+	// not a tenant's permitted profiles, and excludes the inline admin VPC profile.
+	FindRoutingProfileNames(context.Context, *RoutingProfileSearchFilter) (*RoutingProfileNameList, error)
+	// Retrieves configured definitions by exact, case-sensitive name. Unknown
+	// names are omitted; duplicates appear once; results are sorted by name.
+	// Empty requests or more than max_find_by_ids names return InvalidArgument.
+	// Each call reads this server's loaded configuration, without a snapshot
+	// guarantee across list and fetch calls or between server replicas.
+	FindRoutingProfilesByNames(context.Context, *RoutingProfilesByNamesRequest) (*NamedRoutingProfileList, error)
 }
 
 // UnimplementedForgeServer should be embedded to have
@@ -9900,6 +9944,12 @@ func (UnimplementedForgeServer) UpdateOperatingSystemCachableIpxeTemplateArtifac
 }
 func (UnimplementedForgeServer) ReWrapSecrets(context.Context, *ReWrapSecretsRequest) (*ReWrapSecretsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReWrapSecrets not implemented")
+}
+func (UnimplementedForgeServer) FindRoutingProfileNames(context.Context, *RoutingProfileSearchFilter) (*RoutingProfileNameList, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindRoutingProfileNames not implemented")
+}
+func (UnimplementedForgeServer) FindRoutingProfilesByNames(context.Context, *RoutingProfilesByNamesRequest) (*NamedRoutingProfileList, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindRoutingProfilesByNames not implemented")
 }
 func (UnimplementedForgeServer) testEmbeddedByValue() {}
 
@@ -19749,6 +19799,42 @@ func _Forge_ReWrapSecrets_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_FindRoutingProfileNames_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RoutingProfileSearchFilter)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindRoutingProfileNames(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindRoutingProfileNames_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindRoutingProfileNames(ctx, req.(*RoutingProfileSearchFilter))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_FindRoutingProfilesByNames_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RoutingProfilesByNamesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindRoutingProfilesByNames(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindRoutingProfilesByNames_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindRoutingProfilesByNames(ctx, req.(*RoutingProfilesByNamesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Forge_ServiceDesc is the grpc.ServiceDesc for Forge service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -21935,6 +22021,14 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReWrapSecrets",
 			Handler:    _Forge_ReWrapSecrets_Handler,
+		},
+		{
+			MethodName: "FindRoutingProfileNames",
+			Handler:    _Forge_FindRoutingProfileNames_Handler,
+		},
+		{
+			MethodName: "FindRoutingProfilesByNames",
+			Handler:    _Forge_FindRoutingProfilesByNames_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
