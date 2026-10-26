@@ -51,6 +51,10 @@ mod readers;
 mod rest;
 #[expect(dead_code, reason = "the state readers are wired in later")]
 mod snapshot;
+#[expect(dead_code, reason = "the state readers are wired in later")]
+mod state;
+#[expect(dead_code, reason = "the state readers are wired in later")]
+mod state_metrics;
 
 use std::sync::Arc;
 

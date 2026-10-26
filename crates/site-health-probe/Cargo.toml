@@ -34,6 +34,7 @@ clap = { features = ["derive", "env"], workspace = true }
 duration-str = { workspace = true }
 eyre = { workspace = true }
 opentelemetry = { workspace = true }
+prometheus = { workspace = true }
 reqwest = { default-features = false, features = [
   "json",
   "rustls",
@@ -60,7 +61,6 @@ metrics-endpoint = { path = "../metrics-endpoint" }
 [dev-dependencies]
 axum = { workspace = true }
 carbide-test-support = { path = "../test-support" }
-prometheus = { workspace = true }
 tempfile = { workspace = true }
 tokio = { features = ["test-util"], workspace = true }
 
