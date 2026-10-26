@@ -685,7 +685,12 @@ subsequent upgrade. Switching early causes older Site Manager pods to receive
 
 The client certificate must chain to Certificate Manager's configured client CA.
 Its issuer is configurable independently from the server signing CA; when these
-differ, mount the correct client CA and set `authorization.clientCaFile`.
+differ, create a Secret in Certificate Manager's namespace containing the client
+CA bundle under `ca.crt` and set `authorization.clientCaSecretName` to its name.
+The chart mounts that bundle read-only at `/etc/pki/client-ca/ca.crt` and configures
+authorization to use it. A missing Secret or `ca.crt` key prevents the pod from
+starting. This setting is mutually exclusive with `authorization.clientCaFile`,
+which selects a bundle in an existing mount.
 The default ClusterIssuer uses automatic approval: a principal able to request
 certificates from it can request the allowed URI. Constrain certificate issuance
 with approval policy or use a dedicated client CA whose issuance is restricted.
