@@ -28,7 +28,7 @@ use carbide_site_health_probe_api::VersionSource;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use carbide_uuid::power_shelf::{PowerShelfId, PowerShelfIdSource, PowerShelfType};
-use carbide_uuid::rack::RackId;
+use carbide_uuid::rack::{RackGroupId, RackId};
 use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
 use rpc::forge::host_reprovisioning_list_response::HostReprovisioningListItem;
 use rpc::{forge, site_explorer};
@@ -186,6 +186,60 @@ pub(crate) fn instance(i: u32, on_host: u32, state: forge::TenantState) -> forge
             }),
             ..Default::default()
         }),
+        ..Default::default()
+    }
+}
+
+/// An expected machine record `i`, linked to host `linked_to` when given.
+pub(crate) fn expected_machine(i: u32, linked_to: Option<u32>) -> forge::LinkedExpectedMachine {
+    forge::LinkedExpectedMachine {
+        bmc_mac_address: format!("aa:00:00:00:00:{i:02x}"),
+        explored_endpoint_address: linked_to.map(|h| format!("10.0.1.{h}")),
+        machine_id: linked_to.map(host_id),
+        expected_machine_id: Some(rpc::common::Uuid {
+            value: format!("em-{i}"),
+        }),
+        ..Default::default()
+    }
+}
+
+/// An expected switch record `i`, linked to switch `linked_to` when given.
+pub(crate) fn expected_switch(i: u32, linked_to: Option<u32>) -> forge::LinkedExpectedSwitch {
+    forge::LinkedExpectedSwitch {
+        bmc_mac_address: format!("bb:00:00:00:00:{i:02x}"),
+        explored_endpoint_address: linked_to.map(|s| format!("10.0.2.{s}")),
+        switch_id: linked_to.map(switch_id),
+        expected_switch_id: Some(rpc::common::Uuid {
+            value: format!("es-{i}"),
+        }),
+        ..Default::default()
+    }
+}
+
+/// An expected power shelf record `i`, linked to shelf `linked_to` when
+/// given.
+pub(crate) fn expected_shelf(i: u32, linked_to: Option<u32>) -> forge::LinkedExpectedPowerShelf {
+    forge::LinkedExpectedPowerShelf {
+        bmc_mac_address: format!("cc:00:00:00:00:{i:02x}"),
+        explored_endpoint_address: linked_to.map(|s| format!("10.0.3.{s}")),
+        power_shelf_id: linked_to.map(shelf_id),
+        expected_power_shelf_id: Some(rpc::common::Uuid {
+            value: format!("ep-{i}"),
+        }),
+        ..Default::default()
+    }
+}
+
+pub(crate) fn expected_rack(i: u32) -> forge::ExpectedRack {
+    forge::ExpectedRack {
+        rack_id: Some(rack_id(i)),
+        ..Default::default()
+    }
+}
+
+pub(crate) fn expected_rack_group(name: &str) -> forge::ExpectedRackGroup {
+    forge::ExpectedRackGroup {
+        rack_group_id: Some(RackGroupId::new(name)),
         ..Default::default()
     }
 }

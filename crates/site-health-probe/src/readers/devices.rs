@@ -16,8 +16,9 @@
  */
 
 //! The device reader: one sweep reads the census and by-ID records of hosts,
-//! DPUs, switches, power shelves, racks and instances, and the open host
-//! firmware requests, and publishes one snapshot per family. A family is published only when every read it needs succeeded and
+//! DPUs, switches, power shelves, racks and instances, the expected records
+//! and the open host firmware requests, and publishes one snapshot per
+//! family. A family is published only when every read it needs succeeded and
 //! no unit is unresolved; otherwise it keeps its last snapshot.
 //!
 //! DPUs get no by-ID read: a DPU is attached when a host lists it, and takes
@@ -30,7 +31,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use carbide_site_health_probe_api::{
-    DpuFields, Family, FirmwareRequest, HostFields, InstanceFields, Source, Stage, Unit, UnitType,
+    DpuFields, ExpectedFields, Family, FirmwareRequest, HostFields, InstanceFields, MismatchKind,
+    RecordType, Source, Stage, Unit, UnitType,
 };
 use chrono::{DateTime, Utc};
 use rpc::forge;
@@ -47,14 +49,22 @@ use crate::nico::{NicoApi, NicoConnector};
 use crate::readers::{Attempt, Failure, incomplete};
 use crate::snapshot::{Reader, SnapshotSink, SweepMeta, UnitsData, unix_millis};
 
+/// Unlinked expected records get an explorer read for their reason only up
+/// to this many; above it the reason is a bare `no_device`.
+const EXPLORED_READ_LIMIT: usize = 500;
+
+/// Explored endpoints per explorer read.
+const EXPLORED_BATCH: usize = 25;
+
 /// The families this reader publishes.
-pub(crate) const DEVICE_FAMILIES: [Family; 7] = [
+pub(crate) const DEVICE_FAMILIES: [Family; 8] = [
     Family::Host,
     Family::Dpu,
     Family::Switch,
     Family::PowerShelf,
     Family::Rack,
     Family::Instance,
+    Family::Expected,
     Family::HostFirmwareRequests,
 ];
 
@@ -176,7 +186,16 @@ struct Reads {
     shelves: Result<CensusRead<forge::PowerShelf>, Failure>,
     racks: Result<CensusRead<forge::Rack>, Failure>,
     instances: Result<CensusRead<forge::Instance>, Failure>,
+    expected: Result<ExpectedReads, Failure>,
     firmware: Result<Vec<HostReprovisioningListItem>, Failure>,
+}
+
+struct ExpectedReads {
+    machines: Vec<forge::LinkedExpectedMachine>,
+    switches: Vec<forge::LinkedExpectedSwitch>,
+    shelves: Vec<forge::LinkedExpectedPowerShelf>,
+    racks: Vec<forge::ExpectedRack>,
+    rack_groups: Vec<forge::ExpectedRackGroup>,
 }
 
 impl Sweep<'_> {
@@ -336,6 +355,7 @@ impl Sweep<'_> {
                 |i: &forge::Instance| i.id.map(|id| id.to_string()).unwrap_or_default(),
             )
             .await;
+        let expected = self.read_expected().await;
         let firmware = self
             .call("list_hosts_waiting_for_reprovisioning", || {
                 nico.hosts_waiting_for_reprovisioning()
@@ -350,8 +370,68 @@ impl Sweep<'_> {
             shelves,
             racks,
             instances,
+            expected,
             firmware,
         }
+    }
+
+    async fn read_expected(&self) -> Result<ExpectedReads, Failure> {
+        let nico = &self.nico;
+        let fail = |call: &'static str| move |e: CallError| Failure::call(call, &e);
+        Ok(ExpectedReads {
+            machines: self
+                .call("get_all_expected_machines_linked", || {
+                    nico.expected_machines_linked()
+                })
+                .await
+                .map_err(fail("get_all_expected_machines_linked"))?,
+            switches: self
+                .call("get_all_expected_switches_linked", || {
+                    nico.expected_switches_linked()
+                })
+                .await
+                .map_err(fail("get_all_expected_switches_linked"))?,
+            shelves: self
+                .call("get_all_expected_power_shelves_linked", || {
+                    nico.expected_power_shelves_linked()
+                })
+                .await
+                .map_err(fail("get_all_expected_power_shelves_linked"))?,
+            racks: self
+                .call("get_all_expected_racks", || nico.expected_racks())
+                .await
+                .map_err(fail("get_all_expected_racks"))?,
+            rack_groups: self
+                .call("get_all_expected_rack_groups", || {
+                    nico.expected_rack_groups()
+                })
+                .await
+                .map_err(fail("get_all_expected_rack_groups"))?,
+        })
+    }
+
+    /// `last_exploration_error` per explored address, read in batches.
+    async fn explored_errors(
+        &self,
+        addresses: Vec<String>,
+    ) -> Result<BTreeMap<String, Option<String>>, Failure> {
+        let mut errors = BTreeMap::new();
+        for chunk in addresses.chunks(EXPLORED_BATCH) {
+            let endpoints = self
+                .call("find_explored_endpoints_by_ids", || {
+                    self.nico.explored_endpoints(chunk)
+                })
+                .await
+                .map_err(|e| Failure::call("find_explored_endpoints_by_ids", &e))?;
+            for endpoint in endpoints {
+                let error = endpoint
+                    .report
+                    .and_then(|report| report.last_exploration_error)
+                    .filter(|e| !e.is_empty());
+                errors.insert(endpoint.address, error);
+            }
+        }
+        Ok(errors)
     }
 
     async fn read(&self) -> Vec<(Family, Built)> {
@@ -386,6 +466,7 @@ impl Sweep<'_> {
                 Ok(UnitsData::new(joined.units, 0))
             }
         });
+        let expected_family = self.expected_family(&reads).await;
 
         vec![
             (Family::Host, host_family),
@@ -422,11 +503,132 @@ impl Sweep<'_> {
                     .map(|r| instance_units(&r.rows))
                     .map_err(Clone::clone),
             ),
+            (Family::Expected, expected_family),
             (Family::HostFirmwareRequests, firmware_family),
         ]
     }
+
+    async fn expected_family(&self, reads: &Reads) -> Built {
+        let expected = reads.expected.as_ref().map_err(Clone::clone)?;
+        let hosts = census_ids(&reads.hosts)?;
+        let switches = census_ids(&reads.switches)?;
+        let shelves = census_ids(&reads.shelves)?;
+        let racks = census_ids(&reads.racks)?;
+
+        let mut records = Vec::new();
+        records.extend(link_records(
+            RecordType::Host,
+            expected.machines.iter().map(|row| LinkRow {
+                expected_id: row.expected_machine_id.as_ref().map(|id| id.value.clone()),
+                bmc_mac: &row.bmc_mac_address,
+                explored: row.explored_endpoint_address.as_deref(),
+                device: row.machine_id.map(|id| id.to_string()),
+            }),
+            &hosts,
+        ));
+        records.extend(link_records(
+            RecordType::Switch,
+            expected.switches.iter().map(|row| LinkRow {
+                expected_id: row.expected_switch_id.as_ref().map(|id| id.value.clone()),
+                bmc_mac: &row.bmc_mac_address,
+                explored: row.explored_endpoint_address.as_deref(),
+                device: row.switch_id.map(|id| id.to_string()),
+            }),
+            &switches,
+        ));
+        records.extend(link_records(
+            RecordType::PowerShelf,
+            expected.shelves.iter().map(|row| LinkRow {
+                expected_id: row
+                    .expected_power_shelf_id
+                    .as_ref()
+                    .map(|id| id.value.clone()),
+                bmc_mac: &row.bmc_mac_address,
+                explored: row.explored_endpoint_address.as_deref(),
+                device: row.power_shelf_id.map(|id| id.to_string()),
+            }),
+            &shelves,
+        ));
+
+        // Unlinked records name why: the explorer's last error for their
+        // address, read only while few records are unlinked.
+        let unlinked: Vec<&Record> = records.iter().filter(|r| r.devices.is_empty()).collect();
+        let explored = if unlinked.len() <= EXPLORED_READ_LIMIT {
+            let addresses: Vec<String> = unlinked
+                .iter()
+                .filter_map(|r| r.explored.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            Some(self.explored_errors(addresses).await?)
+        } else {
+            None
+        };
+
+        let mut units = Vec::new();
+        for record in &records {
+            units.extend(record.units(explored.as_ref()));
+        }
+        for rack in &expected.racks {
+            let Some(id) = rack.rack_id.as_ref().map(ToString::to_string) else {
+                continue;
+            };
+            let linked = racks.contains(&id);
+            units.push(plain_record(
+                RecordType::Rack,
+                id.clone(),
+                linked,
+                linked.then_some(id),
+            ));
+        }
+        for group in &expected.rack_groups {
+            let Some(id) = group.rack_group_id.as_ref().map(ToString::to_string) else {
+                continue;
+            };
+            // Rack groups have no device of their own to link to.
+            units.push(plain_record(RecordType::RackGroup, id, false, None));
+        }
+        for (record_type, census, linked) in [
+            (
+                RecordType::Host,
+                &hosts,
+                linked_devices(&records, RecordType::Host),
+            ),
+            (
+                RecordType::Switch,
+                &switches,
+                linked_devices(&records, RecordType::Switch),
+            ),
+            (
+                RecordType::PowerShelf,
+                &shelves,
+                linked_devices(&records, RecordType::PowerShelf),
+            ),
+        ] {
+            for device in census.difference(&linked) {
+                units.push(mismatch_unit(
+                    record_type,
+                    MismatchKind::NoExpectedRecord,
+                    device.clone(),
+                    Some(device.clone()),
+                    None,
+                    None,
+                ));
+            }
+        }
+        Ok(UnitsData::new(units, 0))
+    }
 }
 
+/// The read IDs of a unit type the expected family links against.
+fn census_ids<R>(read: &Result<CensusRead<R>, Failure>) -> Result<BTreeSet<String>, Failure> {
+    match read {
+        Ok(read) => Ok(read.rows.keys().cloned().collect()),
+        Err(failure) => Err(failure.needed_by(Family::Expected)),
+    }
+}
+
+/// Moves soft-deleted rows to `gone`.
 fn drop_deleted<R>(deleted: fn(&R) -> bool) -> impl FnOnce(CensusRead<R>) -> CensusRead<R> {
     move |mut read| {
         let ids: Vec<String> = read
@@ -771,6 +973,194 @@ fn instance_units(rows: &BTreeMap<String, forge::Instance>) -> UnitsData {
     UnitsData::new(units, unknown)
 }
 
+/// One row of a linked expected-record read. Rows repeat when a record joins
+/// several interfaces.
+struct LinkRow<'a> {
+    expected_id: Option<String>,
+    bmc_mac: &'a str,
+    explored: Option<&'a str>,
+    device: Option<String>,
+}
+
+/// One expected host, switch or shelf record and the census devices it
+/// links to.
+struct Record {
+    record_type: RecordType,
+    id: String,
+    bmc_mac: Option<String>,
+    explored: Option<String>,
+    devices: BTreeSet<String>,
+}
+
+impl Record {
+    /// Linked to exactly one device. Two or more is an ambiguous link, which
+    /// does not count as linked.
+    fn linked(&self) -> bool {
+        self.devices.len() == 1
+    }
+
+    /// Linked to two or more devices.
+    fn ambiguous(&self) -> bool {
+        self.devices.len() > 1
+    }
+
+    /// The record's unit, and for an ambiguous link also its mismatch unit:
+    /// the record stays an expected record, unlinked.
+    fn units(&self, explored: Option<&BTreeMap<String, Option<String>>>) -> Vec<Unit> {
+        let mut units = vec![self.record_unit(explored)];
+        if self.ambiguous() {
+            units.push(mismatch_unit(
+                self.record_type,
+                MismatchKind::AmbiguousLink,
+                self.id.clone(),
+                None,
+                self.bmc_mac.clone(),
+                self.explored.clone(),
+            ));
+        }
+        units
+    }
+
+    fn record_unit(&self, explored: Option<&BTreeMap<String, Option<String>>>) -> Unit {
+        let linked = self.linked();
+        let reason = (!linked).then(|| match (&self.explored, explored) {
+            _ if self.ambiguous() => {
+                format!("ambiguous_link: linked to {} devices", self.devices.len())
+            }
+            (_, None) => "no_device".to_string(),
+            (None, Some(_)) => "no_device: not_explored".to_string(),
+            (Some(address), Some(errors)) => match errors.get(address) {
+                Some(Some(error)) => format!("no_device: {error}"),
+                Some(None) => "no_device".to_string(),
+                None => "no_device: not_explored".to_string(),
+            },
+        });
+        Unit {
+            id: self.id.clone(),
+            unit_type: UnitType::ExpectedRecord,
+            source: Source::NicoApi,
+            stage: Stage::Expected,
+            done: linked,
+            state: if linked { "linked" } else { "unlinked" }.to_string(),
+            reason,
+            bmc_ip: self.explored.clone(),
+            host: None,
+            dpu: None,
+            instance: None,
+            expected: Some(ExpectedFields {
+                record_type: self.record_type,
+                linked,
+                device_id: linked
+                    .then(|| self.devices.iter().next().cloned())
+                    .flatten(),
+                bmc_mac: self.bmc_mac.clone(),
+                explored_address: self.explored.clone(),
+            }),
+        }
+    }
+}
+
+/// Groups linked rows by expected record. Only devices in `census` count as
+/// links.
+fn link_records<'a>(
+    record_type: RecordType,
+    rows: impl Iterator<Item = LinkRow<'a>>,
+    census: &BTreeSet<String>,
+) -> Vec<Record> {
+    let mut records: BTreeMap<String, Record> = BTreeMap::new();
+    for row in rows {
+        let id = row
+            .expected_id
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| format!("bmc-mac:{}", row.bmc_mac));
+        let record = records.entry(id.clone()).or_insert_with(|| Record {
+            record_type,
+            id,
+            bmc_mac: Some(row.bmc_mac.to_string()).filter(|m| !m.is_empty()),
+            explored: None,
+            devices: BTreeSet::new(),
+        });
+        if record.explored.is_none() {
+            record.explored = row.explored.filter(|a| !a.is_empty()).map(str::to_string);
+        }
+        if let Some(device) = row.device.filter(|d| census.contains(d)) {
+            record.devices.insert(device);
+        }
+    }
+    records.into_values().collect()
+}
+
+/// Census devices some record of `record_type` names, linked or ambiguous.
+fn linked_devices(records: &[Record], record_type: RecordType) -> BTreeSet<String> {
+    records
+        .iter()
+        .filter(|r| r.record_type == record_type)
+        .flat_map(|r| r.devices.iter().cloned())
+        .collect()
+}
+
+/// An expected rack or rack group record.
+fn plain_record(record_type: RecordType, id: String, linked: bool, device: Option<String>) -> Unit {
+    Unit {
+        id,
+        unit_type: UnitType::ExpectedRecord,
+        source: Source::NicoApi,
+        stage: Stage::Expected,
+        done: linked,
+        state: if linked { "linked" } else { "unlinked" }.to_string(),
+        reason: (!linked).then(|| "no_device".to_string()),
+        bmc_ip: None,
+        host: None,
+        dpu: None,
+        instance: None,
+        expected: Some(ExpectedFields {
+            record_type,
+            linked,
+            device_id: device,
+            bmc_mac: None,
+            explored_address: None,
+        }),
+    }
+}
+
+fn mismatch_unit(
+    record_type: RecordType,
+    kind: MismatchKind,
+    id: String,
+    device: Option<String>,
+    bmc_mac: Option<String>,
+    explored: Option<String>,
+) -> Unit {
+    let state = match kind {
+        MismatchKind::AmbiguousLink => "ambiguous_link",
+        MismatchKind::NoExpectedRecord => "no_expected_record",
+    };
+    Unit {
+        id,
+        unit_type: UnitType::IdentityMismatch,
+        source: Source::NicoApi,
+        stage: if device.is_some() {
+            Stage::Registered
+        } else {
+            Stage::Expected
+        },
+        done: false,
+        state: state.to_string(),
+        reason: Some(state.to_string()),
+        bmc_ip: explored.clone(),
+        host: None,
+        dpu: None,
+        instance: None,
+        expected: Some(ExpectedFields {
+            record_type,
+            linked: false,
+            device_id: device,
+            bmc_mac,
+            explored_address: explored,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -827,20 +1217,38 @@ mod tests {
         }
     }
 
-    /// One rack: hosts 1 to 4 with two DPUs each, two switches, one shelf
-    /// and one instance.
+    /// One rack: hosts 1 to 4 with two DPUs each, two switches, one shelf,
+    /// all with expected records, and one instance.
     fn small_site() -> FakeSite {
         let mut site = FakeSite::default();
         for i in 1..=4 {
             site.add_host(fake::host(i, "Ready", &[2 * i - 1, 2 * i]));
+            site.expected_machines
+                .push(fake::expected_machine(i, Some(i)));
         }
         for i in 1..=2 {
             site.add_switch(fake::switch(i, "ready"));
+            site.expected_switches
+                .push(fake::expected_switch(i, Some(i)));
         }
         site.add_shelf(fake::shelf(1, "ready"));
+        site.expected_shelves.push(fake::expected_shelf(1, Some(1)));
         site.add_rack(fake::rack(1, "ready"));
+        site.expected_racks.push(fake::expected_rack(1));
         site.add_instance(fake::instance(1, 1, forge::TenantState::Ready));
         site
+    }
+
+    fn count_linked(units: &[Unit], record_type: RecordType) -> usize {
+        units
+            .iter()
+            .filter(|u| {
+                u.unit_type == UnitType::ExpectedRecord
+                    && u.expected
+                        .as_ref()
+                        .is_some_and(|e| e.record_type == record_type && e.linked)
+            })
+            .count()
     }
 
     /// The reader on the framework's scheduler, publishing into a fake
@@ -1024,6 +1432,17 @@ mod tests {
         assert_eq!(h.units(Family::Rack).len(), 1);
         let instance = &h.units(Family::Instance)[0];
         assert_eq!((instance.state.as_str(), instance.done), ("ready", true));
+        let expected = h.units(Family::Expected);
+        assert_eq!(count_linked(&expected, RecordType::Host), 4);
+        assert_eq!(count_linked(&expected, RecordType::Switch), 2);
+        assert_eq!(count_linked(&expected, RecordType::PowerShelf), 1);
+        assert_eq!(count_linked(&expected, RecordType::Rack), 1);
+        assert!(
+            expected
+                .iter()
+                .all(|u| u.unit_type == UnitType::ExpectedRecord),
+            "no identity mismatch on a clean site"
+        );
         assert!(h.units(Family::HostFirmwareRequests).is_empty());
         assert_eq!(h.nico.max_in_flight(), 1, "one call in flight");
         let (meta, _) = h.sink.latest::<UnitsData>(Family::Host).expect("host");
@@ -1099,8 +1518,9 @@ mod tests {
         assert_eq!(kept, first, "the host family keeps its last snapshot");
         assert_eq!(hosts_after, hosts_before);
         assert_eq!(h.sink.failure_kinds(Family::Host), vec![FailureKind::Rpc]);
-        // DPUs and firmware requests need the host read.
+        // DPUs, expected records and firmware requests need the host read.
         assert_eq!(h.sink.count(Family::Dpu), 1);
+        assert_eq!(h.sink.count(Family::Expected), 1);
         assert_eq!(h.sink.count(Family::Switch), 2);
         assert_eq!(h.sink.count(Family::Instance), 2);
     }
@@ -1189,6 +1609,102 @@ mod tests {
         assert_eq!(dpu.dpu.unwrap().host_id, None);
         assert_eq!(dpu.reason.as_deref(), Some(UNATTACHED));
         assert_eq!(h.units(Family::Dpu).len(), 9, "still counted as registered");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ambiguous_link_not_counted() {
+        let mut site = small_site();
+        // Expected host 5 links to hosts 3 and 4 (a BMC MAC on two
+        // interfaces), repeating rows.
+        let mut row = fake::expected_machine(5, Some(3));
+        site.expected_machines.push(row.clone());
+        site.expected_machines.push(row.clone());
+        row.machine_id = Some(fake::host_id(4));
+        site.expected_machines.push(row);
+        // Host 6 has no expected record.
+        site.add_host(fake::host(6, "Ready", &[]));
+        let h = harness(site);
+        h.sweep().await.expect("complete sweep");
+        let expected = h.units(Family::Expected);
+        assert_eq!(
+            count_linked(&expected, RecordType::Host),
+            4,
+            "em-5 is not linked"
+        );
+        let host_records: Vec<&Unit> = expected
+            .iter()
+            .filter(|u| {
+                u.unit_type == UnitType::ExpectedRecord
+                    && u.expected.as_ref().unwrap().record_type == RecordType::Host
+            })
+            .collect();
+        assert_eq!(host_records.len(), 5, "em-5 stays an expected record");
+        let record = host_records.iter().find(|u| u.id == "em-5").unwrap();
+        assert!(!record.done && !record.expected.as_ref().unwrap().linked);
+        assert_eq!(record.expected.as_ref().unwrap().device_id, None);
+        assert_eq!(
+            record.reason.as_deref(),
+            Some("ambiguous_link: linked to 2 devices")
+        );
+        let mismatch: Vec<&Unit> = expected
+            .iter()
+            .filter(|u| u.unit_type == UnitType::IdentityMismatch && u.id == "em-5")
+            .collect();
+        assert_eq!(mismatch.len(), 1, "plus one mismatch diagnostic");
+        assert_eq!(mismatch[0].state, "ambiguous_link");
+        let orphan = h.unit(Family::Expected, &fake::host_id(6).to_string());
+        assert_eq!(orphan.unit_type, UnitType::IdentityMismatch);
+        assert_eq!(orphan.state, "no_expected_record");
+        assert_eq!(orphan.expected.unwrap().record_type, RecordType::Host);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rack_linked_by_census() {
+        let mut site = small_site();
+        site.expected_racks.push(fake::expected_rack(2));
+        site.expected_rack_groups
+            .push(fake::expected_rack_group("group-a"));
+        // Expected switch 3 has no switch and an explorer error; expected
+        // shelf 2 has never been explored.
+        site.expected_switches.push(forge::LinkedExpectedSwitch {
+            explored_endpoint_address: Some("10.9.9.9".to_string()),
+            ..fake::expected_switch(3, None)
+        });
+        site.explored.insert(
+            "10.9.9.9".to_string(),
+            rpc::site_explorer::ExploredEndpoint {
+                address: "10.9.9.9".to_string(),
+                report: Some(rpc::site_explorer::EndpointExplorationReport {
+                    last_exploration_error: Some("Unauthorized".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        site.expected_shelves.push(fake::expected_shelf(2, None));
+        let h = harness(site);
+        h.sweep().await.expect("complete sweep");
+        let rack = |id: &str| h.unit(Family::Expected, id);
+        let linked = rack(fake::rack_id(1).as_str());
+        assert!(linked.done && linked.expected.unwrap().linked);
+        let missing = rack(fake::rack_id(2).as_str());
+        assert!(!missing.done);
+        assert_eq!(missing.expected.unwrap().record_type, RecordType::Rack);
+        let group = rack("group-a");
+        assert_eq!(group.expected.unwrap().record_type, RecordType::RackGroup);
+        assert!(!group.done, "rack groups never link");
+        assert_eq!(
+            h.unit(Family::Expected, "es-3").reason.as_deref(),
+            Some("no_device: Unauthorized")
+        );
+        assert_eq!(
+            h.unit(Family::Expected, "es-3").bmc_ip.as_deref(),
+            Some("10.9.9.9")
+        );
+        assert_eq!(
+            h.unit(Family::Expected, "ep-2").reason.as_deref(),
+            Some("no_device: not_explored")
+        );
     }
 
     #[tokio::test(start_paused = true)]
