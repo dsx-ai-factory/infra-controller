@@ -161,6 +161,7 @@ struct RedfishSimState {
     network_adapter_port_mac_addresses: Vec<MacAddress>,
     /// Chassis linked from the simulated ComputerSystem.
     system_chassis_ids: Vec<String>,
+    boot_progress: Option<Option<libredfish::model::BootProgress>>,
 }
 
 /// Build the `HTTPErrorCode` a real BMC would return for a rejected request, so
@@ -640,6 +641,12 @@ impl RedfishSim {
 
     pub fn set_system_chassis_ids(&self, chassis_ids: Vec<String>) {
         self.state.lock().unwrap().system_chassis_ids = chassis_ids;
+    }
+
+    /// Sets the BootProgress the
+    /// simulated system reports.
+    pub fn set_boot_progress(&self, boot_progress: Option<libredfish::model::BootProgress>) {
+        self.state.lock().unwrap().boot_progress = Some(boot_progress);
     }
 
     /// Seed a credential into the sim's credential store -- the same store
@@ -1484,6 +1491,19 @@ impl Redfish for RedfishSimClient {
                     odata_id: format!("/redfish/v1/Chassis/{id}"),
                 })
                 .collect::<Vec<_>>();
+            let boot_progress = self
+                .state
+                .lock()
+                .unwrap()
+                .boot_progress
+                .clone()
+                .unwrap_or_else(|| {
+                    Some(libredfish::model::BootProgress {
+                        last_state: Some(libredfish::model::BootProgressTypes::OSRunning),
+                        last_state_time: Some(Utc::now().to_string()),
+                        oem_last_state: Some("OSRunning".to_string()),
+                    })
+                });
             Ok(libredfish::model::ComputerSystem {
                 odata: libredfish::model::OData {
                     odata_id: format!("/redfish/v1/Systems/{id}"),
@@ -1496,11 +1516,7 @@ impl Redfish for RedfishSimClient {
                         managed_by: None,
                     },
                 ),
-                boot_progress: Some(libredfish::model::BootProgress {
-                    last_state: Some(libredfish::model::BootProgressTypes::OSRunning),
-                    last_state_time: Some(Utc::now().to_string()),
-                    oem_last_state: Some("OSRunning".to_string()),
-                }),
+                boot_progress,
                 ..Default::default()
             })
         })

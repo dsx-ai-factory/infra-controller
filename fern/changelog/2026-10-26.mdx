@@ -1,0 +1,14 @@
+---
+tags: ["unreleased", "machine-controller", "bios"]
+---
+
+## BIOS setup waits for the host to boot — unreleased
+
+`PollingBiosSetup` now completes only once the host's Redfish `BootProgress` shows the OS booting after the BIOS reboot. Previously it could complete while the BMC was still applying the settings with extra power cycles, and the DPU-wait state then restarted the DPU in the middle of its boot. BMCs that report no standard `BootProgress` keep the previous behavior.
+
+### New and changed configuration
+
+| Setting | Change |
+| --- | --- |
+| `machine_state_controller.bios_apply_settle_timeout` | New. Longest wait for the host to boot after the BIOS reboot; defaults to `20m`. After it, the step completes and logs a warning. |
+| `machine_state_controller.dpu_first_restart_delay` | New. Delay before the first restart of a DPU that has not reported. Unset keeps 5 minutes. |
