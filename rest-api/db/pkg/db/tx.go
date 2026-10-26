@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/avast/retry-go/v4"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/uptrace/bun"
 )
@@ -47,31 +48,25 @@ func BeginTx(ctx context.Context, dbSession *Session, txOptions *sql.TxOptions) 
 		return nil, err
 	}
 
+	wrappedTx := &Tx{tx: tx}
+
 	// Set a max lock timeout to 300s for the transaction
 	// so that no blocking attempt to acquire a lock
 	// will block indefinitely.
 	_, err = tx.Exec(fmt.Sprintf("SET LOCAL lock_timeout = '%ds'", DefaultTxLockTimeoutSeconds))
 	if err != nil {
-		rollbackErr := tx.Rollback()
-		if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-			log.Error().Err(rollbackErr).Msg("failed to rollback transaction")
-		}
+		wrappedTx.RollbackWithLog(log.Logger)
 		return nil, err
 	}
 
-	return &Tx{
-		tx: tx,
-	}, nil
+	return wrappedTx, nil
 }
 
 // RollbackTx is called deferred in functions that create a transaction
 // if transaction was committed, this will do nothing
 func RollbackTx(ctx context.Context, tx *Tx, committed *bool) {
 	if committed != nil && !*committed {
-		err := tx.Rollback()
-		if err != nil && !errors.Is(err, sql.ErrTxDone) {
-			log.Error().Err(err).Msg("failed to rollback transaction")
-		}
+		tx.RollbackWithLog(log.Logger)
 	}
 }
 
@@ -192,6 +187,16 @@ func (tx *Tx) Commit() error {
 // Rollback wraps bun's Rollback
 func (tx *Tx) Rollback() error {
 	return tx.tx.Rollback()
+}
+
+// RollbackWithLog rolls back the transaction and logs failures through logger.
+// Already-completed transactions are ignored. Use Rollback when the caller
+// needs to inspect or propagate the rollback error.
+func (tx *Tx) RollbackWithLog(logger zerolog.Logger) {
+	err := tx.Rollback()
+	if err != nil && !errors.Is(err, sql.ErrTxDone) {
+		logger.Error().Err(err).Msg("failed to rollback transaction")
+	}
 }
 
 // AcquireAdvisoryLock will "try" to take the specified advisory lock
