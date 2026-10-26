@@ -197,6 +197,16 @@ pub struct SiteExplorerConfig {
     /// CompareResult for side-by-side validation).
     #[serde(default = "SiteExplorerConfig::default_explore_mode")]
     pub explore_mode: SiteExplorerExploreMode,
+    /// Whether nv-redfish exploration reads drive firmware versions from each
+    /// host's Redfish Storage subsystems and reports each enabled drive with
+    /// a usable model and version as a
+    /// `Drive_<Model>_<DriveId>` firmware inventory entry, which host firmware
+    /// configuration can select. Adds one request per Storage subsystem and
+    /// per drive to every exploration. Takes effect only when `explore_mode`
+    /// is `nv-redfish`: `libredfish` ignores it, and `compare-result` reads
+    /// the drives but returns the libredfish report, which omits them.
+    #[serde(default)]
+    pub explore_drive_firmware: bool,
 }
 
 impl From<&SiteExplorerConfig> for crate::inventory_creator::Config {
@@ -239,6 +249,7 @@ impl Default for SiteExplorerConfig {
             dpu_policy: None,
             deprecated_force_dpu_nic_mode: None,
             explore_mode: Self::default_explore_mode(),
+            explore_drive_firmware: false,
         }
     }
 }
@@ -270,6 +281,7 @@ impl PartialEq for SiteExplorerConfig {
             dpu_policy,
             deprecated_force_dpu_nic_mode,
             explore_mode,
+            explore_drive_firmware,
         } = self;
 
         enabled.load(AtomicOrdering::Relaxed) == other.enabled.load(AtomicOrdering::Relaxed)
@@ -303,6 +315,7 @@ impl PartialEq for SiteExplorerConfig {
             && *dpu_policy == other.dpu_policy
             && *deprecated_force_dpu_nic_mode == other.deprecated_force_dpu_nic_mode
             && *explore_mode == other.explore_mode
+            && *explore_drive_firmware == other.explore_drive_firmware
     }
 }
 

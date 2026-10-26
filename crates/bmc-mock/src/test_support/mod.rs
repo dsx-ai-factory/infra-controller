@@ -522,6 +522,56 @@ pub async fn dell_poweredge_r750_bmc() -> TestBmcHandle {
     .await
 }
 
+const TEST_DELL_STORAGE: &str = "/redfish/v1/Systems/System.Embedded.1/Storage";
+
+/// Builds a Dell PowerEdge R750 whose Storage collection lists `storages`.
+/// Every Storage and drive resource is served at its own `@odata.id`, so a
+/// Storage can link a drive that is not served to model a partly failing walk.
+pub async fn dell_poweredge_r750_bmc_with_storage(
+    storages: Vec<serde_json::Value>,
+    drives: Vec<serde_json::Value>,
+) -> TestBmcHandle {
+    let (router, state) = create_test_bmc(
+        &host_info(HardwareType::DellPowerEdgeR750),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    );
+    state.injection.upsert(Rule {
+        id: RuleId::from("storage-collection"),
+        selector: Selector::Path {
+            method: Some("GET".to_string()),
+            glob: TEST_DELL_STORAGE.to_string(),
+        },
+        action: Action::Replace(serde_json::json!({
+            "@odata.id": TEST_DELL_STORAGE,
+            "@odata.type": "#StorageCollection.StorageCollection",
+            "Name": "Storage Collection",
+            "Members": storages
+                .iter()
+                .map(|storage| serde_json::json!({ "@odata.id": storage["@odata.id"] }))
+                .collect::<Vec<_>>()
+        })),
+        remaining: None,
+    });
+    let router = storages
+        .into_iter()
+        .chain(drives)
+        .fold(router, |router, resource| {
+            let path = resource["@odata.id"].as_str().unwrap().to_string();
+            let resource = Arc::new(resource);
+            router.route(
+                &path,
+                get(move || {
+                    let resource = Arc::clone(&resource);
+                    async move { Json((*resource).clone()) }
+                }),
+            )
+        });
+    test_bmc((router, state)).await
+}
+
 pub async fn dell_poweredge_r750_bluefield3_bmc(settings: DpuSettings) -> TestBmcHandle {
     let machine_info = {
         let mut mac_pool = TEST_MAC_POOL.lock().unwrap();

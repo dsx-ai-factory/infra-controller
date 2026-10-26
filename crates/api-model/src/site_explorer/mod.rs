@@ -2038,6 +2038,25 @@ pub struct Inventory {
     pub description: Option<String>,
     pub version: Option<String>,
     pub release_date: Option<String>,
+    /// The drive this entry reports, set only on entries that exploration
+    /// created from a Redfish Storage drive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive: Option<DriveIdentity>,
+}
+
+/// The drive behind a firmware inventory entry created from Redfish Storage.
+/// Host firmware configuration selects drive components by `model`.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "PascalCase")]
+pub struct DriveIdentity {
+    /// The drive's Redfish `Model`, trimmed. Its form depends on the BMC: some
+    /// report the part number alone (`KCD8DPUG15T3` on Lenovo XCC), some add
+    /// the vendor (`SAMSUNG MZTL63T8HFLT-00AW7` on GB200), and Dell reports
+    /// its own name (`Dell Ent NVMe CM6 RI 1.92TB`).
+    pub model: String,
+    /// The drive's Redfish `MediaType` (`SSD`, `HDD` or `SMR`), for reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
 }
 
 /// The result of one Redfish machine-setup check.
@@ -2915,6 +2934,28 @@ mod tests {
     use crate::firmware::FirmwareComponent;
     use crate::machine::machine_id::from_hardware_info;
 
+    /// Stored reports written before inventory entries carried drive data
+    /// still load, and the drive data round-trips.
+    #[test]
+    fn inventory_drive_identity_is_optional_in_stored_reports() {
+        let legacy: Inventory =
+            serde_json::from_str(r#"{"Id": "BMC-Primary", "Version": "1.0"}"#).unwrap();
+        assert_eq!(legacy.drive, None);
+        assert!(!serde_json::to_string(&legacy).unwrap().contains("Drive"));
+
+        let drive = Inventory {
+            id: "Drive_KCD8DPUG15T3_drive_bay_0".into(),
+            version: Some("1XET7106".into()),
+            drive: Some(DriveIdentity {
+                model: "KCD8DPUG15T3".into(),
+                media_type: Some("SSD".into()),
+            }),
+            ..Default::default()
+        };
+        let stored = serde_json::to_string(&drive).unwrap();
+        assert_eq!(serde_json::from_str::<Inventory>(&stored).unwrap(), drive);
+    }
+
     fn processor_position_report() -> EndpointExplorationReport {
         EndpointExplorationReport {
             systems: vec![ComputerSystem {
@@ -3359,6 +3400,7 @@ mod tests {
                 description: None,
                 version: version.map(|v| v.to_string()),
                 release_date: None,
+                drive: None,
             })
             .collect();
 
@@ -4440,6 +4482,7 @@ mod tests {
             description: Some("Host image".to_string()),
             version: uefi_version.clone(),
             release_date: None,
+            drive: None,
         };
         let report = EndpointExplorationReport {
             endpoint_type: EndpointType::Bmc,

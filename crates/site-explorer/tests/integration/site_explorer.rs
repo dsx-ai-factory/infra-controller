@@ -2723,6 +2723,7 @@ async fn test_site_explorer_audit_exploration_results(
         deprecated_force_dpu_nic_mode: None,
         // Tests use MockEndpointExplorer. So this doesn't affect anything.
         explore_mode: SiteExplorerExploreMode::NvRedfish,
+        explore_drive_firmware: false,
     };
     let explorer = env.test_site_explorer(explorer_config);
     explorer.insert_endpoints(vec![

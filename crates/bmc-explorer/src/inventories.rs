@@ -19,6 +19,7 @@ use model::site_explorer::{Inventory as ModelInventory, Service as ModelService}
 use nv_redfish::update_service::SoftwareInventory;
 use nv_redfish::{Bmc, ServiceRoot};
 
+use crate::drives::ExploredDrives;
 use crate::{Error, hw};
 
 pub(crate) struct ExploredInventories<B: Bmc> {
@@ -40,7 +41,14 @@ impl<B: Bmc> ExploredInventories<B> {
         })
     }
 
-    pub(crate) fn to_model(&self, hw_type: Option<hw::HwType>) -> Vec<ModelService> {
+    /// Converts the firmware inventory, followed by one entry per collected
+    /// drive. Drive entries are not subject to the vendor version trimming
+    /// applied to `UpdateService` members.
+    pub(crate) fn to_model(
+        &self,
+        hw_type: Option<hw::HwType>,
+        drives: Option<&ExploredDrives<B>>,
+    ) -> Vec<ModelService> {
         let fw_inventories = ModelService {
             id: "FirmwareInventory".to_string(),
             inventories: self
@@ -77,7 +85,9 @@ impl<B: Bmc> ExploredInventories<B> {
                         _ => inventory.version().map(|v| v.to_string()),
                     },
                     release_date: inventory.release_date().map(|v| v.into_inner().to_string()),
+                    drive: None,
                 })
+                .chain(drives.map(ExploredDrives::to_model).unwrap_or_default())
                 .collect(),
         };
         vec![fw_inventories]

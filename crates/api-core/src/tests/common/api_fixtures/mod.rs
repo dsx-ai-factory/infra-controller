@@ -1889,6 +1889,7 @@ async fn create_test_env_with_overrides_inner(
             deprecated_force_dpu_nic_mode: None,
             // Tests use MockEndpointExplorer. So this doesn't affect anything.
             explore_mode: SiteExplorerExploreMode::NvRedfish,
+            explore_drive_firmware: false,
         },
         test_meter.meter(),
         api.endpoint_exploration_service.clone(),
