@@ -41,7 +41,7 @@ use uuid::Uuid;
 use crate::device_handle::DeviceHandle;
 use crate::device_simulator::{DeviceSimulator, SimulatorLifecycle};
 use crate::discovery_info;
-use crate::expected_inventory::ExpectedInventorySummary;
+use crate::expected_inventory::{ExpectedInventorySummary, ExpectedRecordsResponse};
 use crate::rack::RackInstance;
 use crate::simulator_registry::SimulatorRegistry;
 use crate::status::{DeviceKind, DeviceStatus, DeviceStatusConfig, DevicesStatusResponse};
@@ -60,6 +60,10 @@ pub fn append(router: Option<Router>, control_state: ControlState) -> Router {
         .route(
             "/expected-inventory/status",
             get(get_expected_inventory_status),
+        )
+        .route(
+            "/expected-inventory/records",
+            get(get_expected_inventory_records),
         )
         .route(
             "/machines/{id}/bmc/injection/rules",
@@ -84,6 +88,7 @@ pub struct ControlState {
     rms_snapshot: Arc<Mutex<RmsSnapshot>>,
     nmxc_snapshot: Arc<Mutex<NmxcSnapshot>>,
     expected_inventory: Arc<ExpectedInventorySummary>,
+    expected_records: Option<Arc<ExpectedRecordsResponse>>,
 }
 
 #[derive(Debug)]
@@ -163,6 +168,7 @@ impl ControlState {
             rms_snapshot: Arc::default(),
             nmxc_snapshot: Arc::default(),
             expected_inventory: Arc::default(),
+            expected_records: None,
         }
     }
 
@@ -170,6 +176,13 @@ impl ControlState {
     /// `/expected-inventory/status`.
     pub fn with_expected_inventory(mut self, summary: ExpectedInventorySummary) -> Self {
         self.expected_inventory = Arc::new(summary);
+        self
+    }
+
+    /// Publishes the expected records built from the devices on
+    /// `/expected-inventory/records`.
+    pub fn with_expected_records(mut self, records: Arc<ExpectedRecordsResponse>) -> Self {
+        self.expected_records = Some(records);
         self
     }
 
@@ -585,6 +598,17 @@ async fn get_expected_inventory_status(
     Json(state.control_state.expected_inventory.as_ref().clone())
 }
 
+async fn get_expected_inventory_records(State(state): State<ControlRouter>) -> Response {
+    match &state.control_state.expected_records {
+        Some(records) => Json(records.as_ref()).into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "expected records are not available",
+        )
+            .into_response(),
+    }
+}
+
 async fn get_machines_ui() -> Html<&'static str> {
     Html(include_str!("../web/index.html"))
 }
@@ -682,10 +706,13 @@ mod tests {
     use super::{ControlState, append};
     use crate::device_simulator::DeviceSimulator;
     use crate::dpu_machine::DpuMachineHandle;
-    use crate::expected_inventory::ExpectedInventorySummary;
+    use crate::expected_inventory::{
+        DeviceRecord, DpuKey, ExpectedInventorySummary, ExpectedRecordsResponse, MemberIntent,
+        NicIntent, RackGroupIntent, RackIntent,
+    };
     use crate::rack::{RackMemberRegistration, RackRegistration};
     use crate::simulator_registry::SimulatorRegistry;
-    use crate::status::DeviceStatusConfig;
+    use crate::status::{DeviceKind, DeviceStatusConfig};
     use crate::{DeviceHandle, discovery_info};
 
     const GB200_RACK: RackInfo = RackInfo {
@@ -1046,6 +1073,79 @@ mod tests {
                 "already_present": 1,
                 "failed_identifiers": ["switch SW1 (02:00:00:00:00:01)"],
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn records_route_serves_served_records() {
+        let records = ExpectedRecordsResponse {
+            inventory_id: "mat-06:00:00:00:00:00".to_string(),
+            register_expected_machines: false,
+            carbide_api_url: "https://carbide-api.forge:443".to_string(),
+            racks: vec![RackIntent {
+                rack_id: "rack-001".to_string(),
+                rack_profile_id: "GB200_NVL72R1_C2G4_WIWYNN".to_string(),
+                group: RackGroupIntent {
+                    rack_group_id: "rack-001".to_string(),
+                    topology: "gb200_nvl72r1_c2g4".to_string(),
+                    protocol: "NVLINK_V5".to_string(),
+                    members: vec![MemberIntent {
+                        r#type: "Compute".to_string(),
+                        manufacturer: "WIWYNN".to_string(),
+                        id: "rack-unit-11".to_string(),
+                    }],
+                },
+            }],
+            devices: vec![DeviceRecord {
+                kind: DeviceKind::Machine,
+                hardware_type: "WiwynnGB200Nvl".to_string(),
+                bmc_mac: "02:00:00:00:00:01".to_string(),
+                serial: "HOST1".to_string(),
+                rack_id: Some("rack-001".to_string()),
+                dpu_policy: None,
+                dpf_enabled: true,
+                interfaces: vec![NicIntent {
+                    mac_address: "02:00:00:00:00:11".to_string(),
+                    primary: true,
+                }],
+                nvos_macs: Vec::new(),
+            }],
+            dpus: vec![DpuKey {
+                bmc_mac: "02:00:00:00:00:21".to_string(),
+                serial: "DPU1".to_string(),
+                parent_bmc_mac: "02:00:00:00:00:01".to_string(),
+            }],
+        };
+        let request = || {
+            Request::builder()
+                .uri("/expected-inventory/records")
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let response = append(None, control_state(Vec::new()))
+            .oneshot(request())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let response = append(
+            None,
+            control_state(Vec::new()).with_expected_records(Arc::new(records.clone())),
+        )
+        .oneshot(request())
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["registerExpectedMachines"], false);
+        assert_eq!(body["devices"][0]["kind"], "machine");
+        assert_eq!(body["dpus"][0]["parentBmcMac"], "02:00:00:00:00:01");
+        assert_eq!(body["racks"][0]["group"]["members"][0]["type"], "Compute");
+        assert_eq!(
+            serde_json::from_value::<ExpectedRecordsResponse>(body).unwrap(),
+            records
         );
     }
 

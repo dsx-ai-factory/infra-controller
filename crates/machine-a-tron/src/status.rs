@@ -16,7 +16,7 @@
  */
 use bmc_mock::HardwareType;
 use nv_redfish::schema::resource::PowerState;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use ufm_mock::{EpochId, Generation, InventoryId};
 
 use crate::{Guid, InfinibandPortState};
@@ -27,7 +27,7 @@ pub struct InfinibandPortStatus {
     pub state: InfinibandPortState,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceKind {
     Machine,
