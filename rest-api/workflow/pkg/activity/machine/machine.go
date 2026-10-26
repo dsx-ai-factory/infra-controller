@@ -7,7 +7,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -380,10 +379,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 			newMachine, serr := mDAO.Create(ctx, txn, createInput)
 			if serr != nil {
 				slogger.Error().Err(serr).Msg("failed to create DB record for new Machine")
-				rollbackErr := txn.Rollback()
-				if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-					slogger.Error().Err(rollbackErr).Msg("failed to rollback transaction")
-				}
+				txn.RollbackWithLog(slogger)
 				continue
 			}
 
@@ -394,10 +390,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				})
 				if serr != nil {
 					slogger.Error().Err(serr).Msg("failed to create MachineInstanceType DB record for new Machine")
-					rollbackErr := txn.Rollback()
-					if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-						slogger.Error().Err(rollbackErr).Msg("failed to rollback transaction")
-					}
+					txn.RollbackWithLog(slogger)
 					continue
 				}
 			}
@@ -480,10 +473,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				})
 				if err != nil {
 					slogger.Error().Err(err).Msg("failed to clear soft-delete timestamp for Machine")
-					terr := txn.Rollback()
-					if terr != nil {
-						slogger.Error().Err(terr).Msg("failed to rollback transaction")
-					}
+					txn.RollbackWithLog(slogger)
 					continue
 				}
 			} else {
@@ -491,10 +481,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				existingCloudMachine, err = mDAO.GetByID(ctx, txn, existingCloudMachine.ID, nil, true)
 				if err != nil {
 					slogger.Error().Err(err).Msg("failed to retrieve Machine in transaction")
-					terr := txn.Rollback()
-					if terr != nil {
-						slogger.Error().Err(terr).Msg("failed to rollback transaction")
-					}
+					txn.RollbackWithLog(slogger)
 					continue
 				}
 			}
@@ -503,10 +490,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 			// should consider the inventory details stale for this machine.
 			if !wasDeleted && site.IsTimeWithinStaleInventoryThreshold(existingCloudMachine.Updated) {
 				slogger.Warn().Msg("machine updated more recently than inventory received time, skipping processing")
-				rollbackErr := txn.Rollback()
-				if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-					slogger.Error().Err(rollbackErr).Msg("failed to rollback transaction")
-				}
+				txn.RollbackWithLog(slogger)
 				continue
 			}
 
@@ -548,10 +532,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 
 			if serr != nil {
 				slogger.Error().Err(serr).Msg("failed to update Machine in DB")
-				rollbackErr := txn.Rollback()
-				if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-					slogger.Error().Err(rollbackErr).Msg("failed to rollback transaction")
-				}
+				txn.RollbackWithLog(slogger)
 				continue
 			}
 
@@ -562,10 +543,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 			machineInstanceTypes, _, err := mitDAO.GetAll(ctx, txn, cdbm.MachineInstanceTypeFilterInput{MachineID: &existingCloudMachine.ID}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
 			if err != nil {
 				slogger.Error().Err(err).Msg("failed to get MachineInstanceTypes for reconciliation")
-				rollbackErr := txn.Rollback()
-				if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-					slogger.Error().Err(rollbackErr).Msg("failed to rollback transaction")
-				}
+				txn.RollbackWithLog(slogger)
 				continue
 			}
 
@@ -587,10 +565,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 					}
 				}
 				if err != nil {
-					rollbackErr := txn.Rollback()
-					if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-						slogger.Error().Err(rollbackErr).Msg("failed to rollback transaction")
-					}
+					txn.RollbackWithLog(slogger)
 					continue
 				}
 
@@ -601,10 +576,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 					})
 					if serr != nil {
 						slogger.Error().Err(serr).Msg("failed to create MachineInstanceType during reconciliation")
-						rollbackErr := txn.Rollback()
-						if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-							slogger.Error().Err(rollbackErr).Msg("failed to rollback transaction")
-						}
+						txn.RollbackWithLog(slogger)
 						continue
 					}
 				}
@@ -625,10 +597,7 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 				_, serr = mDAO.Clear(ctx, txn, clearInput)
 				if serr != nil {
 					slogger.Error().Err(serr).Msg("failed to clear maintenance or network health message from Machine in DB")
-					rollbackErr := txn.Rollback()
-					if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-						slogger.Error().Err(rollbackErr).Msg("failed to rollback transaction")
-					}
+					txn.RollbackWithLog(slogger)
 					continue
 				}
 			}
