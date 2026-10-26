@@ -48,6 +48,8 @@ mod probes;
 )]
 mod readers;
 #[expect(dead_code, reason = "the state readers are wired in later")]
+mod rest;
+#[expect(dead_code, reason = "the state readers are wired in later")]
 mod snapshot;
 
 use std::sync::Arc;
@@ -206,7 +208,8 @@ async fn run() -> eyre::Result<()> {
 
 /// Assembles the enabled probe set from configuration. nico-api (gRPC) and
 /// nico-rest-api probes come from distinct modules, each owning its
-/// transport/auth machinery. The gRPC probe calls nico-api through its gate.
+/// transport/auth machinery. Every probe calls its API through that API's
+/// gate.
 fn build_probes(
     cfg: &config::Config,
     gates: &gate::Gates,
@@ -221,11 +224,13 @@ fn build_probes(
     if cfg.probes.rest_machines.enabled {
         out.push(Arc::new(probes::restapi::new_machines_probe(
             cfg.probes.rest_machines.clone(),
+            Arc::clone(&gates.rest),
         )?));
     }
     if cfg.probes.rest_instances.enabled {
         out.push(Arc::new(probes::restapi::new_instances_probe(
             cfg.probes.rest_instances.clone(),
+            Arc::clone(&gates.rest),
         )?));
     }
     Ok(out)

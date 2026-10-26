@@ -21,6 +21,7 @@
 //! [`SnapshotSink`](crate::snapshot::SnapshotSink).
 
 pub(crate) mod devices;
+pub(crate) mod rest_inventory;
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};

@@ -73,6 +73,20 @@ pub enum Source {
     Rest,
 }
 
+/// Whether the REST site's machines are this NICo site's machines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SiteMatch {
+    /// Every machine on a nonempty page is a machine of this NICo site.
+    Match,
+    /// No machine on the page is.
+    Mismatch,
+    /// An empty page, a mixed page, a machine without a NICo ID, or no
+    /// device sweep yet. Never binds the site.
+    Unknown,
+}
+
 /// Kind of expected record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -415,13 +429,28 @@ pub struct ReadInfo {
     pub last_attempt_error: Option<String>,
 }
 
-/// `GET /v1/config` reply. A source is `null` before its first good read.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// `GET /v1/config` reply. A source is `null` before its first good read,
+/// and while its reader is off.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigResponse {
     pub nico_api: Option<ConfigNicoApi>,
     pub rest: Option<ConfigRest>,
+    #[serde(default)]
+    pub rest_site: Option<RestSiteBinding>,
+}
+
+/// The REST site checked against the NICo device census, with the times of
+/// that check. Only `match` from a fresh read with no newer failed attempt
+/// binds the site.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct RestSiteBinding {
+    #[serde(flatten)]
+    pub read: ReadInfo,
+    pub result: SiteMatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -771,6 +800,11 @@ mod tests {
             (Component::Uefi, "uefi"),
             (Component::BmcUefi, "bmc_uefi"),
             (Component::Other, "other"),
+        ]);
+        assert_wire_names(&[
+            (SiteMatch::Match, "match"),
+            (SiteMatch::Mismatch, "mismatch"),
+            (SiteMatch::Unknown, "unknown"),
         ]);
         assert_wire_names(&[
             (MismatchKind::AmbiguousLink, "ambiguous_link"),
@@ -1138,6 +1172,67 @@ mod tests {
         );
     }
 
+    fn read_info() -> ReadInfo {
+        ReadInfo {
+            read_start: t("2026-10-23T10:00:00Z"),
+            read_at: t("2026-10-23T10:00:02Z"),
+            read_age_seconds: 5.0,
+            read_interval_seconds: 120.0,
+            last_attempt_error: None,
+        }
+    }
+
+    fn read_info_json() -> serde_json::Value {
+        json!({
+            "readStart": "2026-10-23T10:00:00Z",
+            "readAt": "2026-10-23T10:00:02Z",
+            "readAgeSeconds": 5.0,
+            "readIntervalSeconds": 120.0,
+            "lastAttemptError": null,
+        })
+    }
+
+    #[test]
+    fn config_response_json_golden() {
+        let reply = ConfigResponse {
+            nico_api: None,
+            rest: None,
+            rest_site: Some(RestSiteBinding {
+                read: read_info(),
+                result: SiteMatch::Match,
+            }),
+        };
+        let mut rest_site = read_info_json();
+        rest_site["result"] = json!("match");
+        assert_json_golden(
+            &reply,
+            json!({"nicoApi": null, "rest": null, "restSite": rest_site}),
+        );
+
+        // A reply from before restSite reads as no site check.
+        let old: ConfigResponse =
+            serde_json::from_value(json!({"nicoApi": null, "rest": null})).unwrap();
+        assert_eq!(old, ConfigResponse::default());
+
+        // Clients built on the first contract (16bc37890) read the new
+        // reply: restSite is a field they do not know, and they ignore it.
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct FirstConfigResponse {
+            nico_api: Option<ConfigNicoApi>,
+            rest: Option<ConfigRest>,
+        }
+        let first: FirstConfigResponse =
+            serde_json::from_value(serde_json::to_value(&reply).unwrap()).unwrap();
+        assert_eq!(
+            first,
+            FirstConfigResponse {
+                nico_api: None,
+                rest: None
+            }
+        );
+    }
+
     #[test]
     fn request_none_fields_omitted() {
         let filter = Filter::new(UnitType::Host);
@@ -1286,6 +1381,13 @@ mod tests {
         let units = property_names(&schema::<UnitsResponse>());
         for name in ["units", "missingIds", "nextCursor", "snapshotId"] {
             assert!(units.contains(name), "UnitsResponse lacks {name}");
+        }
+
+        let config = property_names(&schema::<ConfigResponse>());
+        assert!(config.contains("restSite"), "ConfigResponse lacks restSite");
+        let site = property_names(&schema::<RestSiteBinding>());
+        for name in ["result", "readAt", "lastAttemptError"] {
+            assert!(site.contains(name), "RestSiteBinding lacks {name}");
         }
 
         // Every other top-level request and reply has a schema.
