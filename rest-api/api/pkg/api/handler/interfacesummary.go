@@ -21,32 +21,34 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 )
 
-// GetAllVPCAttachmentHandler retrieves the safe attachment view for a Tenant-owned VPC.
-type GetAllVPCAttachmentHandler struct {
+// GetAllInterfaceSummaryHandler retrieves the Tenant-visible, owner-safe Interface view.
+type GetAllInterfaceSummaryHandler struct {
 	dbSession *cdb.Session
 }
 
-// NewGetAllVPCAttachmentHandler initializes a VPC attachment list handler.
-func NewGetAllVPCAttachmentHandler(dbSession *cdb.Session) GetAllVPCAttachmentHandler {
-	return GetAllVPCAttachmentHandler{dbSession: dbSession}
+// NewGetAllInterfaceSummaryHandler initializes an Interface summary list handler.
+func NewGetAllInterfaceSummaryHandler(dbSession *cdb.Session) GetAllInterfaceSummaryHandler {
+	return GetAllInterfaceSummaryHandler{dbSession: dbSession}
 }
 
 // Handle godoc
-// @Summary Retrieve all attachments for a VPC
-// @Description Retrieve current Interface attachments for a Tenant-owned VPC
-// @Tags vpc
+// @Summary Retrieve Tenant-visible Interface summaries
+// @Description Retrieve VPC-backed Interface summaries visible to the current Tenant
+// @Tags interface
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
-// @Param vpcId path string true "ID of VPC"
+// @Param vpcId query string false "Filter by attached VPC ID"
+// @Param crossTenant query boolean false "Filter by whether the Instance belongs to another Tenant"
+// @Param instanceTenantId query string false "Filter by consuming Instance Tenant ID"
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
-// @Success 200 {array} model.APIVpcAttachment
-// @Router /v2/org/{org}/nico/vpc/{vpcId}/attachment [get]
-func (h GetAllVPCAttachmentHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("VPCAttachment", "GetAll", c)
+// @Success 200 {array} model.APIInterfaceSummary
+// @Router /v2/org/{org}/nico/interface [get]
+func (h GetAllInterfaceSummaryHandler) Handle(c echo.Context) error {
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("InterfaceSummary", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -70,10 +72,21 @@ func (h GetAllVPCAttachmentHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Tenant Admin role with org", nil)
 	}
 
+	request := model.APIInterfaceSummaryGetAllRequest{}
 	pageRequest := pagination.PageRequest{}
-	err = common.ValidateKnownQueryParams(c.QueryParams(), pageRequest)
+	err = common.ValidateKnownQueryParams(c.QueryParams(), request, pageRequest)
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
+	}
+	err = c.Bind(&request)
+	if err != nil {
+		logger.Warn().Err(err).Msg("error binding Interface summary filters")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse Interface summary filters", nil)
+	}
+	err = request.Validate()
+	if err != nil {
+		logger.Warn().Err(err).Msg("error validating Interface summary filters")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate Interface summary filters", err)
 	}
 	err = c.Bind(&pageRequest)
 	if err != nil {
@@ -95,47 +108,49 @@ func (h GetAllVPCAttachmentHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant", nil)
 	}
 
-	vpcID, err := uuid.Parse(c.Param("vpcId"))
-	if err != nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid VPC ID in URL", nil)
+	filter := cdbm.InterfaceFilterInput{
+		VisibleToTenantID: &tenant.ID,
+		CrossTenant:       request.CrossTenant,
+		VpcAttachedOnly:   true,
 	}
-	vpc, err := cdbm.NewVpcDAO(h.dbSession).GetByID(ctx, nil, vpcID, nil)
-	if err != nil {
-		if err == cdb.ErrDoesNotExist {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find VPC with specified ID", nil)
-		}
-		logger.Error().Err(err).Msg("error retrieving VPC from DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve VPC", nil)
+	if request.VpcID != nil {
+		vpcID := uuid.MustParse(*request.VpcID)
+		filter.VpcID = &vpcID
 	}
-	if vpc.TenantID != tenant.ID {
-		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "VPC does not belong to current Tenant", nil)
+	if request.InstanceTenantID != nil {
+		instanceTenantID := uuid.MustParse(*request.InstanceTenantID)
+		filter.InstanceTenantID = &instanceTenantID
 	}
 
 	dbInterfaces, total, err := cdbm.NewInterfaceDAO(h.dbSession).GetAll(
 		ctx,
 		nil,
-		cdbm.InterfaceFilterInput{VpcID: &vpc.ID},
+		filter,
 		cdbp.PageInput{
 			Limit:   pageRequest.Limit,
 			Offset:  pageRequest.Offset,
 			OrderBy: pageRequest.OrderBy,
 		},
-		[]string{cdbm.InstanceRelationName},
+		[]string{cdbm.InstanceRelationName, cdbm.VpcPrefixRelationName},
 	)
 	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving VPC attachments from DB")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve VPC attachments", nil)
+		logger.Error().Err(err).Msg("error retrieving Interface summaries from DB")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Interface summaries", nil)
 	}
 
-	attachments := make([]model.APIVpcAttachment, 0, len(dbInterfaces))
+	summaries := make([]model.APIInterfaceSummary, 0, len(dbInterfaces))
 	for i := range dbInterfaces {
 		if dbInterfaces[i].Instance == nil {
-			logger.Error().Str("interfaceID", dbInterfaces[i].ID.String()).Msg("VPC attachment is missing its Instance relation")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to build VPC attachment response", nil)
+			logger.Error().Str("interfaceID", dbInterfaces[i].ID.String()).Msg("Interface summary is missing its Instance relation")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to build Interface summary response", nil)
 		}
-		var attachment model.APIVpcAttachment
-		attachment.FromDBModel(&dbInterfaces[i], vpc.ID)
-		attachments = append(attachments, attachment)
+		if dbInterfaces[i].VpcID == nil && dbInterfaces[i].VpcPrefix == nil {
+			logger.Error().Str("interfaceID", dbInterfaces[i].ID.String()).Msg("Interface summary is missing its VPC relation")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to build Interface summary response", nil)
+		}
+		var summary model.APIInterfaceSummary
+		summary.FromDBModel(&dbInterfaces[i])
+		summaries = append(summaries, summary)
 	}
 
 	pageResponse := pagination.NewPageResponse(*pageRequest.PageNumber, *pageRequest.PageSize, total, pageRequest.OrderByStr)
@@ -146,5 +161,5 @@ func (h GetAllVPCAttachmentHandler) Handle(c echo.Context) error {
 	}
 	c.Response().Header().Set(pagination.ResponseHeaderName, string(pageHeader))
 
-	return c.JSON(http.StatusOK, attachments)
+	return c.JSON(http.StatusOK, summaries)
 }

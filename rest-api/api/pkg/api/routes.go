@@ -238,11 +238,6 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewGetAllVPCHandler(dbSession, tc, cfg),
 		},
 		{
-			Path:    apiPathPrefix + "/vpc/:vpcId/attachment",
-			Method:  http.MethodGet,
-			Handler: apiHandler.NewGetAllVPCAttachmentHandler(dbSession),
-		},
-		{
 			Path:    apiPathPrefix + "/vpc/:id",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetVPCHandler(dbSession, tc, cfg),
@@ -421,6 +416,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewDeleteInstanceTypeHandler(dbSession, tc, scp, cfg),
 		},
 		// Interface endpoints
+		{
+			Path:    apiPathPrefix + "/interface",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllInterfaceSummaryHandler(dbSession),
+		},
 		{
 			Path:    apiPathPrefix + "/instance/:instanceId/interface",
 			Method:  http.MethodGet,

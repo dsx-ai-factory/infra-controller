@@ -559,6 +559,48 @@ func TestHasCrossTenantInterface(t *testing.T) {
 	}
 }
 
+func TestBuildInterfacesForCrossTenantAuthorization(t *testing.T) {
+	vpcID := uuid.New()
+	vpcPrefixID := uuid.New()
+	device := "eth0"
+	deviceInstance := 1
+	virtualFunctionID := 2
+	requestedIPAddress := "192.0.2.10"
+	vpc := &cdbm.Vpc{ID: vpcID}
+	vpcPrefix := &cdbm.VpcPrefix{ID: vpcPrefixID, VpcID: vpcID}
+
+	requested := BuildInterfacesForCrossTenantAuthorization(
+		[]APIInterfaceCreateOrUpdateRequest{
+			{
+				VpcID:             cutil.GetPtr(vpcID.String()),
+				IPFamilies:        []IPFamily{IPFamilyIPv6},
+				IPAddress:         &requestedIPAddress,
+				Device:            &device,
+				DeviceInstance:    &deviceInstance,
+				VirtualFunctionID: &virtualFunctionID,
+				IsPhysical:        true,
+			},
+			{VpcPrefixID: cutil.GetPtr(vpcPrefixID.String())},
+			{VpcID: cutil.GetPtr(uuid.NewString())},
+			{SubnetID: cutil.GetPtr(uuid.NewString())},
+		},
+		map[uuid.UUID]*cdbm.Vpc{vpcID: vpc},
+		map[uuid.UUID]*cdbm.VpcPrefix{vpcPrefixID: vpcPrefix},
+	)
+
+	require.Len(t, requested, 2)
+	assert.Equal(t, &vpcID, requested[0].VpcID)
+	assert.Same(t, vpc, requested[0].Vpc)
+	assert.Equal(t, cutil.GetPtr(cdbm.InterfaceVpcIPFamilyModeIPv6Only), requested[0].VpcIPFamilyMode)
+	assert.Equal(t, &requestedIPAddress, requested[0].RequestedIpAddress)
+	assert.Equal(t, &device, requested[0].Device)
+	assert.Equal(t, &deviceInstance, requested[0].DeviceInstance)
+	assert.Equal(t, &virtualFunctionID, requested[0].VirtualFunctionID)
+	assert.True(t, requested[0].IsPhysical)
+	assert.Equal(t, &vpcPrefixID, requested[1].VpcPrefixID)
+	assert.Same(t, vpcPrefix, requested[1].VpcPrefix)
+}
+
 func TestHasNewCrossTenantInterface(t *testing.T) {
 	tenantID := uuid.New()
 	crossTenantTenantID := uuid.New()

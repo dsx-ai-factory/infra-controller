@@ -3385,7 +3385,7 @@ paths:
                   labels:
                     region: us-west-1
                     env: dev
-  '/v2/org/{org}/nico/vpc/{vpcId}/attachment':
+  '/v2/org/{org}/nico/interface':
     parameters:
       - schema:
           type: string
@@ -3393,35 +3393,28 @@ paths:
         in: path
         required: true
         description: Name of the Tenant organization
-      - schema:
-          type: string
-          format: uuid
-        name: vpcId
-        in: path
-        required: true
-        description: ID of the VPC whose attachments are listed
     get:
-      summary: Retrieve VPC attachments
-      operationId: get-all-vpc-attachment
+      summary: Retrieve Tenant-visible Interface summaries
+      operationId: get-all-interface-summary
       tags:
-        - VPC
+        - Interface
       description: |-
-        Retrieve the current, non-deleted REST Interface rows that explicitly select this VPC, either directly through `vpcId` or through a `vpcPrefixId` whose parent is this VPC. The response reflects REST's persisted desired/current Interface state and status; it is not a Core visibility query.
+        Retrieve current, non-deleted, VPC-backed REST Interface summaries visible to the caller's Tenant. Results include Interfaces on the caller's Instances regardless of VPC ownership, plus Interfaces on other Tenants' Instances when they explicitly select a VPC owned by the caller or a VPC Prefix under one.
 
-        The caller's organization must own the requested VPC, and the user must have authorization role with `TENANT_ADMIN` suffix. The `targetedInstanceCreation` capability is not required to list attachments. Results include attachments from Instances owned by other Tenants, but expose only opaque attachment, Instance, and consuming-Tenant identity plus device identity and Interface status. Visibility does not grant authority over another Tenant's Instance or its security policy.
+        `vpcId` filters by the directly selected VPC or the parent of an explicitly selected VPC Prefix. `crossTenant` is relative to the caller's Tenant: `true` returns only Interfaces on other Tenants' Instances and `false` returns only Interfaces on the caller's Instances. `instanceTenantId` filters by the consuming Instance's Tenant. Filters compose and may produce an empty result. A valid but inaccessible `vpcId` or `instanceTenantId` returns an empty list rather than disclosing resource existence.
 
-        This endpoint does not expose Instance names, Machine or Controller IDs, operating systems, user data, metadata, labels, Network Security Group contents, IP addresses, MAC addresses, or requested IP addresses. Generic VPC and VPC Prefix list, get, and mutation endpoints remain scoped to resources owned by the caller's Tenant.
+        The caller must have an organization membership and an authorization role with `TENANT_ADMIN` suffix. The `targetedInstanceCreation` capability is not required. The response exposes only opaque Interface, Instance, consuming-Tenant, selected-network, device identity, and Interface status. It does not expose Instance names, Machine or Controller IDs, operating systems, user data, metadata, labels, Network Security Group contents, IP addresses, MAC addresses, requested IP addresses, or routing profiles. Visibility does not grant authority over another Tenant's Instance, VPC, VPC Prefix, or security policy.
 
-        Results are ordered by `created` ascending by default, with Interface `id` ascending as a stable tie-breaker. `orderBy` supports `status`, `created`, and `updated` in ascending or descending order; Interface `id` ascending remains the tie-breaker. An empty result is returned as `[]`.
+        The response reflects REST's persisted desired/current Interface state and status; it is not a Core visibility query. Results are ordered by `created` ascending by default, with Interface `id` ascending as a stable tie-breaker. `orderBy` supports `status`, `created`, and `updated` in ascending or descending order; Interface `id` ascending remains the tie-breaker. An empty result is returned as `[]`.
       responses:
         '200':
-          description: VPC attachments visible to the VPC owner
+          description: Interface summaries visible to the current Tenant
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/VpcAttachment'
+                  $ref: '#/components/schemas/InterfaceSummary'
               examples:
                 direct-and-prefix:
                   value:
@@ -3459,11 +3452,26 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
-        '404':
-          $ref: '#/components/responses/NotFoundError'
         '500':
           $ref: '#/components/responses/GenericHttpError'
       parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: query
+          name: vpcId
+          description: Filter by the selected VPC or the parent VPC of an explicitly selected VPC Prefix
+        - schema:
+            type: boolean
+          in: query
+          name: crossTenant
+          description: Filter by whether the consuming Instance belongs to a Tenant other than the caller's Tenant
+        - schema:
+            type: string
+            format: uuid
+          in: query
+          name: instanceTenantId
+          description: Filter by the Tenant that owns the consuming Instance, within the caller's visibility boundary
         - schema:
             $ref: '#/components/schemas/PageNumber'
             default: 1
@@ -21896,8 +21904,8 @@ components:
           description: Value of the Allocation Constraint. For InstanceType, this value represents number of Machines allocated for Tenant. For IPBlock, this value represents the prefix Length of the IP Block.
       required:
         - constraintValue
-    VpcAttachment:
-      title: VpcAttachment
+    InterfaceSummary:
+      title: InterfaceSummary
       type: object
       x-go-has-nullable-required-properties: true
       x-go-nullable-required-properties:
@@ -21905,7 +21913,7 @@ components:
         - device
         - deviceInstance
         - virtualFunctionId
-      description: Owner-safe projection of a persisted Interface that selects a VPC directly or through an explicit VPC Prefix.
+      description: Tenant-visible, owner-safe projection of a persisted Interface that selects a VPC directly or through an explicit VPC Prefix.
       examples:
         - id: 07cd865e-5512-4fe9-8063-8f4c8f442b1a
           vpcId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
@@ -21927,7 +21935,7 @@ components:
         vpcId:
           type: string
           format: uuid
-          description: VPC whose attachments are being listed
+          description: Directly selected VPC or parent VPC of the explicitly selected VPC Prefix
         vpcPrefixId:
           type:
             - string
@@ -21955,7 +21963,7 @@ components:
           description: Interface device instance, or null when device metadata is unavailable
         isPhysical:
           type: boolean
-          description: Whether the attachment uses a physical function
+          description: Whether the Interface uses a physical function
         virtualFunctionId:
           type:
             - integer
@@ -25808,7 +25816,7 @@ components:
       description: |-
         Request data to update an Instance.
 
-        A complete `interfaces` replacement may select a same-Site Ready FNN VPC or explicit VPC Prefix owned by another Tenant on a non-primary Interface only while the Instance Tenant has effective `targetedInstanceCreation` capability at the Site. Revoking the capability does not detach existing Interfaces: an update without `interfaces`, an `interfaces` replacement that drops every cross-Tenant Interface, and Instance deletion remain allowed. Any `interfaces` replacement that includes a cross-Tenant selector, including an unchanged one, returns 403 after revocation.
+        A complete `interfaces` replacement may select a same-Site Ready FNN VPC or explicit VPC Prefix owned by another Tenant on a non-primary Interface only while the Instance Tenant has effective `targetedInstanceCreation` capability at the Site. Revoking the capability does not detach existing Interfaces: an update without `interfaces`, an unchanged complete `interfaces` replacement, an `interfaces` replacement that removes cross-Tenant Interfaces, and Instance deletion remain allowed. Adding a cross-Tenant Interface, retargeting one to another cross-Tenant VPC or VPC Prefix, or changing its identity returns 403 after revocation.
 
         The Tenant-owned primary VPC and primary physical Interface rules remain enforced, and cross-Tenant Subnets remain unsupported. The capability does not grant cross-Tenant VPC or VPC Prefix discovery or CRUD access. Instance-level Network Security Group policy continues to take precedence over VPC-level policy on all Interfaces.
       examples:

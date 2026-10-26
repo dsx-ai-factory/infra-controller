@@ -1206,6 +1206,186 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("tenant visibility filters VPC-backed Interfaces before pagination", func(t *testing.T) {
+		callerTenant := testInstanceBuildTenant(t, dbSession, "interfaceVisibilityCaller")
+		otherTenant := testInstanceBuildTenant(t, dbSession, "interfaceVisibilityOther")
+		callerVpc := testInstanceBuildVpc(t, dbSession, ip, site, callerTenant, "interfaceVisibilityCallerVpc")
+		otherVpc := testInstanceBuildVpc(t, dbSession, ip, site, otherTenant, "interfaceVisibilityOtherVpc")
+		callerPrefix, err := vpsd.Create(ctx, nil, VpcPrefixCreateInput{
+			Name:         "interface-visibility-prefix",
+			TenantOrg:    callerTenant.Org,
+			SiteID:       site.ID,
+			VpcID:        callerVpc.ID,
+			TenantID:     callerTenant.ID,
+			IpBlockID:    &ipv4Block.ID,
+			Prefix:       ipv4Prefix,
+			PrefixLength: 24,
+			Status:       VpcPrefixStatusReady,
+			CreatedBy:    user.ID,
+		})
+		require.NoError(t, err)
+
+		buildInstance := func(name string, owner *Tenant, primaryVpcID uuid.UUID) *Instance {
+			instance, createErr := isd.Create(ctx, nil, InstanceCreateInput{
+				Name:                     name,
+				TenantID:                 owner.ID,
+				InfrastructureProviderID: ip.ID,
+				SiteID:                   site.ID,
+				InstanceTypeID:           &instanceType.ID,
+				VpcID:                    primaryVpcID,
+				MachineID:                &machine.ID,
+				OperatingSystemID:        &operatingSystem.ID,
+				Status:                   InstanceStatusReady,
+				CreatedBy:                user.ID,
+			})
+			require.NoError(t, createErr)
+			return instance
+		}
+		callerInstance := buildInstance("interfaceVisibilityCallerInstance", callerTenant, callerVpc.ID)
+		otherInstance := buildInstance("interfaceVisibilityOtherInstance", otherTenant, otherVpc.ID)
+
+		createInterface := func(input InterfaceCreateInput) Interface {
+			ifc, createErr := ifcd.Create(ctx, nil, input)
+			require.NoError(t, createErr)
+			return *ifc
+		}
+		callerOnCallerVpc := createInterface(InterfaceCreateInput{
+			InstanceID: callerInstance.ID,
+			VpcID:      &callerVpc.ID,
+			Status:     InterfaceStatusReady,
+			CreatedBy:  user.ID,
+		})
+		callerOnOtherVpc := createInterface(InterfaceCreateInput{
+			InstanceID: callerInstance.ID,
+			VpcID:      &otherVpc.ID,
+			Status:     InterfaceStatusReady,
+			CreatedBy:  user.ID,
+		})
+		otherOnCallerVpc := createInterface(InterfaceCreateInput{
+			InstanceID:  otherInstance.ID,
+			VpcPrefixID: &callerPrefix.ID,
+			Status:      InterfaceStatusReady,
+			CreatedBy:   user.ID,
+		})
+		otherOnOtherVpc := createInterface(InterfaceCreateInput{
+			InstanceID: otherInstance.ID,
+			VpcID:      &otherVpc.ID,
+			Status:     InterfaceStatusReady,
+			CreatedBy:  user.ID,
+		})
+		callerSubnetOnly := createInterface(InterfaceCreateInput{
+			InstanceID: callerInstance.ID,
+			SubnetID:   &subnet1.ID,
+			Status:     InterfaceStatusReady,
+			CreatedBy:  user.ID,
+		})
+
+		crossTenant := true
+		sameTenant := false
+		cases := []struct {
+			name      string
+			filter    InterfaceFilterInput
+			wantIDs   []uuid.UUID
+			wantError bool
+		}{
+			{
+				name: "default visibility includes own Interfaces and cross-Tenant Interfaces on owned VPCs",
+				filter: InterfaceFilterInput{
+					VisibleToTenantID: &callerTenant.ID,
+					VpcAttachedOnly:   true,
+				},
+				wantIDs: []uuid.UUID{callerOnCallerVpc.ID, callerOnOtherVpc.ID, otherOnCallerVpc.ID},
+			},
+			{
+				name: "cross-Tenant true includes only other Tenants on owned VPCs",
+				filter: InterfaceFilterInput{
+					VisibleToTenantID: &callerTenant.ID,
+					CrossTenant:       &crossTenant,
+					VpcAttachedOnly:   true,
+				},
+				wantIDs: []uuid.UUID{otherOnCallerVpc.ID},
+			},
+			{
+				name: "cross-Tenant false includes only caller-owned Instances",
+				filter: InterfaceFilterInput{
+					VisibleToTenantID: &callerTenant.ID,
+					CrossTenant:       &sameTenant,
+					VpcAttachedOnly:   true,
+				},
+				wantIDs: []uuid.UUID{callerOnCallerVpc.ID, callerOnOtherVpc.ID},
+			},
+			{
+				name: "Instance Tenant filters within the visibility boundary",
+				filter: InterfaceFilterInput{
+					VisibleToTenantID: &callerTenant.ID,
+					InstanceTenantID:  &otherTenant.ID,
+					VpcAttachedOnly:   true,
+				},
+				wantIDs: []uuid.UUID{otherOnCallerVpc.ID},
+			},
+			{
+				name: "caller-owned VPC includes own and cross-Tenant Interfaces",
+				filter: InterfaceFilterInput{
+					VisibleToTenantID: &callerTenant.ID,
+					VpcID:             &callerVpc.ID,
+					VpcAttachedOnly:   true,
+				},
+				wantIDs: []uuid.UUID{callerOnCallerVpc.ID, otherOnCallerVpc.ID},
+			},
+			{
+				name: "other Tenant VPC includes only caller-owned Instance Interfaces",
+				filter: InterfaceFilterInput{
+					VisibleToTenantID: &callerTenant.ID,
+					VpcID:             &otherVpc.ID,
+					VpcAttachedOnly:   true,
+				},
+				wantIDs: []uuid.UUID{callerOnOtherVpc.ID},
+			},
+			{
+				name: "conflicting filters return no Interfaces",
+				filter: InterfaceFilterInput{
+					VisibleToTenantID: &callerTenant.ID,
+					InstanceTenantID:  &callerTenant.ID,
+					CrossTenant:       &crossTenant,
+					VpcAttachedOnly:   true,
+				},
+			},
+			{
+				name:      "cross-Tenant filter requires visibility Tenant",
+				filter:    InterfaceFilterInput{CrossTenant: &crossTenant, VpcAttachedOnly: true},
+				wantError: true,
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got, _, getErr := ifcd.GetAll(ctx, nil, tc.filter, paginator.PageInput{
+					Limit: cutil.GetPtr(paginator.TotalLimit),
+				}, nil)
+				if tc.wantError {
+					require.Error(t, getErr)
+					return
+				}
+				require.NoError(t, getErr)
+				gotIDs := make([]uuid.UUID, 0, len(got))
+				for _, ifc := range got {
+					gotIDs = append(gotIDs, ifc.ID)
+				}
+				assert.ElementsMatch(t, tc.wantIDs, gotIDs)
+			})
+		}
+
+		for _, ifc := range []Interface{
+			callerOnCallerVpc,
+			callerOnOtherVpc,
+			otherOnCallerVpc,
+			otherOnOtherVpc,
+			callerSubnetOnly,
+		} {
+			require.NoError(t, ifcd.Delete(ctx, nil, ifc.ID))
+		}
+	})
 }
 
 func TestInterfaceSQLDAO_Clear(t *testing.T) {

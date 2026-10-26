@@ -20,14 +20,14 @@ import (
 	"time"
 )
 
-// checks if the VpcAttachment type satisfies the MappedNullable interface at compile time
-var _ MappedNullable = &VpcAttachment{}
+// checks if the InterfaceSummary type satisfies the MappedNullable interface at compile time
+var _ MappedNullable = &InterfaceSummary{}
 
-// VpcAttachment Owner-safe projection of a persisted Interface that selects a VPC directly or through an explicit VPC Prefix.
-type VpcAttachment struct {
+// InterfaceSummary Tenant-visible, owner-safe projection of a persisted Interface that selects a VPC directly or through an explicit VPC Prefix.
+type InterfaceSummary struct {
 	// Stable REST Interface ID
 	Id string `json:"id"`
-	// VPC whose attachments are being listed
+	// Directly selected VPC or parent VPC of the explicitly selected VPC Prefix
 	VpcId string `json:"vpcId"`
 	// Explicitly selected VPC Prefix ID, or null when the Interface selects the VPC directly
 	VpcPrefixId NullableString `json:"vpcPrefixId"`
@@ -39,7 +39,7 @@ type VpcAttachment struct {
 	Device NullableString `json:"device"`
 	// Interface device instance, or null when device metadata is unavailable
 	DeviceInstance NullableInt32 `json:"deviceInstance"`
-	// Whether the attachment uses a physical function
+	// Whether the Interface uses a physical function
 	IsPhysical bool `json:"isPhysical"`
 	// Virtual function number, or null for a physical function
 	VirtualFunctionId NullableInt32 `json:"virtualFunctionId"`
@@ -51,14 +51,14 @@ type VpcAttachment struct {
 	Updated time.Time `json:"updated"`
 }
 
-type _VpcAttachment VpcAttachment
+type _InterfaceSummary InterfaceSummary
 
-// NewVpcAttachment instantiates a new VpcAttachment object
+// NewInterfaceSummary instantiates a new InterfaceSummary object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewVpcAttachment(id string, vpcId string, vpcPrefixId NullableString, instanceId string, instanceTenantId string, device NullableString, deviceInstance NullableInt32, isPhysical bool, virtualFunctionId NullableInt32, status InterfaceStatus, created time.Time, updated time.Time) *VpcAttachment {
-	this := VpcAttachment{}
+func NewInterfaceSummary(id string, vpcId string, vpcPrefixId NullableString, instanceId string, instanceTenantId string, device NullableString, deviceInstance NullableInt32, isPhysical bool, virtualFunctionId NullableInt32, status InterfaceStatus, created time.Time, updated time.Time) *InterfaceSummary {
+	this := InterfaceSummary{}
 	this.Id = id
 	this.VpcId = vpcId
 	this.VpcPrefixId = vpcPrefixId
@@ -74,16 +74,16 @@ func NewVpcAttachment(id string, vpcId string, vpcPrefixId NullableString, insta
 	return &this
 }
 
-// NewVpcAttachmentWithDefaults instantiates a new VpcAttachment object
+// NewInterfaceSummaryWithDefaults instantiates a new InterfaceSummary object
 // This constructor will only assign default values to properties that have it defined,
 // but it doesn't guarantee that properties required by API are set
-func NewVpcAttachmentWithDefaults() *VpcAttachment {
-	this := VpcAttachment{}
+func NewInterfaceSummaryWithDefaults() *InterfaceSummary {
+	this := InterfaceSummary{}
 	return &this
 }
 
 // GetId returns the Id field value
-func (o *VpcAttachment) GetId() string {
+func (o *InterfaceSummary) GetId() string {
 	if o == nil {
 		var ret string
 		return ret
@@ -94,7 +94,7 @@ func (o *VpcAttachment) GetId() string {
 
 // GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
-func (o *VpcAttachment) GetIdOk() (*string, bool) {
+func (o *InterfaceSummary) GetIdOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -102,12 +102,12 @@ func (o *VpcAttachment) GetIdOk() (*string, bool) {
 }
 
 // SetId sets field value
-func (o *VpcAttachment) SetId(v string) {
+func (o *InterfaceSummary) SetId(v string) {
 	o.Id = v
 }
 
 // GetVpcId returns the VpcId field value
-func (o *VpcAttachment) GetVpcId() string {
+func (o *InterfaceSummary) GetVpcId() string {
 	if o == nil {
 		var ret string
 		return ret
@@ -118,7 +118,7 @@ func (o *VpcAttachment) GetVpcId() string {
 
 // GetVpcIdOk returns a tuple with the VpcId field value
 // and a boolean to check if the value has been set.
-func (o *VpcAttachment) GetVpcIdOk() (*string, bool) {
+func (o *InterfaceSummary) GetVpcIdOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -126,13 +126,13 @@ func (o *VpcAttachment) GetVpcIdOk() (*string, bool) {
 }
 
 // SetVpcId sets field value
-func (o *VpcAttachment) SetVpcId(v string) {
+func (o *InterfaceSummary) SetVpcId(v string) {
 	o.VpcId = v
 }
 
 // GetVpcPrefixId returns the VpcPrefixId field value
 // If the value is explicit nil, the zero value for string will be returned
-func (o *VpcAttachment) GetVpcPrefixId() string {
+func (o *InterfaceSummary) GetVpcPrefixId() string {
 	if o == nil || o.VpcPrefixId.Get() == nil {
 		var ret string
 		return ret
@@ -144,7 +144,7 @@ func (o *VpcAttachment) GetVpcPrefixId() string {
 // GetVpcPrefixIdOk returns a tuple with the VpcPrefixId field value
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
-func (o *VpcAttachment) GetVpcPrefixIdOk() (*string, bool) {
+func (o *InterfaceSummary) GetVpcPrefixIdOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -152,12 +152,12 @@ func (o *VpcAttachment) GetVpcPrefixIdOk() (*string, bool) {
 }
 
 // SetVpcPrefixId sets field value
-func (o *VpcAttachment) SetVpcPrefixId(v string) {
+func (o *InterfaceSummary) SetVpcPrefixId(v string) {
 	o.VpcPrefixId.Set(&v)
 }
 
 // GetInstanceId returns the InstanceId field value
-func (o *VpcAttachment) GetInstanceId() string {
+func (o *InterfaceSummary) GetInstanceId() string {
 	if o == nil {
 		var ret string
 		return ret
@@ -168,7 +168,7 @@ func (o *VpcAttachment) GetInstanceId() string {
 
 // GetInstanceIdOk returns a tuple with the InstanceId field value
 // and a boolean to check if the value has been set.
-func (o *VpcAttachment) GetInstanceIdOk() (*string, bool) {
+func (o *InterfaceSummary) GetInstanceIdOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -176,12 +176,12 @@ func (o *VpcAttachment) GetInstanceIdOk() (*string, bool) {
 }
 
 // SetInstanceId sets field value
-func (o *VpcAttachment) SetInstanceId(v string) {
+func (o *InterfaceSummary) SetInstanceId(v string) {
 	o.InstanceId = v
 }
 
 // GetInstanceTenantId returns the InstanceTenantId field value
-func (o *VpcAttachment) GetInstanceTenantId() string {
+func (o *InterfaceSummary) GetInstanceTenantId() string {
 	if o == nil {
 		var ret string
 		return ret
@@ -192,7 +192,7 @@ func (o *VpcAttachment) GetInstanceTenantId() string {
 
 // GetInstanceTenantIdOk returns a tuple with the InstanceTenantId field value
 // and a boolean to check if the value has been set.
-func (o *VpcAttachment) GetInstanceTenantIdOk() (*string, bool) {
+func (o *InterfaceSummary) GetInstanceTenantIdOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -200,13 +200,13 @@ func (o *VpcAttachment) GetInstanceTenantIdOk() (*string, bool) {
 }
 
 // SetInstanceTenantId sets field value
-func (o *VpcAttachment) SetInstanceTenantId(v string) {
+func (o *InterfaceSummary) SetInstanceTenantId(v string) {
 	o.InstanceTenantId = v
 }
 
 // GetDevice returns the Device field value
 // If the value is explicit nil, the zero value for string will be returned
-func (o *VpcAttachment) GetDevice() string {
+func (o *InterfaceSummary) GetDevice() string {
 	if o == nil || o.Device.Get() == nil {
 		var ret string
 		return ret
@@ -218,7 +218,7 @@ func (o *VpcAttachment) GetDevice() string {
 // GetDeviceOk returns a tuple with the Device field value
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
-func (o *VpcAttachment) GetDeviceOk() (*string, bool) {
+func (o *InterfaceSummary) GetDeviceOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -226,13 +226,13 @@ func (o *VpcAttachment) GetDeviceOk() (*string, bool) {
 }
 
 // SetDevice sets field value
-func (o *VpcAttachment) SetDevice(v string) {
+func (o *InterfaceSummary) SetDevice(v string) {
 	o.Device.Set(&v)
 }
 
 // GetDeviceInstance returns the DeviceInstance field value
 // If the value is explicit nil, the zero value for int32 will be returned
-func (o *VpcAttachment) GetDeviceInstance() int32 {
+func (o *InterfaceSummary) GetDeviceInstance() int32 {
 	if o == nil || o.DeviceInstance.Get() == nil {
 		var ret int32
 		return ret
@@ -244,7 +244,7 @@ func (o *VpcAttachment) GetDeviceInstance() int32 {
 // GetDeviceInstanceOk returns a tuple with the DeviceInstance field value
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
-func (o *VpcAttachment) GetDeviceInstanceOk() (*int32, bool) {
+func (o *InterfaceSummary) GetDeviceInstanceOk() (*int32, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -252,12 +252,12 @@ func (o *VpcAttachment) GetDeviceInstanceOk() (*int32, bool) {
 }
 
 // SetDeviceInstance sets field value
-func (o *VpcAttachment) SetDeviceInstance(v int32) {
+func (o *InterfaceSummary) SetDeviceInstance(v int32) {
 	o.DeviceInstance.Set(&v)
 }
 
 // GetIsPhysical returns the IsPhysical field value
-func (o *VpcAttachment) GetIsPhysical() bool {
+func (o *InterfaceSummary) GetIsPhysical() bool {
 	if o == nil {
 		var ret bool
 		return ret
@@ -268,7 +268,7 @@ func (o *VpcAttachment) GetIsPhysical() bool {
 
 // GetIsPhysicalOk returns a tuple with the IsPhysical field value
 // and a boolean to check if the value has been set.
-func (o *VpcAttachment) GetIsPhysicalOk() (*bool, bool) {
+func (o *InterfaceSummary) GetIsPhysicalOk() (*bool, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -276,13 +276,13 @@ func (o *VpcAttachment) GetIsPhysicalOk() (*bool, bool) {
 }
 
 // SetIsPhysical sets field value
-func (o *VpcAttachment) SetIsPhysical(v bool) {
+func (o *InterfaceSummary) SetIsPhysical(v bool) {
 	o.IsPhysical = v
 }
 
 // GetVirtualFunctionId returns the VirtualFunctionId field value
 // If the value is explicit nil, the zero value for int32 will be returned
-func (o *VpcAttachment) GetVirtualFunctionId() int32 {
+func (o *InterfaceSummary) GetVirtualFunctionId() int32 {
 	if o == nil || o.VirtualFunctionId.Get() == nil {
 		var ret int32
 		return ret
@@ -294,7 +294,7 @@ func (o *VpcAttachment) GetVirtualFunctionId() int32 {
 // GetVirtualFunctionIdOk returns a tuple with the VirtualFunctionId field value
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
-func (o *VpcAttachment) GetVirtualFunctionIdOk() (*int32, bool) {
+func (o *InterfaceSummary) GetVirtualFunctionIdOk() (*int32, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -302,12 +302,12 @@ func (o *VpcAttachment) GetVirtualFunctionIdOk() (*int32, bool) {
 }
 
 // SetVirtualFunctionId sets field value
-func (o *VpcAttachment) SetVirtualFunctionId(v int32) {
+func (o *InterfaceSummary) SetVirtualFunctionId(v int32) {
 	o.VirtualFunctionId.Set(&v)
 }
 
 // GetStatus returns the Status field value
-func (o *VpcAttachment) GetStatus() InterfaceStatus {
+func (o *InterfaceSummary) GetStatus() InterfaceStatus {
 	if o == nil {
 		var ret InterfaceStatus
 		return ret
@@ -318,7 +318,7 @@ func (o *VpcAttachment) GetStatus() InterfaceStatus {
 
 // GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
-func (o *VpcAttachment) GetStatusOk() (*InterfaceStatus, bool) {
+func (o *InterfaceSummary) GetStatusOk() (*InterfaceStatus, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -326,12 +326,12 @@ func (o *VpcAttachment) GetStatusOk() (*InterfaceStatus, bool) {
 }
 
 // SetStatus sets field value
-func (o *VpcAttachment) SetStatus(v InterfaceStatus) {
+func (o *InterfaceSummary) SetStatus(v InterfaceStatus) {
 	o.Status = v
 }
 
 // GetCreated returns the Created field value
-func (o *VpcAttachment) GetCreated() time.Time {
+func (o *InterfaceSummary) GetCreated() time.Time {
 	if o == nil {
 		var ret time.Time
 		return ret
@@ -342,7 +342,7 @@ func (o *VpcAttachment) GetCreated() time.Time {
 
 // GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
-func (o *VpcAttachment) GetCreatedOk() (*time.Time, bool) {
+func (o *InterfaceSummary) GetCreatedOk() (*time.Time, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -350,12 +350,12 @@ func (o *VpcAttachment) GetCreatedOk() (*time.Time, bool) {
 }
 
 // SetCreated sets field value
-func (o *VpcAttachment) SetCreated(v time.Time) {
+func (o *InterfaceSummary) SetCreated(v time.Time) {
 	o.Created = v
 }
 
 // GetUpdated returns the Updated field value
-func (o *VpcAttachment) GetUpdated() time.Time {
+func (o *InterfaceSummary) GetUpdated() time.Time {
 	if o == nil {
 		var ret time.Time
 		return ret
@@ -366,7 +366,7 @@ func (o *VpcAttachment) GetUpdated() time.Time {
 
 // GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
-func (o *VpcAttachment) GetUpdatedOk() (*time.Time, bool) {
+func (o *InterfaceSummary) GetUpdatedOk() (*time.Time, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -374,11 +374,11 @@ func (o *VpcAttachment) GetUpdatedOk() (*time.Time, bool) {
 }
 
 // SetUpdated sets field value
-func (o *VpcAttachment) SetUpdated(v time.Time) {
+func (o *InterfaceSummary) SetUpdated(v time.Time) {
 	o.Updated = v
 }
 
-func (o VpcAttachment) MarshalJSON() ([]byte, error) {
+func (o InterfaceSummary) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
 		return []byte{}, err
@@ -386,7 +386,7 @@ func (o VpcAttachment) MarshalJSON() ([]byte, error) {
 	return json.Marshal(toSerialize)
 }
 
-func (o VpcAttachment) ToMap() (map[string]interface{}, error) {
+func (o InterfaceSummary) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["id"] = o.Id
 	toSerialize["vpcId"] = o.VpcId
@@ -403,7 +403,7 @@ func (o VpcAttachment) ToMap() (map[string]interface{}, error) {
 	return toSerialize, nil
 }
 
-func (o *VpcAttachment) UnmarshalJSON(data []byte) (err error) {
+func (o *InterfaceSummary) UnmarshalJSON(data []byte) (err error) {
 	// This validates that all required properties are included in the JSON object
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
@@ -443,52 +443,52 @@ func (o *VpcAttachment) UnmarshalJSON(data []byte) (err error) {
 		}
 	}
 
-	varVpcAttachment := _VpcAttachment{}
+	varInterfaceSummary := _InterfaceSummary{}
 
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	err = decoder.Decode(&varVpcAttachment)
+	err = decoder.Decode(&varInterfaceSummary)
 
 	if err != nil {
 		return err
 	}
 
-	*o = VpcAttachment(varVpcAttachment)
+	*o = InterfaceSummary(varInterfaceSummary)
 
 	return err
 }
 
-type NullableVpcAttachment struct {
-	value *VpcAttachment
+type NullableInterfaceSummary struct {
+	value *InterfaceSummary
 	isSet bool
 }
 
-func (v NullableVpcAttachment) Get() *VpcAttachment {
+func (v NullableInterfaceSummary) Get() *InterfaceSummary {
 	return v.value
 }
 
-func (v *NullableVpcAttachment) Set(val *VpcAttachment) {
+func (v *NullableInterfaceSummary) Set(val *InterfaceSummary) {
 	v.value = val
 	v.isSet = true
 }
 
-func (v NullableVpcAttachment) IsSet() bool {
+func (v NullableInterfaceSummary) IsSet() bool {
 	return v.isSet
 }
 
-func (v *NullableVpcAttachment) Unset() {
+func (v *NullableInterfaceSummary) Unset() {
 	v.value = nil
 	v.isSet = false
 }
 
-func NewNullableVpcAttachment(val *VpcAttachment) *NullableVpcAttachment {
-	return &NullableVpcAttachment{value: val, isSet: true}
+func NewNullableInterfaceSummary(val *InterfaceSummary) *NullableInterfaceSummary {
+	return &NullableInterfaceSummary{value: val, isSet: true}
 }
 
-func (v NullableVpcAttachment) MarshalJSON() ([]byte, error) {
+func (v NullableInterfaceSummary) MarshalJSON() ([]byte, error) {
 	return json.Marshal(v.value)
 }
 
-func (v *NullableVpcAttachment) UnmarshalJSON(src []byte) error {
+func (v *NullableInterfaceSummary) UnmarshalJSON(src []byte) error {
 	v.isSet = true
 	return json.Unmarshal(src, &v.value)
 }

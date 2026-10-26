@@ -977,6 +977,54 @@ func HasNewCrossTenantInterface(tenantID uuid.UUID, requested, existing []cdbm.I
 	return false, nil
 }
 
+// BuildInterfacesForCrossTenantAuthorization converts loaded VPC and VPC Prefix selectors
+// into the normalized Interface identity fields needed before detailed selector validation.
+// Selectors absent from the maps are left to the existing not-found checks.
+func BuildInterfacesForCrossTenantAuthorization(interfaces []APIInterfaceCreateOrUpdateRequest, vpcMap map[uuid.UUID]*cdbm.Vpc, vpcPrefixMap map[uuid.UUID]*cdbm.VpcPrefix) []cdbm.Interface {
+	requested := make([]cdbm.Interface, 0, len(interfaces))
+	for _, ifc := range interfaces {
+		dbIfc := cdbm.Interface{
+			Device:               ifc.Device,
+			DeviceInstance:       ifc.DeviceInstance,
+			VirtualFunctionID:    ifc.VirtualFunctionID,
+			IsPhysical:           ifc.IsPhysical,
+			RequestedIpAddress:   ifc.IPAddress,
+			InlineRoutingProfile: ifc.InlineRoutingProfile.ToDB(),
+		}
+
+		switch {
+		case ifc.VpcID != nil:
+			vpcID, err := uuid.Parse(*ifc.VpcID)
+			if err != nil {
+				continue
+			}
+			vpc, ok := vpcMap[vpcID]
+			if !ok {
+				continue
+			}
+			dbIfc.VpcID = &vpcID
+			dbIfc.Vpc = vpc
+			dbIfc.VpcIPFamilyMode = cutil.GetPtr(ifc.VpcIPFamilyMode())
+		case ifc.VpcPrefixID != nil:
+			vpcPrefixID, err := uuid.Parse(*ifc.VpcPrefixID)
+			if err != nil {
+				continue
+			}
+			vpcPrefix, ok := vpcPrefixMap[vpcPrefixID]
+			if !ok {
+				continue
+			}
+			dbIfc.VpcPrefixID = &vpcPrefixID
+			dbIfc.VpcPrefix = vpcPrefix
+		default:
+			continue
+		}
+
+		requested = append(requested, dbIfc)
+	}
+	return requested
+}
+
 // HasCrossTenantInterface return `true` of the array of Interfaces argument includes at least
 // one non-Deleting Interface that attaches to a different Tenant's VPC or VPC Prefix
 // Returns `false` otherwise

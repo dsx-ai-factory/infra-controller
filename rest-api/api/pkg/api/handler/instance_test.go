@@ -5098,7 +5098,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		require.NoError(t, err)
 		return instance, crossTenantIfc.ID
 	}
-	instCrossTenantUnchanged, _ := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-unchanged", crossTenantVpcUpdateA)
+	instCrossTenantUnchanged, crossTenantIfcUnchangedID := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-unchanged", crossTenantVpcUpdateA)
 	instCrossTenantRemove, crossTenantIfcRemoveID := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-remove", crossTenantVpcUpdateA)
 	instCrossTenantAdd, _ := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-add", nil)
 	instCrossTenantRetarget, _ := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-retarget", crossTenantVpcUpdateA)
@@ -7374,7 +7374,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "unchanged cross-Tenant Interface replacement fails after capability revocation",
+			name: "unchanged cross-Tenant Interface replacement succeeds after capability revocation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -7399,8 +7399,12 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				reqInstance: instCrossTenantUnchanged.ID.String(),
 				reqOrg:      tnOrg1,
 				reqUser:     tnu1,
-				respCode:    http.StatusForbidden,
-				respMessage: cutil.GetPtr("Tenant does not have targetedInstanceCreation capability enabled"),
+				respCode:    http.StatusOK,
+				ethernetReconciliation: &ethernetReconciliationExpectation{
+					rowCount:     2,
+					readyIDs:     []uuid.UUID{crossTenantIfcUnchangedID},
+					pendingCount: 0,
+				},
 			},
 		},
 		{

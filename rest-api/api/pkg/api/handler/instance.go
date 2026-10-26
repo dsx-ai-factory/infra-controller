@@ -2986,11 +2986,18 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		}
 	}
 
-	// Any Interface that selects another Tenant's VPC or VPC Prefix needs targetedInstanceCreation
-	// at the Site, including one a persisted Interface already uses. Check before validating the
-	// selectors, so the errors can't reveal another Tenant's VPC state.
+	// A new Interface identity that selects another Tenant's VPC or VPC Prefix needs
+	// targetedInstanceCreation at the Site. Compare before validating the selectors so
+	// additions and retargeting cannot reveal another Tenant's VPC state. An unchanged
+	// persisted identity remains usable after capability revocation.
 	hasTargetedInstanceCreation := false
-	if model.HasCrossTenantInterface(apiRequest.Interfaces, tenant.ID, interfaceVpcIDMap, vpcPrefixIDMap) {
+	requestedIfcsForAuthorization := model.BuildInterfacesForCrossTenantAuthorization(apiRequest.Interfaces, interfaceVpcIDMap, vpcPrefixIDMap)
+	hasNewCrossTenantInterface, attachmentErr := model.HasNewCrossTenantInterface(tenant.ID, requestedIfcsForAuthorization, existingIfcsForAuthorization)
+	if attachmentErr != nil {
+		logger.Error().Err(attachmentErr).Msg("failed to compare requested and persisted Interface identities")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to authorize cross-Tenant VPC attachments", nil)
+	}
+	if hasNewCrossTenantInterface {
 		hasTargetedInstanceCreation, err = common.TenantHasTargetedInstanceCreation(ctx, nil, uih.dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &site.ID})
 		if err != nil {
 			logger.Error().Err(err).Msg("failed to resolve targetedInstanceCreation capability for cross-Tenant VPC attachment")
