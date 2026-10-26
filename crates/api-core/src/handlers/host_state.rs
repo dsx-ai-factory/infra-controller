@@ -19,6 +19,8 @@
 //! one database snapshot.
 
 use std::collections::BTreeSet;
+#[cfg(test)]
+use std::sync::Arc;
 
 use ::rpc::forge as rpc;
 use ::rpc::model::machine::host_state::{explored_firmware, host_state_from_snapshot};
@@ -31,11 +33,23 @@ use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 use crate::machine_update_manager::host_on_disable_list;
 
+/// Test hook carried in one request's extensions. The handler notifies
+/// `after_snapshot` once the snapshot is read, then waits for `resume` before
+/// the gate read.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct SnapshotReadHook {
+    pub(crate) after_snapshot: Arc<tokio::sync::Notify>,
+    pub(crate) resume: Arc<tokio::sync::Notify>,
+}
+
 pub(crate) async fn find_host_states_by_ids(
     api: &Api,
     request: Request<rpc::HostStatesByIdsRequest>,
 ) -> Result<Response<rpc::HostStateList>, Status> {
     log_request_data(&request);
+    #[cfg(test)]
+    let hook = request.extensions().get::<SnapshotReadHook>().cloned();
     let request = request.into_inner();
 
     let max_find_by_ids = api.runtime_config.max_find_by_ids as usize;
@@ -71,6 +85,11 @@ pub(crate) async fn find_host_states_by_ids(
         .create_snapshot_with_overrides(overrides);
     let mut snapshots =
         db::managed_host::load_compact_by_host_ids(&mut txn, &host_ids, config.host_health).await?;
+    #[cfg(test)]
+    if let Some(hook) = hook {
+        hook.after_snapshot.notify_one();
+        hook.resume.notified().await;
+    }
     let mut gates = db::host_machine_update::find_update_gates(
         &mut txn,
         now,
