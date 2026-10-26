@@ -301,9 +301,13 @@ dependencies = ["check-cargo-home-set", "build-cargo-docker-image"]
 script = '''
 set -e
 if [ -z "$CARGO_HOME" ]; then CARGO_HOME="$HOME/.cargo"; fi
+# Mount only the download caches, not $CARGO_HOME/bin, so host-built Cargo
+# subcommands cannot shadow the container's own tools.
+mkdir -p "${CARGO_HOME}/registry" "${CARGO_HOME}/git"
 docker run --rm \
   -v "${REPO_ROOT}":/code \
-  -v "${CARGO_HOME}":/cargo \
+  -v "${CARGO_HOME}/registry":/cargo/registry \
+  -v "${CARGO_HOME}/git":/cargo/git \
   -w /code \
   -u $(id -u):$(id -g) \
   -e CARGO_HOME=/cargo \
@@ -319,13 +323,17 @@ dependencies = ["check-cargo-home-set", "build-cargo-docker-image"]
 script = '''
 set -e
 if [ -z "$CARGO_HOME" ]; then CARGO_HOME="$HOME/.cargo"; fi
-# Install the lint driver into a root outside the mounted CARGO_HOME, so the
-# container's binary never lands in (or is shadowed by) the host's ~/.cargo/bin.
+# Mount only the download caches, not $CARGO_HOME/bin, so host-built Cargo
+# subcommands cannot shadow the container's own tools.
+mkdir -p "${CARGO_HOME}/registry" "${CARGO_HOME}/git"
+# Install the lint driver into a root outside the mounted caches, so the
+# container's binary never lands in the host's ~/.cargo/bin.
 # Name the nightly toolchain: the stable cargo's library path would leave the
 # lint driver unable to load the nightly compiler's librustc_driver.
 docker run --rm \
   -v "${REPO_ROOT}":/code \
-  -v "${CARGO_HOME}":/cargo \
+  -v "${CARGO_HOME}/registry":/cargo/registry \
+  -v "${CARGO_HOME}/git":/cargo/git \
   -w /code \
   -u $(id -u):$(id -g) \
   -e CARGO_HOME=/cargo \
