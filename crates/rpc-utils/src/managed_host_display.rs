@@ -28,8 +28,8 @@ use itertools::Itertools;
 use rpc::common::DpuMachineIdList;
 // use rpc::forge::forge_server::Forge;
 use rpc::forge::{
-    BmcInfo, ConnectedDevice, GetSiteExplorationRequest, MachineType, ManagedHostQuarantineState,
-    NetworkDevice, NetworkDeviceIdList,
+    BmcEndpoint, BmcInfo, BmcStatus, ConnectedDevice, GetSiteExplorationRequest, MachineType,
+    ManagedHostQuarantineState, NetworkDevice, NetworkDeviceIdList,
 };
 use rpc::machine_discovery::MemoryDeviceGroup;
 use rpc::site_explorer::{EndpointExplorationReport, ExploredEndpoint};
@@ -167,12 +167,13 @@ impl From<Machine> for ManagedHostOutput {
             })
             .unwrap_or((None, None));
 
-        let BmcInfoDisplay {
+        #[allow(deprecated)] // The CLI can connect to older Core versions.
+        let BmcDisplay {
             ip: host_bmc_ip,
             mac: host_bmc_mac,
             version: host_bmc_version,
             firmware_version: host_bmc_firmware_version,
-        } = machine.bmc_info.into();
+        } = (machine.bmc, status.bmc_status, machine.bmc_info).into();
 
         let discovery_info = status.discovery_info;
         let host_gpu_count = discovery_info
@@ -378,12 +379,13 @@ impl ManagedHostAttachedDpu {
             None => (None, None),
         };
 
-        let BmcInfoDisplay {
+        #[allow(deprecated)] // The CLI can connect to older Core versions.
+        let BmcDisplay {
             ip: bmc_ip,
             mac: bmc_mac,
             version: bmc_version,
             firmware_version: bmc_firmware_version,
-        } = dpu_machine.bmc_info.into();
+        } = (dpu_machine.bmc, status.bmc_status, dpu_machine.bmc_info).into();
 
         let DmiDataDisplay {
             product_serial: serial_number,
@@ -468,11 +470,13 @@ pub fn get_managed_host_output(source: ManagedHostMetadata) -> Vec<ManagedHostOu
                         })
                 })
                 .map(|(dpu_id, dpu)| {
-                    let dpu_exploration_report = dpu
-                        .bmc_info
-                        .as_ref()
-                        .and_then(|bmc_info| bmc_info.ip.as_ref())
-                        .and_then(|ip| index.exploration_reports_by_address.remove(ip));
+                    let bmc_ip = match dpu.bmc.as_ref() {
+                        Some(endpoint) => endpoint.ip.as_ref(),
+                        #[allow(deprecated)] // The CLI can connect to older Core versions.
+                        None => dpu.bmc_info.as_ref().and_then(|info| info.ip.as_ref()),
+                    };
+                    let dpu_exploration_report =
+                        bmc_ip.and_then(|ip| index.exploration_reports_by_address.remove(ip));
 
                     let switch_connections = index
                         .switch_connections_by_dpu_id
@@ -630,26 +634,36 @@ pub fn to_time<M: Display>(t: Option<Timestamp>, machine_id: Option<M>) -> Optio
     }
 }
 
-/// Helper to easily turn an Option<BmcInfo> into optional fields for display, without cloning
+/// BMC endpoint and status fields for display, without cloning.
 #[derive(Default)]
-struct BmcInfoDisplay {
+struct BmcDisplay {
     ip: Option<String>,
     mac: Option<String>,
     version: Option<String>,
     firmware_version: Option<String>,
 }
 
-impl From<Option<BmcInfo>> for BmcInfoDisplay {
-    fn from(value: Option<BmcInfo>) -> Self {
-        if let Some(bmc_info) = value {
-            Self {
-                ip: bmc_info.ip.none_if_empty(),
-                mac: bmc_info.mac.none_if_empty(),
-                version: bmc_info.version.none_if_empty(),
-                firmware_version: bmc_info.firmware_version.none_if_empty(),
-            }
-        } else {
-            Self::default()
+impl From<(Option<BmcEndpoint>, Option<BmcStatus>, Option<BmcInfo>)> for BmcDisplay {
+    fn from(
+        (endpoint, status, legacy): (Option<BmcEndpoint>, Option<BmcStatus>, Option<BmcInfo>),
+    ) -> Self {
+        let legacy = legacy.unwrap_or_default();
+        // A present split message is authoritative, including unknown fields.
+        let endpoint = endpoint.unwrap_or(BmcEndpoint {
+            ip: legacy.ip,
+            mac: legacy.mac,
+            port: legacy.port,
+            machine_interface_id: legacy.machine_interface_id,
+        });
+        let status = status.unwrap_or(BmcStatus {
+            version: legacy.version,
+            firmware_version: legacy.firmware_version,
+        });
+        Self {
+            ip: endpoint.ip.none_if_empty(),
+            mac: endpoint.mac.none_if_empty(),
+            version: status.version.none_if_empty(),
+            firmware_version: status.firmware_version.none_if_empty(),
         }
     }
 }
@@ -775,6 +789,116 @@ mod tests {
         })
         .host_memory;
         assert_eq!(host_memory, Some("32 GiB (16 GiBx2)".to_string()));
+    }
+
+    #[test]
+    #[allow(deprecated)] // Exercise responses from Core before the BMC split.
+    fn machine_displays_use_bmc_endpoint_and_status() {
+        let endpoint = BmcEndpoint {
+            ip: Some("192.0.2.10".into()),
+            mac: Some("02:03:04:05:06:07".into()),
+            ..Default::default()
+        };
+        let status = BmcStatus {
+            version: Some("2.0".into()),
+            firmware_version: Some("24.10".into()),
+        };
+        let legacy = BmcInfo {
+            ip: Some("192.0.2.20".into()),
+            mac: Some("02:03:04:05:06:08".into()),
+            version: Some("1.0".into()),
+            firmware_version: Some("23.10".into()),
+            ..Default::default()
+        };
+        let new_values = (
+            Some("192.0.2.10"),
+            Some("02:03:04:05:06:07"),
+            Some("2.0"),
+            Some("24.10"),
+        );
+        let old_values = (
+            Some("192.0.2.20"),
+            Some("02:03:04:05:06:08"),
+            Some("1.0"),
+            Some("23.10"),
+        );
+        for (scenario, bmc, bmc_status, bmc_info, expected) in [
+            (
+                "split only",
+                Some(endpoint.clone()),
+                Some(status.clone()),
+                None,
+                new_values,
+            ),
+            (
+                "split messages win",
+                Some(endpoint.clone()),
+                Some(status.clone()),
+                Some(legacy.clone()),
+                new_values,
+            ),
+            ("legacy only", None, None, Some(legacy.clone()), old_values),
+            (
+                "legacy status",
+                Some(endpoint),
+                None,
+                Some(legacy.clone()),
+                (new_values.0, new_values.1, old_values.2, old_values.3),
+            ),
+            (
+                "legacy endpoint",
+                None,
+                Some(status),
+                Some(legacy.clone()),
+                (old_values.0, old_values.1, new_values.2, new_values.3),
+            ),
+            (
+                "empty split messages win",
+                Some(BmcEndpoint::default()),
+                Some(BmcStatus::default()),
+                Some(legacy),
+                (None, None, None, None),
+            ),
+            (
+                "missing BMC fields",
+                None,
+                None,
+                None,
+                (None, None, None, None),
+            ),
+        ] {
+            let machine = Machine {
+                bmc,
+                bmc_info,
+                status: Some(rpc::forge::MachineStatus {
+                    bmc_status,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let host = ManagedHostOutput::from(machine.clone());
+            let dpu = ManagedHostAttachedDpu::new_from_dpu_machine(machine, vec![], None, true);
+            assert_eq!(
+                (
+                    host.host_bmc_ip.as_deref(),
+                    host.host_bmc_mac.as_deref(),
+                    host.host_bmc_version.as_deref(),
+                    host.host_bmc_firmware_version.as_deref()
+                ),
+                expected,
+                "{scenario}: host display"
+            );
+            assert_eq!(
+                (
+                    dpu.bmc_ip.as_deref(),
+                    dpu.bmc_mac.as_deref(),
+                    dpu.bmc_version.as_deref(),
+                    dpu.bmc_firmware_version.as_deref()
+                ),
+                expected,
+                "{scenario}: DPU display"
+            );
+        }
     }
 
     #[test]

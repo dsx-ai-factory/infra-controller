@@ -372,7 +372,14 @@ fn machine_component_inventory(
             machine_id: Some(machine_id),
             ..machine_data(machine)
         }),
-        bmc_mac: inventory_bmc_mac(machine.bmc_info.as_ref()),
+        bmc_mac: match machine.bmc.as_ref() {
+            Some(bmc) => bmc
+                .mac
+                .as_deref()
+                .and_then(|mac| MacAddress::from_str(mac).ok()),
+            #[allow(deprecated)] // The health service can connect to older Core versions.
+            None => inventory_bmc_mac(machine.bmc_info.as_ref()),
+        },
     }))
 }
 
@@ -867,12 +874,15 @@ impl ApiEndpointSource {
         &self,
         machine: &rpc::forge::Machine,
     ) -> Result<Arc<BmcEndpoint>, HealthError> {
-        let Some(bmc_info) = &machine.bmc_info else {
-            return Err(HealthError::GenericError(
-                "Could not extract machine endpoint without BMC Info".to_string(),
-            ));
+        let addr = match machine.bmc.as_ref() {
+            Some(endpoint) => BmcAddr::try_from(endpoint)?,
+            #[allow(deprecated)] // The health service can connect to older Core versions.
+            None => BmcAddr::try_from(machine.bmc_info.as_ref().ok_or_else(|| {
+                HealthError::GenericError(
+                    "Could not extract machine endpoint without a BMC endpoint".to_string(),
+                )
+            })?)?,
         };
-        let addr = BmcAddr::try_from(bmc_info)?;
         let metadata = machine
             .id
             .map(|_| EndpointMetadata::Machine(machine_data(machine)));
@@ -1078,28 +1088,47 @@ impl TryFrom<&rpc::forge::BmcInfo> for BmcAddr {
     type Error = HealthError;
 
     fn try_from(bmc_info: &rpc::forge::BmcInfo) -> Result<Self, Self::Error> {
-        let ip = bmc_info
-            .ip
-            .as_ref()
-            .ok_or_else(|| HealthError::GenericError("missing BMC IP address".to_string()))?
-            .parse::<IpAddr>()
-            .map_err(|error| HealthError::GenericError(error.to_string()))?;
-        let mac = bmc_info
-            .mac
-            .as_ref()
-            .ok_or_else(|| HealthError::GenericError("missing BMC MAC address".to_string()))
-            .and_then(|mac| {
-                MacAddress::from_str(mac)
-                    .map_err(|error| HealthError::GenericError(error.to_string()))
-            })?;
-        let port = bmc_info.port.map(|port| port.try_into().unwrap_or(443));
-
-        Ok(Self {
-            ip,
-            port,
-            mac: Some(mac),
-        })
+        bmc_addr(
+            bmc_info.ip.as_deref(),
+            bmc_info.mac.as_deref(),
+            bmc_info.port,
+        )
     }
+}
+
+impl TryFrom<&rpc::forge::BmcEndpoint> for BmcAddr {
+    type Error = HealthError;
+
+    fn try_from(endpoint: &rpc::forge::BmcEndpoint) -> Result<Self, Self::Error> {
+        bmc_addr(
+            endpoint.ip.as_deref(),
+            endpoint.mac.as_deref(),
+            endpoint.port,
+        )
+    }
+}
+
+fn bmc_addr(
+    ip: Option<&str>,
+    mac: Option<&str>,
+    port: Option<u32>,
+) -> Result<BmcAddr, HealthError> {
+    let ip = ip
+        .ok_or_else(|| HealthError::GenericError("missing BMC IP address".to_string()))?
+        .parse::<IpAddr>()
+        .map_err(|error| HealthError::GenericError(error.to_string()))?;
+    let mac = mac
+        .ok_or_else(|| HealthError::GenericError("missing BMC MAC address".to_string()))
+        .and_then(|mac| {
+            MacAddress::from_str(mac).map_err(|error| HealthError::GenericError(error.to_string()))
+        })?;
+    let port = port.map(|port| port.try_into().unwrap_or(443));
+
+    Ok(BmcAddr {
+        ip,
+        port,
+        mac: Some(mac),
+    })
 }
 
 impl TryFrom<&rpc::forge::SwitchNvosInfo> for BmcAddr {
@@ -1404,12 +1433,112 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // Exercise responses from Core before the BMC split.
+    fn machine_endpoint_and_inventory_bmc_compatibility() {
+        let source = ApiEndpointSource::new(
+            Arc::new(ApiClientWrapper::new(
+                "test-ca.pem".to_string(),
+                "test-client.pem".to_string(),
+                "test-client-key.pem".to_string(),
+                &Url::parse("https://127.0.0.1:1079").expect("valid API URL"),
+            )),
+            reqwest(),
+            None,
+            10,
+            None,
+        );
+        let endpoint = rpc::forge::BmcEndpoint {
+            ip: Some("2001:db8::10".into()),
+            mac: Some(test_mac().to_string()),
+            port: Some(8443),
+            ..Default::default()
+        };
+        let legacy = rpc::forge::BmcInfo {
+            ip: Some("192.0.2.20".into()),
+            mac: Some("02:03:04:05:06:08".into()),
+            port: Some(443),
+            ..Default::default()
+        };
+        for (scenario, bmc, bmc_info, expected, expected_mac) in [
+            (
+                "split only",
+                Some(endpoint.clone()),
+                None,
+                Ok(("2001:db8::10", Some(8443))),
+                Some(test_mac()),
+            ),
+            (
+                "split wins over legacy",
+                Some(endpoint),
+                Some(legacy.clone()),
+                Ok(("2001:db8::10", Some(8443))),
+                Some(test_mac()),
+            ),
+            (
+                "legacy only",
+                None,
+                Some(legacy.clone()),
+                Ok(("192.0.2.20", Some(443))),
+                Some("02:03:04:05:06:08".parse().unwrap()),
+            ),
+            (
+                "empty split message is authoritative",
+                Some(rpc::forge::BmcEndpoint::default()),
+                Some(legacy.clone()),
+                Err("generic error: missing BMC IP address"),
+                None,
+            ),
+            (
+                "missing split MAC does not fall back",
+                Some(rpc::forge::BmcEndpoint {
+                    ip: Some("2001:db8::10".into()),
+                    ..Default::default()
+                }),
+                Some(legacy),
+                Err("generic error: missing BMC MAC address"),
+                None,
+            ),
+            (
+                "missing both messages",
+                None,
+                None,
+                Err("generic error: Could not extract machine endpoint without a BMC endpoint"),
+                None,
+            ),
+        ] {
+            let machine = rpc::forge::Machine {
+                id: Some(test_machine_id()),
+                rack_id: Some(RackId::new("RACK_1")),
+                bmc,
+                bmc_info,
+                ..Default::default()
+            };
+            let actual = source
+                .extract_machine_endpoint(&machine)
+                .map(|endpoint| {
+                    (
+                        endpoint.addr.ip.to_string(),
+                        endpoint.addr.port,
+                        endpoint.addr.mac,
+                    )
+                })
+                .map_err(|error| error.to_string());
+            let expected = expected
+                .map(|(ip, port)| (ip.to_string(), port, expected_mac))
+                .map_err(str::to_string);
+            assert_eq!(actual, expected, "{scenario}: endpoint");
+            let inventory = machine_component_inventory(&machine).unwrap().unwrap();
+            assert_eq!(inventory.bmc_mac, expected_mac, "{scenario}: inventory");
+        }
+    }
+
+    #[test]
     fn authoritative_component_inventory_does_not_require_bmc_endpoint() {
         let rack_id = RackId::new("RACK_1");
         let machine = machine_component_inventory(&rpc::forge::Machine {
             id: Some(test_machine_id()),
             rack_id: Some(rack_id.clone()),
-            bmc_info: Some(rpc::forge::BmcInfo {
+            bmc: Some(rpc::forge::BmcEndpoint {
                 mac: Some("not-a-mac".to_string()),
                 ..Default::default()
             }),

@@ -463,8 +463,9 @@ struct MachineDetail<'a> {
     ib_interfaces: Vec<MachineIbInterfaceDisplay>,
     inventory: Vec<MachineInventorySoftwareComponent>,
     health_detail: super::HealthDetail,
-    bmc_info: Option<rpc::forge::BmcInfo>,
-    has_complete_bmc_info: bool,
+    bmc: Option<rpc::forge::BmcEndpoint>,
+    bmc_status: Option<rpc::forge::BmcStatus>,
+    has_complete_bmc_endpoint: bool,
     discovery_info_json: String,
     metadata_detail: super::MetadataDetail,
     capabilities: Vec<MachineCapability>,
@@ -967,10 +968,10 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
             status.health,
             status.health_sources,
         );
-        let has_complete_bmc_info = m
-            .bmc_info
+        let has_complete_bmc_endpoint = m
+            .bmc
             .as_ref()
-            .is_some_and(|bmc_info| bmc_info.ip.is_some() && bmc_info.mac.is_some());
+            .is_some_and(|bmc_endpoint| bmc_endpoint.ip.is_some() && bmc_endpoint.mac.is_some());
 
         MachineDetail {
             id: machine_id.clone(),
@@ -990,8 +991,9 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
             machine_type: get_machine_type(&machine_id),
             is_host,
             network_config: String::new(), // filled in later
-            bmc_info: m.bmc_info,
-            has_complete_bmc_info,
+            bmc: m.bmc,
+            bmc_status: status.bmc_status,
+            has_complete_bmc_endpoint,
             history,
             bios_version,
             board_version,
@@ -1578,6 +1580,63 @@ pub(super) async fn reconcile_boot_interface(
 
 impl super::Base for MachineShow {}
 impl<'a> super::Base for MachineDetail<'a> {}
+
+#[cfg(test)]
+mod machine_detail_tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    #[test]
+    fn bmc_endpoint_and_status_render_independently() {
+        let endpoint = forgerpc::BmcEndpoint {
+            ip: Some("192.0.2.10".to_string()),
+            mac: Some("02:03:04:05:06:07".to_string()),
+            ..Default::default()
+        };
+        let status = forgerpc::BmcStatus {
+            version: Some("BMC-2.0".to_string()),
+            firmware_version: Some("FW-24.10".to_string()),
+        };
+        value_scenarios!(run = |(bmc, bmc_status)| {
+            let display = MachineDetail::from(forgerpc::Machine {
+                bmc,
+                status: Some(forgerpc::MachineStatus {
+                    bmc_status,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            let html = display.render().expect("machine detail renders");
+            let bmc_section = html
+                .split_once("<h3 id=\"bmc_info_view\">BMC</h3>")
+                .unwrap().1
+                .split_once("<h3>Discovery Info</h3>")
+                .unwrap().0;
+            (
+                bmc_section.contains("<th>IP</th>"),
+                bmc_section.contains("<th>Version</th>"),
+                bmc_section.contains("<th>Firmware Version</th>"),
+                bmc_section.contains("id=\"powercontrol_action\""),
+                bmc_section.contains("id=\"bmcreset_action\""),
+                bmc_section.contains("Missing BMC Data"),
+            )
+        };
+            "endpoint and status show details, versions, and actions" {
+                (Some(endpoint.clone()), Some(status.clone())) => (true, true, true, true, true, false),
+            }
+            "endpoint without status retains details and actions" {
+                (Some(endpoint), None) => (true, false, false, true, true, false),
+            }
+            "status without endpoint shows versions without actions" {
+                (None, Some(status)) => (false, true, true, false, false, false),
+            }
+            "neither endpoint nor status shows the empty state" {
+                (None, None) => (false, false, false, false, false, true),
+            }
+        );
+    }
+}
 
 #[cfg(test)]
 mod boot_interface_display_tests {

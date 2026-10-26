@@ -77,9 +77,12 @@ async fn fetch_bmc_credentials(pool: PgPool) {
     let (env, mh) = init(pool).await;
     let host_bmc_mac = mh.host.bmc_mac;
     let host_machine = mh.host.rpc_machine().await;
-    let bmc_info = host_machine.bmc_info.clone().unwrap();
-    assert_eq!(bmc_info.mac, Some(host_bmc_mac.to_string()));
-    let host_bmc_ip = bmc_info.ip.clone().expect("Host BMC IP must be available");
+    let bmc_endpoint = host_machine.bmc.clone().unwrap();
+    assert_eq!(bmc_endpoint.mac, Some(host_bmc_mac.to_string()));
+    let host_bmc_ip = bmc_endpoint
+        .ip
+        .clone()
+        .expect("Host BMC IP must be available");
 
     for request in vec![
         rpc::forge::BmcMetaDataGetRequest {
@@ -128,9 +131,9 @@ async fn test_fetch_ssh_serial_console_metadata(pool: PgPool) {
     let (env, mh) = init(pool).await;
     let host_machine = mh.host.rpc_machine().await;
     let host_bmc_ip = host_machine
-        .bmc_info
+        .bmc
         .as_ref()
-        .and_then(|bmc_info| bmc_info.ip.clone())
+        .and_then(|bmc_endpoint| bmc_endpoint.ip.clone())
         .expect("Host BMC IP must be available");
 
     let mut txn = env.db_txn().await;
@@ -166,9 +169,9 @@ async fn test_fetch_ssh_serial_console_metadata_ignores_invalid_ports(pool: PgPo
     let (env, mh) = init(pool).await;
     let host_machine = mh.host.rpc_machine().await;
     let host_bmc_ip = host_machine
-        .bmc_info
+        .bmc
         .as_ref()
-        .and_then(|bmc_info| bmc_info.ip.clone())
+        .and_then(|bmc_endpoint| bmc_endpoint.ip.clone())
         .expect("Host BMC IP must be available");
     let host_bmc_ip = IpAddr::from_str(&host_bmc_ip).expect("invalid host IP");
 
@@ -210,9 +213,12 @@ async fn test_fetch_ipmi_metadata(pool: PgPool) {
     let (env, mh) = init(pool).await;
     let host_bmc_mac = mh.host.bmc_mac;
     let host_machine = mh.host.rpc_machine().await;
-    let bmc_info = host_machine.bmc_info.clone().unwrap();
-    assert_eq!(bmc_info.mac, Some(host_bmc_mac.to_string()));
-    let host_bmc_ip = bmc_info.ip.clone().expect("Host BMC IP must be available");
+    let bmc_endpoint = host_machine.bmc.clone().unwrap();
+    assert_eq!(bmc_endpoint.mac, Some(host_bmc_mac.to_string()));
+    let host_bmc_ip = bmc_endpoint
+        .ip
+        .clone()
+        .expect("Host BMC IP must be available");
 
     let mut txn = env.db_txn().await;
     sqlx::query(
@@ -251,9 +257,9 @@ async fn test_fetch_ipmi_metadata_ignores_invalid_ports(pool: PgPool) {
     let (env, mh) = init(pool).await;
     let host_machine = mh.host.rpc_machine().await;
     let host_bmc_ip = host_machine
-        .bmc_info
+        .bmc
         .as_ref()
-        .and_then(|bmc_info| bmc_info.ip.clone())
+        .and_then(|bmc_endpoint| bmc_endpoint.ip.clone())
         .expect("Host BMC IP must be available");
     let host_bmc_ip = IpAddr::from_str(&host_bmc_ip).expect("invalid host IP");
 
@@ -293,9 +299,12 @@ async fn test_fetch_ipmi_metadata_null_vendor(pool: PgPool) {
     let (env, mh) = init(pool).await;
     let host_bmc_mac = mh.host.bmc_mac;
     let host_machine = mh.host.rpc_machine().await;
-    let bmc_info = host_machine.bmc_info.clone().unwrap();
-    assert_eq!(bmc_info.mac, Some(host_bmc_mac.to_string()));
-    let host_bmc_ip = bmc_info.ip.clone().expect("Host BMC IP must be available");
+    let bmc_endpoint = host_machine.bmc.clone().unwrap();
+    assert_eq!(bmc_endpoint.mac, Some(host_bmc_mac.to_string()));
+    let host_bmc_ip = bmc_endpoint
+        .ip
+        .clone()
+        .expect("Host BMC IP must be available");
 
     // Set the Vendor to a null string to test handling
     let query = "UPDATE explored_endpoints SET exploration_report = jsonb_set(exploration_report, '{Vendor}', 'null'::jsonb) WHERE address = $1";

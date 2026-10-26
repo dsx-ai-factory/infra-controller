@@ -296,7 +296,7 @@ async fn redfish_browse_reports_http_failures_and_preserves_successes(pool: PgPo
         .host()
         .rpc_machine()
         .await
-        .bmc_info
+        .bmc
         .expect("host BMC")
         .ip()
         .to_string();
@@ -472,7 +472,7 @@ async fn redfish_browse_body_read_failure_reports_status_and_preserves_rpc_error
         .host()
         .rpc_machine()
         .await
-        .bmc_info
+        .bmc
         .expect("host BMC")
         .ip()
         .to_string();
@@ -542,7 +542,7 @@ async fn redfish_browse_core_proxy_preserves_credential_ownership_and_diagnostic
         .host()
         .rpc_machine()
         .await
-        .bmc_info
+        .bmc
         .expect("host BMC")
         .ip()
         .to_string();
@@ -632,7 +632,7 @@ async fn failed_claim_commit_does_not_dispatch_and_same_action_can_retry(pool: P
         .host()
         .rpc_machine()
         .await
-        .bmc_info
+        .bmc
         .expect("host BMC")
         .ip()
         .to_string();

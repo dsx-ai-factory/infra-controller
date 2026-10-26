@@ -439,6 +439,34 @@ func (abmc *APIBMCInfo) FromProto(protoBmcInfo *corev1.BmcInfo) {
 	abmc.FirmwareRevision = protoBmcInfo.FirmwareVersion
 }
 
+// newAPIBMCInfoFromMachine preserves the REST shape across Core versions.
+func newAPIBMCInfoFromMachine(protoMachine *corev1.Machine) *APIBMCInfo {
+	bmc := protoMachine.GetBmc()
+	bmcStatus := protoMachine.GetStatus().GetBmcStatus()
+	legacyBmc := protoMachine.GetBmcInfo() //nolint:staticcheck // Support Core versions before the BMC split.
+	var info *APIBMCInfo
+	if bmc != nil || bmcStatus != nil || legacyBmc != nil {
+		info = &APIBMCInfo{}
+		// A present split message is authoritative, even when its fields are unknown.
+		if bmc != nil {
+			info.IP = bmc.Ip
+			info.Mac = bmc.Mac
+		} else if legacyBmc != nil {
+			info.IP = legacyBmc.Ip
+			info.Mac = legacyBmc.Mac
+		}
+		if bmcStatus != nil {
+			info.Version = bmcStatus.Version
+			info.FirmwareRevision = bmcStatus.FirmwareVersion
+		} else if legacyBmc != nil {
+			info.Version = legacyBmc.Version
+			info.FirmwareRevision = legacyBmc.FirmwareVersion
+		}
+	}
+
+	return info
+}
+
 // APIMachineGPUInfo is the data structure to capture API representation of a Machine's GPU Info
 type APIMachineGPUInfo struct {
 	// Name of the Machine's GPU
@@ -660,10 +688,7 @@ func (m *APIMachineMetadata) FromProto(machine *corev1.Machine) {
 		return
 	}
 
-	if machine.BmcInfo != nil {
-		m.BMCInfo = &APIBMCInfo{}
-		m.BMCInfo.FromProto(machine.BmcInfo)
-	}
+	m.BMCInfo = newAPIBMCInfoFromMachine(machine)
 
 	discoveryInfo := machine.GetStatus().GetDiscoveryInfo()
 	if discoveryInfo != nil {

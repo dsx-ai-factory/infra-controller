@@ -95,7 +95,7 @@ async fn test_create_and_approve_action(_: PgPoolOptions, options: PgConnectOpti
         .host
         .rpc_machine()
         .await
-        .bmc_info
+        .bmc
         .as_ref()
         .unwrap()
         .ip()
@@ -238,7 +238,7 @@ async fn test_action_with_equivalent_ipv6_addresses(_: PgPoolOptions, options: P
     let env = create_test_env(pool).await;
     let mh = create_managed_host(&env).await;
     let machine = mh.host.rpc_machine().await;
-    let bmc_ip = machine.bmc_info.as_ref().unwrap().ip();
+    let bmc_ip = machine.bmc.as_ref().unwrap().ip();
     let mut txn = env.harness.db_txn().await;
     let bmc_interface =
         db::machine_interface_address::find_by_address(&mut *txn, bmc_ip.parse().unwrap())
@@ -323,7 +323,7 @@ async fn test_action_failure_at_bmc_request(_: PgPoolOptions, options: PgConnect
         .host
         .rpc_machine()
         .await
-        .bmc_info
+        .bmc
         .as_ref()
         .unwrap()
         .ip()
@@ -381,7 +381,7 @@ async fn test_action_failure_at_client_creation(_: PgPoolOptions, options: PgCon
         .host
         .rpc_machine()
         .await
-        .bmc_info
+        .bmc
         .as_ref()
         .unwrap()
         .ip()

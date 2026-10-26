@@ -364,6 +364,8 @@ impl<ID: MachineIdSubtypeTrait> From<model::machine::Machine<ID>> for rpc::forge
                 .collect(),
         };
 
+        let bmc = rpc::forge::BmcEndpoint::from(&machine.status.bmc_info);
+
         // -- Build the new structured status sub-message --
         let status_msg = rpc::forge::MachineStatus {
             interfaces: interfaces_rpc,
@@ -406,6 +408,7 @@ impl<ID: MachineIdSubtypeTrait> From<model::machine::Machine<ID>> for rpc::forge
                 .map(|s| s.into()),
             last_scout_observed_version: machine.status.last_scout_observed_version.clone(),
             instance_network_restrictions,
+            bmc_status: Some((&machine.status.bmc_info).into()),
             lifecycle: Some(rpc::forge::LifecycleStatus {
                 state: rpc_state.clone(),
                 version: rpc_state_version.clone(),
@@ -414,6 +417,7 @@ impl<ID: MachineIdSubtypeTrait> From<model::machine::Machine<ID>> for rpc::forge
             }),
         };
 
+        #[allow(deprecated)] // Populate the legacy BMC field for older clients.
         rpc::Machine {
             id: Some(machine_id),
             rack_id: machine.rack_id.clone(),
@@ -430,6 +434,7 @@ impl<ID: MachineIdSubtypeTrait> From<model::machine::Machine<ID>> for rpc::forge
                 .map(|event| event.into())
                 .collect(),
             bmc_info: Some(machine.status.bmc_info.into()),
+            bmc: Some(bmc),
             inventory: Some(machine.status.inventory.unwrap_or_default().into()),
             state_reason: rpc_state_reason,
             placement_in_rack,
@@ -683,6 +688,8 @@ fn machine_instance_network_restrictions(
 
 #[cfg(test)]
 mod test {
+    use carbide_test_support::{Check, check_values};
+    use model::bmc_info::BmcInfo;
     use model::machine::{ManagedHostStateSnapshot, slas, state_sla};
     use model::test_support::machine_snapshot;
 
@@ -762,6 +769,76 @@ mod test {
             restrictions.network_segment_ids.sort();
         }
         machine
+    }
+
+    #[test]
+    #[allow(deprecated)] // Verify the compatibility field remains populated.
+    fn machine_bmc_fields_preserve_values_and_legacy_info() {
+        let interface_id = uuid::Uuid::from_u128(42).into();
+        check_values(
+            [
+                Check {
+                    scenario: "connection details and observed versions are separated",
+                    input: BmcInfo {
+                        ip: Some("2001:db8::10".parse().unwrap()),
+                        mac: Some("02:03:04:05:06:07".parse().unwrap()),
+                        port: Some(8443),
+                        machine_interface_id: Some(interface_id),
+                        version: Some("2.0".to_string()),
+                        firmware_version: Some("24.10".to_string()),
+                    },
+                    expect: (
+                        rpc::forge::BmcEndpoint {
+                            ip: Some("2001:db8::10".to_string()),
+                            mac: Some("02:03:04:05:06:07".to_string()),
+                            port: Some(8443),
+                            machine_interface_id: Some(interface_id),
+                        },
+                        rpc::forge::BmcStatus {
+                            version: Some("2.0".to_string()),
+                            firmware_version: Some("24.10".to_string()),
+                        },
+                    ),
+                },
+                Check {
+                    scenario: "observed versions do not require known connection details",
+                    input: BmcInfo {
+                        firmware_version: Some("24.10".to_string()),
+                        ..Default::default()
+                    },
+                    expect: (
+                        rpc::forge::BmcEndpoint::default(),
+                        rpc::forge::BmcStatus {
+                            firmware_version: Some("24.10".to_string()),
+                            ..Default::default()
+                        },
+                    ),
+                },
+                Check {
+                    scenario: "unknown fields remain absent without inferred defaults",
+                    input: BmcInfo::default(),
+                    expect: (
+                        rpc::forge::BmcEndpoint::default(),
+                        rpc::forge::BmcStatus::default(),
+                    ),
+                },
+            ],
+            |bmc_info| {
+                let expected_legacy = rpc::forge::BmcInfo::from(bmc_info.clone());
+                let mut machine = machine_snapshot::host_machine();
+                machine.status.bmc_info = bmc_info;
+                let machine = rpc::Machine::from(machine);
+                assert_eq!(machine.bmc_info, Some(expected_legacy));
+                (
+                    machine.bmc.expect("BMC endpoint is populated"),
+                    machine
+                        .status
+                        .expect("machine status is populated")
+                        .bmc_status
+                        .expect("BMC status is populated"),
+                )
+            },
+        );
     }
 
     #[test]

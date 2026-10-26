@@ -115,7 +115,8 @@ func machineDetailFromPb(machine *corev1.Machine) MachineDetail {
 		UpdateComplete: status.GetUpdateComplete(),
 	}
 	for _, dpuID := range status.GetAssociatedDpuMachineIds() {
-		if id := dpuID.GetId(); id != "" {
+		id := dpuID.GetId()
+		if id != "" {
 			detail.AssociatedDpuMachineIDs = append(detail.AssociatedDpuMachineIDs, id)
 		}
 	}
@@ -126,17 +127,22 @@ func machineDetailFromPb(machine *corev1.Machine) MachineDetail {
 		detail.ChassisSerial = &serial
 	}
 
-	// BMC info
-	if machine.BmcInfo != nil {
-		if machine.BmcInfo.Ip != nil {
-			detail.BmcIP = *machine.BmcInfo.Ip
-		}
-		if machine.BmcInfo.Mac != nil {
-			detail.BmcMac = *machine.BmcInfo.Mac
-		}
-		if machine.BmcInfo.FirmwareVersion != nil {
-			detail.FirmwareVersion = *machine.BmcInfo.FirmwareVersion
-		}
+	// Prefer each split message, even when its values are unknown. Older Core
+	// versions omit these messages and expose only the combined BMC info.
+	bmc := machine.GetBmc()
+	if bmc != nil {
+		detail.BmcIP = bmc.GetIp()
+		detail.BmcMac = bmc.GetMac()
+	} else {
+		legacyBmc := machine.GetBmcInfo() //nolint:staticcheck // Support Core versions before the BMC split.
+		detail.BmcIP = legacyBmc.GetIp()
+		detail.BmcMac = legacyBmc.GetMac()
+	}
+	bmcStatus := status.GetBmcStatus()
+	if bmcStatus != nil {
+		detail.FirmwareVersion = bmcStatus.GetFirmwareVersion()
+	} else {
+		detail.FirmwareVersion = machine.GetBmcInfo().GetFirmwareVersion() //nolint:staticcheck // Support Core versions before the BMC split.
 	}
 
 	// Health status - derived from alerts
