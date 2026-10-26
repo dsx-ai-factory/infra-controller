@@ -2583,6 +2583,7 @@ dependencies = [
 name = "carbide-machine-a-tron"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "axum",
  "base64",
  "bmc-mock",
@@ -2623,6 +2624,7 @@ dependencies = [
  "tokio-util",
  "toml 1.1.2+spec-1.1.0",
  "tonic",
+ "tonic-client-wrapper 0.1.0",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -11878,6 +11880,7 @@ dependencies = [
  "futures-core",
  "futures-io",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "slab",
  "tokio",
