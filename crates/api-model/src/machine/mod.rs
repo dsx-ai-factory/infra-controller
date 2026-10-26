@@ -259,6 +259,22 @@ pub enum NotAllocatableReason {
     HealthAlert(Box<health_report::HealthProbeAlert>),
 }
 
+impl NotAllocatableReason {
+    /// The stable snake_case code reported by the API.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidState(_) => "invalid_state",
+            Self::PendingInstanceCreation => "pending_instance_creation",
+            Self::PendingDecommission => "pending_decommission",
+            Self::PendingBootConfiguration => "pending_boot_configuration",
+            Self::DpuReprovisioningStarted => "dpu_reprovisioning_started",
+            Self::NoDpuSnapshots => "no_dpu_snapshots",
+            Self::MaintenanceMode => "maintenance_mode",
+            Self::HealthAlert(_) => "health_alert",
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ManagedHostStateSnapshotError {
     #[error(transparent)]
@@ -505,6 +521,11 @@ impl ManagedHostStateSnapshot {
     /// - no pending or operator maintenance, even when `allow_unhealthy` is true
     /// - the desired boot-interface generation to have a matching observation
     /// - no started DPU reprovision request, even when `allow_unhealthy` is true
+    ///
+    /// `FindHostStatesByIds` also runs this on a compact snapshot that blanks
+    /// host topology, interface addresses and vendors, DPU interfaces,
+    /// topology and BMC info, NIC firmware, power options and SKU device type.
+    /// A new input from those parts must be loaded by the compact query too.
     pub fn is_usable_as_instance(&self, allow_unhealthy: bool) -> Result<(), NotAllocatableReason> {
         // TODO: allow other states than Ready when allow_unhealthy=true. Will require changes to state machine (see Matthias).
         if !matches!(self.managed_state, ManagedHostState::Ready) {
@@ -572,6 +593,8 @@ impl ManagedHostStateSnapshot {
 
     /// Derives the aggregate health of the Managed Host based on individual
     /// health reports
+    ///
+    /// Also runs on the compact snapshot, see [`Self::is_usable_as_instance`].
     pub fn derive_aggregate_health(&mut self, host_health_config: HostHealthConfig) {
         let source = "aggregate-host-health".to_string();
         let observed_at = Some(chrono::Utc::now());
@@ -4480,6 +4503,37 @@ mod tests {
                     FailsWith(NotAllocatableReason::DpuReprovisioningStarted),
             }
         );
+    }
+
+    #[test]
+    fn not_allocatable_reason_codes_are_stable_and_unique() {
+        let alert = alert_with_classifications(vec![]);
+        let codes = [
+            NotAllocatableReason::InvalidState(Box::new(ManagedHostState::Ready)),
+            NotAllocatableReason::PendingInstanceCreation,
+            NotAllocatableReason::PendingDecommission,
+            NotAllocatableReason::PendingBootConfiguration,
+            NotAllocatableReason::DpuReprovisioningStarted,
+            NotAllocatableReason::NoDpuSnapshots,
+            NotAllocatableReason::MaintenanceMode,
+            NotAllocatableReason::HealthAlert(Box::new(alert)),
+        ]
+        .map(|reason| reason.code());
+
+        assert_eq!(
+            codes,
+            [
+                "invalid_state",
+                "pending_instance_creation",
+                "pending_decommission",
+                "pending_boot_configuration",
+                "dpu_reprovisioning_started",
+                "no_dpu_snapshots",
+                "maintenance_mode",
+                "health_alert",
+            ]
+        );
+        assert_eq!(HashSet::from(codes).len(), codes.len());
     }
 
     /// A fixture DPU reporting `factory_mac`, or without hardware info.
