@@ -28,6 +28,17 @@ tests:
             name: CERT_AUTH_MODE
             value: AUDIT
       - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CERT_AUTH_CLIENT_CA_FILE
+            value: ""
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 2
+      - lengthEqual:
+          path: spec.template.spec.containers[0].volumeMounts
+          count: 2
+      - contains:
           path: spec.template.spec.containers[0].args
           content: --dns-name=nico-rest-cert-manager
       - contains:
@@ -132,3 +143,19 @@ tests:
     asserts:
       - failedTemplate:
           errorMessage: authorization.clientCaSecretName and clientCaFile are mutually exclusive
+
+  - it: preserves a client CA path in an existing mount
+    set:
+      authorization.clientCaFile: /etc/pki/ca/tls.crt
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CERT_AUTH_CLIENT_CA_FILE
+            value: /etc/pki/ca/tls.crt
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 2
+      - lengthEqual:
+          path: spec.template.spec.containers[0].volumeMounts
+          count: 2

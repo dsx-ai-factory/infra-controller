@@ -457,7 +457,6 @@ kubectl -n "$NAMESPACE" get secret "$CM_CLIENT_SECRET" \
 kubectl -n "$NAMESPACE" get secret "$CM_CLIENT_SECRET" \
     -o jsonpath='{.data.tls\.key}' | base64 -d > "$CM_CLIENT_DIR/tls.key"
 chmod 600 "$CM_CLIENT_DIR/tls.key"
-AUTH_CHECK_START=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 ISSUE_RESP=$(curl -sSf --cacert "$CM_CA_FILE" --noproxy "$CM_SERVER_NAME" \
     --cert "$CM_CLIENT_DIR/tls.crt" --key "$CM_CLIENT_DIR/tls.key" \
     --resolve "$CM_SERVER_NAME:18000:127.0.0.1" \
@@ -477,9 +476,10 @@ else
 fi
 
 # AUDIT also issues certificates to rejected callers, so verify admission separately.
-CM_CLIENT_IDENTITY=$(openssl x509 -in "$CM_CLIENT_DIR/tls.crt" -noout -ext subjectAltName | sed -n 's/.*URI:\([^, ]*\).*/\1/p')
-if [[ -n "$CM_CLIENT_IDENTITY" ]] && kubectl -n "$NAMESPACE" logs deployment/nico-rest-cert-manager \
-    --since-time="$AUTH_CHECK_START" | awk -v identity="$CM_CLIENT_IDENTITY" '
+CM_CLIENT_IDENTITY=$(openssl x509 -in "$CM_CLIENT_DIR/tls.crt" -noout -text | sed -n '/X509v3 Subject Alternative Name:/{n;s/.*URI:\([^, ]*\).*/\1/p;}')
+CM_LOG_SELECTOR=$(kubectl -n "$NAMESPACE" get service nico-rest-cert-manager -o json | jq -r '.spec.selector | to_entries | map("\(.key)=\(.value)") | join(",")')
+if [[ -n "$CM_CLIENT_IDENTITY" && -n "$CM_LOG_SELECTOR" ]] && kubectl -n "$NAMESPACE" logs -l "$CM_LOG_SELECTOR" \
+    --since=2m --tail=-1 | awk -v identity="$CM_CLIENT_IDENTITY" '
       /certificate issuance authorized caller/ {
           for (i = 1; i <= NF; i++) {
               if ($i == "service_identity=" identity || $i == "service_identity=\"" identity "\"") found = 1
