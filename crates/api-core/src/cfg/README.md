@@ -31,7 +31,7 @@ behavior.
 | `listen` | `SocketAddr` | `[::]:1079` | `server` | Socket address for the gRPC API server. |
 | `listen_only` | `bool` | `false` | `server` | Run passively (no background services, RPC/web only). Used in dev mode. |
 | `metrics_endpoint` | `Option<SocketAddr>` | — | `integrations` | Socket address for the Prometheus `/metrics` HTTP server. |
-| `alt_metric_prefix` | `Option<String>` | — | `integrations` | Alternative metric prefix emitted alongside `nico_` for dashboard migration. |
+| `alt_metric_prefix` | `Option<String>` | — | `integrations` | Alternative metric prefix emitted alongside `carbide_` for dashboard migration. |
 | `database_url` | `String` | **required** | `server` | Postgres connection string for all persistent state. |
 | `max_database_connections` | `u32` | `1000` | `server` | Maximum database connection pool size. |
 | `deny_unknown_fields` | `bool` | `false` | `server` | Reject unknown configuration fields instead of logging warnings and continuing. |

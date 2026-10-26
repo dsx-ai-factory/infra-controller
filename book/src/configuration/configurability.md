@@ -1376,7 +1376,7 @@ helm template nico ./helm -f helm-prereqs/values/nico-core.yaml --set global.ima
 - **NICo Core log level**: set `RUST_LOG` via `nico-api.extraEnv` (`info`, `debug`, `trace`; default `info`). Same pattern for every Rust workload.
 - **Structured logging**: `nico-api` emits JSON to stdout — collect with any cluster logging stack.
 - **Prometheus metrics**: every chart exposes `/metrics`; ServiceMonitor CRDs are off by default and gated behind `<chart>.serviceMonitor.enabled`.
-- **Metric prefix migration**: existing dashboards reference `carbide_*`. Set `alt_metric_prefix = "nico"` in siteConfig to emit `nico_*` aliases alongside without breaking the legacy names.
+- **Metric prefix migration**: existing dashboards reference `carbide_*`. Set `alt_metric_prefix = "nico_"` in siteConfig to emit `nico_*` aliases alongside without breaking the legacy names.
 - **SSH session logs**: opt-in via `nico-ssh-console-rs.lokiLogCollector.enabled` — see *Layer 4* above.
 
 ### Backup and restore
