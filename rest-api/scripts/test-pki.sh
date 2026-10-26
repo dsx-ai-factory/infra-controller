@@ -457,6 +457,7 @@ kubectl -n "$NAMESPACE" get secret "$CM_CLIENT_SECRET" \
 kubectl -n "$NAMESPACE" get secret "$CM_CLIENT_SECRET" \
     -o jsonpath='{.data.tls\.key}' | base64 -d > "$CM_CLIENT_DIR/tls.key"
 chmod 600 "$CM_CLIENT_DIR/tls.key"
+AUTH_CHECK_START=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 ISSUE_RESP=$(curl -sSf --cacert "$CM_CA_FILE" --noproxy "$CM_SERVER_NAME" \
     --cert "$CM_CLIENT_DIR/tls.crt" --key "$CM_CLIENT_DIR/tls.key" \
     --resolve "$CM_SERVER_NAME:18000:127.0.0.1" \
@@ -473,6 +474,21 @@ if echo "$ISSUE_RESP" | jq -e '.certificate' > /dev/null 2>&1; then
     fi
 else
     fail "PKI API certificate issuance (missing certificate in response)"
+fi
+
+# AUDIT also issues certificates to rejected callers, so verify admission separately.
+CM_CLIENT_IDENTITY=$(openssl x509 -in "$CM_CLIENT_DIR/tls.crt" -noout -ext subjectAltName | sed -n 's/.*URI:\([^, ]*\).*/\1/p')
+if [[ -n "$CM_CLIENT_IDENTITY" ]] && kubectl -n "$NAMESPACE" logs deployment/nico-rest-cert-manager \
+    --since-time="$AUTH_CHECK_START" | awk -v identity="$CM_CLIENT_IDENTITY" '
+      /certificate issuance authorized caller/ {
+          for (i = 1; i <= NF; i++) {
+              if ($i == "service_identity=" identity || $i == "service_identity=\"" identity "\"") found = 1
+          }
+      }
+      END { exit !found }'; then
+    pass "Certificate Manager admitted the deployed Site Manager identity"
+else
+    fail "Certificate Manager did not confirm Site Manager admission (including in AUDIT mode)"
 fi
 
 echo ""

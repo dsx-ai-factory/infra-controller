@@ -99,3 +99,36 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: configure CERT_AUTH_ALLOWED_IDENTITIES through chart values
+
+  - it: mounts a separate client CA and points authorization at its bundle
+    set:
+      authorization.clientCaSecretName: site-client-ca
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CERT_AUTH_CLIENT_CA_FILE
+            value: /etc/pki/client-ca/ca.crt
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: client-ca
+            mountPath: /etc/pki/client-ca
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: client-ca
+            secret:
+              secretName: site-client-ca
+              items:
+                - key: ca.crt
+                  path: ca.crt
+
+  - it: rejects ambiguous client CA sources
+    set:
+      authorization.clientCaSecretName: site-client-ca
+      authorization.clientCaFile: /etc/pki/ca/tls.crt
+    asserts:
+      - failedTemplate:
+          errorMessage: authorization.clientCaSecretName and clientCaFile are mutually exclusive
