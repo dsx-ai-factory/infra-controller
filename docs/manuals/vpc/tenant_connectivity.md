@@ -4,12 +4,14 @@ An instance in an FNN VPC can reach storage, shared services, and external netwo
 
 ## Where to Configure Access
 
+The connection pattern and configuration owner depend on the destination:
+
 | Destination | Connection pattern | Who configures it |
 |---|---|---|
 | Another NICo VPC | Explicit VPC peering, subject to site policy and access controls | Tenant Admin for their own VPCs, or Provider Admin for cross-tenant peering |
 | Existing datacenter network or routed storage | A route to the destination in the VPC and a return route in the external network | NICo operator selects routing policy. Network team configures the external path |
-| Shared storage on an EVPN-capable leaf | Storage VRF exports service prefixes that authorized VPCs import | Network team owns the leaf/VTEP. NICo configures managed-host DPUs |
-| External administrator or VPN client | Provider-routed private access or an explicitly deployed tenant edge/bastion | Provider network team and tenant/platform operator |
+| Shared storage on an EVPN-capable leaf | Storage VRF exports service prefixes that authorized VPCs import | Network team owns the leaf and its VTEP. NICo configures managed-host DPUs |
+| External administrator or VPN client | Provider-routed private access or an explicitly deployed tenant edge instance or bastion | Provider network team and tenant or platform operator |
 
 Creating an FNN VPC does not provision a public IP, NAT gateway, VPN endpoint, or SSH bastion. An `EXTERNAL` routing profile selects routing policy. Supply the edge and both directions of routing, then permit the required traffic with network and host firewalls.
 
@@ -17,7 +19,7 @@ Creating an FNN VPC does not provision a public IP, NAT gateway, VPN endpoint, o
 
 For administrative access, put a VPN endpoint or SSH bastion in a separate edge VPC for each tenant. Peer it with that tenant's workload VPCs on the same Site:
 
-1. The provider supplies a private routed connection or a public-IP/VPN mapping to the edge instance. The external gateway, NAT if used, and return routing are provider-managed.
+1. The provider supplies routed access to the edge instance through a private connection, a public IP mapping, or a VPN. The external gateway, NAT if used, and return routing are provider-managed.
 2. The tenant deploys and secures the edge instance, including authentication, patching, host firewall rules, and any forwarding or NAT it needs.
 3. A Tenant Admin creates a peering from the edge VPC to each workload VPC using the [VPC peering REST API](vpc_peering_management.md#creating-through-rest).
 4. The tenant applies NSGs that permit only the intended management flows and validates both permitted access and isolation from other tenants.
@@ -37,17 +39,19 @@ For a storage server without a DPU, the leaf or border gateway can terminate VXL
 3. The leaf decapsulates VXLAN and routes to the storage VLAN or subnet.
 4. The storage server replies through its gateway. The storage VRF uses the tenant route it imported to reach the instance's DPU.
 
-The storage server receives ordinary IP/Ethernet traffic, possibly VLAN-tagged. It does not need a VXLAN interface. NICo configures the managed-host DPUs. The network/storage team configures the leaf VTEP, VRFs, VLANs, SVIs, EVPN policy, and storage interfaces, and must validate that they work together.
+The storage server receives ordinary IP packets in Ethernet frames, possibly VLAN-tagged. It does not need a VXLAN interface. NICo configures the managed-host DPUs. The network and storage teams configure the leaf VTEP, VRFs, VLANs, SVIs, EVPN policy, and storage interfaces, and must validate that they work together.
 
 ### Storage Isolation Choices
 
+Choose the storage attachment model based on where tenant separation must be enforced:
+
 | Model | Isolation boundary | Operational consequence |
 |---|---|---|
-| Storage instance behind its own NICo-managed DPU | NICo VPC/VRF and NSG controls apply to that attachment | Use a storage VPC and explicit peerings where needed. Storage authorization is still required |
-| Separate storage attachment per tenant, with VLAN support | Operator-managed VLAN/VRF separation on the leaf plus the storage system's tenant interfaces | The leaf performs VLAN-to-VXLAN integration. Onboarding may require per-tenant VRF, VLAN, SVI, VNI, and storage interface configuration |
-| One shared storage VRF/subnet | Multiple authorized VPCs reach the same service network | Less per-tenant fabric configuration, but storage credentials, exports, namespaces, and application authorization must separate tenants |
+| Storage instance behind its own NICo-managed DPU | NICo VPC isolation and NSG controls apply to that attachment | Use a storage VPC and explicit peerings where needed. Storage authorization is still required |
+| Separate storage attachment per tenant, with VLAN support | Operator-managed VLAN and VRF separation on the leaf plus the storage system's tenant interfaces | The leaf performs VLAN-to-VXLAN integration. Onboarding may require per-tenant VRF, VLAN, SVI, VNI, and storage interface configuration |
+| One shared storage VRF and subnet | Multiple authorized VPCs reach the same service network | Less per-tenant fabric configuration, but storage credentials, exports, namespaces, and application authorization must separate tenants |
 
-If the storage endpoint cannot provide separate VLAN interfaces or equivalent tenant attachments, a shared subnet cannot provide per-tenant L2 isolation at that endpoint. Use storage/application isolation and appropriate network ACLs. Importing a route grants reachability. It does not authorize access to a file, object, block volume, or database.
+If the storage endpoint cannot provide separate VLAN interfaces or equivalent tenant attachments, a shared subnet cannot provide per-tenant L2 isolation at that endpoint. Use isolation in the storage system or application and appropriate network ACLs. Importing a route grants reachability. It does not authorize access to a file, object, block volume, or database.
 
 ### Example: A Shared Storage VRF
 
@@ -62,9 +66,9 @@ flowchart TB
         dpuB["DPU B: external VPC<br/>Import storage: 64512:50600<br/>Export common tenant RT:<br/>64512:50500"]
     end
     subgraph storageNetwork["Operator-managed storage network"]
-        leaf["Storage leaf VTEP / shared VRF<br/>Import common tenant RTs:<br/>64512:50200 and 64512:50500<br/>Export storage only: 64512:50600"]
+        leaf["Storage leaf VTEP<br/>Shared VRF<br/>Import common tenant RTs:<br/>64512:50200 and 64512:50500<br/>Export storage only: 64512:50600"]
         storage["Storage without a DPU<br/>198.51.100.0/24"]
-        leaf -->|"Storage VLAN / IP subnet"| storage
+        leaf -->|"Storage VLAN and IP subnet"| storage
     end
 
     dpuA -->|"VXLAN"| leaf
@@ -72,6 +76,8 @@ flowchart TB
 ```
 
 Arrows follow requests to storage. Replies use the same links in reverse. The RTs in each box control which routes that VRF imports and exports. Native VPC and infrastructure RTs are omitted from the diagram. The storage leaf imports tenant routes for the return path. Each tenant imports the storage RT, without importing the other tenants' export RTs.
+
+Configure the tenant and storage route targets as follows:
 
 | Routing table | Import | Export |
 |---|---|---|
@@ -90,7 +96,7 @@ For replies, the storage VRF needs routes to the instance interfaces. NICo expor
 Do not import a common tenant-export RT into every tenant VPC. That imports other tenants' routes too. Only attach the storage RT to service prefixes. Do not re-export learned tenant routes or tenant aggregates with that tag. For the same reason, give an external default route its own RT that tenants import but never attach to their own exports. Importing an RT accepts all routes tagged with it, without filtering them to the storage prefix.
 </Warning>
 
-This shared VRF example requires non-overlapping tenant return addresses in the storage routing table. If tenants reuse addresses, the storage network cannot choose the correct return tenant from the destination IP alone. Use separate routing contexts/attachments, or a provider-managed NAT or proxy design that gives each tenant an unambiguous return path. NICo route-target imports and VPC peering do not perform SNAT or DNAT.
+This shared VRF example requires non-overlapping tenant return addresses in the storage routing table. If tenants reuse addresses, the storage network cannot choose the correct return tenant from the destination IP alone. Use separate routing contexts and attachments, or a provider-managed NAT or proxy design that gives each tenant an unambiguous return path. NICo route-target imports and VPC peering do not perform SNAT or DNAT.
 
 ### Default Routes and Unintended Access
 
@@ -103,15 +109,15 @@ Keep unauthorized destinations out of those transit paths or filter them on the 
 [Network Security Groups](../networking/network_security_groups.md) filter traffic at managed instance interfaces. They do not supply routes or protect an unmanaged storage server's other attachments.
 
 - Attach an NSG to the VPC for rules shared by its instances. An instance NSG **replaces**, rather than merges with, that VPC NSG for the instance.
-- Express rules from the instance's perspective: ingress is traffic to the instance, egress is traffic from it. Permit only the required source/destination prefixes, protocols, and ports. Rules with lower priority numbers are evaluated first.
+- Express rules from the instance's perspective: ingress is traffic to the instance, egress is traffic from it. Permit only the required source and destination prefixes, protocols, and ports. Rules with lower priority numbers are evaluated first.
 - Account for replies. For stateless rules, permit the return flow explicitly. Stateful egress requires site support and does not grant arbitrary inbound connections. Site deny rules and operator overrides also apply.
-- Wait for `networkSecurityGroupPropagationDetails` on the VPC/instance to show the intended rules have propagated. The instance's `Ready` status alone does not confirm this.
+- Wait for `networkSecurityGroupPropagationDetails` on the VPC or instance to show the intended rules have propagated. The instance's `Ready` status alone does not confirm this.
 
 Before handing the network over, verify:
 
 1. The tenant VRF has the intended storage or edge route and a reachable remote VTEP. The receiving VRF has routes back to the instance interfaces.
 2. A real application connection succeeds in both directions, using the expected path and ports. An established BGP session alone is insufficient.
-3. An unauthorized VPC cannot reach the service or another tenant, including through an exit/default route or the shared storage VRF.
+3. An unauthorized VPC cannot reach the service or another tenant, including through a default route to an exit VRF or through the shared storage VRF.
 4. Revoking access removes reachability through every alternate path. Exercise withdrawal and recovery in a test environment before relying on the design.
 
 For the configuration NICo generates, see the [FNN DPU template](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/agent/templates/nvue_startup_fnn.conf). Request fields and permissions are defined in the [REST API contract](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/openapi/spec.yaml).

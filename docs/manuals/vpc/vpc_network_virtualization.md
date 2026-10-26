@@ -53,7 +53,7 @@ for every VPC hosted on its managed host. Routes flow between VRFs and the fabri
 │  VPC VRF  ◄─── VPC VNI (vpc-vni or external-vpc-vni pool)               │
 │    native + peered VPC RT imports: <datacenter_asn>:<imported_vni>      │
 │    additional RT imports: from routing profile + fnn config             │
-│    export tags: native RT + profile RTs + optional site common RT      │
+│    export tags: native RT + profile RTs + optional site common RT       │
 │    site_fabric_null_routes: distance-250 blackholes in mutual isolation │
 │                                                                         │
 │  deny_prefixes ACL ──► blocks listed prefixes from tenant traffic       │
@@ -359,7 +359,7 @@ The network device VRFs must import the route-targets present on VPC routes to s
 
 This is the most common cause of one-way connectivity: the instance can send packets out, but responses are dropped because the network cannot route back.
 
-**Diagnostic question to ask the network team**: Is the network VRF configured to import the route-targets listed in `route_targets_on_exports` for this VPC's routing profile?
+**Diagnostic question to ask the network team**: Does the network VRF import at least one RT carried by the VPC's routes? Check the VPC's native RT, `route_targets_on_exports` from its effective profile (including per-VPC overrides), and `fnn.common_internal_route_target` when configured.
 
 See [VPC Routing Profiles — Troubleshooting: No Internet Access](vpc_routing_profiles.md#troubleshooting-example-no-internet-access-in-a-vpc) for the full troubleshooting procedure.
 
@@ -457,7 +457,7 @@ numbers `:50100`, `:50200`, and `:50500` are conventional; see
 
 Have the network team confirm:
 
-- [ ] Network device VRFs import the route-targets that external VPCs export (`route_targets_on_exports`).
+- [ ] Network device VRFs import an RT carried by each external VPC's routes. Check the [full export policy](#export-route-targets-and-return-path-reachability).
 - [ ] Network device VRFs export a default route tagged with either:
   - the route-target listed in `route_target_imports` for each VPC profile that needs internet
     access, or
@@ -501,6 +501,6 @@ For routing-profile-specific troubleshooting, see
 | VPC creation fails with `NOT_FOUND` | Routing profile name is not defined in `fnn.routing_profiles` |
 | DPU reports no BGP sessions | `datacenter_asn` or `fnn-asn` pool mismatch; route servers not reachable |
 | Intra-VPC connectivity works but internet access fails | `route_target_imports` missing or network not advertising the expected route-target |
-| Internet access works but no return traffic | Network VRF not importing `route_targets_on_exports` |
+| Internet access works but no return traffic | Network VRF has no matching import for the VPC's [export RTs](#export-route-targets-and-return-path-reachability) |
 | All connectivity fails after adding a second VPC | VNI pool exhausted; check pool capacity in [VNI Resource Pools](vni_resource_pools.md) |
 | `vpc-dpu-lo` allocation error | Per-VPC DPU loopback pool exhausted; check [IP Resource Pools](../networking/ip_resource_pools.md) |

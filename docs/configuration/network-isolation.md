@@ -13,7 +13,7 @@ Key properties:
 - Null-routes prevent unauthorized upstream-VRF hairpinning
 - Route targets control which VRFs can exchange routes
 - `deny_prefixes` ACLs block tenant traffic from reaching management networks
-- [Network Security Groups](../manuals/networking/network_security_groups.md) attach to VPCs or instances. An instance NSG replaces the inherited VPC NSG
+- [Network Security Groups](../manuals/networking/network_security_groups.md) attach to VPCs or instances, and an instance NSG replaces the inherited VPC NSG
 
 For the full networking architecture, see [VPC Network Virtualization](../manuals/vpc/vpc_network_virtualization.md). For ingress and access to storage outside managed DPUs, see [Tenant Connectivity and Shared Services](../manuals/vpc/tenant_connectivity.md).
 

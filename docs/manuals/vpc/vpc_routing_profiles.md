@@ -176,7 +176,7 @@ The replacement semantics are significant:
 - Within the object, an omitted or `null` property inherits its named-profile value. A present list replaces that profile list rather than appending to it. An empty list selects no entries from that profile property. Sending `{}` restores inheritance for all properties.
 - `routeTargetsOnExports` follows the same rules for additional export tags. These lists do not remove the VPC's native RT, an optional site-wide common export RT, active peering imports, or site-wide additional imports that the DPU adds separately. See [Export Route-Targets](vpc_network_virtualization.md#export-route-targets-and-return-path-reachability).
 
-Fetch the VPC before updating it. Afterward, authorized callers can inspect `effectiveRoutingProfile` once Site inventory has reported the resolved policy, then verify the DPU routes and application connectivity. That field can be `null` while inventory catches up and is visible only to callers with the required capability.
+Fetch the VPC before updating it. Afterward, callers with the required capability can inspect `effectiveRoutingProfile` once Site inventory has persisted the resolved policy reported by Core. The REST response omits the field until that value is available. It also omits the field for callers without the required capability. If Core reports no profile, Site inventory clears the cached value. Verify the DPU routes and application connectivity after the policy converges.
 
 See the [REST schemas and operation descriptions](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/openapi/spec.yaml) for the complete override fields, and the [profile resolver](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/file.rs) for inheritance behavior.
 
@@ -340,7 +340,7 @@ There are several common causes, and distinguishing between them requires compar
 
 ### How to Resolve This Issue
 
-Contact the team that manages the network infrastructure. Provide them with the routing profile assigned to the VPC, specifically the `route_target_imports` values and the `route_targets_on_exports` values, and have them compare those profiles against the expected network deployment. These are the questions to answer:
+Contact the team that manages the network infrastructure. Provide the VPC's effective `route_target_imports` and `route_targets_on_exports`, including per-VPC overrides, its native RT, and `fnn.common_internal_route_target` when configured. See the [full export policy](vpc_network_virtualization.md#export-route-targets-and-return-path-reachability). Compare these values against the expected network deployment:
 
 - Is this profile expected to import a specific route-target that carries a default route? If so, is that entry present and correct?
 - Is this deployment relying on network injection via the VPC's native route-target? If so, is the network advertising the expected route?
