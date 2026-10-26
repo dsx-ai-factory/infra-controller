@@ -82,7 +82,7 @@ impl MachineUpdateManager {
         MachineUpdateManager {
             database_connection,
             max_concurrent_machine_updates: config.max_concurrent_machine_updates(),
-            run_interval: Duration::from_secs(config.machine_update_run_interval.unwrap_or(300)),
+            run_interval: Duration::from_secs(config.machine_update_run_interval_secs()),
             update_modules: modules,
             metrics: None,
             host_health: config.host_health,
@@ -118,12 +118,17 @@ impl MachineUpdateManager {
         MachineUpdateManager {
             database_connection,
             max_concurrent_machine_updates: config.max_concurrent_machine_updates(),
-            run_interval: Duration::from_secs(config.machine_update_run_interval.unwrap_or(300)),
+            run_interval: Duration::from_secs(config.machine_update_run_interval_secs()),
             update_modules,
             metrics: Some(machine_update_metrics),
             host_health: config.host_health,
             work_lock_manager_handle,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_interval(&self) -> Duration {
+        self.run_interval
     }
 
     /// Start the MachineUpdateManager and return a [sending channel](tokio::sync::oneshot::Sender) that will stop the MachineUpdateManager when dropped.
