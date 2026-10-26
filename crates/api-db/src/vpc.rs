@@ -29,6 +29,8 @@ use super::{ColumnInfo, FilterableQueryBuilder, ObjectColumnFilter, network_segm
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
+pub mod configured_creation;
+
 #[cfg(test)]
 mod test_explicit_columns;
 

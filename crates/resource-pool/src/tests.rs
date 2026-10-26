@@ -19,10 +19,17 @@ use std::net::Ipv4Addr;
 
 use db::ConditionalWrite;
 use db::resource_pool::{ResourcePoolAllocationNotOwned, allocate_exact, populate};
+use model::resource_pool::remote::CompletionAuthority;
 use model::resource_pool::{OwnerType, ResourcePool, ResourcePoolEntryState, ValueType};
+use sqlx::postgres::PgPoolOptions;
 use sqlx::types::Json;
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
-use crate::{IntegratedResourcePoolBackend, ResourcePoolBackend, ResourcePoolWithBackend};
+use crate::{
+    IntegratedResourcePoolBackend, ResourcePoolBackend, ResourcePoolRegistry,
+    ResourcePoolWithBackend,
+};
 
 #[ctor::ctor(unsafe)]
 fn setup_test_logging() {
@@ -58,13 +65,12 @@ async fn integrated_forwards_pool_values_and_owners_in_the_borrowed_transaction(
     txn.commit().await?;
 
     let selected_backend = ResourcePoolBackend::Integrated(IntegratedResourcePoolBackend);
-    let pool = ResourcePoolWithBackend::new(&descriptor, &selected_backend);
-    let backend = pool.backend();
+    let backend = selected_backend.require_integrated()?;
     let mut txn = database.begin().await?;
     assert_eq!(
         backend
             .release(
-                pool.pool(),
+                &descriptor,
                 &mut txn,
                 existing,
                 OwnerType::Vpc,
@@ -73,22 +79,26 @@ async fn integrated_forwards_pool_values_and_owners_in_the_borrowed_transaction(
             .await?,
         ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned)
     );
+    let registry = ResourcePoolRegistry::default();
+    let owned = registry
+        .find_owned(
+            &descriptor,
+            &mut txn,
+            OwnerType::IBPartition,
+            "existing-owner",
+            "address",
+        )
+        .await?
+        .expect("existing owner has its IPv4 allocation");
+    assert_eq!(*owned.value(), existing);
     assert_eq!(
-        backend
-            .release(
-                pool.pool(),
-                &mut txn,
-                existing,
-                OwnerType::IBPartition,
-                "existing-owner"
-            )
-            .await?,
+        owned.release(&mut txn).await?,
         ConditionalWrite::Applied(())
     );
     assert_eq!(
         backend
             .allocate_exact(
-                pool.pool(),
+                &descriptor,
                 &mut txn,
                 OwnerType::Vpc,
                 "exact-owner",
@@ -100,7 +110,7 @@ async fn integrated_forwards_pool_values_and_owners_in_the_borrowed_transaction(
     assert_eq!(
         backend
             .allocate(
-                pool.pool(),
+                &descriptor,
                 &mut txn,
                 OwnerType::Machine,
                 "automatic-owner",
@@ -112,7 +122,7 @@ async fn integrated_forwards_pool_values_and_owners_in_the_borrowed_transaction(
     assert_eq!(
         backend
             .allocate(
-                pool.pool(),
+                &descriptor,
                 &mut txn,
                 OwnerType::NetworkSegment,
                 "requested-owner",
@@ -195,5 +205,89 @@ async fn integrated_forwards_pool_values_and_owners_in_the_borrowed_transaction(
             ),
         ],
     );
+    Ok(())
+}
+
+/// Both preparation entry points leave Integrated inventory free without opening
+/// a connection. Reservation belongs to the entity transaction and its rollback.
+#[carbide_macros::sqlx_test]
+async fn shared_allocation_defers_integrated_reservation_until_the_entity_transaction(
+    database: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let descriptor = ResourcePool::<i32>::new("prepared-pool".to_owned(), ValueType::Integer);
+    let backend = ResourcePoolBackend::Integrated(IntegratedResourcePoolBackend);
+    let selected = ResourcePoolWithBackend {
+        pool: &descriptor,
+        backend: &backend,
+    };
+    let mut txn = database.begin().await?;
+    populate(&descriptor, &mut txn, vec![42], true).await?;
+    let prepared = selected
+        .prepare(
+            &mut txn,
+            OwnerType::NetworkSegment,
+            "segment-1",
+            "vni",
+            None,
+            CompletionAuthority::Controller {
+                desire_id: Uuid::new_v4(),
+            },
+        )
+        .await?;
+    txn.commit().await?;
+    // Preparation must not need a database clock or a separate transaction for
+    // Integrated. A closed pool makes either accidental access fail immediately.
+    let closed =
+        PgPoolOptions::new().connect_lazy_with(database.connect_options().as_ref().clone());
+    closed.close().await;
+    let allocations = [
+        // Controllers commit their preparation before consuming the request.
+        prepared.resolve(&closed, &CancellationToken::new()).await?,
+        // Ordinary callers receive the same owned allocation in one call.
+        selected
+            .prepare_allocation(
+                &closed,
+                OwnerType::NetworkSegment,
+                "segment-1",
+                "vni",
+                None,
+                &CancellationToken::new(),
+            )
+            .await?,
+    ];
+    let state_query = "SELECT state FROM resource_pool WHERE name = $1";
+    let before: Json<ResourcePoolEntryState> = sqlx::query_scalar(state_query)
+        .bind(descriptor.name())
+        .fetch_one(&database)
+        .await?;
+    assert_eq!(before.0, ResourcePoolEntryState::Free);
+
+    for allocation in allocations {
+        assert_eq!(allocation.value(), None);
+        assert_eq!(allocation.route_target_policy(), None);
+        let mut txn = database.begin().await?;
+        assert_eq!(allocation.allocate(&mut txn).await?, 42);
+        let allocated: Json<ResourcePoolEntryState> = sqlx::query_scalar(state_query)
+            .bind(descriptor.name())
+            .fetch_one(&mut *txn)
+            .await?;
+        assert_eq!(
+            allocated.0,
+            ResourcePoolEntryState::Allocated {
+                owner: "segment-1".to_owned(),
+                owner_type: "network_segment".to_owned(),
+            },
+        );
+
+        // A failed entity write must not leave the returned value reserved, and
+        // Integrated cancellation must not open a cleanup transaction either.
+        txn.rollback().await?;
+        allocation.cancel(&closed).await?;
+        let after: Json<ResourcePoolEntryState> = sqlx::query_scalar(state_query)
+            .bind(descriptor.name())
+            .fetch_one(&database)
+            .await?;
+        assert_eq!(after.0, ResourcePoolEntryState::Free);
+    }
     Ok(())
 }

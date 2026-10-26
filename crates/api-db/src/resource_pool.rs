@@ -34,8 +34,8 @@ use model::resource_pool::common::{
 };
 use model::resource_pool::define::{ResourcePoolDef, ResourcePoolType};
 use model::resource_pool::{
-    OwnerType, ResourcePool, ResourcePoolEntry, ResourcePoolEntryState, ResourcePoolError,
-    ResourcePoolSnapshot, ResourcePoolStats, ValueType,
+    OwnerType, ResourcePool, ResourcePoolBackendKind, ResourcePoolEntry, ResourcePoolEntryState,
+    ResourcePoolError, ResourcePoolSnapshot, ResourcePoolStats, ValueType,
 };
 use sqlx::{PgConnection, Postgres};
 
@@ -1042,14 +1042,22 @@ pub async fn pool_has_rows(txn: &mut PgConnection, name: &str) -> Result<bool, D
 /// Pools that appear in the snapshot table but are no longer declared
 /// ("dropped" from `InitialObjectsConfig.pools`) are warned about, but
 /// not removed.
+/// Remote pools save the same seed snapshot and drift diagnostics without
+/// creating local inventory; provider registration uses that saved seed later.
 pub async fn reconcile_pool_defs(
     txn: &mut PgConnection,
     declared: &HashMap<String, ResourcePoolDef>,
 ) -> Result<(), DefineResourcePoolError> {
     let stored = all_stored_defs(&mut *txn).await?;
+    let remote_pools: HashSet<_> = binding::all(&mut *txn)
+        .await?
+        .into_iter()
+        .filter(|pool| pool.backend_kind == ResourcePoolBackendKind::Grpc)
+        .map(|pool| pool.pool_name)
+        .collect();
 
     for (name, def) in declared {
-        let pool_exists = pool_has_rows(&mut *txn, name).await?;
+        let pool_exists = remote_pools.contains(name) || pool_has_rows(&mut *txn, name).await?;
         match (stored.get(name), pool_exists) {
             // Snapshot exists but pool is missing from resource_pool.
             // Anomaly: e.g., partial DB restore. Don't auto-heal — operator
@@ -1074,15 +1082,11 @@ pub async fn reconcile_pool_defs(
                     declared: Some(format!("{def:?}")),
                 });
             }
-            // Pool exists in resource_pool but has no snapshot yet.
-            // Pre-migration deployment, or a pool re-added after a snapshot
-            // was manually deleted. Record the snapshot only.
+            // Remote pools have no local inventory to populate. Existing
+            // Integrated rows also need only their missing seed snapshot.
             (None, true) => {
                 insert_pool_def(txn, name, def).await?;
-                tracing::info!(
-                    pool_name = name,
-                    "Backfilled pool definition snapshot for pre-existing pool"
-                );
+                tracing::info!(pool_name = name, "Recorded Resource Pool seed definition");
             }
             // New — seed and snapshot.
             (None, false) => {
@@ -1529,7 +1533,10 @@ fn expand_int_range(start_s: &str, end_s: &str) -> Result<Vec<i64>, eyre::Report
     Ok((start..end).collect())
 }
 
-/// Build the shared pool handles after checking that mandatory pools have free values.
+/// `create_common_pools` builds shared pool handles after checking mandatory
+/// Integrated pools have free values. A remote `vpc-vni` pool requires an accepted registration;
+/// startup validates that definition and its provider before calling this.
+/// Remote statistics do not establish readiness or guarantee free capacity.
 pub async fn create_common_pools(
     db: sqlx::PgPool,
     ib_fabric_ids: HashSet<String>,
@@ -1570,6 +1577,18 @@ pub async fn create_common_pools(
 
     // We can't run if any of the mandatory pools are missing
     for name in &pool_names {
+        if name == VPC_VNI
+            && let Some(binding) = binding::load(&db, name).await?
+            && binding.backend_kind == ResourcePoolBackendKind::Grpc
+        {
+            eyre::ensure!(
+                registration::latest_accepted(&db, binding.binding_id)
+                    .await?
+                    .is_some(),
+                "resource pool '{name}' has no accepted definition",
+            );
+            continue;
+        }
         if stats(&db, name).await?.free == 0 {
             eyre::bail!("resource pool '{name}' missing or full. edit config file and restart");
         }

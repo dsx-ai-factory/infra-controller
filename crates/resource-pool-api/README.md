@@ -58,6 +58,8 @@ limits such as VNI width.
 
 Core's [`registration` module](../resource-pool/src/registration.rs) saves each effective definition in `resource_pool_registration`, together with its revision and whether the provider has acknowledged it. A lost reply reuses that saved definition; it does not create another revision. Accepted definitions stay available so an allocation recovered after growth can still be checked against the values allowed when it started.
 
+Startup registers remote pools from their saved seed definitions. If registration was interrupted, startup retries the saved request, including its original provider pool ID and revision. An edited TOML declaration produces the existing drift diagnostic; it does not replace that request or grow the pool.
+
 Growth names the previous revision and appends declarations to its existing
 ordered list. Earlier declarations determine the assignment mode when entries
 overlap, so adding a manual range cannot change an existing automatic value.
@@ -79,9 +81,21 @@ remain invalid and are rejected. These
 preserve the existing parsing, normalization, and eligibility rules, but do not
 apply Integrated's `MAX_POOL_SIZE` inventory limit or enumerate values.
 
+### Rejected definitions
+
+A provider error after NICo saves the `Define` request leaves the definition pending, including when the provider rejects it. The saved `resource_pool_registration` row identifies the binding and revision being retried; `accepted = false` means NICo has not recorded acknowledgement. It does not prove that the provider has not accepted the request. A failure during the initial `Describe` check occurs before NICo saves a request, so there is no registration to resume.
+
+Registration errors identify the logical pool and binding. For an RPC failure, Core also reports the gRPC code. Read the provider's logs for its diagnostic text; Core omits the raw provider message.
+
+After correcting a provider, credential, or connection problem, restart `nico-api`. Startup uses `registration::resume` for a saved request, or `registration::define` if no request was saved. Preserve the saved request and revision while provider acceptance is uncertain.
+
+If correction requires changing the saved definition itself, protocol v1 has no operation to replace or cancel that pending definition. No safe replacement procedure is available, and restarting with different TOML cannot resolve it. The planned v2.5 P25 task must define and verify that recovery procedure before production activation, as required by the [VPC integration task](https://github.com/dsx-ai-factory/infra-controller/issues/7140). Remote selection remains disabled under the [activation requirements](../../designs/resource-pool/resource-pool-backend.md#status-and-scope).
+
 ## Lost replies and delayed requests
 
 Within one authority, `request_id` identifies an allocation attempt across all bindings. The provider saves the request inputs or an equivalent digest so it can reject changes, including a different binding. Active allocations retain the complete assignment. Replaying a request returns the same value, allocation ID, and optional route target policy. Different slots let one entity own several allocations without using its owner ID as a retry key.
+
+An interrupted configured VPC creation replays a matching saved request while it remains `Pending`, including when its allocation reply was dropped or its final database transaction failed. A configured VPC that is still wanted keeps that request for the next startup; an ordinary API creation requests cancellation when its final transaction fails. If an error or explicit cancellation moves it to `CancelRequested`, the same owner and slot cannot start a new generation until cleanup is confirmed as `Cancelled` or `Released`.
 
 `Recover` returning `unknown` only means the provider has not observed the request. For example, an allocation request might still arrive after that lookup. `Cancel` records that the attempt cannot allocate, and acknowledges terminal cancellation only after any allocation and its owned provisioning have been removed. If cleanup returns `pending`, the provider continues it for the same request. NICo repeats `Cancel` with the original identity and, when the reply is `pending`, checks `Recover` to see whether cleanup has finished. It stops only after observing `cancelled` or `released`. A delayed allocation request then observes the terminal state.
 
@@ -99,7 +113,11 @@ statistics return `Unavailable`, rather than a successful zero count.
 
 ## Conformance and implementation boundaries
 
-The production registry rejects remote pool selection while [P11](https://github.com/dsx-ai-factory/infra-controller/issues/7140) adds the startup and VPC integration below the v2.4 gate. Clients and providers must use the same identity contract before remote activation; reserving removed protobuf fields does not make a provider that requires a site ID compatible with this API.
+Production configuration rejects remote pool selection. The [VPC integration](https://github.com/dsx-ai-factory/infra-controller/issues/7140) exercises creation, ownership lookup, deletion, and restart recovery by injecting a local provider below that gate. Clients and providers must use the same identity contract before remote activation; reserving removed protobuf fields does not make a provider that requires a site ID compatible with this API.
+
+Core callers use the shared [`resource-pool` interface](../resource-pool/src/lib.rs) for either backend. `prepare_allocation` saves any remote request and completes provider work before the caller starts its entity transaction. The returned `Allocation` reserves Integrated inventory or attaches the remote result through `allocate(&mut txn)`, alongside the entity's writes. If creation fails, the caller requests cleanup with `cancel`. Configured startup uses the lower-level `prepare` and `resolve` methods so its generated VPC identity and allocation request commit together before provider work. VPC callers still enforce their own admission and VNI policy checks.
+
+Ownership lookup returns an `OwnedAllocation` whose `release` method either frees Integrated inventory or saves remote release intent in the entity transaction. The recovery task finishes provider cleanup after that transaction commits.
 
 Older stored definitions remain readable and keep their original database bytes. Decoding ignores the removed field, so a retry encodes the remaining fields on the wire rather than reproducing those stored bytes.
 
@@ -113,4 +131,4 @@ Run the package tests, including the generated client/server loopback test:
 cargo test -p carbide-resource-pool-api
 ```
 
-Core's [pool conversions](https://github.com/dsx-ai-factory/infra-controller/issues/7634) live in [`carbide_resource_pool::value`](../resource-pool/src/value.rs). Core's transport adapter belongs to [P05](https://github.com/dsx-ai-factory/infra-controller/issues/7134). Saved operations belong to [P06](https://github.com/dsx-ai-factory/infra-controller/issues/7135), and recovery polling belongs to [P07](https://github.com/dsx-ai-factory/infra-controller/issues/7136). [P11](https://github.com/dsx-ai-factory/infra-controller/issues/7140) wires the library coordinator and cleanup sampler into API startup and shutdown. `carbide_resource_pool_cleanup_pending` counts saved cancellation and release requests awaiting confirmation; the integration test exercises it, but production registration also waits for P11. The sampler emits no value before its first successful query. It then retains the last count, with `fresh="true"` while that sample is less than 30 seconds old and `fresh="false"` afterward. Neither this crate nor these conversions activate a new backend. See the [execution and recovery design](../../designs/resource-pool/resource-pool-backend.md) for the complete lifecycle, release boundaries, and metric sampling contract.
+Core's [pool conversions](https://github.com/dsx-ai-factory/infra-controller/issues/7634) live in [`carbide_resource_pool::value`](../resource-pool/src/value.rs). Core's transport adapter belongs to [P05](https://github.com/dsx-ai-factory/infra-controller/issues/7134). Saved operations belong to [P06](https://github.com/dsx-ai-factory/infra-controller/issues/7135), and recovery polling belongs to [P07](https://github.com/dsx-ai-factory/infra-controller/issues/7136). [P11](https://github.com/dsx-ai-factory/infra-controller/issues/7140) wires the library coordinator and cleanup sampler into API startup and shutdown. `carbide_resource_pool_cleanup_pending` counts saved cancellation and release requests awaiting confirmation. On replicas with `listen_only = false`, the API starts the sampler even when every pool uses Integrated, and the integration test checks its emitted series. The sampler emits no value before its first successful query. It then retains the last count, with `fresh="true"` while that sample is less than 30 seconds old and `fresh="false"` afterward. Neither this crate nor these conversions activate a new backend. See the [execution and recovery design](../../designs/resource-pool/resource-pool-backend.md) for the complete lifecycle, release boundaries, and metric sampling contract.

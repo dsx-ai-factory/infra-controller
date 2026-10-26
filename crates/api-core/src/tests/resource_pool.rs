@@ -603,6 +603,65 @@ async fn startup_rejects_remote_selection_before_pool_effects(
     Ok(())
 }
 
+/// A saved remote binding cannot activate a provider through an otherwise
+/// unused backend definition, even after its pool selector is removed.
+#[crate::sqlx_test]
+async fn startup_rejects_saved_remote_binding_before_pool_effects(
+    db_pool: sqlx::PgPool,
+) -> eyre::Result<()> {
+    let env = create_test_env(db_pool.clone()).await;
+    let mut txn = db_pool.begin().await?;
+    db::resource_pool::binding::bind_or_verify(
+        &mut txn,
+        &ResourcePoolSelection {
+            pool_name: "removed-remote-pool".to_owned(),
+            value_domain: ResourcePoolValueDomain::Integer,
+            backend_name: Some("unused".to_owned()),
+            backend_kind: ResourcePoolBackendKind::Grpc,
+            authority_id: "remote-authority".to_owned(),
+            remote_pool: "provider-pool".to_owned(),
+        },
+    )
+    .await?;
+    txn.commit().await?;
+    let provider = std::net::TcpListener::bind("127.0.0.1:0")?;
+    provider.set_nonblocking(true)?;
+    let original = pool_database_snapshot(&db_pool).await?;
+    let mut config = pool_startup_config(&env);
+    config.listen_only = false;
+    // A normal seed gets past source validation. The saved remote binding
+    // must still reject startup before this new pool is written.
+    config.pools = Some(HashMap::from([(
+        "new-before-saved-remote".to_owned(),
+        model::resource_pool::ResourcePoolDef {
+            pool_type: model::resource_pool::ResourcePoolType::Ipv4,
+            prefix: Some("192.0.2.0/30".to_owned()),
+            ranges: Vec::new(),
+            delegate_prefix_len: None,
+        }
+        .into(),
+    )]));
+    config.resource_pool_backends.insert(
+        "unused".to_owned(),
+        ResourcePoolBackendConfig::Grpc {
+            endpoint: format!("http://{}", provider.local_addr()?).parse()?,
+            tls: None,
+        },
+    );
+    let error = start_and_stop_runtime(&env, config)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("removed-remote-pool"), "{error}");
+    assert!(error.contains("v2.4 requires integrated"), "{error}");
+    assert_eq!(pool_database_snapshot(&db_pool).await?, original);
+    assert_eq!(
+        provider.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+    );
+    Ok(())
+}
+
 #[crate::sqlx_test]
 async fn listen_only_restart_retains_bindings_without_seeding_or_contacting_unused_backend(
     db_pool: sqlx::PgPool,
@@ -746,6 +805,42 @@ async fn listen_only_restart_retains_bindings_without_seeding_or_contacting_unus
             std::io::ErrorKind::WouldBlock
         );
     }
+    Ok(())
+}
+
+/// Removing the last configured VPC must still run startup cleanup. The saved
+/// creation identity cannot remain just because the new configuration is empty.
+#[crate::sqlx_test]
+async fn authoritative_startup_cleans_removed_vpc_with_empty_configuration(
+    db_pool: sqlx::PgPool,
+) -> eyre::Result<()> {
+    let env = create_test_env(db_pool.clone()).await;
+    let mut config = pool_startup_config(&env);
+    config.listen_only = false;
+    // The fixture populated the pools; authoritative startup still needs this section.
+    config.pools = Some(HashMap::new());
+    config.vpcs = None;
+    let mut txn = db_pool.begin().await?;
+    let creation =
+        db::vpc::configured_creation::begin(&mut txn, "removed-configured-vpc", None).await?;
+    txn.commit().await?;
+    assert_eq!(
+        db::vpc::configured_creation::list(&db_pool).await?,
+        vec![creation.clone()],
+    );
+
+    // Exercise start_runtime so restoring its old empty-config guard fails here.
+    assert_ne!(start_and_stop_runtime(&env, config).await?.port(), 0);
+    assert!(
+        db::vpc::configured_creation::list(&db_pool)
+            .await?
+            .is_empty()
+    );
+    let entities: i64 = sqlx::query_scalar("SELECT count(*) FROM vpcs WHERE id = $1")
+        .bind(creation.vpc_id)
+        .fetch_one(&db_pool)
+        .await?;
+    assert_eq!(entities, 0);
     Ok(())
 }
 

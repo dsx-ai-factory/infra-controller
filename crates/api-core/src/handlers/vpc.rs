@@ -14,12 +14,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::time::Duration;
+
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
 use ::rpc::network::vpc_virtualization_type_try_from_rpc;
 use carbide_network::virtualization::{DEFAULT_NETWORK_VIRTUALIZATION_TYPE, VpcVirtualizationType};
 use carbide_resource_pool::{
-    ResourcePoolRegistry, ResourcePoolRegistryError, ResourcePoolWithBackend,
+    OwnedAllocation, ResourcePoolBackendError, ResourcePoolRegistry, ResourcePoolRegistryError,
 };
 use carbide_uuid::network_security_group::NetworkSecurityGroupId;
 use carbide_uuid::vpc::VpcId;
@@ -41,20 +43,140 @@ use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 use crate::cfg::file::FnnConfig;
 
+pub(crate) mod vni;
+
+// Bound the complete write, including connection acquisition, so cleanup is
+// reachable even when a database lock prevents the VPC insert.
+const VPC_COMPLETION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `create` checks admission, prepares a VNI, then saves it with the VPC.
+/// Admission is checked again because it can change during provider work.
 pub(crate) async fn create(
     api: &Api,
     request: Request<rpc::VpcCreationRequest>,
 ) -> Result<Response<rpc::Vpc>, Status> {
     log_request_data(&request);
-    let vpc_creation_request = request.get_ref();
-
+    let mut request = request.into_inner();
     let mut txn = api.txn_begin().await?;
+    let (new_vpc, internal) = prepare_create(api, &mut txn, &request).await?;
+    let pool = if internal {
+        &api.common_pools.ethernet.pool_vpc_vni
+    } else {
+        &api.common_pools.ethernet.pool_external_vpc_vni
+    };
+    let owner_id = new_vpc.id.to_string();
+    let requested_vni = new_vpc.vni;
+    let selected = api
+        .resource_pool_registry
+        .select(&mut txn, pool)
+        .await
+        .map_err(|error| match error {
+            ResourcePoolRegistryError::Database(error) => {
+                map_vpc_allocation_error(pool, &owner_id, requested_vni, error.into())
+            }
+            error => CarbideError::from(error),
+        })?
+        .ok_or_else(|| {
+            map_vpc_allocation_error(
+                pool,
+                &owner_id,
+                requested_vni,
+                resource_pool::ResourcePoolError::MissingAllocationRange {
+                    pool_name: pool.name().to_owned(),
+                    auto_assign: requested_vni.is_none(),
+                }
+                .into(),
+            )
+        })?;
+    let map_error = |error| match error {
+        ResourcePoolBackendError::Integrated(error) => {
+            map_vpc_allocation_error(pool, &owner_id, requested_vni, error)
+        }
+        error => CarbideError::from(error),
+    };
 
+    // Rechecking admission must use the same VPC ID that owns the allocation.
+    request.id = Some(new_vpc.id);
+    txn.commit().await?;
+    let allocation = selected
+        .prepare_allocation(
+            &api.database_connection,
+            resource_pool::OwnerType::Vpc,
+            &owner_id,
+            vni::VNI_SLOT,
+            requested_vni,
+            &api.cancel_token,
+        )
+        .await
+        .map_err(map_error)?;
+
+    let completion = async {
+        if let Some(value) = allocation.value() {
+            vni::validate(*value, allocation.route_target_policy())?;
+        }
+        let mut txn = carbide_resource_pool::database_transaction(&api.database_connection).await?;
+        let (new_vpc, still_internal) = prepare_create(api, &mut txn, &request).await?;
+        if still_internal != internal {
+            return Err(CarbideError::FailedPrecondition(
+                "VPC routing changed while its VNI was being allocated; retry creation".to_owned(),
+            )
+            .into());
+        }
+        let vni = allocation.allocate(&mut txn).await.map_err(map_error)?;
+        let response = finish_create(api, &mut txn, new_vpc, vni).await?;
+        txn.commit().await?;
+        Ok::<_, Status>(response)
+    };
+    // This wait owns the completion future: cancellation drops its transaction
+    // before cleanup starts. The statement limit also bounds SQL that finishes
+    // before PostgreSQL can process SQLx's queued rollback.
+    let completion = match api
+        .cancel_token
+        .run_until_cancelled(tokio::time::timeout(VPC_COMPLETION_TIMEOUT, completion))
+        .await
+    {
+        Some(Ok(result)) => result,
+        Some(Err(_)) => Err(CarbideError::UnavailableError(
+            "timed out saving VPC and its VNI allocation".to_owned(),
+        )
+        .into()),
+        None => Err(CarbideError::from(
+            carbide_resource_pool::remote::RemoteResourcePoolError::Cancelled,
+        )
+        .into()),
+    };
+    match completion {
+        Ok(response) => Ok(Response::new(response)),
+        Err(error) => {
+            if let Err(cleanup_error) = allocation.cancel(&api.database_connection).await {
+                tracing::error!(
+                    vpc_id = %owner_id,
+                    error = %cleanup_error,
+                    "could not save cancellation of VPC VNI request",
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
+/// `prepare_create` checks tenant and NSG admission under their row locks.
+/// Creation repeats these checks before inserting the VPC because the first
+/// transaction releases those locks while the allocation is resolved.
+async fn prepare_create(
+    api: &Api,
+    txn: &mut PgConnection,
+    vpc_creation_request: &rpc::VpcCreationRequest,
+) -> Result<(NewVpc, bool), Status> {
     // Grab the tenant details and a row-lock if found so we can coordinate around the tenant record.
     // Missing tenants remain supported for non-FNN VPCs; FNN creation rejects them below after
     // resolving the requested virtualization type.
-    let tenant =
-        db::tenant::find(&vpc_creation_request.tenant_organization_id, true, &mut txn).await?;
+    let tenant = db::tenant::find(
+        &vpc_creation_request.tenant_organization_id,
+        true,
+        &mut *txn,
+    )
+    .await?;
 
     if let Some(ref nsg_id) = vpc_creation_request.network_security_group_id {
         let id = nsg_id.parse::<NetworkSecurityGroupId>().map_err(|e| {
@@ -66,7 +188,7 @@ pub(crate) async fn create(
         // Query to check the validity of the NSG ID but to also grab
         // a row-level lock on it if it exists.
         if network_security_group::find_by_ids(
-            &mut txn,
+            &mut *txn,
             std::slice::from_ref(&id),
             Some(
                 &vpc_creation_request
@@ -131,13 +253,7 @@ pub(crate) async fn create(
     }
 
     let requested_profile_type = vpc_creation_request.routing_profile_type.clone();
-    let mut new_vpc = NewVpc::try_from(request.into_inner())?;
-    let resolution_source = if new_vpc.vni.is_some() {
-        RouteTargetResolutionSource::Request
-    } else {
-        RouteTargetResolutionSource::ServerState
-    };
-    let requested_routing_profile_overrides = new_vpc.routing_profile_overrides.clone();
+    let mut new_vpc = NewVpc::try_from(vpc_creation_request.clone())?;
 
     let ResolvedVpcRouting {
         profile_type: resolved_profile_type,
@@ -151,35 +267,35 @@ pub(crate) async fn create(
         &new_vpc.tenant_organization_id,
     )?;
 
-    let vni = Some(
-        allocate_vpc_vni(
-            api,
-            &mut txn,
-            &new_vpc.id.to_string(),
-            internal,
-            new_vpc.vni,
-        )
-        .await?,
-    );
-
     new_vpc.routing_profile_type = resolved_profile_type;
+    Ok((new_vpc, internal))
+}
 
-    let vpc = db::vpc::persist(new_vpc, VpcStatus { vni }, &mut txn).await?;
-
+/// `finish_create` inserts the VPC and validates the response before commit.
+/// `config.vni` remains the caller's request; `status.vni` is the assigned value.
+async fn finish_create(
+    api: &Api,
+    txn: &mut PgConnection,
+    new_vpc: NewVpc,
+    vni: i32,
+) -> Result<rpc::Vpc, Status> {
+    let resolution_source = if new_vpc.vni.is_some() {
+        RouteTargetResolutionSource::Request
+    } else {
+        RouteTargetResolutionSource::ServerState
+    };
+    let requested_overrides = new_vpc.routing_profile_overrides.clone();
+    let vpc = db::vpc::persist(new_vpc, VpcStatus { vni: Some(vni) }, txn).await?;
     validate_requested_route_targets(
-        requested_routing_profile_overrides.as_ref(),
+        requested_overrides.as_ref(),
         route_target_vpc_vni(&vpc)?,
         resolution_source,
     )?;
-    let rpc_out = vpc_to_rpc(
+    Ok(vpc_to_rpc(
         vpc,
         api.runtime_config.fnn.as_ref(),
         EffectiveProfileErrorPolicy::Reject(resolution_source),
-    )?;
-
-    txn.commit().await?;
-
-    Ok(Response::new(rpc_out))
+    )?)
 }
 
 pub(crate) async fn update(
@@ -515,6 +631,7 @@ pub(crate) async fn change_routing_profile(
         tenant_prefix_overlap::validate_vpc_policy(api, &mut txn, candidate).await?;
     }
 
+    require_integrated_routing_pools(api)?;
     let allocations = find_vpc_vni_allocations(api, &mut txn, &vpc).await?;
     let destination_pool = if destination.internal {
         api.common_pools.ethernet.pool_vpc_vni.as_ref()
@@ -781,6 +898,7 @@ async fn release_inactive_vpc_vni(
     vpc: &model::vpc::Vpc,
     expected_inactive_vni: u32,
 ) -> Result<i32, CarbideError> {
+    require_integrated_routing_pools(api)?;
     let allocations = find_vpc_vni_allocations(api, txn, vpc).await?;
     let (inactive_pool, inactive_vni) = allocations.inactive.ok_or_else(|| {
         CarbideError::FailedPrecondition(format!(
@@ -806,13 +924,12 @@ async fn release_inactive_vpc_vni(
                 inactive_pool.name(),
             ))
         })?;
-    let selected_pool = ResourcePoolWithBackend::new(inactive_pool, backend.as_ref());
     // The ownership lookup holds this allocation's row lock through commit,
     // so this release must apply. Treat a rejection as an invariant failure.
-    let released = selected_pool
-        .backend()
+    let released = backend
+        .require_integrated()?
         .release(
-            selected_pool.pool(),
+            inactive_pool,
             txn,
             inactive_vni,
             resource_pool::OwnerType::Vpc,
@@ -831,6 +948,44 @@ async fn release_inactive_vpc_vni(
     }
 
     Ok(inactive_vni)
+}
+
+/// `find_owned_vni` locks the VPC's assignment using its resolved backend.
+async fn find_owned_vni<'pool>(
+    api: &'pool Api,
+    txn: &mut PgConnection,
+    pool: &'pool resource_pool::ResourcePool<i32>,
+    owner_id: &str,
+) -> Result<Option<OwnedAllocation<'pool, i32>>, CarbideError> {
+    api.resource_pool_registry
+        .find_owned(
+            pool,
+            txn,
+            resource_pool::OwnerType::Vpc,
+            owner_id,
+            vni::VNI_SLOT,
+        )
+        .await
+        .map_err(CarbideError::from)
+}
+
+/// `require_integrated_routing_pools` rejects remote routing transitions until
+/// they can release a retained VNI through its original provider.
+fn require_integrated_routing_pools(api: &Api) -> Result<(), CarbideError> {
+    for pool in [
+        &api.common_pools.ethernet.pool_vpc_vni,
+        &api.common_pools.ethernet.pool_external_vpc_vni,
+    ] {
+        if let Some(selected) = api.resource_pool_registry.get(pool.name()) {
+            selected.backend.require_integrated().map_err(|_| {
+                CarbideError::FailedPrecondition(
+                    "routing-profile transitions and inactive VNI release require integrated VNI pools"
+                        .to_owned(),
+                )
+            })?;
+        }
+    }
+    Ok(())
 }
 
 struct VpcVniAllocations<'a> {
@@ -853,22 +1008,12 @@ async fn find_vpc_vni_allocations<'a>(
     let internal_pool = api.common_pools.ethernet.pool_vpc_vni.as_ref();
     let external_pool = api.common_pools.ethernet.pool_external_vpc_vni.as_ref();
     let owner_id = vpc.id.to_string();
-    let internal_vni = db::resource_pool::find_owned_allocation(
-        internal_pool,
-        txn,
-        resource_pool::OwnerType::Vpc,
-        &owner_id,
-    )
-    .await
-    .map_err(db::DatabaseError::from)?;
-    let external_vni = db::resource_pool::find_owned_allocation(
-        external_pool,
-        txn,
-        resource_pool::OwnerType::Vpc,
-        &owner_id,
-    )
-    .await
-    .map_err(db::DatabaseError::from)?;
+    let internal_vni = find_owned_vni(api, txn, internal_pool, &owner_id)
+        .await?
+        .map(|allocation| *allocation.value());
+    let external_vni = find_owned_vni(api, txn, external_pool, &owner_id)
+        .await?
+        .map(|allocation| *allocation.value());
 
     let (active_pool, inactive) = match (internal_vni, external_vni) {
         (Some(internal_vni), Some(external_vni))
@@ -1074,21 +1219,14 @@ pub(crate) async fn delete(
         &api.common_pools.ethernet.pool_vpc_vni,
         &api.common_pools.ethernet.pool_external_vpc_vni,
     ] {
-        if let Some(vni) = db::resource_pool::find_owned_allocation(
-            pool,
-            &mut txn,
-            resource_pool::OwnerType::Vpc,
-            &owner_id,
-        )
-        .await
-        .map_err(db::DatabaseError::from)?
-        {
+        if let Some(allocation) = find_owned_vni(api, &mut txn, pool, &owner_id).await? {
+            let vni = *allocation.value();
             if owned_allocation.is_some() || Some(vni) != vpc.status.vni {
                 return Err(CarbideError::FailedPrecondition(format!(
                     "VPC `{vpc_id}` has an inactive or inconsistent VNI allocation; release the inactive VNI before deleting the VPC",
                 )).into());
             }
-            owned_allocation = Some((pool, vni));
+            owned_allocation = Some((pool, allocation));
         }
     }
 
@@ -1110,39 +1248,20 @@ pub(crate) async fn delete(
         .into());
     }
 
-    if let Some((pool, vni)) = owned_allocation {
-        let backend = api
-            .resource_pool_registry
-            .get_or_load_backend(&mut txn, pool.name())
-            .await
-            .map_err(CarbideError::from)?
-            .ok_or_else(|| {
-                CarbideError::FailedPrecondition(format!(
-                    "resource pool `{}` has neither a backend binding nor stored values",
-                    pool.name(),
-                ))
-            })?;
-        let selected_pool = ResourcePoolWithBackend::new(pool, backend.as_ref());
-        // The ownership lookup above keeps the allocation locked until commit.
-        let released = selected_pool
-            .backend()
-            .release(
-                selected_pool.pool(),
-                &mut txn,
-                vni,
-                resource_pool::OwnerType::Vpc,
-                &owner_id,
-            )
-            .await?;
-        match released {
-            ConditionalWrite::Applied(()) => {}
-            ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {
-                return Err(CarbideError::FailedPrecondition(format!(
-                    "VPC `{vpc_id}` no longer owns VNI `{vni}` in pool `{}`",
-                    pool.name(),
-                ))
-                .into());
-            }
+    if let Some((pool, allocation)) = owned_allocation {
+        let vni = *allocation.value();
+        if matches!(
+            allocation
+                .release(&mut txn)
+                .await
+                .map_err(CarbideError::from)?,
+            ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned)
+        ) {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "VPC `{vpc_id}` no longer owns VNI `{vni}` in pool `{}`",
+                pool.name(),
+            ))
+            .into());
         }
     }
 
@@ -1385,7 +1504,7 @@ fn vpc_to_rpc(
     Ok(rpc_vpc)
 }
 
-/// `allocate_vpc_vni` allocates from the selected internal or external VNI pool.
+/// `allocate_vpc_vni` allocates from an Integrated VNI pool during a routing change.
 /// A missing pool rejects both explicit and automatic requests as failed preconditions.
 async fn allocate_vpc_vni(
     api: &Api,
@@ -1394,10 +1513,6 @@ async fn allocate_vpc_vni(
     internal: bool,
     requested_vni: Option<i32>,
 ) -> Result<i32, CarbideError> {
-    // If FNN is not configured, then there is no distinction between internal
-    // and external tenants: they're all internal.  This matches how things are
-    // deployed today.
-
     let source_pool = if internal {
         &api.common_pools.ethernet.pool_vpc_vni
     } else {
@@ -1410,11 +1525,10 @@ async fn allocate_vpc_vni(
         .await
     {
         Ok(Some(backend)) => {
-            let selected_pool = ResourcePoolWithBackend::new(source_pool, backend.as_ref());
-            selected_pool
-                .backend()
+            backend
+                .require_integrated()?
                 .allocate(
-                    selected_pool.pool(),
+                    source_pool,
                     txn,
                     resource_pool::OwnerType::Vpc,
                     owner_id,
@@ -1433,61 +1547,66 @@ async fn allocate_vpc_vni(
         Err(ResourcePoolRegistryError::Database(error)) => Err(error.into()),
         Err(error) => return Err(error.into()),
     };
-    match (allocation, requested_vni) {
-        (Ok(val), _) => Ok(val),
+    allocation
+        .map_err(|error| map_vpc_allocation_error(source_pool, owner_id, requested_vni, error))
+}
+
+/// `map_vpc_allocation_error` preserves VPC allocation diagnostics and counts
+/// each failed Integrated attempt once at the API boundary.
+fn map_vpc_allocation_error(
+    pool: &resource_pool::ResourcePool<i32>,
+    owner_id: &str,
+    requested_vni: Option<i32>,
+    error: ResourcePoolDatabaseError,
+) -> CarbideError {
+    match (error, requested_vni) {
         (
-            Err(
-                error @ ResourcePoolDatabaseError::ResourcePool(
-                    resource_pool::ResourcePoolError::Empty,
-                ),
-            ),
+            error
+            @ ResourcePoolDatabaseError::ResourcePool(resource_pool::ResourcePoolError::Empty),
             requested_vni,
         ) => {
             db::resource_pool::emit_allocation_failure(
-                source_pool.value_type,
+                pool.value_type,
                 owner_id,
                 requested_vni.is_some(),
-                source_pool.name(),
+                pool.name(),
                 &error,
             );
-            Err(CarbideError::ResourceExhausted(format!(
-                "pool {}",
-                source_pool.name
-            )))
+            CarbideError::ResourceExhausted(format!("pool {}", pool.name))
         }
-        (Err(error), Some(requested_vni))
+        (error, Some(requested_vni))
             if db::resource_pool::is_requested_value_unavailable(&error) =>
         {
             db::resource_pool::emit_requested_vni_unavailable(
-                source_pool.value_type,
+                pool.value_type,
                 owner_id,
                 requested_vni,
-                source_pool.name(),
+                pool.name(),
             );
-            Err(CarbideError::FailedPrecondition(format!(
+            CarbideError::FailedPrecondition(format!(
                 "VNI `{}` cannot be requested or is already allocated",
                 requested_vni
-            )))
+            ))
         }
-        (Err(ResourcePoolDatabaseError::Database(error)), Some(_)) => {
+        (ResourcePoolDatabaseError::Database(error), Some(_)) => {
             db::resource_pool::emit_database_allocation_failure(
-                source_pool.value_type,
+                pool.value_type,
                 owner_id,
                 true,
-                source_pool.name(),
+                pool.name(),
                 &error,
             );
-            Err((*error).into())
+            (*error).into()
         }
-        (Err(err), requested_vni) => {
+        (error, requested_vni) => {
             db::resource_pool::emit_allocation_failure(
-                source_pool.value_type,
+                pool.value_type,
                 owner_id,
                 requested_vni.is_some(),
-                source_pool.name(),
-                &err,
+                pool.name(),
+                &error,
             );
-            Err(err.into())
+            error.into()
         }
     }
 }
@@ -1503,16 +1622,9 @@ async fn allocate_exact_vpc_vni(
 ) -> Result<i32, CarbideError> {
     let allocation = match registry.get_or_load_backend(txn, pool.name()).await {
         Ok(Some(backend)) => {
-            let selected_pool = ResourcePoolWithBackend::new(pool, backend.as_ref());
-            selected_pool
-                .backend()
-                .allocate_exact(
-                    selected_pool.pool(),
-                    txn,
-                    resource_pool::OwnerType::Vpc,
-                    owner_id,
-                    vni,
-                )
+            backend
+                .require_integrated()?
+                .allocate_exact(pool, txn, resource_pool::OwnerType::Vpc, owner_id, vni)
                 .await
         }
         Ok(None) => {

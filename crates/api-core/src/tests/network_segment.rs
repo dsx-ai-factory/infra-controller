@@ -741,6 +741,7 @@ pub(in crate::tests) async fn test_create_initial_vpc_and_attached_network(
         &vpcs,
         env.common_pools.ethernet.pool_vpc_vni.as_ref(),
         &env.api.resource_pool_registry,
+        &env.api.cancel_token,
     )
     .await?;
     crate::db_init::create_initial_networks(&env.api, &env.pool, &networks).await?;
@@ -771,6 +772,7 @@ pub(in crate::tests) async fn test_create_initial_vpc_and_attached_network(
         &vpcs,
         env.common_pools.ethernet.pool_vpc_vni.as_ref(),
         &env.api.resource_pool_registry,
+        &env.api.cancel_token,
     )
     .await?;
     let seeded_vpcs = db::vpc::find_by_name(&env.pool, "zero-dpu-vpc").await?;
@@ -787,7 +789,7 @@ pub(in crate::tests) async fn test_create_initial_vpc_and_attached_network(
 enum InitialVpcAllocationFailure {
     Exhausted,
     RequestedUnavailable,
-    MissingPool,
+    MissingPool(Option<i32>),
 }
 
 impl InitialVpcAllocationFailure {
@@ -795,14 +797,15 @@ impl InitialVpcAllocationFailure {
         match self {
             Self::Exhausted => "initial-vpc-empty",
             Self::RequestedUnavailable => "initial-vpc-requested",
-            Self::MissingPool => "initial-vpc-unconfigured",
+            Self::MissingPool(_) => "initial-vpc-unconfigured",
         }
     }
 
     fn requested_vni(self) -> Option<i32> {
         match self {
-            Self::Exhausted | Self::MissingPool => None,
+            Self::Exhausted => None,
             Self::RequestedUnavailable => Some(42),
+            Self::MissingPool(requested) => requested,
         }
     }
 
@@ -822,11 +825,18 @@ impl InitialVpcAllocationFailure {
                 ("allocation_mode", "requested"),
                 ("value_type", "integer"),
             ],
-            Self::MissingPool => [
+            Self::MissingPool(requested) => [
                 ("operation", "allocate"),
                 ("failure", "configuration"),
                 ("failure_policy", "required"),
-                ("allocation_mode", "automatic"),
+                (
+                    "allocation_mode",
+                    if requested.is_some() {
+                        "requested"
+                    } else {
+                        "automatic"
+                    },
+                ),
                 ("value_type", "integer"),
             ],
         }
@@ -852,6 +862,8 @@ struct InitialVpcAllocationFailureRecord {
     error: Option<String>,
 }
 
+/// Startup preserves allocation errors and emits one matching failure event,
+/// including the requested allocation mode when the pool is missing.
 #[crate::sqlx_test]
 async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
     db_pool: sqlx::PgPool,
@@ -910,8 +922,34 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                 }),
             },
             Case {
-                scenario: "absent pool configuration",
-                input: InitialVpcAllocationFailure::MissingPool,
+                scenario: "requested VNI has no configured pool",
+                input: InitialVpcAllocationFailure::MissingPool(Some(42)),
+                expect: Yields(InitialVpcAllocationFailureRecord {
+                    error_kind: "failed_precondition",
+                    error_message:
+                        "resource-pool `initial-vpc-unconfigured` has no explicit allocation range"
+                            .to_string(),
+                    metadata_name: "resource_pool_allocation_failed".to_string(),
+                    event_name: Some("resource_pool_allocation_failed".to_string()),
+                    metric_name: Some(LIFECYCLE_FAILURES_METRIC.to_string()),
+                    level: tracing::Level::ERROR,
+                    message: "Error allocating from resource pool".to_string(),
+                    operation: Some("allocate".to_string()),
+                    failure: Some("configuration".to_string()),
+                    failure_policy: Some("required".to_string()),
+                    allocation_mode: Some("requested".to_string()),
+                    value_type: Some("integer".to_string()),
+                    owner_id_is_vpc: true,
+                    pool: Some("initial-vpc-unconfigured".to_string()),
+                    error: Some(
+                        "resource-pool `initial-vpc-unconfigured` has no explicit allocation range"
+                            .to_string(),
+                    ),
+                }),
+            },
+            Case {
+                scenario: "automatic VNI has no configured pool",
+                input: InitialVpcAllocationFailure::MissingPool(None),
                 expect: Yields(InitialVpcAllocationFailureRecord {
                     error_kind: "failed_precondition",
                     error_message:
@@ -943,7 +981,7 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                     ResourcePool::<i32>::new(failure.pool_name().to_string(), ValueType::Integer);
                 let mut txn = db_pool.begin().await.expect("begin seed transaction");
                 let auto_assign = matches!(failure, InitialVpcAllocationFailure::Exhausted);
-                if !matches!(failure, InitialVpcAllocationFailure::MissingPool) {
+                if !matches!(failure, InitialVpcAllocationFailure::MissingPool(_)) {
                     db::resource_pool::populate(&source_pool, &mut txn, vec![43], auto_assign)
                         .await
                         .expect("seed an allocation range");
@@ -975,7 +1013,7 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                 let registry = ResourcePoolRegistry::resolve(
                     PoolDefinitionSource::SeedConfiguration,
                     &mut txn,
-                    &if matches!(failure, InitialVpcAllocationFailure::MissingPool) {
+                    &if matches!(failure, InitialVpcAllocationFailure::MissingPool(_)) {
                         HashMap::new()
                     } else {
                         HashMap::from([(
@@ -995,7 +1033,7 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                 .expect("resolve configured VPC pool");
                 assert_eq!(
                     registry.get(failure.pool_name()).is_some(),
-                    !matches!(failure, InitialVpcAllocationFailure::MissingPool)
+                    !matches!(failure, InitialVpcAllocationFailure::MissingPool(_))
                 );
                 txn.commit().await.expect("commit pool binding");
                 let metrics = MetricsCapture::start();
@@ -1004,6 +1042,7 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                     &vpcs,
                     &source_pool,
                     &registry,
+                    &tokio_util::sync::CancellationToken::new(),
                 ))
                 .await;
                 let returned_error = result.expect_err("initial VPC allocation must fail");

@@ -378,6 +378,8 @@ async fn vpc_consumers_preserve_independent_named_integrated_bindings(
     Ok(())
 }
 
+/// Failed VPC inserts leave inventory untouched. Configured retries retain their
+/// generated IDs until the definition is removed.
 #[crate::sqlx_test]
 async fn vpc_creation_rolls_back_allocation_on_entity_write_failure(
     pool: sqlx::PgPool,
@@ -398,6 +400,17 @@ async fn vpc_creation_rolls_back_allocation_on_entity_write_failure(
     let before: Vec<serde_json::Value> = sqlx::query_scalar(pool_query)
         .fetch_all(&mut *observer)
         .await?;
+    let mut configured_vpcs = HashMap::from([(
+        "failed-create-configured".to_string(),
+        VpcDefinition {
+            // Omit the tenant so startup generates and saves both IDs.
+            organization_id: None,
+            network_virtualization_type: VpcVirtualizationType::Flat,
+            routing_profile_type: None,
+            routing_profile_overrides: None,
+            vni: None,
+        },
+    )]);
     for (name, creation) in [
         ("failed-create-api", Creation::Api),
         ("failed-create-configured", Creation::Configured),
@@ -431,18 +444,10 @@ async fn vpc_creation_rolls_back_allocation_on_entity_write_failure(
             }
             Creation::Configured => db_init::create_initial_vpcs(
                 &env.pool,
-                &HashMap::from([(
-                    name.to_string(),
-                    VpcDefinition {
-                        organization_id: Some(FIXTURE_TENANT_ORG_ID.to_string()),
-                        network_virtualization_type: VpcVirtualizationType::Flat,
-                        routing_profile_type: None,
-                        routing_profile_overrides: None,
-                        vni: None,
-                    },
-                )]),
+                &configured_vpcs,
                 &env.common_pools.ethernet.pool_vpc_vni,
                 &env.api.resource_pool_registry,
+                &env.api.cancel_token,
             )
             .await
             .expect_err("injected configured VPC insert failure")
@@ -458,6 +463,52 @@ async fn vpc_creation_rolls_back_allocation_on_entity_write_failure(
             .fetch_all(&mut *observer)
             .await?;
         assert_eq!(after, before, "{name}");
+
+        if let Creation::Configured = creation {
+            let saved = db::vpc::configured_creation::list(&mut *observer).await?;
+            assert_eq!(saved.len(), 1);
+            assert_eq!(saved[0].name, name);
+
+            // An unchanged retry must reuse both generated IDs after rollback.
+            let retry_error = db_init::create_initial_vpcs(
+                &env.pool,
+                &configured_vpcs,
+                &env.common_pools.ethernet.pool_vpc_vni,
+                &env.api.resource_pool_registry,
+                &env.api.cancel_token,
+            )
+            .await
+            .expect_err("injected configured VPC insert failure on retry");
+            assert!(retry_error.to_string().contains("reject_vpc_creation"));
+            assert_eq!(
+                db::vpc::configured_creation::list(&mut *observer).await?,
+                saved
+            );
+            let after_retry: Vec<serde_json::Value> = sqlx::query_scalar(pool_query)
+                .fetch_all(&mut *observer)
+                .await?;
+            assert_eq!(after_retry, before);
+
+            // Removing the definition forgets the IDs without reserving inventory.
+            configured_vpcs.clear();
+            db_init::create_initial_vpcs(
+                &env.pool,
+                &configured_vpcs,
+                &env.common_pools.ethernet.pool_vpc_vni,
+                &env.api.resource_pool_registry,
+                &env.api.cancel_token,
+            )
+            .await?;
+            assert!(
+                db::vpc::configured_creation::list(&mut *observer)
+                    .await?
+                    .is_empty()
+            );
+            let after_removal: Vec<serde_json::Value> = sqlx::query_scalar(pool_query)
+                .fetch_all(&mut *observer)
+                .await?;
+            assert_eq!(after_removal, before);
+        }
     }
     Ok(())
 }
@@ -1159,6 +1210,7 @@ async fn vpc_binding_read_failures_preserve_allocations_and_report_errors(
                     )]),
                     &env.common_pools.ethernet.pool_vpc_vni,
                     &ResourcePoolRegistry::default(),
+                    &env.api.cancel_token,
                 )
                 .await
                 .map_err(tonic::Status::from),
@@ -4230,6 +4282,7 @@ async fn initial_vpc_inline_overrides_are_rejected_before_existing_vpc_check(
         &initial_vpcs,
         env.common_pools.ethernet.pool_vpc_vni.as_ref(),
         &env.api.resource_pool_registry,
+        &env.api.cancel_token,
     )
     .await?;
 
@@ -4254,6 +4307,7 @@ async fn initial_vpc_inline_overrides_are_rejected_before_existing_vpc_check(
         &vpcs,
         env.common_pools.ethernet.pool_vpc_vni.as_ref(),
         &env.api.resource_pool_registry,
+        &env.api.cancel_token,
     )
     .await
     .expect_err("seeded inline overrides must always be rejected");

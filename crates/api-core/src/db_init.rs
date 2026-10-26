@@ -16,13 +16,14 @@
  */
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use carbide_network::virtualization::VpcVirtualizationType;
+use carbide_resource_pool::remote::RemoteResourcePoolError;
 use carbide_resource_pool::{
-    ResourcePoolRegistry, ResourcePoolRegistryError, ResourcePoolWithBackend,
+    PreparedAllocation, ResourcePoolBackendError, ResourcePoolRegistry, ResourcePoolRegistryError,
 };
 use carbide_uuid::domain::DomainId;
-use carbide_uuid::vpc::VpcId;
 use db::dns::domain;
 use db::network_segment::reconcile_network_defs;
 use db::vpc::{self};
@@ -36,14 +37,23 @@ use model::network_prefix::NewNetworkPrefix;
 use model::network_segment::{NetworkDefinition, NetworkSegmentType, NewNetworkSegment};
 use model::resource_pool;
 use model::resource_pool::ResourcePool;
-use model::vpc::{NewVpc, VpcDefinition, VpcStatus, VpcVirtualizationTypeCapabilities};
+use model::resource_pool::remote::CompletionAuthority;
+use model::vpc::{
+    ConfiguredVpcCreation, NewVpc, VpcDefinition, VpcStatus, VpcVirtualizationTypeCapabilities,
+};
 use sqlx::{Pool, Postgres};
+use tokio_util::sync::CancellationToken;
 
 use crate::CarbideError;
 use crate::api::Api;
+use crate::handlers::vpc::vni;
 
 const STATIC_ASSIGNMENTS_IPV4_PREFIX: &str = "169.254.254.254/32";
 const STATIC_ASSIGNMENTS_IPV6_PREFIX: &str = "100::/128";
+
+// Transaction setup, including connection acquisition, gets the same five-second
+// bound as the resource-pool helper applies to each SQL statement.
+const CONFIGURED_VPC_DATABASE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Creates the configured initial domain when the `domains` table is empty.
 ///
@@ -245,102 +255,366 @@ pub(crate) fn validate_initial_vpcs(
     Ok(())
 }
 
+/// `PreparedConfiguredVpc` keeps the requested VPC and its allocation attempt
+/// together while provider work runs outside the startup transaction.
+struct PreparedConfiguredVpc<'a> {
+    creation: ConfiguredVpcCreation,
+    definition: &'a VpcDefinition,
+    allocation: PreparedAllocation<'a, i32>,
+}
+
+/// `create_initial_vpcs` saves creation IDs, resolves allocations, then inserts
+/// the VPCs and their allocations in one transaction. The same pool operations
+/// support either backend; a failed startup can reuse its saved creation IDs.
 pub(crate) async fn create_initial_vpcs(
     db_pool: &Pool<Postgres>,
     vpcs: &HashMap<String, VpcDefinition>,
     vni_pool: &ResourcePool<i32>,
     resource_pool_registry: &ResourcePoolRegistry,
+    cancel: &CancellationToken,
 ) -> Result<(), CarbideError> {
-    // Retain validation at the mutation boundary as defense in depth. Startup
-    // also validates during SeedData resolution, before any reconciliation.
     validate_initial_vpcs(vpcs).map_err(CarbideError::InvalidConfiguration)?;
+    cancel
+        .run_until_cancelled(Box::pin(create_configured_vpcs(
+            db_pool,
+            vpcs,
+            vni_pool,
+            resource_pool_registry,
+            cancel,
+        )))
+        .await
+        .ok_or(RemoteResourcePoolError::Cancelled)?
+}
 
-    let mut txn = Transaction::begin(db_pool).await?;
-    for (name, def) in vpcs {
-        if db::vpc::find_by_name(&mut txn, name)
-            .await
-            .is_ok_and(|v| !v.is_empty())
-        {
-            tracing::debug!(
-                vpc_name = %name,
-                "VPC exists",
-            );
+/// `create_configured_vpcs` separates provider work from the batch transaction.
+/// Creation rows are locked in name order so concurrent startups use the same
+/// order in both the preparation and insertion transactions.
+async fn create_configured_vpcs(
+    database: &Pool<Postgres>,
+    vpcs: &HashMap<String, VpcDefinition>,
+    vni_pool: &ResourcePool<i32>,
+    registry: &ResourcePoolRegistry,
+    cancel: &CancellationToken,
+) -> Result<(), CarbideError> {
+    cancel_removed_configured_vpcs(database, vpcs, registry, cancel).await?;
+    let mut txn = configured_vpc_transaction(database).await?;
+    let mut creations = Vec::new();
+    for (name, definition) in vpcs.iter().sorted_by_key(|(name, _)| *name) {
+        if !db::vpc::find_by_name(&mut txn, name).await?.is_empty() {
+            tracing::debug!(vpc_name = %name, "VPC exists");
             continue;
         }
-
-        let vpc_id = VpcId::new();
-        let tenant_organization_id = def
+        if definition.routing_profile_type.is_some()
+            || definition.routing_profile_overrides.is_some()
+        {
+            definition
+                .network_virtualization_type
+                .ensure_supports_routing_profiles()?;
+        }
+        let creation = db::vpc::configured_creation::begin(
+            &mut txn,
+            name,
+            definition.organization_id.as_deref(),
+        )
+        .await?;
+        // Omission reuses the saved tenant; an explicit replacement withdraws
+        // the old creation before a later startup generates a new identity.
+        if definition
             .organization_id
-            .clone()
-            .unwrap_or(uuid::Uuid::new_v4().into());
-        let owner_id = vpc_id.to_string();
+            .as_ref()
+            .is_some_and(|id| *id != creation.tenant_organization_id)
+        {
+            txn.commit().await?;
+            cancel_configured_vpc(database, &creation, registry, cancel).await?;
+            return Err(CarbideError::FailedPrecondition(format!(
+                "configured VPC `{name}` organization ID changed; retry startup",
+            )));
+        }
+        creations.push((creation, definition));
+    }
+    if creations.is_empty() {
+        txn.commit().await?;
+        return Ok(());
+    }
 
-        let allocation = match resource_pool_registry
-            .get_or_load_backend(&mut txn, vni_pool.name())
+    let (first_creation, first_definition) = &creations[0];
+    let selected = match registry.select(&mut txn, vni_pool).await {
+        Ok(Some(selected)) => Ok(selected),
+        Ok(None) => Err(resource_pool::ResourcePoolError::MissingAllocationRange {
+            pool_name: vni_pool.name().to_owned(),
+            auto_assign: first_definition.vni.is_none(),
+        }
+        .into()),
+        Err(ResourcePoolRegistryError::Database(error)) => {
+            Err(db::resource_pool::ResourcePoolDatabaseError::from(error))
+        }
+        Err(error) => return Err(error.into()),
+    }
+    .inspect_err(|error| {
+        db::resource_pool::emit_allocation_failure(
+            vni_pool.value_type,
+            &first_creation.vpc_id.to_string(),
+            first_definition.vni.is_some(),
+            vni_pool.name(),
+            error,
+        );
+    })?;
+    let mut prepared = Vec::with_capacity(creations.len());
+    for (creation, definition) in creations {
+        let authority = CompletionAuthority::Controller {
+            desire_id: creation.vpc_id.into(),
+        };
+        let allocation = match selected
+            .prepare(
+                &mut txn,
+                resource_pool::OwnerType::Vpc,
+                &creation.vpc_id.to_string(),
+                vni::VNI_SLOT,
+                definition.vni,
+                authority,
+            )
             .await
         {
-            Ok(Some(backend)) => {
-                let selected_pool = ResourcePoolWithBackend::new(vni_pool, backend.as_ref());
-                selected_pool
-                    .backend()
-                    .allocate(
-                        selected_pool.pool(),
-                        &mut txn,
+            Ok(allocation) => allocation,
+            Err(ResourcePoolBackendError::RequestChanged) => {
+                txn.commit().await?;
+                // Changed inputs need fresh creation IDs after the previous
+                // allocation has been cleaned up.
+                cancel_configured_vpc(database, &creation, registry, cancel).await?;
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "configured VPC `{}` needs a startup retry after VNI cleanup",
+                    creation.name,
+                )));
+            }
+            Err(ResourcePoolBackendError::CleanupPending) => {
+                txn.commit().await?;
+                // The definition is unchanged. Keep its VPC and tenant IDs so
+                // the next startup can retry allocation for the same creation.
+                registry
+                    .cancel_pending_allocation(
+                        database,
                         resource_pool::OwnerType::Vpc,
-                        &owner_id,
-                        def.vni,
+                        &creation.vpc_id.to_string(),
+                        vni::VNI_SLOT,
+                        cancel,
                     )
-                    .await
+                    .await?;
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "configured VPC `{}` needs a startup retry after VNI cleanup",
+                    creation.name,
+                )));
             }
-            // A pool with neither a binding nor values has nothing to allocate.
-            Ok(None) => Err(resource_pool::ResourcePoolError::MissingAllocationRange {
-                pool_name: vni_pool.name().to_string(),
-                auto_assign: def.vni.is_none(),
-            }
-            .into()),
-            Err(ResourcePoolRegistryError::Database(error)) => Err(error.into()),
             Err(error) => return Err(error.into()),
         };
-        let vni = allocation.inspect_err(|error| {
-            db::resource_pool::emit_allocation_failure(
-                vni_pool.value_type,
-                &owner_id,
-                def.vni.is_some(),
-                vni_pool.name(),
-                error,
-            );
-        })?;
+        prepared.push(PreparedConfiguredVpc {
+            creation,
+            definition,
+            allocation,
+        });
+    }
+    txn.commit().await?;
 
+    let mut resolved = Vec::with_capacity(prepared.len());
+    for PreparedConfiguredVpc {
+        creation,
+        definition,
+        allocation,
+    } in prepared
+    {
+        let allocation = match allocation.resolve(database, cancel).await {
+            Ok(allocation) => allocation,
+            Err(error)
+                if error.is_not_current()
+                    && configured_vpc_exists(database, &creation.name).await? =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        // A provider result is already known here. Integrated still chooses its
+        // value in the batch transaction, retaining its existing value contract.
+        if let Some(value) = allocation.value()
+            && let Err(error) = vni::validate(*value, allocation.route_target_policy())
+        {
+            if let Err(cancel_error) = allocation.cancel(database).await {
+                tracing::error!(vpc_name = %creation.name, error = %cancel_error,
+                    "could not cancel rejected configured VPC allocation");
+            }
+            return Err(error);
+        }
+        resolved.push((creation, definition, allocation));
+    }
+
+    let mut txn = configured_vpc_transaction(database).await?;
+    let mut superseded = Vec::new();
+    let mut created = Vec::new();
+    for (creation, definition, allocation) in &resolved {
+        let current = db::vpc::configured_creation::lock(&mut txn, &creation.name).await?;
+        let exists = !db::vpc::find_by_name(&mut txn, &creation.name)
+            .await?
+            .is_empty();
+        if current.as_ref() != Some(creation) {
+            if exists {
+                continue;
+            }
+            return Err(CarbideError::FailedPrecondition(format!(
+                "configured VPC `{}` is no longer requested",
+                creation.name,
+            )));
+        }
+        if exists {
+            superseded.push(creation);
+            continue;
+        }
+        let vni = allocation.allocate(&mut txn).await.inspect_err(|error| {
+            if let ResourcePoolBackendError::Integrated(error) = error {
+                db::resource_pool::emit_allocation_failure(
+                    vni_pool.value_type,
+                    &creation.vpc_id.to_string(),
+                    definition.vni.is_some(),
+                    vni_pool.name(),
+                    error,
+                );
+            }
+        })?;
         let vpc = NewVpc {
-            id: vpc_id,
-            tenant_organization_id,
-            network_virtualization_type: def.network_virtualization_type,
+            id: creation.vpc_id,
+            tenant_organization_id: creation.tenant_organization_id.clone(),
+            network_virtualization_type: definition.network_virtualization_type,
             metadata: Metadata {
-                name: name.to_owned(),
+                name: creation.name.clone(),
                 ..Default::default()
             },
             network_security_group_id: None,
-            routing_profile_type: def.routing_profile_type.clone(),
-            routing_profile_overrides: def.routing_profile_overrides.clone(),
+            routing_profile_type: definition.routing_profile_type.clone(),
+            routing_profile_overrides: definition.routing_profile_overrides.clone(),
             power_resource_group: None,
             vni: Some(vni),
             slaac_enabled: false,
         };
-
-        // Validation
-        if def.routing_profile_type.is_some() || def.routing_profile_overrides.is_some() {
-            def.network_virtualization_type
-                .ensure_supports_routing_profiles()
-                .map_err(CarbideError::from)?;
-        }
-
         db::vpc::persist(vpc, VpcStatus { vni: Some(vni) }, &mut txn).await?;
-        tracing::info!(
-            vpc_name = %name,
-            "Created VPC",
-        );
+        db::vpc::configured_creation::remove(&mut txn, &creation.name).await?;
+        created.push(&creation.name);
+    }
+    txn.commit().await?;
+    for name in created {
+        tracing::info!(vpc_name = %name, "Created VPC");
     }
 
+    // Another creator can satisfy a configured name during provider I/O. Its
+    // VPC stays intact; release only our unfinished attempt before forgetting it.
+    for creation in superseded {
+        cancel_configured_vpc(database, creation, registry, cancel).await?;
+    }
+    Ok(())
+}
+
+/// `configured_vpc_transaction` bounds connection setup and each SQL statement.
+/// The enclosing configured startup future observes cancellation, while the
+/// statement limit lets PostgreSQL finish a dropped query and its queued rollback.
+async fn configured_vpc_transaction(
+    database: &Pool<Postgres>,
+) -> Result<Transaction<'_>, CarbideError> {
+    Ok(tokio::time::timeout(
+        CONFIGURED_VPC_DATABASE_TIMEOUT,
+        carbide_resource_pool::database_transaction(database),
+    )
+    .await
+    .map_err(|_| {
+        CarbideError::UnavailableError(
+            "timed out starting the configured VPC database transaction".to_owned(),
+        )
+    })??)
+}
+
+/// `configured_vpc_exists` checks whether an active VPC already satisfies the name.
+async fn configured_vpc_exists(
+    database: &Pool<Postgres>,
+    name: &str,
+) -> Result<bool, CarbideError> {
+    let mut txn = configured_vpc_transaction(database).await?;
+    let exists = !db::vpc::find_by_name(&mut txn, name).await?.is_empty();
+    txn.commit().await?;
+    Ok(exists)
+}
+
+/// `cancel_removed_configured_vpcs` withdraws unfinished requests whose VPC
+/// definition disappeared, or whose name was satisfied by another creation.
+async fn cancel_removed_configured_vpcs(
+    database: &Pool<Postgres>,
+    vpcs: &HashMap<String, VpcDefinition>,
+    registry: &ResourcePoolRegistry,
+    cancel: &CancellationToken,
+) -> Result<(), CarbideError> {
+    let mut txn = configured_vpc_transaction(database).await?;
+    let creations = db::vpc::configured_creation::list(txn.as_pgconn()).await?;
+    txn.commit().await?;
+    for saved in creations {
+        if vpcs.contains_key(&saved.name) && !configured_vpc_exists(database, &saved.name).await? {
+            continue;
+        }
+        cancel_configured_vpc(database, &saved, registry, cancel).await?;
+    }
+    Ok(())
+}
+
+/// `cancel_configured_vpc` keeps the creation IDs until pool cleanup finishes.
+/// The second identity check prevents an old startup from removing a replacement
+/// creation that appeared while cleanup was running.
+async fn cancel_configured_vpc(
+    database: &Pool<Postgres>,
+    creation: &ConfiguredVpcCreation,
+    registry: &ResourcePoolRegistry,
+    cancel: &CancellationToken,
+) -> Result<(), CarbideError> {
+    let mut txn = configured_vpc_transaction(database).await?;
+    // Wait for any startup finishing this creation before deciding what needs
+    // cleanup. Release the lock before provider work; recheck identity afterward.
+    let current = db::vpc::configured_creation::lock(&mut txn, &creation.name).await?;
+    txn.commit().await?;
+    if current.as_ref() != Some(creation) {
+        return Ok(());
+    }
+    let cleanup = match registry
+        .cancel_pending_allocation(
+            database,
+            resource_pool::OwnerType::Vpc,
+            &creation.vpc_id.to_string(),
+            vni::VNI_SLOT,
+            cancel,
+        )
+        .await
+    {
+        Ok(cleanup) => cleanup,
+        Err(error) if error.is_not_current() => {
+            // Another startup may have attached the allocation and removed the
+            // creation after our first check. Its completed work needs no cleanup.
+            let mut txn = configured_vpc_transaction(database).await?;
+            let current = db::vpc::configured_creation::lock(&mut txn, &creation.name).await?;
+            txn.commit().await?;
+            if current.as_ref() != Some(creation) {
+                return Ok(());
+            }
+            return Err(error.into());
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    let mut txn = configured_vpc_transaction(database).await?;
+    if db::vpc::configured_creation::lock(&mut txn, &creation.name)
+        .await?
+        .as_ref()
+        != Some(creation)
+    {
+        return Ok(());
+    }
+    if !cleanup.is_complete(&mut txn).await? {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "configured VPC `{}` is still waiting for VNI cleanup; retry startup",
+            creation.name,
+        )));
+    }
+    db::vpc::configured_creation::remove(&mut txn, &creation.name).await?;
     txn.commit().await?;
     Ok(())
 }

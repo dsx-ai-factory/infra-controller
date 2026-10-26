@@ -231,6 +231,9 @@ carbide-nvlink-manager = { path = "../nvlink-manager", features = [
 ] }
 carbide-rack = { path = "../rack", features = ["test-support"] }
 carbide-redfish = { path = "../redfish", features = ["test-support"] }
+carbide-resource-pool-api = { path = "../resource-pool-api", features = [
+  "test-support",
+] }
 carbide-rpc = { path = "../rpc", features = ["model", "sqlx", "test-support"] }
 carbide-rpc-utils = { path = "../rpc-utils" }
 carbide-secrets = { path = "../secrets", features = ["test-support"] }

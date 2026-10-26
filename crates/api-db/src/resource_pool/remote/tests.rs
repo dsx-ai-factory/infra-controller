@@ -2227,3 +2227,216 @@ async fn provider_string_indexes_preserve_allocations_with_a_live_writer(
     duplicate.rollback().await?;
     Ok(())
 }
+
+/// VPC retries need the greatest saved generation even after cleanup or a pool
+/// change; lexical ordering would choose generation 9 over generation 10.
+/// An attached lookup also locks its row until deletion can request release.
+#[crate::sqlx_test]
+async fn owner_slot_lookup_keeps_terminal_generations_across_pools(
+    pool: PgPool,
+) -> eyre::Result<()> {
+    let mut previous = new_request(&pool, "vpc-vni", ResourcePoolValueDomain::Integer).await?;
+    previous.owner.generation = 9;
+    let authority = controller_authority();
+    assert_eq!(
+        super::latest_for_owner_slot(&pool, OwnerType::Vpc, &previous.owner.owner_id, "vni")
+            .await?,
+        None
+    );
+    begin(&pool, &previous, &authority).await?;
+    let mut txn = pool.begin().await?;
+    assert_eq!(
+        request_cancel(&mut txn, previous.request_id).await?,
+        Applied(())
+    );
+    assert_eq!(
+        confirm_cleanup(
+            &mut txn,
+            previous.request_id,
+            CleanupConfirmation::Cancelled
+        )
+        .await?,
+        Applied(())
+    );
+    txn.commit().await?;
+    assert_eq!(
+        super::latest_for_owner_slot(&pool, OwnerType::Vpc, &previous.owner.owner_id, "vni")
+            .await?,
+        load(&pool, previous.request_id).await?
+    );
+
+    let mut current =
+        new_request(&pool, "external-vpc-vni", ResourcePoolValueDomain::Integer).await?;
+    current.owner = previous.owner.clone();
+    current.owner.generation = 10;
+    let pending = begin(&pool, &current, &authority).await?;
+    // Generation determines the newest attempt even if timestamps disagree.
+    // Sorting by either timestamp must not return the earlier generation.
+    sqlx::query(
+        "UPDATE resource_pool_allocations \
+         SET created_at = clock_timestamp() + interval '1 day', \
+             updated_at = clock_timestamp() + interval '1 day' \
+         WHERE allocation_id = $1",
+    )
+    .bind(previous.request_id)
+    .execute(&pool)
+    .await?;
+    assert_eq!(
+        super::latest_for_owner_slot(&pool, OwnerType::Vpc, &current.owner.owner_id, "vni").await?,
+        Some(pending)
+    );
+
+    // A different purpose for the same owner must not change its VNI generation.
+    let mut other_slot = current.clone();
+    other_slot.request_id = Uuid::new_v4();
+    other_slot.owner.slot = "another-purpose".to_owned();
+    other_slot.owner.generation = u64::MAX;
+    begin(&pool, &other_slot, &authority).await?;
+    // Another owner or entity type must not supply this VPC's generation or
+    // attached assignment, even when its generation is greater.
+    for (owner_type, owner_id) in [
+        (OwnerType::Vpc, Uuid::new_v4().to_string()),
+        (OwnerType::Machine, current.owner.owner_id.clone()),
+    ] {
+        let mut other_owner = current.clone();
+        other_owner.request_id = Uuid::new_v4();
+        other_owner.owner.owner_type = owner_type;
+        other_owner.owner.owner_id = owner_id;
+        other_owner.owner.generation = u64::MAX;
+        begin(&pool, &other_owner, &authority).await?;
+        attach_assignment(&pool, other_owner.request_id, &authority, &assignment()).await?;
+    }
+    let granted = assignment();
+    attach_assignment(&pool, current.request_id, &authority, &granted).await?;
+    let mut txn = pool.begin().await?;
+    let attached = super::attached_for_owner_slot(
+        &mut txn,
+        &current.pool.logical_pool,
+        OwnerType::Vpc,
+        &current.owner.owner_id,
+        "vni",
+    )
+    .await?
+    .expect("the current generation attached");
+    assert_eq!(
+        Some(attached.clone()),
+        load(&pool, current.request_id).await?
+    );
+    assert_eq!(
+        super::latest_for_owner_slot(&pool, OwnerType::Vpc, &current.owner.owner_id, "vni").await?,
+        Some(attached)
+    );
+    let locking_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(txn.as_mut())
+        .await?;
+
+    // Deletion cannot change the assignment while its ownership lookup is in use.
+    let mut deleting = pool.begin().await?;
+    let release = async {
+        let applied =
+            request_release(&mut deleting, current.request_id, &granted.allocation_id).await?;
+        deleting.commit().await?;
+        Ok::<_, eyre::Report>(applied)
+    };
+    let unlock = async {
+        wait_for_blocked_query(&pool, locking_pid, "resource_pool_allocations").await;
+        txn.commit().await?;
+        Ok::<_, eyre::Report>(())
+    };
+    let (released, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::try_join!(release, unlock)
+    })
+    .await??;
+    assert_eq!(released, Applied(()));
+    let mut txn = pool.begin().await?;
+    assert!(
+        super::attached_for_owner_slot(
+            &mut txn,
+            &current.pool.logical_pool,
+            OwnerType::Vpc,
+            &current.owner.owner_id,
+            "vni",
+        )
+        .await?
+        .is_none()
+    );
+    assert_eq!(
+        confirm_cleanup(&mut txn, current.request_id, CleanupConfirmation::Released).await?,
+        Applied(())
+    );
+    txn.commit().await?;
+    let terminal =
+        super::latest_for_owner_slot(&pool, OwnerType::Vpc, &current.owner.owner_id, "vni")
+            .await?
+            .expect("cleanup keeps the generation");
+    assert_eq!(terminal.state, AllocationState::Released);
+    assert_saved_request(&terminal, &current, &authority);
+    Ok(())
+}
+
+/// Ownership lookup must ignore Integrated receipts and reject two attached
+/// remote generations instead of silently choosing one for deletion.
+#[crate::sqlx_test]
+async fn attached_owner_slot_rejects_duplicates_and_ignores_integrated(
+    pool: PgPool,
+) -> eyre::Result<()> {
+    let request = new_request(&pool, "vpc-vni", ResourcePoolValueDomain::Integer).await?;
+    let inventory = ResourcePool::new(request.pool.logical_pool.clone(), ValueType::Integer);
+    let mut txn = pool.begin().await?;
+    populate(&inventory, &mut txn, vec![42], true).await?;
+    allocate(
+        &inventory,
+        &mut txn,
+        OwnerType::Vpc,
+        &request.owner.owner_id,
+        None,
+    )
+    .await?;
+    txn.commit().await?;
+
+    let mut txn = pool.begin().await?;
+    assert!(
+        super::attached_for_owner_slot(
+            &mut txn,
+            &request.pool.logical_pool,
+            OwnerType::Vpc,
+            &request.owner.owner_id,
+            "vni",
+        )
+        .await?
+        .is_none()
+    );
+    txn.commit().await?;
+
+    let authority = controller_authority();
+    begin(&pool, &request, &authority).await?;
+    attach_assignment(&pool, request.request_id, &authority, &assignment()).await?;
+    let mut duplicate = request.clone();
+    duplicate.request_id = Uuid::new_v4();
+    duplicate.owner.generation += 1;
+    begin(&pool, &duplicate, &authority).await?;
+    attach_assignment(&pool, duplicate.request_id, &authority, &assignment()).await?;
+    let mut txn = pool.begin().await?;
+    assert!(matches!(
+        super::attached_for_owner_slot(
+            &mut txn,
+            &request.pool.logical_pool,
+            OwnerType::Vpc,
+            &request.owner.owner_id,
+            "vni",
+        )
+        .await,
+        Err(crate::DatabaseError::FailedPrecondition(_))
+    ));
+    txn.commit().await?;
+    for request_id in [request.request_id, duplicate.request_id] {
+        assert_eq!(
+            load(&pool, request_id)
+                .await?
+                .expect("unchanged receipt")
+                .state,
+            AllocationState::Attached
+        );
+    }
+    Ok(())
+}

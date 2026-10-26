@@ -1501,9 +1501,11 @@ procedure is tracked in [#3903](https://github.com/dsx-ai-factory/infra-controll
 
 ### `VpcDefinition`
 
+Startup keeps the generated VPC ID until creation succeeds, so an interrupted attempt can reuse its identity. Removing an unfinished entry cancels that creation. Changing its explicit `organization_id` cleans up the previous attempt and asks for another startup. Remote allocation cleanup must finish before the saved IDs are discarded; an unavailable provider can delay that cleanup. Existing VPCs with the same name are left unchanged. The [allocation recovery contract](../../../resource-pool-api/README.md#lost-replies-and-delayed-requests) describes retries and pending cleanup.
+
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
-| `organization_id` | `Option<String>` | — | Tenant organization that owns the seeded VPC. |
+| `organization_id` | `Option<String>` | — | Tenant organization that owns the seeded VPC. When omitted, startup generates an ID and keeps it across creation retries. |
 | `network_virtualization_type` | `VpcVirtualizationType` | **required** | Data plane used by the VPC. |
 | `routing_profile_type` | `Option<String>` | — | Named FNN routing profile recorded on the seeded VPC. |
 | `routing_profile_overrides` | `Option<VpcRoutingProfileOverrides>` | — | Unsupported for seeded VPCs. Any configured value causes startup to fail; inline overrides are accepted only by VPC creation or update requests. |

@@ -13,6 +13,7 @@
 
 use std::num::NonZeroU16;
 
+use model::resource_pool::OwnerType;
 use model::resource_pool::allocation::{AllocationSource, AllocationState, ResourcePoolAllocation};
 use model::resource_pool::remote::{
     AllocationAssignment, AllocationResult, CleanupConfirmation, CompletionAuthority,
@@ -171,6 +172,75 @@ pub async fn load(
     Ok(load_allocation(db, request_id)
         .await?
         .filter(|allocation| matches!(&allocation.source, AllocationSource::Remote { .. })))
+}
+
+/// `latest_for_owner_slot` loads the highest remote allocation generation for one
+/// purpose, including attached and terminal requests. Callers use the saved request
+/// for an unfinished attempt or advance its generation after confirmed cleanup.
+/// `None` means this owner and slot have never requested a remote allocation.
+/// This read does not reserve the next generation; `begin` enforces uniqueness.
+pub async fn latest_for_owner_slot(
+    db: impl DbReader<'_>,
+    owner_type: OwnerType,
+    owner_id: &str,
+    slot: &str,
+) -> Result<Option<ResourcePoolAllocation>, DatabaseError> {
+    // Use the bounded owner index, but compare the original strings too: a hash
+    // match alone must never select another owner's request.
+    let query = "SELECT allocation_id, pool_name, owner_type, owner_id, state,
+        created_at, updated_at, integrated_resource_id, value, value_type,
+        auto_assign, allocated_at, binding_id, remote_request, result
+        FROM resource_pool_allocations
+        WHERE binding_id IS NOT NULL AND owner_type = $1
+          AND public.digest(owner_id, 'sha256') = public.digest($2::text, 'sha256')
+          AND public.digest(remote_request->>'slot', 'sha256') = public.digest($3::text, 'sha256')
+          AND owner_id = $2 AND remote_request->>'slot' = $3
+        ORDER BY remote_request->'generation' DESC LIMIT 1";
+    sqlx::query_as(query)
+        .bind(owner_type.to_string())
+        .bind(owner_id)
+        .bind(slot)
+        .fetch_optional(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// `attached_for_owner_slot` locks the remote assignment attached to an entity.
+/// More than one attached assignment is an error: choosing either would leave
+/// the other allocated. Pending and cleanup requests are not entity ownership.
+/// Integrated callers keep using `find_owned_allocation`, which locks inventory
+/// before its allocation record; this query never locks Integrated records.
+pub async fn attached_for_owner_slot(
+    txn: &mut PgConnection,
+    pool_name: &str,
+    owner_type: OwnerType,
+    owner_id: &str,
+    slot: &str,
+) -> Result<Option<ResourcePoolAllocation>, DatabaseError> {
+    let query = "SELECT allocation_id, pool_name, owner_type, owner_id, state,
+        created_at, updated_at, integrated_resource_id, value, value_type,
+        auto_assign, allocated_at, binding_id, remote_request, result
+        FROM resource_pool_allocations
+        WHERE binding_id IS NOT NULL AND state = 'attached' AND pool_name = $1
+          AND owner_type = $2
+          AND public.digest(owner_id, 'sha256') = public.digest($3::text, 'sha256')
+          AND public.digest(remote_request->>'slot', 'sha256') = public.digest($4::text, 'sha256')
+          AND owner_id = $3 AND remote_request->>'slot' = $4
+        ORDER BY allocation_id LIMIT 2 FOR UPDATE";
+    let allocations: Vec<ResourcePoolAllocation> = sqlx::query_as(query)
+        .bind(pool_name)
+        .bind(owner_type.to_string())
+        .bind(owner_id)
+        .bind(slot)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if allocations.len() > 1 {
+        return Err(DatabaseError::FailedPrecondition(format!(
+            "resource pool `{pool_name}` has multiple attached allocations for {owner_type} `{owner_id}` slot `{slot}`"
+        )));
+    }
+    Ok(allocations.into_iter().next())
 }
 
 // `begin` must also see an Integrated row with this UUID to reject its reuse.

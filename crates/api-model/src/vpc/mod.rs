@@ -115,6 +115,19 @@ pub struct VpcDefinition {
     pub vni: Option<i32>,
 }
 
+/// `ConfiguredVpcCreation` identifies an unfinished VPC from seed configuration.
+/// Successful creation removes this row in the VPC's transaction. A later
+/// recreation receives fresh IDs, including after the old VPC was deleted.
+#[derive(Clone, Debug, PartialEq, Eq, FromRow)]
+pub struct ConfiguredVpcCreation {
+    /// Name of the VPC definition in configuration.
+    pub name: String,
+    /// VPC ID reused by allocation retries and final insertion.
+    pub vpc_id: VpcId,
+    /// Configured organization, or the generated default reused after restart.
+    pub tenant_organization_id: String,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct VpcSearchFilter {
     pub name: Option<String>,

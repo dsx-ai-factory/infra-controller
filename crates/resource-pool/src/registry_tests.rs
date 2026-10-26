@@ -15,12 +15,13 @@
  * limitations under the License.
  */
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
+use db::DatabaseError;
 use db::resource_pool::binding::{self, BindingError};
 use db::resource_pool::populate;
+use db::work_lock_manager::{self, KeepaliveConfig};
 use model::resource_pool::binding::{
     INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolSelection,
     ResourcePoolValueDomain,
@@ -29,7 +30,10 @@ use model::resource_pool::common::ib_pkey_pool_name;
 use model::resource_pool::{
     OwnerType, Range, ResourcePool, ResourcePoolDef, ResourcePoolType, ValueType,
 };
+use tokio::task::JoinSet;
 
+use crate::grpc::GrpcResourcePoolBackend;
+use crate::remote::RemoteResourcePool;
 use crate::{
     PoolDefinitionSource, ResourcePoolBackend, ResourcePoolRegistry, ResourcePoolRegistryError,
 };
@@ -48,12 +52,15 @@ fn integrated_selection(
     }
 }
 
+/// A typed selection keeps its pool and backend after commit, and cached lookup
+/// needs no SQL even when the caller's transaction cannot execute queries.
 #[carbide_macros::sqlx_test]
 async fn runtime_lookup_borrows_resolved_backend_without_database_access(
     database: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let selection = integrated_selection("resolved", ResourcePoolValueDomain::Integer);
     let configured = HashMap::from([(selection.pool_name.clone(), selection)]);
+    let pool = ResourcePool::<i32>::new("resolved".to_owned(), ValueType::Integer);
     let mut txn = database.begin().await?;
     let registry = ResourcePoolRegistry::resolve(
         PoolDefinitionSource::SeedConfiguration,
@@ -61,7 +68,16 @@ async fn runtime_lookup_borrows_resolved_backend_without_database_access(
         &configured,
     )
     .await?;
+    let selected = registry
+        .select(&mut txn, &pool)
+        .await?
+        .expect("resolved pool must have a backend");
     txn.commit().await?;
+    assert!(std::ptr::eq(selected.pool, &pool));
+    assert!(std::ptr::eq(
+        selected.backend,
+        &registry.get("resolved").expect("resolved pool").backend
+    ));
 
     // Any SQL lookup would fail in this aborted transaction.
     let mut txn = database.begin().await?;
@@ -69,9 +85,8 @@ async fn runtime_lookup_borrows_resolved_backend_without_database_access(
         .execute(&mut *txn)
         .await
         .expect_err("division by zero must abort the transaction");
-    let Some(Cow::Borrowed(backend)) = registry.get_or_load_backend(&mut txn, "resolved").await?
-    else {
-        panic!("a resolved backend must be borrowed without querying the database");
+    let Some(backend) = registry.get_or_load_backend(&mut txn, "resolved").await? else {
+        panic!("resolved pool must have a backend");
     };
     assert!(std::ptr::eq(
         backend,
@@ -101,12 +116,12 @@ async fn runtime_lookup_uses_the_callers_transaction_without_caching_results(
         registry
             .get_or_load_backend(&mut txn, &selection.pool_name)
             .await?,
-        Some(Cow::Owned(ResourcePoolBackend::Integrated(_)))
+        Some(ResourcePoolBackend::Integrated(_))
     ));
     assert!(registry.get(&selection.pool_name).is_none());
     txn.rollback().await?;
 
-    // A backend loaded from a rolled-back binding must not survive in memory.
+    // A rolled-back binding must not make later lookups find this pool.
     let mut txn = database.begin().await?;
     assert!(
         registry
@@ -133,13 +148,13 @@ async fn runtime_lookup_uses_unbound_sql_values_without_saving_or_caching_a_bind
     db::resource_pool::allocate_exact(&pool, &mut txn, OwnerType::Vpc, "vpc-1", 42).await?;
     assert!(matches!(
         registry.get_or_load_backend(&mut txn, pool.name()).await?,
-        Some(Cow::Owned(ResourcePoolBackend::Integrated(_)))
+        Some(ResourcePoolBackend::Integrated(_))
     ));
     assert!(binding::all(&mut *txn).await?.is_empty());
     assert!(registry.get(pool.name()).is_none());
     txn.rollback().await?;
 
-    // The rolled-back values must not leave an Integrated backend in memory.
+    // A later lookup must not reuse the selection for these rolled-back values.
     let mut txn = database.begin().await?;
     assert!(
         registry
@@ -473,10 +488,18 @@ async fn seed_domain_drift_preserves_inventory_and_binding_but_growth_requires_m
     Ok(())
 }
 
+/// Explicit selections and stored inventory must match an existing Integrated
+/// binding before resolution writes any new bindings, even if the pool is unconfigured.
 #[carbide_macros::sqlx_test]
 async fn invalid_existing_selection_prevents_every_prospective_binding_write(
     database: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    /// Identifies the input that disagrees with the saved binding.
+    enum Conflict {
+        Configured(ResourcePoolSelection),
+        StoredInventory,
+    }
+
     let existing = integrated_selection("z-existing", ResourcePoolValueDomain::Integer);
     let mut txn = database.begin().await?;
     let original = binding::bind_or_verify(&mut txn, &existing).await?;
@@ -488,29 +511,52 @@ async fn invalid_existing_selection_prevents_every_prospective_binding_write(
         value_domain: ResourcePoolValueDomain::IpAddress,
         ..existing
     };
-    let configured = HashMap::from([
-        (new.pool_name.clone(), new),
-        (invalid.pool_name.clone(), invalid),
-    ]);
-    let mut txn = database.begin().await?;
-    let Err(error) = ResourcePoolRegistry::resolve(
-        PoolDefinitionSource::SeedConfiguration,
-        &mut txn,
-        &configured,
-    )
-    .await
-    else {
-        panic!("changing the stored pool domain must fail");
-    };
-    assert!(matches!(
-        error,
-        ResourcePoolRegistryError::Binding(BindingError::Conflict { name, .. })
-            if name == original.pool_name
-    ));
+    for (scenario, conflict) in [
+        (
+            "configured domain conflicts with the binding",
+            Conflict::Configured(invalid),
+        ),
+        (
+            "unconfigured inventory conflicts with the binding",
+            Conflict::StoredInventory,
+        ),
+    ] {
+        let mut configured = HashMap::from([(new.pool_name.clone(), new.clone())]);
+        let mut txn = database.begin().await?;
+        match conflict {
+            Conflict::Configured(selection) => {
+                configured.insert(selection.pool_name.clone(), selection);
+            }
+            Conflict::StoredInventory => {
+                // Simulate inconsistent stored rows without changing the binding.
+                // Removing configuration must not bypass the existing domain check.
+                let pool = ResourcePool::new(original.pool_name.clone(), ValueType::Ipv4);
+                populate(&pool, &mut txn, vec![Ipv4Addr::new(192, 0, 2, 1)], true).await?;
+            }
+        }
+        let Err(error) = ResourcePoolRegistry::resolve(
+            PoolDefinitionSource::SeedConfiguration,
+            &mut txn,
+            &configured,
+        )
+        .await
+        else {
+            panic!("{scenario}: changing the stored pool domain must fail");
+        };
+        assert!(
+            matches!(error, ResourcePoolRegistryError::Binding(BindingError::Conflict { name, .. })
+                if name == original.pool_name),
+            "{scenario}",
+        );
 
-    // Commit the failed call's transaction so rollback cannot hide partial writes.
-    txn.commit().await?;
-    assert_eq!(binding::all(&database).await?, vec![original]);
+        // Commit the failed call's transaction so rollback cannot hide partial writes.
+        txn.commit().await?;
+        assert_eq!(
+            binding::all(&database).await?,
+            vec![original.clone()],
+            "{scenario}"
+        );
+    }
     Ok(())
 }
 
@@ -586,5 +632,169 @@ async fn grpc_authorities_fail_before_binding_writes_and_legacy_inventory_classi
     ));
     txn.commit().await?;
     assert_eq!(binding::all(&database).await?, vec![original]);
+    Ok(())
+}
+
+/// `remote_runtime` supplies a coordinator whose unavailable endpoint makes any
+/// accidental provider I/O fail; registry resolution must need only its identity.
+async fn remote_runtime(
+    database: &sqlx::PgPool,
+    tasks: &mut JoinSet<()>,
+    authority_id: &str,
+) -> Result<RemoteResourcePool, Box<dyn std::error::Error>> {
+    let work_locks =
+        work_lock_manager::start(tasks, database.clone(), KeepaliveConfig::default()).await?;
+    let provider = GrpcResourcePoolBackend::new("http://127.0.0.1:1".parse()?, None)?;
+    Ok(RemoteResourcePool::new(
+        database.clone(),
+        work_locks,
+        authority_id.to_owned(),
+        provider,
+    ))
+}
+
+/// A backend alias is configuration shorthand. Restart and alias changes keep
+/// the saved authority and binding, including when only its seed snapshot remains.
+#[carbide_macros::sqlx_test]
+async fn remote_resolution_retains_authority_across_alias_changes(
+    database: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut tasks = JoinSet::new();
+    let runtime = remote_runtime(&database, &mut tasks, "provider-a").await?;
+    let remotes = HashMap::from([("provider-a".to_owned(), runtime)]);
+    let selection = ResourcePoolSelection {
+        backend_name: Some("fabric".to_owned()),
+        backend_kind: ResourcePoolBackendKind::Grpc,
+        authority_id: "provider-a".to_owned(),
+        remote_pool: "tenant-vnis".to_owned(),
+        ..integrated_selection("vpc-vni", ResourcePoolValueDomain::Integer)
+    };
+    let mut configured = HashMap::from([(selection.pool_name.clone(), selection)]);
+    let mut txn = database.begin().await?;
+    let registry = ResourcePoolRegistry::resolve_with_remotes(
+        PoolDefinitionSource::SeedConfiguration,
+        &mut txn,
+        &configured,
+        &remotes,
+    )
+    .await?;
+    let original = registry
+        .get("vpc-vni")
+        .expect("resolved remote pool")
+        .binding
+        .clone();
+    db::resource_pool::insert_pool_def(
+        &mut txn,
+        "vpc-vni",
+        &ResourcePoolDef {
+            ranges: vec![],
+            prefix: None,
+            pool_type: ResourcePoolType::Integer,
+            delegate_prefix_len: None,
+        },
+    )
+    .await?;
+    txn.commit().await?;
+    configured
+        .get_mut("vpc-vni")
+        .expect("configured pool")
+        .backend_name = Some("renamed-fabric".to_owned());
+
+    // Both an alias change and removing the declaration keep the same provider.
+    for declarations in [&configured, &HashMap::new()] {
+        let mut txn = database.begin().await?;
+        let restarted = ResourcePoolRegistry::resolve_with_remotes(
+            PoolDefinitionSource::SeedConfiguration,
+            &mut txn,
+            declarations,
+            &remotes,
+        )
+        .await?;
+        txn.commit().await?;
+        let resolved = restarted.get("vpc-vni").expect("retained remote binding");
+        assert_eq!(resolved.binding, original);
+        assert_eq!(
+            resolved
+                .backend
+                .remote()
+                .expect("remote backend")
+                .authority_id(),
+            "provider-a"
+        );
+        assert_eq!(restarted.pools().count(), 1);
+    }
+
+    // Lookup and Integrated adapter selection must not contact this provider
+    // or consult SQL; an aborted transaction makes a SQL fallback observable.
+    let mut txn = database.begin().await?;
+    sqlx::query("SELECT 1 / 0")
+        .execute(&mut *txn)
+        .await
+        .expect_err("abort transaction");
+    let Some(backend) = registry.get_or_load_backend(&mut txn, "vpc-vni").await? else {
+        panic!("resolved remote pool must have a backend");
+    };
+    assert!(matches!(
+        backend.require_integrated(),
+        Err(DatabaseError::FailedPrecondition(_))
+    ));
+    txn.rollback().await?;
+    assert_eq!(binding::all(&database).await?, vec![original]);
+    tasks.shutdown().await;
+    Ok(())
+}
+
+/// Supplying a remote runtime must not transfer existing SQL inventory to it,
+/// and a map entry cannot substitute a coordinator for another authority.
+#[carbide_macros::sqlx_test]
+async fn remote_resolution_rejects_local_inventory_and_mismatched_runtime(
+    database: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut tasks = JoinSet::new();
+    let runtime = remote_runtime(&database, &mut tasks, "provider-a").await?;
+    let legacy = ResourcePool::new("vpc-vni".to_owned(), ValueType::Integer);
+    let mut txn = database.begin().await?;
+    populate(&legacy, &mut txn, vec![42], true).await?;
+    txn.commit().await?;
+
+    // The first declaration agrees with the runtime but conflicts with inventory;
+    // the second disagrees with the runtime before any bindings can be written.
+    for (authority, expected_inventory_conflict) in [("provider-a", true), ("provider-b", false)] {
+        let selection = ResourcePoolSelection {
+            backend_kind: ResourcePoolBackendKind::Grpc,
+            authority_id: authority.to_owned(),
+            remote_pool: "tenant-vnis".to_owned(),
+            ..integrated_selection(legacy.name(), ResourcePoolValueDomain::Integer)
+        };
+        let configured = HashMap::from([(selection.pool_name.clone(), selection)]);
+        let remotes = HashMap::from([(authority.to_owned(), runtime.clone())]);
+        let mut txn = database.begin().await?;
+        let error = match ResourcePoolRegistry::resolve_with_remotes(
+            PoolDefinitionSource::SeedConfiguration,
+            &mut txn,
+            &configured,
+            &remotes,
+        )
+        .await
+        {
+            Ok(_) => panic!("invalid remote selection must fail"),
+            Err(error) => error,
+        };
+        if expected_inventory_conflict {
+            assert!(matches!(
+                error,
+                ResourcePoolRegistryError::IntegratedInventory { .. }
+            ));
+        } else {
+            assert!(matches!(
+                error,
+                ResourcePoolRegistryError::UnsupportedAuthority { .. }
+            ));
+        }
+        // Commit so rollback cannot hide a write made before validation failed.
+        txn.commit().await?;
+        assert!(binding::all(&database).await?.is_empty());
+    }
+    tasks.shutdown().await;
     Ok(())
 }
