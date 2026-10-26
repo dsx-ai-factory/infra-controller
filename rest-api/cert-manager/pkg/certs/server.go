@@ -6,8 +6,10 @@ package certs
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"net/http"
-	"os"
+	"sync"
+	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core"
 	"github.com/getsentry/sentry-go"
@@ -15,9 +17,9 @@ import (
 )
 
 const (
-	svcKeyFile  = "/tmp/svc.key"
-	svcCertFile = "/tmp/svc.cert"
-	svcTTL      = 365 * 24
+	svcTTL         = 365 * 24
+	svcRenewBefore = 7 * 24 * time.Hour
+	svcRenewRetry  = time.Hour
 )
 
 // Options defines options for the server
@@ -38,10 +40,13 @@ type Options struct {
 // Server defines a server
 type Server struct {
 	Options
-	certificateIssuer CertificateIssuer
-	authorizer        *certificateAuthorizer
-	appService        *core.HTTPService
-	insecService      *core.HTTPService
+	certificateIssuer  CertificateIssuer
+	authorizer         *certificateAuthorizer
+	appService         *core.HTTPService
+	insecService       *core.HTTPService
+	certificateMu      sync.Mutex
+	servingCertificate *tls.Certificate
+	nextRenewal        time.Time
 }
 
 // NewServerWithIssuer returns a server instance with the provided certificate issuer.
@@ -61,8 +66,14 @@ func NewServerWithIssuer(ctx context.Context, o Options, certIssuer CertificateI
 		return nil, err
 	}
 
-	appService := core.NewTLSService(s.Addr, svcCertFile, svcKeyFile)
-	appService.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, ClientAuth: tls.RequestClientCert}
+	appService := core.NewTLSService(s.Addr, "", "")
+	appService.TLSConfig = &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		ClientAuth: tls.RequestClientCert,
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return s.getCertificate(core.WithLogger(hello.Context(), core.GetLogger(ctx)))
+		},
+	}
 	appService.AddHealthRoute(ctx)
 	appService.AddVersionRoute(ctx)
 	appService.AddMetricsRoute(ctx)
@@ -138,23 +149,43 @@ func (s *Server) PKICloudCertificateHandler(_ context.Context) http.Handler {
 }
 
 func (s *Server) tlsSetup(ctx context.Context) error {
-	i := s.certificateIssuer
-	cert, key, err := i.RawCertificate(ctx, s.DNSNames, svcTTL)
+	cert, key, err := s.certificateIssuer.RawCertificate(ctx, s.DNSNames, svcTTL)
 	if err != nil {
 		return err
 	}
-
-	err = os.WriteFile(svcCertFile, []byte(cert), 0644)
+	pair, err := tls.X509KeyPair([]byte(cert), []byte(key))
 	if err != nil {
 		return err
 	}
-
-	err = os.WriteFile(svcKeyFile, []byte(key), 0644)
-	if err != nil {
-		return err
+	now := time.Now()
+	if pair.Leaf == nil || !now.Before(pair.Leaf.NotAfter) || now.Before(pair.Leaf.NotBefore) {
+		return fmt.Errorf("serving certificate is not currently valid")
 	}
-
+	s.servingCertificate = &pair
+	s.nextRenewal = pair.Leaf.NotAfter.Add(-svcRenewBefore)
 	return nil
+}
+
+// getCertificate renews on a new handshake, so ServeTLS never retains a stale
+// file-loaded keypair. Renewal failures retain the valid pair and retry later.
+func (s *Server) getCertificate(ctx context.Context) (*tls.Certificate, error) {
+	s.certificateMu.Lock()
+	defer s.certificateMu.Unlock()
+	now := time.Now()
+	if !now.Before(s.nextRenewal) {
+		err := s.tlsSetup(ctx)
+		if err != nil {
+			s.nextRenewal = now.Add(svcRenewRetry)
+			core.GetLogger(ctx).WithError(err).Error("failed to renew serving certificate")
+			if s.servingCertificate == nil || !now.Before(s.servingCertificate.Leaf.NotAfter) {
+				return nil, err
+			}
+		}
+	}
+	if s.servingCertificate == nil || !time.Now().Before(s.servingCertificate.Leaf.NotAfter) {
+		return nil, fmt.Errorf("serving certificate has expired")
+	}
+	return s.servingCertificate, nil
 }
 
 // withWraps applies the required wrappers to the handlers
