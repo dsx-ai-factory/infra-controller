@@ -2232,12 +2232,6 @@ mod tests {
                     FMDS_SERVICE_NAD_NAME => ("br-sfc", FMDS_SERVICE_MTU),
                     _ => unreachable!("rendered NAD names were checked above"),
                 };
-                // Slot listeners use the service-VPC contract while ordinary DHCP and FMDS stay unchanged.
-                let expected_mtu = if name == "service-vpc-dhcp-slot0" {
-                    SERVICE_VPC_MTU
-                } else {
-                    1500
-                };
                 assert_eq!(nad.metadata.name.as_deref(), Some(name.as_str()));
                 assert_eq!(nad.spec.bridge.as_deref(), Some(expected_bridge));
                 assert_eq!(nad.spec.ipam, Some(false));

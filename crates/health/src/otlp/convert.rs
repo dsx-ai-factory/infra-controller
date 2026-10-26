@@ -1835,6 +1835,14 @@ mod tests {
         let batch = [
             (first.clone(), sample("status", "state", "swp1", 1.0)),
             (first.clone(), sample("power", "watts", "swp1", 10.0)),
+            (
+                first.clone(),
+                MetricSample {
+                    name: "other_source".to_string(),
+                    ..sample("power", "watts", "swp1", 20.0)
+                },
+            ),
+            (first.clone(), sample("power", "kilowatts", "swp1", 0.01)),
             (first.clone(), sample("status", "state", "swp2", 0.0)),
             (second, sample("status", "state", "swp3", 3.0)),
             (
@@ -1876,7 +1884,38 @@ mod tests {
 
         let metrics = &first_resource.scope_metrics[0].metrics;
 
-        assert_eq!(metrics.len(), 6);
+        assert_eq!(metrics.len(), 8);
+
+        let power_descriptor = |name: &str| {
+            let metric = metrics
+                .iter()
+                .find(|metric| metric.name == name)
+                .unwrap_or_else(|| panic!("missing power descriptor {name}"));
+            let Some(metric::Data::Gauge(gauge)) = &metric.data else {
+                panic!("power metric must be a gauge");
+            };
+            let values: Vec<_> = gauge.data_points.iter().map(|point| point.value).collect();
+
+            (metric.unit.as_str(), metric.description.as_str(), values)
+        };
+
+        value_scenarios!(run = power_descriptor;
+            "original descriptor" {
+                "health_nvue_gnmi_power_watts" => (
+                    "watts", "", vec![Some(number_data_point::Value::AsDouble(10.0))]
+                )
+            }
+            "only the descriptor name differs" {
+                "health_other_source_power_watts" => (
+                    "watts", "", vec![Some(number_data_point::Value::AsDouble(20.0))]
+                )
+            }
+            "only the descriptor unit differs" {
+                "health_nvue_gnmi_power_kilowatts" => (
+                    "kilowatts", "", vec![Some(number_data_point::Value::AsDouble(0.01))]
+                )
+            }
+        );
 
         for (name, description) in [
             ("health_nvue_gnmi_errors_count", ""),
