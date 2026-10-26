@@ -4,6 +4,7 @@
 package tenant
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -15,6 +16,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/uptrace/bun/extra/bundebug"
@@ -94,6 +97,7 @@ func TestManageTenant_UpdateTenantsInDB(t *testing.T) {
 	st := cwu.TestBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusRegistered, nil, ipu)
 	st2 := cwu.TestBuildSite(t, dbSession, ip, "test-site-2", cdbm.SiteStatusRegistered, nil, ipu)
 	st3 := cwu.TestBuildSite(t, dbSession, ip, "test-site-3", cdbm.SiteStatusRegistered, nil, ipu)
+	st4 := cwu.TestBuildSite(t, dbSession, ip, "test-site-4", cdbm.SiteStatusRegistered, nil, ipu)
 
 	// Build Tenant inventory that is paginated
 	// Generate data for 34 Tenants reported from Site Agent while Cloud has 38 Tenants
@@ -132,6 +136,10 @@ func TestManageTenant_UpdateTenantsInDB(t *testing.T) {
 		pagedCtrlTenants = append(pagedCtrlTenants, ctrlTenant)
 	}
 
+	removedTenantSite := cwu.TestBuildTenantSiteAssociation(t, dbSession, pagedTenants[1].Org, pagedTenants[1].ID, st4.ID, ipu.ID)
+	err := cdbm.NewTenantSiteDAO(dbSession).Delete(ctx, nil, removedTenantSite.ID)
+	assert.NoError(t, err)
+
 	tenantsToCreate := pagedTenants[34:38]
 	cwu.TestBuildTenantSiteAssociation(t, dbSession, pagedTenants[0].Org, pagedTenants[0].ID, st2.ID, ipu.ID)
 
@@ -151,6 +159,8 @@ func TestManageTenant_UpdateTenantsInDB(t *testing.T) {
 
 	mtc2 := &tmocks.Client{}
 	mtc2.Mock.On("ExecuteWorkflow", context.Background(), mock.AnythingOfType("internal.StartWorkflowOptions"), "UpdateTenant", mock.Anything).Return(wrun, nil)
+
+	mtcNoAssociation := &tmocks.Client{}
 
 	type fields struct {
 		dbSession        *cdb.Session
@@ -172,6 +182,8 @@ func TestManageTenant_UpdateTenantsInDB(t *testing.T) {
 		tenantsToCreate []*cdbm.Tenant
 		tenantsToUpdate []*cdbm.Tenant
 		wantErr         bool
+		wantLogMessage  string
+		wantNoWorkflow  bool
 	}{
 		{
 			name: "test Tenant inventory processing error, non-existent Site",
@@ -189,6 +201,26 @@ func TestManageTenant_UpdateTenantsInDB(t *testing.T) {
 				},
 			},
 			wantErr: true,
+		},
+		{
+			name: "test Tenant inventory processing, Tenant without active Site association",
+			fields: fields{
+				dbSession:        dbSession,
+				siteClientPool:   tSiteClientPool,
+				clientPoolClient: mtcNoAssociation,
+				env:              env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st4.ID,
+				vpcInventory: &corev1.TenantInventory{
+					Tenants:         []*corev1.Tenant{pagedCtrlTenants[1]},
+					Timestamp:       timestamppb.Now(),
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				},
+			},
+			wantLogMessage: "skipping Tenant inventory entry because Tenant is not associated with Site",
+			wantNoWorkflow: true,
 		},
 		{
 			name:            "test paged Tenant inventory processing, empty inventory",
@@ -278,8 +310,27 @@ func TestManageTenant_UpdateTenantsInDB(t *testing.T) {
 
 			mv.siteClientPool.IDClientMap[tt.args.siteID.String()] = tt.fields.clientPoolClient
 
+			var logOutput bytes.Buffer
+			if tt.wantLogMessage != "" {
+				originalLogger := log.Logger
+				log.Logger = zerolog.New(&logOutput).Level(zerolog.DebugLevel)
+				t.Cleanup(func() {
+					log.Logger = originalLogger
+				})
+			}
+
+			workflowCallCount := len(tt.fields.clientPoolClient.Calls)
 			err := mv.UpdateTenantsInDB(tt.args.ctx, tt.args.siteID, tt.args.vpcInventory)
 			assert.Equal(t, tt.wantErr, err != nil)
+
+			if tt.wantLogMessage != "" {
+				assert.Contains(t, logOutput.String(), `"level":"debug"`)
+				assert.Contains(t, logOutput.String(), tt.wantLogMessage)
+				assert.NotContains(t, logOutput.String(), "Tenant does not have a record in DB")
+			}
+			if tt.wantNoWorkflow {
+				assert.Len(t, tt.fields.clientPoolClient.Calls, workflowCallCount)
+			}
 
 			if tt.wantErr {
 				return

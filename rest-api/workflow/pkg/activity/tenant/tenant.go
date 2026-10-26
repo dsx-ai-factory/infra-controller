@@ -108,7 +108,7 @@ func (mt ManageTenant) UpdateTenantsInDB(ctx context.Context, siteID uuid.UUID, 
 
 		tenant, ok := existingTenantOrgMap[controllerTenant.OrganizationId]
 		if !ok {
-			slogger.Error().Msg("Tenant does not have a record in DB, possibly created directly on Site")
+			slogger.Debug().Msg("skipping Tenant inventory entry because Tenant is not associated with Site")
 			continue
 		}
 
