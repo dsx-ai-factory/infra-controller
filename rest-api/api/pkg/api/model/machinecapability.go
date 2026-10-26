@@ -128,14 +128,14 @@ func (mc APIMachineCapability) validateDeviceType(value interface{}) error {
 	switch mc.Type {
 	case cdbm.MachineCapabilityTypeNetwork:
 		if *dt != cdbm.MachineCapabilityDeviceTypeDPU && *dt != cdbm.MachineCapabilityDeviceTypeSpectrumX {
-			return fmt.Errorf("Unsupported Device Type specified for Network Capability %s", *dt)
+			return fmt.Errorf("unsupported Device Type specified for Network Capability %s", *dt)
 		}
 	case cdbm.MachineCapabilityTypeGPU:
 		if *dt != cdbm.MachineCapabilityDeviceTypeNVLink {
-			return fmt.Errorf("Unsupported Device Type specified for GPU Capability %s", *dt)
+			return fmt.Errorf("unsupported Device Type specified for GPU Capability %s", *dt)
 		}
 	default:
-		return fmt.Errorf("Unsupported Device Type: %s specified for Capability type %s", *dt, mc.Type)
+		return fmt.Errorf("unsupported Device Type: %s specified for Capability type %s", *dt, mc.Type)
 	}
 	return nil
 }

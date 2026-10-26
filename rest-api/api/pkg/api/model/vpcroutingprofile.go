@@ -118,7 +118,7 @@ func (s *APIVpcRoutingState) FromProto(raw *corev1.VpcRoutingState) {
 // Inspection also supports stored zero or larger-than-24-bit VNIs.
 func (s *APIVpcRoutingState) ValidateResponse(expectedID string) error {
 	if s == nil || s.VpcID == "" || s.VpcID != expectedID {
-		return errors.New("Core returned a missing or different VPC identity")
+		return errors.New("the Core returned a missing or different VPC identity")
 	}
 	_, err := parseVpcRoutingVersion(s.Version)
 	if err != nil {
@@ -127,7 +127,7 @@ func (s *APIVpcRoutingState) ValidateResponse(expectedID string) error {
 	if s.RetainedAllocation != nil {
 		retained := s.RetainedAllocation
 		if (retained.PoolName != "vpc-vni" && retained.PoolName != "external-vpc-vni") || retained.Vni == s.ActiveVni {
-			return errors.New("Core returned an invalid retained allocation")
+			return errors.New("the Core returned an invalid retained allocation")
 		}
 	}
 	return nil
@@ -146,21 +146,21 @@ func (r *APIVpcRoutingProfileUpdateRequest) ValidateResponse(raw *corev1.VpcRout
 		return err
 	}
 	if raw.RoutingProfileType == nil || *raw.RoutingProfileType != NormalizeAPIVpcRoutingProfileForSite(r.RoutingProfile) {
-		return errors.New("Core acknowledged a different routing profile")
+		return errors.New("the Core acknowledged a different routing profile")
 	}
 	retained := state.RetainedAllocation
 	if observed == nil || retained == nil || retained.Vni != observed.ActiveVni {
-		return errors.New("Core did not retain the previous active VNI")
+		return errors.New("the Core did not retain the previous active VNI")
 	}
 	if state.ActiveVni == 0 || state.ActiveVni > maxVpcRoutingVni || retained.Vni == 0 || retained.Vni > maxVpcRoutingVni {
-		return errors.New("Core returned a VNI outside the routing-profile transition range")
+		return errors.New("the Core returned a VNI outside the routing-profile transition range")
 	}
 	if r.Vni != nil && int64(state.ActiveVni) != int64(*r.Vni) {
-		return errors.New("Core did not select the requested VNI")
+		return errors.New("the Core did not select the requested VNI")
 	}
 	previousRetained := observed.RetainedAllocation
 	if previousRetained != nil && (state.ActiveVni != previousRetained.Vni || retained.PoolName == previousRetained.PoolName) {
-		return errors.New("Core did not reuse the retained allocation from the other pool")
+		return errors.New("the Core did not reuse the retained allocation from the other pool")
 	}
 	return nil
 }
@@ -194,17 +194,17 @@ func (r *APIVpcInactiveVniReleaseResult) FromProto(raw *corev1.VpcReleaseInactiv
 func (r *APIVpcInactiveVniReleaseRequest) ValidateResponse(raw *corev1.VpcReleaseInactiveVniResult) error {
 	vpc := raw.GetVpc()
 	if vpc.GetId().GetValue() == "" || vpc.GetId().GetValue() != r.VpcID {
-		return errors.New("Core acknowledged a missing or different VPC")
+		return errors.New("the Core acknowledged a missing or different VPC")
 	}
 	if vpc.Config == nil || vpc.Status == nil || vpc.Status.Vni == nil {
-		return errors.New("Core omitted the active routing configuration from the release acknowledgement")
+		return errors.New("the Core omitted the active routing configuration from the release acknowledgement")
 	}
 	err := checkVpcRoutingVersionAdvanced(r.IfVersionMatch, vpc.Version)
 	if err != nil {
 		return err
 	}
 	if r.ExpectedInactiveVni == nil || int64(raw.ReleasedInactiveVni) != int64(*r.ExpectedInactiveVni) || raw.ReleasedInactiveVni == *vpc.Status.Vni {
-		return errors.New("Core acknowledged a different released VNI")
+		return errors.New("the Core acknowledged a different released VNI")
 	}
 	return nil
 }
@@ -243,7 +243,7 @@ func checkVpcRoutingVersionAdvanced(before, after string) error {
 		expectedCounter = 1
 	}
 	if nextCounter != expectedCounter {
-		return errors.New("Core did not acknowledge the next configuration version")
+		return errors.New("the Core did not acknowledge the next configuration version")
 	}
 	return nil
 }
