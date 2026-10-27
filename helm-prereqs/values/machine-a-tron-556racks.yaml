@@ -13,9 +13,12 @@
 # The controller publishes two Services per simulator pod, one carrying the
 # pod's BMC addresses and one its switch NVOS addresses as externalIPs: 46
 # Services instead of 44,480, so the cluster ServiceCIDR no longer caps the
-# fleet. The BMC and NVOS networks must still lie outside the ServiceCIDR,
-# pod CIDR, and node network (helm-prereqs/check-mat-service-cidr.py). The
-# protocol gateway serves one RMS mock and one UFM API for all 23 pods.
+# fleet. A device whose Redfish port pair differs from its pod's keeps a
+# per-device Service and the controller logs a warning. The BMC and NVOS
+# networks must still lie outside the ServiceCIDR, pod CIDR, and node
+# network. helm-prereqs/check-mat-service-cidr.py checks the ServiceCIDR
+# only. The protocol gateway serves one RMS mock and one UFM API for all 23
+# pods.
 #
 # Install order:
 #   1. nico-core with helm-prereqs/values/nico-core-10k-hosts.yaml. Its
@@ -61,10 +64,6 @@ certificate:
   uris:
     - spiffe://nico.local/nico-system/sa/machine-a-tron
 
-extraEnv:
-  - name: RUST_LOG
-    value: info
-
 machineATron:
   configureBmcProxyHost: ""  # Not used in controller mode
   # The chart reads the site root password from the site credentials Secret
@@ -109,8 +108,10 @@ mat-k8s-controller:
     # pod: two Services per simulator pod. device (the default) restores one
     # Service per BMC and per NVOS endpoint, 44,480 at this fleet size.
     serviceGranularity: pod
-  # Controller container: reconciles 46 Services at pod granularity (subchart
-  # default 500m and 512Mi).
+  # Controller container: polls /machines/status of 23 pods every 30 s, each
+  # answer about 1,700 BMCs, and reconciles 46 Services. Unmeasured headroom
+  # over the subchart default limits of 500m and 512Mi (requests 100m and
+  # 128Mi).
   resources:
     limits:
       cpu: "2"
@@ -129,12 +130,14 @@ mat-k8s-controller:
         cpu: "1"
         memory: 1Gi
 
-# The chart's default startupProbe (120 x 30s) covers 25 racks per pod:
-# one rack registers 36 records, 25 x 36 = 900 records x 2s = 30 min.
+# The chart's default startupProbe (120 x 30s, 60 min) covers 25 racks per
+# pod at the chart's 2 s per record rule: one rack registers 36 records,
+# 25 x 36 = 900 records, 30 min, with headroom. On the 556-rack runs all 23
+# pods were Ready within 10 minutes.
 #
-# A restart discards the mock state and repeats the 30 min registration, so
-# the kubelet tolerates a stalled redfish port for 240 x 30s = 2 h before it
-# restarts the pod.
+# A restart discards the mock state and repeats registration, so the kubelet
+# tolerates a stalled redfish port for 240 x 30s = 2 h before it restarts the
+# pod.
 livenessProbe:
   tcpSocket:
     port: redfish
@@ -160,8 +163,8 @@ resources:
 # simulated-oob gateway. underlay_dhcp_relay_address is the simulated-underlay
 # gateway: NICo predicts DPU OOB on an underlay segment, so DPU OOB and switch
 # NVOS DHCP relay there (both segments in nico-core-10k-hosts.yaml).
-# mat-1 to mat-22 declare no machine groups. machines: {} makes the chart
-# render the bare [machines] table the binary requires.
+# mat-1 to mat-22 declare only racks. A pod with no machine groups still gets
+# the bare [machines] table the binary requires (chart configmap template).
 pods:
   mat-0:
     machines:
@@ -200,7 +203,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-1:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -234,7 +236,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-2:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -268,7 +269,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-3:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -302,7 +302,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-4:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -336,7 +335,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-5:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -370,7 +368,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-6:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -404,7 +401,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-7:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -438,7 +434,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-8:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -472,7 +467,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-9:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -506,7 +500,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-10:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -540,7 +533,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-11:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -574,7 +566,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-12:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -608,7 +599,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-13:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -642,7 +632,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-14:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -676,7 +665,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-15:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -710,7 +698,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-16:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -744,7 +731,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-17:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -778,7 +764,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-18:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -812,7 +797,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-19:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -847,7 +831,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-20:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -882,7 +865,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-21:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72
@@ -917,7 +899,6 @@ pods:
         bmc_dhcp_relay_address: "10.200.0.1"
         underlay_dhcp_relay_address: "10.201.0.1"
   mat-22:
-    machines: {}
     racks:
       gb200:
         type: wiwynn_gb200_nvl72

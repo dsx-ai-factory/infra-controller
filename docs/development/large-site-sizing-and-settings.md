@@ -23,9 +23,12 @@ nodes as NICo. The runs covered ingestion only: discovery, preingestion, machine
 creation, and the machine state controller up to `ready`. Provisioning, firmware
 updates, and tenant workflows were not exercised. Storage input/output
 operations per second (IOPS) were not measured, and no node failed during a run.
-Hours are counted from fleet-up, the point at which every simulated BMC endpoint
-is deployed and reachable. The fleet-up burst is the elevated kube-apiserver
-load in the first 2 to 3 hours after that point.
+Times count from fleet-up, the point at which every simulator pod is Ready, the
+protocol gateway answers, and the controller has published every pod's
+Services, so every simulated BMC address is reachable. It is the same gate as
+[fleet-up](machine-a-tron-scale-testing.md#10000-host-simulated-fleet) on the
+10,000-host page. The fleet-up burst is the elevated kube-apiserver load in the
+first 2 to 3 hours after that point.
 
 ## Site Controller Sizing
 

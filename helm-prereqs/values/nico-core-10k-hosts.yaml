@@ -33,16 +33,23 @@
 ## Declare networks and pools here before nico-api first starts. A declared
 ## network or pool is created when nico-api first sees it and is not re-applied
 ## after a change. Network creation is skipped on sites with several forward
-## DNS domains unless initial_domain_name names one. On an established site
-## use nico-admin-cli network-segment create and resource-pool grow instead.
+## DNS domains unless initial_domain_name names one. An established site keeps
+## the segments it was installed with: nico-api logs a drift warning and
+## nico-admin-cli network-segment create rejects a prefix that overlaps an
+## existing one. Install the fleet on a fresh site, or delete the three
+## simulated segments and recreate them with the wider prefixes before any
+## address in them is leased. nico-admin-cli resource-pool grow still adds
+## capacity to the lo-ip and fnn-asn pools.
 ##
 ## Install order: raise postgresql.resources.limits in helm-prereqs/values.yaml
 ## to 32 CPU and 96Gi and enable siteCredentials there, deploy the DPF
-## simulator, then run
-##   ./setup.sh --skip-dpf --skip-rms --core-values values/nico-core-10k-hosts.yaml
+## simulator, copy this file to values/nico-core-10k-hosts.site.yaml
+## (gitignored), fill in the REQUIRED fields, then run
+##   ./setup.sh --skip-dpf --skip-rms --core-values values/nico-core-10k-hosts.site.yaml
 ## from this directory. The protocol gateway serves the RMS mock, so the RMS
 ## chart is skipped. The simulator install
-##   make -C dev/k8s/dpf-sim-controller deploy IMG=<registry>/dpf-sim-controller:<tag>
+##   make -C dev/k8s/dpf-sim-controller deploy DPF_NAMESPACE=dpf-operator-system \
+##     IMG=<registry>/dpf-sim-controller:<tag>
 ## installs the DPF CRDs and creates dpf-operator-system. The Makefile default
 ## image is a local name no cluster can pull. The ordered steps, the expected
 ## timeline, and what to watch are in the 10,000-Host Simulated Fleet section
@@ -59,7 +66,8 @@ global:
     pullPolicy: IfNotPresent
 
   ## setup.sh creates a secret named `imagepullsecret` in nico-system from
-  ## REGISTRY_PULL_SECRET (host nvcr.io). Reference that name here.
+  ## REGISTRY_PULL_SECRET for the host part of NICO_IMAGE_REGISTRY. Reference
+  ## that name here.
   imagePullSecrets:
     - name: imagepullsecret
 
@@ -156,7 +164,8 @@ nico-api:
   ## Role and RoleBinding for nico-api in dpf-operator-system. setup.sh sets
   ## this only when it installs DPF, so a simulation site sets it here. The
   ## namespace must exist before the install: make -C dev/k8s/dpf-sim-controller
-  ## deploy IMG=<registry>/dpf-sim-controller:<tag> creates it with the DPF CRDs.
+  ## deploy DPF_NAMESPACE=dpf-operator-system IMG=<registry>/dpf-sim-controller:<tag>
+  ## creates it with the DPF CRDs.
   dpf:
     rbacCreate: true
 
@@ -171,7 +180,7 @@ nico-api:
   ## 32 CPU and 32Gi (chart default 3 CPU and 32Gi): nico-api peaked at 18.9
   ## cores and 22.8 GiB on the 556-rack fleet, with its 32 Tokio workers 49
   ## percent busy over the run and 59 to 68 percent while the racks came
-  ## ready. At 16 CPU and 16 workers, on the previous build, the workers ran
+  ## ready. At 16 CPU and 16 workers, on the earlier run, the workers ran
   ## 75 to 96 percent busy.
   resources:
     limits:
@@ -181,8 +190,10 @@ nico-api:
       cpu: 16
       memory: 8Gi
 
-  ## Pins the Tokio worker pool to the 32 CPU limit so the runtime matches the
-  ## quota.
+  ## Tokio sizes its pool from the cgroup CPU quota, so 32 is what it derives
+  ## from the 32 CPU limit. The pin keeps the count explicit if the limit
+  ## changes. The startup log line "Tokio worker thread configuration" shows
+  ## the effective worker_count.
   extraEnv:
     - name: TOKIO_WORKER_THREADS
       value: "32"
@@ -476,7 +487,7 @@ nico-api:
         { asn = 4266030000, vni = 50500 }, # Tag routes with the common external RT; replace 50500 with actual vni to use for this purpose
       ]
 
-      # The only use-case for this right now is DPS.
+      # Only DPS uses this profile.
       [fnn.routing_profiles.PRIVILEGED_INTERNAL]
       internal = true
       route_target_imports = [
