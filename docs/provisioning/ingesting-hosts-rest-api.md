@@ -100,6 +100,8 @@ unset NICO_PASSWORD
 
 `hostLifecycleProfile` is also JSON-only. Set `disableLockdown` to `true` only when the host must remain unlocked during lifecycle management. When the profile is omitted or `disableLockdown` is `false`, NICo applies UEFI lockdown during `HostInit`.
 
+Set `controlPlane` to `true` to designate the machine as a control-plane machine. NICo then keeps its management addresses usable while the control plane is down, so the machine and its DPU can complete a full power-on cycle without NICo. A designated machine must use a `fixed` or `retained` `ipAllocation` on every `host_bmc`, `dpu_bmc`, and `dpu_os` interface; the request fails otherwise. Host data interfaces are not restricted. When the profile is omitted or `controlPlane` is `false`, the machine depends on the control plane to boot.
+
 ### Batch (Recommended for Full-Rack Onboarding)
 
 For multiple machines, prefer `batch-create`. The endpoint accepts up to 100 Expected Machines per request and validates the whole batch atomically:

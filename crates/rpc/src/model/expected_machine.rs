@@ -375,6 +375,7 @@ impl From<ExpectedMachine> for rpc::forge::ExpectedMachine {
                         .data
                         .host_lifecycle_profile
                         .disable_lockdown,
+                    control_plane: expected_machine.data.host_lifecycle_profile.control_plane,
                 }),
             server_name: expected_machine.data.server_name,
         }
@@ -509,6 +510,7 @@ impl TryFrom<rpc::forge::ExpectedMachine> for ExpectedMachineData {
                 .host_lifecycle_profile
                 .map(|hlp| HostLifecycleProfile {
                     disable_lockdown: hlp.disable_lockdown,
+                    control_plane: hlp.control_plane,
                 })
                 .unwrap_or_default(),
             server_name: em.server_name,
@@ -1578,6 +1580,7 @@ mod tests {
             chassis_serial_number: "SN-1".into(),
             host_lifecycle_profile: disable_lockdown.map(|dl| rpc::forge::HostLifecycleProfile {
                 disable_lockdown: Some(dl),
+                control_plane: None,
             }),
             ..Default::default()
         }
@@ -1603,6 +1606,53 @@ mod tests {
                 };
                 let back: rpc::forge::ExpectedMachine = em.into();
                 let back_side = back.host_lifecycle_profile.map(|p| p.disable_lockdown);
+
+                Ok::<_, ()>((data_side, back_side))
+            };
+            "true" {
+                Some(true) => Yields((Some(true), Some(Some(true)))),
+            }
+
+            "false" {
+                Some(false) => Yields((Some(false), Some(Some(false)))),
+            }
+
+            "none" {
+                None => Yields((None, None)),
+            }
+        );
+    }
+
+    /// `control_plane` survives the rpc -> data -> rpc round trip independently
+    /// of `disable_lockdown`, so a machine carrying only the designation still
+    /// produces a profile on the way back.
+    #[test]
+    fn control_plane_round_trips_through_proto() {
+        scenarios!(
+            run = |control_plane| {
+                let rpc_machine = rpc::forge::ExpectedMachine {
+                    bmc_mac_address: "AA:BB:CC:DD:EE:FF".into(),
+                    bmc_username: "root".into(),
+                    bmc_password: "pass".into(),
+                    chassis_serial_number: "SN-1".into(),
+                    host_lifecycle_profile: control_plane.map(|cp| {
+                        rpc::forge::HostLifecycleProfile {
+                            disable_lockdown: None,
+                            control_plane: Some(cp),
+                        }
+                    }),
+                    ..Default::default()
+                };
+                let data = ExpectedMachineData::try_from(rpc_machine).map_err(drop)?;
+                let data_side = data.host_lifecycle_profile.control_plane;
+
+                let em = ExpectedMachine {
+                    id: None,
+                    bmc_mac_address: "AA:BB:CC:DD:EE:FF".parse().map_err(drop)?,
+                    data,
+                };
+                let back: rpc::forge::ExpectedMachine = em.into();
+                let back_side = back.host_lifecycle_profile.map(|p| p.control_plane);
 
                 Ok::<_, ()>((data_side, back_side))
             };

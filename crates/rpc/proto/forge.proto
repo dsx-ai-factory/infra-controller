@@ -7785,6 +7785,11 @@ message HostLifecycleProfile {
   // If true, do not lock down the server as part of host lifecycle management. If unset or false, preserve
   // the default behavior of locking down the server after configuring the BIOS.
   optional bool disable_lockdown = 1;
+  // If true, designate the machine as a control-plane machine, so its management
+  // addresses stay usable while the control plane is down. Every host BMC, DPU BMC,
+  // and DPU OS interface must then use a fixed or retained IP allocation. If unset
+  // or false, the machine depends on the control plane to boot.
+  optional bool control_plane = 2;
 }
 
 message ExpectedMachine {
@@ -12326,6 +12331,7 @@ message PatchExpectedMachineRequest {
   // default_pause_ingestion_and_poweron, bmc_retain_credentials, dpu_mode,
   // bmc_ip_address, bmc_ip_allocation, host_nics,
   // host_lifecycle_profile.disable_lockdown,
+  // host_lifecycle_profile.control_plane,
   // metadata.name, metadata.description, metadata.labels.
   //
   // Unselected values are ignored. Selected values replace the stored field,
@@ -12333,7 +12339,8 @@ message PatchExpectedMachineRequest {
   // A selected `bmc_ip_address` must be present: an empty string clears it,
   // otherwise it must parse as IPv4 or IPv6. Selected optional booleans and
   // enums must be present. False disables the selected setting; for
-  // `disable_lockdown`, it restores lockdown. `DPU_MODE_UNSPECIFIED` resets to
+  // `disable_lockdown`, it restores lockdown; for `control_plane`, it removes the
+  // control-plane designation. `DPU_MODE_UNSPECIFIED` resets to
   // site inheritance. Selecting only `bmc_ip_address` preserves the merged
   // allocation policy; an address incompatible with that policy is rejected.
   // Select `bmc_ip_allocation` with `BMC_IP_ALLOCATION_TYPE_UNSPECIFIED` to

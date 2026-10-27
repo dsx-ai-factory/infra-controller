@@ -40693,8 +40693,13 @@ type HostLifecycleProfile struct {
 	// If true, do not lock down the server as part of host lifecycle management. If unset or false, preserve
 	// the default behavior of locking down the server after configuring the BIOS.
 	DisableLockdown *bool `protobuf:"varint,1,opt,name=disable_lockdown,json=disableLockdown,proto3,oneof" json:"disable_lockdown,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// If true, designate the machine as a control-plane machine, so its management
+	// addresses stay usable while the control plane is down. Every host BMC, DPU BMC,
+	// and DPU OS interface must then use a fixed or retained IP allocation. If unset
+	// or false, the machine depends on the control plane to boot.
+	ControlPlane  *bool `protobuf:"varint,2,opt,name=control_plane,json=controlPlane,proto3,oneof" json:"control_plane,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *HostLifecycleProfile) Reset() {
@@ -40730,6 +40735,13 @@ func (*HostLifecycleProfile) Descriptor() ([]byte, []int) {
 func (x *HostLifecycleProfile) GetDisableLockdown() bool {
 	if x != nil && x.DisableLockdown != nil {
 		return *x.DisableLockdown
+	}
+	return false
+}
+
+func (x *HostLifecycleProfile) GetControlPlane() bool {
+	if x != nil && x.ControlPlane != nil {
+		return *x.ControlPlane
 	}
 	return false
 }
@@ -69565,6 +69577,7 @@ type PatchExpectedMachineRequest struct {
 	// default_pause_ingestion_and_poweron, bmc_retain_credentials, dpu_mode,
 	// bmc_ip_address, bmc_ip_allocation, host_nics,
 	// host_lifecycle_profile.disable_lockdown,
+	// host_lifecycle_profile.control_plane,
 	// metadata.name, metadata.description, metadata.labels.
 	//
 	// Unselected values are ignored. Selected values replace the stored field,
@@ -69572,7 +69585,8 @@ type PatchExpectedMachineRequest struct {
 	// A selected `bmc_ip_address` must be present: an empty string clears it,
 	// otherwise it must parse as IPv4 or IPv6. Selected optional booleans and
 	// enums must be present. False disables the selected setting; for
-	// `disable_lockdown`, it restores lockdown. `DPU_MODE_UNSPECIFIED` resets to
+	// `disable_lockdown`, it restores lockdown; for `control_plane`, it removes the
+	// control-plane designation. `DPU_MODE_UNSPECIFIED` resets to
 	// site inheritance. Selecting only `bmc_ip_address` preserves the merged
 	// allocation policy; an address incompatible with that policy is rejected.
 	// Select `bmc_ip_allocation` with `BMC_IP_ALLOCATION_TYPE_UNSPECIFIED` to
@@ -79535,10 +79549,12 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x05_roleB\x10\n" +
 	"\x0e_ip_allocationB\x12\n" +
 	"\x10_physical_ifnameB\x11\n" +
-	"\x0f_logical_ifname\"[\n" +
+	"\x0f_logical_ifname\"\x97\x01\n" +
 	"\x14HostLifecycleProfile\x12.\n" +
-	"\x10disable_lockdown\x18\x01 \x01(\bH\x00R\x0fdisableLockdown\x88\x01\x01B\x13\n" +
-	"\x11_disable_lockdown\"\xc4\f\n" +
+	"\x10disable_lockdown\x18\x01 \x01(\bH\x00R\x0fdisableLockdown\x88\x01\x01\x12(\n" +
+	"\rcontrol_plane\x18\x02 \x01(\bH\x01R\fcontrolPlane\x88\x01\x01B\x13\n" +
+	"\x11_disable_lockdownB\x10\n" +
+	"\x0e_control_plane\"\xc4\f\n" +
 	"\x0fExpectedMachine\x12&\n" +
 	"\x0fbmc_mac_address\x18\x01 \x01(\tR\rbmcMacAddress\x12!\n" +
 	"\fbmc_username\x18\x02 \x01(\tR\vbmcUsername\x12!\n" +

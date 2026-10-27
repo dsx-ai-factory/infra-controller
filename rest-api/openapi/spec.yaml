@@ -30159,6 +30159,11 @@ components:
             - boolean
             - 'null'
           description: When true, the server is not locked down during host lifecycle management. When omitted, the existing value is preserved.
+        controlPlane:
+          type:
+            - boolean
+            - 'null'
+          description: When true, the machine is designated as a control-plane machine, so its management addresses stay usable while the control plane is down. A designated machine requires a fixed or retained IP allocation on every host BMC, DPU BMC, and DPU OS interface. When omitted, the existing value is preserved.
     ExpectedMachineInterface:
       title: ExpectedMachineInterface
       type: object

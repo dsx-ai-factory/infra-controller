@@ -1,5 +1,5 @@
 ---
-tags: ["unreleased", "nvlink", "rest-api", "deployment"]
+tags: ["unreleased", "nvlink", "rest-api", "deployment", "provisioning", "networking"]
 ---
 
 ## NVLink partitioning configuration defaults — unreleased
@@ -38,4 +38,22 @@ The Site capability `nvLinkPartition` is now owned by Site configuration invento
 
 <Note>
 Enabling NVLink partitioning on a rack with running instances removes the NMX-C default partition on the first monitor pass, so those instances lose NVLink connectivity until tenants configure NVLink partitions through NICo.
+</Note>
+
+## Control-plane machine designation — unreleased
+
+An administrator can now designate an Expected Machine as a control-plane machine. The designation records that the machine and its DPU must complete a full power-on cycle while the NICo control plane is down. It does not change host behavior yet; later work reads it to write static addresses into the BMC and to keep the DPU HBN configuration.
+
+Set the designation with the new `host_lifecycle_profile.control_plane` field:
+
+| Interface | Form |
+| --- | --- |
+| REST | `hostLifecycleProfile.controlPlane` on Expected Machine create, update, and patch |
+| Admin CLI | `nico-admin-cli expected-machine add --control-plane` and `expected-machine patch --control-plane` |
+| Manifest | `host_lifecycle_profile.control_plane` in `expected_machines.json` |
+
+The field is optional and defaults to unset, so existing machines and manifests do not change. Omitting it in a patch preserves the stored value.
+
+<Note title="Address policy requirement">
+A designated machine must use a `fixed` or `retained` IP allocation on every `host_bmc`, `dpu_bmc`, and `dpu_os` interface. NICo rejects the designation when one of these interfaces resolves to `dynamic`, because a DHCP address is not available during the outage that the designation exists for. Host data interfaces are not restricted.
 </Note>

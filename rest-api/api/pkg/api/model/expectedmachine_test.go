@@ -679,6 +679,22 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 			hostLifecycleProfile: cdbm.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
 			wantProfile:          &APIHostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
 		},
+		{
+			desc:                 "controlPlane alone round-trips",
+			hostLifecycleProfile: cdbm.HostLifecycleProfile{ControlPlane: cutil.GetPtr(true)},
+			wantProfile:          &APIHostLifecycleProfile{ControlPlane: cutil.GetPtr(true)},
+		},
+		{
+			desc: "both profile fields round-trip together",
+			hostLifecycleProfile: cdbm.HostLifecycleProfile{
+				DisableLockdown: cutil.GetPtr(true),
+				ControlPlane:    cutil.GetPtr(false),
+			},
+			wantProfile: &APIHostLifecycleProfile{
+				DisableLockdown: cutil.GetPtr(true),
+				ControlPlane:    cutil.GetPtr(false),
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -735,9 +751,18 @@ func TestAPIHostLifecycleProfile_Conversions(t *testing.T) {
 		}
 	})
 
+	t.Run("ToDBModel maps controlPlane", func(t *testing.T) {
+		dbTrue := (&APIHostLifecycleProfile{ControlPlane: cutil.GetPtr(true)}).ToDBModel()
+		if assert.NotNil(t, dbTrue.ControlPlane) {
+			assert.Equal(t, true, *dbTrue.ControlPlane)
+		}
+		assert.Nil(t, dbTrue.DisableLockdown)
+	})
+
 	t.Run("ToDBModel on nil receiver yields zero value", func(t *testing.T) {
 		var p *APIHostLifecycleProfile
 		assert.Nil(t, p.ToDBModel().DisableLockdown)
+		assert.Nil(t, p.ToDBModel().ControlPlane)
 	})
 
 	t.Run("ToDBModelPtr preserves nil-vs-set distinction", func(t *testing.T) {
@@ -749,6 +774,13 @@ func TestAPIHostLifecycleProfile_Conversions(t *testing.T) {
 		if assert.NotNil(t, ptr) {
 			assert.Equal(t, true, *ptr.DisableLockdown)
 		}
+
+		// controlPlane alone is a meaningful write, so it must survive the
+		// nil-vs-set collapse that ToDBModelPtr performs.
+		cpOnly := (&APIHostLifecycleProfile{ControlPlane: cutil.GetPtr(true)}).ToDBModelPtr()
+		if assert.NotNil(t, cpOnly) {
+			assert.Equal(t, true, *cpOnly.ControlPlane)
+		}
 	})
 
 	t.Run("NewAPIHostLifecycleProfile omits unset profile", func(t *testing.T) {
@@ -757,6 +789,12 @@ func TestAPIHostLifecycleProfile_Conversions(t *testing.T) {
 		got := NewAPIHostLifecycleProfile(cdbm.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)})
 		if assert.NotNil(t, got) {
 			assert.Equal(t, false, *got.DisableLockdown)
+		}
+
+		cpOnly := NewAPIHostLifecycleProfile(cdbm.HostLifecycleProfile{ControlPlane: cutil.GetPtr(true)})
+		if assert.NotNil(t, cpOnly) {
+			assert.Nil(t, cpOnly.DisableLockdown)
+			assert.Equal(t, true, *cpOnly.ControlPlane)
 		}
 	})
 }
@@ -771,12 +809,34 @@ func TestAPIExpectedMachine_HostLifecycleProfile_JSONRoundTrip(t *testing.T) {
 
 		raw, err := json.Marshal(orig)
 		assert.NoError(t, err)
-		assert.Contains(t, string(raw), `"hostLifecycleProfile":{"disableLockdown":true}`)
+		// Profile fields carry no omitempty, so an unset sibling is rendered as
+		// null rather than dropped. See the REST empty-value contract.
+		assert.Contains(t, string(raw), `"hostLifecycleProfile":{"disableLockdown":true,"controlPlane":null}`)
 
 		var round APIExpectedMachine
 		assert.NoError(t, json.Unmarshal(raw, &round))
 		if assert.NotNil(t, round.HostLifecycleProfile) {
 			assert.Equal(t, true, *round.HostLifecycleProfile.DisableLockdown)
+			assert.Nil(t, round.HostLifecycleProfile.ControlPlane)
+		}
+	})
+
+	t.Run("controlPlane true survives marshal/unmarshal", func(t *testing.T) {
+		orig := &APIExpectedMachine{
+			BmcMacAddress:        "00:11:22:33:44:55",
+			ChassisSerialNumber:  "CHASSIS123",
+			HostLifecycleProfile: &APIHostLifecycleProfile{ControlPlane: cutil.GetPtr(true)},
+		}
+
+		raw, err := json.Marshal(orig)
+		assert.NoError(t, err)
+		assert.Contains(t, string(raw), `"hostLifecycleProfile":{"disableLockdown":null,"controlPlane":true}`)
+
+		var round APIExpectedMachine
+		assert.NoError(t, json.Unmarshal(raw, &round))
+		if assert.NotNil(t, round.HostLifecycleProfile) {
+			assert.Nil(t, round.HostLifecycleProfile.DisableLockdown)
+			assert.Equal(t, true, *round.HostLifecycleProfile.ControlPlane)
 		}
 	})
 

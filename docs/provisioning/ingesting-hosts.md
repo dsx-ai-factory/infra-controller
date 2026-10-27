@@ -257,6 +257,7 @@ per-host fields and compatibility controls. It reads a snake_case
   [Host BMC compatibility fields](ip-and-network-configuration.md#host-bmc-compatibility-fields)
   for field interactions and the supported shared HostInband topology.
 - **`host_lifecycle_profile.disable_lockdown`** (bool, default `false`): When `true`, the state machine does not lock down the host during lifecycle management, which suits automation workflows that keep lockdown disabled.
+- **`host_lifecycle_profile.control_plane`** (bool, default `false`): When `true`, the machine is designated as a control-plane machine. NICo keeps its management addresses usable while the control plane is down, so the machine and its DPU can complete a full power-on cycle without NICo. A designated machine must use a `Fixed` or `Retained` `ip_allocation` on every `host_bmc`, `dpu_bmc`, and `dpu_os` interface; the API rejects the designation otherwise. Host data interfaces are not restricted.
 
 The previous `host_nics` manifest key and `--host_nics` CLI option remain
 aliases for `interfaces` and `--interfaces`. Existing manifests do not need

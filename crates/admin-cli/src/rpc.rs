@@ -1199,6 +1199,13 @@ impl ApiClient {
                     .is_some(),
                 "host_lifecycle_profile.disable_lockdown",
             ),
+            (
+                host_lifecycle_profile
+                    .as_ref()
+                    .and_then(|profile| profile.control_plane)
+                    .is_some(),
+                "host_lifecycle_profile.control_plane",
+            ),
             (parsed_interfaces.is_some(), "host_nics"),
         ]
         .into_iter()
@@ -1451,6 +1458,7 @@ impl ApiClient {
                     host_lifecycle_profile: machine.host_lifecycle_profile.map(|hlp| {
                         ::rpc::forge::HostLifecycleProfile {
                             disable_lockdown: hlp.disable_lockdown,
+                            control_plane: hlp.control_plane,
                         }
                     }),
                     server_name: machine.server_name,

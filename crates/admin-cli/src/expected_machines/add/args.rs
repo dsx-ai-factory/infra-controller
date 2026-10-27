@@ -68,6 +68,14 @@ machine-interface record:
     --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 \
     --bmc-ip-allocation retained
 
+Add a control-plane machine. Every host BMC, DPU BMC, and DPU OS interface must
+use a fixed or retained IP allocation, so the machine and its DPU can boot while
+the control plane is down:
+    $ nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 \
+    --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 \
+    --control-plane true \
+    --interfaces '[{\"mac_address\":\"00:11:22:33:44:55\",\"role\":\"host_bmc\",\"ip_allocation\":\"retained\"}]'
+
 ")]
 pub(crate) struct Args {
     #[clap(short = 'a', long, help = "BMC MAC Address of the expected machine")]
@@ -200,6 +208,13 @@ pub(crate) struct Args {
         help = "If true, do not lock down the server as part of lifecycle management within the state machine. If unset or false, preserve the default behavior of locking down the server after configuring the BIOS."
     )]
     disable_lockdown: Option<bool>,
+
+    #[clap(
+        long = "control-plane",
+        value_name = "CONTROL_PLANE",
+        help = "If true, designate the machine as a control-plane machine, so its management addresses stay usable while the control plane is down. Every host BMC, DPU BMC, and DPU OS interface must then use a fixed or retained IP allocation. If unset or false, the machine depends on the control plane to boot."
+    )]
+    control_plane: Option<bool>,
 }
 
 impl Args {
@@ -253,10 +268,11 @@ impl TryFrom<Args> for rpc::forge::ExpectedMachine {
                 .map(|policy| rpc::forge::DpuMode::from(policy) as i32),
             bmc_ip_allocation: value.bmc_ip_allocation.map(|m| m as i32),
             replace_host_nics: false,
-            host_lifecycle_profile: value.disable_lockdown.map(|dl| {
-                rpc::forge::HostLifecycleProfile {
-                    disable_lockdown: Some(dl),
-                }
+            host_lifecycle_profile: (value.disable_lockdown.is_some()
+                || value.control_plane.is_some())
+            .then_some(rpc::forge::HostLifecycleProfile {
+                disable_lockdown: value.disable_lockdown,
+                control_plane: value.control_plane,
             }),
             server_name: None,
         })

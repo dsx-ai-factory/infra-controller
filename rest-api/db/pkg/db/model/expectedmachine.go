@@ -162,13 +162,18 @@ type HostLifecycleProfile struct {
 	// during lifecycle management. A nil value means the setting is unset, so
 	// Core preserves its existing value (patch semantics).
 	DisableLockdown *bool `json:"disable_lockdown,omitempty"`
+	// ControlPlane, when non-nil, controls whether the machine is designated as
+	// a control-plane machine, so its management addresses stay usable while the
+	// control plane is down. A nil value means the setting is unset, so Core
+	// preserves its existing value (patch semantics).
+	ControlPlane *bool `json:"control_plane,omitempty"`
 }
 
 // HasSetFields reports whether the profile carries at least one explicitly set
 // field. Keep this method in sync when adding fields to HostLifecycleProfile so
 // update paths do not mistake an empty patch object for a requested write.
 func (h HostLifecycleProfile) HasSetFields() bool {
-	return h.DisableLockdown != nil
+	return h.DisableLockdown != nil || h.ControlPlane != nil
 }
 
 // ToProto returns the workflow proto for this profile, or nil when no setting
@@ -177,7 +182,10 @@ func (h HostLifecycleProfile) ToProto() *corev1.HostLifecycleProfile {
 	if !h.HasSetFields() {
 		return nil
 	}
-	return &corev1.HostLifecycleProfile{DisableLockdown: h.DisableLockdown}
+	return &corev1.HostLifecycleProfile{
+		DisableLockdown: h.DisableLockdown,
+		ControlPlane:    h.ControlPlane,
+	}
 }
 
 // FromProto populates the receiver from a workflow proto profile. A nil proto
@@ -188,6 +196,7 @@ func (h *HostLifecycleProfile) FromProto(proto *corev1.HostLifecycleProfile) {
 		return
 	}
 	h.DisableLockdown = proto.DisableLockdown
+	h.ControlPlane = proto.ControlPlane
 }
 
 // ExpectedMachineCredentials carries the BMC credentials for one

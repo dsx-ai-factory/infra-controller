@@ -202,6 +202,7 @@ async fn machine_flags_select_only_supplied_fields() {
                 bmc_retain_credentials: Some(false),
                 host_lifecycle_profile: Some(forge::HostLifecycleProfile {
                     disable_lockdown: Some(false),
+                    control_plane: None,
                 }),
                 dpu_mode: Some(forge::DpuMode::Unspecified as i32),
                 bmc_ip_allocation: Some(forge::BmcIpAllocationType::Auto as i32),
@@ -225,6 +226,28 @@ async fn machine_flags_select_only_supplied_fields() {
                 id: Some(rpc_id()),
                 host_lifecycle_profile: Some(forge::HostLifecycleProfile {
                     disable_lockdown: Some(false),
+                    control_plane: None,
+                }),
+                ..Default::default()
+            },
+        },
+        Case {
+            scenario: "standalone control-plane flag selects only the nested lifecycle field",
+            args: vec![
+                "expected-machine",
+                "patch",
+                "--id",
+                ID,
+                "--control-plane",
+                "true",
+            ],
+            methods: &["PatchExpectedMachine"],
+            paths: &["host_lifecycle_profile.control_plane"],
+            expected: forge::ExpectedMachine {
+                id: Some(rpc_id()),
+                host_lifecycle_profile: Some(forge::HostLifecycleProfile {
+                    disable_lockdown: None,
+                    control_plane: Some(true),
                 }),
                 ..Default::default()
             },

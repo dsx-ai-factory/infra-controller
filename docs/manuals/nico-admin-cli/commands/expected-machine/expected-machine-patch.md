@@ -19,7 +19,8 @@ nico-admin-cli expected-machine patch
 [--dpf-enabled] [--bmc-ip-address] [--extended]
 [--bmc-retain-credentials] [--dpu-policy]
 [--bmc-ip-allocation] [--interfaces]
-[--disable-lockdown] [--sort-by] [-h|--help]
+[--disable-lockdown] [--control-plane] [--sort-by]
+[-h|--help]
 ```
 
 ## DESCRIPTION
@@ -224,6 +225,20 @@ setting
 >
 > - false
 
+`--control-plane <CONTROL_PLANE>`
+
+Set true to designate the machine as a control-plane machine, so its
+management addresses stay usable while the control plane is down, or
+false to remove the designation. A designated machine requires a fixed
+or retained IP allocation on every host BMC, DPU BMC, and DPU OS
+interface. Omission preserves the stored setting
+
+*Possible values:*
+
+> - true
+>
+> - false
+
 `--sort-by <SORT_BY> [default: primary-id]`
 
 Sort output by specified field
@@ -250,6 +265,8 @@ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --dpu-
 nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --bmc-ip-allocation retained
 nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --interfaces '[{"mac_address":"02:00:00:00:20:01","fixed_ip":"192.0.2.10"}]'
 nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --interfaces '[{"mac_address":"02:00:00:00:20:01","role":"unspecified","ip_allocation":"unspecified","fixed_ip":"192.0.2.10"}]'
+nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --control-plane true
+nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --control-plane false
 ```
 
 ---
