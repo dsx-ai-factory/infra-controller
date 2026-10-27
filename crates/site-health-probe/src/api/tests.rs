@@ -984,6 +984,73 @@ async fn rest_site_from_the_inventory_reader_without_upstream_text() {
     assert!(!logs.text().contains(SENTINEL), "{}", logs.text());
 }
 
+fn summary_harness() -> (Harness, Arc<crate::store::fake::FakeStore>, SystemTime) {
+    let mut h = harness();
+    let base = UNIX_EPOCH + Duration::from_secs(1_000_000);
+    let started = tokio::time::Instant::now();
+    let clock: crate::summary::Clock = Arc::new(move || base + started.elapsed());
+    let fake = Arc::new(crate::store::fake::FakeStore::new(Arc::clone(&clock)));
+    let mut cfg = state_config();
+    cfg.metrics_store.selector = [("job", "j"), ("namespace", "ns")]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let summaries = crate::summary::SummaryState::new(
+        Arc::clone(&fake) as Arc<dyn crate::store::MetricsStore>,
+        &cfg.metrics_store,
+        clock,
+    );
+    h.router = router(ApiState::new(Arc::clone(&h.store), &cfg).with_summary(summaries));
+    (h, fake, base)
+}
+
+fn summary_uri(base: SystemTime) -> String {
+    let params = carbide_site_health_probe_api::SummaryParams {
+        start: DateTime::<Utc>::from(base - Duration::from_secs(600)),
+        end: DateTime::<Utc>::from(base),
+        base: 0,
+        n: 1,
+        direction: carbide_site_health_probe_api::Direction::Up,
+        q: None,
+        add_window_seconds: 0.0,
+    };
+    format!(
+        "/v1/summary?type=host&stage=ready&{}",
+        serde_urlencoded::to_string(&params).unwrap()
+    )
+}
+
+#[tokio::test(start_paused = true)]
+async fn summary_busy_is_429() {
+    let (h, fake, base) = summary_harness();
+    fake.set_delay(Duration::from_secs(20));
+    let uri = summary_uri(base);
+    let (first, second) = tokio::join!(h.get(&uri), h.get(&uri));
+    // The first summary has no sweeps, so it answers with null values.
+    assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+    assert_eq!(first.body["timingErrorSeconds"], Value::Null);
+    assert_eq!(second.status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(second.code(), "busy");
+}
+
+#[tokio::test(start_paused = true)]
+async fn summary_deadline_is_504() {
+    let (h, fake, base) = summary_harness();
+    fake.set_delay(Duration::from_secs(50));
+    let started = tokio::time::Instant::now();
+    let reply = h.get(&summary_uri(base)).await;
+    assert_eq!(reply.status, StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(reply.code(), "store_timeout");
+    assert_eq!(started.elapsed(), Duration::from_secs(90));
+
+    fake.set_delay(Duration::ZERO);
+    let status = h.get("/v1/store-status").await;
+    assert_eq!(status.status, StatusCode::OK, "{}", status.body);
+    assert_eq!(status.body["lastSampleAt"], Value::Null);
+    let reply = h.get(&format!("{}&bogus=1", summary_uri(base))).await;
+    assert_eq!((reply.status.as_u16(), reply.field()), (400, "bogus"));
+}
+
 /// Log lines written while the guard lives, at every level.
 #[derive(Clone, Default)]
 struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
@@ -1016,3 +1083,39 @@ impl CapturedLogs {
 }
 
 const SENTINEL: &str = "SENTINEL-c0ffee";
+
+#[tokio::test(start_paused = true)]
+async fn summary_unrepresentable_targets_are_400() {
+    let (h, fake, base) = summary_harness();
+    let uri = |target_base: u64, n: u64, direction: &str| {
+        let params = carbide_site_health_probe_api::SummaryParams {
+            start: DateTime::<Utc>::from(base - Duration::from_secs(600)),
+            end: DateTime::<Utc>::from(base),
+            base: target_base,
+            n,
+            direction: serde_json::from_value(json!(direction)).unwrap(),
+            q: Some("1".to_string()),
+            add_window_seconds: 0.0,
+        };
+        format!(
+            "/v1/summary?type=host&stage=ready&{}",
+            serde_urlencoded::to_string(&params).unwrap()
+        )
+    };
+    let reply = h.get(&uri(u64::MAX, 1, "up")).await;
+    assert_eq!(
+        (reply.status.as_u16(), reply.code(), reply.field()),
+        (400, "invalid_param", "base")
+    );
+    let reply = h.get(&uri(1, u64::MAX, "up")).await;
+    assert_eq!((reply.status.as_u16(), reply.field()), (400, "base"));
+    let reply = h.get(&uri(10, 100, "down")).await;
+    assert_eq!(
+        (reply.status.as_u16(), reply.code(), reply.field()),
+        (400, "invalid_param", "n")
+    );
+    assert!(
+        fake.queries.lock().unwrap().is_empty(),
+        "rejected before any store query"
+    );
+}

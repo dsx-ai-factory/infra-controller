@@ -36,8 +36,8 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use carbide_site_health_probe_api::{
     Component, ConfigResponse, CountResponse, ErrorBody, ErrorCode, ErrorDetail, Family, Filter,
-    ReadInfo, RestResource, RestSiteBinding, Source, SweepInfo, Unit, UnitType, UnitsQuery,
-    UnitsResponse,
+    ReadInfo, RestResource, RestSiteBinding, Source, StoreStatus, SummaryParams, SummaryResponse,
+    SweepInfo, Unit, UnitType, UnitsQuery, UnitsResponse,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -49,6 +49,8 @@ use crate::readers::rest_inventory::{RestTotalsData, SiteMatchData};
 use crate::snapshot::AnySnapshot;
 use crate::state::store::SnapshotStore;
 use crate::state_metrics::{Series, data_of, family_series, gauge_labels, units_of};
+use crate::store::StoreError;
+use crate::summary::{SUMMARY_KEYS, SummaryState, store_status, summarize};
 
 /// Units per page unless the client asks for fewer.
 const DEFAULT_LIMIT: u32 = 100;
@@ -67,6 +69,8 @@ pub(crate) struct ApiState {
     /// Each family's reader interval.
     pub intervals: BTreeMap<Family, Duration>,
     pub caps: Capabilities,
+    /// Summaries and the store status, when a metrics store is configured.
+    pub summary: Option<SummaryState>,
 }
 
 impl ApiState {
@@ -86,7 +90,22 @@ impl ApiState {
             caps: Capabilities {
                 full_host_read: state.nico_api.host_read == HostReadMode::Full,
             },
+            summary: None,
         }
+    }
+
+    /// Serves summaries and the store status from `summary`.
+    pub(crate) fn with_summary(mut self, summary: SummaryState) -> Self {
+        self.summary = Some(summary);
+        self
+    }
+
+    fn summary(&self) -> Result<&SummaryState, ApiError> {
+        self.summary.as_ref().ok_or_else(|| {
+            ApiError::store(StoreError::Unavailable(
+                "no metrics store is configured".to_string(),
+            ))
+        })
     }
 
     fn interval_seconds(&self, family: Family) -> f64 {
@@ -185,10 +204,34 @@ impl ApiError {
         )
     }
 
+    /// 502 `store_unavailable` or 504 `store_timeout`.
+    pub(crate) fn store(err: StoreError) -> Self {
+        match err {
+            StoreError::Timeout => Self::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                ErrorCode::StoreTimeout,
+                None,
+                "the metrics store did not answer in time".to_string(),
+            ),
+            StoreError::Unavailable(message) => Self::new(
+                StatusCode::BAD_GATEWAY,
+                ErrorCode::StoreUnavailable,
+                None,
+                message,
+            ),
+        }
+    }
+
     /// The reply status, for tests.
     #[cfg(test)]
     pub(crate) fn status(&self) -> StatusCode {
         self.status
+    }
+
+    /// The error code, for tests.
+    #[cfg(test)]
+    pub(crate) fn code(&self) -> ErrorCode {
+        self.detail.code
     }
 
     fn snapshot_expired() -> Self {
@@ -221,6 +264,8 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/v1/units", get(units))
         .route("/v1/units/query", post(units_query))
         .route("/v1/config", get(config))
+        .route("/v1/summary", get(summary))
+        .route("/v1/store-status", get(store_status_route))
         .fallback(not_found)
         .with_state(Arc::new(state))
 }
@@ -558,6 +603,48 @@ async fn config(
         rest: None,
         rest_site,
     }))
+}
+
+async fn summary(
+    State(api): State<Arc<ApiState>>,
+    RawQuery(raw): RawQuery,
+) -> Result<Json<SummaryResponse>, ApiError> {
+    let summary = api.summary()?;
+    let (query, extras) = split_query(raw.as_deref(), &SUMMARY_KEYS)?;
+    let filter: Filter = parse_query(&query)?;
+    let params = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(&extras)
+        .finish();
+    let params: SummaryParams = parse_query(&params)?;
+    let spec = series_spec(&filter, &api.caps)?;
+    let interval = api.intervals.get(&spec.family).copied().unwrap_or_default();
+    // The deadline covers the wait for the summary in flight and for the
+    // final scrape too.
+    tokio::time::timeout(
+        summary.deadline,
+        summarize(summary, &spec, &params, interval),
+    )
+    .await
+    .unwrap_or_else(|_| Err(ApiError::store(StoreError::Timeout)))
+    .map(Json)
+}
+
+async fn store_status_route(
+    State(api): State<Arc<ApiState>>,
+    RawQuery(raw): RawQuery,
+) -> Result<Json<StoreStatus>, ApiError> {
+    let summary = api.summary()?;
+    let (query, _) = split_query(raw.as_deref(), &[])?;
+    if !query.is_empty() {
+        return Err(ApiError::bad_param(
+            "query",
+            "/v1/store-status takes no parameters".to_string(),
+        ));
+    }
+    tokio::time::timeout(summary.deadline, store_status(summary))
+        .await
+        .unwrap_or_else(|_| Err(ApiError::store(StoreError::Timeout)))
+        .map(Json)
 }
 
 #[cfg(test)]

@@ -28,16 +28,21 @@
 //! covers.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use carbide_site_health_probe_api::{
     Crossing, CurvePoint, Direction, ErrorCode, Family, MAX_COUNT, Q_DECIMALS, ScrapeGap,
-    SummaryResponse, UnitsPerMinute,
+    StoreStatus, SummaryParams, SummaryResponse, UnitsPerMinute,
 };
 use chrono::{DateTime, Utc};
+use tokio::sync::Semaphore;
 
 use crate::api::ApiError;
-use crate::store::{RawSeries, is_time};
+use crate::api::spec::{Need, SeriesSpec, wire};
+use crate::config::MetricsStoreConfig;
+use crate::state_metrics::gauge_labels;
+use crate::store::{MatchOp, MetricsStore, RawQuery, RawSeries, StoreError, is_time};
 
 const PREFIX: &str = "carbide_site_health_probe_";
 const SWEEP_START: &str = "carbide_site_health_probe_sweep_start_timestamp_seconds";
@@ -51,6 +56,10 @@ const TIME_DIMS: [&str; 3] = ["reader", "family", "result"];
 /// 10^[`Q_DECIMALS`]: every accepted q is a whole number of these parts.
 const Q_PARTS: u64 = 10_u64.pow(Q_DECIMALS as u32);
 
+/// Store queries cover at most this much time each.
+const CHUNK: Duration = Duration::from_secs(3600);
+/// A second summary waits this long for the one in flight.
+const BUSY_WAIT: Duration = Duration::from_secs(30);
 /// The curve keeps at most this many points.
 pub(crate) const CURVE_POINTS: usize = 200;
 /// Quantiles one summary may ask for: each crossing is a curve point that is
@@ -60,6 +69,69 @@ pub(crate) const MAX_QUANTILES: usize = CURVE_POINTS - 2;
 const LISTED_SCRAPE_GAPS: usize = 100;
 /// `peak10m` looks at count changes within this window.
 const PEAK_WINDOW: f64 = 600.0;
+
+/// The `/v1/summary` query parameters beside the filter's.
+pub(crate) const SUMMARY_KEYS: [&str; 7] = [
+    "start",
+    "end",
+    "base",
+    "n",
+    "direction",
+    "q",
+    "addWindowSeconds",
+];
+
+/// The wall clock, injectable for tests.
+pub(crate) type Clock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
+
+/// What summaries read and how long they may take.
+pub(crate) struct SummaryState {
+    pub store: Arc<dyn MetricsStore>,
+    /// Label matchers that pick this site's probe series.
+    pub selector: Vec<(String, String)>,
+    pub scrape_interval: Duration,
+    pub deadline: Duration,
+    pub max_window: Duration,
+    pub clock: Clock,
+    /// One summary in flight.
+    permit: Semaphore,
+}
+
+impl SummaryState {
+    pub(crate) fn new(
+        store: Arc<dyn MetricsStore>,
+        cfg: &MetricsStoreConfig,
+        clock: Clock,
+    ) -> Self {
+        Self {
+            store,
+            selector: cfg
+                .selector
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            scrape_interval: cfg.scrape_interval,
+            deadline: cfg.summary_deadline,
+            max_window: cfg.max_window,
+            clock,
+            permit: Semaphore::new(1),
+        }
+    }
+
+    fn now(&self) -> SystemTime {
+        (self.clock)()
+    }
+
+    fn selector(&self) -> impl Iterator<Item = (String, MatchOp, String)> + '_ {
+        self.selector
+            .iter()
+            .map(|(k, v)| (k.clone(), MatchOp::Eq, v.clone()))
+    }
+}
+
+fn store_error(err: StoreError) -> ApiError {
+    ApiError::store(err)
+}
 
 fn secs(at: SystemTime) -> f64 {
     at.duration_since(UNIX_EPOCH)
@@ -75,6 +147,14 @@ fn at_secs(secs: f64) -> DateTime<Utc> {
         .ok()
         .and_then(|d| DateTime::from_timestamp(i64::try_from(d.as_secs()).ok()?, d.subsec_nanos()))
         .unwrap_or(DateTime::<Utc>::MAX_UTC)
+}
+
+fn millis(at: SystemTime) -> i64 {
+    at.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
 }
 
 fn ms_secs(ms: i64) -> f64 {
@@ -744,11 +824,323 @@ pub(crate) fn probe_restarts(times: &[RawSeries], start: f64, end: f64) -> u32 {
         .count() as u32
 }
 
+/// A capability flag query: the selector, its dimension labels, and the
+/// value that allows the filter.
+type CapQuery = (RawQuery, &'static [&'static str], fn(f64) -> bool);
+
+/// The capability flag series a need reads.
+fn cap_query(need: &Need, range: Duration, state: &SummaryState) -> CapQuery {
+    match need {
+        Need::RestTotal(resource) => (
+            RawQuery {
+                names: vec![format!("{PREFIX}rest_totals_available")],
+                matchers: std::iter::once(("resource".to_string(), MatchOp::Eq, wire(resource)))
+                    .chain(state.selector())
+                    .collect(),
+                range,
+            },
+            &["resource"],
+            |v| v == 1.0,
+        ),
+    }
+}
+
+/// Raw samples gathered so far, merged by series.
+#[derive(Default)]
+struct Gathered {
+    counts: BTreeMap<BTreeMap<String, String>, BTreeMap<i64, f64>>,
+    times: BTreeMap<BTreeMap<String, String>, BTreeMap<i64, f64>>,
+    caps: Vec<BTreeMap<BTreeMap<String, String>, BTreeMap<i64, f64>>>,
+}
+
+fn merge(
+    into: &mut BTreeMap<BTreeMap<String, String>, BTreeMap<i64, f64>>,
+    series: Vec<RawSeries>,
+) {
+    for s in series {
+        into.entry(s.labels).or_default().extend(s.samples);
+    }
+}
+
+fn flatten(from: &BTreeMap<BTreeMap<String, String>, BTreeMap<i64, f64>>) -> Vec<RawSeries> {
+    from.iter()
+        .map(|(labels, samples)| RawSeries {
+            labels: labels.clone(),
+            samples: samples.iter().map(|(t, v)| (*t, *v)).collect(),
+        })
+        .collect()
+}
+
+/// The queries of one summary.
+struct Plan<'a> {
+    state: &'a SummaryState,
+    count: RawQuery,
+    times: RawQuery,
+    caps: Vec<CapQuery>,
+}
+
+impl Plan<'_> {
+    /// Fetches `(at - range, at]` of every selector.
+    async fn fetch(
+        &mut self,
+        at: SystemTime,
+        range: Duration,
+        into: &mut Gathered,
+    ) -> Result<(), ApiError> {
+        let store = &self.state.store;
+        self.count.range = range;
+        self.times.range = range;
+        merge(
+            &mut into.counts,
+            store.raw(&self.count, at).await.map_err(store_error)?,
+        );
+        merge(
+            &mut into.times,
+            store.raw(&self.times, at).await.map_err(store_error)?,
+        );
+        into.caps.resize_with(self.caps.len(), BTreeMap::new);
+        for (i, (query, _, _)) in self.caps.iter_mut().enumerate() {
+            query.range = range;
+            merge(
+                &mut into.caps[i],
+                store.raw(query, at).await.map_err(store_error)?,
+            );
+        }
+        Ok(())
+    }
+
+    fn points(
+        &self,
+        gathered: &Gathered,
+        count_dims: &[&str],
+    ) -> Result<Vec<ScrapePoint>, ApiError> {
+        let caps: Vec<Vec<RawSeries>> = gathered.caps.iter().map(flatten).collect();
+        let cap_series: Vec<CapSeries<'_>> = self
+            .caps
+            .iter()
+            .zip(&caps)
+            .map(|((_, dims, ok), series)| CapSeries {
+                series,
+                dims,
+                ok: *ok,
+            })
+            .collect();
+        join_points(
+            &flatten(&gathered.counts),
+            count_dims,
+            &flatten(&gathered.times),
+            &cap_series,
+        )
+    }
+}
+
+/// Answers one `/v1/summary` request.
+pub(crate) async fn summarize(
+    state: &SummaryState,
+    spec: &SeriesSpec,
+    params: &SummaryParams,
+    reader_interval: Duration,
+) -> Result<SummaryResponse, ApiError> {
+    let now = state.now();
+    let start = SystemTime::from(params.start);
+    let end = SystemTime::from(params.end);
+    if end > now {
+        return Err(ApiError::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            ErrorCode::EndInFuture,
+            Some("end"),
+            "end is in the future".to_string(),
+        ));
+    }
+    if start >= end {
+        return Err(ApiError::bad_param(
+            "start",
+            "start must be before end".to_string(),
+        ));
+    }
+    if end.duration_since(start).unwrap_or_default() > state.max_window {
+        return Err(ApiError::bad_param(
+            "start",
+            format!("the window is longer than {:?}", state.max_window),
+        ));
+    }
+    let qs = params
+        .quantiles()
+        .map_err(|message| ApiError::bad_param("q", message))?;
+    if qs.len() > MAX_QUANTILES {
+        return Err(ApiError::bad_param(
+            "q",
+            format!(
+                "at most {MAX_QUANTILES} quantiles: each is a curve point kept in a curve of \
+                 {CURVE_POINTS}"
+            ),
+        ));
+    }
+    if !(params.add_window_seconds.is_finite() && params.add_window_seconds >= 0.0) {
+        return Err(ApiError::bad_param(
+            "addWindowSeconds",
+            "addWindowSeconds must be 0 or more".to_string(),
+        ));
+    }
+    let input = SummaryInput {
+        family: spec.family,
+        start: secs(start),
+        end: secs(end),
+        base: params.base,
+        n: params.n,
+        direction: params.direction,
+        qs,
+        add_window_seconds: params.add_window_seconds,
+        scrape_interval: state.scrape_interval.as_secs_f64(),
+    };
+    // Every target must be a count before any store work.
+    input.targets()?;
+
+    // One summary in flight; the next waits, within the deadline.
+    let _permit = tokio::time::timeout(BUSY_WAIT, state.permit.acquire())
+        .await
+        .map_err(|_| {
+            ApiError::new(
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                ErrorCode::Busy,
+                None,
+                "another summary is running".to_string(),
+            )
+        })?
+        .map_err(|_| store_error(StoreError::Unavailable("summary gate closed".to_string())))?;
+
+    let family_matcher = format!("{}|", wire(spec.family));
+    let mut plan = Plan {
+        state,
+        count: RawQuery {
+            names: vec![format!("{PREFIX}{}", spec.metric)],
+            matchers: spec
+                .matchers
+                .iter()
+                .map(|(label, value)| (label.to_string(), MatchOp::Eq, value.clone()))
+                .chain(state.selector())
+                .collect(),
+            range: CHUNK,
+        },
+        times: RawQuery {
+            names: [SWEEP_START, SWEEP_END, SWEEPS_TOTAL, PROCESS_START]
+                .map(str::to_string)
+                .to_vec(),
+            matchers: std::iter::once(("family".to_string(), MatchOp::Re, family_matcher))
+                .chain(state.selector())
+                .collect(),
+            range: CHUNK,
+        },
+        caps: spec
+            .needs
+            .iter()
+            .map(|need| cap_query(need, CHUNK, state))
+            .collect(),
+    };
+
+    // The window plus two reader intervals before it, in chunks.
+    let from = start - reader_interval * 2;
+    let mut gathered = Gathered::default();
+    let mut upper = end;
+    while upper > from {
+        let range = upper.duration_since(from).unwrap_or_default().min(CHUNK);
+        plan.fetch(upper, range, &mut gathered).await?;
+        upper -= range;
+    }
+
+    // Wait for a complete scrape at or after the end: the sweeps that ended
+    // before it may not have been scraped yet. That scrape lands within
+    // three scrape intervals of the end if it lands at all, so only that
+    // span is read, never the gap to today of a historical request. Each
+    // poll re-reads the whole post-end span up to now (or the horizon), in
+    // chunks, because a sample can become queryable after its time was
+    // already read; merging drops the repeats.
+    let count_dims = gauge_labels(spec.metric);
+    let end_ms = millis(end);
+    let horizon = end + state.scrape_interval * 3;
+    let final_scrape_seen = loop {
+        let upper = state.now().min(horizon);
+        let mut chunk_upper = upper;
+        while chunk_upper > end {
+            let range = chunk_upper
+                .duration_since(end)
+                .unwrap_or_default()
+                .min(CHUNK);
+            plan.fetch(chunk_upper, range, &mut gathered).await?;
+            chunk_upper -= range;
+        }
+        if plan
+            .points(&gathered, count_dims)?
+            .iter()
+            .any(|p| p.at_ms >= end_ms)
+        {
+            break true;
+        }
+        if upper >= horizon {
+            break false;
+        }
+        tokio::time::sleep((state.scrape_interval / 2).max(Duration::from_millis(100))).await;
+    };
+
+    let points = plan.points(&gathered, count_dims)?;
+    let found = sweeps(&points)?;
+    let usable: Vec<&Sweep> = found.iter().filter(|s| s.end <= secs(end)).collect();
+    // Every usable sweep must show the capability its filter needs; a
+    // missing flag is unavailable, never proof.
+    if !spec.needs.is_empty() && usable.iter().any(|s| s.capable != Some(true)) {
+        return Err(ApiError::unprocessable(
+            ErrorCode::FieldUnavailable,
+            None,
+            "a sweep in the window could not answer this filter (label budget or REST total)"
+                .to_string(),
+        ));
+    }
+    let times = flatten(&gathered.times);
+    let tail = TailState {
+        final_scrape_seen,
+        probe_restarts: probe_restarts(&times, secs(start), secs(end)),
+        incomplete_sweeps: incomplete_sweeps(&times, secs(start), secs(end)),
+    };
+    let scrapes: Vec<ScrapeMark> = points
+        .iter()
+        .map(|p| ScrapeMark {
+            at_ms: p.at_ms,
+            end: p.end,
+        })
+        .collect();
+    Ok(compute(&input, &found, &scrapes, tail))
+}
+
+/// `/v1/store-status`: the newest host sweep end sample in the store.
+pub(crate) async fn store_status(state: &SummaryState) -> Result<StoreStatus, ApiError> {
+    let query = RawQuery {
+        names: vec![SWEEP_END.to_string()],
+        matchers: std::iter::once(("family".to_string(), MatchOp::Eq, "host".to_string()))
+            .chain(state.selector())
+            .collect(),
+        range: Duration::from_secs(120),
+    };
+    let now = state.now();
+    let series = state.store.raw(&query, now).await.map_err(store_error)?;
+    let last = series
+        .iter()
+        .flat_map(|s| s.samples.iter())
+        .max_by_key(|(at, _)| *at)
+        .copied();
+    Ok(StoreStatus {
+        last_sample_at: last.map(|(at, _)| at_secs(ms_secs(at))),
+        sample_age_seconds: last.map(|(at, _)| (secs(now) - ms_secs(at)).max(0.0)),
+        sweep_complete_at: last.map(|(_, value)| at_secs(value)),
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use carbide_site_health_probe_api::{DEFAULT_Q, parse_q};
+    use carbide_site_health_probe_api::{DEFAULT_Q, Filter, parse_q};
 
     use super::*;
+    use crate::api::spec::{Capabilities, series_spec};
+    use crate::store::fake::{FakeStore, millis};
 
     const T0: f64 = 1_000_000.0;
 
@@ -1234,6 +1626,26 @@ mod tests {
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn summary_rejects_more_quantiles_than_the_curve_keeps() {
+        let site = site();
+        let mut params = site.params(-60.0, 0.0, 0, 10_000, Direction::Up);
+        let qs: Vec<String> = (1..=MAX_QUANTILES + 1)
+            .map(|i| format!("{}", i as f64 / 1_000.0))
+            .collect();
+        params.q = Some(qs.join(","));
+        let err = summarize(&site.state, &spec(READY), &params, INTERVAL)
+            .await
+            .expect_err("more crossings than curve points");
+        assert_eq!(err.code(), ErrorCode::InvalidParam);
+        params.q = Some(qs[..MAX_QUANTILES].join(","));
+        site.scrape(0.0, 1.0, -5.0, &[]);
+        let reply = summarize(&site.state, &spec(READY), &params, INTERVAL)
+            .await
+            .expect("the largest admitted request");
+        assert_eq!(reply.crossings.len(), MAX_QUANTILES);
+    }
+
     #[test]
     fn summary_units_per_minute() {
         // One more unit every 60 s for 100 minutes.
@@ -1527,5 +1939,775 @@ mod tests {
         let reply = compute(&input, &sweeps, &scrapes, seen());
         assert_eq!(reply.scrape_gaps_total, 1);
         assert_eq!(reply.scrape_gaps[0].to, DateTime::<Utc>::MAX_UTC);
+    }
+
+    // The store-backed tests below run on a paused clock: the fake store's
+    // wall clock moves with tokio time.
+
+    const SELECTOR: [(&str, &str); 2] = [("job", "j"), ("namespace", "ns")];
+
+    /// A capability flag sample: metric, labels, value.
+    type Flag<'a> = (&'a str, &'a [(&'a str, &'a str)], f64);
+
+    struct Site {
+        store: Arc<FakeStore>,
+        state: SummaryState,
+        base: SystemTime,
+    }
+
+    fn site() -> Site {
+        let base = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let started = tokio::time::Instant::now();
+        let clock: Clock = Arc::new(move || base + started.elapsed());
+        let store = Arc::new(FakeStore::new(Arc::clone(&clock)));
+        let cfg = MetricsStoreConfig {
+            url: "http://store".to_string(),
+            selector: SELECTOR
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..MetricsStoreConfig::default()
+        };
+        Site {
+            state: SummaryState::new(Arc::clone(&store) as Arc<dyn MetricsStore>, &cfg, clock),
+            store,
+            base,
+        }
+    }
+
+    impl Site {
+        /// Seconds since the clock's base.
+        fn at(&self, offset: f64) -> SystemTime {
+            if offset >= 0.0 {
+                self.base + Duration::from_secs_f64(offset)
+            } else {
+                self.base - Duration::from_secs_f64(-offset)
+            }
+        }
+
+        fn ms(&self, offset: f64) -> i64 {
+            millis(self.at(offset))
+        }
+
+        /// One scrape at `at` of a probe whose current host snapshot ended
+        /// at `end` with `count` ready hosts, and optional capability flags.
+        fn scrape(&self, at: f64, count: f64, end: f64, flags: &[Flag<'_>]) {
+            self.scrape_visible(at, count, end, flags, at);
+        }
+
+        /// Like [`Site::scrape`], but the store can answer with the scrape
+        /// only from `visible` on.
+        fn scrape_visible(&self, at: f64, count: f64, end: f64, flags: &[Flag<'_>], visible: f64) {
+            let (ms, visible) = (self.ms(at), self.ms(visible));
+            let labels =
+                |extra: &[(&'static str, &'static str)]| -> Vec<(&'static str, &'static str)> {
+                    extra.iter().copied().chain(SELECTOR).collect()
+                };
+            let s = &self.store;
+            let add = |name: &str, labels: &[(&str, &str)], value: f64| {
+                s.add_late(name, labels, ms, value, visible);
+            };
+            add(
+                "carbide_site_health_probe_units",
+                &labels(&[("type", "host"), ("stage", "ready"), ("state", "Ready")]),
+                count,
+            );
+            let host = labels(&[
+                ("model", "m"),
+                ("instance_type", "none"),
+                ("state", "Ready"),
+                ("bmc_version", "v1"),
+                ("uefi_version", "u1"),
+                ("allocatable", "unknown"),
+                ("update_complete", "false"),
+            ]);
+            add("carbide_site_health_probe_hosts", &host, count);
+            let times = labels(&[("reader", "devices"), ("family", "host")]);
+            add(SWEEP_END, &times, crate::summary::secs(self.at(end)));
+            add(
+                SWEEP_START,
+                &times,
+                crate::summary::secs(self.at(end - 10.0)),
+            );
+            add(
+                PROCESS_START,
+                &labels(&[]),
+                crate::summary::secs(self.at(-100_000.0)),
+            );
+            for (name, extra, value) in flags {
+                let mut l: Vec<(&str, &str)> = extra.to_vec();
+                l.extend(SELECTOR);
+                add(name, &l, *value);
+            }
+        }
+
+        fn params(
+            &self,
+            start: f64,
+            end: f64,
+            base: u64,
+            n: u64,
+            direction: Direction,
+        ) -> SummaryParams {
+            SummaryParams {
+                start: DateTime::<Utc>::from(self.at(start)),
+                end: DateTime::<Utc>::from(self.at(end)),
+                base,
+                n,
+                direction,
+                q: Some("1".to_string()),
+                add_window_seconds: 0.0,
+            }
+        }
+    }
+
+    fn spec(query: &str) -> SeriesSpec {
+        let filter: Filter = serde_urlencoded::from_str(query).unwrap();
+        series_spec(
+            &filter,
+            &Capabilities {
+                full_host_read: true,
+            },
+        )
+        .unwrap()
+    }
+
+    const READY: &str = "type=host&stage=ready";
+    const INTERVAL: Duration = Duration::from_secs(20);
+
+    #[tokio::test(start_paused = true)]
+    async fn summary_waits_for_final_scrape_then_counts_tail() {
+        let site = site();
+        // Sweeps every 20 s, scraped every 5 s, until the clock (0).
+        for i in 0..24 {
+            let at = -120.0 + 5.0 * i as f64;
+            let end = (at / 20.0).floor() * 20.0 - 1.0;
+            site.scrape(at, if end >= -10.0 { 10.0 } else { 3.0 }, end, &[]);
+        }
+        // The next scrape lands 7 s after the window's end.
+        site.scrape(7.0, 10.0, -1.0, &[]);
+        let reply = summarize(
+            &site.state,
+            &spec(READY),
+            &site.params(-100.0, 0.0, 0, 10, Direction::Up),
+            INTERVAL,
+        )
+        .await
+        .expect("summary");
+        assert!(reply.final_scrape_seen);
+        assert_eq!(reply.final_count, Some(10));
+        assert_eq!(
+            reply.crossings[0].reached_at,
+            Some(DateTime::<Utc>::from(site.at(-1.0)))
+        );
+        assert_eq!(reply.max_sweep_gap_seconds, Some(20.0));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn summary_final_poll_fetches_counts_and_flags() {
+        for rack in [Some(5), None] {
+            let site = site();
+            let probe = ProbeProcess::start(site.at(-10_000.0));
+            probe.rack_total(1, site.at(-45.0), Some(0));
+            probe.scrape(&site.store, site.at(-40.0), "replica-a");
+            // Window ends at -5; the sweep ending at -10 is first scraped at
+            // +0, after the window, with or without its flag.
+            probe.rack_total(2, site.at(-10.0), rack);
+            probe.scrape(&site.store, site.at(0.0), "replica-a");
+            let result = summarize(
+                &site.state,
+                &spec("type=rest_total&resource=rack"),
+                &site.params(-30.0, -5.0, 0, 5, Direction::Up),
+                INTERVAL,
+            )
+            .await;
+            if rack.is_some() {
+                let reply = result.expect("summary");
+                assert!(reply.final_scrape_seen);
+                assert_eq!(
+                    reply.crossings[0].reached_at,
+                    Some(DateTime::<Utc>::from(site.at(-10.0)))
+                );
+            } else {
+                let err = result.expect_err("the sweep's own scrape has no total");
+                assert_eq!(err.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn historical_final_poll_reads_only_post_end_evidence() {
+        let site = site();
+        // A run two hours ago, its final scrape 3 s after its end, and an
+        // unrelated restart and count an hour after it.
+        site.scrape(-7_260.0, 1.0, -7_265.0, &[]);
+        site.scrape(-7_197.0, 2.0, -7_205.0, &[]);
+        let later = UNIX_EPOCH + Duration::from_secs(1_000_000 - 3_600);
+        let ms = millis(later);
+        let s = &site.store;
+        let labels: Vec<(&str, &str)> = [("type", "host"), ("stage", "ready"), ("state", "Ready")]
+            .into_iter()
+            .chain(SELECTOR)
+            .collect();
+        s.add("carbide_site_health_probe_units", &labels, ms, 99.0);
+        let times: Vec<(&str, &str)> = [("reader", "devices"), ("family", "host")]
+            .into_iter()
+            .chain(SELECTOR)
+            .collect();
+        s.add(SWEEP_END, &times, ms, secs(later));
+        s.add(SWEEP_START, &times, ms, secs(later) - 5.0);
+        s.add(PROCESS_START, &SELECTOR, ms, secs(later) - 60.0);
+
+        let started = tokio::time::Instant::now();
+        let reply = summarize(
+            &site.state,
+            &spec(READY),
+            &site.params(-7_250.0, -7_200.0, 0, 2, Direction::Up),
+            INTERVAL,
+        )
+        .await
+        .expect("summary");
+        assert_eq!(
+            started.elapsed(),
+            Duration::ZERO,
+            "no wait on a historical request"
+        );
+        assert!(reply.final_scrape_seen);
+        assert_eq!(reply.final_count, Some(2));
+        assert_eq!(
+            reply.probe_restarts, 0,
+            "the later restart is not this run's"
+        );
+        let horizon = site.ms(-7_200.0 + 15.0);
+        for (promql, at) in site.store.queries.lock().unwrap().iter() {
+            assert!(*at <= horizon, "{promql} read past the post-end span");
+            let range: u64 = promql
+                .rsplit('[')
+                .next()
+                .and_then(|r| r.strip_suffix("s]"))
+                .and_then(|r| r.parse().ok())
+                .expect("range");
+            assert!(range <= 3_600, "{promql}");
+        }
+    }
+
+    /// One probe process, scraped through its real collector and counters.
+    struct ProbeProcess {
+        setup: metrics_endpoint::MetricsSetup,
+        sink: crate::state_metrics::CountingSink,
+    }
+
+    impl ProbeProcess {
+        fn start(process_start: SystemTime) -> Self {
+            let setup = metrics_endpoint::new_metrics_setup("site-health-probe", "test", false)
+                .expect("metrics setup");
+            let store = Arc::new(crate::state::store::SnapshotStore::new(
+                &crate::config::Paging::default(),
+            ));
+            setup
+                .registry
+                .register(Box::new(crate::state_metrics::StateCollector::new(
+                    Arc::clone(&store),
+                    process_start,
+                    crate::config::HostReadMode::Full,
+                )))
+                .expect("register");
+            let sink = crate::state_metrics::CountingSink::new(store, &setup.meter);
+            Self { setup, sink }
+        }
+
+        /// A complete REST totals sweep that ended at `end` with this rack
+        /// total (`None`: the site answered 412).
+        fn rack_total(&self, seq: u64, end: SystemTime, rack: Option<u64>) {
+            use carbide_site_health_probe_api::RestResource;
+
+            use crate::readers::rest_inventory::RestTotalsData;
+            use crate::snapshot::{FamilySnapshot, Reader, SnapshotSink, SweepMeta};
+            self.sink.publish(
+                Family::RestTotals,
+                Arc::new(FamilySnapshot {
+                    meta: SweepMeta {
+                        process: 1,
+                        seq,
+                        reader: Reader::RestInventory,
+                        start: end - Duration::from_secs(3),
+                        end,
+                    },
+                    data: RestTotalsData {
+                        totals: [(RestResource::Machine, Some(5)), (RestResource::Rack, rack)]
+                            .into_iter()
+                            .collect(),
+                    },
+                }),
+            );
+        }
+
+        /// A complete host sweep that ended at `end` with `ready` hosts.
+        fn sweep(&self, seq: u64, end: SystemTime, ready: usize) {
+            use carbide_site_health_probe_api::{Source, Stage, Unit, UnitType};
+
+            use crate::snapshot::{FamilySnapshot, Reader, SnapshotSink, SweepMeta, UnitsData};
+            let units = (0..ready)
+                .map(|i| Unit {
+                    id: format!("fm100h{i:04}"),
+                    unit_type: UnitType::Host,
+                    source: Source::NicoApi,
+                    stage: Stage::Ready,
+                    done: true,
+                    state: "Ready".to_string(),
+                    reason: None,
+                    bmc_ip: None,
+                    host: None,
+                    dpu: None,
+                    instance: None,
+                    expected: None,
+                })
+                .collect();
+            self.sink.publish(
+                Family::Host,
+                Arc::new(FamilySnapshot {
+                    meta: SweepMeta {
+                        process: 1,
+                        seq,
+                        reader: Reader::Devices,
+                        start: end - Duration::from_secs(5),
+                        end,
+                    },
+                    data: UnitsData::new(units, 0),
+                }),
+            );
+        }
+
+        /// An incomplete host sweep.
+        fn fail(&self) {
+            use crate::snapshot::{FailureKind, Reader, SnapshotSink};
+            self.sink
+                .failed(Reader::Devices, Family::Host, FailureKind::Timeout, "slow");
+        }
+
+        /// One scrape of this process by the monitoring replica `instance`.
+        fn scrape(&self, store: &FakeStore, at: SystemTime, instance: &str) {
+            for family in self.setup.registry.gather() {
+                for metric in family.get_metric() {
+                    let value = match family.get_field_type() {
+                        prometheus::proto::MetricType::GAUGE => metric.gauge.value(),
+                        prometheus::proto::MetricType::COUNTER => metric.counter.value(),
+                        _ => continue,
+                    };
+                    let mut labels: Vec<(&str, &str)> = metric
+                        .get_label()
+                        .iter()
+                        .map(|l| (l.name(), l.value()))
+                        .collect();
+                    labels.extend(SELECTOR);
+                    labels.push(("instance", instance));
+                    store.add(family.name(), &labels, millis(at), value);
+                }
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn summary_counts_only_run_events() {
+        let site = site();
+        let at = |offset: f64| site.at(offset);
+        // Two monitoring replicas scrape every probe 2 s apart.
+        let scrape = |probe: &ProbeProcess, offset: f64| {
+            probe.scrape(&site.store, at(offset), "replica-a");
+            probe.scrape(&site.store, at(offset + 2.0), "replica-b");
+        };
+        // The run is (-300, -60].
+        // Process z restarted into process a before the run: not the run's.
+        let z = ProbeProcess::start(at(-10_000.0));
+        z.sweep(1, at(-350.0), 1);
+        z.fail();
+        z.fail();
+        z.fail();
+        scrape(&z, -345.0);
+        let a = ProbeProcess::start(at(-330.0));
+        a.sweep(1, at(-325.0), 2);
+        a.fail();
+        scrape(&a, -310.0);
+        // In the run: one incomplete sweep of a, a restart into b, one
+        // incomplete sweep of b.
+        a.fail();
+        a.sweep(2, at(-205.0), 3);
+        scrape(&a, -195.0);
+        let b = ProbeProcess::start(at(-150.0));
+        b.sweep(1, at(-145.0), 4);
+        b.fail();
+        scrape(&b, -95.0);
+        // After the run: another incomplete sweep, seen by the final scrape.
+        b.fail();
+        scrape(&b, -55.0);
+
+        let reply = summarize(
+            &site.state,
+            &spec(READY),
+            &site.params(-300.0, -60.0, 0, 4, Direction::Up),
+            INTERVAL,
+        )
+        .await
+        .expect("summary");
+        assert!(reply.final_scrape_seen);
+        assert_eq!(
+            reply.incomplete_sweeps, 2,
+            "one of a and one of b, each replica once"
+        );
+        assert_eq!(reply.probe_restarts, 1, "a to b; z to a was before the run");
+        assert_eq!(reply.final_count, Some(4));
+        assert_eq!(
+            reply.crossings[0].reached_at,
+            Some(DateTime::<Utc>::from(at(-145.0)))
+        );
+    }
+
+    /// A run ending 0.3 s before the request, at a fractional time, with
+    /// its sweeps scraped before the end; `after_end` adds the scrapes after
+    /// it. The summary must see a final scrape and the terminal count 2.
+    async fn final_poll_finds(after_end: impl Fn(&Site)) {
+        let site = site();
+        site.scrape(-40.3, 1.0, -45.0, &[]);
+        site.scrape(-20.3, 1.0, -25.0, &[]);
+        after_end(&site);
+        let reply = summarize(
+            &site.state,
+            &spec(READY),
+            &site.params(-60.3, -0.3, 0, 2, Direction::Up),
+            INTERVAL,
+        )
+        .await
+        .expect("summary");
+        assert!(reply.final_scrape_seen, "the final scrape is read");
+        assert_eq!(reply.final_count, Some(2), "with its terminal count");
+        assert_eq!(
+            reply.crossings[0].reached_at,
+            Some(DateTime::<Utc>::from(site.at(-5.3)))
+        );
+        let horizon = site.ms(-0.3 + 15.0);
+        let queries = site.store.queries.lock().unwrap();
+        assert!(queries.iter().all(|(_, at)| *at <= horizon));
+        assert!(
+            queries.iter().any(|(promql, _)| promql.ends_with("ms]")),
+            "fractional spans are read exactly, not rounded down"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_poll_rereads_a_late_scrape() {
+        // The only scrape after the end, 0.25 s after it, reaches the store
+        // 4 s after the request: a poll that read its time before then must
+        // read it again.
+        final_poll_finds(|site| site.scrape_visible(-0.05, 2.0, -5.3, &[], 4.0)).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn final_poll_reads_an_offset_scrape() {
+        // The only scrape after the end lands 2.75 s after the request,
+        // between two polls 2.5 s apart.
+        final_poll_finds(|site| site.scrape(2.75, 2.0, -5.3, &[])).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restart_into_a_failing_process_counts() {
+        let site = site();
+        let at = |offset: f64| site.at(offset);
+        let scrape = |probe: &ProbeProcess, offset: f64| {
+            probe.scrape(&site.store, at(offset), "replica-a");
+            probe.scrape(&site.store, at(offset + 2.0), "replica-b");
+        };
+        // The run is (-300, -60]. Process a is healthy; it restarts into b,
+        // which never completes a sweep, so b has no sweep times at all.
+        let a = ProbeProcess::start(at(-10_000.0));
+        a.sweep(1, at(-250.0), 2);
+        scrape(&a, -245.0);
+        scrape(&a, -200.0);
+        let b = ProbeProcess::start(at(-150.0));
+        b.fail();
+        scrape(&b, -140.0);
+        b.fail();
+        scrape(&b, -100.0);
+        // b restarts into c after the run; c's first scrape is the final one.
+        let c = ProbeProcess::start(at(-57.0));
+        c.sweep(1, at(-56.0), 3);
+        scrape(&c, -55.0);
+
+        let reply = summarize(
+            &site.state,
+            &spec(READY),
+            &site.params(-300.0, -60.0, 0, 2, Direction::Up),
+            INTERVAL,
+        )
+        .await
+        .expect("summary");
+        assert_eq!(
+            reply.probe_restarts, 1,
+            "a to b counts; b to c is after the run"
+        );
+        assert_eq!(reply.incomplete_sweeps, 2);
+        assert!(reply.final_scrape_seen);
+        assert_eq!(reply.final_count, Some(2), "c's sweep ended after the run");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn summary_poll_upper_bound_is_now() {
+        let site = site();
+        site.scrape(-20.0, 1.0, -25.0, &[]);
+        // The final scrape lands 4 s after the request.
+        site.scrape(4.0, 2.0, 2.0, &[]);
+        let reply = summarize(
+            &site.state,
+            &spec(READY),
+            &site.params(-60.0, 0.0, 0, 1, Direction::Up),
+            INTERVAL,
+        )
+        .await
+        .expect("no query asked the store about the future");
+        assert!(reply.final_scrape_seen);
+        assert_eq!(
+            reply.final_count,
+            Some(1),
+            "the sweep after the end is not counted"
+        );
+        let last_query = site
+            .store
+            .queries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, at)| *at)
+            .max()
+            .unwrap();
+        assert!(last_query >= site.ms(4.0), "the poll read up to now");
+    }
+
+    /// One scrape by `instance` of a REST totals sweep that ended at `end`
+    /// with one rack, with its availability flag when `flag` is set.
+    fn rack_scrape(site: &Site, at: f64, end: f64, instance: &'static str, flag: Option<f64>) {
+        let ms = site.ms(at);
+        let labels = |extra: &[(&'static str, &'static str)]| -> Vec<(&'static str, &'static str)> {
+            extra
+                .iter()
+                .copied()
+                .chain(SELECTOR)
+                .chain([("instance", instance)])
+                .collect()
+        };
+        let times = labels(&[("reader", "rest_inventory"), ("family", "rest_totals")]);
+        let add = |name: &str, labels: &[(&str, &str)], value: f64| {
+            site.store.add(name, labels, ms, value);
+        };
+        add(
+            "carbide_site_health_probe_rest_totals",
+            &labels(&[("resource", "rack")]),
+            1.0,
+        );
+        if let Some(flag) = flag {
+            add(
+                "carbide_site_health_probe_rest_totals_available",
+                &labels(&[("resource", "rack")]),
+                flag,
+            );
+        }
+        add(SWEEP_END, &times, crate::summary::secs(site.at(end)));
+        add(
+            SWEEP_START,
+            &times,
+            crate::summary::secs(site.at(end - 3.0)),
+        );
+        add(
+            PROCESS_START,
+            &labels(&[]),
+            crate::summary::secs(site.at(-100_000.0)),
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn summary_missing_capability_flag_is_unavailable() {
+        // REST rack totals whose availability flag never reached the store.
+        let site = site();
+        rack_scrape(&site, -20.0, -25.0, "a", None);
+        rack_scrape(&site, 0.0, -5.0, "a", None);
+        let err = summarize(
+            &site.state,
+            &spec("type=rest_total&resource=rack"),
+            &site.params(-60.0, 0.0, 0, 1, Direction::Up),
+            INTERVAL,
+        )
+        .await
+        .expect_err("no flag sample");
+        assert_eq!(err.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn summary_keeps_any_false_capability_of_one_sweep() {
+        // Replicas a and b scrape the sweep that ended at -25 with the same
+        // count; the sweep that ended at -5 is fully available.
+        for (a, b, answers) in [
+            (Some(1.0), Some(1.0), true),
+            (Some(1.0), Some(0.0), false),
+            (Some(0.0), Some(1.0), false),
+            (Some(1.0), None, false),
+        ] {
+            let site = site();
+            rack_scrape(&site, -20.0, -25.0, "a", a);
+            rack_scrape(&site, -18.0, -25.0, "b", b);
+            rack_scrape(&site, 0.0, -5.0, "a", Some(1.0));
+            let result = summarize(
+                &site.state,
+                &spec("type=rest_total&resource=rack"),
+                &site.params(-60.0, 0.0, 0, 1, Direction::Up),
+                INTERVAL,
+            )
+            .await;
+            match result {
+                Ok(_) => assert!(answers, "a {a:?}, b {b:?} answered"),
+                Err(err) => {
+                    assert!(!answers, "a {a:?}, b {b:?}: {err:?}");
+                    assert_eq!(err.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+                }
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn summary_rest_total_available_412_available_down_is_422() {
+        // REST rack totals through the real collector: 10, then a 412 (no
+        // total), then 0, counted down from 10.
+        let run = |totals: [Option<u64>; 3]| {
+            let site = site();
+            let probe = ProbeProcess::start(site.at(-10_000.0));
+            for (i, rack) in totals.into_iter().enumerate() {
+                probe.rack_total(i as u64 + 1, site.at(-62.0 + 20.0 * i as f64), rack);
+                probe.scrape(&site.store, site.at(-60.0 + 20.0 * i as f64), "replica-a");
+            }
+            probe.scrape(&site.store, site.at(0.0), "replica-a");
+            (site, probe)
+        };
+        let spec = spec("type=rest_total&resource=rack");
+        assert_eq!(spec.family, Family::RestTotals);
+
+        let (site, _probe) = run([Some(10), None, Some(0)]);
+        let err = summarize(
+            &site.state,
+            &spec,
+            &site.params(-70.0, 0.0, 10, 10, Direction::Down),
+            INTERVAL,
+        )
+        .await
+        .expect_err("the 412 sweep reads as 0 without its flag");
+        assert_eq!(err.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err.code(), ErrorCode::FieldUnavailable);
+
+        let (site, _probe) = run([Some(10), Some(5), Some(0)]);
+        let reply = summarize(
+            &site.state,
+            &spec,
+            &site.params(-70.0, 0.0, 10, 10, Direction::Down),
+            INTERVAL,
+        )
+        .await
+        .expect("every sweep had its total");
+        assert_eq!(reply.family, Family::RestTotals);
+        assert_eq!(reply.crossings[0].target, 0);
+        assert_eq!(
+            reply.crossings[0].reached_at,
+            Some(DateTime::<Utc>::from(site.at(-22.0)))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn summary_stalled_reader_tail_counts() {
+        let site = site();
+        // The reader stalled: every scrape shows the sweep that ended at
+        // -100.
+        for i in 0..=20 {
+            site.scrape(-100.0 + 5.0 * i as f64, 4.0, -100.0, &[]);
+        }
+        let reply = summarize(
+            &site.state,
+            &spec(READY),
+            &site.params(-90.0, 0.0, 0, 4, Direction::Up),
+            INTERVAL,
+        )
+        .await
+        .expect("summary");
+        assert_eq!(
+            reply.max_sweep_gap_seconds,
+            Some(100.0),
+            "fresh scrapes of an old sweep close no gap"
+        );
+        assert_eq!(reply.sweeps_seen, 0);
+        assert_eq!(reply.final_count, Some(4));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn summary_over_five_seconds_succeeds() {
+        let site = site();
+        site.scrape(-10_000.0, 1.0, -10_005.0, &[]);
+        site.scrape(0.0, 2.0, -5.0, &[]);
+        site.store.set_delay(Duration::from_secs(2));
+        let started = tokio::time::Instant::now();
+        let reply = summarize(
+            &site.state,
+            &spec(READY),
+            &site.params(-10_000.0, 0.0, 0, 2, Direction::Up),
+            INTERVAL,
+        )
+        .await
+        .expect("a slow summary still answers");
+        assert!(started.elapsed() > Duration::from_secs(5));
+        assert_eq!(reply.final_count, Some(2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn summary_rejects_end_in_future_and_negative_target() {
+        let site = site();
+        let err = summarize(
+            &site.state,
+            &spec(READY),
+            &site.params(-60.0, 10.0, 0, 1, Direction::Up),
+            INTERVAL,
+        )
+        .await
+        .expect_err("end in the future");
+        assert_eq!(err.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.code(), ErrorCode::EndInFuture);
+        let err = summarize(
+            &site.state,
+            &spec(READY),
+            &site.params(-60.0, 0.0, 10, 100, Direction::Down),
+            INTERVAL,
+        )
+        .await
+        .expect_err("a target below 0");
+        assert_eq!(err.code(), ErrorCode::InvalidParam);
+        let mut params = site.params(-60.0, 0.0, 0, 1, Direction::Up);
+        params.q = Some("0,1".to_string());
+        let err = summarize(&site.state, &spec(READY), &params, INTERVAL)
+            .await
+            .expect_err("q 0");
+        assert_eq!(err.code(), ErrorCode::InvalidParam);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn store_status_reports_sample_age() {
+        let site = site();
+        site.scrape(-30.0, 1.0, -40.0, &[]);
+        site.scrape(-12.0, 1.0, -20.0, &[]);
+        let status = store_status(&site.state).await.expect("status");
+        assert_eq!(
+            status.last_sample_at,
+            Some(DateTime::<Utc>::from(site.at(-12.0)))
+        );
+        assert_eq!(status.sample_age_seconds, Some(12.0));
+        assert_eq!(
+            status.sweep_complete_at,
+            Some(DateTime::<Utc>::from(site.at(-20.0)))
+        );
+        let empty = self::site();
+        let status = store_status(&empty.state).await.expect("status");
+        assert_eq!(status.last_sample_at, None);
+        assert_eq!(status.sample_age_seconds, None);
     }
 }

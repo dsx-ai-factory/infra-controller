@@ -310,6 +310,165 @@ impl MetricsStore for PromStore {
 }
 
 #[cfg(test)]
+pub(crate) mod fake {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    /// One stored sample.
+    #[derive(Debug, Clone)]
+    pub(crate) struct Sample {
+        pub name: String,
+        pub labels: BTreeMap<String, String>,
+        pub at_ms: i64,
+        pub value: f64,
+        /// When the store can answer with it; ingestion can lag the scrape.
+        pub visible_ms: i64,
+    }
+
+    type Clock = Arc<dyn Fn() -> SystemTime + Send + Sync>;
+
+    /// A store over recorded samples. A sample exists only once the clock
+    /// passed it, and a query whose time is in the future fails, like a
+    /// real store would answer it with nothing newer than now.
+    pub(crate) struct FakeStore {
+        pub samples: Mutex<Vec<Sample>>,
+        clock: Clock,
+        delay: Mutex<Duration>,
+        /// Every query: its PromQL and time in Unix milliseconds.
+        pub queries: Mutex<Vec<(String, i64)>>,
+    }
+
+    pub(crate) fn millis(at: SystemTime) -> i64 {
+        at.duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64
+    }
+
+    impl FakeStore {
+        pub(crate) fn new(clock: Clock) -> Self {
+            Self {
+                samples: Mutex::new(Vec::new()),
+                clock,
+                delay: Mutex::new(Duration::ZERO),
+                queries: Mutex::new(Vec::new()),
+            }
+        }
+
+        pub(crate) fn add(&self, name: &str, labels: &[(&str, &str)], at_ms: i64, value: f64) {
+            self.add_late(name, labels, at_ms, value, at_ms);
+        }
+
+        /// A sample the store can answer with only from `visible_ms` on.
+        pub(crate) fn add_late(
+            &self,
+            name: &str,
+            labels: &[(&str, &str)],
+            at_ms: i64,
+            value: f64,
+            visible_ms: i64,
+        ) {
+            self.samples.lock().unwrap().push(Sample {
+                name: name.to_string(),
+                labels: labels
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                at_ms,
+                value,
+                visible_ms,
+            });
+        }
+
+        /// The `(time, range)` bounds a store would read from the rendered
+        /// query, in milliseconds.
+        fn rendered_bounds(promql: &str, at: SystemTime) -> (i64, i64) {
+            let time: f64 = unix_seconds_text(at).parse().expect("query time");
+            let range = promql
+                .rsplit('[')
+                .next()
+                .and_then(|r| r.strip_suffix(']'))
+                .expect("range selector");
+            let range_ms = match range.strip_suffix("ms") {
+                Some(ms) => ms.parse::<i64>().expect("ms"),
+                None => {
+                    range
+                        .strip_suffix('s')
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .expect("seconds")
+                        * 1_000
+                }
+            };
+            ((time * 1_000.0).round() as i64, range_ms)
+        }
+
+        pub(crate) fn set_delay(&self, delay: Duration) {
+            *self.delay.lock().unwrap() = delay;
+        }
+
+        fn matches(query: &RawQuery, sample: &Sample) -> bool {
+            query.names.contains(&sample.name)
+                && query.matchers.iter().all(|(label, op, want)| {
+                    let have = sample.labels.get(label).map_or("", String::as_str);
+                    match op {
+                        MatchOp::Eq => have == want,
+                        MatchOp::Re => regex::Regex::new(&format!("^(?:{want})$"))
+                            .expect("matcher regex")
+                            .is_match(have),
+                    }
+                })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MetricsStore for FakeStore {
+        async fn raw(
+            &self,
+            query: &RawQuery,
+            at: SystemTime,
+        ) -> Result<Vec<RawSeries>, StoreError> {
+            let delay = *self.delay.lock().unwrap();
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            let now = millis((self.clock)());
+            // Read the bounds from the rendered query, as a real store does.
+            let promql = render_promql(query);
+            let (at, range_ms) = Self::rendered_bounds(&promql, at);
+            self.queries.lock().unwrap().push((promql, at));
+            if at > now {
+                return Err(StoreError::Unavailable(format!(
+                    "query time {at} is after now {now}"
+                )));
+            }
+            let from = at - range_ms;
+            let mut series: BTreeMap<BTreeMap<String, String>, Vec<(i64, f64)>> = BTreeMap::new();
+            for sample in self.samples.lock().unwrap().iter() {
+                if sample.at_ms > from
+                    && sample.at_ms <= at
+                    && sample.visible_ms <= now
+                    && Self::matches(query, sample)
+                {
+                    let mut labels = sample.labels.clone();
+                    labels.insert("__name__".to_string(), sample.name.clone());
+                    series
+                        .entry(labels)
+                        .or_default()
+                        .push((sample.at_ms, sample.value));
+                }
+            }
+            Ok(series
+                .into_iter()
+                .map(|(labels, mut samples)| {
+                    samples.sort_by_key(|(at, _)| *at);
+                    RawSeries { labels, samples }
+                })
+                .collect())
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::future::Future;
     use std::sync::atomic::{AtomicU32, Ordering};
