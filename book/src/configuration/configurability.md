@@ -1402,8 +1402,9 @@ and upgrade — knowing they exist helps when debugging stuck rollouts:
 If `helm upgrade` hangs, check Job logs first — the helm-prereqs Jobs above
 run as pre-/post-install hooks and a failure there blocks the chart from
 finishing. The NICo Core migration Job is not a hook, so it does not block the
-release, but `helm --wait` waits for it and the chart is not usable until it
-has applied the schema.
+release. `helm --wait` alone does **not** wait for an ordinary Job --
+`--wait-for-jobs` is needed as well, and `setup.sh` passes both. Without it an
+upgrade reports success while the schema is still being applied.
 
 ### Schema migrations
 
@@ -1416,9 +1417,11 @@ Postgres datastore. Migration files are versioned in
 - Is an ordinary manifest, not a Helm hook. Helm applies hooks before every
   manifest in the same release, including the datastore, so a hook could not
   reach a Postgres the same release installs.
-- Retries until the datastore accepts connections, with `restartPolicy:
-  OnFailure` and `migrationJob.backoffLimit` attempts. Raise the limit where
-  the datastore is slow to start.
+- Retries until the datastore accepts connections. `restartPolicy: OnFailure`
+  restarts the container in place, with the backoff Kubernetes applies, so a
+  datastore that is slow to start delays the Job rather than failing it.
+  `migrationJob.backoffLimit` bounds whole-Pod failures, which this path does
+  not produce; raise it only if the Pod itself is being replaced.
 - Carries the release revision in its name, because a Job's pod template is
   immutable and a fixed name cannot be re-applied on upgrade. Helm removes the
   previous revision's Job.

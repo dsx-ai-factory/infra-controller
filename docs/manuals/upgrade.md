@@ -444,7 +444,9 @@ kubectl label configmap "${NS}-nico-database-config" -n "${NS}" \
     app.kubernetes.io/managed-by=Helm --overwrite
 ```
 
-`helm upgrade --take-ownership` adopts it instead, on Helm 3.17 and later. It leaves the dead hook annotations in place, which are inert but misleading when reading the object later.
+Pass `--wait-for-jobs` alongside `--wait` on the upgrade itself. The schema migration is an ordinary Job from 2.5, and `--wait` alone does not wait for ordinary Jobs, so the upgrade would otherwise report success while the schema is still being applied.
+
+`helm upgrade --take-ownership` adopts the ConfigMap instead, on Helm 3.17 and later. It leaves the dead hook annotations in place, which are inert but misleading when reading the object later.
 
 The migration Job needs no adoption: it is renamed to `nico-api-migrate-<revision>`, so the old hook-created Job does not collide. Delete it once, since Helm never owned it and will not remove it:
 

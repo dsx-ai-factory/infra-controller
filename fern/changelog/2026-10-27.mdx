@@ -6,7 +6,9 @@ tags: ["unreleased", "deployment", "helm"]
 
 The `nico-api` schema migration Job and the database-config ConfigMap were `pre-install,pre-upgrade` Helm hooks. Helm applies hooks before every ordinary manifest in the same release, so neither could reach anything that release creates — the namespace, the datastore, or the Secret the Job reads its credentials from. That suited `setup.sh`, where PostgreSQL comes from an earlier release, but it made the chart impossible to install in one release alongside a database.
 
-Both are ordinary manifests now. The Job is applied alongside the datastore and waits by retrying, with `restartPolicy: OnFailure` and the new `nico-api.migrationJob.backoffLimit` (default 12) bounding the attempts. Its name carries the release revision, because a Job's pod template is immutable and a fixed name cannot be re-applied on upgrade.
+Both are ordinary manifests now. The Job is applied alongside the datastore and waits by retrying: `restartPolicy: OnFailure` restarts the container in place until the migration connects, so a slow datastore delays the Job rather than failing it. Its name carries the release revision, because a Job's pod template is immutable and a fixed name cannot be re-applied on upgrade.
+
+`helm --wait` does **not** wait for an ordinary Job; `--wait-for-jobs` is needed as well. `setup.sh` passes both, so a Core upgrade no longer reports success while the schema is still being applied. A manual `helm upgrade` should pass both too.
 
 The Argo CD hook annotations and sync waves are unchanged, so sites deploying through Argo CD see no difference.
 
@@ -24,4 +26,4 @@ The Job is renamed to `nico-api-migrate-<revision>`, so the hook-created `nico-a
 
 | Setting | Change |
 | --- | --- |
-| `nico-api.migrationJob.backoffLimit` | New. Retries before the migration Job is marked failed. Default `12`. Raise it where the datastore is slow to accept connections. |
+| `nico-api.migrationJob.backoffLimit` | New. Whole-Pod failures allowed before the migration Job is marked failed. Default `12`. Container restarts from a datastore that is not yet serving do not consume it, because `restartPolicy` is `OnFailure`. |

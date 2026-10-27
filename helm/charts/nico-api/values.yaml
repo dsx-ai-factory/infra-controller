@@ -285,11 +285,16 @@ nvSwitchTls:
 
 migrationJob:
   sslMode: require
-  ## Retries before the migration Job is marked failed. The Job is applied
-  ## alongside the datastore rather than before it, so the first attempts may
-  ## find nothing listening; each retry is a fresh pod with the backoff Job
-  ## controllers apply. Raise it where the datastore is slow to accept
-  ## connections.
+  ## Whole-Pod failures allowed before the migration Job is marked failed.
+  ##
+  ## Not the usual knob for a slow datastore: restartPolicy is OnFailure, so a
+  ## migration that cannot connect is restarted IN PLACE, with the backoff
+  ## Kubernetes applies to a container. Those restarts are not Pod failures and
+  ## do not consume this budget, so the Job keeps retrying rather than giving
+  ## up on a datastore that is slow to start.
+  ##
+  ## Raise it only where the Pod itself is being replaced -- eviction, node
+  ## pressure, an image that will not pull.
   backoffLimit: 12
 
 ## Grace period for nico-api to stop claiming state-controller work and drain
