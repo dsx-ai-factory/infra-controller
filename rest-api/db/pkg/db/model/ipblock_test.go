@@ -1622,6 +1622,7 @@ func TestIPBlockSQLDAO_Clear(t *testing.T) {
 	ipb, err := ipbsd.Create(
 		ctx, nil, IPBlockCreateInput{
 			Name:                     "test1",
+			SitePrefixID:             cutil.GetPtr(uuid.New()),
 			Description:              cutil.GetPtr("description"),
 			SiteID:                   site1.ID,
 			InfrastructureProviderID: ip.ID,
@@ -1685,6 +1686,7 @@ func TestIPBlockSQLDAO_Clear(t *testing.T) {
 		paramDescription    bool
 		paramTenantID       bool
 		paramDeleted        bool
+		paramSitePrefixID   bool
 		expectedUpdate      bool
 		expectedDescription *string
 		expectedTenantID    *uuid.UUID
@@ -1733,6 +1735,13 @@ func TestIPBlockSQLDAO_Clear(t *testing.T) {
 			expectedError:       false,
 		},
 		{
+			desc:              "can clear Core link without clearing other fields",
+			ipb:               ipb,
+			paramSitePrefixID: true,
+			expectedUpdate:    true,
+			expectedTenantID:  ipb.TenantID,
+		},
+		{
 			desc:                "can restore soft deleted IP Block without clearing other fields",
 			ipb:                 ipb2,
 			paramDeleted:        true,
@@ -1748,14 +1757,20 @@ func TestIPBlockSQLDAO_Clear(t *testing.T) {
 				require.ErrorIs(t, err, db.ErrDoesNotExist)
 			}
 			tmp, err := ipbsd.Clear(ctx, nil, IPBlockClearInput{
-				IPBlockID:   tc.ipb.ID,
-				Description: tc.paramDescription,
-				TenantID:    tc.paramTenantID,
-				Deleted:     tc.paramDeleted,
+				IPBlockID:    tc.ipb.ID,
+				Description:  tc.paramDescription,
+				TenantID:     tc.paramTenantID,
+				Deleted:      tc.paramDeleted,
+				SitePrefixID: tc.paramSitePrefixID,
 			})
 			assert.Equal(t, tc.expectedError, err != nil)
 			assert.NotNil(t, tmp)
 			assert.Nil(t, tmp.Deleted)
+			if tc.paramSitePrefixID {
+				assert.Nil(t, tmp.SitePrefixID)
+			} else {
+				assert.Equal(t, tc.ipb.SitePrefixID, tmp.SitePrefixID)
+			}
 			assert.Equal(t, tc.ipb.ID, tmp.ID)
 			assert.Equal(t, tc.ipb.Created, tmp.Created)
 			assert.Equal(t, tc.expectedDescription == nil, tmp.Description == nil)
