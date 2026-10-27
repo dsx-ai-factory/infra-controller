@@ -68,7 +68,9 @@ struct RedfishSimState {
     /// Fail one power-state read without changing the host's actual power.
     next_power_state_error: Option<String>,
     /// Fail the next matching power action before changing the host's power.
-    next_power_action_error: Option<(SystemPowerControl, String)>,
+    next_power_action_error: Option<(SystemPowerControl, RedfishError)>,
+    /// Value of `ac_powercycle_supported_by_power`. Defaults to `false`.
+    ac_powercycle_supported: bool,
     job_state_sequence: VecDeque<JobState>,
     /// Offset (in seconds) applied to the BMC `DateTime` returned by
     /// `get_manager`, relative to the controller's `Utc::now()`. Defaults to 0
@@ -413,6 +415,18 @@ impl RedfishSim {
         self.state.lock().unwrap().next_lockdown_status_error = Some(error);
     }
 
+    /// Set one simulated host's power state, as a BMC would report it; the
+    /// host entry is created if no client has touched it yet.
+    pub fn set_power_state(&self, host: &str, power: PowerState) {
+        self.state
+            .lock()
+            .unwrap()
+            .hosts
+            .entry(host.to_string())
+            .or_default()
+            .power = power;
+    }
+
     /// Inject a transient error into the next power-state read only.
     pub fn fail_next_power_state_read(&self, error: &str) {
         self.state.lock().unwrap().next_power_state_error = Some(error.to_string());
@@ -420,7 +434,22 @@ impl RedfishSim {
 
     /// Fail the next matching power action, recording the attempt but applying no change.
     pub fn fail_next_power_action(&self, action: SystemPowerControl, error: &str) {
-        self.state.lock().unwrap().next_power_action_error = Some((action, error.to_string()));
+        self.fail_next_power_action_with(
+            action,
+            RedfishError::GenericError {
+                error: error.to_string(),
+            },
+        );
+    }
+
+    /// Fail the next matching power action with the supplied error.
+    pub fn fail_next_power_action_with(&self, action: SystemPowerControl, error: RedfishError) {
+        self.state.lock().unwrap().next_power_action_error = Some((action, error));
+    }
+
+    /// Set whether clients report AC power cycle support through `power`.
+    pub fn set_ac_powercycle_supported(&self, supported: bool) {
+        self.state.lock().unwrap().ac_powercycle_supported = supported;
     }
 
     /// Set the offset (in seconds) applied to the BMC `DateTime` returned by
@@ -816,7 +845,7 @@ impl Redfish for RedfishSimClient {
                     .unwrap()
                     .actions
                     .push(RedfishSimAction::PowerFailed(action));
-                return Err(RedfishError::GenericError { error });
+                return Err(error);
             }
             let host_state = state.hosts.get_mut(&self._host).unwrap();
             host_state.power = power_state;
@@ -826,7 +855,7 @@ impl Redfish for RedfishSimClient {
     }
 
     fn ac_powercycle_supported_by_power(&self) -> bool {
-        false
+        self.state.lock().unwrap().ac_powercycle_supported
     }
 
     fn bmc_reset<'a>(
