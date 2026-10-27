@@ -314,18 +314,59 @@ func TestSiteSQLDAO_GetByIDForTenantIPBlockMutation(t *testing.T) {
 			require.Equal(t, SiteStatusError, updated.Status)
 			require.True(t, updated.Config.NetworkSecurityGroup)
 			for _, supplied := range []bool{false, true} {
-				var writer *db.Tx
-				if supplied {
-					writer, err = db.BeginTx(ctx, session, nil)
-					require.NoError(t, err)
-				}
-				require.ErrorIs(t, dao.Delete(ctx, writer, site.ID), db.ErrXactAdvisoryLockFailed)
-				_, err = dao.Update(ctx, writer, SiteUpdateInput{SiteID: site.ID, Config: &SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(true)}})
-				require.ErrorIs(t, err, db.ErrXactAdvisoryLockFailed)
-				if writer != nil {
-					require.NoError(t, writer.Rollback())
+				for _, remove := range []bool{false, true} {
+					var writer *db.Tx
+					if supplied {
+						writer, err = db.BeginTx(ctx, session, nil)
+						require.NoError(t, err)
+					}
+					waitCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+					if remove {
+						err = dao.Delete(waitCtx, writer, site.ID)
+					} else {
+						_, err = dao.Update(waitCtx, writer, SiteUpdateInput{SiteID: site.ID, Config: &SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(true)}})
+					}
+					require.ErrorIs(t, err, db.ErrXactAdvisoryLockFailed)
+					cancel()
+					if writer != nil {
+						_ = writer.Rollback()
+					}
 				}
 			}
+		}},
+		{"queued lifecycle writer excludes later readers", func(t *testing.T) {
+			reader, err := db.BeginTx(ctx, session, nil)
+			require.NoError(t, err)
+			defer func() { _ = reader.Rollback() }()
+			_, err = dao.GetByIDForTenantIPBlockMutation(ctx, reader, site.ID)
+			require.NoError(t, err)
+			writer, err := db.BeginTx(ctx, session, nil)
+			require.NoError(t, err)
+			defer func() { _ = writer.Rollback() }()
+			var pid int
+			require.NoError(t, writer.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &pid))
+			finished := make(chan error, 1)
+			waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			go func() {
+				_, err := dao.Update(waitCtx, writer, SiteUpdateInput{SiteID: site.ID, Config: &SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(false)}})
+				finished <- err
+			}()
+			require.Eventually(t, func() bool {
+				var waiting bool
+				err := session.DB.NewSelect().ColumnExpr("EXISTS (SELECT 1 FROM pg_locks WHERE pid = ? AND locktype = 'advisory' AND NOT granted)", pid).Scan(ctx, &waiting)
+				return err == nil && waiting
+			}, time.Second, 10*time.Millisecond)
+			lateReader, err := db.BeginTx(ctx, session, nil)
+			require.NoError(t, err)
+			defer func() { _ = lateReader.Rollback() }()
+			require.ErrorIs(t, lateReader.TryAcquireSharedAdvisoryLock(ctx, siteTenantIPBlockLockID(site.ID), &db.LockRetryOptions{Retries: cutil.GetPtr(1)}), db.ErrXactAdvisoryLockFailed)
+			require.NoError(t, reader.Rollback())
+			require.NoError(t, <-finished)
+			require.NoError(t, writer.Commit())
+			got, err := dao.GetByIDForTenantIPBlockMutation(ctx, lateReader, site.ID)
+			require.NoError(t, err)
+			require.False(t, got.Config.TenantSitePrefix)
 		}},
 		{"exclusive lifecycle writer prevents admission until commit", func(t *testing.T) {
 			writer, err := db.BeginTx(ctx, session, nil)

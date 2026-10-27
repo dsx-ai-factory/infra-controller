@@ -78,6 +78,7 @@ type tenantIPBlockFixture struct {
 	deadlines          []time.Time
 	org                string
 	duringCore         func()
+	siteTimeout        time.Duration
 }
 
 func newTenantIPBlockFixture(t *testing.T) *tenantIPBlockFixture {
@@ -142,7 +143,15 @@ func newTenantIPBlockFixture(t *testing.T) *tenantIPBlockFixture {
 	f.router = echo.New()
 	f.router.Use(middleware.AuditBody(f.session), middleware.AuditLog(f.session))
 	f.router.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c echo.Context) error { c.Set("user", f.user); return next(c) }
+		return func(c echo.Context) error {
+			c.Set("user", f.user)
+			if f.siteTimeout > 0 && strings.Contains(c.Request().URL.Path, "/site/") {
+				ctx, cancel := context.WithTimeout(c.Request().Context(), f.siteTimeout)
+				defer cancel()
+				c.SetRequest(c.Request().WithContext(ctx))
+			}
+			return next(c)
+		}
 	})
 	base := "/v2/org/:orgName/nico/ipblock"
 	cfg := common.GetTestConfig()
@@ -208,12 +217,29 @@ func TestTenantIPBlockHandler_handle(t *testing.T) {
 				tenantUser := f.user
 				f.user = f.providerUser
 				defer func() { f.user = tenantUser }()
+				f.siteTimeout = 100 * time.Millisecond
+				server := httptest.NewServer(f.router)
+				defer server.Close()
+				cfg := sdk.NewConfiguration()
+				cfg.Servers = sdk.ServerConfigurations{{URL: server.URL}}
+				client := sdk.NewAPIClient(cfg)
 				for _, method := range []string{http.MethodPatch, http.MethodDelete} {
-					req := httptest.NewRequest(method, "/v2/org/provider/nico/site/"+f.site.ID.String(), strings.NewReader(`{"capabilities":{"tenantSitePrefix":false}}`))
-					req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
-					rec := httptest.NewRecorder()
-					f.router.ServeHTTP(rec, req)
-					require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+					var response *http.Response
+					var err error
+					if method == http.MethodPatch {
+						capabilities := sdk.NewSiteCapabilitiesUpdateRequest()
+						capabilities.SetTenantSitePrefix(false)
+						request := sdk.NewSiteUpdateRequest()
+						request.SetCapabilities(*capabilities)
+						_, response, err = client.SiteAPI.UpdateSite(context.Background(), "provider", f.site.ID.String()).SiteUpdateRequest(*request).Execute()
+					} else {
+						_, response, err = client.SiteAPI.DeleteSite(context.Background(), "provider", f.site.ID.String()).Execute()
+					}
+					require.Error(t, err)
+					require.Equal(t, http.StatusConflict, response.StatusCode)
+					var apiErr *sdk.GenericOpenAPIError
+					require.ErrorAs(t, err, &apiErr)
+					require.IsType(t, sdk.NICoAPIError{}, apiErr.Model())
 				}
 
 			}
@@ -296,6 +322,7 @@ func TestTenantIPBlockHandler_handle(t *testing.T) {
 			f.core.Metadata.Labels = []*corev1.Label{{Key: "existing", Value: cutil.GetPtr("preserved")}}
 			updated := readTenantIPBlock(t, f.request(t, http.MethodPatch, "/"+result.ID, map[string]any{"name": "renamed"}), http.StatusOK)
 			require.Equal(t, "renamed", updated.Name)
+			require.Nil(t, updated.Description)
 			require.Equal(t, f.deadlines[1], f.deadlines[2], "both Core calls must share one overall deadline")
 			require.Equal(t, "preserved", f.core.Metadata.Labels[0].GetValue())
 			// Inventory only changes lifecycle; it cannot undo an API metadata update.
@@ -310,6 +337,10 @@ func TestTenantIPBlockHandler_handle(t *testing.T) {
 			require.NoError(t, receiver.UpdateSitePrefixesInDB(context.Background(), f.site.ID, report))
 			got = readTenantIPBlock(t, f.request(t, http.MethodGet, "/"+result.ID, nil), http.StatusOK)
 			require.Equal(t, cdbm.IPBlockStatusDeleting, got.Status)
+			calls := len(f.calls)
+			require.Equal(t, http.StatusConflict, f.request(t, http.MethodPatch, "/"+result.ID, map[string]any{"name": "too-late"}).Code)
+			require.Len(t, f.calls, calls)
+
 			require.Equal(t, http.StatusAccepted, f.request(t, http.MethodDelete, "/"+result.ID, nil).Code)
 		}},
 		{"Core create timeout rolls back and inventory recovers the same ID", func(t *testing.T, f *tenantIPBlockFixture) {
@@ -324,6 +355,44 @@ func TestTenantIPBlockHandler_handle(t *testing.T) {
 			require.NoError(t, receiver.UpdateSitePrefixesInDB(context.Background(), f.site.ID, &corev1.SitePrefixInventory{InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS, SitePrefixes: []*corev1.SitePrefix{f.core}}))
 			result := readTenantIPBlock(t, f.request(t, http.MethodGet, "/"+f.core.Id.Value, nil), http.StatusOK)
 			require.Equal(t, f.core.Id.Value, result.ID)
+		}},
+		{"definitive create rejection rolls back and releases admission", func(t *testing.T, f *tenantIPBlockFixture) {
+			for _, failure := range []struct {
+				name, kind string
+				code       int
+			}{
+				{"invalid prefix", swe.ErrTypeNICoInvalidArgument, http.StatusBadRequest},
+				{"conflict", swe.ErrTypeNICoAlreadyExists, http.StatusConflict},
+				{"quota", swe.ErrTypeNICoResourceExhausted, http.StatusTooManyRequests},
+			} {
+				t.Run(failure.name, func(t *testing.T) {
+					f.nextError = tp.NewNonRetryableApplicationError("Core rejected create", failure.kind, nil)
+					response := f.request(t, http.MethodPost, "", f.body())
+					require.Equal(t, failure.code, response.Code, response.Body.String())
+					_, err := cdbm.NewIPBlockDAO(f.session).GetByID(context.Background(), nil, uuid.MustParse(f.core.Id.Value), nil)
+					require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+				})
+			}
+			readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
+		}},
+		{"an admitted create remains removable after association removal", func(t *testing.T, f *tenantIPBlockFixture) {
+			f.duringCore = func() {
+				dao := cdbm.NewTenantSiteDAO(f.session)
+				association, err := dao.GetByTenantIDAndSiteID(context.Background(), nil, f.tenant.ID, f.site.ID, nil)
+				require.NoError(t, err)
+				require.NoError(t, dao.Delete(context.Background(), nil, association.ID))
+				f.duringCore = nil
+			}
+			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
+			require.Equal(t, http.StatusBadRequest, f.request(t, http.MethodPatch, "/"+created.ID, map[string]any{"name": "after-removal"}).Code)
+			require.Equal(t, http.StatusAccepted, f.request(t, http.MethodDelete, "/"+created.ID, nil).Code)
+		}},
+		{"dual-role create uses provider authorization", func(t *testing.T, f *tenantIPBlockFixture) {
+			f.user = common.TestBuildUser(t, f.session, uuid.NewString(), f.org, []string{auth.ProviderAdminRole, auth.TenantAdminRole})
+			response := f.request(t, http.MethodPost, "", f.body())
+			require.Equal(t, http.StatusBadRequest, response.Code)
+			require.Contains(t, response.Body.String(), "Failed to retrieve infrastructure provider")
+			require.Empty(t, f.calls)
 		}},
 		{"mutation failures roll back REST changes", func(t *testing.T, f *tenantIPBlockFixture) {
 			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
@@ -396,7 +465,13 @@ func TestTenantIPBlockHandler_handle(t *testing.T) {
 			require.Len(t, f.calls, calls)
 		}},
 		{"capability association and strict request validation", func(t *testing.T, f *tenantIPBlockFixture) {
-			_, err := f.session.DB.ExecContext(context.Background(), "UPDATE site SET config = NULL WHERE id = ?", f.site.ID)
+			_, err := cdbm.NewSiteDAO(f.session).Update(context.Background(), nil, cdbm.SiteUpdateInput{SiteID: f.site.ID, Status: cutil.GetPtr(cdbm.SiteStatusError)})
+			require.NoError(t, err)
+			require.Equal(t, http.StatusBadRequest, f.request(t, http.MethodPost, "", f.body()).Code)
+			require.Empty(t, f.calls)
+			_, err = cdbm.NewSiteDAO(f.session).Update(context.Background(), nil, cdbm.SiteUpdateInput{SiteID: f.site.ID, Status: cutil.GetPtr(cdbm.SiteStatusRegistered)})
+			require.NoError(t, err)
+			_, err = f.session.DB.ExecContext(context.Background(), "UPDATE site SET config = NULL WHERE id = ?", f.site.ID)
 			require.NoError(t, err)
 			require.Equal(t, http.StatusPreconditionFailed, f.request(t, http.MethodPost, "", f.body()).Code)
 			_, err = cdbm.NewSiteDAO(f.session).Update(context.Background(), nil, cdbm.SiteUpdateInput{SiteID: f.site.ID, Config: &cdbm.SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(false)}})

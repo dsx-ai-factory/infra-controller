@@ -1158,10 +1158,18 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Tenant IP Block mutations did not finish within the lifecycle wait budget; retry the request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
       tags:
         - Site
       description: |-
         Update a specific Site
+
+        Setting `capabilities.tenantSitePrefix` waits for admitted tenant IP Block mutations, for up to 50 seconds or the remaining request deadline. If the wait expires, the request returns 409 and can be retried. New tenant mutations cannot bypass a queued capability change. Other Site updates remain available.
 
         User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -1207,6 +1215,12 @@ paths:
                     message: Deletion request was accepted
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Tenant IP Block mutations did not finish within the lifecycle wait budget; retry the request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
       tags:
         - Site
       description: |-
@@ -1214,7 +1228,7 @@ paths:
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
-        Site can only be deleted if all Allocations have been deleted.
+        Site can only be deleted if all Allocations have been deleted. Deletion waits for admitted tenant IP Block mutations, for up to 50 seconds or the remaining request deadline. If the wait expires, it returns 409 and can be retried.
       parameters:
         - schema:
             type: boolean
@@ -2526,11 +2540,30 @@ paths:
       responses:
         '201':
           description: Created
+          headers:
+            Location:
+              description: Relative URL of the created tenant IP Block, returned for tenant creation.
+              schema:
+                type: string
+                example: /v2/org/tenant-org/nico/ipblock/497f6eca-6276-4993-bfeb-53cbbbba6f08
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/IpBlock'
               examples:
+                tenant-created:
+                  value:
+                    id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
+                    name: Tenant private network
+                    description: null
+                    siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+                    tenantId: 97c57510-b443-43b4-881c-974d4b86c87c
+                    managed: false
+                    routingType: DatacenterOnly
+                    prefix: 10.21.0.0
+                    prefixLength: 24
+                    protocolVersion: IPv4
+                    status: Provisioning
                 example-1:
                   value:
                     id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
@@ -2557,7 +2590,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: An IP Block conflicts with an existing name or address range, or Site fabric IP Blocks are being updated.
+          description: An IP Block conflicts with an existing name or address range, Site fabric IP Blocks are being updated, or a tenant mutation conflicts with a Site lifecycle change. Concurrent changes can be retried.
           content:
             application/json:
               schema:
@@ -2603,11 +2636,11 @@ paths:
 
         A `PROVIDER_ADMIN` creates a managed provider root. A conflicting provider name or address range returns 409. A range conflicts when it overlaps another root IP Block of the Site, whatever its routing type. Provider creation also returns 409 while another Site fabric IP Block update holds the shared Site lock; retry the request. If the caller has both provider and tenant admin roles, creation uses the provider path.
 
-        A `TENANT_ADMIN` without the provider admin role can create a private tenant root with `managed: false`. The tenant must be associated with the Registered Site, and the provider-controlled `tenantSitePrefix` capability must be enabled (default false). The request uses the existing fields: `prefix` is a network-aligned IPv4 address, `prefixLength` is /8 through /31 wholly within RFC1918 space, `protocolVersion` is IPv4, and `routingType` is DatacenterOnly. Unknown fields, including caller-supplied ownership or managed values, are rejected. Tenant descriptions are limited to 1024 UTF-8 bytes.
+        A `TENANT_ADMIN` without the provider admin role can create a private tenant root with `managed: false`. Site association and Registered status are checked when admitting the request. An admitted mutation may finish after the association or status changes. Removing the association does not revoke the owner's read access or ability to retire the block at a Registered Site. The provider-controlled `tenantSitePrefix` capability must be enabled (default false). The request uses the existing fields: `prefix` is a network-aligned IPv4 address, `prefixLength` is /8 through /31 wholly within RFC1918 space, `protocolVersion` is IPv4, and `routingType` is DatacenterOnly. Unknown fields, including caller-supplied ownership or managed values, are rejected. Tenant descriptions are limited to 1024 UTF-8 bytes.
 
-        Tenant creation writes the IP Block and calls Core CreateSitePrefix in one database transaction, using the same UUID for both resources. Success returns 201 with Provisioning status and a Location header. Core errors roll back the REST row and are returned immediately, including quota errors as 429, invalid, denied, or overlapping tenant prefixes as 400, existing resource conflicts as 409, unmet Core admission preconditions as 412, unavailability as 503, and timeout as 504. If Core committed despite a lost response, subsequent SitePrefix inventory recreates the REST row with the same UUID. There is no create-retry key; clients should retrieve the recovered resource before retrying an uncertain create.
+        Tenant creation writes the IP Block and calls Core CreateSitePrefix in one database transaction, using the same UUID for both resources. Success returns 201 with Provisioning status and a Location header. Core errors roll back the REST row and are returned immediately, including quota errors as 429, invalid, denied, or overlapping tenant prefixes as 400, existing resource or concurrent Site mutation conflicts as 409, unmet Core admission preconditions as 412, unavailability as 503, and timeout as 504. If Core committed despite a lost response, subsequent SitePrefix inventory recreates the REST row with the same UUID. There is no create-retry key; clients should retrieve the recovered resource before retrying an uncertain create.
 
-        Tenant-created blocks remain outside cloud IPAM. Allocated tenant blocks retain their existing Allocation workflow and managed value of true. VPC Prefix and Subnet creation accept only allocated blocks; using tenant-created roots for VPC Prefixes is tracked by https://github.com/dsx-ai-factory/infra-controller/issues/3900. SitePrefix publication and final absence processing require the deployment described in https://github.com/dsx-ai-factory/infra-controller/issues/5763; the capability must remain disabled until that dependency is available.
+        Tenant-created blocks remain outside cloud IPAM. Allocated tenant blocks retain their existing Allocation workflow and managed value of true. VPC Prefix and Subnet creation accept only allocated blocks; using tenant-created roots for VPC Prefixes is tracked by https://github.com/dsx-ai-factory/infra-controller/issues/3900. SitePrefix publication and final absence processing require the deployment described in https://github.com/dsx-ai-factory/infra-controller/issues/5763; the capability must remain disabled until that dependency is available. Complete the API and inventory-worker rollout before using tenant mutations; mixed-version writers do not share all admission guards.
       requestBody:
         content:
           application/json:
@@ -2740,7 +2773,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: The IP Block is linked to an `OperatorManaged` SitePrefix. Remove the corresponding prefix from Core's `site_fabric_prefixes` configuration instead.
+          description: The IP Block is linked to an `OperatorManaged` SitePrefix, or a concurrent Site lifecycle change or mutation of the same tenant IP Block prevents admission. For OperatorManaged prefixes, remove the corresponding prefix from Core's `site_fabric_prefixes` configuration. Concurrent tenant mutations can be retried.
           content:
             application/json:
               schema:
@@ -2822,7 +2855,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: The IP Block is Deleting
+          description: The IP Block is Deleting, or a concurrent Site lifecycle change or mutation of the same IP Block prevents admission. Retry concurrent changes after the earlier operation completes.
           content:
             application/json:
               schema:

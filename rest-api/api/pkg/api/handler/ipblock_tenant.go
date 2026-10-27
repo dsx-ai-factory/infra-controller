@@ -139,11 +139,25 @@ func (h tenantIPBlockHandler) handle(c echo.Context) error {
 	statusMessage := "Core accepted tenant IP Block mutation; waiting for inventory"
 	err = cdb.WithTx(ctx, h.dbSession, func(tx *cdb.Tx) error {
 		lockedSite, err := cdbm.NewSiteDAO(h.dbSession).GetByIDForTenantIPBlockMutation(ctx, tx, site.ID)
+		if errors.Is(err, cdb.ErrDoesNotExist) {
+			return cutil.NewAPIError(http.StatusBadRequest, "Site is unavailable to this Tenant", nil)
+		}
 		if err != nil {
 			return err
 		}
 		if lockedSite.Status != cdbm.SiteStatusRegistered {
 			return cutil.NewAPIError(http.StatusBadRequest, "Site is not Registered", nil)
+		}
+		// Association and Registered status are admission checks. Once admitted,
+		// a mutation can finish even if the association or status later changes.
+		if method != http.MethodDelete {
+			_, err = cdbm.NewTenantSiteDAO(h.dbSession).GetByTenantIDAndSiteID(ctx, tx, tenant.ID, site.ID, nil)
+			if errors.Is(err, cdb.ErrDoesNotExist) {
+				return cutil.NewAPIError(http.StatusBadRequest, "Site is unavailable to this Tenant", nil)
+			}
+			if err != nil {
+				return err
+			}
 		}
 		prefixID := uuid.New()
 		if method != http.MethodPost {
@@ -217,7 +231,12 @@ func (h tenantIPBlockHandler) handle(c echo.Context) error {
 				}
 				apiErr = common.ExecuteCoreGRPC(ctx, stc, updateTenantIPBlockMethod, &corev1.SitePrefixUpdateRequest{Id: id, TenantOrganizationId: org, Metadata: metadata, IfVersionMatch: &current.Version}, nil, "")
 				if apiErr == nil {
-					block, err = dao.Update(ctx, tx, cdbm.IPBlockUpdateInput{IPBlockID: block.ID, Name: &metadata.Name, Description: &metadata.Description})
+					description := &metadata.Description
+					if updateRequest.Description == nil && block.Description == nil && metadata.Description == "" {
+						// Preserve REST's absent description when Core has the same empty value.
+						description = nil
+					}
+					block, err = dao.Update(ctx, tx, cdbm.IPBlockUpdateInput{IPBlockID: block.ID, Name: &metadata.Name, Description: description})
 					if err != nil {
 						return err
 					}

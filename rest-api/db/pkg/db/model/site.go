@@ -6,10 +6,12 @@ package model
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"go.opentelemetry.io/otel/attribute"
 	otrace "go.opentelemetry.io/otel/trace"
 
@@ -267,6 +269,21 @@ func siteTenantIPBlockLockID(id uuid.UUID) uint64 {
 	return db.GetAdvisoryLockIDFromString("site-tenant-ip-blocks:" + id.String())
 }
 
+// Queue exclusive lifecycle writers so new tenant mutations cannot starve them.
+// Keep the wait within the same budget as the in-flight Core mutations.
+func lockSiteTenantIPBlockMutations(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+	ctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+	defer cancel()
+	err := tx.AcquireAdvisoryLock(ctx, siteTenantIPBlockLockID(id), true)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if ctx.Err() != nil || (errors.As(err, &pgErr) && pgErr.Code == "55P03") {
+			return fmt.Errorf("%w: %w", db.ErrXactAdvisoryLockFailed, err)
+		}
+	}
+	return err
+}
+
 // GetByIDForTenantIPBlockMutation reads an active Site under a shared lifecycle
 // guard. Status is checked at admission; routine status and inventory writers
 // remain free to update the Site while the mutation calls Core.
@@ -495,7 +512,7 @@ func (ssd SiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input SiteUpdateInp
 		return updated, err
 	}
 	if input.Config != nil && input.Config.TenantSitePrefix != nil {
-		err := tx.TryAcquireAdvisoryLock(ctx, siteTenantIPBlockLockID(input.SiteID), nil)
+		err := lockSiteTenantIPBlockMutations(ctx, tx, input.SiteID)
 		if err != nil {
 			return nil, err
 		}
@@ -646,7 +663,7 @@ func (ssd SiteSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retE
 			return ssd.Delete(ctx, inner, id)
 		})
 	}
-	err := tx.TryAcquireAdvisoryLock(ctx, siteTenantIPBlockLockID(id), nil)
+	err := lockSiteTenantIPBlockMutations(ctx, tx, id)
 	if err != nil {
 		return err
 	}
