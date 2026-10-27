@@ -167,22 +167,39 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_hardware_health_inventory_last_success_time_seconds</td><td>gauge</td><td>Unix timestamp of the last successful NICo inventory reconciliation</td></tr>
 <tr><td>carbide_hardware_health_inventory_refresh_failures_total</td><td>counter</td><td>Number of authoritative hardware inventory refreshes that failed.</td></tr>
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_in_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_in_errors_count_total</td><td>counter</td><td>Number of inbound packets with errors reported by the interface</td></tr>
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_in_octets_bytes</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_in_octets_bytes_total</td><td>counter</td><td>Number of octets received by the interface</td></tr>
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_in_packets_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_in_packets_count_total</td><td>counter</td><td>Number of packets received by the interface</td></tr>
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_link_downed_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_link_downed_count_total</td><td>counter</td><td>Number of link down events reported by the InfiniBand port</td></tr>
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_link_error_recovery_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_link_error_recovery_count_total</td><td>counter</td><td>Number of link error recovery events reported by the InfiniBand port</td></tr>
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_local_link_integrity_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_local_link_integrity_errors_count_total</td><td>counter</td><td>Number of local link integrity errors reported by the InfiniBand port</td></tr>
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_out_discards_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_out_discards_count_total</td><td>counter</td><td>Number of outbound packets discarded by the interface without detected errors</td></tr>
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_out_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_out_errors_count_total</td><td>counter</td><td>Number of outbound packets with errors reported by the interface</td></tr>
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_out_octets_bytes</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_out_octets_bytes_total</td><td>counter</td><td>Number of octets transmitted by the interface</td></tr>
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_out_packets_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_out_packets_count_total</td><td>counter</td><td>Number of packets transmitted by the interface</td></tr>
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_port_buffer_overrun_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_port_buffer_overrun_errors_count_total</td><td>counter</td><td>Number of excessive buffer overrun errors reported by the InfiniBand port</td></tr>
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_port_xmit_wait_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_port_xmit_wait_count_total</td><td>counter</td><td>Number of ticks during which the InfiniBand port had data to transmit but sent none for the entire tick</td></tr>
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_qp1_dropped_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_qp1_dropped_count_total</td><td>counter</td><td>Number of QP1 packets dropped by the InfiniBand port</td></tr>
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_rcv_constraint_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_rcv_constraint_errors_count_total</td><td>counter</td><td>Number of receive constraint errors reported by the InfiniBand port</td></tr>
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_rcv_remote_physical_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_rcv_remote_physical_errors_count_total</td><td>counter</td><td>Number of receive remote physical errors reported by the InfiniBand port</td></tr>
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_rcv_switch_relay_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_rcv_switch_relay_errors_count_total</td><td>counter</td><td>Number of receive switch relay errors reported by the InfiniBand port</td></tr>
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_vl15_dropped_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_nvue_gnmi_interface_vl15_dropped_count_total</td><td>counter</td><td>Number of VL15 packets dropped by the InfiniBand port</td></tr>
 <tr><td>carbide_hardware_health_rack_nvlink_domain_info</td><td>gauge</td><td>Authoritative NICo rack-to-NVLink-domain assignments for current rack-ingestion sessions</td></tr>
 <tr><td>carbide_hardware_health_rack_session_start_time_seconds</td><td>gauge</td><td>NICo rack creation time in Unix seconds, labeled by its ingestion session</td></tr>
 <tr><td>carbide_health_otlp_egress_records_total</td><td>counter</td><td>Number of OTLP log records or metric data points acknowledged by the receiver, excluding explicit partial-success rejections, by target and signal.</td></tr>

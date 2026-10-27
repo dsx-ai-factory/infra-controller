@@ -27,7 +27,7 @@ use super::client::{typed_value_to_f64, typed_value_to_string};
 use super::proto::{self, PathElem};
 use super::reconciliation::MetricReconciler;
 use super::subscriber::GnmiStreamMetrics;
-use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample};
+use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample, MetricSemantics};
 
 pub(crate) const NVUE_GNMI_SAMPLE_STREAM_ID: &str = "nvue_gnmi";
 
@@ -264,13 +264,11 @@ impl GnmiSampleProcessor {
                 oper_status_to_state(typed_value_to_string(val).as_deref()),
                 OPER_STATUS_STATES,
             ),
-            Some(InterfaceLeaf::Numeric(metric_type)) => match typed_value_to_f64(val) {
+            Some(InterfaceLeaf::Numeric(metric)) => match typed_value_to_f64(val) {
                 Some(value) => {
-                    self.emit_iface(elems, metric_type.name, iface_name, value, metric_type.unit)
+                    self.emit_iface(elems, metric, iface_name, value);
                 }
-                None => {
-                    debug_unmapped_value(elems, val, metric_type.name, self.event_context.rack_id())
-                }
+                None => debug_unmapped_value(elems, val, metric.name, self.event_context.rack_id()),
             },
             Some(InterfaceLeaf::PhysicalPortState) => self.emit_state_set(
                 elems,
@@ -292,10 +290,13 @@ impl GnmiSampleProcessor {
                 match link_speed_to_gbps(typed_value_to_string(val).as_deref()) {
                     Some(value) => self.emit_iface(
                         elems,
-                        "interface_link_speed_active",
+                        NumericLeaf {
+                            name: "interface_link_speed_active",
+                            unit: "gbps",
+                            semantics: MetricSemantics::Gauge,
+                        },
                         iface_name,
                         value,
-                        "gbps",
                     ),
                     None => debug_unmapped_value(
                         elems,
@@ -309,10 +310,13 @@ impl GnmiSampleProcessor {
                 match link_width_to_f64(typed_value_to_string(val).as_deref()) {
                     Some(value) => self.emit_iface(
                         elems,
-                        "interface_link_width_active",
+                        NumericLeaf {
+                            name: "interface_link_width_active",
+                            unit: "lanes",
+                            semantics: MetricSemantics::Gauge,
+                        },
                         iface_name,
                         value,
-                        "lanes",
                     ),
                     None => debug_unmapped_value(
                         elems,
@@ -326,10 +330,13 @@ impl GnmiSampleProcessor {
                 match link_width_to_f64(typed_value_to_string(val).as_deref()) {
                     Some(value) => self.emit_iface(
                         elems,
-                        "interface_supported_width",
+                        NumericLeaf {
+                            name: "interface_supported_width",
+                            unit: "lanes",
+                            semantics: MetricSemantics::Gauge,
+                        },
                         iface_name,
                         value,
-                        "lanes",
                     ),
                     None => debug_unmapped_value(
                         elems,
@@ -363,20 +370,12 @@ impl GnmiSampleProcessor {
         }
     }
 
-    fn emit_iface(
-        &self,
-        source: &[&PathElem],
-        metric_type: &str,
-        iface_name: &str,
-        value: f64,
-        unit: &str,
-    ) {
+    fn emit_iface(&self, source: &[&PathElem], metric: NumericLeaf, iface_name: &str, value: f64) {
         self.emit_data_metric(
             source,
-            metric_type,
+            metric,
             iface_name,
             value,
-            unit,
             ("interface_name", iface_name),
         );
     }
@@ -537,17 +536,20 @@ impl GnmiSampleProcessor {
     fn emit_comp(
         &self,
         source: &[&PathElem],
-        metric_type: &str,
+        metric_type: &'static str,
         comp_name: &str,
         value: f64,
-        unit: &str,
+        unit: &'static str,
     ) {
         self.emit_data_metric(
             source,
-            metric_type,
+            NumericLeaf {
+                name: metric_type,
+                unit,
+                semantics: MetricSemantics::Gauge,
+            },
             comp_name,
             value,
-            unit,
             ("component_name", comp_name),
         );
     }
@@ -640,14 +642,13 @@ impl GnmiSampleProcessor {
     fn emit_data_metric(
         &self,
         source: &[&PathElem],
-        metric_type: &str,
+        metric: NumericLeaf,
         entity_id: &str,
         value: f64,
-        unit: &str,
         entity_label: (&'static str, &str),
     ) {
-        let mut key = String::with_capacity(metric_type.len() + 1 + entity_id.len());
-        key.push_str(metric_type);
+        let mut key = String::with_capacity(metric.name.len() + 1 + entity_id.len());
+        key.push_str(metric.name);
         key.push(':');
         key.push_str(entity_id);
 
@@ -656,11 +657,11 @@ impl GnmiSampleProcessor {
         self.emit_sample(
             source,
             MetricSample {
-                semantics: crate::sink::MetricSemantics::Gauge,
+                semantics: metric.semantics,
                 key,
                 name: NVUE_GNMI_SAMPLE_STREAM_ID.to_string(),
-                metric_type: metric_type.to_string(),
-                unit: unit.to_string(),
+                metric_type: metric.name.to_string(),
+                unit: metric.unit.to_string(),
                 value,
                 labels,
                 context: None,
@@ -1033,11 +1034,13 @@ struct NumericLeafMapping {
     tail: &'static [&'static str],
     name: &'static str,
     unit: &'static str,
+    semantics: MetricSemantics,
 }
 
 struct NumericLeaf {
     name: &'static str,
     unit: &'static str,
+    semantics: MetricSemantics,
 }
 
 enum InterfaceLeaf {
@@ -1075,8 +1078,8 @@ fn classify_interface_leaf(elems: &[&PathElem]) -> Option<InterfaceLeaf> {
 
     if matches(&["state", "oper-status"]) {
         Some(InterfaceLeaf::OperStatus)
-    } else if let Some(metric_type) = numeric_interface_leaf(elems) {
-        Some(InterfaceLeaf::Numeric(metric_type))
+    } else if let Some(metric) = numeric_interface_leaf(elems) {
+        Some(InterfaceLeaf::Numeric(metric))
     } else if matches(&["infiniband", "state", "physical-port-state"]) {
         Some(InterfaceLeaf::PhysicalPortState)
     } else if matches(&["infiniband", "state", "logical-port-state"]) {
@@ -1096,6 +1099,15 @@ fn classify_interface_leaf(elems: &[&PathElem]) -> Option<InterfaceLeaf> {
     }
 }
 
+// The static mappings have no per-interface last-clear timestamp. An
+// observation or connection time does not establish when counting began.
+const fn interface_total(description: &'static str) -> MetricSemantics {
+    MetricSemantics::CumulativeCounter {
+        description,
+        start_time: None,
+    }
+}
+
 /// Table-driven dispatch for numeric `/interfaces/interface` leaves. The
 /// expected leaf path tail is matched against the live gNMI tree.
 fn numeric_interface_leaves() -> &'static [NumericLeafMapping] {
@@ -1105,42 +1117,58 @@ fn numeric_interface_leaves() -> &'static [NumericLeafMapping] {
             tail: &["state", "counters", "in-errors"],
             name: "interface_in_errors",
             unit: "count",
+            semantics: interface_total(
+                "Number of inbound packets with errors reported by the interface",
+            ),
         },
         NumericLeafMapping {
             tail: &["state", "counters", "out-errors"],
             name: "interface_out_errors",
             unit: "count",
+            semantics: interface_total(
+                "Number of outbound packets with errors reported by the interface",
+            ),
         },
         NumericLeafMapping {
             tail: &["state", "counters", "out-discards"],
             name: "interface_out_discards",
             unit: "count",
+            semantics: interface_total(
+                "Number of outbound packets discarded by the interface without detected errors",
+            ),
         },
         NumericLeafMapping {
             tail: &["state", "counters", "in-octets"],
             name: "interface_in_octets",
             unit: "bytes",
+            semantics: interface_total("Number of octets received by the interface"),
         },
         NumericLeafMapping {
             tail: &["state", "counters", "out-octets"],
             name: "interface_out_octets",
             unit: "bytes",
+            semantics: interface_total("Number of octets transmitted by the interface"),
         },
         NumericLeafMapping {
             tail: &["state", "counters", "in-pkts"],
             name: "interface_in_packets",
             unit: "count",
+            semantics: interface_total("Number of packets received by the interface"),
         },
         NumericLeafMapping {
             tail: &["state", "counters", "out-pkts"],
             name: "interface_out_packets",
             unit: "count",
+            semantics: interface_total("Number of packets transmitted by the interface"),
         },
         // InfiniBand port counters (`/infiniband/state/counters/port/*`)
         NumericLeafMapping {
             tail: &["infiniband", "state", "counters", "port", "link-downed"],
             name: "interface_link_downed",
             unit: "count",
+            semantics: interface_total(
+                "Number of link down events reported by the InfiniBand port",
+            ),
         },
         NumericLeafMapping {
             tail: &[
@@ -1152,6 +1180,9 @@ fn numeric_interface_leaves() -> &'static [NumericLeafMapping] {
             ],
             name: "interface_link_error_recovery",
             unit: "count",
+            semantics: interface_total(
+                "Number of link error recovery events reported by the InfiniBand port",
+            ),
         },
         NumericLeafMapping {
             tail: &[
@@ -1163,6 +1194,9 @@ fn numeric_interface_leaves() -> &'static [NumericLeafMapping] {
             ],
             name: "interface_rcv_remote_physical_errors",
             unit: "count",
+            semantics: interface_total(
+                "Number of receive remote physical errors reported by the InfiniBand port",
+            ),
         },
         NumericLeafMapping {
             tail: &[
@@ -1174,6 +1208,9 @@ fn numeric_interface_leaves() -> &'static [NumericLeafMapping] {
             ],
             name: "interface_rcv_switch_relay_errors",
             unit: "count",
+            semantics: interface_total(
+                "Number of receive switch relay errors reported by the InfiniBand port",
+            ),
         },
         NumericLeafMapping {
             tail: &[
@@ -1185,6 +1222,9 @@ fn numeric_interface_leaves() -> &'static [NumericLeafMapping] {
             ],
             name: "interface_rcv_constraint_errors",
             unit: "count",
+            semantics: interface_total(
+                "Number of receive constraint errors reported by the InfiniBand port",
+            ),
         },
         NumericLeafMapping {
             tail: &[
@@ -1196,6 +1236,9 @@ fn numeric_interface_leaves() -> &'static [NumericLeafMapping] {
             ],
             name: "interface_local_link_integrity_errors",
             unit: "count",
+            semantics: interface_total(
+                "Number of local link integrity errors reported by the InfiniBand port",
+            ),
         },
         NumericLeafMapping {
             tail: &[
@@ -1207,182 +1250,224 @@ fn numeric_interface_leaves() -> &'static [NumericLeafMapping] {
             ],
             name: "interface_port_buffer_overrun_errors",
             unit: "count",
+            semantics: interface_total(
+                "Number of excessive buffer overrun errors reported by the InfiniBand port",
+            ),
         },
         NumericLeafMapping {
             tail: &["infiniband", "state", "counters", "port", "qp1-dropped"],
             name: "interface_qp1_dropped",
             unit: "count",
+            semantics: interface_total("Number of QP1 packets dropped by the InfiniBand port"),
         },
         NumericLeafMapping {
             tail: &["infiniband", "state", "counters", "port", "vl15-dropped"],
             name: "interface_vl15_dropped",
             unit: "count",
+            semantics: interface_total("Number of VL15 packets dropped by the InfiniBand port"),
         },
         NumericLeafMapping {
             tail: &["infiniband", "state", "counters", "port", "xmit-wait"],
             name: "interface_port_xmit_wait",
             unit: "count",
+            semantics: interface_total(concat!(
+                "Number of ticks during which the InfiniBand port had data to transmit ",
+                "but sent none for the entire tick"
+            )),
         },
+        // InfiniBand state (`/infiniband/state/*`)
         NumericLeafMapping {
             tail: &["infiniband", "state", "mtu"],
             name: "interface_mtu",
             unit: "bytes",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["infiniband", "state", "max-supported-mtus"],
             name: "interface_max_supported_mtu",
             unit: "bytes",
+            semantics: MetricSemantics::Gauge,
         },
-        // phy-diag counters and ratios (`/phy-diag/state/*`)
+        // PHY diagnostic readings (`/phy-diag/state/*`)
         NumericLeafMapping {
             tail: &["phy-diag", "state", "raw-ber"],
             name: "interface_raw_ber",
             unit: "ratio",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "effective-ber"],
             name: "interface_effective_ber",
             unit: "ratio",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "symbol-ber"],
             name: "interface_symbol_ber",
             unit: "ratio",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "raw-ber-ch-1"],
             name: "interface_raw_ber_lane0",
             unit: "ratio",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "raw-ber-ch-2"],
             name: "interface_raw_ber_lane1",
             unit: "ratio",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "raw-errors-ch-1"],
             name: "interface_phy_raw_errors_lane0",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "raw-errors-ch-2"],
             name: "interface_phy_raw_errors_lane1",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "effective-errors"],
             name: "interface_phy_effective_errors",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "zero-hist"],
             name: "interface_zero_hist",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "phy-received-bits"],
             name: "interface_phy_received_bits",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-malformed-packet-errors"],
             name: "interface_port_malformed_packet_errors",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-neighbor-mtu-discards"],
             name: "interface_port_neighbor_mtu_discards",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-multi-cast-rcv-pkts"],
             name: "interface_port_multicast_rcv_packets",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-multi-cast-xmit-pkts"],
             name: "interface_port_multicast_xmit_packets",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-uni-cast-rcv-pkts"],
             name: "interface_port_unicast_rcv_packets",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-uni-cast-xmit-pkts"],
             name: "interface_port_unicast_xmit_packets",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-local-physical-errors"],
             name: "interface_port_local_physical_errors",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "sync-header-error-counter"],
             name: "interface_sync_header_error_counter",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-dlid-mapping-errors"],
             name: "interface_port_dlid_mapping_errors",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-vl-mapping-errors"],
             name: "interface_port_vl_mapping_errors",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-looping-errors"],
             name: "interface_port_looping_errors",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "port-inactive-discards"],
             name: "interface_port_inactive_discards",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "rq-general-error"],
             name: "interface_rq_general_error",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "plr-rcv-codes"],
             name: "interface_plr_rcv_codes",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "plr-rcv-code-err"],
             name: "interface_plr_rcv_codes_err",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "plr-rcv-uncorrectable-code"],
             name: "interface_plr_rcv_uncorrectables_code",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "plr-xmit-codes"],
             name: "interface_plr_xmit_codes",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "plr-xmit-retry-codes"],
             name: "interface_plr_xmit_retrys_codes",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "plr-xmit-retry-events"],
             name: "interface_plr_xmit_retrys_events",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "plr-sync-events"],
             name: "interface_plr_sync_events",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &[
@@ -1392,16 +1477,19 @@ fn numeric_interface_leaves() -> &'static [NumericLeafMapping] {
             ],
             name: "interface_plr_xmit_retry_events_within_minute",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "plr-bw-loss-percent"],
             name: "interface_plr_bw_loss_percent",
             unit: "percent",
+            semantics: MetricSemantics::Gauge,
         },
         NumericLeafMapping {
             tail: &["phy-diag", "state", "unintentional-link-down-events"],
             name: "interface_link_down_events",
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         },
     ];
 
@@ -1420,6 +1508,7 @@ fn numeric_interface_leaf(elems: &[&PathElem]) -> Option<NumericLeaf> {
         return Some(NumericLeaf {
             name: FEC_HIST_NAMES[n],
             unit: "count",
+            semantics: MetricSemantics::Gauge,
         });
     }
 
@@ -1427,6 +1516,7 @@ fn numeric_interface_leaf(elems: &[&PathElem]) -> Option<NumericLeaf> {
         (elems.len() == m.tail.len() && leaf_matches(elems, m.tail)).then_some(NumericLeaf {
             name: m.name,
             unit: m.unit,
+            semantics: m.semantics,
         })
     })
 }
@@ -2390,7 +2480,7 @@ mod tests {
     }
 
     #[test]
-    fn sample_reconciliation_is_opt_in_and_preserves_live_deletes() {
+    fn sample_counter_aliases_follow_snapshot_reconciliation_and_live_deletes() {
         use crate::metrics::MetricsManager;
         use crate::sink::PrometheusSink;
 
@@ -2419,7 +2509,7 @@ mod tests {
                 ..Default::default()
             };
 
-            processor.process_notification(&proto::Notification {
+            let update = proto::Notification {
                 update: vec![proto::Update {
                     path: Some(path.clone()),
                     val: Some(proto::TypedValue {
@@ -2428,19 +2518,68 @@ mod tests {
                     ..Default::default()
                 }],
                 ..Default::default()
-            });
+            };
 
             assert_eq!(processor.reconciliation.is_some(), enabled);
-            let before = metrics.export_telemetry().expect("telemetry");
-            assert!(before.contains("interface_in_packets_count{"), "{before}");
+            let assert_exported = |present| {
+                let telemetry = metrics.export_telemetry().expect("telemetry");
+                for name in [
+                    "test_nvue_gnmi_interface_in_packets_count",
+                    "test_nvue_gnmi_interface_in_packets_count_total",
+                ] {
+                    let points = telemetry
+                        .lines()
+                        .filter(|line| line.starts_with(&format!("{name}{{")))
+                        .collect::<Vec<_>>();
+                    assert_eq!(points.len(), usize::from(present), "{name}: {telemetry}");
+                    for point in points {
+                        let (_, value) = point.rsplit_once(' ').expect("sample reading");
+                        assert_eq!(value.parse::<f64>().expect("numeric reading"), 7.0);
+                    }
+                }
+            };
+
+            processor.process_notification(&update);
+            assert_exported(true);
+
+            if let Some(reconciliation) = &processor.reconciliation {
+                let request = proto::SubscribeRequest {
+                    request: Some(proto::subscribe_request::Request::Subscribe(
+                        proto::SubscriptionList {
+                            subscription: vec![proto::Subscription {
+                                path: Some(path.clone()),
+                                ..Default::default()
+                            }],
+                            mode: proto::subscription_list::Mode::Once as i32,
+                            ..Default::default()
+                        },
+                    )),
+                    ..Default::default()
+                };
+                let mut snapshot = reconciliation.begin(&request).expect("retained metric");
+
+                // A completed snapshot with no samples removes both exported series.
+                assert!(
+                    snapshot
+                        .process_response(&proto::SubscribeResponse {
+                            response: Some(proto::subscribe_response::Response::SyncResponse(true)),
+                            ..Default::default()
+                        })
+                        .expect("completed snapshot")
+                );
+                assert_eq!(reconciliation.finish(Some(snapshot)), 1);
+                assert_exported(false);
+
+                processor.process_notification(&update);
+                assert_exported(true);
+            }
 
             processor.process_notification(&proto::Notification {
                 delete: vec![path],
                 ..Default::default()
             });
 
-            let after = metrics.export_telemetry().expect("telemetry");
-            assert!(!after.contains("interface_in_packets_count{"), "{after}");
+            assert_exported(false);
         }
     }
 
@@ -2812,7 +2951,9 @@ mod tests {
 
     #[test]
     fn test_process_notification_symbol_ber_and_link_down_events() {
-        let proc = test_processor();
+        let sink = Arc::new(CapturingSink::default());
+        let mut proc = test_processor();
+        proc.data_sink = Some(sink.clone());
         let notification = proto::Notification {
             timestamp: 0,
             prefix: Some(proto::Path {
@@ -2855,6 +2996,21 @@ mod tests {
 
         let count = proc.process_notification(&notification);
         assert_eq!(count, 1);
+
+        let events = sink.events.lock().expect("capture mutex");
+        assert_eq!(events.len(), 2);
+        for ((_, event), (name, unit, value)) in events.iter().zip([
+            ("interface_symbol_ber", "ratio", 3.2e-10),
+            ("interface_link_down_events", "count", 7.0),
+        ]) {
+            let CollectorEvent::Metric(sample) = event else {
+                panic!("expected a Metric event");
+            };
+            assert_eq!(sample.metric_type, name);
+            assert_eq!(sample.unit, unit);
+            assert_eq!(sample.value, value);
+            assert_eq!(sample.semantics, MetricSemantics::Gauge);
+        }
     }
 
     fn test_stream_metrics() -> super::super::subscriber::GnmiStreamMetrics {
@@ -2949,7 +3105,7 @@ mod tests {
         elems.extend(tail.iter().map(|n| make_path_elem(n, &[])));
 
         let notification = proto::Notification {
-            timestamp: 0,
+            timestamp: 1_000_000_000,
             prefix: None,
             update: vec![proto::Update {
                 path: Some(proto::Path {
@@ -3150,6 +3306,131 @@ mod tests {
     }
 
     #[test]
+    fn only_selected_interface_counters_emit_cumulative_samples() {
+        let mut expected = [
+            ("state/counters/in-errors", "interface_in_errors", "count"),
+            ("state/counters/out-errors", "interface_out_errors", "count"),
+            (
+                "state/counters/out-discards",
+                "interface_out_discards",
+                "count",
+            ),
+            ("state/counters/in-octets", "interface_in_octets", "bytes"),
+            ("state/counters/out-octets", "interface_out_octets", "bytes"),
+            ("state/counters/in-pkts", "interface_in_packets", "count"),
+            ("state/counters/out-pkts", "interface_out_packets", "count"),
+            (
+                "infiniband/state/counters/port/link-downed",
+                "interface_link_downed",
+                "count",
+            ),
+            (
+                "infiniband/state/counters/port/link-error-recovery",
+                "interface_link_error_recovery",
+                "count",
+            ),
+            (
+                "infiniband/state/counters/port/rcv-remote-phy-errors",
+                "interface_rcv_remote_physical_errors",
+                "count",
+            ),
+            (
+                "infiniband/state/counters/port/rcv-switch-relay-errors",
+                "interface_rcv_switch_relay_errors",
+                "count",
+            ),
+            (
+                "infiniband/state/counters/port/rcv-constraints-errors",
+                "interface_rcv_constraint_errors",
+                "count",
+            ),
+            (
+                "infiniband/state/counters/port/local-link-integrity-errors",
+                "interface_local_link_integrity_errors",
+                "count",
+            ),
+            (
+                "infiniband/state/counters/port/excessive-buffer-overrun",
+                "interface_port_buffer_overrun_errors",
+                "count",
+            ),
+            (
+                "infiniband/state/counters/port/qp1-dropped",
+                "interface_qp1_dropped",
+                "count",
+            ),
+            (
+                "infiniband/state/counters/port/vl15-dropped",
+                "interface_vl15_dropped",
+                "count",
+            ),
+            (
+                "infiniband/state/counters/port/xmit-wait",
+                "interface_port_xmit_wait",
+                "count",
+            ),
+        ];
+
+        check_values(
+            expected.map(|(path, name, unit)| Check {
+                scenario: path,
+                input: path,
+                expect: (
+                    format!("{name}:acp0"),
+                    name.to_string(),
+                    unit.to_string(),
+                    7.0,
+                    None,
+                ),
+            }),
+            |path| {
+                let tail = path.split('/').collect::<Vec<_>>();
+                let (sample, _) = run_interface_leaf(&tail, make_typed_value_uint(7));
+                let MetricSemantics::CumulativeCounter {
+                    description,
+                    start_time,
+                } = sample.semantics
+                else {
+                    panic!("{path}: expected cumulative counter semantics");
+                };
+                assert!(
+                    !description.trim().is_empty(),
+                    "{path}: missing description"
+                );
+                assert_eq!(
+                    sample.labels,
+                    [(Cow::Borrowed("interface_name"), "acp0".to_string())],
+                    "{path}: interface labels"
+                );
+                (
+                    sample.key,
+                    sample.metric_type,
+                    sample.unit,
+                    sample.value,
+                    start_time,
+                )
+            },
+        );
+
+        let mut counters = numeric_interface_leaves()
+            .iter()
+            .filter(|mapping| {
+                matches!(mapping.semantics, MetricSemantics::CumulativeCounter { .. })
+            })
+            .map(|mapping| (mapping.tail.join("/"), mapping.name, mapping.unit))
+            .collect::<Vec<_>>();
+        counters.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(
+            counters
+                .iter()
+                .map(|(path, name, unit)| (path.as_str(), *name, *unit))
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
     fn test_interface_fec_histogram_bins() {
         for n in 0u8..=15 {
             let leaf = format!("rs-num-corr-err-bin{n}");
@@ -3158,6 +3439,7 @@ mod tests {
             assert_eq!(sample.metric_type, format!("interface_fec_hist_{n}"));
             assert_eq!(sample.unit, "count");
             assert_eq!(sample.value, 11.0);
+            assert_eq!(sample.semantics, MetricSemantics::Gauge);
         }
     }
 
@@ -3171,6 +3453,7 @@ mod tests {
         assert_eq!(sample.metric_type, "interface_raw_ber");
         assert_eq!(sample.unit, "ratio");
         assert!((sample.value - 1e-12).abs() < f64::EPSILON);
+        assert_eq!(sample.semantics, MetricSemantics::Gauge);
     }
 
     #[test]
@@ -3345,6 +3628,7 @@ mod tests {
         assert_eq!(active.metric_type, "interface_link_width_active");
         assert_eq!(active.unit, "lanes");
         assert_eq!(active.value, 2.0);
+        assert_eq!(active.semantics, MetricSemantics::Gauge);
 
         let (supported, _) = run_interface_leaf(
             &["infiniband", "state", "supported-widths"],
@@ -3353,6 +3637,7 @@ mod tests {
         assert_eq!(supported.metric_type, "interface_supported_width");
         assert_eq!(supported.unit, "lanes");
         assert_eq!(supported.value, 4.0);
+        assert_eq!(supported.semantics, MetricSemantics::Gauge);
     }
 
     #[test]
@@ -3439,6 +3724,7 @@ mod tests {
             assert_eq!(sample.metric_type, case.metric_type);
             assert_eq!(sample.unit, case.unit);
             assert_eq!(sample.value, case.raw as f64);
+            assert_eq!(sample.semantics, MetricSemantics::Gauge);
         }
     }
 
@@ -3627,6 +3913,7 @@ mod tests {
             assert_eq!(sample.metric_type, "interface_link_speed_active");
             assert_eq!(sample.unit, "gbps", "speed unit must be gbps for {raw}");
             assert_eq!(sample.value, expected, "speed {raw}");
+            assert_eq!(sample.semantics, MetricSemantics::Gauge);
         }
 
         // defensive suffix forms
