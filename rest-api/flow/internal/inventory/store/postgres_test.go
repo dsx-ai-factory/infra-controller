@@ -17,13 +17,16 @@ import (
 	"google.golang.org/grpc/status"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	dbtestutil "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/testutil"
 	commonutils "github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/protobuf"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/migrations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/inventory/resolver"
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
 
@@ -277,6 +280,77 @@ func (c *domainPageQueryCounter) BeforeQuery(ctx context.Context, _ *bun.QueryEv
 }
 
 func (*domainPageQueryCounter) AfterQuery(context.Context, *bun.QueryEvent) {}
+
+// TestPostgresStore_GetComponentIdentitiesByIDsIncludingDeleted protects saved
+// task selections after inventory soft deletion without loading BMC relations.
+func TestPostgresStore_GetComponentIdentitiesByIDsIncludingDeleted(t *testing.T) {
+	if os.Getenv("DB_PORT") == "" {
+		t.Skip("Skipping integration test: no DB environment specified")
+	}
+	ctx := t.Context()
+	conf, err := cdb.ConfigFromEnv()
+	require.NoError(t, err)
+	// Configured database failures must fail this retained-identity proof.
+	pool, err := dbtestutil.CreateTestDB(ctx, t, conf)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	require.NoError(t, migrations.MigrateWithDB(ctx, pool.DB, migrations.MigrateOptions{}))
+	store := NewPostgres(pool)
+
+	// The selected switch and its rack are retained soft-deleted records. The
+	// selected compute now lives in another rack, which must not hide its ID.
+	oldRack := model.Rack{Name: "old-rack"}
+	newRack := model.Rack{Name: "new-rack"}
+	require.NoError(t, oldRack.Create(ctx, pool.DB))
+	require.NoError(t, newRack.Create(ctx, pool.DB))
+	rows := []model.Component{
+		{Name: "moved-compute", Type: "Compute", RackID: newRack.ID, ComponentID: stringPtr("shared-external-id")},
+		{Name: "deleted-switch", Type: "NVSwitch", RackID: oldRack.ID, ComponentID: stringPtr("shared-external-id")},
+		{Name: "unlinked-shelf", Type: "PowerShelf", RackID: newRack.ID},
+		{Name: "unrequested", Type: "Compute", RackID: newRack.ID, ComponentID: stringPtr("other-external-id")},
+	}
+	for i := range rows {
+		require.NoError(t, rows[i].Create(ctx, pool.DB))
+	}
+	_, err = pool.DB.NewDelete().Model(&rows[1]).WherePK().Exec(ctx)
+	require.NoError(t, err)
+	_, err = pool.DB.NewDelete().Model(&oldRack).WherePK().Exec(ctx)
+	require.NoError(t, err)
+	var deletedComponent model.Component
+	err = pool.DB.NewSelect().Model(&deletedComponent).WhereAllWithDeleted().Where("c.id = ?", rows[1].ID).Scan(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, deletedComponent.DeletedAt, "fixture must exercise a retained deleted component")
+
+	counter := &domainPageQueryCounter{}
+	pool.DB.AddQueryHook(counter)
+	for _, tc := range []struct {
+		name    string
+		ids     []uuid.UUID
+		want    []component.Identity
+		queries int
+	}{
+		// Empty selections must not become an unfiltered inventory query.
+		{name: "empty selection"},
+		// UUID selection includes retained and unlinked rows, omits missing rows,
+		// and preserves type when external IDs overlap across component kinds.
+		{name: "retained requested identities", ids: []uuid.UUID{rows[1].ID, rows[0].ID, rows[2].ID, uuid.New(), rows[0].ID}, queries: 1,
+			want: []component.Identity{
+				{ID: rows[0].ID, Type: devicetypes.ComponentTypeCompute, ExternalID: "shared-external-id"},
+				{ID: rows[1].ID, Type: devicetypes.ComponentTypeNVSwitch, ExternalID: "shared-external-id"},
+				{ID: rows[2].ID, Type: devicetypes.ComponentTypePowerShelf},
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			counter.queries = 0
+
+			got, err := store.GetComponentIdentitiesByIDsIncludingDeleted(ctx, tc.ids)
+
+			require.NoError(t, err)
+			require.ElementsMatch(t, tc.want, got)
+			require.Equal(t, tc.queries, counter.queries)
+		})
+	}
+}
 
 func TestPostgresStore_GetRacksForNVLDomains(t *testing.T) {
 	if os.Getenv("DB_PORT") == "" {

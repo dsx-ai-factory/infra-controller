@@ -50,6 +50,9 @@ type Manager interface {
 	GetComponentBySerial(ctx context.Context, manufacturer string, serial string, withRack bool) (*component.Component, error)
 	GetComponentByBMCMAC(ctx context.Context, macAddress string) (*component.Component, error)
 	GetComponentsByExternalIDs(ctx context.Context, externalIDs []string) ([]*component.Component, error)
+	// GetComponentIdentitiesByIDsIncludingDeleted resolves saved task selections;
+	// missing UUIDs are omitted, and an empty request performs no query.
+	GetComponentIdentitiesByIDsIncludingDeleted(ctx context.Context, ids []uuid.UUID) ([]component.Identity, error)
 	GetListOfComponents(ctx context.Context, info dbquery.StringQueryInfo, manufacturerFilter *dbquery.StringQueryInfo, modelFilter *dbquery.StringQueryInfo, componentTypes []devicetypes.ComponentType, pagination *dbquery.Pagination, orderBy *dbquery.OrderBy) ([]*component.Component, int32, error)
 	AddComponent(ctx context.Context, comp *component.Component) (uuid.UUID, error)
 	PatchComponent(ctx context.Context, comp *component.Component) error
@@ -174,6 +177,12 @@ func (m *ManagerImpl) GetComponentByBMCMAC(ctx context.Context, macAddress strin
 // GetComponentsByExternalIDs retrieves components by their external IDs.
 func (m *ManagerImpl) GetComponentsByExternalIDs(ctx context.Context, externalIDs []string) ([]*component.Component, error) {
 	return m.store.GetComponentsByExternalIDs(ctx, externalIDs)
+}
+
+// GetComponentIdentitiesByIDsIncludingDeleted retains identities after soft
+// deletion so task details can still name their recorded inventory targets.
+func (m *ManagerImpl) GetComponentIdentitiesByIDsIncludingDeleted(ctx context.Context, ids []uuid.UUID) ([]component.Identity, error) {
+	return m.store.GetComponentIdentitiesByIDsIncludingDeleted(ctx, ids)
 }
 
 // CreateNVLDomain creates a new NVL domain.

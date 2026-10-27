@@ -476,6 +476,40 @@ func (s *PostgresStore) GetComponentsByExternalIDs(
 	return result, nil
 }
 
+// GetComponentIdentitiesByIDsIncludingDeleted reads only the identity fields
+// needed to display recorded task targets. Rack membership is deliberately not
+// filtered: a component may have moved since the task was recorded.
+func (s *PostgresStore) GetComponentIdentitiesByIDsIncludingDeleted(
+	ctx context.Context,
+	ids []uuid.UUID,
+) ([]component.Identity, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	var rows []struct {
+		ID         uuid.UUID
+		Type       string
+		ExternalID *string
+	}
+	err := s.pg.DB.NewSelect().Model((*model.Component)(nil)).
+		Column("c.id", "c.type", "c.external_id").
+		WhereAllWithDeleted().Where("c.id IN (?)", bun.In(ids)).Scan(ctx, &rows)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read retained component identities: %w", err)
+	}
+
+	identities := make([]component.Identity, 0, len(rows))
+	for _, row := range rows {
+		identity := component.Identity{ID: row.ID, Type: devicetypes.ComponentTypeFromString(row.Type)}
+		if row.ExternalID != nil {
+			identity.ExternalID = *row.ExternalID
+		}
+		identities = append(identities, identity)
+	}
+	return identities, nil
+}
+
 // CreateNVLDomain creates a new NVL domain.
 func (s *PostgresStore) CreateNVLDomain(
 	ctx context.Context,

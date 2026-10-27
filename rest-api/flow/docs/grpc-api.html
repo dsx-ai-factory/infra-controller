@@ -883,6 +883,10 @@
                 </li>
 
                 <li>
+                  <a href="#v1.PowerTaskExternalTargets"><span class="badge">M</span>PowerTaskExternalTargets</a>
+                </li>
+
+                <li>
                   <a href="#v1.PowerTaskWaitingContext"><span class="badge">M</span>PowerTaskWaitingContext</a>
                 </li>
 
@@ -7375,6 +7379,15 @@ Absent when no targets were recorded. </p></td>
 On a Waiting task, absence means the service did not provide context. </p></td>
                 </tr>
 
+                <tr>
+                  <td>external_targets</td>
+                  <td><a href="#v1.PowerTaskExternalTargets">PowerTaskExternalTargets</a></td>
+                  <td></td>
+                  <td><p>Inventory identifiers for REST consumers. Absent on older services/proxies;
+a present result has every member of targets or a categorized error.
+Failure here does not remove the task or change its recorded UUID targets. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -7404,6 +7417,52 @@ On a Waiting task, absence means the service did not provide context. </p></td>
                   <td><a href="#v1.PowerDetailsReadError">PowerDetailsReadError</a></td>
                   <td>optional</td>
                   <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.PowerTaskExternalTargets">PowerTaskExternalTargets</h3>
+        <p>External identities read from retained inventory, including soft-deleted rows.</p><p>These are the identities available at read time, not a historical copy saved</p><p>with the task. A component may have moved racks since the task was recorded.</p><p>Error is absent on success, including an empty recorded selection. On failure,</p><p>rack_id and targets are empty; no partial selection or Flow UUID fallback is</p><p>returned. Lookup shares the power-details request's existing read deadline.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>rack_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>External identifier of the task&#39;s recorded rack; nonempty on success. </p></td>
+                </tr>
+
+                <tr>
+                  <td>targets</td>
+                  <td><a href="#v1.ExternalRef">ExternalRef</a></td>
+                  <td>repeated</td>
+                  <td><p>Membership and order match the existing PowerTaskDetails.targets field,
+which is ordered by type and UUID, not by external ID. Each type is
+explicit and matches the selected type. </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.PowerDetailsReadError">PowerDetailsReadError</a></td>
+                  <td>optional</td>
+                  <td><p>NotLinked means a rack or component identity is missing, empty, or purged.
+InvalidResponse means a selected type is unknown or disagrees with the
+inventory type, a target UUID is malformed, or the retained rack reply has
+wrong identity or cardinality. DeadlineExceeded/ReadFailed mean lookup
+failed; Unsupported means the dependency does not implement the read.
+LimitExceeded means external identity lookup was skipped because the UUID
+text alone cannot fit, or the result was removed to fit the response limit. </p></td>
                 </tr>
 
             </tbody>
@@ -8498,7 +8557,7 @@ e.g. &#34;Power Reset (forced)&#34; or &#34;Upgrade Firmware to v2.3.1&#34;. </p
 
 
         <h3 id="v1.TrayPowerDetails">TrayPowerDetails</h3>
-        <p>Flow inventory identity remains usable before a managed Core ID exists.</p><p>Every section is populated with either its value or a categorized error.</p><p>Inventory and both child reads share at most 30 seconds from RPC entry, capped</p><p>at one second before a caller deadline. Completed sections survive another</p><p>section's failure. Core hardware, policy, and actions may describe different</p><p>instants from Flow tasks; Running tasks do not imply active Core actions.</p><p>The encoded proxy response is limited to 1,991,680 bytes (1945 KiB).</p><p>If the response is oversized, populated waiting-context lists are replaced</p><p>with context-level LimitExceeded first. If it still exceeds the limit, the</p><p>entire task section is replaced with LimitExceeded. If the rest still exceeds</p><p>the limit, the RPC returns ResourceExhausted. No task targets are truncated.</p>
+        <p>Power details remain readable by MAC before a managed Core ID exists.</p><p>Every section is populated with either its value or a categorized error.</p><p>Inventory and both child reads share at most 30 seconds from RPC entry, capped</p><p>at one second before a caller deadline. Completed sections survive another</p><p>section's failure. Core hardware, policy, and actions may describe different</p><p>instants from Flow tasks; Running tasks do not imply active Core actions.</p><p>The encoded proxy response is limited to 1,991,680 bytes (1945 KiB).</p><p>If the response is oversized, populated waiting-context lists are replaced</p><p>with context-level LimitExceeded first, then successful external target results</p><p>are replaced with LimitExceeded. If it still exceeds the limit, the entire</p><p>task section is replaced with LimitExceeded. If the rest still exceeds the</p><p>limit, the RPC returns ResourceExhausted. No task targets are truncated.</p>
 
 
           <table class="field-table">
@@ -8508,17 +8567,11 @@ e.g. &#34;Power Reset (forced)&#34; or &#34;Upgrade Firmware to v2.3.1&#34;. </p
             <tbody>
 
                 <tr>
-                  <td>flow_component_id</td>
-                  <td><a href="#v1.UUID">UUID</a></td>
-                  <td></td>
-                  <td><p> </p></td>
-                </tr>
-
-                <tr>
-                  <td>core_component_id</td>
+                  <td>component_id</td>
                   <td><a href="#string">string</a></td>
                   <td>optional</td>
-                  <td><p>Absent until the inventory member has a managed Core identity. </p></td>
+                  <td><p>External inventory ID, matching Component.component_id.
+Absent until the inventory member has a managed Core identity. </p></td>
                 </tr>
 
                 <tr>
@@ -8554,6 +8607,15 @@ e.g. &#34;Power Reset (forced)&#34; or &#34;Upgrade Firmware to v2.3.1&#34;. </p
                   <td><a href="#v1.PowerOperations">PowerOperations</a></td>
                   <td></td>
                   <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_external_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p>The inventory rack identifier used by REST rack and tray resources.
+Includes retained soft-deleted racks. Absent when no rack identity can be
+read; older services or proxies also omit it. Never uses the Flow UUID. </p></td>
                 </tr>
 
             </tbody>
@@ -10024,7 +10086,8 @@ graceful restart</p></td>
                 <td>POWER_DETAILS_READ_ERROR_NOT_LINKED</td>
                 <td>1</td>
                 <td><p>The section lacks its required identity: a managed Core ID for Core
-sections, or a Flow rack assignment for tasks.</p></td>
+sections, a Flow rack assignment for tasks, or a retained external
+component/rack identifier for an external target result.</p></td>
               </tr>
 
               <tr>
@@ -10055,7 +10118,8 @@ sections, or a Flow rack assignment for tasks.</p></td>
                 <td>POWER_DETAILS_READ_ERROR_INVALID_RESPONSE</td>
                 <td>6</td>
                 <td><p>A dependency returned the wrong identity/cardinality, an absent required
-value, or task data that cannot be converted to the declared operation.</p></td>
+value, an inventory type that differs from the selected type, or task data
+that cannot be converted to the declared operation or UUID.</p></td>
               </tr>
 
               <tr>
