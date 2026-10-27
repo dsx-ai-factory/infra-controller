@@ -1645,7 +1645,10 @@ impl MachineStateHandler {
                         deconfiguring_state,
                         mh_snapshot,
                         ctx,
-                        self.host_handler_params.reachability_params.uefi_boot_wait,
+                        self.host_handler
+                            .host_handler_params
+                            .reachability_params
+                            .uefi_boot_wait,
                     )
                     .await
                 }
