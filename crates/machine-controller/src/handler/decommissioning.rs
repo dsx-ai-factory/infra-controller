@@ -25,8 +25,8 @@ use libredfish::{EnabledDisabled, JobState, PowerState, RedfishError, SystemPowe
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::dpa_interface::{DpaInterfaceControllerState, DpaInterfaceType, DpaLockMode};
 use model::machine::{
-    DecommissioningState, DeconfiguringDpuState, DeconfiguringHostState, Machine, ManagedHostState,
-    ManagedHostStateSnapshot,
+    DecommissioningState, DeconfiguringDpuState, DeconfiguringHostState, Machine,
+    MachineLastRebootRequestedMode, ManagedHostState, ManagedHostStateSnapshot,
 };
 use model::machine_interface::InterfaceType;
 use model::network_segment::NetworkSegmentType;
@@ -37,6 +37,7 @@ use state_controller::state_handler::{
 
 use crate::context::MachineStateHandlerContextObjects;
 use crate::dpf::{DpfOperations, dpf_dpudevices_and_dpunode_crs_noexist};
+use crate::handler::wait;
 use crate::redfish::{did_dpu_finish_booting, host_power_control};
 
 fn deconfiguring_dpus_after_host_reset(state: &ManagedHostStateSnapshot) -> ManagedHostState {
@@ -113,6 +114,7 @@ pub(super) async fn handle_deconfiguring_host(
     deconfiguring_state: &DeconfiguringHostState,
     state: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    uefi_boot_wait: chrono::Duration,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let machine = &state.host_snapshot;
     match deconfiguring_state {
@@ -121,7 +123,22 @@ pub(super) async fn handle_deconfiguring_host(
                 .services
                 .create_redfish_client_from_machine(machine)
                 .await?;
-            match redfish_client.lockdown_bmc(EnabledDisabled::Disabled).await {
+            let requires_reboot = redfish_client
+                .lockdown_requires_host_reboot()
+                .await
+                .map_err(|error| {
+                    StateHandlerError::GenericError(eyre::eyre!(
+                        "failed to determine full lockdown reboot requirement: {error}"
+                    ))
+                })?;
+            // Release boot-latched runtime protection when handing the server
+            // back, rather than only opening its BMC configuration interface.
+            let unlock = if requires_reboot {
+                redfish_client.lockdown(EnabledDisabled::Disabled).await
+            } else {
+                redfish_client.lockdown_bmc(EnabledDisabled::Disabled).await
+            };
+            match unlock {
                 Ok(()) | Err(RedfishError::NotSupported(_)) => {}
                 Err(error) => {
                     return Err(StateHandlerError::GenericError(eyre::eyre!(
@@ -130,7 +147,7 @@ pub(super) async fn handle_deconfiguring_host(
                 }
             }
 
-            let next = if machine.bmc_vendor().is_supermicro() {
+            let next = if requires_reboot || machine.bmc_vendor().is_supermicro() {
                 DeconfiguringHostState::RebootAfterLockdown
             } else {
                 DeconfiguringHostState::ClearSuperNicLockdown
@@ -148,6 +165,35 @@ pub(super) async fn handle_deconfiguring_host(
                 .services
                 .create_redfish_client_from_machine(machine)
                 .await?;
+            let requires_reboot = redfish_client
+                .lockdown_requires_host_reboot()
+                .await
+                .map_err(|error| {
+                    StateHandlerError::GenericError(eyre::eyre!(
+                        "failed to determine full lockdown reboot requirement: {error}"
+                    ))
+                })?;
+            if requires_reboot {
+                // Keep this persisted step until the requested reboot has had
+                // time to apply runtime policy. Do not restart on every tick.
+                if let Some(reboot) = &machine.status.last_reboot_requested
+                    && reboot.time >= machine.state.version.timestamp()
+                    && reboot.mode == MachineLastRebootRequestedMode::Reboot
+                {
+                    if wait(&reboot.time, uefi_boot_wait) {
+                        return Ok(StateHandlerOutcome::wait(
+                            "Waiting for host boot to release runtime EFI protection".to_string(),
+                        ));
+                    }
+                    return Ok(StateHandlerOutcome::transition(
+                        ManagedHostState::Decommissioning {
+                            decommissioning_state: DecommissioningState::DeconfiguringHost {
+                                deconfiguring_state: DeconfiguringHostState::ClearSuperNicLockdown,
+                            },
+                        },
+                    ));
+                }
+            }
             host_power_control(
                 redfish_client.as_ref(),
                 machine,
@@ -160,6 +206,11 @@ pub(super) async fn handle_deconfiguring_host(
                     "failed to reboot host after disabling BMC lockdown: {error}"
                 ))
             })?;
+            if requires_reboot {
+                return Ok(StateHandlerOutcome::wait(
+                    "Host restart requested to release runtime EFI protection".to_string(),
+                ));
+            }
             Ok(StateHandlerOutcome::transition(
                 ManagedHostState::Decommissioning {
                     decommissioning_state: DecommissioningState::DeconfiguringHost {

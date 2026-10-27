@@ -1645,6 +1645,7 @@ impl MachineStateHandler {
                         deconfiguring_state,
                         mh_snapshot,
                         ctx,
+                        self.host_handler_params.reachability_params.uefi_boot_wait,
                     )
                     .await
                 }
@@ -11440,7 +11441,7 @@ impl HostUpgradeState {
                         && matches!(next_state, ManagedHostState::HostInit {
                             machine_state: MachineState::WaitingForLockdown {
                                 lockdown_info: LockdownInfo {
-                                    state: LockdownState::PollingLockdownStatus,
+                                    state: LockdownState::SetLockdown | LockdownState::PollingLockdownStatus,
                                     mode: Enable,
                                 },
                             },
@@ -11696,6 +11697,26 @@ impl HostUpgradeState {
         };
 
         if lockdown_disabled && !state.host_snapshot.host_profile.disable_lockdown {
+            // Readback is only configured state for boot-latched controls.
+            // Persist the existing apply/reboot flow before writing policy so
+            // a retry cannot skip the reboot after observing the new value.
+            if matches!(scenario, HostFirmwareScenario::Ready)
+                && redfish_client
+                    .lockdown_requires_host_reboot()
+                    .await
+                    .map_err(|e| redfish_error("lockdown_requires_host_reboot", e))?
+            {
+                return Ok(StateHandlerOutcome::transition(
+                    ManagedHostState::HostInit {
+                        machine_state: MachineState::WaitingForLockdown {
+                            lockdown_info: LockdownInfo {
+                                state: LockdownState::SetLockdown,
+                                mode: Enable,
+                            },
+                        },
+                    },
+                ));
+            }
             tracing::debug!("host firmware update: Reenabling lockdown");
             if let Err(e) = redfish_client
                 .lockdown(libredfish::EnabledDisabled::Enabled)
