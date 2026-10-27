@@ -60,7 +60,7 @@ defaults:
     working-directory: rest-api
 
 env:
-  GO_VERSION: "1.26.4"
+  GO_VERSION: "1.27.3"
 
 jobs:
   resolve-manual-identity:
