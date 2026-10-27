@@ -24,7 +24,8 @@ Instance.
 Configure REST authentication using the
 [nicocli reference](../manuals/nicocli-reference.md). The examples use separate
 Provider and Tenant configurations so each operation runs in the correct
-organization. Both configurations must use `api.name: nico`.
+organization. In both configurations, set `api.name` to match the deployment's
+configured API name. The default is `nico`.
 
 ## Set up the service
 
