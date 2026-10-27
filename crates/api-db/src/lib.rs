@@ -114,10 +114,12 @@ pub mod vpc_dpu_loopback;
 pub mod vpc_peering;
 pub mod vpc_prefix;
 pub mod work_lock_manager;
+mod writable_pool;
 
 pub use conditional_write::{
     ConditionalWrite, ControllerStateNotCurrent, MaintenanceRequestNotCurrent,
 };
+pub use writable_pool::writable_pool_options;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

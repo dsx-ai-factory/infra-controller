@@ -235,21 +235,31 @@ impl IBFabricManager for IBFabricManagerImpl {
                     })?;
 
                 let fingerprint = fabric_client_fingerprint(endpoint, &credentials);
-                let (_deprecated_address, token) = match credentials {
+                let (_deprecated_address, auth) = match credentials {
                     Credentials::UsernamePassword { username, password } => (username, password),
                 };
-                // The auth method these credentials select, and so the on-disk
-                // material (if any) a client built from them loads.
-                let (_, cert) = rest::auth_method(&token);
-                let tls_material: Vec<&Path> = cert
-                    .iter()
-                    .flat_map(|cert| [&cert.ca_crt, &cert.tls_key, &cert.tls_crt])
-                    .map(Path::new)
-                    .collect();
+                // Resolve the auth method once and build from that resolution,
+                // so the client loads exactly the on-disk material (if any)
+                // this call watches for rotation. The resolution stays out of
+                // the fingerprint: while a credential's certificate directory
+                // is briefly missing, the credential resolves to a token with
+                // no material to watch, so a cached certificate client is kept
+                // rather than replaced. A client built during such a gap uses
+                // the path as its token until the directory's files are newer
+                // than it or the credential changes.
+                let auth_method = rest::auth_method(&auth);
+                let tls_material: Vec<&Path> = match &auth_method {
+                    rest::AuthMethod::Cert(cert) => vec![
+                        Path::new(&cert.ca_crt),
+                        Path::new(&cert.tls_key),
+                        Path::new(&cert.tls_crt),
+                    ],
+                    rest::AuthMethod::Token(_) => Vec::new(),
+                };
 
                 self.rest_clients
                     .get_or_build(fabric_name, fingerprint, &tls_material, || async {
-                        rest::new_client(endpoint, &token)
+                        rest::new_client(endpoint, auth_method.clone())
                     })
                     .await
             }

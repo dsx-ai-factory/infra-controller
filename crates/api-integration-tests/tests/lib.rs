@@ -592,6 +592,13 @@ async fn run_integration() -> eyre::Result<()> {
     }
     wait_for_count_metric_aliases(&test_env).await?;
     prepare_measured_boot_metric_aliases(&test_env).await?;
+    // The VPC prefixes created above feed this gauge, so its catalogue row comes
+    // from the scrape rather than being retained from the existing file.
+    metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        "# TYPE carbide_vpc_prefixes_with_state_handling_errors_per_state gauge\n",
+    )
+    .await?;
     // Exercise the library sampler on the server's meter without activating a
     // remote backend. Stop its task before catalogue collection and generation,
     // which can return early or panic on I/O errors.

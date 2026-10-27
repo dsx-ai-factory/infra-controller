@@ -25,6 +25,7 @@ use model::ib::{
 };
 
 use super::iface::{Filter, GetPartitionOptions, IBFabricRawResponse};
+pub(super) use super::ufmclient::AuthMethod;
 use super::ufmclient::{
     self, Partition, PartitionKey, PartitionQoS, Port, PortConfig, PortMembership, SmConfig,
     UFMCert, UFMConfig, UFMError, Ufm,
@@ -42,41 +43,33 @@ const DEFAULT_MEMBERSHIP: PortMembership = PortMembership::Full;
 /// Detects the authentication method `auth` selects: a bearer token, or
 /// client-certificate files on disk. Certificate authentication is chosen for
 /// an empty `auth` string (the SPIFFE default paths) or one naming an existing
-/// path. The returned [`UFMCert`] paths are exactly what a client built from
-/// `auth` loads, so callers can also watch them for rotation.
-pub(super) fn auth_method(auth: &str) -> (Option<String>, Option<UFMCert>) {
+/// path. The [`AuthMethod::Cert`] paths are exactly what [`new_client`] loads
+/// when given this result, so a caller resolves once, watches those paths for
+/// rotation, and builds from the same result.
+pub(super) fn auth_method(auth: &str) -> AuthMethod {
     if auth.trim().is_empty() {
-        (
-            None,
-            Some(UFMCert {
-                ca_crt: "/var/run/secrets/spiffe.io/ca.crt".to_string(),
-                tls_key: "/var/run/secrets/spiffe.io/tls.key".to_string(),
-                tls_crt: "/var/run/secrets/spiffe.io/tls.crt".to_string(),
-            }),
-        )
+        AuthMethod::Cert(UFMCert {
+            ca_crt: "/var/run/secrets/spiffe.io/ca.crt".to_string(),
+            tls_key: "/var/run/secrets/spiffe.io/tls.key".to_string(),
+            tls_crt: "/var/run/secrets/spiffe.io/tls.crt".to_string(),
+        })
     } else if Path::new(auth).exists() {
-        (
-            None,
-            Some(UFMCert {
-                ca_crt: format!("{auth}/ca.crt"),
-                tls_key: format!("{auth}/tls.key"),
-                tls_crt: format!("{auth}/tls.crt"),
-            }),
-        )
+        AuthMethod::Cert(UFMCert {
+            ca_crt: format!("{auth}/ca.crt"),
+            tls_key: format!("{auth}/tls.key"),
+            tls_crt: format!("{auth}/tls.crt"),
+        })
     } else {
-        (Some(auth.to_string()), None)
+        AuthMethod::Token(auth.to_string())
     }
 }
 
-pub(super) fn new_client(addr: &str, auth: &str) -> Result<Arc<dyn IBFabric>, IbError> {
-    let (token, cert) = auth_method(auth);
-
+/// Builds a client for the UFM at `addr` that authenticates with `auth`, as
+/// [`auth_method`] resolved it.
+pub(super) fn new_client(addr: &str, auth: AuthMethod) -> Result<Arc<dyn IBFabric>, IbError> {
     let conf = UFMConfig {
         address: addr.to_string(),
-        username: None,
-        password: None,
-        token,
-        cert,
+        auth,
     };
 
     let ufm = ufmclient::new_client(conf).map_err(IbError::from)?;
@@ -426,6 +419,7 @@ impl From<PortMembership> for IBPortMembership {
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::value_scenarios;
     use model::errors::ModelError;
     use opentelemetry::global;
     use ufm_mock::{
@@ -434,6 +428,30 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn auth_method_resolves_empty_and_missing_credentials() {
+        value_scenarios!(
+            run = |auth: &str| match auth_method(auth) {
+                AuthMethod::Token(token) => ("token", vec![token]),
+                AuthMethod::Cert(cert) => ("cert", vec![cert.ca_crt, cert.tls_key, cert.tls_crt]),
+            };
+            "an empty credential selects the SPIFFE default certificate files" {
+                "" => ("cert", vec![
+                    "/var/run/secrets/spiffe.io/ca.crt".to_string(),
+                    "/var/run/secrets/spiffe.io/tls.key".to_string(),
+                    "/var/run/secrets/spiffe.io/tls.crt".to_string(),
+                ]),
+            }
+
+            "a path that does not exist is a token" {
+                // A certificate directory missing mid-rotation resolves to a
+                // token, which the manager relies on to keep a cached client.
+                "/nonexistent/ufm-credentials" =>
+                    ("token", vec!["/nonexistent/ufm-credentials".to_string()]),
+            }
+        );
+    }
 
     #[tokio::test]
     async fn rest_client_is_compatible_with_the_ufm_mock() {
@@ -464,7 +482,11 @@ mod tests {
         let server = tokio::spawn(async move {
             axum::serve(listener, ufm_mock.router()).await.unwrap();
         });
-        let client = new_client(&format!("http://{address}"), "test-token").unwrap();
+        let client = new_client(
+            &format!("http://{address}"),
+            AuthMethod::Token("test-token".to_string()),
+        )
+        .unwrap();
 
         assert_eq!(client.versions().await.unwrap().ufm_version, "6.18.0");
         assert_eq!(client.find_ib_port(None).await.unwrap().len(), 1);

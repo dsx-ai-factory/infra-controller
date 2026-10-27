@@ -34,9 +34,9 @@ use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
-use crate::firmware::config::FirmwareFlasherProfile;
+use crate::firmware::config::{FirmwareFlasherProfile, FirmwareUpdateContext};
 
-pub(super) const PROTOCOL_VERSION: u32 = 2;
+pub(super) const PROTOCOL_VERSION: u32 = 3;
 pub(super) const MESSAGE_LIMIT: usize = 128 * 1024;
 // Local admission and receipt reads are short operations. This cumulative bound
 // includes channel readiness and reconnection, not the firmware job's lifetime.
@@ -45,8 +45,9 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(5);
 /// The protocol, PCI slot, execution target, and boot served by one supervisor socket.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SupervisorStatus {
-    /// Private protocol version: 2 supports post-reset verification retries;
-    /// version 1 permits receipt reads and cancellation, but not submission.
+    /// Private protocol version: 3 supports checked submission and post-reset
+    /// verification retries. Versions 1 and 2 permit receipt reads and
+    /// cancellation, but not submission.
     pub protocol_version: u32,
     /// Normalized PCI slot `dddd:bb:ss`, not proof of physical-card
     /// identity or an independently isolated reset domain.
@@ -61,7 +62,7 @@ pub struct SupervisorStatus {
 /// An input, connection, or receipt failure; no error resolves an earlier submission.
 #[derive(Debug, Error)]
 pub enum FirmwareSupervisorClientError {
-    /// Caller-local paths could not be resolved; no submission RPC was sent.
+    /// Local request validation or path resolution failed; no submission RPC was sent.
     #[error("invalid firmware supervisor request: {0}")]
     InvalidRequest(String),
     /// The Unix-socket connection or HTTP/2 handshake failed.
@@ -77,7 +78,7 @@ pub enum FirmwareSupervisorClientError {
     #[error("invalid firmware supervisor response: {0}")]
     InvalidResponse(String),
     /// The supervisor's private protocol cannot support this connection or request.
-    /// Protocol 1 permits receipt reads and cancellation, but not submission.
+    /// Protocols 1 and 2 permit receipt reads and cancellation, but not submission.
     #[error("unsupported firmware supervisor protocol version {0}")]
     UnsupportedProtocol(u32),
 }
@@ -149,22 +150,16 @@ impl FirmwareSupervisorClient {
     /// Explicit SSH-agent authentication
     /// uses the supervisor's `SSH_AUTH_SOCK`; host verification uses its
     /// default known-hosts file. Those environments are not forwarded per request.
-    /// A protocol-1 daemon cannot honor post-reset retry policy, so submission
-    /// is refused before sending an RPC. Use [`Self::get`] or [`Self::cancel`]
-    /// to reconcile its existing work before replacing that supervisor.
+    /// Protocols 1 and 2 permit receipt recovery only; every submission requires
+    /// protocol 3. Use [`Self::get`] or [`Self::cancel`] to reconcile existing
+    /// work before replacing an older daemon.
     pub async fn submit(
         &mut self,
         operation_id: &str,
         mut profile: Option<FirmwareFlasherProfile>,
         observer_exit_behavior: ObserverExitBehavior,
     ) -> Result<FirmwareOperation, FirmwareSupervisorClientError> {
-        // Protocol 1 ignores retry settings and performs each check once.
-        // Omitted timing also selects bounded retries, so Submit requires v2.
-        if self.identity.protocol_version != PROTOCOL_VERSION {
-            return Err(FirmwareSupervisorClientError::UnsupportedProtocol(
-                self.identity.protocol_version,
-            ));
-        }
+        self.require_submission_protocol()?;
         if let Some(profile) = &mut profile {
             // Absolute inputs and remote URLs remain usable after the caller's
             // working directory is removed. With no directory available, any
@@ -182,14 +177,71 @@ impl FirmwareSupervisorClient {
             profile: profile.map(Into::into),
             observer_exit_behavior: ObserverExitBehaviorPb::from(observer_exit_behavior).into(),
             expected_identity: Some(self.identity.clone().into()),
+            update_context: None,
         };
+        self.submit_request(request).await
+    }
+
+    /// `submit_update` admits or observes one digest-bound firmware workflow.
+    /// Every delivery must use this method, including repeated IDs, so changed
+    /// profile, artifact digests, or dispatch token conflict with accepted work.
+    /// The supervisor owns staging and checks both digests before mutation.
+    /// Only protocol 3 accepts checked work; older helpers remain readable and
+    /// cancellable but cannot silently fall back to unchecked execution.
+    ///
+    /// [`FirmwareUpdateContext::validate`] checks the dispatch token, digest
+    /// requirements, and unauthenticated HTTP(S) source policy before any RPC.
+    /// The submission RPC has a five-second cumulative deadline, including
+    /// channel readiness and reconnection, not the firmware operation's lifetime.
+    /// A deadline or lost response leaves admission uncertain and does not cancel
+    /// accepted work; resolve it using the same operation ID and unchanged inputs.
+    pub async fn submit_update(
+        &mut self,
+        operation_id: &str,
+        profile: FirmwareFlasherProfile,
+        context: FirmwareUpdateContext,
+        observer_exit_behavior: ObserverExitBehavior,
+    ) -> Result<FirmwareOperation, FirmwareSupervisorClientError> {
+        self.require_submission_protocol()?;
+        context
+            .validate(&profile)
+            .map_err(|error| FirmwareSupervisorClientError::InvalidRequest(error.to_string()))?;
+        self.submit_request(SubmitFirmwareOperationRequest {
+            operation_id: operation_id.into(),
+            profile: Some(profile.into()),
+            observer_exit_behavior: ObserverExitBehaviorPb::from(observer_exit_behavior).into(),
+            expected_identity: Some(self.identity.clone().into()),
+            update_context: Some(rpc::protos::firmware_supervisor::FirmwareUpdateContext {
+                phase_id: context.phase_id,
+                expected_digests: Some(context.expected_digests.into()),
+            }),
+        })
+        .await
+    }
+
+    fn require_submission_protocol(&self) -> Result<(), FirmwareSupervisorClientError> {
+        // Protocol 1 ignores retry policy; protocols 1 and 2 ignore checked
+        // update context. Keep all admission on the matching helper version.
+        if self.identity.protocol_version != PROTOCOL_VERSION {
+            return Err(FirmwareSupervisorClientError::UnsupportedProtocol(
+                self.identity.protocol_version,
+            ));
+        }
+        Ok(())
+    }
+
+    async fn submit_request(
+        &mut self,
+        request: SubmitFirmwareOperationRequest,
+    ) -> Result<FirmwareOperation, FirmwareSupervisorClientError> {
+        let operation_id = request.operation_id.clone();
         tokio::time::timeout(RPC_TIMEOUT, async {
             let response = self
                 .client
                 .submit_firmware_operation(request)
                 .await?
                 .into_inner();
-            decode_operation(response.operation, operation_id)
+            decode_operation(response.operation, &operation_id)
         })
         .await
         .map_err(|_| FirmwareSupervisorClientError::Deadline)?
@@ -274,7 +326,7 @@ impl TryFrom<GetSupervisorStatusResponse> for SupervisorStatus {
     type Error = FirmwareSupervisorClientError;
 
     fn try_from(response: GetSupervisorStatusResponse) -> Result<Self, Self::Error> {
-        if !matches!(response.protocol_version, 1 | PROTOCOL_VERSION) {
+        if !(1..=PROTOCOL_VERSION).contains(&response.protocol_version) {
             return Err(FirmwareSupervisorClientError::UnsupportedProtocol(
                 response.protocol_version,
             ));

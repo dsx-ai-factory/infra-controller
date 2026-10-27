@@ -3826,7 +3826,11 @@ impl DpuPhaseObservation {
                 "DPU {cr_name} has no status"
             )));
         };
-        let phase = DpuPhase::from(status.phase.clone());
+        let phase = status
+            .phase
+            .clone()
+            .ok_or_else(|| DpfError::InvalidState(format!("DPU {cr_name} has no status phase")))?;
+        let phase = DpuPhase::from(phase);
         let failure = (phase == DpuPhase::Error).then(|| DpuFailureObservation {
             name: dpu.metadata.name,
             namespace: dpu.metadata.namespace,
@@ -3871,7 +3875,8 @@ impl<R: DpuRepository, L> DpfSdk<R, L> {
     /// A deletion timestamp returns `Deleting` without failure details, even
     /// when status is absent or still reports `Error`. Otherwise, only `Error`
     /// includes failure details. A missing CR returns `NotFound`, and
-    /// a CR with neither a deletion timestamp nor status returns `InvalidState`.
+    /// a CR without a deletion timestamp requires both status and its phase,
+    /// otherwise it returns `InvalidState`.
     /// Resource read errors are propagated; deployment ownership is not checked.
     pub async fn get_dpu_phase_observation(
         &self,
@@ -3951,7 +3956,7 @@ impl<R: DpuRepository + DpuDeploymentRepository, L: ResourceLabeler> DpfSdk<R, L
     ///
     /// `None` means the deployment has not reported `DPUSetsReconciled=True`
     /// for its current generation, or a requested DPU is missing, is being
-    /// deleted, belongs to another deployment, or has no status. Duplicate
+    /// deleted, belongs to another deployment, or has no status or phase. Duplicate
     /// device IDs also return `None`. No partial map is returned, including
     /// when an observed DPU reports `Error`. Empty input returns an empty map
     /// after deployment checks, without reading any DPUs.
@@ -4003,7 +4008,10 @@ impl<R: DpuRepository + DpuDeploymentRepository, L: ResourceLabeler> DpfSdk<R, L
             let Some(status) = dpu.status.as_ref() else {
                 return Ok(None);
             };
-            let phase = DpuPhase::from(status.phase.clone());
+            let Some(phase) = status.phase.clone() else {
+                return Ok(None);
+            };
+            let phase = DpuPhase::from(phase);
             if phase == DpuPhase::Ready {
                 match dpu_comparison(&self.namespace, &dpu, &deployment) {
                     DpuComparison::Match => {}
@@ -4642,7 +4650,11 @@ impl<R: DpuNodeRepository + DpuDeviceRepository + DpuRepository, L> DpfSdk<R, L>
                     spec_dpu_flavor: Some(d.spec.dpu_flavor.clone()),
                     spec_dpu_device_name: d.spec.dpu_device_name.clone(),
                     spec_dpu_node_name: d.spec.dpu_node_name.clone(),
-                    status_phase: d.status.as_ref().map(|s| format!("{:?}", s.phase)),
+                    status_phase: d
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.phase.as_ref())
+                        .map(|phase| format!("{phase:?}")),
                     status_bfb_file: d.status.as_ref().and_then(|s| s.bfb_file.clone()),
                     status_conditions: d.status.as_ref().and_then(|s| s.conditions.clone()),
                     status_operational_conditions: d
@@ -8203,7 +8215,9 @@ mod tests {
                 astra_enabled: None,
             },
             status: Some(DpuStatus {
-                phase: DpuStatusPhase::Ready,
+                phase: Some(DpuStatusPhase::Ready),
+                dpu_reconfig: None,
+                post_provisioning_dpu_config: None,
                 addresses: None,
                 bf_cfg_file: None,
                 bfb_file: None,
@@ -8348,7 +8362,9 @@ mod tests {
                 astra_enabled: None,
             },
             status: Some(DpuStatus {
-                phase: DpuStatusPhase::Error,
+                phase: Some(DpuStatusPhase::Error),
+                dpu_reconfig: None,
+                post_provisioning_dpu_config: None,
                 addresses: None,
                 bf_cfg_file: None,
                 bfb_file: None,
@@ -8394,7 +8410,7 @@ mod tests {
                 let mock = &mock;
                 let sdk = &sdk;
                 async move {
-                    dpu.status.as_mut().expect("DPU status").phase = stale_phase;
+                    dpu.status.as_mut().expect("DPU status").phase = Some(stale_phase);
                     mock.dpus
                         .write()
                         .unwrap()

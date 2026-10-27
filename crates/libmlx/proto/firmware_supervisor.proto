@@ -19,9 +19,10 @@ import "mlx_device.proto";
 // progress and observer cancellation do not consume this quota. Transport limits
 // allow 32 connected sockets and eight active HTTP/2 streams per connection;
 // excess sockets are closed. Requests and responses are limited to 128 KiB.
-// Protocol 2 adds bounded post-reset verification retries. Version-2 clients
-// may read and cancel version-1 receipts, but must not submit work to version 1:
-// it cannot honor the retry policy, including its omitted defaults.
+// Protocol 3 supports checked submission and bounded post-reset verification
+// retries. Version-3 clients may read and cancel receipts from versions 1 and 2,
+// but every submission requires version 3. Version 1 ignores retry policy,
+// including its omitted defaults; versions 1 and 2 ignore checked update context.
 service FirmwareSupervisor {
   // Record an immutable request, or return its existing receipt. Reusing an ID
   // with different work is rejected, as is new work while a predecessor still
@@ -77,6 +78,20 @@ message SubmitFirmwareOperationRequest {
   // Required identity from the client's handshake. Omission or any mismatch
   // returns FAILED_PRECONDITION before admitting work.
   SupervisorIdentity expected_identity = 4;
+  // Presence selects digest-bound UpdateFirmware semantics and requires profile.
+  // Omission preserves the legacy profile/no-work contract. Clients must require
+  // protocol 3 before sending this field; earlier helpers do not enforce it.
+  FirmwareUpdateContext update_context = 5;
+}
+
+// FirmwareUpdateContext binds one checked workflow to its dispatch and artifacts.
+// Both fields participate in immutable request identity. Neither changes the
+// supervisor's internal phase ordering or permits resuming an interrupted burn.
+message FirmwareUpdateContext {
+  // Immutable caller dispatch token: 1-256 printable nonspace ASCII bytes.
+  string phase_id = 1;
+  // Required image digest and configuration digest iff the profile has config.
+  mlx_device.FirmwareArtifactDigests expected_digests = 2;
 }
 
 // SubmitFirmwareOperationResponse contains the durably recorded receipt.
@@ -119,7 +134,7 @@ message GetSupervisorStatusRequest {}
 
 // GetSupervisorStatusResponse supplies the identity checked before submission.
 message GetSupervisorStatusResponse {
-  // Private protocol version, exactly 2 for this service implementation.
+  // Private protocol version, exactly 3 for this service implementation.
   uint32 protocol_version = 1;
   // Normalized PCI slot dddd:bb:ss, not a certified physical card or an
   // independently isolated reset domain.

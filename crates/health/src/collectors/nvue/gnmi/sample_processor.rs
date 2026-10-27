@@ -1431,6 +1431,70 @@ fn numeric_interface_leaf(elems: &[&PathElem]) -> Option<NumericLeaf> {
     })
 }
 
+/// `emit_catalogue_samples` exercises interface source paths through notification
+/// processing for the metric catalogue. Literal paths stay independent of
+/// `numeric_interface_leaves` so missing mappings remain detectable. Callers must
+/// verify received samples: `handle_event` logs sink errors without returning them.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn emit_catalogue_samples(sink: Arc<dyn DataSink>, context: EventContext) {
+    let processor =
+        GnmiSampleProcessor::new(Some(sink), context, "catalogue-switch".into(), None, false);
+    let update = [
+        "state/counters/in-errors",
+        "state/counters/out-errors",
+        "state/counters/out-discards",
+        "state/counters/in-octets",
+        "state/counters/out-octets",
+        "state/counters/in-pkts",
+        "state/counters/out-pkts",
+        "infiniband/state/counters/port/link-downed",
+        "infiniband/state/counters/port/link-error-recovery",
+        "infiniband/state/counters/port/rcv-remote-phy-errors",
+        "infiniband/state/counters/port/rcv-switch-relay-errors",
+        "infiniband/state/counters/port/rcv-constraints-errors",
+        "infiniband/state/counters/port/local-link-integrity-errors",
+        "infiniband/state/counters/port/excessive-buffer-overrun",
+        "infiniband/state/counters/port/qp1-dropped",
+        "infiniband/state/counters/port/vl15-dropped",
+        "infiniband/state/counters/port/xmit-wait",
+    ]
+    .into_iter()
+    .map(|path| proto::Update {
+        path: Some(proto::Path {
+            elem: path
+                .split('/')
+                .map(|name| PathElem {
+                    name: name.into(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }),
+        val: Some(proto::TypedValue {
+            value: Some(proto::typed_value::Value::UintVal(7)),
+        }),
+        ..Default::default()
+    })
+    .collect();
+    processor.process_notification(&proto::Notification {
+        prefix: Some(proto::Path {
+            elem: vec![
+                PathElem {
+                    name: "interfaces".into(),
+                    ..Default::default()
+                },
+                PathElem {
+                    name: "interface".into(),
+                    key: HashMap::from([("name".into(), "catalogue0".into())]),
+                },
+            ],
+            ..Default::default()
+        }),
+        update,
+        ..Default::default()
+    });
+}
+
 /// FEC histogram bins 0..=15
 const FEC_HIST_NAMES: [&str; 16] = [
     "interface_fec_hist_0",

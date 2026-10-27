@@ -91,12 +91,14 @@ impl BuildAndFillLegacyFields for ForgeAgentControlResponse {
                         .device_actions
                         .iter()
                         .filter_map(|action| Some((action, action.command.as_ref()?)))
-                        // Older JSON clients execute ApplyFirmware without operation
-                        // identity, so durable work must stay on the typed interface.
+                        // Legacy JSON cannot preserve operation identity or
+                        // required digest checks. Keep both firmware commands
+                        // on the typed interface.
                         .filter(|(_, command)| {
                             !matches!(
                                 command,
                                 fac::mlx_device_action::Command::ApplyFirmwareOperation(_)
+                                    | fac::mlx_device_action::Command::UpdateFirmware(_)
                             )
                         })
                         .map(|(action, command)| {
@@ -395,6 +397,76 @@ mod tests {
 
         assert_eq!(legacy.pci_name, "04:00.0");
         assert_eq!(legacy.command, None);
+    }
+
+    /// Predecessor readers must ignore generic work and receipts, rather than
+    /// accepting weaker DPA semantics after dropping the new fields.
+    #[test]
+    fn firmware_update_wire_fields_do_not_alias_predecessor_dpa_fields() {
+        use prost::Message;
+
+        #[derive(Clone, PartialEq, prost::Message)]
+        struct PredecessorMlxDeviceAction {
+            #[prost(string, tag = "1")]
+            pci_name: String,
+            #[prost(oneof = "PredecessorCommand", tags = "7")]
+            command: Option<PredecessorCommand>,
+        }
+
+        #[derive(Clone, PartialEq, prost::Oneof)]
+        enum PredecessorCommand {
+            #[prost(message, tag = "7")]
+            ApplyFirmwareOperation(fac::MlxDeviceApplyFirmwareOperation),
+        }
+
+        #[derive(Clone, PartialEq, prost::Message)]
+        struct PredecessorMlxObservation {
+            #[prost(message, optional, tag = "6")]
+            firmware_operation: Option<mlx_device::FirmwareOperation>,
+        }
+
+        let action = fac::MlxDeviceAction {
+            pci_name: "0000:cc:00.0".into(),
+            command: Some(fac::mlx_device_action::Command::UpdateFirmware(
+                fac::MlxDeviceUpdateFirmware {
+                    operation_id: "nic-firmware:attempt".into(),
+                    phase_id: "update:1".into(),
+                    ..Default::default()
+                },
+            )),
+        };
+        let predecessor =
+            PredecessorMlxDeviceAction::decode(action.encode_to_vec().as_slice()).unwrap();
+
+        assert_eq!(predecessor.pci_name, action.pci_name);
+        assert_eq!(predecessor.command, None);
+
+        // The reverse direction has the same constraint: a generic success
+        // must never look like a completed DPA firmware attempt to old Core.
+        let observation = mlx_device::MlxObservation {
+            firmware_update_result: Some(mlx_device::MlxDeviceUpdateFirmwareResult {
+                operation_id: "nic-firmware:attempt".into(),
+                phase_id: "update:1".into(),
+                pci_name: "0000:cc:00.0".into(),
+                result: Some(
+                    mlx_device::mlx_device_update_firmware_result::Result::Receipt(
+                        mlx_device::FirmwareOperation {
+                            operation_id: "nic-firmware:attempt".into(),
+                            state: mlx_device::FirmwareOperationState::Complete.into(),
+                            report: Some(mlx_device::FirmwareFlashReport {
+                                flashed: true,
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                    ),
+                ),
+            }),
+            ..Default::default()
+        };
+        let predecessor =
+            PredecessorMlxObservation::decode(observation.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(predecessor.firmware_operation, None);
     }
 
     #[test]

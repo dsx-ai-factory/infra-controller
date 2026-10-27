@@ -151,12 +151,43 @@ impl FirmwareSource {
         match self {
             Self::Local { path } => resolve_local(path).await,
             Self::Http { url, credentials } => {
-                resolve_http(url, credentials.as_ref(), work_dir, SOURCE_TRANSFER_TIMEOUT).await
+                resolve_http(
+                    url,
+                    credentials.as_ref(),
+                    work_dir,
+                    SOURCE_TRANSFER_TIMEOUT,
+                    reqwest::redirect::Policy::default(),
+                )
+                .await
             }
             Self::Ssh(ssh_source) => {
                 resolve_ssh(ssh_source, work_dir, None, SOURCE_TRANSFER_TIMEOUT).await
             }
         }
+    }
+
+    /// Checked updates accept only unauthenticated HTTP(S), with no redirects.
+    /// Reuse the legacy transfer deadline and file-writing path, but never let
+    /// a redirect change the source policy established at admission.
+    pub(super) async fn resolve_for_update(&self, work_dir: &Path) -> FirmwareResult<PathBuf> {
+        let Self::Http {
+            url,
+            credentials: None,
+        } = self
+        else {
+            return Err(FirmwareError::ConfigError(
+                "firmware updates require unauthenticated HTTP(S) sources".into(),
+            ));
+        };
+        super::config::validate_update_source(url)?;
+        resolve_http(
+            url,
+            None,
+            work_dir,
+            SOURCE_TRANSFER_TIMEOUT,
+            reqwest::redirect::Policy::none(),
+        )
+        .await
     }
 
     // description returns a human-readable description of the
@@ -192,6 +223,7 @@ async fn resolve_http(
     credentials: Option<&Credentials>,
     work_dir: &Path,
     transfer_timeout: Duration,
+    redirects: reqwest::redirect::Policy,
 ) -> FirmwareResult<PathBuf> {
     // Extract filename from URL, falling back to a generic name.
     let filename = url::Url::parse(url)
@@ -213,7 +245,11 @@ async fn resolve_http(
 
     // Build the HTTP request with optional credentials. The `reqwest-tracing` middleware injects
     // the current span's W3C trace context into the outgoing request (#2438).
-    let client = reqwest_middleware::ClientBuilder::new(reqwest::Client::new())
+    let client = reqwest::Client::builder()
+        .redirect(redirects)
+        .build()
+        .map_err(|error| FirmwareError::HttpError(error.to_string()))?;
+    let client = reqwest_middleware::ClientBuilder::new(client)
         .with(reqwest_tracing::TracingMiddleware::default())
         .build();
     let mut request = client.get(url);
@@ -467,6 +503,78 @@ mod tests {
 
     use super::*;
 
+    /// Checked downloads reject the redirect itself, while the public legacy
+    /// resolver must still follow it and preserve the destination's bytes.
+    #[tokio::test]
+    async fn download_redirect_policy_preserves_legacy_and_rejects_checked_updates() {
+        #[derive(Clone, Copy, Debug)]
+        enum Submission {
+            Legacy,
+            Checked,
+        }
+
+        for submission in [Submission::Legacy, Submission::Checked] {
+            let directory = tempdir().unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}/image.bin", listener.local_addr().unwrap());
+            let (stop, stopped) = oneshot::channel();
+            let mut server = JoinSet::new();
+            server.spawn(async move {
+                tokio::pin!(stopped);
+                let mut requests = 0;
+                loop {
+                    let (stream, _) = tokio::select! {
+                        _ = &mut stopped => return requests,
+                        accepted = listener.accept() => accepted.unwrap(),
+                    };
+                    let mut stream = BufReader::new(stream);
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        assert_ne!(stream.read_line(&mut line).await.unwrap(), 0);
+                        if line == "\r\n" {
+                            break;
+                        }
+                    }
+                    requests += 1;
+                    let response = if requests == 1 {
+                        b"HTTP/1.1 302 Found\r\nLocation: /redirected.bin\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
+                    } else {
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nimage".as_slice()
+                    };
+                    stream.get_mut().write_all(response).await.unwrap();
+                }
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let source = FirmwareSource::http(url);
+                let result = match submission {
+                    Submission::Legacy => source.resolve(directory.path()).await,
+                    Submission::Checked => source.resolve_for_update(directory.path()).await,
+                };
+                stop.send(()).unwrap();
+                let requests = server.join_next().await.unwrap().unwrap();
+                match submission {
+                    Submission::Legacy => {
+                        let path = result.expect("legacy download follows redirects");
+                        assert_eq!(std::fs::read(path).unwrap(), b"image");
+                        assert_eq!(requests, 2);
+                    }
+                    Submission::Checked => {
+                        let error = result.expect_err("checked download rejects redirects");
+                        let FirmwareError::HttpError(message) = error else {
+                            panic!("expected HTTP redirect rejection, got {error:?}");
+                        };
+                        assert!(message.starts_with("HTTP 302"), "{message}");
+                        assert_eq!(requests, 1);
+                        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{submission:?} redirect handling exceeds watchdog"));
+        }
+    }
+
     /// A successful response header must not leave an unfinished body unbounded.
     #[tokio::test]
     async fn http_transfer_deadline_includes_the_response_body() {
@@ -499,7 +607,7 @@ mod tests {
 
         let transfer_timeout = Duration::from_secs(1);
         tokio::time::timeout(Duration::from_secs(5), async {
-            let transfer = resolve_http(&url, None, directory.path(), transfer_timeout);
+            let transfer = resolve_http(&url, None, directory.path(), transfer_timeout, reqwest::redirect::Policy::default());
             tokio::pin!(transfer);
             tokio::select! {
                 started = body_started => started.unwrap(),

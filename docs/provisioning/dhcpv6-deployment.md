@@ -1,19 +1,23 @@
-# Deploy DHCPv6 <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
+# Deploy DHCPv6
 
-Dynamic Host Configuration Protocol for IPv6 (DHCPv6) is opt-in and has not been deployed to production. The deployment work is tracked by [DHCP06](https://github.com/NVIDIA/infra-controller/issues/2388). Validate the target pod network and relay path before enabling it.
+Use this guide to enable NICo's opt-in Dynamic Host Configuration Protocol for IPv6 (DHCPv6) service. Prepare the managed network, enable the DHCPv6 workload, and verify address allocation through the site's relay. If you also need to boot hosts over IPv6, complete [Embedded iPXE Boot Over IPv6](#embedded-ipxe-boot-over-ipv6).
 
 The Core chart runs Kea DHCPv4 in `nico-dhcp` and, when enabled, Kea DHCPv6 in `nico-dhcp6`. The Deployments have separate pods, selectors, configuration, Services, probes, and rollouts. Both use the same image, hook library, ServiceAccount, client certificate, and application programming interface (API) identity. Both hooks call the same API through gRPC with mutual Transport Layer Security (mTLS). API role-based access control (RBAC) continues to apply.
 
 ## Network and Identity Requirements
 
+Before enabling the DHCPv6 workload, review the following requirements:
+
 - The DHCPv6 pod needs a routable IPv6 address on its listening interface and reachability to the API. An IPv6 Service alone does not assign an IPv6 address to a pod. Configure the cluster's Container Network Interface (CNI) plugin and eligible nodes accordingly.
 - Supply a site-unique, stable server identifier consisting of exactly 12 hexadecimal digits. Keep it unchanged across pod replacements and upgrades. Kea advertises a DHCP unique identifier (DUID) based on a link-layer address (DUID-LL), with Ethernet hardware type and this identifier. It does not generate or persist a pod-local identity.
 - Point IPv4 relays to the IPv4-only DHCP Service on UDP 67. Point IPv6 relays to the separate IPv6-only DHCP Service on UDP 547. A MetalLB deployment needs a distinct IPv6 virtual IP address (VIP) from an IPv6 address pool and a working route from the relay to that VIP.
-- Configure relays to supply RFC 6939 Client Link-Layer Address option 79 for clients whose DUID has no Ethernet media access control (MAC) address. These include enterprise-number DUIDs (DUID-EN) and universally unique identifier DUIDs (DUID-UUID).
+- Configure relays to supply option 79, defined in [RFC 6939: Client Link-Layer Address Option in DHCPv6](https://www.rfc-editor.org/rfc/rfc6939), for clients whose DUID has no Ethernet media access control (MAC) address. These include enterprise-number DUIDs (DUID-EN) and universally unique identifier DUIDs (DUID-UUID).
 - [Prepare the managed network](#prepare-the-managed-network) with an IPv6 prefix and the relay link-address before enabling DHCPv6.
 - DHCPv6 runs one replica with a `Recreate` rollout. The chart's `replicas` value controls DHCPv4 only and defaults to one. Enabling DHCPv6 does not restrict that setting. Leases use pod-local memfiles. Durable lease storage and active-writer coordination remain outside this deployment's supported scope.
 
 NICo accepts option 79 only from relay metadata, with Ethernet hardware type 1 and exactly six MAC bytes. That MAC takes precedence over a DUID-LL or DUID-LLT (link-layer address plus time) MAC. Mismatches produce a warning. If the relay supplies no usable option 79, NICo falls back to the Ethernet MAC in DUID-LL or DUID-LLT. Requests without either MAC source are dropped before API discovery (`no_mac_no_option79`). A missing or malformed client DUID is rejected even when option 79 is usable.
+
+The relay path supports one Relay-Forward envelope with hop count zero. Nested relay envelopes or a nonzero hop count are rejected before API discovery (`nested_relay`).
 
 Startup selects the first global-scope IPv6 address on the configured pod interface and binds Kea to that address explicitly. Use an interface with one routable pod IPv6 address. A missing address stops startup. Startup and readiness probes also require a bound IPv6 UDP 547 socket. Readiness checks the hook endpoint, and liveness checks the metrics HTTP server. These probes do not prove off-host routing or API allocation. Validate those with a representative client through the actual relay.
 
@@ -38,7 +42,138 @@ reserve_first = 5
 
 Apply the site configuration through the normal API deployment workflow, then confirm the stored segment contains both prefixes before enabling the DHCPv6 workload. Network definitions are applied only when the segment is first created. Adding `prefix_v6` or changing `dhcpv6_link_address` on an existing seeded segment only reports configuration drift. It does not update the stored prefixes. The network-segment command-line interface (CLI) and remote procedure calls (RPCs) provide no in-place prefix update. Existing IPv4 segments therefore need a reviewed segment migration before DHCPv6 can be enabled for their clients. Keep the DHCPv6 workload disabled until the segments it will serve are ready.
 
-## Helm Values
+## Enable the DHCPv6 Workload
+
+After preparing the managed network and relay path, add the following to the site's Helm values. Replace the example addresses and server identifier with site allocations. If you supply Domain Name System (DNS) servers, use reachable IPv6 recursive resolvers:
+
+```yaml
+nico-dhcp:
+  dhcp:
+    v6Enabled: true
+    # Replace with this site's stable identifier.
+    v6ServerIdentifier: "020000000001"
+    # Replace with a reachable IPv6 recursive resolver.
+    v6DnsServers: "2001:db8:10::53"
+  v6ExternalService:
+    enabled: true
+    annotations:
+      # Replace with the IPv6 relay VIP.
+      metallb.universe.tf/loadBalancerIPs: "2001:db8:10::67"
+```
+
+Apply through the site's normal Helm upgrade workflow, using the Core image and chart from the same repository revision as required by the [image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration). When upgrading from a revision without the `dhcp` and `v6ExternalService` maps, update both the chart and Core image. DSX, hardware-health, and PXE use their dual-stack listener defaults unless an explicit listener configuration overrides them. Setting `dhcp.v6Enabled: false` removes the v6 resources while preserving the v4 pod template. The v6 Deployment uses `Recreate` so old and replacement v6 pods do not serve simultaneously.
+
+The example enables address allocation, not HTTP boot. Refer to [Helm Values](#helm-values) for the complete settings and defaults, then complete [Deployment Verification and Metrics](#deployment-verification-and-metrics).
+
+## Deployment Verification and Metrics
+
+Validate address allocation with a representative DHCPv6 client through the actual relay and confirm that it receives an address from the managed IPv6 prefix. Before serving DUID-EN or DUID-UUID clients, verify that the relay supplies a usable option 79 with a representative client of that type.
+
+Both independent DHCP metrics targets use the configured port (1089 by default). With ServiceMonitor enabled, the common `app.kubernetes.io/metrics` label discovers both through the named `http` port. Check both pod targets after the exchange:
+
+```bash
+curl --noproxy '*' -fsS 'http://192.0.2.10:1089/metrics'
+curl --noproxy '*' -fsS 'http://[2001:db8:10::10]:1089/metrics'
+```
+
+Replace the example addresses with the actual v4 and v6 pod addresses. Confirm that the v6 request count increased and that the v4 endpoint remains independently reachable. [NICo Metrics](../observability/metrics.md) describes the metrics Service address-family policy and shared TCP listener behavior.
+
+## Embedded iPXE Boot Over IPv6
+
+Optional: complete this procedure to boot a host when DHCPv4 is unavailable. The host's UEFI firmware downloads and starts an iPXE EFI executable. That executable contains NICo's boot script, which configures networking and contacts the NICo PXE API for the next boot script.
+
+### Check the Boot Prerequisites
+
+Use a source revision containing both the DHCPv6 HTTP boot server support and the embedded IPv6 iPXE support listed in [Implementation References](#implementation-references). Build the Core image, chart, and EFI artifacts from that revision. For packaged deployments, check the [repository releases](https://github.com/dsx-ai-factory/infra-controller/releases) for both features and compatible EFI artifacts before enabling HTTP boot. Do not infer artifact support from the Core version alone.
+
+Prepare the boot network and firmware with the following:
+
+- A stateful DHCPv6 lease from NICo and router advertisements with the managed-address (`M`) flag set. Additional Stateless Address Autoconfiguration (SLAAC) addresses are allowed.
+- A relay that supplies the client's Ethernet MAC address in RFC 6939 option 79. Embedded iPXE uses DUID-UUID, so it needs this relay metadata even if firmware previously used DUID-LL or DUID-LLT.
+- UEFI firmware configured to HTTP boot over IPv6 and pass the boot URL to iPXE in its EFI device path. Loading an EFI file from local storage without that URL does not provide the PXE API endpoint.
+- IPv6 routing to the boot server and every HTTP or HTTPS payload endpoint used by the returned boot script, including redirect targets. Provide AAAA records for hostname endpoints and advertise reachable IPv6 recursive resolvers through `dhcp.v6DnsServers`. Refer to [Helm Values](#helm-values) and [Unbound IPv6 Transport](../configuration/dns.md#unbound-ipv6-transport).
+
+The stateful-lease requirement belongs to NICo's embedded script, not IPv6 itself. With only the other-configuration (`O`) flag, iPXE can obtain DHCPv6 configuration without a leased address, but NICo's script rejects that result. [Interface Selection](#interface-selection) explains the related multi-interface limitation.
+
+HTTPS endpoints require a certificate chain trusted by the deployed iPXE artifact. The build tasks retain upstream iPXE trust defaults and do not add a site-specific CA. A successful firmware download does not establish that iPXE trusts the same endpoint.
+
+### Build and Deploy the EFI Artifacts
+
+Follow [Generating Bootable Artifacts](../bootable_artifacts.md#3-build-ipxe-image) to build iPXE for each required architecture, `x86_64` or `aarch64`. The build tasks embed NICo's boot script and apply the HTTP IPv6 source-address patch.
+
+Follow [Publish the EFI Files](../bootable_artifacts.md#publish-the-efi-files) to replace the served files while preserving the other boot artifacts. Updating DHCP configuration or Core does not replace an EFI file served separately.
+
+### Configure the Boot Server
+
+Set `nico-dhcp.dhcp.v6ProvisioningServer` to the provisioning server's IPv6 address in umbrella chart values. Use the bare address, without brackets, a port, a CIDR suffix, or surrounding whitespace. An empty or whitespace-only value disables generated URLs. Other values that are not IPv6 literals fail hook initialization.
+
+For eligible UEFI HTTP boot clients, the DHCPv6 hook supplies option 59 with a URL in this format. The architecture is `x86_64` or `aarch64`:
+
+```text
+http://[<IPv6-address>]:8080/public/blobs/internal/<architecture>/ipxe.efi
+```
+
+The server must expose this path over IPv6 HTTP on TCP port 8080 to boot clients, including `ipxe.efi` for each required architecture. It must also expose `/api/v0/pxe/` on the same scheme and port. A static-file server alone is insufficient. Preserve the client's source address on PXE API requests: NICo identifies the booting interface from the connection's source IP, not `X-Forwarded-For`.
+
+For the bundled `nico-pxe` external Services, configure the following settings under `nico-pxe.externalService` in umbrella chart values. The address-family settings apply to both external ports, 8080 and 80:
+
+- Set `enabled` to `true`. The default is `false`.
+- Use `ipFamilyPolicy: RequireDualStack` when DHCPv4 or other IPv4 PXE clients still need these Services. Set `ipFamilies: [IPv4, IPv6]` for an IPv4-primary Service or `[IPv6, IPv4]` for an IPv6-primary Service.
+- Use `ipFamilyPolicy: SingleStack` with `ipFamilies: [IPv6]` only when no IPv4 exposure is needed through these Services. This configuration does not preserve IPv4 PXE access. Both family settings default to empty, which preserves Kubernetes defaults.
+- Keep `port` at its default of `8080` and `alternatePort` at its default of `80`. Setting `alternatePort` to `0` disables the companion Service on port 80.
+- Keep `externalTrafficPolicy` at its default of `Local` to preserve client source addresses. Route external traffic through nodes with serving PXE pods.
+
+An existing Service's primary address family, the first entry in `ipFamilies`, cannot change in place. Preserve that family when adding a second one.
+
+Provision an IPv6 address reachable from boot clients through the site's load balancer. Set `nico-dhcp.dhcp.v6ProvisioningServer` to that address. The chart does not automatically copy the Service address into this setting.
+
+For an explicit MetalLB address reservation, set `metallb.universe.tf/loadBalancerIPs` in `nico-pxe.externalService.annotations`. Use an IPv6 VIP from the site's IPv6 pool. For dual-stack exposure, include the retained IPv4 VIP and the IPv6 VIP as a comma-separated string. Omitting the annotation permits automatic address allocation. Configure the matching address pools and advertisement or routing.
+
+The cluster and CNI must provide IPv6 pod addresses and backend endpoints for PXE, and the PXE listener must accept IPv6 connections. An IPv6 Service or VIP alone does not provide IPv6 connectivity to its pods.
+
+Apply the values through the site's Helm upgrade workflow. Provisioning-address changes take effect after the DHCPv6 pod restarts. The configuration checksum triggers that rollout. [HTTP Boot Options](#http-boot-options) describes client eligibility and explicit API URL overrides.
+
+### Follow the Boot Sequence
+
+Firmware and iPXE configure networking separately. The handoff proceeds as follows:
+
+1. UEFI firmware downloads and starts `ipxe.efi` using the HTTP boot URL from DHCPv6 option 59 or a firmware-configured boot option. Firmware exposes that URL in its EFI device path, which iPXE uses as its current working URI (`cwuri`).
+2. NICo's embedded script tries DHCPv4 first. If DHCPv4 succeeds, it contacts the PXE API at `http://${next-server}` on port 80. A later HTTP failure does not switch to IPv6.
+3. If DHCPv4 fails, the script configures IPv6 and checks for a stateful DHCPv6 lease. It binds HTTP and HTTPS requests to that address and interface so NICo can identify the client, even when SLAAC adds another address.
+4. On the IPv6 path, iPXE requests `/api/v0/pxe/boot` using the firmware-provided URL's scheme, server, and port. The root-relative API path replaces the EFI-file path. It is not appended to the artifact's directory.
+5. iPXE executes the returned boot script. That script supplies its own payload URLs. Reusing the firmware's server for the PXE API does not rewrite them.
+
+For example, a firmware URL of `http://[2001:db8:10::10]:8080/public/blobs/internal/x86_64/ipxe.efi` gives iPXE the API endpoint `http://[2001:db8:10::10]:8080/api/v0/pxe/boot`. The machine-information request uses `/api/v0/pxe/whoami` on the same server and port. iPXE does not discover another server when that endpoint is unusable.
+
+Without site configuration or API overrides, the standard PXE template uses `http://carbide-pxe.forge` as its static payload base. That hostname needs an AAAA record and IPv6 reachability on port 80, even when firmware loads iPXE from an IPv6 literal on port 8080.
+
+### Verify the Boot Handoff
+
+Use a representative host through the actual relay path. Confirm each stage before proceeding to the next:
+
+1. Firmware retrieves the intended architecture's EFI artifact and starts NICo's embedded script, which prints the NICo version banner.
+2. iPXE obtains its own stateful DHCPv6 lease. A successful firmware lease alone does not prove this exchange works.
+3. The PXE API identifies the interface. The menu's **Print information about this machine** entry displays its stored hostname under the FQDN (fully qualified domain name) label, along with its MAC address. It does not display IP addresses, gateways, or DNS settings.
+4. The returned boot script retrieves its payloads and completes the intended operating-system boot.
+
+Firmware configuration and platform qualification are separate from the iPXE handoff, as tracked in [Configure Hosts to HTTP Boot Over IPv6](https://github.com/dsx-ai-factory/infra-controller/issues/7173). Reaching iPXE or the PXE API does not establish a complete Core-managed operating-system boot.
+
+### Diagnose the Embedded Handoff
+
+If IPv6 configuration fails, iPXE exits before checking for a lease or boot URL. Check router advertisements and the DHCPv6 exchange through the relay. After configuration succeeds, a missing prerequisite produces one of these diagnostics:
+
+| Message | Check |
+| --- | --- |
+| "NICo IPv6 boot requires a stateful DHCPv6 lease." | Confirm that router advertisements set `M` and the selected interface receives a lease. SLAAC with only `O` does not satisfy the embedded script. |
+| "NICo IPv6 boot requires an inherited HTTP boot URI." | Confirm that firmware passes the HTTP or HTTPS URL used to load `ipxe.efi` in its EFI device path. |
+
+For a fetch failure, check IPv6 reachability, DNS, the boot URL's port, and the root-relative API paths. While HTTP source binding is active, an IPv4-only destination does not trigger IPv4 fallback. This also applies to redirects and payload URLs.
+
+If the returned script reports "Failed to fetch custom_ipxe", inspect the accompanying Core error. For an unknown host interface, confirm that NICo records the client's address and the PXE API receives that same source address. A proxy or NAT that substitutes another source address prevents this lookup. The machine-information errors "Could not load interface" and "Could not load instructions" indicate missing discovery data in the API response.
+
+## Reference
+
+### Helm Values
 
 Set these under `nico-dhcp:` in umbrella chart values, or at the top level for a direct `nico-dhcp` subchart installation.
 
@@ -51,7 +186,7 @@ Default: `eth0`. Pod interface name used by DHCPv6. The template also supplies t
 </ParamField>
 
 <ParamField path="dhcp.v6DnsServers" type="string">
-Default: empty. Comma-separated IPv6 literals for Domain Name System (DNS) resolvers, emitted in DHCPv6 option 23 in input order. Whitespace is trimmed, empty entries are skipped, and duplicates are retained. An empty value omits the option.
+Default: empty. Comma-separated IPv6 literals for DNS resolvers, emitted in DHCPv6 option 23 in input order. Whitespace is trimmed, empty entries are skipped, and duplicates are retained. An empty value omits the option.
 </ParamField>
 
 <ParamField path="dhcp.v6Enabled" type="boolean">
@@ -63,7 +198,7 @@ Default: empty. Comma-separated IPv6 literals, emitted in option 56 as Network T
 </ParamField>
 
 <ParamField path="dhcp.v6ProvisioningServer" type="string">
-Default: empty. Optional IPv6 literal for HTTP boot URLs generated by the DHCPv6 hook. Omission or an empty value disables URL generation. [HTTP Boot Options](#http-boot-options) describes image requirements, client conditions, and reply options.
+Default: empty. Optional IPv6 literal for HTTP boot URLs generated by the DHCPv6 hook. Omission or an empty value disables URL generation. [Configure the Boot Server](#configure-the-boot-server) describes deployment requirements, and [HTTP Boot Options](#http-boot-options) describes client conditions and reply options.
 </ParamField>
 
 <ParamField path="dhcp.v6RapidCommit" type="boolean">
@@ -90,34 +225,11 @@ The four v6 hook values render as `hook-dns-servers-ipv6`, `hook-ntp-servers-ipv
 
 DHCPv6 reuses `config.kea.hookParameters.nicoApiUrl`. An empty value derives the API URL from `apiServiceName` and `namespaceOverride`, falling back to the release namespace when `namespaceOverride` is empty. Its metrics listener binds `[::]:<metrics.port>`. DHCPv4 structured configuration preserves the complete address and port from `config.kea.hookParameters.nicoMetricsEndpoint`. Set its port to match `metrics.port` for Service scraping. The v4 `config.enabled` and `config.keaConfigJsonRaw` controls apply only to the v4 ConfigMap. A raw or externally managed v4 configuration must itself match the metrics Service port.
 
-For a site whose IPv6 networking is ready, an enablement values file can contain:
+### HTTP Boot Options
 
-```yaml
-nico-dhcp:
-  dhcp:
-    v6Enabled: true
-    # Replace with this site's stable identifier.
-    v6ServerIdentifier: "020000000001"
-    # Replace with a reachable IPv6 recursive resolver.
-    v6DnsServers: "2001:db8:10::53"
-  v6ExternalService:
-    enabled: true
-    annotations:
-      # Replace with the IPv6 relay VIP.
-      metallb.universe.tf/loadBalancerIPs: "2001:db8:10::67"
-```
+[Check the Boot Prerequisites](#check-the-boot-prerequisites) and [Configure the Boot Server](#configure-the-boot-server) describe the required artifacts, firmware, and server configuration.
 
-Apply through the site's normal Helm upgrade workflow, using the Core image and chart from the same repository revision as required by the [image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration). When upgrading from a revision without the `dhcp` and `v6ExternalService` maps, update both the chart and Core image. DSX, hardware-health, and PXE use their dual-stack listener defaults unless an explicit listener configuration overrides them. Setting `dhcp.v6Enabled: false` removes the v6 resources while preserving the v4 pod template. The v6 Deployment uses `Recreate` so old and replacement v6 pods do not serve simultaneously.
-
-## HTTP Boot Options
-
-HTTP boot option support is unreleased and is not included in NICo v2.2.1. For source builds, use a Core image containing [the implementation in PR #7574](https://github.com/dsx-ai-factory/infra-controller/pull/7574). This implements [site DHCPv6 HTTP boot support](https://github.com/dsx-ai-factory/infra-controller/issues/7171).
-
-Set `dhcp.v6ProvisioningServer` to the provisioning server's IPv6 address, without brackets, a port, a CIDR suffix, or surrounding whitespace. An empty or whitespace-only value disables generated URLs. Other values that are not IPv6 literals fail hook initialization.
-
-Provisioning-address changes take effect after the DHCPv6 pod restarts. Helm upgrades trigger a rollout through the configuration checksum.
-
-The following rules control options added by the hook. The hook adds boot options only for SOLICIT, REQUEST, RENEW, REBIND, and INFORMATION-REQUEST, not CONFIRM, RELEASE, or DECLINE. Stateful replies that refuse address allocation receive no hook-added boot options. Options-only requests remain eligible.
+The DHCPv6 hook adds boot options only for SOLICIT, REQUEST, RENEW, REBIND, and INFORMATION-REQUEST, not CONFIRM, RELEASE, or DECLINE. Stateful replies that refuse address allocation receive no hook-added boot options. Options-only requests remain eligible.
 
 When the hook adds option 59, 16, or 61, it replaces the corresponding native Kea `option-data` value. If the hook does not add one of these options, it leaves any native value for that option unchanged.
 
@@ -132,19 +244,7 @@ For generation, the client's vendor-class option 16 must include a data entry ex
 - Architecture code 16 selects the `x86_64` directory.
 - Architecture code 19 selects the `aarch64` directory.
 
-Other architecture codes are skipped. Without a supported architecture in option 61, the hook does not generate a URL. Architecture text in the vendor-class string does not replace option 61. The generated URL uses this format:
-
-```text
-http://[<IPv6-address>]:8080/public/blobs/internal/<architecture>/ipxe.efi
-```
-
-The server must expose this path over IPv6 HTTP on TCP port 8080 to boot clients, including `ipxe.efi` for each required architecture. For the bundled `nico-pxe` external Service, configure the following settings under `nico-pxe.externalService` in umbrella chart values:
-
-- Set `enabled` to `true`. The default is `false`.
-- Set `ipFamilyPolicy` to `SingleStack` with `ipFamilies: [IPv6]`, or to `RequireDualStack` with `ipFamilies: [IPv4, IPv6]`. Both settings default to empty, which preserves Kubernetes defaults.
-- Keep `port` at its default of `8080`.
-
-An existing Service's primary address family, the first entry in `ipFamilies`, cannot change in place. Preserve that family when adding a second one.
+Other architecture codes are skipped. Without a supported architecture in option 61, the hook does not generate a URL. Architecture text in the vendor-class string does not replace option 61.
 
 For a generated URL, the hook also adds option 61 with only the selected architecture, whether or not the ORO requests option 61. It adds no architecture option for an explicit API `booturl`.
 
@@ -157,17 +257,30 @@ The hook adds the `HTTPClient` marker in option 16 only when it returns option 5
 
 The reply preserves the enterprise number from the matching request vendor class and returns the bare `HTTPClient` value. With a hostname or IPv4-literal URL and no IPv6 DNS, the hook still adds option 59 but omits the `HTTPClient` marker. This preserves compatibility with EFI Development Kit II (EDK2) firmware, which can reject a marked offer before trying a firmware-configured URL without IPv6 DNS.
 
-Finishing HTTP boot also requires [firmware support for HTTP boot over IPv6](https://github.com/dsx-ai-factory/infra-controller/issues/7173) and an [embedded iPXE script that works without DHCPv4](https://github.com/dsx-ai-factory/infra-controller/issues/7172).
+### Interface Selection
 
-## Deployment Verification and Metrics
+The supplied `ipxe.efi` uses the firmware's boot network device (`snponly`). Native-driver variants such as `golan.efi` can expose multiple supported interfaces. The following selection rule applies to interfaces visible to the chosen build.
 
-Validate address allocation with a representative DHCPv6 client through the actual relay and confirm that it receives an address from the managed IPv6 prefix. Before serving DUID-EN or DUID-UUID clients, verify that the relay supplies a usable option 79 with a representative client of that type.
+iPXE's IPv6 configuration command stops at the first successfully configured interface. NICo's embedded script checks for a DHCPv6 lease only after that selection. If the selected interface has only a SLAAC address, the script exits with the missing-lease diagnostic. It does not try the next interface.
 
-Both independent DHCP metrics targets use the configured port (1089 by default). With ServiceMonitor enabled, the common `app.kubernetes.io/metrics` label discovers both through the named `http` port. Check both pod targets after the exchange:
+Provide stateful DHCPv6 on the interface iPXE selects. Supporting SLAAC-only results or continuing to another suitable interface requires an embedded-script change, not a DHCP server setting.
 
-```bash
-curl --noproxy '*' -fsS 'http://192.0.2.10:1089/metrics'
-curl --noproxy '*' -fsS 'http://[2001:db8:10::10]:1089/metrics'
-```
+### Custom Scripts and Network Reconfiguration
 
-Replace the example addresses with the actual v4 and v6 pod addresses. Confirm that the v6 request count increased and that the v4 endpoint remains independently reachable. [NICo Metrics](../observability/metrics.md) describes the metrics Service address-family policy and shared TCP listener behavior.
+The `http-source6` setting binds HTTP and HTTPS requests to an IPv6 address and interface. NICo sets it to the DHCPv6 lease on the IPv6 boot path. Network commands in a custom script do not clear this setting automatically.
+
+To rerun NICo's network configuration, press p at the boot or retry prompt and choose **Boot according to NICo workflow**. This action clears `http-source6`, tries DHCPv4, and establishes a new binding if it selects IPv6. **Print information about this machine** also reruns network configuration. **Retry boot** returns to the startup prompt, which runs the workflow after a four-second timeout. An idle menu selects the workflow after five seconds. Entering the menu or **iPXE Debug Shell** does not itself clear the binding.
+
+A custom script can run `clear http-source6` before payload downloads that need normal address-family and source-address selection. Clearing the setting does not configure IPv4 or add routes. Keep or restore an address that NICo recognizes before making further PXE API requests.
+
+On either address-family path, iPXE retries a failed one-time custom PXE script if the response marks it retryable. It waits 30 seconds and executes the cached script again without another `/api/v0/pxe/boot` request. A cached retry does not rerun network configuration, so it retains any `http-source6` change made by your script. Retries continue until execution succeeds or you press p during the retry prompt to return to the menu. Payload downloads can repeat.
+
+Starting the NICo workflow again, including through a menu timeout, discards that cached script and sends a new boot request. Core consumes a one-time request when it supplies the script, not when the script finishes successfully. Submit another one-time request if you need the new workflow to fetch it again.
+
+### Implementation References
+
+The following references identify the source changes and their tracked scope:
+
+- [DHCP/06: Deploy Kea DHCPv6, Metrics, and Helm](https://github.com/dsx-ai-factory/infra-controller/issues/2388) tracks the opt-in service deployment.
+- [feat(dhcp): return HTTP boot URLs from the site DHCPv6 server](https://github.com/dsx-ai-factory/infra-controller/pull/7574) implements [Return HTTP Boot URLs From the Site DHCPv6 Server](https://github.com/dsx-ai-factory/infra-controller/issues/7171).
+- [feat(ipxe): boot from IPv6-only provisioning networks](https://github.com/dsx-ai-factory/infra-controller/pull/7650) implements [Boot Through the Embedded iPXE Script on IPv6-Only Networks](https://github.com/dsx-ai-factory/infra-controller/issues/7172).

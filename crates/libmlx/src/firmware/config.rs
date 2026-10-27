@@ -29,6 +29,7 @@ use std::time::Duration;
 
 pub use carbide_libmlx_model::firmware::FirmwareSpec;
 use rpc::protos::mlx_device::{
+    FirmwareArtifactDigests as FirmwareArtifactDigestsPb,
     FirmwareFlasherProfile as FirmwareFlasherProfilePb, FlashOptions as FlashOptionsPb,
     FlashSpec as FlashSpecPb,
 };
@@ -38,6 +39,134 @@ use crate::firmware::credentials::Credentials;
 use crate::firmware::error::{FirmwareError, FirmwareResult};
 use crate::firmware::reset::DEFAULT_RESET_LEVEL;
 use crate::firmware::source::FirmwareSource;
+
+/// `FirmwareArtifactDigests` identifies the exact bytes approved for an update.
+/// Wire digests must be 64 lowercase hexadecimal characters; configuration is
+/// required exactly when the profile supplies a configuration source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirmwareArtifactDigests {
+    /// SHA-256 of the firmware image before any hardware mutation.
+    pub image_sha256: [u8; 32],
+    /// SHA-256 of optional configuration applied before the image burn.
+    pub configuration_sha256: Option<[u8; 32]>,
+}
+
+impl TryFrom<FirmwareArtifactDigestsPb> for FirmwareArtifactDigests {
+    type Error = FirmwareError;
+
+    fn try_from(value: FirmwareArtifactDigestsPb) -> Result<Self, Self::Error> {
+        fn parse(value: &str) -> FirmwareResult<[u8; 32]> {
+            if value.len() != 64
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(FirmwareError::ConfigError(
+                    "firmware SHA-256 must contain 64 lowercase hexadecimal characters".into(),
+                ));
+            }
+            let mut digest = [0; 32];
+            hex::decode_to_slice(value, &mut digest)
+                .map_err(|_| FirmwareError::ConfigError("invalid firmware SHA-256".into()))?;
+            Ok(digest)
+        }
+        Ok(Self {
+            image_sha256: parse(&value.image_sha256)?,
+            configuration_sha256: value
+                .configuration_sha256
+                .as_deref()
+                .map(parse)
+                .transpose()?,
+        })
+    }
+}
+
+impl From<FirmwareArtifactDigests> for FirmwareArtifactDigestsPb {
+    fn from(value: FirmwareArtifactDigests) -> Self {
+        Self {
+            image_sha256: hex::encode(value.image_sha256),
+            configuration_sha256: value.configuration_sha256.map(hex::encode),
+        }
+    }
+}
+
+/// `FirmwareUpdateContext` pins a checked workflow to its whole-workflow phase ID
+/// and approved artifact bytes. It is immutable once the operation is admitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirmwareUpdateContext {
+    /// Whole-workflow phase ID containing 1-256 printable nonspace ASCII bytes.
+    pub phase_id: String,
+    /// Expected image and optional configuration bytes, checked before mutation.
+    pub expected_digests: FirmwareArtifactDigests,
+}
+
+impl FirmwareUpdateContext {
+    /// `validate` rejects malformed phase IDs, missing/extra configuration
+    /// digests, and sources outside unauthenticated HTTP(S). URLs may not contain
+    /// user information, query strings, or fragments. Downloads reject redirects.
+    /// Legacy submissions retain their separate, broader source contract.
+    pub fn validate(&self, profile: &FirmwareFlasherProfile) -> FirmwareResult<()> {
+        if self.phase_id.is_empty()
+            || self.phase_id.len() > 256
+            || !self.phase_id.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            return Err(FirmwareError::ConfigError(
+                "firmware phase ID must contain 1-256 printable nonspace ASCII bytes".into(),
+            ));
+        }
+        let source = &profile.flash_spec;
+        if source.device_conf_url.is_some() != self.expected_digests.configuration_sha256.is_some()
+        {
+            return Err(FirmwareError::ConfigError(
+                "configuration source and SHA-256 must either both be present or both be absent"
+                    .into(),
+            ));
+        }
+        if source.firmware_credentials.is_some() || source.device_conf_credentials.is_some() {
+            return Err(FirmwareError::ConfigError(
+                "firmware updates require unauthenticated artifact sources".into(),
+            ));
+        }
+        for source in
+            std::iter::once(source.firmware_url.as_str()).chain(source.device_conf_url.as_deref())
+        {
+            validate_update_source(source)?;
+        }
+        Ok(())
+    }
+}
+
+/// Validate without echoing a URL that may contain an unsupported credential.
+pub(super) fn validate_update_source(source: &str) -> FirmwareResult<()> {
+    // The WHATWG parser strips whitespace and normalizes empty userinfo. Check
+    // the literal source first so normalization cannot admit those forms.
+    let authority_has_no_userinfo = source.split_once("://").is_some_and(|(_, rest)| {
+        rest.split(['/', '?', '#'])
+            .next()
+            .is_some_and(|authority| !authority.contains('@'))
+    });
+    let valid = (source.starts_with("http://") || source.starts_with("https://"))
+        && source.trim() == source
+        && !source.chars().any(char::is_control)
+        && authority_has_no_userinfo
+        && url::Url::parse(source).is_ok_and(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.has_host()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+        });
+    if !valid {
+        return Err(FirmwareError::ConfigError(
+            "firmware update sources require HTTP(S) URLs without credentials, query, or fragment"
+                .into(),
+        ));
+    }
+    Ok(())
+}
 
 /// `FlashSpec` identifies the image and optional configuration sources used by
 /// preparation and standalone image verification.
@@ -577,6 +706,138 @@ impl TryFrom<FirmwareFlasherProfilePb> for FirmwareFlasherProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Wire digests must use exactly 64 lowercase hexadecimal characters.
+    /// Conversion must reject other spellings and preserve valid digests.
+    #[test]
+    fn update_digest_wire_format_is_lowercase_sha256() {
+        use carbide_test_support::value_scenarios;
+
+        value_scenarios!(run = |value: &str| FirmwareArtifactDigests::try_from(
+            FirmwareArtifactDigestsPb { image_sha256: value.into(), configuration_sha256: None }
+        ).map(|value| FirmwareArtifactDigestsPb::from(value).image_sha256).ok();
+            "canonical bytes round trip" {
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" =>
+                    Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into()),
+            }
+            "alternate or malformed representations fail" {
+                "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF" => None,
+                "00" => None,
+                "g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" => None,
+            }
+        );
+    }
+
+    /// Checked source validation rejects credential-bearing forms before any
+    /// caller, daemon, or error text can forward them to the legacy resolver.
+    #[test]
+    fn update_sources_are_unauthenticated_http_without_query_or_fragment() {
+        use carbide_test_support::Outcome::{Fails, Yields};
+        use carbide_test_support::scenarios;
+
+        scenarios!(run = |source: &str| validate_update_source(source).map_err(drop);
+            "plain HTTP and HTTPS sources" {
+                "https://artifacts.example/image.bin" => Yields(()),
+                "http://[::1]:8080/image.bin" => Yields(()),
+            }
+            "source forms outside the checked transport contract" {
+                "file:///image.bin" => Fails,
+                "ssh://host:image.bin" => Fails,
+                "https://user:password@host/image.bin" => Fails,
+                "https://@host/image.bin" => Fails,
+                "https://host/image.bin?token=secret" => Fails,
+                "https://host/image.bin#fragment" => Fails,
+                "https://host/image.bin " => Fails,
+                "https://host/im\tage.bin" => Fails,
+            }
+        );
+    }
+
+    /// Configuration bytes must be covered by a digest whenever configuration
+    /// will run; an orphan digest must not silently describe skipped work.
+    #[test]
+    fn update_context_requires_configuration_and_digest_together() {
+        let profile = FirmwareFlasherProfile::from_toml(
+            r#"
+            part_number = "part"
+            psid = "psid"
+            version = "version"
+            firmware_url = "https://host/image.bin"
+        "#,
+        )
+        .unwrap();
+        for (scenario, source, digest, valid) in [
+            ("no configuration requested", None, None, true),
+            (
+                "configuration is covered",
+                Some("https://host/config.bin"),
+                Some([1; 32]),
+                true,
+            ),
+            (
+                "configuration lacks its digest",
+                Some("https://host/config.bin"),
+                None,
+                false,
+            ),
+            (
+                "digest describes no requested configuration",
+                None,
+                Some([1; 32]),
+                false,
+            ),
+        ] {
+            let mut profile = profile.clone();
+            profile.flash_spec.device_conf_url = source.map(str::to_owned);
+            let context = FirmwareUpdateContext {
+                phase_id: "dispatch-1".into(),
+                expected_digests: FirmwareArtifactDigests {
+                    image_sha256: [0; 32],
+                    configuration_sha256: digest,
+                },
+            };
+            assert_eq!(context.validate(&profile).is_ok(), valid, "{scenario}");
+        }
+    }
+
+    /// Plain URLs do not make explicit authentication safe. Both credential
+    /// fields must be absent before a checked update can be admitted.
+    #[test]
+    fn update_context_rejects_explicit_artifact_credentials() {
+        use carbide_test_support::Outcome::Fails;
+        use carbide_test_support::scenarios;
+
+        let profile = FirmwareFlasherProfile::from_toml(
+            r#"
+            part_number = "part"
+            psid = "psid"
+            version = "version"
+            firmware_url = "https://host/image.bin"
+            device_conf_url = "https://host/config.bin"
+        "#,
+        )
+        .unwrap();
+        let context = FirmwareUpdateContext {
+            phase_id: "dispatch-1".into(),
+            expected_digests: FirmwareArtifactDigests {
+                image_sha256: [0; 32],
+                configuration_sha256: Some([1; 32]),
+            },
+        };
+        scenarios!(run = |(image, configuration): (Option<Credentials>, Option<Credentials>)| {
+            let mut profile = profile.clone();
+            profile.flash_spec.firmware_credentials = image;
+            profile.flash_spec.device_conf_credentials = configuration;
+            context.validate(&profile).map_err(drop)
+        };
+            "image authentication" {
+                (Some(Credentials::bearer_token("image-secret")), None) => Fails,
+            }
+            "configuration authentication" {
+                (None, Some(Credentials::basic_auth("user", "config-secret"))) => Fails,
+            }
+        );
+    }
 
     /// Resolve caller-local references without reading files, so retries still
     /// identify accepted work after the original inputs have been removed.

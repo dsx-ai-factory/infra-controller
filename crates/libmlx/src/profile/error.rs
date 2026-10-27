@@ -80,7 +80,10 @@ pub enum MlxProfileError {
     // Runner is returned when the underlying mlxconfig-runner
     // returns an error while trying to sync or compare.
     #[error("MLX runner error: {error}")]
-    Runner { error: MlxRunnerError },
+    Runner {
+        #[source]
+        error: MlxRunnerError,
+    },
 
     // Io is returned for a general I/O error.
     #[error("I/O error: {error}")]
