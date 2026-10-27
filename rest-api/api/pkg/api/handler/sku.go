@@ -4,17 +4,20 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"reflect"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"go.opentelemetry.io/otel/attribute"
 	tclient "go.temporal.io/sdk/client"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
@@ -499,42 +502,96 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
 
-	var response corev1.SkuList
-	apiErr = common.ExecuteCoreGRPC(
-		ctx,
-		stc,
-		corev1.Forge_FindSkusByIds_FullMethodName,
-		&corev1.SkusByIdsRequest{Ids: []string{skuID}},
-		&response,
-		siteID,
-	)
-	if apiErr == nil && len(response.Skus) != 1 {
-		apiErr = cutil.NewAPIError(http.StatusNotFound, "Could not find SKU with the specified ID", nil)
-	}
-	if apiErr != nil {
-		logAPIError(logger, apiErr, "failed to retrieve SKU before update")
-		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
-	}
+	// All Core calls share one wait budget. Keep DB work on the request context
+	// so exhausting that budget after a completed update does not prevent saving it.
+	rpcCtx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+	defer cancel()
 
 	apiReq.SkuID = skuID
 
 	coreSKU := &corev1.Sku{}
-	if apiReq.Components == nil {
-		coreSKU = response.Skus[0]
-		logger.Info().Str("skuID", skuID).Str("siteID", siteID).Msg("updating SKU metadata via Core proxy")
-		apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_UpdateSkuMetadata_FullMethodName, apiReq.ToMetadataProto(), nil, siteID)
+	useComponentReplacement := false
+	if apiReq.Components != nil {
+		if rpcCtx.Err() != nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusGatewayTimeout, "SKU update timed out before Core could apply it", nil)
+		}
+		var buildInfo structpb.Struct
+		apiErr = common.ExecuteCoreGRPC(rpcCtx, stc, corev1.Forge_Version_FullMethodName, &corev1.VersionRequest{}, &buildInfo, siteID)
 		if apiErr != nil {
-			logAPIError(logger, apiErr, "failed to update SKU metadata via Core proxy")
+			// Discovery is read-only, so a failed probe can still use
+			// `FindSkusByIds` and `ReplaceSku` while the request is live.
+			logger.Warn().Err(apiErr.Diagnosis()).Msg("failed to check SKU component replacement support")
+		} else {
+			// A Site Agent that knows this capability's name also has the RPC
+			// in its compiled registry. Older agents emit a number, which keeps
+			// full replacement. Decoding into `BuildInfo` loses that distinction.
+			capabilities := buildInfo.GetFields()["capabilities"].GetListValue().GetValues()
+			useComponentReplacement = slices.ContainsFunc(capabilities, func(capability *structpb.Value) bool {
+				return capability.GetStringValue() == corev1.BuildCapability_BUILD_CAPABILITY_REPLACE_SKU_COMPONENTS.String()
+			})
+		}
+	}
+
+	if rpcCtx.Err() != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusGatewayTimeout, "SKU update timed out before Core could apply it", nil)
+	}
+	var method string
+	if useComponentReplacement {
+		method = corev1.Forge_ReplaceSkuComponents_FullMethodName
+		logger.Info().Str("skuID", skuID).Str("siteID", siteID).Msg("replacing SKU components via Core proxy")
+		apiErr = common.ExecuteCoreGRPC(rpcCtx, stc, method, apiReq.ToComponentReplacementProto(), coreSKU, siteID)
+		if apiErr != nil && skuComponentReplacementRejected(apiErr) {
+			// During an upgrade the probe and update can reach different Agent or
+			// Core versions. Only a rejection before dispatch permits `ReplaceSku`;
+			// any other failure may follow a completed update.
+			logger.Warn().Err(apiErr.Diagnosis()).Msg("SKU component replacement rejected before dispatch; using full replacement")
+			useComponentReplacement = false
+		}
+	}
+	if !useComponentReplacement {
+		if rpcCtx.Err() != nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusGatewayTimeout, "SKU update timed out before Core could apply it", nil)
+		}
+		// `UpdateSkuMetadata` returns no record, so metadata updates need this
+		// snapshot. Full replacement also needs it to fill in omitted metadata.
+		var response corev1.SkuList
+		apiErr = common.ExecuteCoreGRPC(
+			rpcCtx,
+			stc,
+			corev1.Forge_FindSkusByIds_FullMethodName,
+			&corev1.SkusByIdsRequest{Ids: []string{skuID}},
+			&response,
+			siteID,
+		)
+		if apiErr == nil && len(response.Skus) != 1 {
+			apiErr = cutil.NewAPIError(http.StatusNotFound, "Could not find SKU with the specified ID", nil)
+		}
+		if apiErr != nil {
+			logAPIError(logger, apiErr, "failed to retrieve SKU before update")
 			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
 		}
-	} else {
-		updatedReq := apiReq.ToReplacementProto(response.Skus[0])
-		logger.Info().Str("skuID", skuID).Str("siteID", siteID).Msg("updating SKU via Core proxy")
-		apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceSku_FullMethodName, updatedReq, coreSKU, siteID)
-		if apiErr != nil {
-			logAPIError(logger, apiErr, "failed to update SKU via Core proxy")
-			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+		if rpcCtx.Err() != nil {
+			return cutil.NewAPIErrorResponse(c, http.StatusGatewayTimeout, "SKU update timed out before Core could apply it", nil)
 		}
+
+		if apiReq.Components == nil {
+			coreSKU = response.Skus[0]
+			method = corev1.Forge_UpdateSkuMetadata_FullMethodName
+			logger.Info().Str("skuID", skuID).Str("siteID", siteID).Msg("updating SKU metadata via Core proxy")
+			apiErr = common.ExecuteCoreGRPC(rpcCtx, stc, method, apiReq.ToMetadataProto(), nil, siteID)
+		} else {
+			method = corev1.Forge_ReplaceSku_FullMethodName
+			logger.Info().Str("skuID", skuID).Str("siteID", siteID).Msg("replacing full SKU via Core proxy")
+			apiErr = common.ExecuteCoreGRPC(rpcCtx, stc, method, apiReq.ToReplacementProto(response.Skus[0]), coreSKU, siteID)
+		}
+	}
+	if apiErr != nil {
+		logger.Error().Str("method", method).Err(apiErr.Diagnosis()).Msg("failed to update SKU via Core proxy")
+		if method == corev1.Forge_ReplaceSkuComponents_FullMethodName && apiErr.Code == http.StatusNotFound {
+			// Keep the response callers received when the preceding Find failed.
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find SKU with the specified ID", nil)
+		}
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
 	}
 
 	if coreSKU == nil || coreSKU.Id == "" {
@@ -542,7 +599,7 @@ func (ush UpdateSkuHandler) Handle(c echo.Context) error {
 	} else {
 		projected := &cdbm.SKU{}
 		projected.FromProto(coreSKU, savedSKU.SiteID)
-		// Component replacement uses metadata from `ReplaceSku`, preserving
+		// Component replacement uses metadata from Core's response, preserving
 		// the saved device type when Core omits it.
 		description := &projected.Description
 		deviceType := projected.DeviceType

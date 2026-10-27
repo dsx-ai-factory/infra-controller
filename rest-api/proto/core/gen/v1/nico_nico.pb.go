@@ -602,6 +602,8 @@ type BuildCapability int32
 const (
 	BuildCapability_BUILD_CAPABILITY_UNSPECIFIED BuildCapability = 0
 	BuildCapability_BUILD_CAPABILITY_VPC_SLAAC   BuildCapability = 1
+	// ReplaceSkuComponents preserves metadata omitted by the caller.
+	BuildCapability_BUILD_CAPABILITY_REPLACE_SKU_COMPONENTS BuildCapability = 2
 )
 
 // Enum value maps for BuildCapability.
@@ -609,10 +611,12 @@ var (
 	BuildCapability_name = map[int32]string{
 		0: "BUILD_CAPABILITY_UNSPECIFIED",
 		1: "BUILD_CAPABILITY_VPC_SLAAC",
+		2: "BUILD_CAPABILITY_REPLACE_SKU_COMPONENTS",
 	}
 	BuildCapability_value = map[string]int32{
-		"BUILD_CAPABILITY_UNSPECIFIED": 0,
-		"BUILD_CAPABILITY_VPC_SLAAC":   1,
+		"BUILD_CAPABILITY_UNSPECIFIED":            0,
+		"BUILD_CAPABILITY_VPC_SLAAC":              1,
+		"BUILD_CAPABILITY_REPLACE_SKU_COMPONENTS": 2,
 	}
 )
 
@@ -81642,10 +81646,11 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x11ROTATION_DPU_UEFI\x10\x03\x12\x11\n" +
 	"\rROTATION_NVOS\x10\x04\x12\x19\n" +
 	"\x15ROTATION_LOCKDOWN_IKM\x10\x05\x12\x1c\n" +
-	"\x18ROTATION_DPU_BMC_SERVICE\x10\x06*S\n" +
+	"\x18ROTATION_DPU_BMC_SERVICE\x10\x06*\x80\x01\n" +
 	"\x0fBuildCapability\x12 \n" +
 	"\x1cBUILD_CAPABILITY_UNSPECIFIED\x10\x00\x12\x1e\n" +
-	"\x1aBUILD_CAPABILITY_VPC_SLAAC\x10\x01*\x89\x01\n" +
+	"\x1aBUILD_CAPABILITY_VPC_SLAAC\x10\x01\x12+\n" +
+	"'BUILD_CAPABILITY_REPLACE_SKU_COMPONENTS\x10\x02*\x89\x01\n" +
 	"\x15VpcVirtualizationType\x12\x18\n" +
 	"\x14ETHERNET_VIRTUALIZER\x10\x00\x12&\n" +
 	"\x1eETHERNET_VIRTUALIZER_WITH_NVUE\x10\x02\x1a\x02\b\x01\x12\x0f\n" +

@@ -1939,6 +1939,8 @@ message VersionRequest {
 enum BuildCapability {
   BUILD_CAPABILITY_UNSPECIFIED = 0;
   BUILD_CAPABILITY_VPC_SLAAC = 1;
+  // ReplaceSkuComponents preserves metadata omitted by the caller.
+  BUILD_CAPABILITY_REPLACE_SKU_COMPONENTS = 2;
 }
 
 message BuildInfo {
