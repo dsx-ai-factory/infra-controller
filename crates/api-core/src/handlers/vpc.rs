@@ -29,7 +29,7 @@ use db::resource_pool::{ResourcePoolAllocationNotOwned, ResourcePoolDatabaseErro
 use db::vpc::{self};
 use db::{self, ConditionalWrite, ObjectColumnFilter, network_security_group};
 use model::resource_pool;
-use model::tenant::{InvalidTenantOrg, Tenant};
+use model::tenant::{InvalidTenantOrg, Tenant, TenantOrganizationId};
 use model::vpc::{
     ChangeVpcRoutingProfile, NewVpc, RouteTargetConfigError, UpdateVpc, UpdateVpcVirtualization,
     VpcRoutingProfileOverrides, VpcStatus, VpcVirtualizationTypeCapabilities,
@@ -342,6 +342,29 @@ async fn prepare_create(
     let requested_profile_type = vpc_creation_request.routing_profile_type.clone();
     let mut new_vpc = NewVpc::try_from(vpc_creation_request.clone())?;
 
+    if let Some(ref id) = new_vpc.dhcp_option_set_id {
+        let tenant_org = new_vpc
+            .tenant_organization_id
+            .parse::<TenantOrganizationId>()
+            .map_err(|e: InvalidTenantOrg| {
+                CarbideError::from(RpcDataConversionError::InvalidTenantOrg(e.to_string()))
+            })?;
+        if db::dhcp_option_set::find_by_ids(
+            &mut txn,
+            std::slice::from_ref(id),
+            Some(&tenant_org),
+            false,
+        )
+        .await?
+        .is_empty()
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "DhcpOptionSet `{id}` does not exist or is not owned by tenant `{tenant_org}`"
+            ))
+            .into());
+        }
+    }
+
     let ResolvedVpcRouting {
         profile_type: resolved_profile_type,
         internal,
@@ -394,6 +417,7 @@ pub(crate) async fn update(
     request: Request<rpc::VpcUpdateRequest>,
 ) -> Result<Response<rpc::VpcUpdateResult>, Status> {
     log_request_data(&request);
+    let keep_dhcp_option_set = request.get_ref().dhcp_option_set_id.is_none();
     // Preserve operator errors previously returned by handler-level validation
     // without changing how unrelated request-conversion errors are represented.
     let mut vpc_update =
@@ -494,6 +518,35 @@ pub(crate) async fn update(
     {
         tenant_prefix_overlap::validate_vpc_policy(api, &mut txn, &policy.candidate).await?;
     }
+
+    // Older clients omit dhcp_option_set_id, so omission keeps the stored value.
+    if keep_dhcp_option_set {
+        vpc_update.dhcp_option_set_id = current_vpc.config.dhcp_option_set_id;
+    }
+    if let Some(ref id) = vpc_update.dhcp_option_set_id {
+        let tenant_org = current_vpc
+            .config
+            .tenant_organization_id
+            .parse::<TenantOrganizationId>()
+            .map_err(|e: InvalidTenantOrg| {
+                CarbideError::from(RpcDataConversionError::InvalidTenantOrg(e.to_string()))
+            })?;
+        if db::dhcp_option_set::find_by_ids(
+            &mut txn,
+            std::slice::from_ref(id),
+            Some(&tenant_org),
+            false,
+        )
+        .await?
+        .is_empty()
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "DhcpOptionSet `{id}` does not exist or is not owned by tenant `{tenant_org}`"
+            ))
+            .into());
+        }
+    }
+
     vpc_update.if_version_match = Some(current_vpc.version);
     let vpc = db::vpc::update(&vpc_update, &mut txn).await?;
     validate_requested_route_targets(
@@ -1927,6 +1980,7 @@ mod tests {
                 tenant_keyset_id: None,
                 network_virtualization_type: VpcVirtualizationType::Fnn,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 default_nvlink_logical_partition_id: None,
                 vni: None,
                 routing_profile_type: Some("INTERNAL".to_string()),
