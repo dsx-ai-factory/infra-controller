@@ -332,6 +332,12 @@ type APIHostLifecycleProfile struct {
 	// DisableLockdown, when true, skips locking down the server during host
 	// lifecycle management. When omitted, the existing value is preserved.
 	DisableLockdown *bool `json:"disableLockdown"`
+	// ControlPlane, when true, designates the machine as a control-plane
+	// machine. After completion of
+	// https://github.com/dsx-ai-factory/infra-controller/issues/7568, its
+	// management addresses stay usable while the control plane is down. When
+	// omitted, the existing value is preserved.
+	ControlPlane *bool `json:"controlPlane"`
 }
 
 // ToDBModel converts the API profile into its DB model form. A nil receiver
@@ -340,7 +346,10 @@ func (p *APIHostLifecycleProfile) ToDBModel() cdbm.HostLifecycleProfile {
 	if p == nil {
 		return cdbm.HostLifecycleProfile{}
 	}
-	return cdbm.HostLifecycleProfile{DisableLockdown: p.DisableLockdown}
+	return cdbm.HostLifecycleProfile{
+		DisableLockdown: p.DisableLockdown,
+		ControlPlane:    p.ControlPlane,
+	}
 }
 
 // ToDBModelPtr converts the API profile into a DB model pointer, returning nil
@@ -359,10 +368,13 @@ func (p *APIHostLifecycleProfile) ToDBModelPtr() *cdbm.HostLifecycleProfile {
 // NewAPIHostLifecycleProfile builds the API profile from its DB model form,
 // returning nil when no setting is present so the field is omitted in responses.
 func NewAPIHostLifecycleProfile(p cdbm.HostLifecycleProfile) *APIHostLifecycleProfile {
-	if p.DisableLockdown == nil {
+	if !p.HasSetFields() {
 		return nil
 	}
-	return &APIHostLifecycleProfile{DisableLockdown: p.DisableLockdown}
+	return &APIHostLifecycleProfile{
+		DisableLockdown: p.DisableLockdown,
+		ControlPlane:    p.ControlPlane,
+	}
 }
 
 // APIExpectedMachineCreateRequest is the data structure to capture instance request to create a new ExpectedMachine
@@ -647,6 +659,7 @@ func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachin
 			util.ExpectedComponentUpdateField{Path: "server_name", Present: emur.ServerName != nil},
 			util.ExpectedComponentUpdateField{Path: "is_dpf_enabled", Present: emur.IsDpfEnabled != nil},
 			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.disable_lockdown", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.DisableLockdown != nil},
+			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.control_plane", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.ControlPlane != nil},
 		),
 	}
 }
