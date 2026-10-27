@@ -294,7 +294,9 @@ converged at 10.5 h.
   from the third hour. Both are expected. A non-zero `oom_kill` count is not.
   On the earlier run, at a 16-core limit, the primary was CPU-bound from
   the sixth hour. The command resolves the primary through its
-  `spilo-role=master` label:
+  `spilo-role=master` label and reads cgroup v2 files, which the measured
+  nodes expose. On a cgroup v1 node `memory.current` does not exist, so the
+  chain stops before the `oom_kill` check:
 
   ```bash
   kubectl -n postgres exec "$(kubectl -n postgres get pods -l cluster-name=nico-pg-cluster,spilo-role=master -o jsonpath='{.items[0].metadata.name}')" -c postgres -- sh -c \
