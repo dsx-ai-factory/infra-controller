@@ -65,6 +65,14 @@ pub struct MachineStateControllerConfig {
         serialize_with = "as_duration"
     )]
     pub failure_retry_time: Duration,
+    /// Minimum time to wait before retrying a host boot once every managed DPU
+    /// has reported since the boot was requested.
+    #[serde(
+        default = "MachineStateControllerConfig::scout_boot_retry_wait_default",
+        deserialize_with = "deserialize_duration_chrono",
+        serialize_with = "as_duration"
+    )]
+    pub scout_boot_retry_wait: Duration,
     /// How long to wait for a health report from the DPU before we assume it's down
     #[serde(
         default = "MachineStateControllerConfig::dpu_up_threshold_default",
@@ -131,6 +139,7 @@ impl MachineStateControllerConfig {
             dpu_wait_time: Duration::seconds(1),
             power_down_wait: Duration::seconds(1),
             failure_retry_time: Duration::seconds(1),
+            scout_boot_retry_wait: MachineStateControllerConfig::scout_boot_retry_wait_default(),
             dpu_up_threshold: Duration::weeks(52),
             controller: StateControllerConfig::default(),
             scout_reporting_timeout: Duration::weeks(52),
@@ -157,6 +166,10 @@ impl MachineStateControllerConfig {
 
     pub fn failure_retry_time_default() -> Duration {
         Duration::minutes(90)
+    }
+
+    pub fn scout_boot_retry_wait_default() -> Duration {
+        Duration::minutes(10)
     }
 
     pub fn dpu_up_threshold_default() -> Duration {
@@ -196,6 +209,7 @@ impl Default for MachineStateControllerConfig {
             dpu_wait_time: MachineStateControllerConfig::dpu_wait_time_default(),
             power_down_wait: MachineStateControllerConfig::power_down_wait_default(),
             failure_retry_time: MachineStateControllerConfig::failure_retry_time_default(),
+            scout_boot_retry_wait: MachineStateControllerConfig::scout_boot_retry_wait_default(),
             dpu_up_threshold: MachineStateControllerConfig::dpu_up_threshold_default(),
             scout_reporting_timeout: MachineStateControllerConfig::scout_reporting_timeout_default(
             ),

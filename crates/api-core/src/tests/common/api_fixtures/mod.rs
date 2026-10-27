@@ -1588,6 +1588,7 @@ async fn create_test_env_with_overrides_inner(
         dpu_wait_time: Duration::seconds(0),
         power_down_wait: Duration::seconds(0),
         failure_retry_time: Duration::seconds(0),
+        scout_boot_retry_wait: config.machine_state_controller.scout_boot_retry_wait,
         scout_reporting_timeout: config.machine_state_controller.scout_reporting_timeout,
         waiting_for_measurements_timeout: config
             .machine_state_controller

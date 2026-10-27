@@ -2132,6 +2132,11 @@ async fn initialize_and_start_controllers<'a>(
                 .dpu_wait_time(carbide_config.machine_state_controller.dpu_wait_time)
                 .power_down_wait(carbide_config.machine_state_controller.power_down_wait)
                 .failure_retry_time(carbide_config.machine_state_controller.failure_retry_time)
+                .scout_boot_retry_wait(
+                    carbide_config
+                        .machine_state_controller
+                        .scout_boot_retry_wait,
+                )
                 .scout_reporting_timeout(
                     carbide_config
                         .machine_state_controller

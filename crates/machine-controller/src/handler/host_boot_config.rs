@@ -495,6 +495,7 @@ mod tests {
             dpu_wait_time: chrono::Duration::zero(),
             power_down_wait: chrono::Duration::zero(),
             failure_retry_time: chrono::Duration::zero(),
+            scout_boot_retry_wait: chrono::Duration::zero(),
             scout_reporting_timeout: chrono::Duration::zero(),
             waiting_for_measurements_timeout: chrono::Duration::zero(),
             uefi_boot_wait: chrono::Duration::zero(),

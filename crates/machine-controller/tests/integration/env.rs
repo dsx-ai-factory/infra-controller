@@ -126,6 +126,9 @@ impl EnvBuilder {
             dpu_wait_time: runtime_config.machine_state_controller.dpu_wait_time,
             power_down_wait: runtime_config.machine_state_controller.power_down_wait,
             failure_retry_time: runtime_config.machine_state_controller.failure_retry_time,
+            scout_boot_retry_wait: runtime_config
+                .machine_state_controller
+                .scout_boot_retry_wait,
             scout_reporting_timeout: runtime_config
                 .machine_state_controller
                 .scout_reporting_timeout,

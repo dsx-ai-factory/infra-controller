@@ -56,7 +56,7 @@ async fn managed_host(env: &TestHarness) -> TestManagedHost {
 async fn create_instance(env: &TestHarness, host: &TestManagedHost) {
     let config = InstanceConfig {
         tenant: TenantConfig {
-            tenant_organization_id: TenantOrganizationId::try_from("dell-retry-test".to_string())
+            tenant_organization_id: TenantOrganizationId::try_from("scout-retry-test".to_string())
                 .unwrap(),
             tenant_keyset_ids: Vec::new(),
             hostname: None,
@@ -118,14 +118,7 @@ async fn age_state(
     age: Duration,
     last_cleanup_time: Option<DateTime<Utc>>,
 ) {
-    age_state_with_last_reboot(
-        env,
-        host,
-        age,
-        last_cleanup_time,
-        Duration::seconds(1),
-    )
-    .await;
+    age_state_with_last_reboot(env, host, age, last_cleanup_time, Duration::seconds(1)).await;
 }
 
 async fn age_state_with_last_reboot(
@@ -166,19 +159,6 @@ async fn age_state_with_last_reboot(
     assert_eq!(result.rows_affected(), 1);
 
     let machine = host.host.machine().await;
-    assert!(machine.bmc_vendor().is_unknown());
-    let bmc_ip = machine
-        .status
-        .bmc_info
-        .ip
-        .expect("host BMC IP should exist");
-    let metadata = db::explored_endpoints::lookup_bmc_metadata_by_ip(
-        bmc_ip,
-        &env.test_harness.api().database_connection,
-    )
-    .await
-    .unwrap();
-    assert_eq!(metadata.vendor.as_deref(), Some("Dell"));
     assert!(machine.state.version.timestamp() <= Utc::now() - age);
     assert!(machine.status.last_reboot_time.is_none());
     assert!(machine.status.last_scout_contact_time.is_none());
@@ -189,6 +169,34 @@ async fn age_state_with_last_reboot(
             .as_ref()
             .is_some_and(|request| request.time < machine.state.version.timestamp())
     );
+}
+
+async fn age_after_early_retry(env: &Env, host: &TestManagedHost) {
+    let machine = host.host.machine().await;
+    let entered_at = Utc::now() - Duration::minutes(101);
+    let stale_version: ConfigVersion = format!(
+        "V{}-T{}",
+        machine.state.version.version_nr(),
+        entered_at.timestamp_micros()
+    )
+    .parse()
+    .unwrap();
+    let early_retry = MachineLastRebootRequested {
+        time: entered_at + Duration::minutes(10),
+        mode: MachineLastRebootRequestedMode::Reboot,
+        restart_verified: None,
+        verification_attempts: None,
+    };
+    sqlx::query(
+        "UPDATE machines SET controller_state_version = $1, last_reboot_requested = $2, \
+         last_reboot_time = NULL, last_scout_contact_time = NULL WHERE id = $3",
+    )
+    .bind(stale_version)
+    .bind(sqlx::types::Json(early_retry))
+    .bind(host.host.id)
+    .execute(&env.test_harness.api().database_connection)
+    .await
+    .unwrap();
 }
 
 async fn enter_host_cleanup(env: &mut Env, host: &TestManagedHost) -> ManagedHostState {
@@ -220,7 +228,10 @@ async fn enter_host_cleanup(env: &mut Env, host: &TestManagedHost) -> ManagedHos
     };
     let machine = host.host.machine().await;
     assert_eq!(machine.current_state(), &state);
-    assert_eq!(machine.status.last_reboot_requested.as_ref(), Some(&request));
+    assert_eq!(
+        machine.status.last_reboot_requested.as_ref(),
+        Some(&request)
+    );
     assert!(request.time < machine.state.version.timestamp());
     state
 }
@@ -234,32 +245,15 @@ async fn set_last_scout_contact(env: &Env, host: &TestManagedHost, contact: Date
         .unwrap();
 }
 
-async fn set_site_explorer_vendor(env: &Env, host: &TestManagedHost, vendor: &str) {
-    let bmc_ip = host
-        .host
-        .machine()
+async fn clear_dpu_network_status(env: &Env, host: &TestManagedHost) {
+    sqlx::query("UPDATE machines SET network_status_observation = NULL WHERE id = $1")
+        .bind(host.first_dpu().id)
+        .execute(&env.test_harness.api().database_connection)
         .await
-        .status
-        .bmc_info
-        .ip
-        .expect("host BMC IP should exist");
-    sqlx::query(
-        "UPDATE explored_endpoints SET exploration_report = \
-         jsonb_set(exploration_report, '{Vendor}', to_jsonb($1::text), true) \
-         WHERE address = $2",
-    )
-    .bind(vendor)
-    .bind(bmc_ip)
-    .execute(&env.test_harness.api().database_connection)
-    .await
-    .unwrap();
+        .unwrap();
 }
 
-async fn assert_force_restart(
-    host: &TestManagedHost,
-    actions: &[RedfishSimAction],
-    reason: &str,
-) {
+async fn assert_force_restart(host: &TestManagedHost, actions: &[RedfishSimAction], reason: &str) {
     let machine = host.host.machine().await;
     assert!(
         actions.contains(&RedfishSimAction::Power(
@@ -275,6 +269,7 @@ async fn booting_with_discovery_image_retries_once_after_ten_minutes(pool: PgPoo
     let mut env = Env::builder(pool)
         .configure_runtime(|config| {
             config.machine_state_controller.failure_retry_time = Duration::minutes(90);
+            config.machine_state_controller.scout_boot_retry_wait = Duration::minutes(10);
         })
         .build()
         .await;
@@ -298,22 +293,31 @@ async fn booting_with_discovery_image_retries_once_after_ten_minutes(pool: PgPoo
         }
     ));
 
+    age_after_early_retry(&env, &host).await;
     let second = env.redfish_sim.timepoint();
     env.run_single_iteration().await;
-    assert!(
-        env.redfish_sim
-            .actions_since(&second)
-            .all_hosts()
-            .is_empty(),
-        "the early Dell retry must run only once in this state"
-    );
+    assert_force_restart(
+        &host,
+        &env.redfish_sim.actions_since(&second).all_hosts(),
+        "the later normal recovery restart",
+    )
+    .await;
+    assert!(matches!(
+        host.host.machine().await.current_state(),
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::BootingWithDiscoveryImage {
+                retry: RetryInfo { count: 1 },
+            },
+        }
+    ));
 }
 
 #[sqlx_test]
-async fn normal_recovery_is_not_blocked_before_dell_deadline(pool: PgPool) {
+async fn normal_recovery_is_not_blocked_before_early_retry(pool: PgPool) {
     let mut env = Env::builder(pool)
         .configure_runtime(|config| {
             config.machine_state_controller.failure_retry_time = Duration::minutes(90);
+            config.machine_state_controller.scout_boot_retry_wait = Duration::minutes(10);
         })
         .build()
         .await;
@@ -347,10 +351,11 @@ async fn normal_recovery_is_not_blocked_before_dell_deadline(pool: PgPool) {
 }
 
 #[sqlx_test]
-async fn recent_scout_contact_suppresses_dell_early_retry(pool: PgPool) {
+async fn recent_scout_contact_suppresses_early_retry(pool: PgPool) {
     let mut env = Env::builder(pool)
         .configure_runtime(|config| {
             config.machine_state_controller.failure_retry_time = Duration::minutes(90);
+            config.machine_state_controller.scout_boot_retry_wait = Duration::minutes(10);
         })
         .build()
         .await;
@@ -371,16 +376,17 @@ async fn recent_scout_contact_suppresses_dell_early_retry(pool: PgPool) {
 }
 
 #[sqlx_test]
-async fn non_dell_site_explorer_vendor_suppresses_early_retry(pool: PgPool) {
+async fn stale_dpu_status_suppresses_early_retry(pool: PgPool) {
     let mut env = Env::builder(pool)
         .configure_runtime(|config| {
             config.machine_state_controller.failure_retry_time = Duration::minutes(90);
+            config.machine_state_controller.scout_boot_retry_wait = Duration::minutes(10);
         })
         .build()
         .await;
     let host = host_booting_with_discovery_image(&env.test_harness).await;
     age_state(&env, &host, Duration::minutes(11), None).await;
-    set_site_explorer_vendor(&env, &host, "Lenovo").await;
+    clear_dpu_network_status(&env, &host).await;
 
     let timepoint = env.redfish_sim.timepoint();
     env.run_single_iteration().await;
@@ -390,7 +396,7 @@ async fn non_dell_site_explorer_vendor_suppresses_early_retry(pool: PgPool) {
             .actions_since(&timepoint)
             .all_hosts()
             .is_empty(),
-        "a non-Dell Site Explorer vendor must suppress the early restart"
+        "the early restart must wait for a fresh DPU-agent observation"
     );
 }
 
@@ -399,6 +405,7 @@ async fn host_cleanup_retries_once_after_ten_minutes(pool: PgPool) {
     let mut env = Env::builder(pool)
         .configure_runtime(|config| {
             config.machine_state_controller.failure_retry_time = Duration::minutes(90);
+            config.machine_state_controller.scout_boot_retry_wait = Duration::minutes(10);
         })
         .build()
         .await;
@@ -416,15 +423,16 @@ async fn host_cleanup_retries_once_after_ten_minutes(pool: PgPool) {
     .await;
     assert_eq!(host.host.machine().await.current_state(), &state);
 
+    age_after_early_retry(&env, &host).await;
     let second = env.redfish_sim.timepoint();
     env.run_single_iteration().await;
-    assert!(
-        env.redfish_sim
-            .actions_since(&second)
-            .all_hosts()
-            .is_empty(),
-        "the early Dell retry must run only once in this state"
-    );
+    assert_force_restart(
+        &host,
+        &env.redfish_sim.actions_since(&second).all_hosts(),
+        "the later normal recovery restart",
+    )
+    .await;
+    assert_eq!(host.host.machine().await.current_state(), &state);
 }
 
 #[sqlx_test]
@@ -432,6 +440,7 @@ async fn completed_host_cleanup_advances_normally(pool: PgPool) {
     let mut env = Env::builder(pool)
         .configure_runtime(|config| {
             config.machine_state_controller.failure_retry_time = Duration::minutes(90);
+            config.machine_state_controller.scout_boot_retry_wait = Duration::minutes(10);
         })
         .build()
         .await;
