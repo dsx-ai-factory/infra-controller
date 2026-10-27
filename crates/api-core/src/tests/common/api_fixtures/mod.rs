@@ -1872,6 +1872,7 @@ async fn create_test_env_with_overrides_inner(
             run_interval: Duration::seconds(0).to_std().unwrap(),
             concurrent_explorations: 100,
             explorations_per_run: 100,
+            exploration_timeouts_before_prevent_allocations: 1,
             create_machines: Arc::new(true.into()),
             machines_created_per_run: 1,
             override_target_ip: None,

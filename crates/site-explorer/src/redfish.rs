@@ -1911,7 +1911,10 @@ pub(crate) fn map_redfish_error(error: RedfishError) -> EndpointExplorationError
             if source.is_connect() {
                 EndpointExplorationError::ConnectionRefused { details }
             } else if source.is_timeout() {
-                EndpointExplorationError::ConnectionTimeout { details }
+                EndpointExplorationError::ConnectionTimeout {
+                    details,
+                    consecutive_count: 1,
+                }
             } else {
                 EndpointExplorationError::Unreachable {
                     details: Some(details),
@@ -2025,7 +2028,10 @@ fn map_nv_redfish_explore_error(
                     if err.is_connect() {
                         EndpointExplorationError::ConnectionRefused { details }
                     } else if err.is_timeout() {
-                        EndpointExplorationError::ConnectionTimeout { details }
+                        EndpointExplorationError::ConnectionTimeout {
+                            details,
+                            consecutive_count: 1,
+                        }
                     } else {
                         EndpointExplorationError::Unreachable {
                             details: Some(details),

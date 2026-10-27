@@ -687,6 +687,7 @@ to keep the previous behavior.
 | `run_interval` | `Duration` | `120s` | Interval between exploration runs. |
 | `concurrent_explorations` | `u64` | `100` | Max nodes explored in parallel. |
 | `explorations_per_run` | `u64` | `360` | Max nodes explored per run. |
+| `exploration_timeouts_before_prevent_allocations` | `u32` | `3` | Explorations of a BMC in a row that must time out before its `BmcExplorationFailure` alert prevents allocations. Other exploration errors prevent allocations immediately. `1` blocks on the first timeout. Until then the BMC is re-explored ahead of the routine refresh. |
 | `create_machines` | `bool` | `true` | When false, SiteExplorer skips creating ManagedHost state machines; the DPU agent (scout) must self-register via DiscoverMachine gRPC endpoint with create_machine=true. Dynamically toggleable. |
 | `machines_created_per_run` | `u64` | `100` | Max ManagedHosts created per run. |
 | `rotate_switch_nvos_credentials` | `bool` | `false` | Auto-rotate switch NVOS admin credentials. |

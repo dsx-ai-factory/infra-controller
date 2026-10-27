@@ -85,6 +85,15 @@ pub struct SiteExplorerConfig {
     #[serde(default = "SiteExplorerConfig::default_explorations_per_run")]
     pub explorations_per_run: u64,
 
+    /// How many explorations of a BMC in a row must time out before its
+    /// `BmcExplorationFailure` alert prevents allocations. Other exploration
+    /// errors prevent allocations immediately. `1` blocks on the first timeout.
+    /// Until then the BMC is re-explored ahead of the routine refresh.
+    #[serde(
+        default = "SiteExplorerConfig::default_exploration_timeouts_before_prevent_allocations"
+    )]
+    pub exploration_timeouts_before_prevent_allocations: u32,
+
     /// When false, SiteExplorer skips creating ManagedHost state machines; the DPU agent (scout) must self-register via DiscoverMachine gRPC endpoint with create_machine=true
     #[serde(
         default = "SiteExplorerConfig::default_create_machines",
@@ -223,6 +232,8 @@ impl Default for SiteExplorerConfig {
             run_interval: Self::default_run_interval(),
             concurrent_explorations: Self::default_concurrent_explorations(),
             explorations_per_run: Self::default_explorations_per_run(),
+            exploration_timeouts_before_prevent_allocations:
+                Self::default_exploration_timeouts_before_prevent_allocations(),
             create_machines: Self::default_create_machines(),
             machines_created_per_run: Self::default_machines_created_per_run(),
             override_target_ip: None,
@@ -254,6 +265,7 @@ impl PartialEq for SiteExplorerConfig {
             run_interval,
             concurrent_explorations,
             explorations_per_run,
+            exploration_timeouts_before_prevent_allocations,
             create_machines,
             machines_created_per_run,
             rotate_switch_nvos_credentials,
@@ -278,6 +290,8 @@ impl PartialEq for SiteExplorerConfig {
             && *run_interval == other.run_interval
             && *concurrent_explorations == other.concurrent_explorations
             && *explorations_per_run == other.explorations_per_run
+            && *exploration_timeouts_before_prevent_allocations
+                == other.exploration_timeouts_before_prevent_allocations
             && create_machines.load(AtomicOrdering::Relaxed)
                 == other.create_machines.load(AtomicOrdering::Relaxed)
             && *machines_created_per_run == other.machines_created_per_run
@@ -330,6 +344,10 @@ impl SiteExplorerConfig {
     /// breadth against how frequently creation runs.
     pub const fn default_explorations_per_run() -> u64 {
         360
+    }
+
+    pub const fn default_exploration_timeouts_before_prevent_allocations() -> u32 {
+        3
     }
 
     /// Machines created per completed exploration cycle. Caps ingestion rate

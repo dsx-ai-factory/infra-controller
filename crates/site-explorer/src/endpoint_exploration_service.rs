@@ -126,7 +126,7 @@ impl EndpointExplorationService {
         let guard = self.locks.try_claim(address.ip())?;
 
         let redfish_explore_started_at = Instant::now();
-        let result = self
+        let mut result = self
             .endpoint_explorer
             .explore_endpoint(
                 address,
@@ -137,6 +137,18 @@ impl EndpointExplorationService {
             )
             .await;
         let redfish_explore_duration = redfish_explore_started_at.elapsed();
+        if let Err(EndpointExplorationError::ConnectionTimeout {
+            consecutive_count, ..
+        }) = &mut result
+        {
+            *consecutive_count = match last_exploration_error {
+                Some(EndpointExplorationError::ConnectionTimeout {
+                    consecutive_count: previous,
+                    ..
+                }) => previous.saturating_add(1),
+                _ => 1,
+            };
+        }
 
         Some(EndpointProbeResult {
             result,
