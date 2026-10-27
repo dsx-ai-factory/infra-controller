@@ -356,6 +356,22 @@ func TestTenantIPBlockHandler_handle(t *testing.T) {
 			require.Equal(t, http.StatusBadRequest, f.request(t, http.MethodPatch, "/"+created.ID, map[string]any{"name": "after-removal"}).Code)
 			require.Equal(t, http.StatusAccepted, f.request(t, http.MethodDelete, "/"+created.ID, nil).Code)
 		}},
+		{"inconsistent Core ownership prevents metadata mutation", func(t *testing.T, f *tenantIPBlockFixture) {
+			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
+			f.core.Config.TenantOrganizationId = cutil.GetPtr("other-tenant")
+			calls := len(f.calls)
+			response := f.request(t, http.MethodPatch, "/"+created.ID, map[string]any{"name": "must-not-change"})
+			require.Equal(t, http.StatusBadGateway, response.Code, response.Body.String())
+			var apiError map[string]any
+			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &apiError))
+			require.Equal(t, "Core returned an inconsistent SitePrefix", apiError["message"])
+			require.Nil(t, apiError["data"])
+			require.Equal(t, []string{findTenantIPBlockMethod}, f.calls[calls:])
+			require.Equal(t, created.Name, f.core.Metadata.Name)
+			persisted := readTenantIPBlock(t, f.request(t, http.MethodGet, "/"+created.ID, nil), http.StatusOK)
+			require.Equal(t, created.Name, persisted.Name)
+			require.Equal(t, created.Status, persisted.Status)
+		}},
 		{"mutation failures roll back REST changes", func(t *testing.T, f *tenantIPBlockFixture) {
 			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
 			for _, mutation := range []struct {

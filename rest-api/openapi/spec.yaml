@@ -2519,7 +2519,6 @@ paths:
           description: Page size for pagination query
         - schema:
             type: string
-            default: CREATED_ASC
             enum:
               - NAME_ASC
               - NAME_DESC
@@ -2607,30 +2606,48 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                capability-disabled:
+                  value:
+                    source: nico
+                    message: 'Tenant-created IP Blocks are disabled for this Site'
+                    data: null
         '429':
           description: Core tenant quota or Site isolation capacity exceeded
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
-        '502':
-          description: Core returned an invalid or inconsistent response
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                core-capacity:
+                  value:
+                    source: nico
+                    message: 'Core IP Block request failed: Too Many Requests'
+                    data: null
         '503':
           description: Site client or Core is unavailable
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                site-client:
+                  value:
+                    source: nico
+                    message: 'Site client unavailable'
+                    data: null
         '504':
           description: Core request timed out
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                timeout:
+                  value:
+                    source: nico
+                    message: 'Tenant IP Block request timed out'
+                    data: null
       description: |-
         Create an IP block for the org.
 
@@ -2784,24 +2801,30 @@ paths:
                     source: nico
                     message: This IP Block is linked to an OperatorManaged SitePrefix; remove the corresponding prefix from Core's site_fabric_prefixes configuration instead
                     data: null
-        '502':
-          description: Core returned an invalid or inconsistent response
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/NICoAPIError'
         '503':
           description: Site client or Core is unavailable
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                site-client:
+                  value:
+                    source: nico
+                    message: 'Site client unavailable'
+                    data: null
         '504':
           description: Core request timed out
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                timeout:
+                  value:
+                    source: nico
+                    message: 'Tenant IP Block request timed out'
+                    data: null
       description: |-
         Delete an IP block
 
@@ -2855,35 +2878,65 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: The IP Block is Deleting, or a concurrent Site lifecycle change or mutation of the same IP Block prevents admission. Retry concurrent changes after the earlier operation completes.
+          description: A provider IP Block name conflicts with another block at the same Site, the tenant IP Block is Deleting, or a concurrent Site lifecycle change or mutation of the same IP Block prevents admission. Retry concurrent changes after the earlier operation completes.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                deleting:
+                  value:
+                    source: nico
+                    message: 'IP Block is being deleted'
+                    data: null
         '412':
-          description: The Core SitePrefix version changed or the prefix is being deleted. The response does not distinguish these causes. Refresh the resource before retrying; a Deleting IP Block cannot be updated.
+          description: The Core SitePrefix version changed, or Core reports that the prefix is being deleted while the REST status is not yet Deleting. The response does not distinguish these causes. Refresh the resource before retrying. After ownership, Site eligibility, and client availability checks pass, an IP Block with REST status Deleting returns 409 rather than 412.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                core-precondition:
+                  value:
+                    source: nico
+                    message: 'Core IP Block request failed: Precondition Failed'
+                    data: null
         '502':
           description: Core returned an invalid or inconsistent response
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                core-response:
+                  value:
+                    source: nico
+                    message: 'Core returned an inconsistent SitePrefix'
+                    data: null
         '503':
           description: Site client or Core is unavailable
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                site-client:
+                  value:
+                    source: nico
+                    message: 'Site client unavailable'
+                    data: null
         '504':
           description: Core request timed out
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                timeout:
+                  value:
+                    source: nico
+                    message: 'Tenant IP Block request timed out'
+                    data: null
       description: |-
         Update an existing IP Block
 
