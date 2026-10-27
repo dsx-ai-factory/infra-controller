@@ -663,6 +663,37 @@ async fn reconcile_interface_segment_preserves_static_assignment_lookup_failure(
     Ok(())
 }
 
+// The DHCP handler normally rejects an unknown DHCPv6 relay before this
+// helper runs, so exercise the helper's own guard directly.
+#[crate::sqlx_test]
+async fn observed_dhcp_unknown_relay_is_failed_precondition(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = db::Transaction::begin(&pool).await?;
+    let error = find_or_create_observed_machine_interface(
+        txn.as_pgconn(),
+        None,
+        "02:00:00:00:71:04".parse()?,
+        &["2001:db8:dead::1".parse()?],
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("an unknown relay should not create an observed interface");
+
+    assert!(
+        matches!(
+            &error,
+            DatabaseError::FailedPrecondition(message)
+                if message.starts_with("No network segment defined for relay addresses")
+        ),
+        "{error:?}"
+    );
+
+    Ok(())
+}
+
 #[crate::sqlx_test]
 async fn observed_dhcp_rechecks_static_assignment_before_moving_segment(
     pool: sqlx::PgPool,

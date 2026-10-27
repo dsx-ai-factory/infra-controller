@@ -1847,7 +1847,7 @@ fn initialize_spx_maintenance_script_raw() -> String {
                 logical="eth_r${rail}_p${plane}"
                 netdev=$(ip -j link show dev "$logical" | jq -er '.[0].ifname')
                 ovs-vsctl --timeout=30 get Interface "$netdev" name >/dev/null
-                args+=(-- set Interface "$netdev" external_ids:spx-arc-maintenance=true)
+                args+=(-- set Interface "$netdev" external_ids:xplane-maintenance=true)
               done
             done
             ovs-vsctl --timeout=30 "${args[@]}"

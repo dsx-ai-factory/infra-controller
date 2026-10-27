@@ -38,8 +38,9 @@ use crate::metrics::MetricLabel;
 use crate::sink::MetricSemantics::Gauge;
 use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample, MetricSemantics};
 
-// Redfish `PCIeErrors` does not report when counting began, so leave
-// `start_time` unknown; collector startup does not establish it.
+// These Redfish PCIe totals and processor throttle durations do not report
+// when accumulation began, so leave `start_time` unknown; collector startup
+// does not establish it.
 fn device_total(description: &'static str) -> MetricSemantics {
     MetricSemantics::CumulativeCounter {
         description,
@@ -111,14 +112,18 @@ macro_rules! excerpt {
 }
 
 /// Push an ISO 8601 `Edm.Duration` field (e.g. `"PT0S"`) as seconds.
+/// Optional semantics default to `Gauge`.
 macro_rules! duration_seconds {
     ($out:expr, $src:expr, $field:ident, $mt:literal) => {
+        duration_seconds!($out, $src, $field, $mt, Gauge);
+    };
+    ($out:expr, $src:expr, $field:ident, $mt:literal, $semantics:expr) => {
         if let Some(Some(duration)) = &$src.$field {
             $out.push(MetricField {
                 metric_type: Cow::Borrowed($mt),
                 unit: "seconds",
                 value: duration.as_f64_seconds(),
-                semantics: Gauge,
+                semantics: $semantics,
             });
         }
     };
@@ -302,13 +307,19 @@ fn processor_metric_fields(m: &ProcessorMetrics) -> Vec<MetricField> {
         out,
         m,
         power_limit_throttle_duration,
-        "power_limit_throttle"
+        "power_limit_throttle",
+        device_total(
+            "Number of seconds the processor has throttled due to a power limit since reset"
+        )
     );
     duration_seconds!(
         out,
         m,
         thermal_limit_throttle_duration,
-        "thermal_limit_throttle"
+        "thermal_limit_throttle",
+        device_total(
+            "Number of seconds the processor has throttled due to a thermal limit since reset"
+        )
     );
     excerpt!(out, m, core_voltage, "core_voltage", "volts");
     if let Some(pcie) = &m.pcie_errors {
@@ -875,7 +886,7 @@ pub(crate) fn catalogue_samples() -> Result<Vec<MetricSample>, HealthError> {
         "@odata.id": "/redfish/v1/Systems/1/Processors/CPU0/ProcessorMetrics",
         "Id": "ProcessorMetrics",
         "Name": "Processor Metrics",
-        "PowerLimitThrottleDuration": "PT1S",
+        "PowerLimitThrottleDuration": "PT1.25S",
         "ThermalLimitThrottleDuration": "PT2S",
         "PCIeErrors": {
             "CorrectableErrorCount": 1,
@@ -1392,8 +1403,8 @@ mod tests {
                         ("operating_speed", "mhz", 3200.0, Gauge),
                         ("correctable_core_errors", "count", 7.0, Gauge),
                         ("uncorrectable_core_errors", "count", 0.0, Gauge),
-                        ("power_limit_throttle", "seconds", 0.0, Gauge),
-                        ("thermal_limit_throttle", "seconds", 90.0, Gauge),
+                        ("power_limit_throttle", "seconds", 0.0, COUNTER),
+                        ("thermal_limit_throttle", "seconds", 90.0, COUNTER),
                         ("pcie_correctable_errors", "count", 3.0, COUNTER),
                         ("pcie_fatal_errors", "count", 1.0, COUNTER),
                     ]),
@@ -1975,27 +1986,55 @@ mod tests {
         check_cases_async(
             [
                 Case {
-                    scenario: "processor metric",
+                    scenario: "processor gauge and cumulative duration",
                     input: CollectionCase {
                         bmc: fixture.bmc(),
                         entity: fixture.entity(TestEntity::Processor).await,
                         with_sink: true,
                     },
                     expect: Yields(ObservedCollection {
-                        field_count: 1,
+                        field_count: 2,
                         fetch_failures: 0,
-                        events: vec![metric(
-                            "/redfish/v1/Systems/SYS0/Processors/CPU0/bandwidth",
-                            "bandwidth",
-                            "percent",
-                            42.0,
-                            &[
+                        events: {
+                            const LABELS: &[(&str, &str)] = &[
                                 ("processor_id", "CPU0"),
                                 ("system_id", "SYS0"),
                                 ("processor_type", "cpu"),
                                 ("model", "Grace"),
-                            ],
-                        )],
+                            ];
+                            vec![
+                                metric(
+                                    "/redfish/v1/Systems/SYS0/Processors/CPU0/bandwidth",
+                                    "bandwidth",
+                                    "percent",
+                                    42.0,
+                                    LABELS,
+                                ),
+                                ObservedEvent::Metric(ObservedMetric {
+                                    key: concat!(
+                                        "/redfish/v1/Systems/SYS0/Processors/CPU0/",
+                                        "power_limit_throttle"
+                                    )
+                                    .to_string(),
+                                    name: "hw_metric".to_string(),
+                                    metric_type: "power_limit_throttle".to_string(),
+                                    unit: "seconds".to_string(),
+                                    value: 1.25,
+                                    semantics: MetricSemantics::CumulativeCounter {
+                                        description: concat!(
+                                            "Number of seconds the processor has throttled ",
+                                            "due to a power limit since reset"
+                                        ),
+                                        start_time: None,
+                                    },
+                                    labels: LABELS
+                                        .iter()
+                                        .map(|(key, value)| (key.to_string(), value.to_string()))
+                                        .collect(),
+                                    has_context: false,
+                                }),
+                            ]
+                        },
                     }),
                 },
                 Case {
@@ -2290,7 +2329,7 @@ mod tests {
                         with_sink: false,
                     },
                     expect: Yields(ObservedCollection {
-                        field_count: 1,
+                        field_count: 2,
                         fetch_failures: 0,
                         events: vec![],
                     }),
@@ -2305,12 +2344,15 @@ mod tests {
     async fn iteration_counts_every_entity_when_entities_exceed_request_slots() {
         let fixture = ProjectionFixture::new().await;
         let mut entities = Vec::new();
+        // Six inventory entries produce five fields, so counting scheduled
+        // entities cannot satisfy the aggregate assertion.
         for entity in [
             TestEntity::Processor,
             TestEntity::Memory,
             TestEntity::Drive,
             TestEntity::PowerSupply,
             TestEntity::ProcessorWithMalformedMetrics,
+            TestEntity::Chassis,
         ] {
             entities.push(fixture.entity(entity).await);
         }
@@ -2337,7 +2379,7 @@ mod tests {
 
         assert_eq!(
             (iteration.entity_count, iteration.fetch_failures),
-            (Some(4), 1)
+            (Some(5), 1)
         );
     }
 }

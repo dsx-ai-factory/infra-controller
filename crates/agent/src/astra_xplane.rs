@@ -40,7 +40,14 @@ async fn load_mapping() -> eyre::Result<Vec<LinkMessage>> {
                 .wrap_err_with(|| {
                     format!("reading provisioned xplane netdev mapping {NETDEV_MAPPING_FILE}")
                 })?;
-            decode_mapping(&mapping)
+            let links = decode_mapping(&mapping)?;
+            tracing::info!(
+                mapping_file = NETDEV_MAPPING_FILE,
+                interface_count = links.len(),
+                logical_to_netdev = %mapping.trim(),
+                "spx-maintenance: [dpu-agent] Cached Xplane netdev mappings"
+            );
+            Ok::<_, eyre::Report>(links)
         })
         .await?;
     Ok(links.clone())
