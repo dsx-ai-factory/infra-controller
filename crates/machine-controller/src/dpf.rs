@@ -41,6 +41,9 @@ use sqlx::PgPool;
 use state_controller::controller::Enqueuer;
 use tokio::task::JoinSet;
 
+pub(crate) mod deployment;
+pub use deployment::validate_reprovision_compatibility;
+
 use crate::handler::is_bf4_dmi_product;
 use crate::io::MachineStateControllerIO;
 
@@ -124,7 +127,7 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
 
     /// Resolve a DPU's base hardware deployment class (BF3 or BF4).
     ///
-    /// The state handler separately refines BF3 from the host rack and DPU
+    /// `deployment_types_for_host` refines BF3 from the host rack and DPU
     /// profile. This returns `Err` when the DMI product name is absent.
     fn deployment_type_for_dpu(
         &self,
@@ -134,6 +137,7 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
 
     /// Check that a DPUNode's labels match the current expected labels.
     /// Returns `false` when the node exists but has stale labels.
+    /// A missing DPUNode returns `true`; this does not establish resource readiness.
     async fn verify_node_labels(
         &self,
         node_name: &str,

@@ -3638,10 +3638,13 @@ impl<R: DpuNodeRepository, L: ResourceLabeler> DpfSdk<R, L> {
         }
     }
 
-    /// Check that a DPUNode's labels contain all entries from the current
-    /// labeler's `node_labels()`. Returns `false` when the node exists but
-    /// has stale labels (e.g. from a previous label version). Returns `true`
-    /// when the node does not exist yet.
+    /// `verify_node_labels` checks the node's labels against
+    /// `node_labels_for_deployment_type` for the requested deployment.
+    ///
+    /// Returns `false` if a required label is missing or differs. Additional
+    /// labels are ignored. Returns `true` when the node does not exist;
+    /// `DPUDevice` resources are not checked. Repository and labeler errors
+    /// are returned.
     pub async fn verify_node_labels(
         &self,
         node_name: &str,
@@ -3658,13 +3661,21 @@ impl<R: DpuNodeRepository, L: ResourceLabeler> DpfSdk<R, L> {
             .node_labels_for_deployment_type(deployment_type)?;
         let node_labels = node.metadata.labels.as_ref();
 
-        Ok(required_labels.iter().all(|(key, required_value)| {
-            node_labels.is_some_and(|labels| {
-                labels
-                    .get(key)
-                    .is_some_and(|node_value| node_value == required_value)
-            })
-        }))
+        for (key, required_value) in &required_labels {
+            let actual_value = node_labels.and_then(|labels| labels.get(key));
+            if actual_value != Some(required_value) {
+                tracing::debug!(
+                    node = %node_name,
+                    ?deployment_type,
+                    label = %key,
+                    expected = %required_value,
+                    actual = ?actual_value,
+                    "DPUNode label does not match deployment selector"
+                );
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Moves one DPUNode from its source DPUDeployment selector to its target

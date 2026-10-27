@@ -27,7 +27,9 @@ use std::time::Duration;
 
 use carbide_dpf::types::{DpuDeviceSummary, DpuNodeSummary, HostDpfSnapshot};
 use carbide_dpf::{DpfError, DpuDeploymentType, DpuPhase};
-use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
+use carbide_machine_controller::dpf::{
+    DpfOperations, MockDpfOperations, validate_reprovision_compatibility,
+};
 use carbide_uuid::machine::{AsMachineId, DpuMachineId, HostMachineId};
 use carbide_uuid::rack::RackId;
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -1135,13 +1137,25 @@ async fn test_runtime_dpf_disable_skips_deployment_migration_probe(pool: sqlx::P
 /// when a host request includes every attached DPU.
 #[crate::sqlx_test]
 async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) {
+    use carbide_test_support::Outcome::FailsWith;
+    use carbide_test_support::{Case, check_cases_async};
+    use model::dpu_machine_update::OutdatedDpfDpu;
+
+    use crate::machine_update_manager::dpu_nic_firmware::DpuNicFirmwareUpdate;
+    use crate::machine_update_manager::machine_update_module::MachineUpdateModule;
+    use crate::tests::dpu_machine_update::get_all_snapshots;
+
     let node_uses_target_labels = Arc::new(AtomicBool::new(false));
     let target_dpu_phase = Arc::new(AtomicUsize::new(0));
     let released_holds = Arc::new(AtomicUsize::new(0));
     let transferred_deployments = Arc::new(Mutex::new(Vec::new()));
     let deleted_source_devices = Arc::new(Mutex::new(Vec::new()));
+    let outdated = Arc::new(Mutex::new(Vec::<OutdatedDpfDpu>::new()));
 
     let mut mock = MockDpfOperations::new();
+    let outdated_for_mock = outdated.clone();
+    mock.expect_find_outdated_dpus_dpf()
+        .returning(move || Ok(outdated_for_mock.lock().unwrap().clone()));
     expect_dpf_service_inventory(&mut mock);
     mock.expect_register_dpu_device()
         .returning(|_, _, _| Ok(()));
@@ -1226,6 +1240,111 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
         .expect("timed out during initial provisioning");
     configure_gb200_b3240_host(&pool, &mh).await;
     let released_holds_before_migration = released_holds.load(Ordering::SeqCst);
+
+    // The automatic updater can select only the outdated subset, independently
+    // of the admin API's whole-host request validation below.
+    let mut txn = pool.begin().await.unwrap();
+    let snapshot = mh.snapshot(&mut txn).await;
+    txn.commit().await.unwrap();
+    let unattached_dpu_id: DpuMachineId =
+        "fm100dtjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"
+            .parse()
+            .unwrap();
+    assert!(!mh.dpu_ids.contains(&unattached_dpu_id));
+    let mut different_dpu_snapshot = snapshot.clone();
+    different_dpu_snapshot.dpu_snapshots[1].id = unattached_dpu_id;
+    let different_dpu_request = [
+        different_dpu_snapshot.dpu_snapshots[0].id,
+        unattached_dpu_id,
+    ];
+
+    // Equal counts are insufficient: the requested IDs must match both the
+    // attachment IDs and the DPU snapshots used to select the deployment.
+    check_cases_async(
+        [
+            ("outdated subset", &snapshot, &mh.dpu_ids[..1]),
+            (
+                "snapshot contains a different DPU",
+                &different_dpu_snapshot,
+                &mh.dpu_ids[..],
+            ),
+            (
+                "request contains an unattached DPU",
+                &different_dpu_snapshot,
+                &different_dpu_request[..],
+            ),
+        ]
+        .map(|(scenario, snapshot, requested_dpus)| Case {
+            scenario,
+            input: (snapshot, requested_dpus),
+            expect: FailsWith(true),
+        }),
+        |(snapshot, requested_dpus)| {
+            let pool = &pool;
+            let env = &env;
+            async move {
+                validate_reprovision_compatibility(
+                    snapshot,
+                    requested_dpus,
+                    pool,
+                    &env.config.rack_profiles,
+                    env.api.dpf_sdk.as_deref().unwrap(),
+                )
+                .await
+                .map_err(|error| {
+                    error
+                        .to_string()
+                        .contains("requires a complete host request")
+                })
+            }
+        },
+    )
+    .await;
+
+    let updater = DpuNicFirmwareUpdate {
+        reported_wrong_versions: Mutex::new(HashSet::new()),
+        metrics: None,
+        config: env.config.clone(),
+        dpf: env.api.dpf_sdk.clone(),
+    };
+    let snapshots = get_all_snapshots(&env).await;
+    for (outdated_count, admitted) in [(1, false), (2, true)] {
+        *outdated.lock().unwrap() = mh.dpu_ids[..outdated_count]
+            .iter()
+            .map(|dpu_id| OutdatedDpfDpu {
+                dpu_machine_id: *dpu_id,
+                target_source: "updated-bfb".to_string(),
+            })
+            .collect();
+        let started = updater
+            .start_updates(&pool, 1, &HashSet::new(), &snapshots)
+            .await
+            .unwrap();
+        assert_eq!(
+            started,
+            if admitted {
+                HashSet::from([mh.id.into()])
+            } else {
+                HashSet::new()
+            },
+            "{outdated_count} outdated DPUs"
+        );
+        let mut txn = pool.begin().await.unwrap();
+        for dpu in mh.dpu_db_machines(&mut txn).await {
+            assert_eq!(
+                dpu.reprovision_requested.is_some(),
+                admitted,
+                "{outdated_count} outdated DPUs: {}",
+                dpu.id
+            );
+            if admitted {
+                db::machine::clear_dpu_reprovisioning_request(txn.as_mut(), &dpu.id, true)
+                    .await
+                    .unwrap();
+            }
+        }
+        txn.commit().await.unwrap();
+    }
 
     mh.mark_machine_for_updates().await;
     let partial_request_error = env
