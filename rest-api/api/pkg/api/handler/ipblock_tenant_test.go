@@ -78,7 +78,7 @@ type tenantIPBlockFixture struct {
 	deadlines          []time.Time
 	org                string
 	duringCore         func()
-	siteTimeout        time.Duration
+	siteRequestContext context.Context
 }
 
 func newTenantIPBlockFixture(t *testing.T) *tenantIPBlockFixture {
@@ -145,10 +145,8 @@ func newTenantIPBlockFixture(t *testing.T) *tenantIPBlockFixture {
 	f.router.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			c.Set("user", f.user)
-			if f.siteTimeout > 0 && strings.Contains(c.Request().URL.Path, "/site/") {
-				ctx, cancel := context.WithTimeout(c.Request().Context(), f.siteTimeout)
-				defer cancel()
-				c.SetRequest(c.Request().WithContext(ctx))
+			if f.siteRequestContext != nil && strings.Contains(c.Request().URL.Path, "/site/") {
+				c.SetRequest(c.Request().WithContext(f.siteRequestContext))
 			}
 			return next(c)
 		}
@@ -594,22 +592,45 @@ func checkTenantIPBlockSiteConflict(t *testing.T, method string) {
 	_, err = cdbm.NewSiteDAO(f.session).GetByIDForTenantIPBlockMutation(context.Background(), tx, f.site.ID)
 	require.NoError(t, err)
 	f.user = f.providerUser
-	f.siteTimeout = 100 * time.Millisecond
+	var blockerPID int
+	require.NoError(t, tx.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(context.Background(), &blockerPID))
+	requestCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	f.siteRequestContext = requestCtx
 	server := httptest.NewServer(f.router)
-	defer server.Close()
+	defer func() { cancel(); server.Close() }()
 	cfg := sdk.NewConfiguration()
 	cfg.Servers = sdk.ServerConfigurations{{URL: server.URL}}
 	client := sdk.NewAPIClient(cfg)
-	var response *http.Response
-	if method == http.MethodPatch {
-		capabilities := sdk.NewSiteCapabilitiesUpdateRequest()
-		capabilities.SetTenantSitePrefix(false)
-		request := sdk.NewSiteUpdateRequest()
-		request.SetCapabilities(*capabilities)
-		_, response, err = client.SiteAPI.UpdateSite(context.Background(), "provider", f.site.ID.String()).SiteUpdateRequest(*request).Execute()
-	} else {
-		_, response, err = client.SiteAPI.DeleteSite(context.Background(), "provider", f.site.ID.String()).Execute()
+	type result struct {
+		response *http.Response
+		err      error
 	}
+	finished := make(chan result, 1)
+	go func() {
+		var response *http.Response
+		var err error
+		if method == http.MethodPatch {
+			capabilities := sdk.NewSiteCapabilitiesUpdateRequest()
+			capabilities.SetTenantSitePrefix(false)
+			request := sdk.NewSiteUpdateRequest()
+			request.SetCapabilities(*capabilities)
+			_, response, err = client.SiteAPI.UpdateSite(context.Background(), "provider", f.site.ID.String()).SiteUpdateRequest(*request).Execute()
+		} else {
+			_, response, err = client.SiteAPI.DeleteSite(context.Background(), "provider", f.site.ID.String()).Execute()
+		}
+		finished <- result{response, err}
+	}()
+	// Cancel only after the provider request reaches the lifecycle lock; a short
+	// request timeout can expire in unrelated setup on a loaded test machine.
+	require.Eventually(t, func() bool {
+		var waiting bool
+		err := f.session.DB.NewSelect().ColumnExpr("EXISTS (SELECT 1 FROM pg_stat_activity WHERE ? = ANY(pg_blocking_pids(pid)))", blockerPID).Scan(context.Background(), &waiting)
+		return err == nil && waiting
+	}, 5*time.Second, 10*time.Millisecond)
+	cancel()
+	got := <-finished
+	response, err := got.response, got.err
+
 	require.Error(t, err)
 	require.Equal(t, http.StatusConflict, response.StatusCode)
 	var apiErr *sdk.GenericOpenAPIError
