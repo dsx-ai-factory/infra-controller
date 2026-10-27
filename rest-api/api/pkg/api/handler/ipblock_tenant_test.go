@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -28,6 +29,8 @@ import (
 	inventory "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/siteprefix"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 	tclient "go.temporal.io/sdk/client"
 	tp "go.temporal.io/sdk/temporal"
@@ -72,6 +75,8 @@ type tenantIPBlockFixture struct {
 	core               *corev1.SitePrefix
 	calls              []string
 	nextError          error
+	commitOnError      bool
+	lastCreatedID      uuid.UUID
 	nextWait           bool
 	requestTimeout     time.Duration
 	failMethod         string
@@ -101,10 +106,21 @@ func newTenantIPBlockFixture(t *testing.T) *tenantIPBlockFixture {
 		require.True(t, ok)
 		f.deadlines = append(f.deadlines, deadline)
 		f.calls = append(f.calls, request.FullMethod)
+		result := tenantIPBlockRun{wait: f.nextWait}
+		commitOnError := false
+		f.nextWait = false
+		if f.failMethod == "" || request.FullMethod == f.failMethod {
+			result.err = f.nextError
+			f.nextError = nil
+			commitOnError = f.commitOnError
+			f.commitOnError = false
+		}
+		// Definitive failures reject before mutation; uncertain outcomes may commit.
+		apply := result.err == nil || commitOnError
 		var data []byte
 		var err error
 		switch request.FullMethod {
-		case "/forge.Forge/CreateSitePrefix":
+		case createTenantIPBlockMethod:
 			req := &corev1.SitePrefixCreationRequest{}
 			require.NoError(t, protojson.Unmarshal(request.RequestJSON, req))
 			require.Equal(t, f.tenant.Org, req.TenantOrganizationId)
@@ -112,29 +128,45 @@ func newTenantIPBlockFixture(t *testing.T) *tenantIPBlockFixture {
 			blocks, _, findErr := cdbm.NewIPBlockDAO(f.session).GetAll(context.Background(), nil, cdbm.IPBlockFilterInput{SitePrefixIDs: []uuid.UUID{uuid.MustParse(req.Id.Value)}}, cdbp.PageInput{}, nil)
 			require.NoError(t, findErr)
 			require.Empty(t, blocks)
+			f.lastCreatedID = uuid.MustParse(req.GetId().GetValue())
+			if !apply {
+				return result, nil
+			}
 			f.core = &corev1.SitePrefix{Id: req.Id, Version: "v1", Metadata: req.Metadata, Config: &corev1.SitePrefixConfig{Prefix: req.Prefix, TenantOrganizationId: &req.TenantOrganizationId, RoutingScope: corev1.SitePrefixRoutingScope_SITE_PREFIX_ROUTING_SCOPE_DATACENTER_ONLY}, Status: &corev1.SitePrefixStatus{Authority: corev1.SitePrefixAuthority_SITE_PREFIX_AUTHORITY_TENANT_MANAGED, LifecycleState: corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_READY}}
 			data, err = protojson.Marshal(f.core)
-		case "/forge.Forge/FindSitePrefixesByIds":
+		case findTenantIPBlockMethod:
+			req := &corev1.SitePrefixesByIdsRequest{}
+			require.NoError(t, protojson.Unmarshal(request.RequestJSON, req))
+			require.Len(t, req.SitePrefixIds, 1)
+			require.Equal(t, f.core.Id.Value, req.SitePrefixIds[0].GetValue())
 			data, err = protojson.Marshal(&corev1.SitePrefixList{SitePrefixes: []*corev1.SitePrefix{f.core}})
-		case "/forge.Forge/UpdateSitePrefix":
+		case updateTenantIPBlockMethod:
 			req := &corev1.SitePrefixUpdateRequest{}
 			require.NoError(t, protojson.Unmarshal(request.RequestJSON, req))
+			require.Equal(t, f.core.Id.Value, req.GetId().GetValue())
+			require.Equal(t, f.tenant.Org, req.TenantOrganizationId)
 			require.Equal(t, f.core.Version, req.GetIfVersionMatch())
+			require.NotNil(t, req.Metadata)
+			if !apply {
+				return result, nil
+			}
 			f.core.Metadata = req.Metadata
 			data, err = protojson.Marshal(f.core)
-		case "/forge.Forge/DeleteSitePrefix":
+		case deleteTenantIPBlockMethod:
+			req := &corev1.SitePrefixDeletionRequest{}
+			require.NoError(t, protojson.Unmarshal(request.RequestJSON, req))
+			require.Equal(t, f.core.Id.Value, req.GetId().GetValue())
+			require.Equal(t, f.tenant.Org, req.TenantOrganizationId)
+			if !apply {
+				return result, nil
+			}
 			f.core.Status.LifecycleState = corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING
 			data, err = protojson.Marshal(&corev1.SitePrefixDeletionResult{SitePrefix: f.core})
 		default:
 			t.Fatalf("unexpected Core method %s", request.FullMethod)
 		}
 		require.NoError(t, err)
-		result := tenantIPBlockRun{data: data, wait: f.nextWait}
-		f.nextWait = false
-		if f.failMethod == "" || request.FullMethod == f.failMethod {
-			result.err = f.nextError
-			f.nextError = nil
-		}
+		result.data = data
 		if f.duringCore != nil {
 			f.duringCore()
 		}
@@ -193,7 +225,8 @@ func readTenantIPBlock(t *testing.T, r *httptest.ResponseRecorder, code int) mod
 	require.NoError(t, json.Unmarshal(r.Body.Bytes(), &result))
 	return result
 }
-func TestTenantIPBlockHandler_handle(t *testing.T) {
+func checkTenantIPBlockLifecycle(t *testing.T) {
+	t.Helper()
 	for _, row := range []struct {
 		name  string
 		check func(*testing.T, *tenantIPBlockFixture)
@@ -338,8 +371,9 @@ func TestTenantIPBlockHandler_handle(t *testing.T) {
 					response := f.request(t, http.MethodPost, "", f.body())
 					require.Equal(t, failure.code, response.Code, response.Body.String())
 					require.NotContains(t, response.Body.String(), failure.message)
-					_, err := cdbm.NewIPBlockDAO(f.session).GetByID(context.Background(), nil, uuid.MustParse(f.core.Id.Value), nil)
+					_, err := cdbm.NewIPBlockDAO(f.session).GetByID(context.Background(), nil, f.lastCreatedID, nil)
 					require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+					require.Nil(t, f.core, "definitive create rejection must not create a Core root")
 				})
 			}
 			readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
@@ -380,16 +414,21 @@ func TestTenantIPBlockHandler_handle(t *testing.T) {
 				errorType          string
 				code               int
 			}{
-				{http.MethodPatch, "/forge.Forge/UpdateSitePrefix", map[string]any{"description": "committed-in-core"}, swe.ErrTypeNICoUnavailable, http.StatusServiceUnavailable},
+				{http.MethodPatch, updateTenantIPBlockMethod, map[string]any{"description": "committed-in-core"}, swe.ErrTypeNICoUnavailable, http.StatusServiceUnavailable},
 				{http.MethodPatch, findTenantIPBlockMethod, map[string]any{"name": "lookup-failed"}, swe.ErrTypeNICoDenied, http.StatusForbidden},
-				{http.MethodPatch, "/forge.Forge/UpdateSitePrefix", map[string]any{"name": "stale-version"}, swe.ErrTypeNICoFailedPrecondition, http.StatusPreconditionFailed},
-				{http.MethodDelete, "/forge.Forge/DeleteSitePrefix", nil, swe.ErrTypeNICoUnavailable, http.StatusServiceUnavailable},
+				{http.MethodPatch, updateTenantIPBlockMethod, map[string]any{"name": "stale-version"}, swe.ErrTypeNICoFailedPrecondition, http.StatusPreconditionFailed},
+				{http.MethodDelete, deleteTenantIPBlockMethod, nil, swe.ErrTypeNICoUnavailable, http.StatusServiceUnavailable},
 			} {
+				before := proto.Clone(f.core)
+				f.commitOnError = mutation.errorType == swe.ErrTypeNICoUnavailable
 				f.failMethod = mutation.coreMethod
 				f.nextError = tp.NewNonRetryableApplicationError("private Core failure detail", mutation.errorType, nil)
 				response := f.request(t, mutation.method, "/"+created.ID, mutation.body)
 				require.Equal(t, mutation.code, response.Code, response.Body.String())
 				require.NotContains(t, response.Body.String(), "private Core failure detail")
+				if mutation.errorType != swe.ErrTypeNICoUnavailable {
+					require.True(t, proto.Equal(before, f.core), "definitive rejection must not mutate Core")
+				}
 				persisted := readTenantIPBlock(t, f.request(t, http.MethodGet, "/"+created.ID, nil), http.StatusOK)
 				require.Equal(t, created.Name, persisted.Name)
 				require.Equal(t, created.Status, persisted.Status)
@@ -688,4 +727,45 @@ func checkTenantIPBlockDispatch(t *testing.T, method string) {
 			}
 		})
 	}
+}
+
+func checkTenantIPBlockLogs(t *testing.T, method, operation string) {
+	t.Helper()
+	f := newTenantIPBlockFixture(t)
+	path := ""
+	var body any = f.body()
+	want := http.StatusCreated
+	if method != http.MethodPost {
+		created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
+		path = "/" + created.ID
+		body, want = map[string]any{"name": "renamed"}, http.StatusOK
+		if method == http.MethodDelete {
+			body, want = nil, http.StatusAccepted
+		}
+	}
+	var logs bytes.Buffer
+	previous := log.Logger
+	log.Logger = zerolog.New(zerolog.SyncWriter(&logs))
+	t.Cleanup(func() { log.Logger = previous })
+	response := f.request(t, method, path, body)
+	require.Equal(t, want, response.Code, response.Body.String())
+	starts, finishes := 0, 0
+	decoder := json.NewDecoder(&logs)
+	for decoder.More() {
+		var event map[string]any
+		require.NoError(t, decoder.Decode(&event))
+		if event["Model"] != "IPBlock" {
+			continue
+		}
+		if event["message"] == "started API handler" {
+			starts++
+			require.Equal(t, operation, event["Handler"])
+		}
+		if event["message"] == "finishing API handler" {
+			finishes++
+			require.Equal(t, operation, event["Handler"])
+		}
+	}
+	require.Equal(t, 1, starts)
+	require.Equal(t, 1, finishes)
 }

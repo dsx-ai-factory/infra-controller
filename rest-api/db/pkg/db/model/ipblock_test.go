@@ -2067,3 +2067,19 @@ func TestIPBlockSQLDAO_LinkSitePrefix(t *testing.T) {
 		})
 	}
 }
+
+func TestIPBlock_ToDeletionRequestProto(t *testing.T) {
+	id, prefixID := uuid.New(), uuid.New()
+	block := IPBlock{ID: id, SitePrefixID: &prefixID}
+	got := block.ToDeletionRequestProto("tenant-org")
+	require.Equal(t, prefixID.String(), got.GetId().GetValue())
+	require.Equal(t, "tenant-org", got.TenantOrganizationId)
+}
+
+func TestIPBlock_ToSitePrefixesByIdsRequest(t *testing.T) {
+	id, prefixID := uuid.New(), uuid.New()
+	block := IPBlock{ID: id, SitePrefixID: &prefixID}
+	got := block.ToSitePrefixesByIdsRequest()
+	require.Len(t, got.SitePrefixIds, 1)
+	require.Equal(t, prefixID.String(), got.SitePrefixIds[0].GetValue())
+}

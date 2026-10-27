@@ -92,7 +92,7 @@ func (cipbh CreateIPBlockHandler) Handle(c echo.Context) error {
 	ok = auth.ValidateUserRoles(dbUser, org, nil, auth.ProviderAdminRole)
 	if !ok {
 		if auth.ValidateUserRoles(dbUser, org, nil, auth.TenantAdminRole) {
-			return (tenantIPBlockHandler{dbSession: cipbh.dbSession, scp: cipbh.sc}).handle(c)
+			return cipbh.handleTenant(c, ctx, logger, org, dbUser)
 		}
 		logger.Warn().Msg("user does not have Provider Admin role, access denied")
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Provider Admin role with org", nil)
@@ -940,7 +940,7 @@ func (uipbh UpdateIPBlockHandler) Handle(c echo.Context) error {
 	ok = auth.ValidateUserRoles(dbUser, org, nil, auth.ProviderAdminRole)
 	if !ok {
 		if auth.ValidateUserRoles(dbUser, org, nil, auth.TenantAdminRole) {
-			return (tenantIPBlockHandler{dbSession: uipbh.dbSession, scp: uipbh.sc}).handle(c)
+			return uipbh.handleTenant(c, ctx, logger, org, dbUser)
 		}
 		logger.Warn().Msg("user does not have Provider Admin role, access denied")
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Provider Admin role with org", nil)
@@ -964,7 +964,7 @@ func (uipbh UpdateIPBlockHandler) Handle(c echo.Context) error {
 		if err == nil {
 			_, err = ipbDAO.GetOne(ctx, nil, ipbID, cdbm.IPBlockFilterInput{TenantIDs: []uuid.UUID{tenant.ID}, Managed: cutil.GetPtr(false)}, nil)
 			if err == nil {
-				return (tenantIPBlockHandler{dbSession: uipbh.dbSession, scp: uipbh.sc}).handle(c)
+				return uipbh.handleTenant(c, ctx, logger, org, dbUser)
 			}
 		}
 		if !errors.Is(err, cdb.ErrDoesNotExist) && !errors.Is(err, common.ErrOrgTenantNotFound) {
@@ -1131,7 +1131,7 @@ func (dipbh DeleteIPBlockHandler) Handle(c echo.Context) error {
 	ok = auth.ValidateUserRoles(dbUser, org, nil, auth.ProviderAdminRole)
 	if !ok {
 		if auth.ValidateUserRoles(dbUser, org, nil, auth.TenantAdminRole) {
-			return (tenantIPBlockHandler{dbSession: dipbh.dbSession, scp: dipbh.sc}).handle(c)
+			return dipbh.handleTenant(c, ctx, logger, org, dbUser)
 		}
 		logger.Warn().Msg("user does not have Provider Admin role, access denied")
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Provider Admin role with org", nil)
@@ -1157,7 +1157,7 @@ func (dipbh DeleteIPBlockHandler) Handle(c echo.Context) error {
 		if err == nil {
 			_, err = ipbDAO.GetOne(ctx, nil, ipbID, cdbm.IPBlockFilterInput{TenantIDs: []uuid.UUID{tenant.ID}, Managed: cutil.GetPtr(false)}, nil)
 			if err == nil {
-				return (tenantIPBlockHandler{dbSession: dipbh.dbSession, scp: dipbh.sc}).handle(c)
+				return dipbh.handleTenant(c, ctx, logger, org, dbUser)
 			}
 		}
 		if !errors.Is(err, cdb.ErrDoesNotExist) && !errors.Is(err, common.ErrOrgTenantNotFound) {

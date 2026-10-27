@@ -13,6 +13,7 @@ import (
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -43,6 +44,9 @@ var tenantIPBlockDescriptionRegexp = regexp.MustCompile(`^[^\x00]*$`)
 
 // APIIPBlockCreateRequest is the data structure to capture user request to create a new IPBlock
 type APIIPBlockCreateRequest struct {
+	// SitePrefixID and TenantOrg are supplied by the handler after authorization.
+	SitePrefixID uuid.UUID `json:"-"`
+	TenantOrg    string    `json:"-"`
 	// Name is the name of the IPBlock
 	Name string `json:"name"`
 	// Description is the description of the IPBlock
@@ -146,6 +150,9 @@ func (ipbcr *APIIPBlockCreateRequest) Validate() error {
 
 // APIIPBlockUpdateRequest is the data structure to capture user request to update an IPBlock
 type APIIPBlockUpdateRequest struct {
+	// SitePrefixID and TenantOrg are supplied by the handler after authorization.
+	SitePrefixID uuid.UUID `json:"-"`
+	TenantOrg    string    `json:"-"`
 	// Name is the name of the IPBlock
 	Name *string `json:"name"`
 	// Description is the description of the IPBlock
@@ -355,10 +362,24 @@ func (r APIIPBlockUpdateRequest) ValidateTenant() error {
 }
 
 // ToSitePrefixCreationRequest maps a validated request to a tenant-owned Core root.
-func (r APIIPBlockCreateRequest) ToSitePrefixCreationRequest(id uuid.UUID, org string) *corev1.SitePrefixCreationRequest {
+func (r APIIPBlockCreateRequest) ToSitePrefixCreationRequest() *corev1.SitePrefixCreationRequest {
 	metadata := &corev1.Metadata{Name: r.Name}
 	if r.Description != nil {
 		metadata.Description = *r.Description
 	}
-	return &corev1.SitePrefixCreationRequest{Id: &corev1.SitePrefixId{Value: id.String()}, TenantOrganizationId: org, Prefix: fmt.Sprintf("%s/%d", r.Prefix, r.PrefixLength), Metadata: metadata}
+	return &corev1.SitePrefixCreationRequest{Id: &corev1.SitePrefixId{Value: r.SitePrefixID.String()}, TenantOrganizationId: r.TenantOrg, Prefix: fmt.Sprintf("%s/%d", r.Prefix, r.PrefixLength), Metadata: metadata}
+}
+
+// ToSitePrefixUpdateRequest overlays supplied metadata on the validated Core snapshot.
+// The caller checks the snapshot's identity, ownership, metadata and version first.
+func (r APIIPBlockUpdateRequest) ToSitePrefixUpdateRequest(current *corev1.SitePrefix) *corev1.SitePrefixUpdateRequest {
+	metadata := proto.Clone(current.Metadata).(*corev1.Metadata)
+	if r.Name != nil {
+		metadata.Name = *r.Name
+	}
+	if r.Description != nil {
+		metadata.Description = *r.Description
+	}
+	version := current.Version
+	return &corev1.SitePrefixUpdateRequest{Id: &corev1.SitePrefixId{Value: r.SitePrefixID.String()}, TenantOrganizationId: r.TenantOrg, Metadata: metadata, IfVersionMatch: &version}
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/uptrace/bun"
 )
 
@@ -192,6 +193,17 @@ func (ipb *IPBlock) ValidateChildPrefixLength(length int) error {
 		return fmt.Errorf("prefix length must be between %d and %d", prefix.Bits(), prefix.Addr().BitLen())
 	}
 	return nil
+}
+
+// ToDeletionRequestProto builds a tenant retirement request for a Core-linked block.
+// The caller validates SitePrefixID and tenant ownership before conversion.
+func (ipb *IPBlock) ToDeletionRequestProto(tenantOrg string) *corev1.SitePrefixDeletionRequest {
+	return &corev1.SitePrefixDeletionRequest{Id: &corev1.SitePrefixId{Value: ipb.SitePrefixID.String()}, TenantOrganizationId: tenantOrg}
+}
+
+// ToSitePrefixesByIdsRequest selects the authoritative Core snapshot of a linked block.
+func (ipb *IPBlock) ToSitePrefixesByIdsRequest() *corev1.SitePrefixesByIdsRequest {
+	return &corev1.SitePrefixesByIdsRequest{SitePrefixIds: []*corev1.SitePrefixId{{Value: ipb.SitePrefixID.String()}}}
 }
 
 // IPBlockCreateInput input parameters for Create method
