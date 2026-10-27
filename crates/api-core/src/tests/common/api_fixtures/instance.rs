@@ -63,6 +63,7 @@ impl<'a, 'b> TestInstanceBuilder<'a, 'b> {
                 network: None,
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
@@ -487,6 +488,7 @@ pub(in crate::tests) fn config_for_ib_config(
         nvlink: None,
         spxconfig: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         power_profile: None,
     }
@@ -504,6 +506,7 @@ pub(in crate::tests) fn config_for_nvlink_config(
         nvlink: Some(nvl_config),
         spxconfig: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         power_profile: None,
     }

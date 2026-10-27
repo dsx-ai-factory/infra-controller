@@ -320,6 +320,7 @@ pub(crate) async fn create_initial_vpcs(
                 ..Default::default()
             },
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             routing_profile_type: def.routing_profile_type.clone(),
             routing_profile_overrides: def.routing_profile_overrides.clone(),
             power_resource_group: None,
@@ -623,6 +624,7 @@ pub(crate) async fn create_admin_vpc(api: &Api, vpc_vni: Option<u32>) -> Result<
         power_resource_group: None,
         slaac_enabled: false,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         network_virtualization_type: carbide_network::virtualization::VpcVirtualizationType::Fnn,
         metadata: Metadata {
             name: "admin".to_string(),

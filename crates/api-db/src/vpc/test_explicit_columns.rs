@@ -88,6 +88,7 @@ async fn exercise_vpc_queries(
             network_virtualization_type: VpcVirtualizationType::EthernetVirtualizer,
             metadata: metadata.clone(),
             network_security_group_id: Some(nsg_id.clone()),
+            dhcp_option_set_id: None,
             routing_profile_type: Some("initial".to_string()),
             routing_profile_overrides: Some(overrides.clone()),
             power_resource_group: Some("rack-a".to_string()),
@@ -107,6 +108,7 @@ async fn exercise_vpc_queries(
             tenant_keyset_id: None,
             network_virtualization_type: VpcVirtualizationType::EthernetVirtualizer,
             network_security_group_id: Some(nsg_id),
+            dhcp_option_set_id: None,
             default_nvlink_logical_partition_id: None,
             vni: Some(vni),
             routing_profile_type: Some("initial".to_string()),
@@ -160,6 +162,7 @@ async fn exercise_vpc_queries(
     let update_request = UpdateVpc {
         id,
         network_security_group_id: vpc.config.network_security_group_id.clone(),
+        dhcp_option_set_id: None,
         routing_profile_overrides: Some(VpcRoutingProfileOverrides {
             leak_tenant_host_routes_to_underlay: Some(false),
             ..Default::default()

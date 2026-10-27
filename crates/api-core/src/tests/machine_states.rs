@@ -4551,6 +4551,7 @@ async fn test_assigned_ready_retries_pending_provisioning_boot(pool: sqlx::PgPoo
             nvlink: None,
             spxconfig: None,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             dpu_extension_services: None,
             power_profile: None,
         })
@@ -7565,6 +7566,7 @@ async fn test_scout_heartbeat_timeout_alert_cleared_on_instance_creation_transit
                 network: Some(single_interface_network_config(segment_id)),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
@@ -7648,6 +7650,7 @@ async fn test_scout_heartbeat_timeout_alert_not_cleared_when_unhealthy_allocatio
                 network: Some(single_interface_network_config(segment_id)),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,

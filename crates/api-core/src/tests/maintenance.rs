@@ -53,6 +53,7 @@ async fn test_maintenance_multi_dpu(db_pool: sqlx::PgPool) -> Result<(), eyre::R
         nvlink: None,
         spxconfig: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         power_profile: None,
     };
