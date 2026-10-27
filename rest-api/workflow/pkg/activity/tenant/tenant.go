@@ -102,13 +102,16 @@ func (mt ManageTenant) UpdateTenantsInDB(ctx context.Context, siteID uuid.UUID, 
 		}
 	}
 
+	// Orgs reported by the Site that have no Tenant association with it
+	unassociatedOrgs := []string{}
+
 	// Iterate through Tenant Inventory and update DB
 	for _, controllerTenant := range tenantInventory.Tenants {
 		slogger := logger.With().Str("Tenant Org", controllerTenant.OrganizationId).Logger()
 
 		tenant, ok := existingTenantOrgMap[controllerTenant.OrganizationId]
 		if !ok {
-			slogger.Debug().Msg("skipping Tenant inventory entry because Tenant is not associated with Site")
+			unassociatedOrgs = append(unassociatedOrgs, controllerTenant.OrganizationId)
 			continue
 		}
 
@@ -126,6 +129,28 @@ func (mt ManageTenant) UpdateTenantsInDB(ctx context.Context, siteID uuid.UUID, 
 			if triggerTenantMetadataUpdate {
 				slogger.Info().Msg("detected data out of sync, triggering Tenant update workflow")
 				_ = mt.CreateOrUpdateTenantOnSite(ctx, siteID, tc, tenant, controllerTenant)
+			}
+		}
+	}
+
+	// An unassociated org is expected when its Tenant is not associated with this Site. An org with
+	// no Tenant record at all was possibly created directly on Site, so it stays visible.
+	if len(unassociatedOrgs) > 0 {
+		knownTenants, _, serr := cdbm.NewTenantDAO(mt.dbSession).GetAll(ctx, nil, cdbm.TenantFilterInput{Orgs: unassociatedOrgs}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if serr != nil {
+			logger.Warn().Err(serr).Msg("failed to look up Tenants not associated with Site")
+		} else {
+			knownOrgs := make(map[string]bool, len(knownTenants))
+			for _, knownTenant := range knownTenants {
+				knownOrgs[knownTenant.Org] = true
+			}
+			for _, org := range unassociatedOrgs {
+				slogger := logger.With().Str("Tenant Org", org).Logger()
+				if knownOrgs[org] {
+					slogger.Debug().Msg("skipping Tenant inventory entry because Tenant is not associated with Site")
+				} else {
+					slogger.Warn().Msg("Tenant does not have a record in DB, possibly created directly on Site")
+				}
 			}
 		}
 	}
