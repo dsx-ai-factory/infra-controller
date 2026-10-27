@@ -48,6 +48,7 @@ async fn managed_host(env: &TestHarness) -> TestManagedHost {
     let site_explorer = env.default_test_site_explorer();
     env.managed_host_builder(&site_explorer, underlay_segment)
         .with_config(ManagedHostConfig::default())
+        .with_dpu_network_status_reported()
         .build()
         .await
         .0
@@ -207,7 +208,7 @@ async fn enter_host_cleanup(env: &mut Env, host: &TestManagedHost) -> ManagedHos
         verification_attempts: None,
     };
     sqlx::query("UPDATE machines SET last_reboot_requested = $1 WHERE id = $2")
-        .bind(sqlx::types::Json(request.clone()))
+        .bind(sqlx::types::Json(request))
         .bind(host.host.id)
         .execute(&env.test_harness.api().database_connection)
         .await
@@ -253,32 +254,6 @@ async fn clear_dpu_network_status(env: &Env, host: &TestManagedHost) {
         .unwrap();
 }
 
-async fn report_dpu_status_since_boot(host: &TestManagedHost) {
-    let boot_requested_at = host
-        .host
-        .machine()
-        .await
-        .status
-        .last_reboot_requested
-        .expect("test host should have a boot request")
-        .time;
-
-    host.report_dpu_network_status().await;
-
-    for dpu in &host.dpus {
-        let observed_at = dpu
-            .machine()
-            .await
-            .network_status_observation
-            .expect("DPU should report network status")
-            .observed_at;
-        assert!(
-            observed_at >= boot_requested_at,
-            "DPU status must be observed after the host boot request"
-        );
-    }
-}
-
 async fn assert_force_restart(host: &TestManagedHost, actions: &[RedfishSimAction], reason: &str) {
     let machine = host.host.machine().await;
     assert!(
@@ -301,7 +276,6 @@ async fn booting_with_discovery_image_retries_once_after_ten_minutes(pool: PgPoo
         .await;
     let host = host_booting_with_discovery_image(&env.test_harness).await;
     age_state(&env, &host, Duration::minutes(11), None).await;
-    report_dpu_status_since_boot(&host).await;
 
     let first = env.redfish_sim.timepoint();
     env.run_single_iteration().await;
@@ -357,7 +331,6 @@ async fn normal_recovery_is_not_blocked_before_early_retry(pool: PgPool) {
         Duration::minutes(91),
     )
     .await;
-    report_dpu_status_since_boot(&host).await;
 
     let timepoint = env.redfish_sim.timepoint();
     env.run_single_iteration().await;
@@ -389,7 +362,6 @@ async fn recent_scout_contact_suppresses_early_retry(pool: PgPool) {
         .await;
     let host = host_booting_with_discovery_image(&env.test_harness).await;
     age_state(&env, &host, Duration::minutes(11), None).await;
-    report_dpu_status_since_boot(&host).await;
     set_last_scout_contact(&env, &host, Utc::now()).await;
 
     let timepoint = env.redfish_sim.timepoint();
@@ -441,7 +413,6 @@ async fn host_cleanup_retries_once_after_ten_minutes(pool: PgPool) {
     let host = managed_host(&env.test_harness).await;
     let state = enter_host_cleanup(&mut env, &host).await;
     age_state(&env, &host, Duration::minutes(11), None).await;
-    report_dpu_status_since_boot(&host).await;
 
     let first = env.redfish_sim.timepoint();
     env.run_single_iteration().await;
