@@ -255,6 +255,7 @@ pub(super) async fn get_astra_config(
 
     tracing::info!(
         machine_id = %snapshot.host_snapshot.id,
+        %dpu_machine_id,
         is_attachment_config_present,
         attachment_count = astra_attachments.len(),
         is_maintenance_config_present = !multiplane_interfaces.is_empty(),
