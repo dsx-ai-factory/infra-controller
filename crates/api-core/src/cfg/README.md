@@ -537,6 +537,8 @@ leaves an existing pool's values unchanged. Administrative growth must keep the
 pool's stored value family; a pool with only a binding also rejects changes to
 that family.
 
+The v2.4 startup gate also rejects saved gRPC bindings, even when their pools no longer appear in configuration, before registry construction or pool writes.
+
 Administrative growth accepts a bare map of pool names to `ResourcePoolDef`
 tables, without the `pools` wrapper or the `backend` and `remote_pool` selectors.
 A new pool created through growth receives the default Integrated binding.

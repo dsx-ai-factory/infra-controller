@@ -599,27 +599,15 @@ async fn run_integration() -> eyre::Result<()> {
         "# TYPE carbide_vpc_prefixes_with_state_handling_errors_per_state gauge\n",
     )
     .await?;
-    // Exercise the library sampler on the server's meter without activating a
-    // remote backend. Stop its task before catalogue collection and generation,
-    // which can return early or panic on I/O errors.
-    let mut cleanup_metric_tasks = tokio::task::JoinSet::new();
-    let cleanup_metric_cancel = cancel_token.child_token();
-    carbide_resource_pool::remote::start_cleanup_metrics(
-        test_env.db_pool.clone(),
-        server_handle_2.ready.meter.clone(),
-        &mut cleanup_metric_tasks,
-        cleanup_metric_cancel.clone(),
-    )?;
-    let cleanup_metric_result = metrics::wait_for_metric_line(
-        &test_env.carbide_metrics_addrs,
-        r#"carbide_resource_pool_cleanup_pending{fresh="true"} 0"#,
-    )
-    .await;
-    cleanup_metric_cancel.cancel();
-    while let Some(result) = cleanup_metric_tasks.join_next().await {
-        result?;
+    // Every authoritative API instance starts this sampler, even with Integrated pools.
+    // Require a fresh sample from each before collecting the catalogue.
+    for endpoint in &test_env.carbide_metrics_addrs {
+        metrics::wait_for_metric_line(
+            std::slice::from_ref(endpoint),
+            r#"carbide_resource_pool_cleanup_pending{fresh="true"} 0"#,
+        )
+        .await?;
     }
-    cleanup_metric_result?;
     let mut metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
     metric_infos.push(collect_ssh_console_metric_info().await?);
     metric_infos.extend(collect_dhcp_metric_infos().await?);

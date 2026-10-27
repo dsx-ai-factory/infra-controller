@@ -14,25 +14,30 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-//! Explicit backend selection and execution for typed resource pools.
+//! Allocate and release typed values through each pool's selected backend.
 //!
-//! Typed pool descriptors remain in `model`; SQL mutations remain in `db`.
-//! [`ResourcePoolRegistry`] saves and checks each pool's backend selection.
-//! [`ResourcePoolWithBackend`] borrows a descriptor and its selected backend.
-//! This association does not resolve configuration or persist which backend is
-//! authoritative for allocations. [`ResourcePoolBackend`] executes Integrated
-//! allocations in the caller's transaction. [`grpc::GrpcResourcePoolBackend`]
-//! independently calls a provider using identities and inputs saved by its caller;
-//! remote selection remains separate from the Integrated backend enum.
-//! [`value`] converts Core definitions and typed values to and from provider messages.
-//! [`registration`] saves remote pool definitions and retries their registration
-//! when provider acceptance has not been recorded locally.
-//! [`remote::RemoteResourcePool`] saves remote requests, recovers lost replies,
-//! and finishes cancellation or release. Consumers attach assignments and request
-//! release in their own entity transactions.
-//! Production startup of the coordinator and its cleanup metric follows in
-//! [P11](https://github.com/dsx-ai-factory/infra-controller/issues/7140);
-//! v2.4 configuration still rejects remote pool selection.
+//! [`ResourcePoolRegistry::select`] looks up a typed pool ready for use. Call its
+//! [`prepare_allocation`](ResourcePoolWithBackend::prepare_allocation) before
+//! starting the entity transaction, then [`Allocation::allocate`] in that
+//! transaction and save the entity. If creation fails, roll back and call
+//! [`Allocation::cancel`]. The allocation owns its saved request identity and
+//! result.
+//!
+//! Controllers that save creation IDs with allocation requests use
+//! [`ResourcePoolWithBackend::prepare_request`] in their preparation transaction instead.
+//! After committing, [`PreparedAllocationRequest::resolve`] returns the same allocation.
+//! Integrated reservation stays in the entity transaction; remote requests retain
+//! their identity so recovery can finish cancellation or release after a restart.
+//! Before forgetting creation IDs, capture cleanup with
+//! [`ResourcePoolRegistry::request_cancellation`] under the creation lock, commit,
+//! then call [`AllocationCleanup::wait`]. Reacquire that lock to recheck the
+//! consumer's current identity and desire and [`AllocationCleanup::is_complete`].
+//!
+//! [`ResourcePoolRegistry`] saves and checks backend selections. API startup owns
+//! remote recovery and cleanup metrics. Production configuration rejects
+//! remote selection; tests exercise the shared API below that gate.
+//! Shared allocation supports automatic and requested manual values. Exact
+//! selection across both partitions remains on the Integrated adapter.
 
 #![cfg_attr(test, allow(txn_held_across_await, txn_without_commit))]
 
@@ -41,7 +46,10 @@ mod registry_tests;
 #[cfg(test)]
 mod tests;
 
+mod allocation;
+mod cleanup;
 pub mod grpc;
+mod owned;
 pub mod registration;
 mod registry;
 pub mod remote;
@@ -50,72 +58,39 @@ pub mod value;
 
 use std::str::FromStr;
 
+pub use allocation::{Allocation, PreparedAllocationRequest};
+pub use cleanup::AllocationCleanup;
 use db::resource_pool::{ResourcePoolAllocationNotOwned, ResourcePoolDatabaseError};
 use db::{ConditionalWrite, DatabaseError};
 use model::resource_pool::{OwnerType, ResourcePool};
+pub use owned::OwnedAllocation;
+use registration::RegistrationError;
 pub use registry::{
     PoolDefinitionSource, ResolvedResourcePool, ResourcePoolRegistry, ResourcePoolRegistryError,
 };
+use remote::{RemoteResourcePool, RemoteResourcePoolError};
 use sqlx::PgConnection;
 pub use transaction::database_transaction;
+use value::ValueConversionError;
 
-/// `ResourcePoolBackend` selects how a pool performs allocation and release.
-///
-/// Integrated uses a connection from the caller's transaction; the caller owns
-/// commit or rollback. It forwards to the SQL allocator without acquiring
-/// connections or committing independently. Existing allocations need no
-/// conversion to be used or released through the Integrated backend.
+/// `ResourcePoolBackend` selects the allocator for a typed pool.
+/// Use [`ResourcePoolWithBackend::prepare_allocation`] for allocations through either
+/// backend. The Integrated adapter also supports existing transaction-only
+/// operations; runtime setup and cleanup can access the remote coordinator with
+/// [`Self::remote`].
 #[derive(Clone)]
 pub enum ResourcePoolBackend {
     /// Use the existing SQL allocator in the caller's entity transaction.
     Integrated(IntegratedResourcePoolBackend),
+    /// Coordinate provider calls separately from the entity transaction.
+    Grpc(RemoteResourcePool),
 }
 
-/// `ResourcePoolWithBackend` pairs a typed pool with an explicitly selected backend.
-///
-/// Both values remain owned by the caller. The association lasts for the borrow;
-/// constructing it performs no I/O and does not establish a durable backend
-/// binding. Allocation and release methods belong to [`ResourcePoolBackend`].
-///
-/// Each pool can select a separate backend instance. The pools must already be
-/// populated in SQL; the caller supplies a transaction to the selected backend:
-///
-/// ```rust,no_run
-/// use std::net::Ipv4Addr;
-///
-/// use carbide_resource_pool::{
-///     IntegratedResourcePoolBackend, ResourcePoolBackend, ResourcePoolWithBackend,
-/// };
-/// use model::resource_pool::{OwnerType, ResourcePool, ValueType};
-/// use sqlx::PgConnection;
-///
-/// async fn allocate_from_selected_pools(
-///     txn: &mut PgConnection,
-/// ) -> Result<(Ipv4Addr, i32), Box<dyn std::error::Error>> {
-///     let loopback = ResourcePool::<Ipv4Addr>::new("loopback_ip".into(), ValueType::Ipv4);
-///     let vni = ResourcePool::<i32>::new("vni".into(), ValueType::Integer);
-///     let machine_backend = ResourcePoolBackend::Integrated(IntegratedResourcePoolBackend);
-///     let network_backend = ResourcePoolBackend::Integrated(IntegratedResourcePoolBackend);
-///     let loopback = ResourcePoolWithBackend::new(&loopback, &machine_backend);
-///     let vni = ResourcePoolWithBackend::new(&vni, &network_backend);
-///
-///     let address = loopback
-///         .backend()
-///         .allocate(loopback.pool(), txn, OwnerType::Machine, "machine-1", None)
-///         .await?;
-///     let vni = vni
-///         .backend()
-///         .allocate(
-///             vni.pool(),
-///             txn,
-///             OwnerType::NetworkSegment,
-///             "segment-1",
-///             Some(42),
-///         )
-///         .await?;
-///     Ok((address, vni))
-/// }
-/// ```
+/// `ResourcePoolWithBackend` borrows a typed pool and its selected allocator.
+/// [`ResourcePoolRegistry::select`] returns this handle. Call
+/// [`Self::prepare_allocation`] before starting the entity transaction, then
+/// allocate and save the entity together. Controllers can use [`Self::prepare_request`]
+/// to save an allocation request alongside their own creation record.
 pub struct ResourcePoolWithBackend<'a, T>
 where
     T: ToString + FromStr + Send + Sync + 'static,
@@ -125,42 +100,40 @@ where
     backend: &'a ResourcePoolBackend,
 }
 
-impl<'a, T> ResourcePoolWithBackend<'a, T>
-where
-    T: ToString + FromStr + Send + Sync + 'static,
-    <T as FromStr>::Err: std::error::Error,
-{
-    /// `new` borrows the descriptor and backend selected by the caller for this pool.
-    pub fn new(pool: &'a ResourcePool<T>, backend: &'a ResourcePoolBackend) -> Self {
-        Self { pool, backend }
-    }
-
-    /// `pool` returns the typed descriptor supplied when this association was created.
-    pub fn pool(&self) -> &'a ResourcePool<T> {
-        self.pool
-    }
-
-    /// `backend` returns the selected backend for allocation and release.
-    pub fn backend(&self) -> &'a ResourcePoolBackend {
-        self.backend
-    }
-}
-
 /// `IntegratedResourcePoolBackend` represents the SQL allocator in
 /// [`ResourcePoolBackend::Integrated`].
 ///
-/// It is stateless; the connection supplied to [`ResourcePoolBackend`] methods
-/// determines the database.
+/// Its transaction-only methods forward to the existing SQL allocator. The
+/// caller supplies the connection and owns commit or rollback.
 #[derive(Clone)]
 pub struct IntegratedResourcePoolBackend;
 
 impl ResourcePoolBackend {
-    /// `allocate` reserves a value and returns it as the pool's Rust type.
-    ///
-    /// `None` selects from free automatic entries. `Some(value)` requests that
-    /// value from the manual partition. Exhaustion, unavailable requested values,
-    /// database failures, and value-conversion errors retain the SQL allocator's
-    /// error types and precedence. Integrated performs one SQL query on success.
+    /// `remote` returns the coordinator for calls made outside an entity transaction.
+    /// `None` means allocation and release belong in the Integrated transaction.
+    pub fn remote(&self) -> Option<&RemoteResourcePool> {
+        match self {
+            Self::Integrated(_) => None,
+            Self::Grpc(remote) => Some(remote),
+        }
+    }
+
+    /// `require_integrated` selects the SQL adapter for operations whose caller
+    /// still depends on Integrated inventory. Remote selection fails before I/O.
+    pub fn require_integrated(&self) -> Result<&IntegratedResourcePoolBackend, DatabaseError> {
+        match self {
+            Self::Integrated(integrated) => Ok(integrated),
+            Self::Grpc(_) => Err(DatabaseError::FailedPrecondition(
+                "operation requires an integrated resource pool".to_owned(),
+            )),
+        }
+    }
+}
+
+impl IntegratedResourcePoolBackend {
+    /// `allocate` reserves a value in the caller's transaction.
+    /// `None` chooses free automatic inventory; `Some(value)` requests that value
+    /// from the manual partition. SQL errors and their precedence are preserved.
     pub async fn allocate<T>(
         &self,
         pool: &ResourcePool<T>,
@@ -171,20 +144,14 @@ impl ResourcePoolBackend {
     ) -> Result<T, ResourcePoolDatabaseError>
     where
         T: ToString + FromStr + Send + Sync + 'static,
-        <T as FromStr>::Err: std::error::Error,
+        T::Err: std::error::Error,
     {
-        match self {
-            Self::Integrated(_) => {
-                db::resource_pool::allocate(pool, txn, owner_type, owner_id, requested_value).await
-            }
-        }
+        db::resource_pool::allocate(pool, txn, owner_type, owner_id, requested_value).await
     }
 
-    /// `allocate_exact` reserves the requested value from either assignment partition.
-    ///
-    /// Assignment mode is preserved. Missing or allocated values return
-    /// [`DatabaseError::FailedPrecondition`], including allocations belonging to
-    /// the same owner; callers must handle retained allocations separately.
+    /// `allocate_exact` reserves a value from either assignment partition.
+    /// Missing or already allocated values return `FailedPrecondition`, even
+    /// when the allocation belongs to the same owner. Assignment mode is preserved.
     pub async fn allocate_exact<T>(
         &self,
         pool: &ResourcePool<T>,
@@ -195,22 +162,15 @@ impl ResourcePoolBackend {
     ) -> Result<T, DatabaseError>
     where
         T: ToString + FromStr + Send + Sync + 'static,
-        <T as FromStr>::Err: std::error::Error,
+        T::Err: std::error::Error,
     {
-        match self {
-            Self::Integrated(_) => {
-                db::resource_pool::allocate_exact(pool, txn, owner_type, owner_id, requested_value)
-                    .await
-            }
-        }
+        db::resource_pool::allocate_exact(pool, txn, owner_type, owner_id, requested_value).await
     }
 
     /// `release` frees a value only when its owner type and ID match.
-    ///
-    /// Missing, free, and differently owned values return
-    /// [`ConditionalWrite::NotApplied`] without mutation. Ownership does not
-    /// identify an allocation generation: callers must prevent stale cleanup
-    /// from reaching a later allocation for the same owner.
+    /// Missing, free, or differently owned values return `NotApplied`. Ownership
+    /// does not identify a generation; callers must exclude stale cleanup that
+    /// could reach a later allocation for the same owner.
     pub async fn release<T>(
         &self,
         pool: &ResourcePool<T>,
@@ -221,12 +181,48 @@ impl ResourcePoolBackend {
     ) -> Result<ConditionalWrite<(), ResourcePoolAllocationNotOwned>, DatabaseError>
     where
         T: ToString + FromStr + Send + Sync + 'static,
-        <T as FromStr>::Err: std::error::Error,
+        T::Err: std::error::Error,
     {
-        match self {
-            Self::Integrated(_) => {
-                db::resource_pool::release(pool, txn, value, owner_type, owner_id).await
-            }
-        }
+        db::resource_pool::release(pool, txn, value, owner_type, owner_id).await
+    }
+}
+
+/// `ResourcePoolBackendError` preserves failures from the selected allocator
+/// while identifying when a controller must clean up its previous request.
+#[derive(Debug, thiserror::Error)]
+pub enum ResourcePoolBackendError {
+    /// A database read, write, or transaction failed.
+    #[error(transparent)]
+    Database(#[from] DatabaseError),
+    /// The pool's backend binding could not be loaded or validated.
+    #[error(transparent)]
+    Registry(#[from] ResourcePoolRegistryError),
+    /// The Integrated allocator rejected or could not complete the allocation.
+    #[error(transparent)]
+    Integrated(#[from] ResourcePoolDatabaseError),
+    /// The remote coordinator could not allocate, attach, or finish cleanup.
+    #[error(transparent)]
+    Remote(#[from] RemoteResourcePoolError),
+    /// The accepted pool definition could not be loaded or validated.
+    #[error(transparent)]
+    Registration(#[from] RegistrationError),
+    /// A requested or assigned value does not fit the pool or its Rust type.
+    #[error(transparent)]
+    Value(#[from] ValueConversionError),
+    /// The same controller request has different pool selection or inputs.
+    /// Cancel its previous attempt before preparing the replacement.
+    #[error("resource pool request changed; cancel the previous attempt before retrying")]
+    RequestChanged,
+    /// The previous attempt is still cancelling or releasing its allocation.
+    #[error("resource pool allocation cleanup is still pending")]
+    CleanupPending,
+}
+
+impl ResourcePoolBackendError {
+    /// `is_not_current` reports that the saved allocation attempt changed before
+    /// this operation completed. A controller can recheck whether another worker
+    /// satisfied its request.
+    pub fn is_not_current(&self) -> bool {
+        matches!(self, Self::Remote(RemoteResourcePoolError::NotCurrent))
     }
 }
