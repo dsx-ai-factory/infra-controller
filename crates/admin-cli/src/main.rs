@@ -21,10 +21,11 @@
 
 use std::fs::File;
 use std::io::{IsTerminal, Write};
+use std::time::Duration;
 
 use ::rpc::admin_cli::OutputFormat;
 use ::rpc::forge_api_client::ForgeApiClient;
-use ::rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+use ::rpc::forge_tls_client::{ApiConfig, ForgeClientConfig, RetryConfig};
 use cfg::cli_options::{CliCommand, CliOptions};
 use clap::CommandFactory;
 use errors::CarbideCliResult;
@@ -41,6 +42,10 @@ use crate::cfg::dispatch::Dispatch;
 use crate::cfg::runtime::{RuntimeConfig, RuntimeContext};
 use crate::errors::CarbideCliError;
 use crate::rpc::ApiClient;
+
+/// Ceiling on the server-verifying attempt of `version`, so that a failure
+/// reaches the unverified fallback quickly.
+const VERIFIED_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 
 mod admission_retry;
 mod async_write;
@@ -257,10 +262,32 @@ async fn main() -> color_eyre::Result<()> {
     // verification. `version` verifies the server only if the user explicitly
     // supplied a usable root CA; an auto-discovered default CA may not be the
     // issuer for this server, and a missing or malformed CA must not make
-    // `version` fail.
+    // `version` fail. Even a usable CA may not match the server, so the
+    // verified attempt is capped and backed by an unverified retry: version
+    // info is never withheld over certificates.
+    let mut version_fallback = None;
+    let mut verified_retry = None;
     if is_version && root_ca_explicit {
         if client_config.root_ca_is_usable() {
-            client_config = client_config.require_tls_enforcement();
+            let mut verified = client_config.clone().require_tls_enforcement();
+            if verified.enforce_tls {
+                // The default connect retries and 60 x 10s retry loop would
+                // stall the fallback for minutes.
+                verified.request_timeout = Some(VERIFIED_VERSION_TIMEOUT);
+                verified.connect_retries_max = Some(0);
+                version_fallback = Some(version::VerificationFallback {
+                    api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(
+                        &url,
+                        &client_config,
+                    ))),
+                    root_ca_path: client_config.root_ca_path.clone(),
+                });
+                verified_retry = Some(RetryConfig {
+                    retries: 0,
+                    interval: Duration::from_secs(1),
+                });
+                client_config = verified;
+            }
         } else if std::path::Path::new(&client_config.root_ca_path).exists() {
             tracing::warn!(
                 path = %client_config.root_ca_path,
@@ -274,8 +301,12 @@ async fn main() -> color_eyre::Result<()> {
         }
     }
 
+    let mut api_config = ApiConfig::new(&url, &client_config);
+    if let Some(retry_config) = verified_retry {
+        api_config = api_config.with_retry_config(retry_config);
+    }
     let ctx = RuntimeContext {
-        api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(&url, &client_config))),
+        api_client: ApiClient(ForgeApiClient::new(&api_config)),
         config: RuntimeConfig {
             format: config.format,
             request_timeout: client_config.request_timeout,
@@ -285,6 +316,13 @@ async fn main() -> color_eyre::Result<()> {
             sort_by: config.sort_by,
         },
         output_file: get_output_file_or_stdout(config.output.as_deref()).await?,
+    };
+
+    let command = match (command, version_fallback) {
+        (CliCommand::Version(opts), Some(fallback)) => {
+            return Ok(version::run_verified_first(opts, ctx, fallback).await?);
+        }
+        (command, _) => command,
     };
 
     // Command to talk to Carbide API.
