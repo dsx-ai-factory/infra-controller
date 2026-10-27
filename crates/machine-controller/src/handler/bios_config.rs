@@ -229,27 +229,23 @@ pub(super) async fn configure_host_bios(
     boot_interface: Option<&BootInterfaceTarget>,
     retry_count: u32,
 ) -> Result<BiosConfigOutcome, StateHandlerError> {
-    let setup_result = match HostBiosProfiles::select(
+    let selection = HostBiosProfiles::select(
         redfish_client,
         &mh_snapshot.host_snapshot.metadata.labels,
         &ctx.services.site_config,
     )
     .await
+    .map_err(|e| redfish_error("select_bios_profile", e))?;
+    selection.record(ctx, mh_snapshot);
+    let bios_job_id = match call_machine_setup_and_handle_no_dpu_error(
+        redfish_client,
+        boot_interface,
+        mh_snapshot.host_snapshot.associated_dpu_machine_ids().len(),
+        selection.bios_profiles(&ctx.services.site_config),
+        &ctx.services.site_config,
+    )
+    .await
     {
-        Ok(selection) => {
-            selection.record(ctx, mh_snapshot);
-            call_machine_setup_and_handle_no_dpu_error(
-                redfish_client,
-                boot_interface,
-                mh_snapshot.host_snapshot.associated_dpu_machine_ids().len(),
-                selection.bios_profiles(&ctx.services.site_config),
-                &ctx.services.site_config,
-            )
-            .await
-        }
-        Err(e) => Err(e),
-    };
-    let bios_job_id = match setup_result {
         Err(e) => {
             tracing::warn!(
                 machine_id = %mh_snapshot.host_snapshot.id,
