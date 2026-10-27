@@ -135,6 +135,28 @@ func TestNewAPIInterface(t *testing.T) {
 	}
 }
 
+func TestAPIInterfaceGetAllRequest_Validate(t *testing.T) {
+	validID := uuid.NewString()
+	invalidID := "not-a-uuid"
+	tests := []struct {
+		name    string
+		request APIInterfaceGetAllRequest
+		wantErr bool
+	}{
+		{name: "no filters"},
+		{name: "valid IDs", request: APIInterfaceGetAllRequest{VpcID: &validID, ForeignTenantID: &validID}},
+		{name: "invalid VPC ID", request: APIInterfaceGetAllRequest{VpcID: &invalidID}, wantErr: true},
+		{name: "invalid foreign Tenant ID", request: APIInterfaceGetAllRequest{ForeignTenantID: &invalidID}, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.request.Validate()
+			assert.Equal(t, tc.wantErr, err != nil)
+		})
+	}
+}
+
 // TestAPIInterfaceVpcSelectionRoundTrip verifies resolved prefix status does not become update intent.
 func TestAPIInterfaceVpcSelectionRoundTrip(t *testing.T) {
 	vpcID := uuid.New()

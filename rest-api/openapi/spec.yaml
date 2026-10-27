@@ -3394,27 +3394,27 @@ paths:
         required: true
         description: Name of the Tenant organization
     get:
-      summary: Retrieve Tenant-visible Interface summaries
-      operationId: get-all-interface-summary
+      summary: Retrieve Tenant-visible Interfaces
+      operationId: get-all-interfaces
       tags:
         - Interface
       description: |-
-        Retrieve current, non-deleted, VPC-backed REST Interface summaries visible to the caller's Tenant. Results include Interfaces on the caller's Instances regardless of VPC ownership, plus Interfaces on other Tenants' Instances when they explicitly select a VPC owned by the caller or a VPC Prefix under one.
+        Retrieve current, non-deleted REST Interfaces visible to the caller's Tenant. Results include all Interfaces on the caller's Instances, plus Interfaces on other Tenants' Instances when they explicitly select a VPC owned by the caller or a VPC Prefix under one.
 
-        `vpcId` filters by the directly selected VPC or the parent of an explicitly selected VPC Prefix. `crossTenant` is relative to the caller's Tenant: `true` returns only Interfaces on other Tenants' Instances and `false` returns only Interfaces on the caller's Instances. `instanceTenantId` filters by the consuming Instance's Tenant. Filters compose and may produce an empty result. A valid but inaccessible `vpcId` or `instanceTenantId` returns an empty list rather than disclosing resource existence.
+        `vpcId` filters by the directly selected VPC or the parent of an explicitly selected VPC Prefix. `crossTenant` is relative to the caller's Tenant: `true` returns only Interfaces on other Tenants' Instances and `false` returns only Interfaces on the caller's Instances. `foreignTenantId` filters by the foreign Tenant that owns the consuming Instance. Filters compose and may produce an empty result. A valid but inaccessible `vpcId` or `foreignTenantId` returns an empty list rather than disclosing resource existence.
 
-        The caller must have an organization membership and an authorization role with `TENANT_ADMIN` suffix. The `targetedInstanceCreation` capability is not required. The response exposes only opaque Interface, Instance, consuming-Tenant, selected-network, device identity, and Interface status. It does not expose Instance names, Machine or Controller IDs, operating systems, user data, metadata, labels, Network Security Group contents, IP addresses, MAC addresses, requested IP addresses, or routing profiles. Visibility does not grant authority over another Tenant's Instance, VPC, VPC Prefix, or security policy.
+        The caller must have an organization membership and an authorization role with `TENANT_ADMIN` suffix. The `targetedInstanceCreation` capability is not required. A cross-Tenant result includes `foreignTenantId`; Interfaces on the caller's Instances omit it. The response uses the complete Interface representation, including addresses and routing data. Visibility does not grant authority over another Tenant's Instance, VPC, VPC Prefix, or security policy.
 
-        The response reflects REST's persisted desired/current Interface state and status; it is not a Core visibility query. Results are ordered by `created` ascending by default, with Interface `id` ascending as a stable tie-breaker. `orderBy` supports `status`, `created`, and `updated` in ascending or descending order; Interface `id` ascending remains the tie-breaker. An empty result is returned as `[]`.
+        Results are ordered by `created` ascending by default, with Interface `id` ascending as a stable tie-breaker. `orderBy` supports `status`, `created`, and `updated` in ascending or descending order; Interface `id` ascending remains the tie-breaker. An empty result is returned as `[]`.
       responses:
         '200':
-          description: Interface summaries visible to the current Tenant
+          description: Interfaces visible to the current Tenant
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/InterfaceSummary'
+                  $ref: '#/components/schemas/Interface'
               examples:
                 direct-and-prefix:
                   value:
@@ -3422,11 +3422,16 @@ paths:
                       vpcId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
                       vpcPrefixId: null
                       instanceId: 37804b21-0a00-4668-81cb-af9e1b07ad3e
-                      instanceTenantId: f97df110-f4de-492e-8849-4a6af68026b0
+                      foreignTenantId: f97df110-f4de-492e-8849-4a6af68026b0
                       device: MT42822 BlueField-2 integrated ConnectX-6 Dx network controller
                       deviceInstance: 1
                       isPhysical: true
                       virtualFunctionId: null
+                      macAddress: '02:00:00:00:00:01'
+                      ipAddresses:
+                        - 192.0.2.10
+                      ipPrefixes:
+                        - 192.0.2.0/24
                       status: Ready
                       created: '2019-08-24T14:15:22Z'
                       updated: '2019-08-24T14:15:22Z'
@@ -3434,7 +3439,7 @@ paths:
                       vpcId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
                       vpcPrefixId: 915443b6-d164-48d4-89dd-041968e1f9d7
                       instanceId: bba44e11-facc-4d7f-a2b5-ffdca3935b8b
-                      instanceTenantId: 34f5c98e-f430-457b-a812-92637d0c6fd0
+                      foreignTenantId: 34f5c98e-f430-457b-a812-92637d0c6fd0
                       device: MT42822 BlueField-2 integrated ConnectX-6 Dx network controller
                       deviceInstance: 0
                       isPhysical: false
@@ -3470,8 +3475,22 @@ paths:
             type: string
             format: uuid
           in: query
-          name: instanceTenantId
-          description: Filter by the Tenant that owns the consuming Instance, within the caller's visibility boundary
+          name: foreignTenantId
+          description: Filter by the foreign Tenant that owns the consuming Instance, within the caller's visibility boundary
+        - schema:
+            $ref: '#/components/schemas/InterfaceStatus'
+          in: query
+          name: status
+          description: Filter Interfaces by status
+        - schema:
+            type: string
+            enum:
+              - Instance
+              - Subnet
+              - VpcPrefix
+          in: query
+          name: includeRelation
+          description: Related entity to expand; repeat the parameter to request multiple relations
         - schema:
             $ref: '#/components/schemas/PageNumber'
             default: 1
@@ -21904,96 +21923,6 @@ components:
           description: Value of the Allocation Constraint. For InstanceType, this value represents number of Machines allocated for Tenant. For IPBlock, this value represents the prefix Length of the IP Block.
       required:
         - constraintValue
-    InterfaceSummary:
-      title: InterfaceSummary
-      type: object
-      x-go-has-nullable-required-properties: true
-      x-go-nullable-required-properties:
-        - vpcPrefixId
-        - device
-        - deviceInstance
-        - virtualFunctionId
-      description: Tenant-visible, owner-safe projection of a persisted Interface that selects a VPC directly or through an explicit VPC Prefix.
-      examples:
-        - id: 07cd865e-5512-4fe9-8063-8f4c8f442b1a
-          vpcId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
-          vpcPrefixId: null
-          instanceId: 37804b21-0a00-4668-81cb-af9e1b07ad3e
-          instanceTenantId: f97df110-f4de-492e-8849-4a6af68026b0
-          device: MT42822 BlueField-2 integrated ConnectX-6 Dx network controller
-          deviceInstance: 1
-          isPhysical: true
-          virtualFunctionId: null
-          status: Ready
-          created: '2019-08-24T14:15:22Z'
-          updated: '2019-08-24T14:15:22Z'
-      properties:
-        id:
-          type: string
-          format: uuid
-          description: Stable REST Interface ID
-        vpcId:
-          type: string
-          format: uuid
-          description: Directly selected VPC or parent VPC of the explicitly selected VPC Prefix
-        vpcPrefixId:
-          type:
-            - string
-            - 'null'
-          format: uuid
-          description: Explicitly selected VPC Prefix ID, or null when the Interface selects the VPC directly
-        instanceId:
-          type: string
-          format: uuid
-          description: Opaque ID of the consuming Instance
-        instanceTenantId:
-          type: string
-          format: uuid
-          description: ID of the Tenant that owns the consuming Instance
-        device:
-          type:
-            - string
-            - 'null'
-          description: Interface device name, or null when device metadata is unavailable
-        deviceInstance:
-          type:
-            - integer
-            - 'null'
-          minimum: 0
-          description: Interface device instance, or null when device metadata is unavailable
-        isPhysical:
-          type: boolean
-          description: Whether the Interface uses a physical function
-        virtualFunctionId:
-          type:
-            - integer
-            - 'null'
-          minimum: 0
-          description: Virtual function number, or null for a physical function
-        status:
-          $ref: '#/components/schemas/InterfaceStatus'
-          description: Persisted REST Interface status
-        created:
-          type: string
-          format: date-time
-          description: Date/time when the Interface was created
-        updated:
-          type: string
-          format: date-time
-          description: Date/time when the Interface was last updated
-      required:
-        - id
-        - vpcId
-        - vpcPrefixId
-        - instanceId
-        - instanceTenantId
-        - device
-        - deviceInstance
-        - isPhysical
-        - virtualFunctionId
-        - status
-        - created
-        - updated
     VPC:
       title: VPC
       type: object
@@ -26136,6 +26065,11 @@ components:
           type: string
           description: 'ID of the associated Instance'
           format: uuid
+        foreignTenantId:
+          type: string
+          description: ID of the Tenant that owns the associated Instance when it differs from the caller's Tenant; omitted for caller-owned Instances
+          format: uuid
+          readOnly: true
         subnetId:
           type:
             - string

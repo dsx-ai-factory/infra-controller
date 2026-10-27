@@ -266,12 +266,31 @@ func (ifcr APIInterfaceCreateOrUpdateRequest) VpcIPFamilyMode() cdbm.InterfaceVp
 	return cdbm.InterfaceVpcIPFamilyModeIPv4Only
 }
 
+// APIInterfaceGetAllRequest captures optional filters for listing Interfaces.
+type APIInterfaceGetAllRequest struct {
+	VpcID           *string  `query:"vpcId"`
+	CrossTenant     *bool    `query:"crossTenant"`
+	ForeignTenantID *string  `query:"foreignTenantId"`
+	Status          *string  `query:"status"`
+	IncludeRelation []string `query:"includeRelation"`
+}
+
+// Validate ensures Interface filter IDs are valid UUIDs.
+func (r APIInterfaceGetAllRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.VpcID, validation.When(r.VpcID != nil, validationis.UUID)),
+		validation.Field(&r.ForeignTenantID, validation.When(r.ForeignTenantID != nil, validationis.UUID)),
+	)
+}
+
 // APIInterface is the data structure to capture Interface
 type APIInterface struct {
 	// ID is the unique UUID v4 identifier for the Interface
 	ID string `json:"id"`
 	// InstanceID is the ID of the associated Instance
 	InstanceID string `json:"instanceId"`
+	// ForeignTenantID is the owning Tenant ID when the Instance belongs to another Tenant
+	ForeignTenantID *string `json:"foreignTenantId,omitempty"`
 	// Instance is the summary of the Instance
 	Instance *APIInstanceSummary `json:"instance,omitempty"`
 	// SubnetID is the ID of the associated Subnet

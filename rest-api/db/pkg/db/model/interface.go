@@ -231,10 +231,9 @@ type InterfaceUpdateInput struct {
 // InterfaceFilterInput input parameters for Filter method
 type InterfaceFilterInput struct {
 	InstanceIDs       []uuid.UUID
-	InstanceTenantID  *uuid.UUID
+	ForeignTenantID   *uuid.UUID
 	VisibleToTenantID *uuid.UUID
 	CrossTenant       *bool
-	VpcAttachedOnly   bool
 	SubnetID          *uuid.UUID
 	VpcID             *uuid.UUID
 	VpcPrefixID       *uuid.UUID
@@ -394,15 +393,15 @@ func (ifcd InterfaceSQLDAO) setQueryWithFilter(filter InterfaceFilterInput, quer
 		cotel.SetAttribute(interfaceDAOSpan, attribute.String("visible_to_tenant_id", tenantID.String()))
 	}
 
-	if filter.InstanceTenantID != nil {
+	if filter.ForeignTenantID != nil {
 		query = query.Where(`EXISTS (
 			SELECT 1
 			FROM instance AS tenant_instance
 			WHERE tenant_instance.id = ifc.instance_id
 				AND tenant_instance.tenant_id = ?
 				AND tenant_instance.deleted IS NULL
-		)`, *filter.InstanceTenantID)
-		cotel.SetAttribute(interfaceDAOSpan, attribute.String("instance_tenant_id", filter.InstanceTenantID.String()))
+		)`, *filter.ForeignTenantID)
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("foreign_tenant_id", filter.ForeignTenantID.String()))
 	}
 
 	if filter.CrossTenant != nil {
@@ -424,19 +423,6 @@ func (ifcd InterfaceSQLDAO) setQueryWithFilter(filter InterfaceFilterInput, quer
 			)`, *filter.VisibleToTenantID)
 		}
 		cotel.SetAttribute(interfaceDAOSpan, attribute.Bool("cross_tenant", *filter.CrossTenant))
-	}
-
-	if filter.VpcAttachedOnly {
-		query = query.WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
-			return q.
-				Where("ifc.vpc_id IS NOT NULL").
-				WhereOr(`EXISTS (
-					SELECT 1
-					FROM vpc_prefix AS attached_prefix
-					WHERE attached_prefix.id = ifc.vpc_prefix_id
-						AND attached_prefix.deleted IS NULL
-				)`)
-		})
 	}
 
 	if filter.SubnetID != nil {
@@ -537,7 +523,7 @@ func (ifcd InterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Interf
 	if err != nil {
 		return nil, 0, err
 	}
-	if filter.VpcID != nil || filter.VpcAttachedOnly || filter.VisibleToTenantID != nil {
+	if filter.VpcID != nil || filter.VisibleToTenantID != nil {
 		dbPaginator.Query = dbPaginator.Query.OrderExpr("ifc.id ASC")
 	}
 

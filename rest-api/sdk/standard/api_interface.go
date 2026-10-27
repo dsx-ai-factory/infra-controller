@@ -25,75 +25,89 @@ import (
 // InterfaceAPIService InterfaceAPI service
 type InterfaceAPIService service
 
-type ApiGetAllInterfaceSummaryRequest struct {
-	ctx              context.Context
-	ApiService       *InterfaceAPIService
-	org              string
-	vpcId            *string
-	crossTenant      *bool
-	instanceTenantId *string
-	pageNumber       *int32
-	pageSize         *int32
-	orderBy          *string
+type ApiGetAllInterfacesRequest struct {
+	ctx             context.Context
+	ApiService      *InterfaceAPIService
+	org             string
+	vpcId           *string
+	crossTenant     *bool
+	foreignTenantId *string
+	status          *InterfaceStatus
+	includeRelation *string
+	pageNumber      *int32
+	pageSize        *int32
+	orderBy         *string
 }
 
 // Filter by the selected VPC or the parent VPC of an explicitly selected VPC Prefix
-func (r ApiGetAllInterfaceSummaryRequest) VpcId(vpcId string) ApiGetAllInterfaceSummaryRequest {
+func (r ApiGetAllInterfacesRequest) VpcId(vpcId string) ApiGetAllInterfacesRequest {
 	r.vpcId = &vpcId
 	return r
 }
 
 // Filter by whether the consuming Instance belongs to a Tenant other than the caller&#39;s Tenant
-func (r ApiGetAllInterfaceSummaryRequest) CrossTenant(crossTenant bool) ApiGetAllInterfaceSummaryRequest {
+func (r ApiGetAllInterfacesRequest) CrossTenant(crossTenant bool) ApiGetAllInterfacesRequest {
 	r.crossTenant = &crossTenant
 	return r
 }
 
-// Filter by the Tenant that owns the consuming Instance, within the caller&#39;s visibility boundary
-func (r ApiGetAllInterfaceSummaryRequest) InstanceTenantId(instanceTenantId string) ApiGetAllInterfaceSummaryRequest {
-	r.instanceTenantId = &instanceTenantId
+// Filter by the foreign Tenant that owns the consuming Instance, within the caller&#39;s visibility boundary
+func (r ApiGetAllInterfacesRequest) ForeignTenantId(foreignTenantId string) ApiGetAllInterfacesRequest {
+	r.foreignTenantId = &foreignTenantId
+	return r
+}
+
+// Filter Interfaces by status
+func (r ApiGetAllInterfacesRequest) Status(status InterfaceStatus) ApiGetAllInterfacesRequest {
+	r.status = &status
+	return r
+}
+
+// Related entity to expand; repeat the parameter to request multiple relations
+func (r ApiGetAllInterfacesRequest) IncludeRelation(includeRelation string) ApiGetAllInterfacesRequest {
+	r.includeRelation = &includeRelation
 	return r
 }
 
 // Page number for pagination query
-func (r ApiGetAllInterfaceSummaryRequest) PageNumber(pageNumber int32) ApiGetAllInterfaceSummaryRequest {
+func (r ApiGetAllInterfacesRequest) PageNumber(pageNumber int32) ApiGetAllInterfacesRequest {
 	r.pageNumber = &pageNumber
 	return r
 }
 
 // Page size for pagination query
-func (r ApiGetAllInterfaceSummaryRequest) PageSize(pageSize int32) ApiGetAllInterfaceSummaryRequest {
+func (r ApiGetAllInterfacesRequest) PageSize(pageSize int32) ApiGetAllInterfacesRequest {
 	r.pageSize = &pageSize
 	return r
 }
 
 // Ordering for pagination query; defaults to &#x60;CREATED_ASC&#x60;
-func (r ApiGetAllInterfaceSummaryRequest) OrderBy(orderBy string) ApiGetAllInterfaceSummaryRequest {
+func (r ApiGetAllInterfacesRequest) OrderBy(orderBy string) ApiGetAllInterfacesRequest {
 	r.orderBy = &orderBy
 	return r
 }
 
-func (r ApiGetAllInterfaceSummaryRequest) Execute() ([]InterfaceSummary, *http.Response, error) {
-	return r.ApiService.GetAllInterfaceSummaryExecute(r)
+func (r ApiGetAllInterfacesRequest) Execute() ([]Interface, *http.Response, error) {
+	return r.ApiService.GetAllInterfacesExecute(r)
 }
 
 /*
-GetAllInterfaceSummary Retrieve Tenant-visible Interface summaries
+GetAllInterfaces Retrieve Tenant-visible Interfaces
 
-Retrieve current, non-deleted, VPC-backed REST Interface summaries visible to the caller's Tenant. Results include Interfaces on the caller's Instances regardless of VPC ownership, plus Interfaces on other Tenants' Instances when they explicitly select a VPC owned by the caller or a VPC Prefix under one.
+Retrieve current, non-deleted REST Interfaces visible to the caller's Tenant. Results include all Interfaces on the caller's Instances, plus Interfaces on other Tenants' Instances when they explicitly select a VPC owned by the caller or a VPC Prefix under one.
 
-`vpcId` filters by the directly selected VPC or the parent of an explicitly selected VPC Prefix. `crossTenant` is relative to the caller's Tenant: `true` returns only Interfaces on other Tenants' Instances and `false` returns only Interfaces on the caller's Instances. `instanceTenantId` filters by the consuming Instance's Tenant. Filters compose and may produce an empty result. A valid but inaccessible `vpcId` or `instanceTenantId` returns an empty list rather than disclosing resource existence.
+`vpcId` filters by the directly selected VPC or the parent of an explicitly selected VPC Prefix. `crossTenant` is relative to the caller's Tenant: `true` returns only Interfaces on other Tenants' Instances and `false` returns only Interfaces on the caller's Instances. `foreignTenantId` filters by the foreign Tenant that owns the consuming Instance. Filters compose and may produce an empty result. A valid but inaccessible `vpcId` or `foreignTenantId` returns an empty list rather than disclosing resource existence.
 
-The caller must have an organization membership and an authorization role with `TENANT_ADMIN` suffix. The `targetedInstanceCreation` capability is not required. The response exposes only opaque Interface, Instance, consuming-Tenant, selected-network, device identity, and Interface status. It does not expose Instance names, Machine or Controller IDs, operating systems, user data, metadata, labels, Network Security Group contents, IP addresses, MAC addresses, requested IP addresses, or routing profiles. Visibility does not grant authority over another Tenant's Instance, VPC, VPC Prefix, or security policy.
+The caller must have an organization membership and an authorization role with `TENANT_ADMIN` suffix. The `targetedInstanceCreation` capability is not required. A cross-Tenant result includes `foreignTenantId`; Interfaces on the caller's Instances omit it. The response uses the complete Interface representation, including addresses and routing data. Visibility does not grant authority over another Tenant's Instance, VPC, VPC Prefix, or security policy.
 
-The response reflects REST's persisted desired/current Interface state and status; it is not a Core visibility query. Results are ordered by `created` ascending by default, with Interface `id` ascending as a stable tie-breaker. `orderBy` supports `status`, `created`, and `updated` in ascending or descending order; Interface `id` ascending remains the tie-breaker. An empty result is returned as `[]`.
+Results are ordered by `created` ascending by default, with Interface `id` ascending as a stable tie-breaker. `orderBy` supports `status`, `created`, and `updated` in ascending or descending order; Interface `id` ascending remains the tie-breaker. An empty result is returned as `[]`.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Tenant organization
-	@return ApiGetAllInterfaceSummaryRequest
+	@return ApiGetAllInterfacesRequest
 */
-func (a *InterfaceAPIService) GetAllInterfaceSummary(ctx context.Context, org string) ApiGetAllInterfaceSummaryRequest {
-	return ApiGetAllInterfaceSummaryRequest{
+func (a *InterfaceAPIService) GetAllInterfaces(ctx context.Context, org string) ApiGetAllInterfacesRequest {
+	return ApiGetAllInterfacesRequest{
 		ApiService: a,
 		ctx:        ctx,
 		org:        org,
@@ -102,16 +116,16 @@ func (a *InterfaceAPIService) GetAllInterfaceSummary(ctx context.Context, org st
 
 // Execute executes the request
 //
-//	@return []InterfaceSummary
-func (a *InterfaceAPIService) GetAllInterfaceSummaryExecute(r ApiGetAllInterfaceSummaryRequest) ([]InterfaceSummary, *http.Response, error) {
+//	@return []Interface
+func (a *InterfaceAPIService) GetAllInterfacesExecute(r ApiGetAllInterfacesRequest) ([]Interface, *http.Response, error) {
 	var (
 		localVarHTTPMethod  = http.MethodGet
 		localVarPostBody    interface{}
 		formFiles           []formFile
-		localVarReturnValue []InterfaceSummary
+		localVarReturnValue []Interface
 	)
 
-	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "InterfaceAPIService.GetAllInterfaceSummary")
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "InterfaceAPIService.GetAllInterfaces")
 	if err != nil {
 		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
 	}
@@ -129,8 +143,14 @@ func (a *InterfaceAPIService) GetAllInterfaceSummaryExecute(r ApiGetAllInterface
 	if r.crossTenant != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "crossTenant", r.crossTenant, "form", "")
 	}
-	if r.instanceTenantId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "instanceTenantId", r.instanceTenantId, "form", "")
+	if r.foreignTenantId != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "foreignTenantId", r.foreignTenantId, "form", "")
+	}
+	if r.status != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
+	}
+	if r.includeRelation != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")

@@ -27,6 +27,8 @@ type Interface struct {
 	Id *string `json:"id,omitempty"`
 	// ID of the associated Instance
 	InstanceId *string `json:"instanceId,omitempty"`
+	// ID of the Tenant that owns the associated Instance when it differs from the caller's Tenant; omitted for caller-owned Instances
+	ForeignTenantId *string `json:"foreignTenantId,omitempty"`
 	// ID of the associated Subnet
 	SubnetId NullableString `json:"subnetId,omitempty"`
 	// ID of the VPC Prefix explicitly selected by the caller
@@ -140,6 +142,38 @@ func (o *Interface) HasInstanceId() bool {
 // SetInstanceId gets a reference to the given string and assigns it to the InstanceId field.
 func (o *Interface) SetInstanceId(v string) {
 	o.InstanceId = &v
+}
+
+// GetForeignTenantId returns the ForeignTenantId field value if set, zero value otherwise.
+func (o *Interface) GetForeignTenantId() string {
+	if o == nil || IsNil(o.ForeignTenantId) {
+		var ret string
+		return ret
+	}
+	return *o.ForeignTenantId
+}
+
+// GetForeignTenantIdOk returns a tuple with the ForeignTenantId field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *Interface) GetForeignTenantIdOk() (*string, bool) {
+	if o == nil || IsNil(o.ForeignTenantId) {
+		return nil, false
+	}
+	return o.ForeignTenantId, true
+}
+
+// HasForeignTenantId returns a boolean if a field has been set.
+func (o *Interface) HasForeignTenantId() bool {
+	if o != nil && !IsNil(o.ForeignTenantId) {
+		return true
+	}
+
+	return false
+}
+
+// SetForeignTenantId gets a reference to the given string and assigns it to the ForeignTenantId field.
+func (o *Interface) SetForeignTenantId(v string) {
+	o.ForeignTenantId = &v
 }
 
 // GetSubnetId returns the SubnetId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -757,6 +791,9 @@ func (o Interface) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.InstanceId) {
 		toSerialize["instanceId"] = o.InstanceId
+	}
+	if !IsNil(o.ForeignTenantId) {
+		toSerialize["foreignTenantId"] = o.ForeignTenantId
 	}
 	if o.SubnetId.IsSet() {
 		toSerialize["subnetId"] = o.SubnetId.Get()
