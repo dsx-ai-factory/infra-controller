@@ -365,7 +365,7 @@ async fn connect_postgres(config: &CarbideConfig) -> eyre::Result<PgPool> {
         );
     }
 
-    let pool_options = sqlx::pool::PoolOptions::new()
+    let pool_options = db::writable_pool_options()
         .max_connections(max_connections)
         // Lifecycle settings are operator-configurable; each `database_pool_*`
         // config field documents what it bounds. The defaults are sqlx's own,
