@@ -1169,7 +1169,7 @@ paths:
       description: |-
         Update a specific Site
 
-        Setting `capabilities.tenantSitePrefix` waits for admitted tenant IP Block mutations, for up to 50 seconds or the remaining request deadline. If the wait expires, the request returns 409 and can be retried. New tenant mutations cannot bypass a queued capability change. Other Site updates remain available.
+        Setting `capabilities.tenantSitePrefix` waits for admitted tenant IP Block REST transactions, for up to 50 seconds or the remaining request deadline. If the wait expires, the request returns 409 and can be retried. New tenant mutations cannot bypass a queued capability change. Other Site updates remain available. A Core operation already dispatched through Temporal can finish after its REST request is canceled and releases this fence; disabling the capability does not cancel such operations, and inventory can subsequently recover their roots.
 
         User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -1228,7 +1228,7 @@ paths:
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
-        Site can only be deleted if all Allocations have been deleted. Deletion waits for admitted tenant IP Block mutations, for up to 50 seconds or the remaining request deadline. If the wait expires, it returns 409 and can be retried.
+        Site can only be deleted if all Allocations have been deleted. Deletion waits for admitted tenant IP Block REST transactions, for up to 50 seconds or the remaining request deadline. If the wait expires, it returns 409 and can be retried. This fence ends when the REST transaction ends. A Core operation already dispatched through Temporal can finish after request cancellation and Site deletion; its root can remain in Core without a REST row because deleted Sites no longer accept inventory. Resolve uncertain tenant operations before deleting the Site.
       parameters:
         - schema:
             type: boolean
@@ -2608,7 +2608,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
         '429':
-          description: Core tenant SitePrefix quota exceeded
+          description: Core tenant quota or Site isolation capacity exceeded
           content:
             application/json:
               schema:
@@ -2638,7 +2638,7 @@ paths:
 
         A `TENANT_ADMIN` without the provider admin role can create a private tenant root with `managed: false`. Site association and Registered status are checked when admitting the request. An admitted mutation may finish after the association or status changes. Removing the association does not revoke the owner's read access or ability to retire the block at a Registered Site. The provider-controlled `tenantSitePrefix` capability must be enabled (default false). The request uses the existing fields: `prefix` is a network-aligned IPv4 address, `prefixLength` is /8 through /31 wholly within RFC1918 space, `protocolVersion` is IPv4, and `routingType` is DatacenterOnly. Unknown fields, including caller-supplied ownership or managed values, are rejected. Tenant descriptions are limited to 1024 UTF-8 bytes.
 
-        Tenant creation writes the IP Block and calls Core CreateSitePrefix in one database transaction, using the same UUID for both resources. Success returns 201 with Provisioning status and a Location header. Core errors roll back the REST row and are returned immediately, including quota errors as 429, invalid, denied, or overlapping tenant prefixes as 400, existing resource or concurrent Site mutation conflicts as 409, unmet Core admission preconditions as 412, unavailability as 503, and timeout as 504. If Core committed despite a lost response, subsequent SitePrefix inventory recreates the REST row with the same UUID. There is no create-retry key; clients should retrieve the recovered resource before retrying an uncertain create.
+        Tenant creation writes the IP Block and calls Core CreateSitePrefix in one database transaction, using the same UUID for both resources. Success returns 201 with Provisioning status and a Location header. Core errors roll back the REST row and return a tenant-safe message without provider configuration or aggregate usage details, including quota errors as 429, invalid, denied, or overlapping tenant prefixes as 400, existing resource or concurrent Site mutation conflicts as 409, unmet Core admission preconditions as 412, unavailability as 503, and timeout as 504. If Core committed despite a lost response, subsequent SitePrefix inventory recreates the REST row with the same UUID. There is no create-retry key; clients should retrieve the recovered resource before retrying an uncertain create.
 
         Tenant-created blocks remain outside cloud IPAM. Allocated tenant blocks retain their existing Allocation workflow and managed value of true. VPC Prefix and Subnet creation accept only allocated blocks; using tenant-created roots for VPC Prefixes is tracked by https://github.com/dsx-ai-factory/infra-controller/issues/3900. SitePrefix publication and final absence processing require the deployment described in https://github.com/dsx-ai-factory/infra-controller/issues/5763; the capability must remain disabled until that dependency is available. Complete the API and inventory-worker rollout before using tenant mutations; mixed-version writers do not share all admission guards.
       requestBody:

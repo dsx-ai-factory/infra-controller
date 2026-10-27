@@ -1397,6 +1397,41 @@ func TestIPBlockSQLDAO_GetAll(t *testing.T) {
 			}
 		})
 	}
+
+	tiedIDs := []uuid.UUID{
+		uuid.MustParse("00000000-0000-4000-8000-000000000003"),
+		uuid.MustParse("00000000-0000-4000-8000-000000000002"),
+		uuid.MustParse("00000000-0000-4000-8000-000000000001"),
+	}
+	for i, id := range tiedIDs {
+		_, err := ipbsd.Create(ctx, nil, IPBlockCreateInput{
+			IPBlockID: &id, Name: fmt.Sprintf("tied-status-%d", i), SiteID: site3.ID,
+			InfrastructureProviderID: ip.ID, RoutingType: IPBlockRoutingTypeDatacenterOnly,
+			Prefix: fmt.Sprintf("10.1.%d.0", i), PrefixLength: 24,
+			ProtocolVersion: "v4", Status: IPBlockStatusReady, CreatedBy: &user.ID,
+		})
+		require.NoError(t, err)
+	}
+	for _, row := range []struct {
+		name   string
+		offset int
+		want   uuid.UUID
+	}{
+		{"tied status first page uses lowest ID", 0, tiedIDs[2]},
+		{"tied status second page uses next ID", 1, tiedIDs[1]},
+		{"tied status final page uses highest ID", 2, tiedIDs[0]},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			got, total, err := ipbsd.GetAll(ctx, nil, IPBlockFilterInput{IPBlockIDs: tiedIDs}, paginator.PageInput{
+				Offset: &row.offset, Limit: cutil.GetPtr(1),
+				OrderBy: &paginator.OrderBy{Field: "status", Order: paginator.OrderDescending},
+			}, nil)
+			require.NoError(t, err)
+			require.Equal(t, len(tiedIDs), total)
+			require.Len(t, got, 1)
+			require.Equal(t, row.want, got[0].ID)
+		})
+	}
 }
 
 func TestIPBlockSQLDAO_Update(t *testing.T) {

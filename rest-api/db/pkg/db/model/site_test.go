@@ -274,7 +274,7 @@ func TestSiteSQLDAO_GetByIDForTenantIPBlockMutation(t *testing.T) {
 			_, err := dao.GetByIDForTenantIPBlockMutation(ctx, nil, site.ID)
 			require.ErrorIs(t, err, db.ErrInvalidValue)
 		}},
-		{"concurrent readers exclude eligibility updates", func(t *testing.T) {
+		{"concurrent mutation readers coexist", func(t *testing.T) {
 			reader, err := db.BeginTx(ctx, session, nil)
 			require.NoError(t, err)
 			defer func() { _ = reader.Rollback() }()
@@ -289,84 +289,6 @@ func TestSiteSQLDAO_GetByIDForTenantIPBlockMutation(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, site.ID, got.ID)
 			require.NoError(t, other.Rollback())
-			writer, err := db.BeginTx(ctx, session, nil)
-			require.NoError(t, err)
-			defer func() { _ = writer.Rollback() }()
-			_, err = writer.GetBunTx().ExecContext(ctx, "SET LOCAL lock_timeout = '100ms'")
-			require.NoError(t, err)
-			_, err = dao.Update(ctx, writer, SiteUpdateInput{SiteID: site.ID, Config: &SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(false)}})
-			require.ErrorIs(t, err, db.ErrXactAdvisoryLockFailed)
-			require.NoError(t, writer.Rollback())
-			require.NoError(t, reader.Rollback())
-			_, err = dao.Update(ctx, nil, SiteUpdateInput{SiteID: site.ID, Config: &SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(false)}})
-			require.NoError(t, err)
-		}},
-		{"routine writes proceed but deletion is fenced for both transaction modes", func(t *testing.T) {
-			reader, err := db.BeginTx(ctx, session, nil)
-			require.NoError(t, err)
-			defer func() { _ = reader.Rollback() }()
-			_, err = dao.GetByIDForTenantIPBlockMutation(ctx, reader, site.ID)
-			require.NoError(t, err)
-			writeCtx, cancel := context.WithTimeout(ctx, time.Second)
-			defer cancel()
-			updated, err := dao.Update(writeCtx, nil, SiteUpdateInput{SiteID: site.ID, Status: cutil.GetPtr(SiteStatusError), Config: &SiteConfigUpdateInput{NetworkSecurityGroup: cutil.GetPtr(true)}})
-			require.NoError(t, err)
-			require.Equal(t, SiteStatusError, updated.Status)
-			require.True(t, updated.Config.NetworkSecurityGroup)
-			for _, supplied := range []bool{false, true} {
-				for _, remove := range []bool{false, true} {
-					var writer *db.Tx
-					if supplied {
-						writer, err = db.BeginTx(ctx, session, nil)
-						require.NoError(t, err)
-					}
-					waitCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
-					if remove {
-						err = dao.Delete(waitCtx, writer, site.ID)
-					} else {
-						_, err = dao.Update(waitCtx, writer, SiteUpdateInput{SiteID: site.ID, Config: &SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(true)}})
-					}
-					require.ErrorIs(t, err, db.ErrXactAdvisoryLockFailed)
-					cancel()
-					if writer != nil {
-						_ = writer.Rollback()
-					}
-				}
-			}
-		}},
-		{"queued lifecycle writer excludes later readers", func(t *testing.T) {
-			reader, err := db.BeginTx(ctx, session, nil)
-			require.NoError(t, err)
-			defer func() { _ = reader.Rollback() }()
-			_, err = dao.GetByIDForTenantIPBlockMutation(ctx, reader, site.ID)
-			require.NoError(t, err)
-			writer, err := db.BeginTx(ctx, session, nil)
-			require.NoError(t, err)
-			defer func() { _ = writer.Rollback() }()
-			var pid int
-			require.NoError(t, writer.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &pid))
-			finished := make(chan error, 1)
-			waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			defer cancel()
-			go func() {
-				_, err := dao.Update(waitCtx, writer, SiteUpdateInput{SiteID: site.ID, Config: &SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(false)}})
-				finished <- err
-			}()
-			require.Eventually(t, func() bool {
-				var waiting bool
-				err := session.DB.NewSelect().ColumnExpr("EXISTS (SELECT 1 FROM pg_locks WHERE pid = ? AND locktype = 'advisory' AND NOT granted)", pid).Scan(ctx, &waiting)
-				return err == nil && waiting
-			}, time.Second, 10*time.Millisecond)
-			lateReader, err := db.BeginTx(ctx, session, nil)
-			require.NoError(t, err)
-			defer func() { _ = lateReader.Rollback() }()
-			require.ErrorIs(t, lateReader.TryAcquireSharedAdvisoryLock(ctx, siteTenantIPBlockLockID(site.ID), &db.LockRetryOptions{Retries: cutil.GetPtr(1)}), db.ErrXactAdvisoryLockFailed)
-			require.NoError(t, reader.Rollback())
-			require.NoError(t, <-finished)
-			require.NoError(t, writer.Commit())
-			got, err := dao.GetByIDForTenantIPBlockMutation(ctx, lateReader, site.ID)
-			require.NoError(t, err)
-			require.False(t, got.Config.TenantSitePrefix)
 		}},
 		{"exclusive lifecycle writer prevents admission until commit", func(t *testing.T) {
 			writer, err := db.BeginTx(ctx, session, nil)
@@ -1692,6 +1614,108 @@ func TestSiteSQLDAO_Update(t *testing.T) {
 			}
 		})
 	}
+
+	dao := NewSiteDAO(dbSession)
+	for _, row := range []struct {
+		name  string
+		check func(*testing.T)
+	}{
+		{"capability update waits for admitted mutations", func(t *testing.T) {
+			reader, err := db.BeginTx(ctx, dbSession, nil)
+			require.NoError(t, err)
+			defer func() { _ = reader.Rollback() }()
+			_, err = dao.GetByIDForTenantIPBlockMutation(ctx, reader, st.ID)
+			require.NoError(t, err)
+			writer, err := db.BeginTx(ctx, dbSession, nil)
+			require.NoError(t, err)
+			defer func() { _ = writer.Rollback() }()
+			_, err = writer.GetBunTx().ExecContext(ctx, "SET LOCAL lock_timeout = '100ms'")
+			require.NoError(t, err)
+			_, err = dao.Update(ctx, writer, SiteUpdateInput{SiteID: st.ID, Config: &SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(false)}})
+			require.ErrorIs(t, err, db.ErrXactAdvisoryLockFailed)
+			require.NoError(t, writer.Rollback())
+			require.NoError(t, reader.Rollback())
+			_, err = dao.Update(ctx, nil, SiteUpdateInput{SiteID: st.ID, Config: &SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(false)}})
+			require.NoError(t, err)
+		}},
+		{"routine writes proceed during admitted mutations", func(t *testing.T) {
+			reader, err := db.BeginTx(ctx, dbSession, nil)
+			require.NoError(t, err)
+			defer func() { _ = reader.Rollback() }()
+			_, err = dao.GetByIDForTenantIPBlockMutation(ctx, reader, st.ID)
+			require.NoError(t, err)
+			writeCtx, cancel := context.WithTimeout(ctx, time.Second)
+			defer cancel()
+			updated, err := dao.Update(writeCtx, nil, SiteUpdateInput{SiteID: st.ID, Status: cutil.GetPtr(SiteStatusError), Config: &SiteConfigUpdateInput{NetworkSecurityGroup: cutil.GetPtr(true)}})
+			require.NoError(t, err)
+			require.Equal(t, SiteStatusError, updated.Status)
+			require.True(t, updated.Config.NetworkSecurityGroup)
+		}},
+		{"queued lifecycle writer excludes later readers", func(t *testing.T) {
+			_, err := dao.Update(ctx, nil, SiteUpdateInput{SiteID: st.ID, Config: &SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(true)}})
+			require.NoError(t, err)
+			reader, err := db.BeginTx(ctx, dbSession, nil)
+			require.NoError(t, err)
+			defer func() { _ = reader.Rollback() }()
+			admitted, err := dao.GetByIDForTenantIPBlockMutation(ctx, reader, st.ID)
+			require.NoError(t, err)
+			require.True(t, admitted.Config.TenantSitePrefix)
+			writer, err := db.BeginTx(ctx, dbSession, nil)
+			require.NoError(t, err)
+			defer func() { _ = writer.Rollback() }()
+			var pid int
+			require.NoError(t, writer.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &pid))
+			finished := make(chan error, 1)
+			waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			go func() {
+				_, err := dao.Update(waitCtx, writer, SiteUpdateInput{SiteID: st.ID, Config: &SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(false)}})
+				finished <- err
+			}()
+			require.Eventually(t, func() bool {
+				var waiting bool
+				err := dbSession.DB.NewSelect().ColumnExpr("EXISTS (SELECT 1 FROM pg_locks WHERE pid = ? AND locktype = 'advisory' AND NOT granted)", pid).Scan(ctx, &waiting)
+				return err == nil && waiting
+			}, time.Second, 10*time.Millisecond)
+			lateReader, err := db.BeginTx(ctx, dbSession, nil)
+			require.NoError(t, err)
+			defer func() { _ = lateReader.Rollback() }()
+			require.ErrorIs(t, lateReader.TryAcquireSharedAdvisoryLock(ctx, siteTenantIPBlockLockID(st.ID), &db.LockRetryOptions{Retries: cutil.GetPtr(1)}), db.ErrXactAdvisoryLockFailed)
+			require.NoError(t, reader.Rollback())
+			require.NoError(t, <-finished)
+			require.NoError(t, writer.Commit())
+			got, err := dao.GetByIDForTenantIPBlockMutation(ctx, lateReader, st.ID)
+			require.NoError(t, err)
+			require.False(t, got.Config.TenantSitePrefix)
+		}},
+	} {
+		t.Run(row.name, row.check)
+	}
+	for _, row := range []struct {
+		name     string
+		supplied bool
+	}{
+		{"lifecycle lock cancellation with internal transaction", false},
+		{"lifecycle lock cancellation with caller transaction", true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			reader, err := db.BeginTx(ctx, dbSession, nil)
+			require.NoError(t, err)
+			defer func() { _ = reader.Rollback() }()
+			_, err = dao.GetByIDForTenantIPBlockMutation(ctx, reader, st.ID)
+			require.NoError(t, err)
+			var writer *db.Tx
+			if row.supplied {
+				writer, err = db.BeginTx(ctx, dbSession, nil)
+				require.NoError(t, err)
+				defer func() { _ = writer.Rollback() }()
+			}
+			waitCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+			defer cancel()
+			_, err = dao.Update(waitCtx, writer, SiteUpdateInput{SiteID: st.ID, Config: &SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(true)}})
+			require.ErrorIs(t, err, db.ErrXactAdvisoryLockFailed)
+		})
+	}
 }
 
 func TestSiteSQLDAO_Delete(t *testing.T) {
@@ -1792,6 +1816,36 @@ func TestSiteSQLDAO_Delete(t *testing.T) {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
 			}
+		})
+	}
+
+	active := buildSite("mutation-lock", ip.ID, nil, nil)
+	_, err = dbSession.DB.NewInsert().Model(&active).Exec(ctx)
+	require.NoError(t, err)
+	dao := NewSiteDAO(dbSession)
+	for _, row := range []struct {
+		name     string
+		supplied bool
+	}{
+		{"lifecycle lock cancellation with internal transaction", false},
+		{"lifecycle lock cancellation with caller transaction", true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			reader, err := db.BeginTx(ctx, dbSession, nil)
+			require.NoError(t, err)
+			defer func() { _ = reader.Rollback() }()
+			_, err = dao.GetByIDForTenantIPBlockMutation(ctx, reader, active.ID)
+			require.NoError(t, err)
+			var writer *db.Tx
+			if row.supplied {
+				writer, err = db.BeginTx(ctx, dbSession, nil)
+				require.NoError(t, err)
+				defer func() { _ = writer.Rollback() }()
+			}
+			waitCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+			defer cancel()
+			err = dao.Delete(waitCtx, writer, active.ID)
+			require.ErrorIs(t, err, db.ErrXactAdvisoryLockFailed)
 		})
 	}
 }

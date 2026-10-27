@@ -555,6 +555,9 @@ func TestCreateSiteHandler_Handle(t *testing.T) {
 }
 
 func TestUpdateSiteHandler_Handle(t *testing.T) {
+	t.Run("tenant mutation fence returns typed conflict", func(t *testing.T) {
+		checkTenantIPBlockSiteConflict(t, http.MethodPatch)
+	})
 	ctx := context.Background()
 	tcsm := &testCsm{}
 	tcsm.setup(t)
@@ -2480,6 +2483,9 @@ func TestGetAllSiteHandler_NullConfig(t *testing.T) {
 }
 
 func TestDeleteSiteHandler_Handle(t *testing.T) {
+	t.Run("tenant mutation fence returns typed conflict", func(t *testing.T) {
+		checkTenantIPBlockSiteConflict(t, http.MethodDelete)
+	})
 	ctx := context.Background()
 
 	tcsm := &testCsm{}

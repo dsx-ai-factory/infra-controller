@@ -243,7 +243,10 @@ func testIPBlockBuildAllocationConstraint(t *testing.T, dbSession *cdb.Session, 
 	return alc
 }
 
-func TestIPBlockHandler_Create(t *testing.T) {
+func TestCreateIPBlockHandler_Handle(t *testing.T) {
+	t.Run("tenant dispatch", func(t *testing.T) {
+		checkTenantIPBlockDispatch(t, http.MethodPost)
+	})
 	ctx := context.Background()
 	dbSession := testIPBlockInitDB(t)
 	defer dbSession.Close()
@@ -715,7 +718,10 @@ func TestIPBlockHandler_Create(t *testing.T) {
 	}
 }
 
-func TestIPBlockHandler_Update(t *testing.T) {
+func TestUpdateIPBlockHandler_Handle(t *testing.T) {
+	t.Run("tenant dispatch", func(t *testing.T) {
+		checkTenantIPBlockDispatch(t, http.MethodPatch)
+	})
 	ctx := context.Background()
 	dbSession := testIPBlockInitDB(t)
 	defer dbSession.Close()
@@ -2270,7 +2276,10 @@ func TestDerivedIPBlockHandler_GetAll(t *testing.T) {
 	}
 }
 
-func TestIPBlockHandler_Delete(t *testing.T) {
+func TestDeleteIPBlockHandler_Handle(t *testing.T) {
+	t.Run("tenant dispatch", func(t *testing.T) {
+		checkTenantIPBlockDispatch(t, http.MethodDelete)
+	})
 	ctx := context.Background()
 	dbSession := testIPBlockInitDB(t)
 	defer dbSession.Close()

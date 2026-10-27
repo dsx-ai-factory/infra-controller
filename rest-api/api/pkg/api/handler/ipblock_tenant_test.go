@@ -214,34 +214,6 @@ func TestTenantIPBlockHandler_handle(t *testing.T) {
 				other := readTenantIPBlock(t, f.request(t, http.MethodPost, "", body), http.StatusCreated)
 				require.NotEqual(t, original.Id.Value, other.ID)
 				f.core = original
-				tenantUser := f.user
-				f.user = f.providerUser
-				defer func() { f.user = tenantUser }()
-				f.siteTimeout = 100 * time.Millisecond
-				server := httptest.NewServer(f.router)
-				defer server.Close()
-				cfg := sdk.NewConfiguration()
-				cfg.Servers = sdk.ServerConfigurations{{URL: server.URL}}
-				client := sdk.NewAPIClient(cfg)
-				for _, method := range []string{http.MethodPatch, http.MethodDelete} {
-					var response *http.Response
-					var err error
-					if method == http.MethodPatch {
-						capabilities := sdk.NewSiteCapabilitiesUpdateRequest()
-						capabilities.SetTenantSitePrefix(false)
-						request := sdk.NewSiteUpdateRequest()
-						request.SetCapabilities(*capabilities)
-						_, response, err = client.SiteAPI.UpdateSite(context.Background(), "provider", f.site.ID.String()).SiteUpdateRequest(*request).Execute()
-					} else {
-						_, response, err = client.SiteAPI.DeleteSite(context.Background(), "provider", f.site.ID.String()).Execute()
-					}
-					require.Error(t, err)
-					require.Equal(t, http.StatusConflict, response.StatusCode)
-					var apiErr *sdk.GenericOpenAPIError
-					require.ErrorAs(t, err, &apiErr)
-					require.IsType(t, sdk.NICoAPIError{}, apiErr.Model())
-				}
-
 			}
 			readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
 		}},
@@ -317,8 +289,6 @@ func TestTenantIPBlockHandler_handle(t *testing.T) {
 			require.NoError(t, receiver.UpdateSitePrefixesInDB(context.Background(), f.site.ID, report))
 			got := readTenantIPBlock(t, f.request(t, http.MethodGet, "/"+result.ID+"?includeUsageStats=true", nil), http.StatusOK)
 			require.Equal(t, cdbm.IPBlockStatusReady, got.Status)
-			// Dual-role users must still be able to mutate their own tenant root.
-			f.user = common.TestBuildUser(t, f.session, uuid.NewString(), f.org, []string{auth.ProviderAdminRole, auth.TenantAdminRole})
 			f.core.Metadata.Labels = []*corev1.Label{{Key: "existing", Value: cutil.GetPtr("preserved")}}
 			updated := readTenantIPBlock(t, f.request(t, http.MethodPatch, "/"+result.ID, map[string]any{"name": "renamed"}), http.StatusOK)
 			require.Equal(t, "renamed", updated.Name)
@@ -358,17 +328,18 @@ func TestTenantIPBlockHandler_handle(t *testing.T) {
 		}},
 		{"definitive create rejection rolls back and releases admission", func(t *testing.T, f *tenantIPBlockFixture) {
 			for _, failure := range []struct {
-				name, kind string
-				code       int
+				name, kind, message string
+				code                int
 			}{
-				{"invalid prefix", swe.ErrTypeNICoInvalidArgument, http.StatusBadRequest},
-				{"conflict", swe.ErrTypeNICoAlreadyExists, http.StatusConflict},
-				{"quota", swe.ErrTypeNICoResourceExhausted, http.StatusTooManyRequests},
+				{"provider deny prefix", swe.ErrTypeNICoInvalidArgument, "tenant SitePrefix 10.20.0.0/24 overlaps configured deny prefix 10.20.0.0/16", http.StatusBadRequest},
+				{"conflict", swe.ErrTypeNICoAlreadyExists, "Core rejected create", http.StatusConflict},
+				{"site isolation quota", swe.ErrTypeNICoResourceExhausted, "SitePrefix isolation rule limit reached: rules in use 231, after creation 232, limit 256", http.StatusTooManyRequests},
 			} {
 				t.Run(failure.name, func(t *testing.T) {
-					f.nextError = tp.NewNonRetryableApplicationError("Core rejected create", failure.kind, nil)
+					f.nextError = tp.NewNonRetryableApplicationError(failure.message, failure.kind, nil)
 					response := f.request(t, http.MethodPost, "", f.body())
 					require.Equal(t, failure.code, response.Code, response.Body.String())
+					require.NotContains(t, response.Body.String(), failure.message)
 					_, err := cdbm.NewIPBlockDAO(f.session).GetByID(context.Background(), nil, uuid.MustParse(f.core.Id.Value), nil)
 					require.ErrorIs(t, err, cdb.ErrDoesNotExist)
 				})
@@ -387,13 +358,6 @@ func TestTenantIPBlockHandler_handle(t *testing.T) {
 			require.Equal(t, http.StatusBadRequest, f.request(t, http.MethodPatch, "/"+created.ID, map[string]any{"name": "after-removal"}).Code)
 			require.Equal(t, http.StatusAccepted, f.request(t, http.MethodDelete, "/"+created.ID, nil).Code)
 		}},
-		{"dual-role create uses provider authorization", func(t *testing.T, f *tenantIPBlockFixture) {
-			f.user = common.TestBuildUser(t, f.session, uuid.NewString(), f.org, []string{auth.ProviderAdminRole, auth.TenantAdminRole})
-			response := f.request(t, http.MethodPost, "", f.body())
-			require.Equal(t, http.StatusBadRequest, response.Code)
-			require.Contains(t, response.Body.String(), "Failed to retrieve infrastructure provider")
-			require.Empty(t, f.calls)
-		}},
 		{"mutation failures roll back REST changes", func(t *testing.T, f *tenantIPBlockFixture) {
 			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
 			for _, mutation := range []struct {
@@ -403,13 +367,15 @@ func TestTenantIPBlockHandler_handle(t *testing.T) {
 				code               int
 			}{
 				{http.MethodPatch, "/forge.Forge/UpdateSitePrefix", map[string]any{"description": "committed-in-core"}, swe.ErrTypeNICoUnavailable, http.StatusServiceUnavailable},
+				{http.MethodPatch, findTenantIPBlockMethod, map[string]any{"name": "lookup-failed"}, swe.ErrTypeNICoDenied, http.StatusForbidden},
 				{http.MethodPatch, "/forge.Forge/UpdateSitePrefix", map[string]any{"name": "stale-version"}, swe.ErrTypeNICoFailedPrecondition, http.StatusPreconditionFailed},
 				{http.MethodDelete, "/forge.Forge/DeleteSitePrefix", nil, swe.ErrTypeNICoUnavailable, http.StatusServiceUnavailable},
 			} {
 				f.failMethod = mutation.coreMethod
-				f.nextError = tp.NewNonRetryableApplicationError("Core mutation failed", mutation.errorType, nil)
+				f.nextError = tp.NewNonRetryableApplicationError("private Core failure detail", mutation.errorType, nil)
 				response := f.request(t, mutation.method, "/"+created.ID, mutation.body)
 				require.Equal(t, mutation.code, response.Code, response.Body.String())
+				require.NotContains(t, response.Body.String(), "private Core failure detail")
 				persisted := readTenantIPBlock(t, f.request(t, http.MethodGet, "/"+created.ID, nil), http.StatusOK)
 				require.Equal(t, created.Name, persisted.Name)
 				require.Equal(t, created.Status, persisted.Status)
@@ -614,5 +580,75 @@ func TestTenantIPBlockHandler_handle(t *testing.T) {
 		}},
 	} {
 		t.Run(row.name, func(t *testing.T) { row.check(t, newTenantIPBlockFixture(t)) })
+	}
+}
+
+// Exercise the public Site handler and generated SDK error contract while a
+// tenant transaction owns the lifecycle fence.
+func checkTenantIPBlockSiteConflict(t *testing.T, method string) {
+	t.Helper()
+	f := newTenantIPBlockFixture(t)
+	tx, err := cdb.BeginTx(context.Background(), f.session, nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	_, err = cdbm.NewSiteDAO(f.session).GetByIDForTenantIPBlockMutation(context.Background(), tx, f.site.ID)
+	require.NoError(t, err)
+	f.user = f.providerUser
+	f.siteTimeout = 100 * time.Millisecond
+	server := httptest.NewServer(f.router)
+	defer server.Close()
+	cfg := sdk.NewConfiguration()
+	cfg.Servers = sdk.ServerConfigurations{{URL: server.URL}}
+	client := sdk.NewAPIClient(cfg)
+	var response *http.Response
+	if method == http.MethodPatch {
+		capabilities := sdk.NewSiteCapabilitiesUpdateRequest()
+		capabilities.SetTenantSitePrefix(false)
+		request := sdk.NewSiteUpdateRequest()
+		request.SetCapabilities(*capabilities)
+		_, response, err = client.SiteAPI.UpdateSite(context.Background(), "provider", f.site.ID.String()).SiteUpdateRequest(*request).Execute()
+	} else {
+		_, response, err = client.SiteAPI.DeleteSite(context.Background(), "provider", f.site.ID.String()).Execute()
+	}
+	require.Error(t, err)
+	require.Equal(t, http.StatusConflict, response.StatusCode)
+	var apiErr *sdk.GenericOpenAPIError
+	require.ErrorAs(t, err, &apiErr)
+	require.IsType(t, sdk.NICoAPIError{}, apiErr.Model())
+}
+
+func checkTenantIPBlockDispatch(t *testing.T, method string) {
+	t.Helper()
+	for _, row := range []struct {
+		name  string
+		roles []string
+	}{
+		{"tenant admin", []string{auth.TenantAdminRole}},
+		{"provider and tenant admin", []string{auth.ProviderAdminRole, auth.TenantAdminRole}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			f := newTenantIPBlockFixture(t)
+			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
+			f.user = common.TestBuildUser(t, f.session, uuid.NewString(), f.org, row.roles)
+			switch method {
+			case http.MethodPost:
+				response := f.request(t, method, "", f.body())
+				if len(row.roles) == 2 {
+					require.Equal(t, http.StatusBadRequest, response.Code)
+					require.Contains(t, response.Body.String(), "Failed to retrieve infrastructure provider")
+					require.Len(t, f.calls, 1)
+				} else {
+					readTenantIPBlock(t, response, http.StatusCreated)
+					require.Len(t, f.calls, 2)
+				}
+			case http.MethodPatch:
+				updated := readTenantIPBlock(t, f.request(t, method, "/"+created.ID, map[string]any{"name": "dispatched"}), http.StatusOK)
+				require.Equal(t, "dispatched", updated.Name)
+				require.Equal(t, updateTenantIPBlockMethod, f.calls[len(f.calls)-1])
+			case http.MethodDelete:
+				require.Equal(t, http.StatusAccepted, f.request(t, method, "/"+created.ID, nil).Code)
+				require.Equal(t, deleteTenantIPBlockMethod, f.calls[len(f.calls)-1])
+			}
+		})
 	}
 }

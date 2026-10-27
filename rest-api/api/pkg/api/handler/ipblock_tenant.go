@@ -27,10 +27,10 @@ import (
 )
 
 const (
-	createTenantIPBlockMethod = "/forge.Forge/CreateSitePrefix"
-	updateTenantIPBlockMethod = "/forge.Forge/UpdateSitePrefix"
-	deleteTenantIPBlockMethod = "/forge.Forge/DeleteSitePrefix"
-	findTenantIPBlockMethod   = "/forge.Forge/FindSitePrefixesByIds"
+	createTenantIPBlockMethod = corev1.Forge_CreateSitePrefix_FullMethodName
+	updateTenantIPBlockMethod = corev1.Forge_UpdateSitePrefix_FullMethodName
+	deleteTenantIPBlockMethod = corev1.Forge_DeleteSitePrefix_FullMethodName
+	findTenantIPBlockMethod   = corev1.Forge_FindSitePrefixesByIds_FullMethodName
 )
 
 // tenantIPBlockHandler handles tenant mutations on the existing IP Block routes.
@@ -213,7 +213,8 @@ func (h tenantIPBlockHandler) handle(c echo.Context) error {
 				prefixes := &corev1.SitePrefixList{}
 				apiErr = common.ExecuteCoreGRPC(ctx, stc, findTenantIPBlockMethod, &corev1.SitePrefixesByIdsRequest{SitePrefixIds: []*corev1.SitePrefixId{id}}, prefixes, "")
 				if apiErr != nil {
-					return cutil.NewAPIError(apiErr.Code, apiErr.Message, nil)
+					logAPIError(logger, apiErr, "tenant IP Block Core lookup failed")
+					return cutil.NewAPIError(apiErr.Code, "Core IP Block request failed: "+http.StatusText(apiErr.Code), nil)
 				}
 				if len(prefixes.SitePrefixes) != 1 {
 					return cutil.NewAPIError(http.StatusNotFound, "Core SitePrefix not found", nil)
@@ -244,8 +245,9 @@ func (h tenantIPBlockHandler) handle(c echo.Context) error {
 			}
 		}
 		if apiErr != nil {
+			// Core errors can contain provider configuration or other tenants' aggregate usage.
 			logAPIError(logger, apiErr, "tenant IP Block Core mutation failed")
-			return cutil.NewAPIError(apiErr.Code, apiErr.Message, nil)
+			return cutil.NewAPIError(apiErr.Code, "Core IP Block request failed: "+http.StatusText(apiErr.Code), nil)
 		}
 		sdDAO := cdbm.NewStatusDetailDAO(h.dbSession)
 		if method == http.MethodPost || deletionStarted {
