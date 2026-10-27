@@ -386,11 +386,47 @@ func TestAPIIPBlockCreateRequest_ValidateTenant(t *testing.T) {
 		{"host route", "10.0.0.1", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 32, nil, false},
 		{"not network aligned", "10.0.0.1", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 24, nil, false},
 		{"range extends beyond RFC1918", "192.168.0.0", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 15, nil, false},
+		{"NUL description", "10.0.0.0", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 8, cutil.GetPtr("a\x00b"), false},
 		{"description byte limit", "10.0.0.0", cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockProtocolVersionV4, 8, cutil.GetPtr(strings.Repeat("é", 513)), false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			request := APIIPBlockCreateRequest{Name: "private-root", SiteID: uuid.NewString(), Prefix: row.prefix, PrefixLength: row.bits, RoutingType: row.routing, ProtocolVersion: row.protocol, Description: row.description}
 			assert.Equal(t, row.valid, request.ValidateTenant() == nil)
+		})
+	}
+	for _, row := range []struct {
+		name, value string
+	}{
+		{"embedded control character", "a\tb"},
+		{"non ASCII name", "réseau"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			request := APIIPBlockCreateRequest{Name: row.value, SiteID: uuid.NewString(), Prefix: "10.0.0.0", PrefixLength: 24, RoutingType: cdbm.IPBlockRoutingTypeDatacenterOnly, ProtocolVersion: cdbm.IPBlockProtocolVersionV4}
+			err := request.ValidateTenant()
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "name")
+		})
+	}
+
+}
+
+func TestAPIIPBlockUpdateRequest_ValidateTenant(t *testing.T) {
+	for _, row := range []struct {
+		name    string
+		request APIIPBlockUpdateRequest
+		valid   bool
+	}{
+		{"omitted metadata", APIIPBlockUpdateRequest{}, true},
+		{"printable ASCII", APIIPBlockUpdateRequest{Name: cutil.GetPtr("private root-2")}, true},
+		{"embedded control character", APIIPBlockUpdateRequest{Name: cutil.GetPtr("a\tb")}, false},
+		{"non ASCII name", APIIPBlockUpdateRequest{Name: cutil.GetPtr("réseau")}, false},
+		{"Unicode and multiline description", APIIPBlockUpdateRequest{Description: cutil.GetPtr("réseau\nprivate")}, true},
+		{"empty description", APIIPBlockUpdateRequest{Description: cutil.GetPtr("")}, true},
+		{"NUL description", APIIPBlockUpdateRequest{Description: cutil.GetPtr("a\x00b")}, false},
+		{"description byte limit", APIIPBlockUpdateRequest{Description: cutil.GetPtr(strings.Repeat("é", 513))}, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			assert.Equal(t, row.valid, row.request.ValidateTenant() == nil)
 		})
 	}
 }

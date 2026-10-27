@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"regexp"
 	"time"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
@@ -36,6 +37,9 @@ const (
 	validationErrorIPv6BlockSizeMin       = "prefixLength must be at least 1"
 	validationErrorIPv6BlockSizeMax       = "prefixLength must be at most 128"
 )
+
+// PostgreSQL text and SitePrefix inventory do not accept NUL in descriptions.
+var tenantIPBlockDescriptionRegexp = regexp.MustCompile(`^[^\x00]*$`)
 
 // APIIPBlockCreateRequest is the data structure to capture user request to create a new IPBlock
 type APIIPBlockCreateRequest struct {
@@ -332,7 +336,10 @@ func (r *APIIPBlockCreateRequest) ValidateTenant() error {
 	if !private {
 		return validation.Errors{"prefix": errors.New("tenant IP Block must be wholly contained in RFC1918 space")}
 	}
-	return validation.ValidateStruct(r, validation.Field(&r.Description, validation.Length(0, 1024)))
+	return validation.ValidateStruct(r,
+		validation.Field(&r.Name, validationis.PrintableASCII),
+		validation.Field(&r.Description, validation.Length(0, 1024), validation.Match(tenantIPBlockDescriptionRegexp).Error("must not contain NUL")),
+	)
 }
 
 // ValidateTenant checks metadata accepted by Core without changing provider validation.
@@ -341,7 +348,10 @@ func (r APIIPBlockUpdateRequest) ValidateTenant() error {
 	if err != nil {
 		return err
 	}
-	return validation.ValidateStruct(&r, validation.Field(&r.Description, validation.Length(0, 1024)))
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.Name, validationis.PrintableASCII),
+		validation.Field(&r.Description, validation.Length(0, 1024), validation.Match(tenantIPBlockDescriptionRegexp).Error("must not contain NUL")),
+	)
 }
 
 // ToSitePrefixCreationRequest maps a validated request to a tenant-owned Core root.
