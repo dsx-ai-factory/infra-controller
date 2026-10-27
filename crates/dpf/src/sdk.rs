@@ -110,14 +110,14 @@ use crate::types::{
     DetachedDpfResourceObservation, DetachedDpuServiceChainDefinition,
     DetachedDpuServiceDefinition, DetachedDpuServiceInterface,
     DetachedDpuServiceInterfaceDefinition, DpfDeletePreconditions, DpfInterceptBridging,
-    DpuDeploymentType, DpuDeviceInfo, DpuDeviceSummary, DpuMismatch, DpuNodeInfo, DpuNodeSummary,
-    DpuPhase, DpuServiceDaemonSetObservation, DpuServiceHelmChartObservation,
-    DpuServiceInterfacePatch, DpuServiceInterfaceTemplateDefinition,
-    DpuServiceInterfaceTemplateType, DpuServiceObservation, DpuServiceSecurityObservation,
-    DpuServiceVersion, DpuSummary, FMDS_SERVICE_NAME, HostDpfSnapshot, InitDpfResourcesConfig,
-    MAX_BLUEFIELD_VFS_PER_PF, OTEL_COLLECTOR_SERVICE_NAME, PF_TOTAL_SF_BF4_ASTRA_FUDGE,
-    ServiceConfigPortProtocol, ServiceDefinition, ServiceNAD, ServiceNADResourceType,
-    ServiceTemplateVersion,
+    DpuDeploymentType, DpuDeviceInfo, DpuDeviceSummary, DpuFailureObservation, DpuMismatch,
+    DpuNodeInfo, DpuNodeSummary, DpuPhase, DpuPhaseObservation, DpuServiceDaemonSetObservation,
+    DpuServiceHelmChartObservation, DpuServiceInterfacePatch,
+    DpuServiceInterfaceTemplateDefinition, DpuServiceInterfaceTemplateType, DpuServiceObservation,
+    DpuServiceSecurityObservation, DpuServiceVersion, DpuSummary, FMDS_SERVICE_NAME,
+    HostDpfSnapshot, InitDpfResourcesConfig, MAX_BLUEFIELD_VFS_PER_PF, OTEL_COLLECTOR_SERVICE_NAME,
+    PF_TOTAL_SF_BF4_ASTRA_FUDGE, ServiceConfigPortProtocol, ServiceDefinition, ServiceNAD,
+    ServiceNADResourceType, ServiceTemplateVersion,
 };
 #[cfg(test)]
 use crate::types::{DEFAULT_PF_TOTAL_SF_RESERVED, InitDpfResourcesConfigBuilder};
@@ -3802,35 +3802,84 @@ impl<R: DpuNodeRepository, L: ResourceLabeler> DpfSdk<R, L> {
     }
 }
 
+impl DpuPhaseObservation {
+    fn from_dpu(dpu: DPU, cr_name: &str) -> Result<Self, DpfError> {
+        // Kubernetes keeps the CR while DPF's finalizer cleans up, so
+        // `status.phase` can still be `Ready` or `Error` after deletion starts.
+        // Report `Deleting` so callers wait for removal instead of acting on
+        // that stale status.
+        if dpu.metadata.deletion_timestamp.is_some() {
+            return Ok(Self {
+                phase: DpuPhase::Deleting,
+                failure: None,
+            });
+        }
+        let Some(status) = dpu.status else {
+            return Err(DpfError::InvalidState(format!(
+                "DPU {cr_name} has no status"
+            )));
+        };
+        let phase = DpuPhase::from(status.phase.clone());
+        let failure = (phase == DpuPhase::Error).then(|| DpuFailureObservation {
+            name: dpu.metadata.name,
+            namespace: dpu.metadata.namespace,
+            uid: dpu.metadata.uid,
+            resource_version: dpu.metadata.resource_version,
+            generation: dpu.metadata.generation,
+            deployment: dpu
+                .metadata
+                .labels
+                .and_then(|mut labels| labels.remove(DPU_OWNED_BY_DEPLOYMENT_LABEL)),
+            dpu_node_name: dpu.spec.dpu_node_name,
+            dpu_device_name: dpu.spec.dpu_device_name,
+            dpu_flavor: dpu.spec.dpu_flavor,
+            bfb: dpu.spec.bfb,
+            blue_field_software: dpu.spec.blue_field_software,
+            status,
+        });
+        Ok(Self { phase, failure })
+    }
+}
+
 impl<R: DpuRepository, L> DpfSdk<R, L> {
-    /// Get the DPU phase for a specific DPU.
+    /// Read only the phase from [`Self::get_dpu_phase_observation`].
     pub async fn get_dpu_phase(
         &self,
         dpu_device_name: &str,
         node_name: &str,
     ) -> Result<DpuPhase, DpfError> {
+        self.get_dpu_phase_observation(dpu_device_name, node_name)
+            .await
+            .map(|observation| observation.phase)
+    }
+
+    /// `get_dpu_phase_observation` reads a DPU phase and terminal failure
+    /// details from the same CR in the SDK namespace.
+    ///
+    /// `device_id` is the device identifier without the `device-` prefix.
+    /// `node_name` accepts a node ID or DPUNode CR name; one leading `node-`
+    /// prefix is stripped before constructing the DPU CR name. For example,
+    /// `("001", "node-host-001")` reads `node-host-001-device-001`.
+    ///
+    /// A deletion timestamp returns `Deleting` without failure details, even
+    /// when status is absent or still reports `Error`. Otherwise, only `Error`
+    /// includes failure details. A missing CR returns `NotFound`, and
+    /// a CR with neither a deletion timestamp nor status returns `InvalidState`.
+    /// Resource read errors are propagated; deployment ownership is not checked.
+    pub async fn get_dpu_phase_observation(
+        &self,
+        device_id: &str,
+        node_name: &str,
+    ) -> Result<DpuPhaseObservation, DpfError> {
         let dpf_id = node_id_from_dpu_node_cr_name(node_name);
-        let cr_name = dpu_cr_name(dpu_device_name, dpf_id);
+        let cr_name = dpu_cr_name(device_id, dpf_id);
         let dpu = DpuRepository::get(&*self.repo, &cr_name, &self.namespace).await?;
 
         let Some(dpu) = dpu else {
             return Err(DpfError::not_found("DPU", cr_name));
         };
 
-        // A DPU being torn down (e.g. right after reprovision deleted it) still reports
-        // its old status.phase (often Ready) until the operator's finalizer runs. Treat
-        // a set deletionTimestamp as authoritative so callers never act on the stale phase.
-        if dpu.metadata.deletion_timestamp.is_some() {
-            return Ok(DpuPhase::Deleting);
-        }
-
-        let Some(status) = dpu.status else {
-            return Err(DpfError::InvalidState(format!(
-                "DPU {cr_name} has no status"
-            )));
-        };
-
-        Ok(DpuPhase::from(status.phase))
+        DpuPhaseObservation::from_dpu(dpu, &cr_name)
     }
 
     /// Reprovision a DPU by deleting the DPU CR.
@@ -3856,19 +3905,60 @@ impl<R: DpuRepository, L> DpfSdk<R, L> {
 }
 
 impl<R: DpuRepository + DpuDeploymentRepository, L: ResourceLabeler> DpfSdk<R, L> {
-    /// Read every requested DPU phase only when one deployment owns the full set.
-    ///
-    /// A DPU that is not Ready may not report its installed BFB yet, so ownership
-    /// is sufficient until that phase. A Ready DPU must also match the flavor and
-    /// provisioning source declared by the deployment. `None` means at least one
-    /// requested DPU is missing, is being deleted, belongs to another deployment,
-    /// has no status yet, or does not match the Ready configuration.
+    /// Read only the phases from
+    /// [`Self::get_dpu_phase_observations_for_deployment_type`].
     pub async fn get_dpu_phases_for_deployment_type(
         &self,
         dpu_device_names: &[String],
         node_name: &str,
         deployment_type: DpuDeploymentType,
     ) -> Result<Option<BTreeMap<String, DpuPhase>>, DpfError> {
+        let observations = self
+            .get_dpu_phase_observations_for_deployment_type(
+                dpu_device_names,
+                node_name,
+                deployment_type,
+            )
+            .await?;
+        Ok(observations.map(|observations| {
+            observations
+                .into_iter()
+                .map(|(name, observation)| (name, observation.phase))
+                .collect()
+        }))
+    }
+
+    /// `get_dpu_phase_observations_for_deployment_type` reads phases and terminal
+    /// failure details only when one deployment owns every requested DPU.
+    ///
+    /// `device_ids` contains distinct device identifiers without the `device-`
+    /// prefix. `node_name` accepts a node ID or DPUNode CR name; one leading
+    /// `node-` prefix is stripped before constructing DPU CR names. Returned
+    /// map keys are the input device IDs, ordered lexicographically.
+    ///
+    /// Each DPU is read by name in the SDK namespace. Its phase and diagnostics
+    /// come from that same read.
+    /// A DPU that is not `Ready` may not report its installed BFB yet, so
+    /// ownership is sufficient until that phase. A `Ready` DPU must also match
+    /// the flavor and provisioning source declared by the deployment.
+    ///
+    /// `None` means the deployment has not reported `DPUSetsReconciled=True`
+    /// for its current generation, or a requested DPU is missing, is being
+    /// deleted, belongs to another deployment, or has no status. Duplicate
+    /// device IDs also return `None`. No partial map is returned, including
+    /// when an observed DPU reports `Error`. Empty input returns an empty map
+    /// after deployment checks, without reading any DPUs.
+    ///
+    /// Returns `DpfError::InvalidState` if the deployment uses a
+    /// `DPUFlavorTemplate` or a `Ready` DPU's configuration differs or cannot
+    /// be compared. Errors from deployment lookup and resource reads are
+    /// propagated.
+    pub async fn get_dpu_phase_observations_for_deployment_type(
+        &self,
+        device_ids: &[String],
+        node_name: &str,
+        deployment_type: DpuDeploymentType,
+    ) -> Result<Option<BTreeMap<String, DpuPhaseObservation>>, DpfError> {
         let (deployment_name, deployment) = self.deployment_for_type(deployment_type).await?;
         if !dpu_deployment_is_ready(&deployment) {
             return Ok(None);
@@ -3881,19 +3971,16 @@ impl<R: DpuRepository + DpuDeploymentRepository, L: ResourceLabeler> DpfSdk<R, L
         }
 
         let expected_owner = dpu_deployment_owner_label_value(&self.namespace, &deployment_name);
-        let owner_selector = format!("{DPU_OWNED_BY_DEPLOYMENT_LABEL}={expected_owner}");
         let dpf_id = node_id_from_dpu_node_cr_name(node_name);
-        let mut dpus_by_name =
-            DpuRepository::list(&*self.repo, &self.namespace, Some(&owner_selector))
-                .await?
-                .into_iter()
-                .filter_map(|dpu| Some((dpu.metadata.name.clone()?, dpu)))
-                .collect::<HashMap<_, _>>();
-        let mut phases = BTreeMap::new();
+        let mut observations = BTreeMap::new();
 
-        for dpu_device_name in dpu_device_names {
-            let cr_name = dpu_cr_name(dpu_device_name, dpf_id);
-            let Some(dpu) = dpus_by_name.remove(&cr_name) else {
+        for device_id in device_ids {
+            if observations.contains_key(device_id) {
+                return Ok(None);
+            }
+            let cr_name = dpu_cr_name(device_id, dpf_id);
+            let Some(dpu) = DpuRepository::get(&*self.repo, &cr_name, &self.namespace).await?
+            else {
                 return Ok(None);
             };
             let has_expected_owner = dpu
@@ -3926,10 +4013,13 @@ impl<R: DpuRepository + DpuDeploymentRepository, L: ResourceLabeler> DpfSdk<R, L
                     }
                 }
             }
-            phases.insert(dpu_device_name.clone(), phase);
+            observations.insert(
+                device_id.clone(),
+                DpuPhaseObservation::from_dpu(dpu, &cr_name)?,
+            );
         }
 
-        Ok(Some(phases))
+        Ok(Some(observations))
     }
 
     /// Delete source deployment DPU CRs without deleting target replacements.
@@ -8208,6 +8298,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_dpu_phase_reports_deleting_when_terminating() {
+        use carbide_test_support::Outcome::Yields;
+        use carbide_test_support::{Case, check_cases_async};
         use kube::core::ObjectMeta;
 
         use crate::crds::dpus_generated::{DpuSpec, DpuStatus, DpuStatusPhase};
@@ -8218,8 +8310,8 @@ mod tests {
             .await
             .unwrap();
 
-        // A DPU that has been deleted (reprovision) but whose finalizer has not yet
-        // run: it carries a deletionTimestamp while its status.phase is still Ready.
+        // Reprovisioning sets `deletionTimestamp` while the finalizer is still
+        // cleaning up. The old phase must not make this CR actionable again.
         let dpu_name = "node-dpu-001-device-dpu-001";
         let dpu = DPU {
             metadata: ObjectMeta {
@@ -8253,7 +8345,7 @@ mod tests {
                 astra_enabled: None,
             },
             status: Some(DpuStatus {
-                phase: DpuStatusPhase::Ready,
+                phase: DpuStatusPhase::Error,
                 addresses: None,
                 bf_cfg_file: None,
                 bfb_file: None,
@@ -8281,17 +8373,43 @@ mod tests {
                 reboot_status: None,
             }),
         };
-        mock.dpus
-            .write()
-            .unwrap()
-            .insert(format!("{}/{}", TEST_NAMESPACE, dpu_name), dpu);
+        check_cases_async(
+            [
+                Case {
+                    scenario: "deletion overrides stale Ready status",
+                    input: DpuStatusPhase::Ready,
+                    expect: Yields((DpuPhase::Deleting, true, DpuPhase::Deleting)),
+                },
+                Case {
+                    scenario: "deletion overrides stale Error status",
+                    input: DpuStatusPhase::Error,
+                    expect: Yields((DpuPhase::Deleting, true, DpuPhase::Deleting)),
+                },
+            ],
+            |stale_phase| {
+                let mut dpu = dpu.clone();
+                let mock = &mock;
+                let sdk = &sdk;
+                async move {
+                    dpu.status.as_mut().expect("DPU status").phase = stale_phase;
+                    mock.dpus
+                        .write()
+                        .unwrap()
+                        .insert(format!("{}/{}", TEST_NAMESPACE, dpu_name), dpu);
 
-        let phase = sdk.get_dpu_phase("dpu-001", "node-dpu-001").await.unwrap();
-        assert_eq!(
-            phase,
-            DpuPhase::Deleting,
-            "a DPU with a deletionTimestamp must report Deleting even though its stale status.phase is Ready"
-        );
+                    let observation = sdk
+                        .get_dpu_phase_observation("dpu-001", "node-dpu-001")
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    let phase = sdk
+                        .get_dpu_phase("dpu-001", "node-dpu-001")
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    Ok::<_, String>((observation.phase, observation.failure.is_none(), phase))
+                }
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
