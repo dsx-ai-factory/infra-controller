@@ -461,7 +461,7 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-current-infrastructure-provider-stats
       description: |-
-        Retrieve statistics for the current Infrastructure Provider. IP Block totals exclude private IP Block records linked to a `TenantManaged` SitePrefix.
+        Retrieve statistics for the current Infrastructure Provider. IP Block totals exclude Tenant-created IP Blocks (`managed: false`).
 
         User must have authorization role with `PROVIDER_ADMIN` suffix.
       parameters: []
@@ -2439,7 +2439,7 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-ipblock
       description: |-
-        Retrieve the IP Blocks visible to the requesting organization. Private IP Block records linked to a `TenantManaged` SitePrefix are not exposed through this API.
+        Retrieve the IP Blocks visible to the requesting organization. Tenant-created IP Blocks (`managed: false`) are not exposed through this API. Blocks allocated to Tenants by the Infrastructure Provider remain managed and visible within the requesting organization's scope.
 
         User must have authorization role with `PROVIDER_ADMIN` or `TENANT_ADMIN` suffix. `infrastructureProviderId` or `tenantId` query parameter may be required for older API versions.
       parameters:
@@ -2651,7 +2651,7 @@ paths:
           $ref: '#/components/responses/NotFoundError'
       operationId: get-ipblock
       description: |-
-        Retrieve an IP Block by ID. Records outside the requesting organization's scope, including private IP Block records linked to a `TenantManaged` SitePrefix, return the same 404 response as an unknown ID.
+        Retrieve an IP Block by ID. Records outside the requesting organization's scope, including Tenant-created IP Blocks (`managed: false`), return the same 404 response as an unknown ID.
 
         User must have authorization role with `PROVIDER_ADMIN` or `TENANT_ADMIN` suffix.
       parameters:
@@ -2722,7 +2722,7 @@ paths:
 
         If the IP Block's prefix is still in the Site's `site_fabric_prefixes`, NICo creates a new IP Block for it the next time the Site reports its configuration.
 
-        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and private IP Block records linked to a `TenantManaged` SitePrefix return 404. A Site fabric root linked to an `OperatorManaged` SitePrefix cannot be deleted through this endpoint and returns 409.
+        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404. A Site fabric root linked to an `OperatorManaged` SitePrefix cannot be deleted through this endpoint and returns 409.
       tags:
         - IP Block
     patch:
@@ -2769,7 +2769,7 @@ paths:
 
         Renaming an IP Block that NICo created from a Site fabric prefix keeps NICo from removing it.
 
-        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and private IP Block records linked to a `TenantManaged` SitePrefix return 404.
+        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404.
       requestBody:
         content:
           application/json:
@@ -11982,6 +11982,107 @@ paths:
         For Infrastructure Providers: Org must have an Infrastructure Provider entity and own the Site that the Machine belongs to. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
         For Tenants: Org must have a Tenant with `TargetedInstanceCreation` capability enabled and Tenant Account with Machine's Provider. User must have authorization role with `TENANT_ADMIN` suffix.
+  '/v2/org/{org}/nico/machine/{machineId}/spectrumx-multiplane':
+    parameters:
+      - name: org
+        in: path
+        required: true
+        description: Name of the Org
+        schema:
+          type: string
+      - name: machineId
+        in: path
+        required: true
+        description: ID of the Machine
+        schema:
+          type: string
+    get:
+      summary: Retrieve Machine Spectrum-X multiplane status
+      operationId: get-machine-spectrumx-multiplane
+      tags: [Machine]
+      x-fern-sdk-group-name: [machine, spectrumXMultiplane]
+      description: |-
+        Retrieve declared rail/plane configuration and separate observations for every associated BlueField-4 DPU.
+        An unconfigured maintenance mode or unavailable readback is null, distinct from false.
+        For Infrastructure Providers: Org must have an Infrastructure Provider entity and own the Site that the Machine belongs to. User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix.
+        Partial-multiplane must be enabled in NICo site config.
+      responses:
+        '200':
+          description: Desired configuration and per-DPU observations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineSpectrumXMultiplane'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: Partial-multiplane is disabled or the Machine is not eligible
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Site service unavailable
+        '504':
+          description: Site request timed out; its outcome may still be pending
+    patch:
+      summary: Update Machine Spectrum-X multiplane maintenance
+      operationId: update-machine-spectrumx-multiplane
+      tags: [Machine]
+      x-fern-sdk-group-name: [machine, spectrumXMultiplane]
+      description: |-
+        Atomically update the Cartesian product of the selected rails and planes. Supply exactly one
+        of rail, allRails, or railRange and exactly one of plane, allPlanes, or planeRange.
+        Ranges are inclusive and ascending. All selected interfaces must be declared on the Machine;
+        an undeclared selection rejects the complete update. Unselected interfaces are unchanged.
+        maintenanceMode true disables links; false enables them. An omitted or null reference preserves
+        the saved reference; an empty string clears it.
+
+        For Infrastructure Providers: Org must have an Infrastructure Provider entity and own the Site that the Machine belongs to. User must have authorization role with `PROVIDER_ADMIN` suffix.
+
+        When an Instance is attached
+        to the Machine, `acknowledgeAttachedInstance` must be `true`; otherwise the request returns HTTP 400.
+        Partial-multiplane must be enabled in NICo site config. A 200 response confirms saved desired
+        configuration, not hardware completion. Read this resource until every relevant DPU observation
+        has the desired interface revision, no error, and the requested maintenance mode. Readbacks
+        remain separate per DPU and may be absent or describe an earlier revision.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MachineSpectrumXMultiplaneUpdateRequest'
+      responses:
+        '200':
+          description: Saved desired configuration with the latest available per-DPU observations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MachineSpectrumXMultiplane'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: Partial-multiplane is disabled or the Machine is not eligible
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Site service unavailable
+        '504':
+          description: Site request timed out; its outcome may still be pending
   '/v2/org/{org}/nico/machine/{machineId}/health-report':
     parameters:
       - schema:
@@ -19811,6 +19912,197 @@ components:
         - CombinedBmcUefi
         - GPU
         - Cx7
+    SpectrumXMultiplaneRange:
+      type: object
+      description: Inclusive ascending bounds. Rail bounds are 0 through 3; plane bounds are 0 through 7.
+      required: [start, end]
+      properties:
+        start:
+          description: First value in the inclusive range.
+          type: integer
+          minimum: 0
+          maximum: 7
+        end:
+          description: Last value in the inclusive range. Must be greater than or equal to start.
+          type: integer
+          minimum: 0
+          maximum: 7
+      examples:
+        - start: 0
+          end: 3
+    MachineSpectrumXMultiplaneUpdateRequest:
+      type: object
+      description: One rail selector and one plane selector are required. Rail range bounds must not exceed 3.
+      required: [maintenanceMode]
+      properties:
+        rail:
+          description: Single rail to update, from 0 through 3. Supply exactly one of rail, allRails, or railRange.
+          type: integer
+          minimum: 0
+          maximum: 3
+        allRails:
+          description: Select all four rails. If supplied, must be true. Supply exactly one of rail, allRails, or railRange.
+          type: boolean
+          enum: [true]
+        railRange:
+          description: Inclusive ascending range of rails to update. Both endpoints must be from 0 through 3. Supply exactly one of rail, allRails, or railRange.
+          $ref: '#/components/schemas/SpectrumXMultiplaneRange'
+        plane:
+          description: Single plane to update on each selected rail, from 0 through 7. Supply exactly one of plane, allPlanes, or planeRange.
+          type: integer
+          minimum: 0
+          maximum: 7
+        allPlanes:
+          description: Select all eight planes on each selected rail. If supplied, must be true. Supply exactly one of plane, allPlanes, or planeRange.
+          type: boolean
+          enum: [true]
+        planeRange:
+          description: Inclusive ascending range of planes to update on each selected rail. Both endpoints must be from 0 through 7. Supply exactly one of plane, allPlanes, or planeRange.
+          $ref: '#/components/schemas/SpectrumXMultiplaneRange'
+        maintenanceMode:
+          type: boolean
+          description: True disables the selected links; false enables them.
+        reference:
+          type: [string, 'null']
+          description: Omit or send null to preserve it; send an empty string to clear it.
+        acknowledgeAttachedInstance:
+          type: boolean
+          description: Must be true when an Instance is attached to the Machine. Acknowledges that maintenance changes may disrupt the Instance's Tenant workload.
+      allOf:
+        - oneOf:
+            - required: [rail]
+            - required: [allRails]
+            - required: [railRange]
+        - oneOf:
+            - required: [plane]
+            - required: [allPlanes]
+            - required: [planeRange]
+      examples:
+        - railRange: {start: 0, end: 3}
+          allPlanes: true
+          maintenanceMode: true
+          reference: CHG-12345
+          acknowledgeAttachedInstance: true
+        - rail: 0
+          planeRange: {start: 2, end: 5}
+          maintenanceMode: false
+    MachineSpectrumXMultiplane:
+      type: object
+      description: Desired host configuration and independent observations for associated BlueField-4 DPUs. There is no aggregate host readback.
+      required: [machineId, interfaces, dpuStatuses]
+      properties:
+        machineId:
+          description: ID of the Machine whose maintenance configuration and DPU observations are returned.
+          type: string
+        interfaces:
+          type: array
+          maxItems: 32
+          description: Declared interfaces ordered by rail and plane.
+          items:
+            $ref: '#/components/schemas/MachineSpectrumXMultiplaneInterface'
+        dpuStatuses:
+          type: array
+          description: One entry per associated BlueField-4 DPU, ordered by DPU ID. Empty when none are present.
+          items:
+            $ref: '#/components/schemas/MachineSpectrumXMultiplaneDPUStatus'
+      examples:
+        - machineId: fm100psbtmb15tgh6q5duqb8ke5grng7ksd96hetbeie9nc5pvcca6eol80
+          interfaces:
+            - logicalName: eth_r0_p0
+              rail: 0
+              plane: 0
+              configuredMaintenanceMode: false
+              reference: CHG-12345
+              revision: V1-T1748645613333257
+          dpuStatuses: []
+    MachineSpectrumXMultiplaneInterface:
+      type: object
+      description: Desired configuration for one declared rail/plane interface.
+      required: [logicalName, rail, plane, configuredMaintenanceMode, reference, revision]
+      properties:
+        logicalName:
+          description: Logical interface name in the form eth_r<rail>_p<plane>, identifying the declared rail and plane.
+          type: string
+        rail:
+          description: Rail number of this interface, from 0 through 3.
+          type: integer
+          minimum: 0
+          maximum: 3
+        plane:
+          description: Plane number of this interface, from 0 through 7.
+          type: integer
+          minimum: 0
+          maximum: 7
+        configuredMaintenanceMode:
+          type: [boolean, 'null']
+          description: Null until an operator requests a mode. True disables links; false enables them.
+        reference:
+          description: Reference recorded with the maintenance configuration, such as a ticket URL. Null if no reference is stored.
+          type: [string, 'null']
+        revision:
+          description: Version of this interface's desired maintenance configuration. Compare it with each DPU observation's revision to determine whether the observation describes the current request.
+          type: string
+      examples:
+        - logicalName: eth_r0_p0
+          rail: 0
+          plane: 0
+          configuredMaintenanceMode: false
+          reference: CHG-12345
+          revision: V1-T1748645613333257
+    MachineSpectrumXMultiplaneDPUStatus:
+      type: object
+      description: Independent maintenance observations from one associated BlueField-4 DPU.
+      required: [dpuMachineId, interfaces]
+      properties:
+        dpuMachineId:
+          description: ID of the associated BlueField-4 DPU whose interface observations are returned.
+          type: string
+        interfaces:
+          type: array
+          maxItems: 32
+          description: One entry per declared interface, including those without readback.
+          items:
+            $ref: '#/components/schemas/MachineSpectrumXMultiplaneObservation'
+      examples:
+        - dpuMachineId: fm100dsasb5dsh6e6ogogslpovne4rj82rp9jlf00qd7mcvmaadv85phk3g
+          interfaces:
+            - logicalName: eth_r0_p0
+              maintenanceMode: false
+              revision: V1-T1748645613333257
+              netdev: A53p0
+              error: null
+              observed: '2026-10-24T00:00:00Z'
+    MachineSpectrumXMultiplaneObservation:
+      type: object
+      description: The last attempted interface revision and observed state. A revision may lag the desired configuration.
+      required: [logicalName, maintenanceMode, revision, netdev, error, observed]
+      properties:
+        logicalName:
+          description: Logical interface name in the form eth_r<rail>_p<plane>, matching the corresponding desired interface configuration.
+          type: string
+        maintenanceMode:
+          type: [boolean, 'null']
+          description: Null when readback is unavailable; false means maintenance is off.
+        revision:
+          description: Desired configuration revision last attempted by this DPU. May be older than the current desired revision. Empty if the DPU has not reported an observation.
+          type: string
+        netdev:
+          description: Linux network device name resolved by the DPU for this logical interface. Null if no device was resolved.
+          type: [string, 'null']
+        error:
+          description: Error from the DPU's attempt to apply or observe this interface. Null when no error has been reported.
+          type: [string, 'null']
+        observed:
+          description: Timestamp when the DPU attempted to apply or observe this interface, in RFC 3339 format. Null if the DPU has not reported an observation.
+          type: [string, 'null']
+          format: date-time
+      examples:
+        - logicalName: eth_r0_p0
+          maintenanceMode: false
+          revision: V1-T1748645613333257
+          netdev: A53p0
+          error: null
+          observed: '2026-10-24T00:00:00Z'
     MachinePowerControlRequest:
       type: object
       title: MachinePowerControlRequest
@@ -20915,7 +21207,8 @@ components:
           description: 'Whether the Site supports Network Security Groups'
         nvLinkPartition:
           type: boolean
-          description: 'Whether the Site supports NVLink partitioning'
+          readOnly: true
+          description: Whether the latest successfully stored Site configuration inventory reports that NVLink partitioning is enabled in the Site's Core configuration. False also represents a new Site that has not reported Site configuration inventory yet. An inventory report from an older Core that omits the setting leaves the stored value unchanged. This value is managed by Site configuration inventory and cannot be updated through the Site API.
         flow:
           type: boolean
           description: 'Whether the Site supports Flow-based operations'
@@ -21093,11 +21386,6 @@ components:
             - boolean
             - 'null'
           description: Enable or disable network security groups for the Site
-        nvLinkPartition:
-          type:
-            - boolean
-            - 'null'
-          description: Enable or disable NVLink partition support for the Site
         imageBasedOperatingSystem:
           type:
             - boolean
@@ -21656,7 +21944,7 @@ components:
     VpcRouteTarget:
       title: VpcRouteTarget
       type: object
-      description: BGP route target represented by an autonomous system number and VNI.
+      description: BGP route target represented by an autonomous system number and either a literal local-administrator value or the VPC's current L3 VNI.
       properties:
         asn:
           type: integer
@@ -21669,7 +21957,11 @@ components:
           format: uint32
           minimum: 0
           maximum: 4294967295
-          description: Route-target VNI.
+          description: 'Literal route-target local-administrator value. A numeric value, including zero, cannot be combined with `vniSelf: true`; omit this field for symbolic resolution. When `vniSelf` is false, omission retains legacy literal-zero behavior.'
+        vniSelf:
+          type: boolean
+          default: false
+          description: Resolve the route-target VNI from the current VPC's L3 VNI when true. Literal targets and effective routing profiles return false.
     VpcRoutingProfileOverrides:
       title: VpcRoutingProfileOverrides
       type: object
@@ -32252,6 +32544,7 @@ components:
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
           infrastructureProviderId: e94bcfda-f6cb-42e4-80ec-516811e5abbf
           tenantId: null
+          managed: true
           routingType: Public
           prefix: 202.168.16.0
           prefixLength: 20
@@ -32294,6 +32587,10 @@ components:
             - 'null'
           description: 'ID of the Tenant'
           format: uuid
+        managed:
+          type: boolean
+          readOnly: true
+          description: Always present. True for Site fabric/root/overlay blocks and blocks allocated to a Tenant by the Infrastructure Provider; false for blocks created by a Tenant. This classification is independent of the Tenant assignment and cannot be changed by clients.
         routingType:
           type: string
           description: 'RoutingType of the IP Block'
@@ -32341,6 +32638,7 @@ components:
       examples:
         - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
           name: Public Network Overlay for Site SJC4
+          managed: true
           routingType: Public
           prefix: 202.168.16.0
           prefixLength: 20
@@ -32356,6 +32654,10 @@ components:
           description: 'Name of the IP Block, only lowercase characters, digits, hyphens and cannot begin/end with hyphen'
           minLength: 2
           maxLength: 256
+        managed:
+          type: boolean
+          readOnly: true
+          description: Always present. True for Site fabric/root/overlay blocks and blocks allocated to a Tenant by the Infrastructure Provider; false for blocks created by a Tenant. This classification is independent of the Tenant assignment and cannot be changed by clients.
         routingType:
           type: string
           description: 'RoutingType of the IP Block'

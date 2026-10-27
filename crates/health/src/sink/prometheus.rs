@@ -37,6 +37,12 @@ use crate::metrics::{CollectorRegistry, GaugeMetrics, GaugeReading, MetricsManag
 pub struct PrometheusSink {
     collector_registry: Arc<CollectorRegistry>,
     stream_metrics: DashMap<String, DashMap<&'static str, Arc<GaugeMetrics>>>,
+    #[cfg(test)]
+    // Called with the endpoint entry guard held; must not access `stream_metrics`.
+    before_endpoint_remove: Option<Box<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
+    // Called when registration observes `Locked`, before the blocking read.
+    on_registration_blocked: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl PrometheusSink {
@@ -51,6 +57,10 @@ impl PrometheusSink {
         Ok(Self {
             collector_registry,
             stream_metrics: DashMap::new(),
+            #[cfg(test)]
+            before_endpoint_remove: None,
+            #[cfg(test)]
+            on_registration_blocked: None,
         })
     }
 
@@ -169,7 +179,22 @@ impl PrometheusSink {
         &self,
         context: &EventContext,
     ) -> Result<Arc<GaugeMetrics>, HealthError> {
-        if let Some(endpoint_metrics) = self.stream_metrics.get::<str>(context.endpoint_key())
+        #[cfg(test)]
+        let endpoint_metrics = match &self.on_registration_blocked {
+            Some(on_blocked) => match self.stream_metrics.try_get::<str>(context.endpoint_key()) {
+                dashmap::try_result::TryResult::Present(metrics) => Some(metrics),
+                dashmap::try_result::TryResult::Absent => None,
+                dashmap::try_result::TryResult::Locked => {
+                    on_blocked();
+                    self.stream_metrics.get::<str>(context.endpoint_key())
+                }
+            },
+            None => self.stream_metrics.get::<str>(context.endpoint_key()),
+        };
+        #[cfg(not(test))]
+        let endpoint_metrics = self.stream_metrics.get::<str>(context.endpoint_key());
+
+        if let Some(endpoint_metrics) = endpoint_metrics
             && let Some(entry) = endpoint_metrics.get(context.collector_type)
         {
             return Ok(entry.value().clone());
@@ -224,6 +249,10 @@ impl PrometheusSink {
         let unregister_result = self.collector_registry.unregister_gauge_metrics(&metrics);
 
         if endpoint.get().is_empty() {
+            #[cfg(test)]
+            if let Some(before_remove) = &self.before_endpoint_remove {
+                before_remove();
+            }
             endpoint.remove();
         } else {
             drop(endpoint);
@@ -487,57 +516,88 @@ mod tests {
 
     #[test]
     fn concurrent_registration_and_last_stream_removal_preserve_new_stream() {
+        use std::sync::{Mutex, mpsc};
+        use std::time::Duration;
+
         let manager = Arc::new(MetricsManager::new("test").expect("metrics manager"));
-        let sink = PrometheusSink::new(manager, "test").expect("sink");
+        let mut sink = PrometheusSink::new(manager.clone(), "test").expect("sink");
 
-        for index in 0..32 {
-            let context = EventContext {
-                endpoint_key: format!("endpoint_{index}"),
-                addr: BmcAddr {
-                    ip: "10.0.0.1".parse().unwrap(),
-                    port: None,
-                    mac: None,
-                },
-                collector_type: "collector_a",
-                labels: Default::default(),
-                metadata: None,
-                rack_id: None,
-            };
+        let context = EventContext {
+            endpoint_key: "endpoint".to_string(),
+            addr: BmcAddr {
+                ip: "10.0.0.1".parse().unwrap(),
+                port: None,
+                mac: None,
+            },
+            collector_type: "collector_a",
+            labels: Default::default(),
+            metadata: None,
+            rack_id: None,
+        };
+        let sibling = EventContext {
+            collector_type: "collector_b",
+            ..context.clone()
+        };
+        sink.get_or_create_stream_metrics(&context).unwrap();
 
-            let sibling = EventContext {
-                collector_type: "collector_b",
-                ..context.clone()
-            };
+        let (removing_tx, removing_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let (blocked_tx, blocked_rx) = mpsc::channel();
+        let resume_rx = Mutex::new(resume_rx);
+        let timeout = Duration::from_secs(10);
+        sink.before_endpoint_remove = Some(Box::new(move || {
+            removing_tx.send(()).expect("report final removal");
+            resume_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(timeout)
+                .expect("resume final removal");
+        }));
+        sink.on_registration_blocked = Some(Box::new(move || {
+            blocked_tx.send(()).expect("report registration contention");
+        }));
 
-            let barrier = std::sync::Barrier::new(2);
+        let metrics = std::thread::scope(|scope| {
+            let removal = scope.spawn(|| sink.remove_collector_metrics(&context));
+            removing_rx
+                .recv_timeout(timeout)
+                .expect("reach final endpoint removal");
 
-            sink.get_or_create_stream_metrics(&context).unwrap();
+            let registration = scope.spawn(|| sink.get_or_create_stream_metrics(&sibling));
 
-            std::thread::scope(|scope| {
-                scope.spawn(|| {
-                    barrier.wait();
-                    sink.remove_collector_metrics(&context).unwrap();
-                });
+            let blocked = blocked_rx.recv_timeout(timeout);
+            // Release removal before checking the registration signal.
+            let resumed = resume_tx.send(());
+            let removal = removal.join();
+            let registration = registration.join();
+            blocked.expect("registration encountered the endpoint lock");
+            resumed.expect("release final removal");
+            removal.expect("removal thread").unwrap();
+            registration.expect("registration thread").unwrap()
+        });
+        sink.before_endpoint_remove = None;
+        sink.on_registration_blocked = None;
 
-                scope.spawn(|| {
-                    barrier.wait();
-                    sink.get_or_create_stream_metrics(&sibling).unwrap();
-                });
-            });
+        assert_eq!(sink.stream_metrics.len(), 1);
+        assert!(
+            sink.stream_metrics
+                .get(context.endpoint_key())
+                .unwrap()
+                .contains_key(sibling.collector_type)
+        );
+        metrics.record(GaugeReading::new(
+            "temperature".to_string(),
+            "temperature".to_string(),
+            "sensor".to_string(),
+            "celsius".to_string(),
+            42.0,
+        ));
+        let exposition = manager.export_telemetry().unwrap();
+        assert!(exposition.contains("collector_type=\"collector_b\""));
 
-            assert_eq!(sink.stream_metrics.len(), 1);
-
-            assert!(
-                sink.stream_metrics
-                    .get(context.endpoint_key())
-                    .unwrap()
-                    .contains_key(sibling.collector_type)
-            );
-
-            sink.remove_collector_metrics(&sibling).unwrap();
-
-            assert!(sink.stream_metrics.is_empty());
-        }
+        sink.remove_collector_metrics(&sibling).unwrap();
+        assert!(sink.stream_metrics.is_empty());
+        assert!(manager.export_telemetry().unwrap().is_empty());
     }
 
     #[test]

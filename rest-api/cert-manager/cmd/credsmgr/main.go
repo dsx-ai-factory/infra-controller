@@ -27,7 +27,7 @@ func main() {
 	app := &cli.App{
 		Name:    cmd.Name,
 		Usage:   cmd.Usage,
-		Version: "0.1.0",
+		Version: core.Version,
 		Flags:   cmd.Flags,
 		Action:  cmd.Action,
 	}

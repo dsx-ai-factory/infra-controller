@@ -805,7 +805,9 @@ impl CurrentNetworkVersion {
         config.anycast_site_prefixes.sort_unstable();
         config
             .additional_route_target_imports
-            .sort_by_key(|route_target| (route_target.asn, route_target.vni));
+            .sort_by_key(|route_target| {
+                (route_target.asn, route_target.vni, route_target.vni_self)
+            });
 
         if let Some(admin_interface) = &mut config.admin_interface {
             Self::normalize_interface(admin_interface);
@@ -855,10 +857,14 @@ impl CurrentNetworkVersion {
     fn normalize_routing_profile(routing_profile: &mut rpc::RoutingProfile) {
         routing_profile
             .route_target_imports
-            .sort_by_key(|route_target| (route_target.asn, route_target.vni));
+            .sort_by_key(|route_target| {
+                (route_target.asn, route_target.vni, route_target.vni_self)
+            });
         routing_profile
             .route_targets_on_exports
-            .sort_by_key(|route_target| (route_target.asn, route_target.vni));
+            .sort_by_key(|route_target| {
+                (route_target.asn, route_target.vni, route_target.vni_self)
+            });
         Self::sort_prefix_entries(&mut routing_profile.accepted_leaks_from_underlay);
         Self::sort_prefix_entries(&mut routing_profile.allowed_anycast_prefixes);
     }
@@ -1296,13 +1302,16 @@ impl MainLoop {
                         .await
                     };
 
-                    // Astra (Weave EW VPC) reconciliation is independent of HBN/DHCP: it is
-                    // reported on network status below, but a failure here must not block
-                    // the HBN/DHCP bookkeeping (or the readiness gate) that follows.
-                    let astra_config_status = astra_weave::build_notify_weave_ew_vpc_astra_config(
-                        conf.astra_config.as_ref(),
-                    )
-                    .await;
+                    // Maintenance-only delivery must not reconcile Weave attachments.
+                    let mut astra_config_status = None;
+                    if let Some(astra_config) = conf.astra_config.as_ref()
+                        && astra_config.is_attachment_config_present.unwrap_or(true)
+                    {
+                        astra_config_status = Some(
+                            astra_weave::build_notify_weave_ew_vpc_astra_config(Some(astra_config))
+                                .await,
+                        );
+                    }
 
                     match (update_result, dhcp_result) {
                         (Ok(hbn_changed), Ok(dhcp_changed)) => {
@@ -1375,11 +1384,13 @@ impl MainLoop {
                         }
                     }
 
-                    set_astra_config_status(
-                        conf.astra_config.as_ref(),
-                        astra_config_status,
-                        &mut status_out,
-                    );
+                    if let Some(result) = astra_config_status {
+                        set_astra_config_status(
+                            conf.astra_config.as_ref(),
+                            result,
+                            &mut status_out,
+                        );
+                    }
 
                     // In case of secondary DPU, the interface must be disabled if on admin network, else enabled.
                     // Note that the nvue config handles the blocking of traffic on the interface.  This is only so that the host link reflects the correct state.
@@ -1389,6 +1400,20 @@ impl MainLoop {
                     {
                         tracing::error!(error = format!("{err:#}"), "Updating interface state.");
                     }
+                }
+
+                // Xplane maintenance has no dependency on HBN being up. Its
+                // per-port failures are reported without changing HBN/DHCP
+                // acknowledgments or the readiness gate.
+                if let Some(astra_config) = conf.astra_config.as_ref()
+                    && astra_config.is_maintenance_config_present.unwrap_or(true)
+                {
+                    status_out.astra_config_status =
+                        crate::astra_xplane::build_notify_xplane_maintenance_config(
+                            astra_config,
+                            status_out.astra_config_status.take(),
+                        )
+                        .await;
                 }
 
                 // Feed the latest instance metadata to FMDS and acknowledge it
@@ -1756,7 +1781,11 @@ fn set_astra_config_status(
             }
             // An empty report retracts Core's previous Astra readiness. Omitting
             // the report would leave that observation unchanged after failure.
-            rpc::AstraConfigStatus::default()
+            rpc::AstraConfigStatus {
+                is_attachment_status_present: Some(true),
+                is_maintenance_status_present: Some(false),
+                ..Default::default()
+            }
         }
     });
 }

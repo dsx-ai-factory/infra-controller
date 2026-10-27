@@ -49,11 +49,13 @@ pub mod dpu;
 mod acl_rules;
 pub mod agent_platform;
 mod astra_weave;
+mod astra_xplane;
 mod command_line;
 pub mod containerd;
 mod dhcp;
 mod dhcp_server_grpc_client;
 mod ethernet_virtualization;
+mod xplane_client;
 use carbide_uuid::machine::DpuMachineId;
 pub use ethernet_virtualization::FPath;
 pub mod extension_services;
@@ -86,6 +88,9 @@ pub mod util;
 pub mod weave_ew_vpc_client;
 #[cfg(test)]
 pub mod weave_ew_vpc_mock_server;
+#[cfg(any(test, feature = "xplane-maintenance-mock"))]
+pub mod xplane_mock_server;
+pub use xplane_client::proto as xplane_proto;
 
 /// The minimum version of HBN that FMDS supports
 pub const FMDS_MINIMUM_HBN_VERSION: &str = "1.5.0-doca2.2.0";

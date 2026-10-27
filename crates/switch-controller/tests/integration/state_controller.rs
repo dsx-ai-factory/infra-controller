@@ -934,6 +934,7 @@ async fn test_configure_certificate_wait_for_complete_transitions_to_error_on_fa
 
     let failing_mock = MockNvSwitchManager::default().with_certificate_job_status(
         ConfigureSwitchCertificateJobStatus {
+            failure: None,
             state: ConfigureSwitchCertificateState::Failed,
             error: Some("cert install failed".to_string()),
         },
@@ -1328,6 +1329,7 @@ async fn test_rack_error_unwinds_switch_waiting_for_nvos(
             rack.controller_state.version,
             rack.controller_state.version.increment(),
             &RackState::Error {
+                certificate_failure: None,
                 cause: "profile SOT unavailable".to_string(),
                 recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
             },

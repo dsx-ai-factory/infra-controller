@@ -70,7 +70,7 @@ behavior.
 | `bmc_max_sessions_per_caller` | `usize` | `4` | `security` | Cap on outstanding Redfish sessions per calling service identity per BMC; a `GetBmcCredentials` mint past the cap revokes that caller's oldest sessions. Values below 1 are treated as 1. |
 | `bmc_proxy` | `Option<BmcProxyConfig>` | — | `security` | Routes this instance's ordinary BMC Redfish traffic — including established-endpoint credentialed exploration — through nico-bmc-proxy. Credential setup and rotation, session minting, exploration's anonymous vendor probes, and component-manager compute-tray power control (explicit per-endpoint credentials) always stay direct. |
 | `ib_fabrics` | `HashMap<String, IbFabricDefinition>` | `{}` | `hardware` | InfiniBand fabrics managed by the site. When `ib_config.enabled = true`, v2.4 accepts at most one fabric, named `default`. Each fabric accepts optional `backend` and `remote_pool` selectors with the [ResourcePoolConfig](#resourcepoolconfig) rules, using `ib_fabrics.<fabric>.pkey` as its logical pool name. When InfiniBand management is disabled, selectors are still validated, but fabric configuration alone creates no PKey binding; existing pool inventory can still receive a missing binding. |
-| `initial_domain_name` | `Option<String>` | — | `machines` | Domain to create if none exist. Most sites use a single domain. |
+| `initial_domain_name` | `Option<String>` | — | `machines` | Domain to create if none exist. Most sites use a single domain. Also the default NMX-C TLS authority; see [NvLinkConfig](#nvlinkconfig). |
 | `initial_dpu_agent_upgrade_policy` | `Option<AgentUpgradePolicyChoice>` | — | `machines` | Policy for nico-dpu-agent upgrades. Also settable via `nico-admin-cli`. |
 | `max_concurrent_machine_updates` | `Option<i32>` | — | `machines` | **Deprecated.** Use `machine_updater` instead. |
 | `machine_update_run_interval` | `Option<u64>` | — | `machines` | Interval (seconds) at which the machine update manager checks for updates. |
@@ -624,29 +624,60 @@ disabled in v2.4.
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
-| `enabled` | `bool` | `false` | Enables NvLink partitioning. |
+| `enabled` | `bool` | `false` | Enables NvLink partitioning. On a rack with running instances, the first monitor pass removes the NMX-C default partition. |
 | `monitor_run_interval` | `Duration` | `60s` | NvLink monitor polling interval. Partition owners accept a couple of minutes of staleness, so a site whose passes overrun `60s` can use `120s`. |
-| `nmx_c_tls_ca_cert_path` | `Option<String>` | — | Extra CA bundle for verifying the NMX-C server over HTTPS. |
-| `nmx_c_tls_client_cert_path` | `Option<String>` | — | Client certificate for mTLS to NMX-C. |
-| `nmx_c_tls_client_key_path` | `Option<String>` | — | Client private key for mTLS to NMX-C. |
-| `nmx_c_tls_authority` | `Option<String>` | — | TLS server name used for SNI and certificate verification. |
-| `allow_insecure` | `bool` | `false` | Skip TLS verification for NMX-C. |
+| `nmx_c_tls_ca_cert_path` | `Option<String>` | *(see below)* | CA bundle that verifies the NMX-C server certificate over HTTPS. It is the only trust source: no system roots are loaded. |
+| `nmx_c_tls_client_cert_path` | `Option<String>` | *(see below)* | Client certificate for mTLS to NMX-C. |
+| `nmx_c_tls_client_key_path` | `Option<String>` | *(see below)* | Client private key for mTLS to NMX-C. |
+| `nmx_c_tls_authority` | `Option<String>` | *(see below)* | TLS server name used for SNI and certificate verification. Unset or empty uses the endpoint host, which is the switch NVOS IP. |
+| `allow_insecure` | `bool` | `false` | Reach NMX-C over plain HTTP when no client certificate and key are set. With both set, NMX-C is still reached over verified HTTPS. |
 | `nmx_c_endpoint_port` | `Option<u16>` | — | TCP port for NMX-C endpoints derived from switch NVOS IP. Unset uses the production NMX-C port. |
 | `nmx_c_certificate_rotation` | `NmxCCertificateRotationConfig` | *(default)* | Optional expiry-driven rotation for NMX-C server certificates. |
 | `partition_monitor_max_concurrent_groups` | `NonZeroUsize` | `16` | Maximum number of NMX-C machine groups (chassis or rack) reconciled concurrently per monitor iteration. Each group in flight holds one NMX-C client and at most one database connection, so this bounds the monitor's gRPC fan-out and its share of the pool. Documented range 1 to 256. Larger values are accepted with a startup warning. 0 is rejected. |
 | `partition_monitor_full_check_interval` | `Duration` | `10m` | How often a machine group is fully reconciled against NMX-C even when nothing changed. Between full checks a group whose database inputs are unchanged since its last successful check, and whose instances all have their NVLink config applied, is skipped. GPU health and the `NvlinkUnhealthy` alert on a skipped group refresh at this interval. `0s` disables skipping. |
 
+When `enabled` or `nmx_c_certificate_rotation.enabled` is `true`, `nico-api`
+fills in unset NMX-C TLS settings at startup:
+
+- **Client certificate, key, and authority.** When `allow_insecure` is `false`
+  and none of the four `nmx_c_tls_*` keys is set, `nico-api` checks for
+  `/var/run/secrets/nvswitch-client/tls.crt` and `tls.key` (the Helm chart's
+  `nvSwitchTls.nicoClient` mount). If both exist, it uses them as the client
+  certificate and key and sets `nmx_c_tls_authority` to
+  `initial_domain_name`. Setting any `nmx_c_tls_*` key disables these three
+  defaults; unset keys among them stay unset.
+- **CA bundle.** When `nmx_c_tls_ca_cert_path` is unset and NMX-C is reached
+  over HTTPS, `nico-api` uses `/var/run/secrets/nvswitch-client/ca.crt`, or
+  else `/var/run/secrets/nico-roots/ca.crt`, whichever exists first. This
+  applies regardless of the other keys.
+
+`nico-api` logs a warning when it reaches NMX-C over HTTPS with no client
+certificate under the first rule, or with no CA bundle after the second.
+
+For the authority default to work, set `initial_domain_name`, and make it
+match a DNS SAN of the certificate NMX-C presents. On switches whose server
+certificate is issued by the RMS Helm chart, that SAN is RMS's
+`apiServer.dnsDomain`, so set both to the same value. If `initial_domain_name`
+is unset, `nmx_c_tls_authority` stays unset and each NMX-C endpoint is
+verified against its own host, which for rack endpoints is the switch NVOS IP.
+
 ### `NmxCCertificateRotationConfig`
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
-| `enabled` | `bool` | `false` | Enables NMX-C server certificate expiry checks and rotation. |
+| `enabled` | `Option<bool>` | *(follows `nvlink_config.enabled`)* | Enables NMX-C server certificate expiry checks and rotation. Unset follows `nvlink_config.enabled`; set it to run or stop the certificate monitor independently. |
 | `run_interval` | `Duration` | `1h` | Interval between checks of the certificate served by NMX-C. |
 | `rotate_before_expiry` | `Duration` | `1w` | Requests rotation when the served certificate expires within this duration. Must leave enough time for the replacement certificate to be issued first. |
 | `probe_timeout` | `Duration` | `10s` | Timeout for each NMX-C certificate probe operation. |
 
 `expiry_warning_window` remains accepted as a deprecated alias for
 `rotate_before_expiry`; its value now controls rotation rather than warning only.
+
+Upgrade note: `enabled` previously defaulted to `false`. A site that sets
+`nvlink_config.enabled = true` without this key starts the certificate monitor
+after upgrading, and the monitor can request `ConfigureNmxCluster` rack
+maintenance when a served certificate nears expiry. Set `enabled = false` here
+to keep the previous behavior.
 
 ### `SiteExplorerConfig`
 
@@ -1012,8 +1043,8 @@ client-certificate authentication is not used.
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
 | `admin_vpc` | `Option<AdminFnnConfig>` | — | FNN configuration for the admin network VPC. |
-| `common_internal_route_target` | `Option<RouteTargetConfig>` | — | Double-tag for internal tenant routes (consumed by the network infrastructure). |
-| `additional_route_target_imports` | `Vec<RouteTargetConfig>` | `[]` | Extra route targets imported on DPU VRFs. |
+| `common_internal_route_target` | `Option<RouteTargetConfig>` | — | Literal double-tag for internal tenant routes. `vni_self` is rejected because this value has no single VPC owner. |
+| `additional_route_target_imports` | `Vec<RouteTargetConfig>` | `[]` | Literal route targets imported on DPU VRFs. `vni_self` is rejected because these values have no single VPC owner. |
 | `routing_profiles` | `HashMap<String, FnnRoutingProfileConfig>` | `{}` | Named per-VPC routing profiles (see [FnnRoutingProfileConfig](#fnnroutingprofileconfig)). |
 | `use_vpc_vrf_loopback` | `bool` | `false` | Whether IPs are allocated for VPC loopbacks. When false, the VPC loopback pool is unused and no VPC/VRF loopback IP is sent to the DPU. |
 
@@ -1021,8 +1052,8 @@ client-certificate authentication is not used.
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
-| `route_target_imports` | `Option<Vec<RouteTargetConfig>>` | — (effective `[]`) | Route targets imported into DPU VRFs for VPC routes. |
-| `route_targets_on_exports` | `Option<Vec<RouteTargetConfig>>` | — (effective `[]`) | Route targets added to routes exported by the DPU. |
+| `route_target_imports` | `Option<Vec<RouteTargetConfig>>` | — (effective `[]`) | Route targets imported into DPU VRFs for VPC routes. Each target can use a literal `vni` or `vni_self = true`. |
+| `route_targets_on_exports` | `Option<Vec<RouteTargetConfig>>` | — (effective `[]`) | Route targets added to routes exported by the DPU. Each target can use a literal `vni` or `vni_self = true`. |
 | `internal` | `Option<bool>` | — (effective `false`) | Whether the profile uses internal VNI allocation. This property cannot be overridden on a VPC. |
 | `tenant_prefix_overlap_eligible` | `bool` | `false` | Base routing profile opt-in for [tenant prefix overlap checks](#tenant-prefix-overlap-checks). This setting cannot be overridden on a VPC. |
 | `leak_default_route_from_underlay` | `Option<bool>` | — (effective `false`) | Leak the default route from the underlay/default VRF into tenant VRFs. Do not enable this for an address family whose effective `site_fabric_null_routes` contains `/0`; the imported default has a better administrative distance than the equal-prefix blackhole. |
@@ -1035,6 +1066,34 @@ client-certificate authentication is not used.
 Unset properties retain presence information so a VPC's inline
 `routing_profile_overrides` can inherit them. After the named profile and VPC
 override are combined, properties still unset use the effective defaults above.
+
+### RouteTargetConfig
+
+The following table describes the route-target settings:
+
+| Field | Type | Default | Description |
+| ----- | ---- | ------- | ----------- |
+| `asn` | `u32` | `0` | Autonomous System Number component of the BGP route target. |
+| `vni` | `Option<u32>` | — (effective literal `0`) | Literal route-target local-administrator value. This is not validated as a VXLAN VNI, and zero is valid. |
+| `vni_self` | `bool` | `false` | Use the current VPC's allocated L3 VNI as the route-target local administrator. This is mutually exclusive with `vni`. |
+
+A two-byte ASN permits a four-byte local administrator. A four-byte ASN permits only a two-byte local administrator, so `asn` and the resolved local administrator cannot both exceed 65535.
+
+`vni_self` ([issue #7232](https://github.com/dsx-ai-factory/infra-controller/issues/7232)) is supported only in `route_target_imports` and `route_targets_on_exports`, including VPC `routing_profile_overrides`.
+
+The following example derives an imported route target from the current VPC:
+
+```toml
+route_target_imports = [
+    { asn = 429000000, vni_self = true },
+]
+```
+
+Core preserves the symbolic value in site configuration, persisted VPC overrides, and VPC configuration responses. `VpcEffectiveRoutingProfile` and DPU network configuration contain a concrete `vni` and `vni_self = false`.
+
+Core rejects conflicting or unencodable literals during site configuration loading or VPC mutation. If a symbolic target becomes unencodable after substituting the allocated VPC VNI, the effective-profile or DPU-configuration request fails instead of truncating the value.
+
+Deploy the supporting Core version before allowing clients to submit `vni_self`. Existing DPU agents remain compatible because Core sends the concrete field-2 value. An older Core can ignore field 3 and interpret an absent field 2 as zero. Before downgrading Core, replace persisted symbolic overrides with concrete route targets and remove symbolic values from site configuration. REST support belongs to a later deployment phase.
 
 ### SitePrefix isolation rules
 
@@ -1468,6 +1527,7 @@ warning. Nest them under `[ewethers_config.svpc]` in new configurations.
 | `enabled` | `bool` | `false` | Enable Cluster Interconnect Network. |
 | `svpc_enabled` | `bool` | `false` | Enable the SVPC path. Not mutually exclusive with `astra_enabled`. |
 | `astra_enabled` | `bool` | `false` | Enable the Astra path. Not mutually exclusive with `svpc_enabled`. |
+| `partial-multiplane` | `"enabled"` or `"disabled"` | `"enabled"` | Site-wide partial multiplane maintenance control. `"disabled"` rejects maintenance operator RPCs, stops maintenance configuration delivery and observation recording, and omits maintenance initialization from newly provisioned Astra flavors. Saved requests and current plane states are preserved. Maintenance delivery and observations require `enabled` and `astra_enabled` to be `true` and an eligible BF4 DPU. See [partial multiplane maintenance](../../../../docs/manuals/dpf.md#site-wide-partial-multiplane-maintenance). |
 | `subnet_ip` | `Ipv4Addr` | `0.0.0.0` | Base IPv4 address of the DPA overlay network. |
 | `subnet_mask` | `i32` | `11` | IPv4 CIDR prefix length (0–32) for the DPA overlay network; also sets Weave `underlayConfigMapData.overlayNetworkPrefixLength` in the generated `DPUServiceConfiguration`. If weave is configured, it uses the default `11` when this field or the entire `ewethers_config` section is omitted. A functional Astra/Weave deployment requires explicit ewethers configuration with the appropriate enable flags and intended overlay subnet address and mask. |
 | `astra` | `AstraConfig` | *(defaults)* | Astra settings (see [AstraConfig](#astraconfig)). |

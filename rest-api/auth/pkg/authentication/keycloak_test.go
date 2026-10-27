@@ -912,8 +912,9 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 					Roles: []string{"testorg:PROVIDER_ADMIN"},
 				},
 				RegisteredClaims: jwt.RegisteredClaims{
-					Subject: "user-subject-123",
-					Issuer:  jwksServer.URL + "/realms/nico",
+					Subject:   "user-subject-123",
+					Issuer:    jwksServer.URL + "/realms/nico",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 				},
 			},
 			path:    "/v2/org/testorg/user/current",
@@ -942,8 +943,9 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 					Roles: []string{"testorg:TENANT_ADMIN"},
 				},
 				RegisteredClaims: jwt.RegisteredClaims{
-					Subject: "service-account-123",
-					Issuer:  jwksServer.URL + "/realms/nico",
+					Subject:   "service-account-123",
+					Issuer:    jwksServer.URL + "/realms/nico",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 				},
 			},
 			path:    "/v2/org/testorg/user/current",
@@ -982,8 +984,9 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 					Roles: []string{}, // No roles
 				},
 				RegisteredClaims: jwt.RegisteredClaims{
-					Subject: "user-subject-123",
-					Issuer:  jwksServer.URL + "/realms/nico",
+					Subject:   "user-subject-123",
+					Issuer:    jwksServer.URL + "/realms/nico",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 				},
 			},
 			path:           "/v2/org/testorg/user/current",
@@ -1021,12 +1024,8 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 				assert.Equal(t, tt.expectedStatus, apiErr.Code)
 				assert.Contains(t, apiErr.Message, tt.expectedErrMsg)
 			} else {
-				// Note: JWT validation will likely fail due to key mismatch, but we test business logic
-				if apiErr != nil {
-					// Should not be role-related or realm-related errors for valid test cases
-					assert.NotContains(t, apiErr.Message, "User does not have any roles assigned")
-					assert.NotContains(t, apiErr.Message, "Token from unexpected realm")
-				} else if tt.validateUser != nil {
+				require.Nil(t, apiErr, "expected successful authentication")
+				if tt.validateUser != nil {
 					tt.validateUser(t, c)
 				}
 			}
@@ -1106,8 +1105,9 @@ func TestAuthProcessor_KeycloakServiceAccountsDisabled(t *testing.T) {
 					Roles: []string{"testorg:PROVIDER_ADMIN"},
 				},
 				RegisteredClaims: jwt.RegisteredClaims{
-					Subject: "service-account-disabled-123",
-					Issuer:  jwksServer.URL + "/realms/nico",
+					Subject:   "service-account-disabled-123",
+					Issuer:    jwksServer.URL + "/realms/nico",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 				},
 			},
 			path:           "/v2/org/testorg/user/current",
@@ -1128,8 +1128,9 @@ func TestAuthProcessor_KeycloakServiceAccountsDisabled(t *testing.T) {
 					Roles: []string{"testorg:PROVIDER_ADMIN"},
 				},
 				RegisteredClaims: jwt.RegisteredClaims{
-					Subject: "regular-user-123",
-					Issuer:  jwksServer.URL + "/realms/nico",
+					Subject:   "regular-user-123",
+					Issuer:    jwksServer.URL + "/realms/nico",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 				},
 			},
 			path:    "/v2/org/testorg/user/current",
@@ -1165,11 +1166,7 @@ func TestAuthProcessor_KeycloakServiceAccountsDisabled(t *testing.T) {
 				assert.Equal(t, tt.expectedStatus, apiErr.Code, "Expected status code %d but got %d", tt.expectedStatus, apiErr.Code)
 				assert.Contains(t, apiErr.Message, tt.expectedErrMsg, "Expected error message to contain '%s' but got '%s'", tt.expectedErrMsg, apiErr.Message)
 			} else {
-				// For regular users, we expect either success or some other error (not service account related)
-				if apiErr != nil {
-					assert.NotContains(t, apiErr.Message, "Service accounts are not enabled",
-						"Regular users should not be blocked due to service account settings")
-				}
+				require.Nil(t, apiErr, "regular users should authenticate when service accounts are disabled")
 			}
 		})
 	}

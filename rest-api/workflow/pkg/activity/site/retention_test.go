@@ -98,6 +98,7 @@ func TestManageInventoryRetention_StartSuccessfulInventoryWorkflowDeletion(t *te
 			}
 
 			require.NotNil(t, gotRequest)
+			assert.Contains(t, gotRequest.GetVisibilityQuery(), "'UpdateSitePrefixInventory'")
 
 			match := queryPattern.FindStringSubmatch(gotRequest.GetVisibilityQuery())
 			require.NotNil(t, match, "unexpected visibility query: %s", gotRequest.GetVisibilityQuery())

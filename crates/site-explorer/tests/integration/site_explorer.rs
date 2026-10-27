@@ -4783,8 +4783,8 @@ async fn test_site_explorer_pairs_dpu_from_chassis_serial(
 }
 
 /// A host can report one BlueField as both a network adapter and a separate
-/// chassis. Refresh must replace a persisted duplicate list and ingest each
-/// distinct DPU once.
+/// chassis, including copies without part numbers. Refresh must replace a
+/// persisted duplicate list and ingest each distinct DPU once.
 #[sqlx_test]
 async fn test_site_explorer_deduplicates_chassis_serials_and_repairs_persisted_host(
     pool: PgPool,
@@ -4821,7 +4821,7 @@ async fn test_site_explorer_deduplicates_chassis_serials_and_repairs_persisted_h
                 .enumerate()
                 .map(|(index, dpu)| NetworkAdapter {
                     id: (index + 1).to_string(),
-                    part_number: Some("900-9D3B6-00CV-AA0".to_string()),
+                    part_number: (index != 0).then(|| "900-9D3B6-00CV-AA0".to_string()),
                     serial_number: Some(dpu.serial.clone()),
                     ..Default::default()
                 })
@@ -4832,6 +4832,15 @@ async fn test_site_explorer_deduplicates_chassis_serials_and_repairs_persisted_h
             id: "SmartNIC_1".to_string(),
             part_number: Some("900-9D3B6-00CV-AA0".to_string()),
             serial_number: Some(dpus[0].serial.clone()),
+            ..Default::default()
+        },
+        Chassis {
+            id: "2".to_string(),
+            network_adapters: vec![NetworkAdapter {
+                id: "1".to_string(),
+                serial_number: Some(dpus[1].serial.clone()),
+                ..Default::default()
+            }],
             ..Default::default()
         },
     ];

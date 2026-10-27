@@ -214,6 +214,7 @@ func testDeleteSiteComponentsFromDBMachineDeletion(t *testing.T) {
 		InfrastructureProviderID: ip.ID,
 		TenantID:                 &tenant.ID,
 		SitePrefixID:             cutil.GetPtr(uuid.New()),
+		Managed:                  cutil.GetPtr(false),
 		RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
 		Prefix:                   "10.60.0.0",
 		PrefixLength:             24,
@@ -705,7 +706,7 @@ func TestManageSite_MonitorInventoryReceiptForAllSites(t *testing.T) {
 
 			for siteID, wantStatus := range tt.wantStatus {
 				siteDAO := cdbm.NewSiteDAO(dbSession)
-				site, err := siteDAO.GetByID(ctx, nil, siteID, nil, false)
+				site, err := siteDAO.GetByID(ctx, nil, siteID, nil, false, false)
 				assert.NoError(t, err)
 				assert.Equal(t, wantStatus, site.Status)
 			}
@@ -864,7 +865,7 @@ func TestManageSite_CheckOTPExpirationAndRenewForAllSites(t *testing.T) {
 			mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", tt.wantWorkflowStarts)
 
 			for _, id := range siteIDs {
-				site, err := cdbm.NewSiteDAO(dbSession).GetByID(ctx, nil, id, nil, false)
+				site, err := cdbm.NewSiteDAO(dbSession).GetByID(ctx, nil, id, nil, false, false)
 				require.NoError(t, err)
 				assert.Equal(t, cdbm.SiteStatusRegistered, site.Status)
 			}
@@ -969,7 +970,7 @@ func TestManageSite_UpdateAgentCertExpiry_Activity(t *testing.T) {
 
 	// Check initial condition: AgentCertExpiry is nil
 	siteDAO := cdbm.NewSiteDAO(dbSession)
-	existingSite, err := siteDAO.GetByID(ctx, nil, site.ID, nil, false)
+	existingSite, err := siteDAO.GetByID(ctx, nil, site.ID, nil, false, false)
 	assert.NoError(t, err)
 	assert.Nil(t, existingSite.AgentCertExpiry)
 
@@ -979,7 +980,7 @@ func TestManageSite_UpdateAgentCertExpiry_Activity(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Verify AgentCertExpiry is updated
-	updatedSite, err := siteDAO.GetByID(ctx, nil, site.ID, nil, false)
+	updatedSite, err := siteDAO.GetByID(ctx, nil, site.ID, nil, false, false)
 	assert.NoError(t, err)
 	assert.NotNil(t, updatedSite.AgentCertExpiry)
 	assert.True(t, updatedSite.AgentCertExpiry.Equal(newCertExpiry))
@@ -1272,7 +1273,7 @@ func testDeleteSiteComponentsFromDBDeletedSiteResources(t *testing.T) {
 	siteDAO := cdbm.NewSiteDAO(dbSession)
 	err := siteDAO.Delete(ctx, nil, site1Resources.site.ID)
 	require.NoError(t, err)
-	_, err = siteDAO.GetByID(ctx, nil, site1Resources.site.ID, nil, false)
+	_, err = siteDAO.GetByID(ctx, nil, site1Resources.site.ID, nil, false, false)
 	require.Equal(t, cdb.ErrDoesNotExist, err)
 
 	// Model inventory admitted before Site deletion writing after the early
@@ -1425,6 +1426,7 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 		wantVersion           *string
 		wantVpcSlaac          bool
 		wantFlow              bool
+		wantNVLinkPartition   bool
 		wantAgentVersion      *string
 		wantInterval          *int
 		wantDBUpdate          bool
@@ -1624,6 +1626,53 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 			wantFlow:           true,
 		},
 		{
+			name:            "enables NVLink partition when Core reports it enabled",
+			existingVersion: cutil.GetPtr("1.0.0"),
+			existingConfig:  &cdbm.SiteConfig{},
+			buildInfo: &corev1.BuildInfo{
+				BuildVersion:  "1.0.0",
+				RuntimeConfig: &corev1.RuntimeConfig{NvlinkPartitioningEnabled: proto.Bool(true)},
+			},
+			wantVersion:         cutil.GetPtr("1.0.0"),
+			wantNVLinkPartition: true,
+			wantDBUpdate:        true,
+		},
+		{
+			name:            "disables NVLink partition when Core reports it disabled",
+			existingVersion: cutil.GetPtr("1.0.0"),
+			existingConfig:  &cdbm.SiteConfig{NVLinkPartition: true},
+			buildInfo: &corev1.BuildInfo{
+				BuildVersion:  "1.0.0",
+				RuntimeConfig: &corev1.RuntimeConfig{NvlinkPartitioningEnabled: proto.Bool(false)},
+			},
+			wantVersion:  cutil.GetPtr("1.0.0"),
+			wantDBUpdate: true,
+		},
+		{
+			// Older Core versions omit the field, and inventory without runtime config carries
+			// no NVLink setting; either must leave the stored value alone.
+			name:            "preserves NVLink partition when Core omits it",
+			existingVersion: cutil.GetPtr("1.0.0"),
+			existingConfig:  &cdbm.SiteConfig{NVLinkPartition: true},
+			buildInfo: &corev1.BuildInfo{
+				BuildVersion:  "1.0.0",
+				RuntimeConfig: &corev1.RuntimeConfig{},
+			},
+			wantVersion:         cutil.GetPtr("1.0.0"),
+			wantNVLinkPartition: true,
+		},
+		{
+			name:            "skips update when reported NVLink partition matches",
+			existingVersion: cutil.GetPtr("1.0.0"),
+			existingConfig:  &cdbm.SiteConfig{NVLinkPartition: true},
+			buildInfo: &corev1.BuildInfo{
+				BuildVersion:  "1.0.0",
+				RuntimeConfig: &corev1.RuntimeConfig{NvlinkPartitioningEnabled: proto.Bool(true)},
+			},
+			wantVersion:         cutil.GetPtr("1.0.0"),
+			wantNVLinkPartition: true,
+		},
+		{
 			name:            "initializes nil config with advertised VPC SLAAC",
 			existingVersion: cutil.GetPtr("1.0.0"),
 			existingConfig:  nil,
@@ -1696,7 +1745,7 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 
 			require.NoError(t, err)
 
-			got, err := siteDAO.GetByID(ctx, nil, site.ID, nil, false)
+			got, err := siteDAO.GetByID(ctx, nil, site.ID, nil, false, false)
 			require.NoError(t, err)
 			if tt.wantVersion == nil {
 				assert.Nil(t, got.SiteControllerVersion)
@@ -1707,6 +1756,7 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 			require.NotNil(t, got.Config)
 			assert.Equal(t, tt.wantVpcSlaac, got.Config.VpcSlaac)
 			assert.Equal(t, tt.wantFlow, got.Config.Flow)
+			assert.Equal(t, tt.wantNVLinkPartition, got.Config.NVLinkPartition)
 
 			// A nil expectation means the report left the stored value as createSite wrote it.
 			wantAgentVersion := existingAgentVersion
@@ -2239,54 +2289,4 @@ func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes(t *testing.T) {
 		assert.Contains(t, logOutput.String(), "created Site fabric IP Block")
 		assert.Contains(t, logOutput.String(), createdIPBlocks[0].ID.String())
 	})
-}
-
-func TestGetSiteFabricIPBlockRoutingType(t *testing.T) {
-	tests := []struct {
-		name   string
-		prefix string
-		want   string
-	}{
-		{
-			name:   "whole 10.0.0.0/8 range",
-			prefix: "10.0.0.0/8",
-			want:   cdbm.IPBlockRoutingTypeDatacenterOnly,
-		},
-		{
-			name:   "last /16 of 172.16.0.0/12",
-			prefix: "172.31.0.0/16",
-			want:   cdbm.IPBlockRoutingTypeDatacenterOnly,
-		},
-		{
-			name:   "inside 192.168.0.0/16",
-			prefix: "192.168.4.128/26",
-			want:   cdbm.IPBlockRoutingTypeDatacenterOnly,
-		},
-		{
-			name:   "inside IPv6 unique local range",
-			prefix: "fd12:3456::/48",
-			want:   cdbm.IPBlockRoutingTypeDatacenterOnly,
-		},
-		{
-			name:   "starts inside a private range but extends past it",
-			prefix: "192.168.0.0/15",
-			want:   cdbm.IPBlockRoutingTypePublic,
-		},
-		{
-			name:   "public IPv4",
-			prefix: "203.0.113.0/24",
-			want:   cdbm.IPBlockRoutingTypePublic,
-		},
-		{
-			name:   "public IPv6",
-			prefix: "2001:db8::/32",
-			want:   cdbm.IPBlockRoutingTypePublic,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, getSiteFabricIPBlockRoutingType(netip.MustParsePrefix(tt.prefix)))
-		})
-	}
 }

@@ -29,11 +29,12 @@ use model::site_explorer::{
 };
 
 use super::MachineCreator;
+use crate::IdentifiedManagedHost;
 use crate::boot_interfaces::HostBootInterfaces;
+use crate::endpoint_exploration_report_ext::host_dpu_inventory_records;
 use crate::metrics::{
     BootInterfaceSelected, DpuMigrationSignal, PairingBlockerReason, SiteExplorationMetrics,
 };
-use crate::{IdentifiedManagedHost, host_dpu_inventory_records};
 
 /// A host whose DPU checks allow identification, including hosts with Ignore policy.
 pub(crate) struct ConfiguredIngestionCandidate {

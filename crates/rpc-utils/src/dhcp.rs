@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
@@ -22,10 +22,12 @@ use std::str::FromStr;
 use carbide_uuid::UuidConversionError;
 use carbide_uuid::machine::MachineInterfaceId;
 use ipnetwork::{Ipv4Network, Ipv6Network};
+use mac_address::MacAddress;
 use rpc::InterfaceFunctionType;
 use rpc::errors::RpcDataConversionError;
 use rpc::forge::ManagedHostNetworkConfigResponse;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// This structure is used in dhcp-server and dpu-agent. dpu-agent passes these information to
 /// dhcp-server. dhcp-server uses it for handling packet.
@@ -102,6 +104,12 @@ pub enum DhcpDataError {
     UuidConversion(#[from] UuidConversionError),
     #[error("DhcpDataError: UuidParseError: {0}")]
     UuidParseError(#[from] carbide_uuid::typed_uuids::UuidError),
+    /// A service reservation contains a MAC address that cannot be parsed.
+    #[error("DhcpDataError: MacParseError: {0}")]
+    MacParseError(#[from] mac_address::MacParseError),
+    /// A service reservation replacement violates an identity or link invariant.
+    #[error("invalid service reservation configuration: {0}")]
+    InvalidServiceConfiguration(String),
 }
 
 impl Default for DhcpConfig {
@@ -195,6 +203,223 @@ pub struct DhcpV4Config {
     pub server: Ipv4Addr,
     /// Address used for DHCPv4 boot URLs and the next-server field.
     pub provisioning_server: Ipv4Addr,
+}
+
+/// Stores immutable service reservations by receiving interface and client MAC so DHCP lookup
+/// cannot cross service slots.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServiceConfig {
+    interfaces: BTreeMap<String, BTreeMap<MacAddress, ServiceReservation>>,
+}
+
+/// Groups service reservations that are reachable only through one provisioned DHCP receiving
+/// interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceInterfaceReservations {
+    /// Listener interface whose ingress identity forms half of every reservation key.
+    pub receiving_interface: String,
+    /// Exact client bindings reserved on this interface; an empty list explicitly blocks host
+    /// fallback.
+    pub reservations: Vec<ServiceReservation>,
+}
+
+/// Identifies one service attachment and its exact client MAC binding so tenant host traffic cannot
+/// claim the address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceReservation {
+    /// Stable API identity of the service attachment that owns this binding.
+    pub attachment_id: Uuid,
+    /// Stable interface position within the attachment.
+    pub interface_ordinal: u32,
+    /// Internal identity used to correlate this binding across replacement snapshots.
+    pub internal_uuid: Uuid,
+    /// DHCP chaddr required to select this binding.
+    pub mac_address: MacAddress,
+    /// Fixed point-to-point address-family configuration; DHCPv4 emits only the IPv4 variant.
+    pub link: ServiceLink,
+}
+
+/// Selects the address-family contract for a service reservation while keeping one exact lookup key
+/// for both families.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServiceLink {
+    /// A DHCPv4-managed `/31` link using HBN as its default gateway.
+    Ipv4(ServiceLinkV4),
+    /// A validated `/127` link retained independently from the DHCPv4-only service response path.
+    Ipv6(ServiceLinkV6),
+}
+
+/// Describes the fixed IPv4 point-to-point link emitted in DHCPv4 responses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceLinkV4 {
+    /// Service-side address (the second address in `prefix`).
+    pub address: Ipv4Addr,
+    /// Canonical `/31` containing the HBN and service endpoints.
+    pub prefix: Ipv4Network,
+    /// HBN-side address (the base address in `prefix`).
+    pub gateway: Ipv4Addr,
+}
+
+/// Describes the fixed IPv6 point-to-point link retained in replacement state; DHCPv4 rejects this
+/// family explicitly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceLinkV6 {
+    /// Service-side address (the second address in `prefix`).
+    pub address: Ipv6Addr,
+    /// Canonical `/127` containing the HBN and service endpoints.
+    pub prefix: Ipv6Network,
+    /// HBN-side address (the base address in `prefix`).
+    pub hbn_peer: Ipv6Addr,
+}
+
+impl ServiceConfig {
+    /// Builds an exact-match reservation index and rejects ambiguous or unsafe service link
+    /// definitions before activation.
+    pub fn try_new(
+        interface_groups: Vec<ServiceInterfaceReservations>,
+    ) -> Result<Self, DhcpDataError> {
+        let mut interfaces = BTreeMap::new();
+        let mut attachment_interfaces = BTreeSet::new();
+        let mut internal_uuids = BTreeSet::new();
+
+        // Validate each group before insertion so a later duplicate cannot silently replace an earlier reservation.
+        for group in interface_groups {
+            if group.receiving_interface.is_empty() {
+                return Err(invalid_service_config(
+                    "receiving interface must not be empty",
+                ));
+            }
+            if interfaces.contains_key(&group.receiving_interface) {
+                return Err(invalid_service_config(format!(
+                    "duplicate receiving interface {}",
+                    group.receiving_interface
+                )));
+            }
+
+            let mut reservations = BTreeMap::new();
+            for reservation in group.reservations {
+                validate_service_reservation(&reservation)?;
+                if !attachment_interfaces
+                    .insert((reservation.attachment_id, reservation.interface_ordinal))
+                {
+                    return Err(invalid_service_config(format!(
+                        "duplicate attachment interface {} ordinal {}",
+                        reservation.attachment_id, reservation.interface_ordinal
+                    )));
+                }
+                if !internal_uuids.insert(reservation.internal_uuid) {
+                    return Err(invalid_service_config(format!(
+                        "duplicate service internal_uuid {}",
+                        reservation.internal_uuid
+                    )));
+                }
+                let mac_address = reservation.mac_address;
+                if reservations.insert(mac_address, reservation).is_some() {
+                    return Err(invalid_service_config(format!(
+                        "duplicate MAC {mac_address} on receiving interface {}",
+                        group.receiving_interface
+                    )));
+                }
+            }
+            interfaces.insert(group.receiving_interface, reservations);
+        }
+
+        Ok(Self { interfaces })
+    }
+
+    /// Returns whether an interface owns service slots so unknown MACs can be rejected without
+    /// falling back to host DHCP.
+    pub fn has_interface(&self, receiving_interface: &str) -> bool {
+        self.interfaces.contains_key(receiving_interface)
+    }
+
+    /// Finds the reservation for an exact receiving-interface and client-MAC pair to preserve
+    /// service-slot isolation.
+    pub fn get(
+        &self,
+        receiving_interface: &str,
+        mac_address: &MacAddress,
+    ) -> Option<&ServiceReservation> {
+        self.interfaces
+            .get(receiving_interface)
+            .and_then(|reservations| reservations.get(mac_address))
+    }
+
+    /// Rejects reservations for interfaces outside the provisioned listener inventory so typos
+    /// cannot create unreachable service slots.
+    pub fn validate_receiving_interfaces(
+        &self,
+        provisioned_interfaces: &[String],
+    ) -> Result<(), DhcpDataError> {
+        let provisioned_interfaces: BTreeSet<_> =
+            provisioned_interfaces.iter().map(String::as_str).collect();
+        if let Some(interface) = self
+            .interfaces
+            .keys()
+            .find(|interface| !provisioned_interfaces.contains(interface.as_str()))
+        {
+            return Err(invalid_service_config(format!(
+                "receiving interface {interface} is not provisioned"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Validates one service reservation so packet handlers can construct replies without repeating
+/// domain checks.
+fn validate_service_reservation(reservation: &ServiceReservation) -> Result<(), DhcpDataError> {
+    // Reject identities that cannot name one stable unicast service endpoint.
+    if reservation.attachment_id.is_nil() || reservation.internal_uuid.is_nil() {
+        return Err(invalid_service_config(
+            "attachment_id and internal_uuid must not be nil",
+        ));
+    }
+    let mac = reservation.mac_address.bytes();
+    if mac == [0; 6] || mac[0] & 1 != 0 {
+        return Err(invalid_service_config(format!(
+            "MAC {} must be a nonzero unicast address",
+            reservation.mac_address
+        )));
+    }
+
+    // Validate the fixed HBN and service positions once so packet serving needs no repair or fallback.
+    match &reservation.link {
+        ServiceLink::Ipv4(link) => {
+            if link.prefix.prefix() != 31
+                || link.prefix.ip() != link.prefix.network()
+                || link.gateway != link.prefix.network()
+                || link.address != link.prefix.broadcast()
+            {
+                return Err(invalid_service_config(
+                    "IPv4 service link must use the /31 base address as gateway and base+1 as the service address",
+                ));
+            }
+        }
+        ServiceLink::Ipv6(link) => {
+            if link.prefix.prefix() != 127 || link.prefix.ip() != link.prefix.network() {
+                return Err(invalid_service_config(
+                    "IPv6 service link must use the /127 base address as HBN peer and base+1 as the service address",
+                ));
+            }
+            let mut service_octets = link.prefix.network().octets();
+            service_octets[15] += 1;
+            if link.hbn_peer != link.prefix.network()
+                || link.address != Ipv6Addr::from(service_octets)
+            {
+                return Err(invalid_service_config(
+                    "IPv6 service link must use the /127 base address as HBN peer and base+1 as the service address",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Creates a consistent validation error so callers can map all service contract failures to
+/// INVALID_ARGUMENT.
+fn invalid_service_config(message: impl Into<String>) -> DhcpDataError {
+    DhcpDataError::InvalidServiceConfiguration(message.into())
 }
 
 /// `DhcpV6ServerId` is an NVIDIA DUID-EN containing 7 through 130 bytes.
@@ -436,6 +661,15 @@ impl DhcpTimestampsFilePath {
             Self::NotSet => "Not set",
         }
     }
+
+    /// Returns the durable timestamp path so initialization checks the HBN file produced by the
+    /// temporary-file rename.
+    fn persisted_path_str(&self) -> &str {
+        match self {
+            Self::HbnTmp => DHCP_TIMESTAMP_FILE_HBN,
+            path => path.path_str(),
+        }
+    }
 }
 
 impl DhcpTimestamps {
@@ -452,6 +686,19 @@ impl DhcpTimestamps {
 
     pub fn get_timestamp(&self, host_id: &MachineInterfaceId) -> Option<&String> {
         self.timestamps.get(host_id)
+    }
+
+    /// Loads or creates durable timestamp history for configured paths so generation restarts
+    /// preserve host activity; `NotSet` performs no file I/O.
+    pub fn initialize_file(&mut self) -> eyre::Result<()> {
+        if let DhcpTimestampsFilePath::NotSet = self.path {
+            return Ok(());
+        }
+        match fs::metadata(self.path.persisted_path_str()) {
+            Ok(_) => self.read(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => self.write(),
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub fn write(&self) -> eyre::Result<()> {
@@ -480,8 +727,9 @@ impl DhcpTimestamps {
         }
         let timestamp_file = fs::OpenOptions::new()
             .read(true)
-            .open(self.path.path_str())?;
-        *self = serde_json::from_reader(timestamp_file)?;
+            .open(self.path.persisted_path_str())?;
+        let persisted: Self = serde_json::from_reader(timestamp_file)?;
+        self.timestamps = persisted.timestamps;
         Ok(())
     }
 }
@@ -516,6 +764,28 @@ mod tests {
 
     const HOST_INTERFACE_ID: &str = "11111111-1111-1111-1111-111111111111";
     const DEFAULT_LEASE_TIME_SECS: u32 = 7 * 24 * 60 * 60;
+
+    /// Builds one valid service reservation so validation cases can change only the invariant they
+    /// exercise.
+    fn service_reservation(link: ServiceLink) -> ServiceReservation {
+        ServiceReservation {
+            attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
+            interface_ordinal: 0,
+            internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),
+            mac_address: "02:00:00:00:00:01".parse().unwrap(),
+            link,
+        }
+    }
+
+    /// Builds the valid IPv4 point-to-point fixture used to isolate service identity and topology
+    /// validation failures.
+    fn service_link_v4() -> ServiceLinkV4 {
+        ServiceLinkV4 {
+            address: "192.0.2.11".parse().unwrap(),
+            prefix: "192.0.2.10/31".parse().unwrap(),
+            gateway: "192.0.2.10".parse().unwrap(),
+        }
+    }
 
     #[derive(Debug, PartialEq)]
     struct DhcpConfigSummary {
@@ -693,7 +963,328 @@ mod tests {
             DhcpDataError::RpcConversion(_) => "rpc-conversion",
             DhcpDataError::UuidConversion(_) => "uuid-conversion",
             DhcpDataError::UuidParseError(_) => "uuid-parse",
+            DhcpDataError::MacParseError(_) => "mac-parse",
+            DhcpDataError::InvalidServiceConfiguration(_) => "service-configuration",
         }
+    }
+
+    /// Verifies service reservations reject ambiguous identity and topology while accepting the
+    /// exact dual-family contract so packet paths can rely on canonical, globally unique lookup
+    /// state.
+    #[test]
+    fn validates_service_reservation_contract() {
+        struct Case {
+            name: &'static str,
+            groups: Vec<ServiceInterfaceReservations>,
+            expected: Result<(), &'static str>,
+        }
+
+        // Build the shared valid fixtures before changing one field for each rejected invariant.
+        let valid_v4 = service_reservation(ServiceLink::Ipv4(service_link_v4()));
+        let valid_v6 = service_reservation(ServiceLink::Ipv6(ServiceLinkV6 {
+            address: "2001:db8::11".parse().unwrap(),
+            prefix: "2001:db8::10/127".parse().unwrap(),
+            hbn_peer: "2001:db8::10".parse().unwrap(),
+        }));
+        // Remove only the attachment identity so the ownership requirement selects this rejection.
+        let mut nil_identity = valid_v4.clone();
+        nil_identity.attachment_id = Uuid::nil();
+        // Remove only the internal identity so replacement correlation selects this rejection.
+        let mut nil_internal_uuid = valid_v4.clone();
+        nil_internal_uuid.internal_uuid = Uuid::nil();
+        // Replace only the client key with the unspecified MAC while leaving ownership and topology valid.
+        let mut zero_mac = valid_v4.clone();
+        zero_mac.mac_address = "00:00:00:00:00:00".parse().unwrap();
+        // Replace only the client key with a multicast MAC to isolate the unicast requirement.
+        let mut multicast_mac = valid_v4.clone();
+        multicast_mac.mac_address = "01:00:5e:00:00:01".parse().unwrap();
+        // Widen only the IPv4 prefix and realign its endpoints so no later topology rule can cause rejection.
+        let mut wrong_v4_prefix = service_link_v4();
+        wrong_v4_prefix.prefix = "192.0.2.8/30".parse().unwrap();
+        wrong_v4_prefix.address = "192.0.2.11".parse().unwrap();
+        wrong_v4_prefix.gateway = "192.0.2.8".parse().unwrap();
+        // Preserve /31 width while setting host bits so only canonical-prefix validation rejects it.
+        let mut noncanonical_v4_prefix = service_link_v4();
+        noncanonical_v4_prefix.prefix = "192.0.2.11/31".parse().unwrap();
+        // Move only the service endpoint to the HBN address so the base + 1 requirement rejects it.
+        let mut wrong_service_address = service_link_v4();
+        wrong_service_address.address = "192.0.2.10".parse().unwrap();
+        // Move only the gateway to the service endpoint so the fixed base position rejects it.
+        let mut wrong_v4_gateway = service_link_v4();
+        wrong_v4_gateway.gateway = wrong_v4_gateway.address;
+        // Use a /128 ending in 0xff so prefix-length rejection precedes the former base-plus-one overflow.
+        let mut wrong_v6_prefix = valid_v6.clone();
+        wrong_v6_prefix.link = ServiceLink::Ipv6(ServiceLinkV6 {
+            address: "2001:db8::ff".parse().unwrap(),
+            prefix: "2001:db8::ff/128".parse().unwrap(),
+            hbn_peer: "2001:db8::ff".parse().unwrap(),
+        });
+        // Preserve /127 width while setting host bits so only canonical-prefix validation rejects it.
+        let mut noncanonical_v6_prefix = valid_v6.clone();
+        noncanonical_v6_prefix.link = ServiceLink::Ipv6(ServiceLinkV6 {
+            address: "2001:db8::11".parse().unwrap(),
+            prefix: "2001:db8::11/127".parse().unwrap(),
+            hbn_peer: "2001:db8::10".parse().unwrap(),
+        });
+        // Move only the HBN peer to the service endpoint so the fixed base position rejects it.
+        let mut wrong_v6_peer = valid_v6.clone();
+        let ServiceLink::Ipv6(link) = &mut wrong_v6_peer.link else {
+            unreachable!();
+        };
+        link.hbn_peer = "2001:db8::11".parse().unwrap();
+        // Move only the service endpoint to the HBN peer so the base + 1 requirement rejects it.
+        let mut wrong_v6_address = valid_v6.clone();
+        let ServiceLink::Ipv6(link) = &mut wrong_v6_address.link else {
+            unreachable!();
+        };
+        link.address = link.hbn_peer;
+        // Preserve the client MAC while changing both stable identities to isolate exact-key uniqueness.
+        let mut duplicate_mac = valid_v4.clone();
+        duplicate_mac.attachment_id = "33333333-3333-3333-3333-333333333333".parse().unwrap();
+        duplicate_mac.internal_uuid = "44444444-4444-4444-4444-444444444444".parse().unwrap();
+        // Preserve the internal identity while changing attachment ownership and MAC to isolate identity uniqueness.
+        let mut duplicate_identity = valid_v4.clone();
+        duplicate_identity.attachment_id = "33333333-3333-3333-3333-333333333333".parse().unwrap();
+        duplicate_identity.mac_address = "02:00:00:00:00:02".parse().unwrap();
+        // Preserve the attachment ordinal while changing internal identity and MAC to isolate interface uniqueness.
+        let mut duplicate_attachment_interface = valid_v4.clone();
+        duplicate_attachment_interface.internal_uuid =
+            "44444444-4444-4444-4444-444444444444".parse().unwrap();
+        duplicate_attachment_interface.mac_address = "02:00:00:00:00:03".parse().unwrap();
+
+        let cases = vec![
+            // Accepts canonical /31 data because DHCPv4 can emit the fixed link without repair.
+            Case {
+                name: "valid IPv4 reservation",
+                groups: vec![ServiceInterfaceReservations {
+                    receiving_interface: "pf0sf1".to_string(),
+                    reservations: vec![valid_v4.clone()],
+                }],
+                expected: Ok(()),
+            },
+            // Accepts canonical /127 data independently of DHCPv4 so validation retains both address-family contracts.
+            Case {
+                name: "valid IPv6 reservation",
+                groups: vec![ServiceInterfaceReservations {
+                    receiving_interface: "pf0sf1".to_string(),
+                    reservations: vec![valid_v6],
+                }],
+                expected: Ok(()),
+            },
+            // Rejects an empty ingress key because packet lookup cannot distinguish or bind an unnamed listener.
+            Case {
+                name: "empty receiving interface",
+                groups: vec![ServiceInterfaceReservations {
+                    receiving_interface: String::new(),
+                    reservations: vec![valid_v4.clone()],
+                }],
+                expected: Err("service-configuration"),
+            },
+            // Rejects nil attachment identity because downstream lifecycle operations require stable ownership.
+            Case {
+                name: "nil attachment identity",
+                groups: vec![ServiceInterfaceReservations {
+                    receiving_interface: "pf0sf1".to_string(),
+                    reservations: vec![nil_identity],
+                }],
+                expected: Err("service-configuration"),
+            },
+            // Rejects nil internal identity because replacement snapshots could not correlate the service binding.
+            Case {
+                name: "nil internal identity",
+                groups: vec![ServiceInterfaceReservations {
+                    receiving_interface: "pf0sf1".to_string(),
+                    reservations: vec![nil_internal_uuid],
+                }],
+                expected: Err("service-configuration"),
+            },
+            // Rejects the all-zero MAC because it cannot name a unicast service endpoint.
+            Case {
+                name: "zero client MAC",
+                groups: vec![ServiceInterfaceReservations {
+                    receiving_interface: "pf0sf1".to_string(),
+                    reservations: vec![zero_mac],
+                }],
+                expected: Err("service-configuration"),
+            },
+            // Rejects multicast MACs because the exact client key must identify one service endpoint.
+            Case {
+                name: "multicast client MAC",
+                groups: vec![ServiceInterfaceReservations {
+                    receiving_interface: "pf0sf1".to_string(),
+                    reservations: vec![multicast_mac],
+                }],
+                expected: Err("service-configuration"),
+            },
+            // Rejects prefixes wider than /31 because they do not encode the fixed two-address service link.
+            Case {
+                name: "invalid IPv4 prefix length",
+                groups: vec![ServiceInterfaceReservations {
+                    receiving_interface: "pf0sf1".to_string(),
+                    reservations: vec![service_reservation(ServiceLink::Ipv4(wrong_v4_prefix))],
+                }],
+                expected: Err("service-configuration"),
+            },
+            // Rejects host bits in a /31 prefix because base and service positions must be unambiguous.
+            Case {
+                name: "noncanonical IPv4 prefix",
+                groups: vec![ServiceInterfaceReservations {
+                    receiving_interface: "pf0sf1".to_string(),
+                    reservations: vec![service_reservation(ServiceLink::Ipv4(
+                        noncanonical_v4_prefix,
+                    ))],
+                }],
+                expected: Err("service-configuration"),
+            },
+            // Rejects a service address on the HBN side of the /31 to preserve the fixed base-plus-one assignment.
+            Case {
+                name: "wrong IPv4 service address",
+                groups: vec![ServiceInterfaceReservations {
+                    receiving_interface: "pf0sf1".to_string(),
+                    reservations: vec![service_reservation(ServiceLink::Ipv4(
+                        wrong_service_address,
+                    ))],
+                }],
+                expected: Err("service-configuration"),
+            },
+            // Rejects a gateway on the service side because HBN must own the base address.
+            Case {
+                name: "wrong IPv4 link gateway",
+                groups: vec![ServiceInterfaceReservations {
+                    receiving_interface: "pf0sf1".to_string(),
+                    reservations: vec![service_reservation(ServiceLink::Ipv4(wrong_v4_gateway))],
+                }],
+                expected: Err("service-configuration"),
+            },
+            // Rejects /128 before computing base+1, preventing malformed caller input from overflowing validation.
+            Case {
+                name: "invalid IPv6 prefix length",
+                groups: vec![ServiceInterfaceReservations {
+                    receiving_interface: "pf0sf1".to_string(),
+                    reservations: vec![wrong_v6_prefix],
+                }],
+                expected: Err("service-configuration"),
+            },
+            // Rejects host bits in a /127 prefix because HBN must own the canonical base address.
+            Case {
+                name: "noncanonical IPv6 prefix",
+                groups: vec![ServiceInterfaceReservations {
+                    receiving_interface: "pf0sf1".to_string(),
+                    reservations: vec![noncanonical_v6_prefix],
+                }],
+                expected: Err("service-configuration"),
+            },
+            // Rejects an HBN peer on the service side of the /127 because endpoint roles are fixed.
+            Case {
+                name: "wrong IPv6 HBN peer",
+                groups: vec![ServiceInterfaceReservations {
+                    receiving_interface: "pf0sf1".to_string(),
+                    reservations: vec![wrong_v6_peer],
+                }],
+                expected: Err("service-configuration"),
+            },
+            // Rejects a service endpoint on the HBN side while retaining the canonical /127 and correct peer.
+            Case {
+                name: "wrong IPv6 service address",
+                groups: vec![ServiceInterfaceReservations {
+                    receiving_interface: "pf0sf1".to_string(),
+                    reservations: vec![wrong_v6_address],
+                }],
+                expected: Err("service-configuration"),
+            },
+            // Rejects duplicate exact keys instead of allowing input order to decide which attachment receives an address.
+            Case {
+                name: "duplicate service MAC",
+                groups: vec![ServiceInterfaceReservations {
+                    receiving_interface: "pf0sf1".to_string(),
+                    reservations: vec![valid_v4.clone(), duplicate_mac],
+                }],
+                expected: Err("service-configuration"),
+            },
+            // Rejects one endpoint identity under multiple MACs because replacement and diagnostics must correlate one reservation unambiguously.
+            Case {
+                name: "duplicate service identity",
+                groups: vec![
+                    ServiceInterfaceReservations {
+                        receiving_interface: "pf0sf1".to_string(),
+                        reservations: vec![valid_v4.clone()],
+                    },
+                    ServiceInterfaceReservations {
+                        receiving_interface: "pf0sf2".to_string(),
+                        reservations: vec![duplicate_identity],
+                    },
+                ],
+                expected: Err("service-configuration"),
+            },
+            // Rejects one attachment ordinal under multiple endpoint identities because attachment replacement must address one interface deterministically.
+            Case {
+                name: "duplicate attachment interface",
+                groups: vec![
+                    ServiceInterfaceReservations {
+                        receiving_interface: "pf0sf1".to_string(),
+                        reservations: vec![valid_v4],
+                    },
+                    ServiceInterfaceReservations {
+                        receiving_interface: "pf0sf2".to_string(),
+                        reservations: vec![duplicate_attachment_interface],
+                    },
+                ],
+                expected: Err("service-configuration"),
+            },
+            // Rejects repeated receiving-interface groups because splitting one slot across groups would make replacement order significant.
+            Case {
+                name: "duplicate receiving interface",
+                groups: vec![
+                    ServiceInterfaceReservations {
+                        receiving_interface: "pf0sf1".to_string(),
+                        reservations: vec![],
+                    },
+                    ServiceInterfaceReservations {
+                        receiving_interface: "pf0sf1".to_string(),
+                        reservations: vec![],
+                    },
+                ],
+                expected: Err("service-configuration"),
+            },
+        ];
+
+        // Construct each index and compare only the admission result because lookup behavior has a separate focused proof.
+        for case in cases {
+            let actual = ServiceConfig::try_new(case.groups)
+                .map(drop)
+                .map_err(dhcp_error_kind);
+            assert_eq!(actual, case.expected, "{}", case.name);
+        }
+    }
+
+    /// Verifies lookup includes the receiving interface and listener validation rejects
+    /// reservations for unprovisioned interfaces.
+    #[test]
+    fn service_reservations_are_scoped_to_provisioned_interfaces() {
+        // Build one valid reservation whose MAC would collide if the receiving interface were ignored.
+        let reservation = service_reservation(ServiceLink::Ipv4(service_link_v4()));
+        let client_mac = reservation.mac_address;
+
+        // Place the same MAC in one service interface to prove another interface cannot retrieve it.
+        let config = ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+            receiving_interface: "pf0sf1".to_string(),
+            reservations: vec![reservation],
+        }])
+        .unwrap();
+
+        // Exact interface lookup succeeds, cross-interface lookup fails, and listener inventory is authoritative.
+        assert!(config.get("pf0sf1", &client_mac).is_some());
+        assert!(config.get("pf0sf2", &client_mac).is_none());
+        assert!(
+            config
+                .validate_receiving_interfaces(&["pf0sf1".to_string()])
+                .is_ok()
+        );
+        assert!(
+            config
+                .validate_receiving_interfaces(&["pf0sf2".to_string()])
+                .is_err()
+        );
     }
 
     #[test]
@@ -1146,6 +1737,16 @@ mod tests {
                 DhcpTimestampsFilePath::Test => "/tmp/timestamps.json".to_string(),
                 DhcpTimestampsFilePath::NotSet => "Not set".to_string(),
             }
+        );
+    }
+
+    /// Verifies HBN temporary-write mode maps reads to the durable pathname because rename-based
+    /// persistence never leaves history at the temporary path.
+    #[test]
+    fn hbn_temporary_write_mode_selects_durable_read_path() {
+        assert_eq!(
+            DhcpTimestampsFilePath::HbnTmp.persisted_path_str(),
+            DHCP_TIMESTAMP_FILE_HBN
         );
     }
 

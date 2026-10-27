@@ -61,7 +61,10 @@ the chart's issuer is the same `global.certificate.issuerRef` that signs the
 `nico-api` certificate, so NICo needs only the CA and that name. The NVUE mock
 on port 443 is outside this setting: hardware health's NVUE REST collector
 accepts any server certificate unless its `[tls.switch]` profile is
-configured, and the BMC proxy accepts any upstream certificate. The simulation
+configured, and the BMC proxy accepts any upstream certificate unless its own
+[`[tls.switch]`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/bmc-proxy/README.md#tlsswitch)
+is set. With either set, the mock's certificate must chain to that profile's
+CA bundle and carry its `tls_server_name`, or else the address dialed. The simulation
 profile `helm-prereqs/values/nico-core-simulation.yaml` and the Tilt values
 carry the block:
 

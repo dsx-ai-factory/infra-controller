@@ -197,19 +197,21 @@ runs:
 
     - name: Install Rust toolchain
       shell: bash
+      env:
+        RUST_VERSION: ${{ inputs.rust-version }}
       run: |
         if ! command -v rustc &> /dev/null; then
-          echo "Installing Rust ${{ inputs.rust-version }}..."
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain ${{ inputs.rust-version }}
+          echo "Installing Rust ${RUST_VERSION}..."
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain "${RUST_VERSION}"
           source $HOME/.cargo/env
         else
           echo "Rust is already installed, checking version..."
           rustc --version
-          if ! rustup toolchain list | grep -q "${{ inputs.rust-version }}"; then
-            echo "Installing Rust ${{ inputs.rust-version }} toolchain..."
-            rustup toolchain install ${{ inputs.rust-version }}
+          if ! rustup toolchain list | grep -Fq -- "${RUST_VERSION}"; then
+            echo "Installing Rust ${RUST_VERSION} toolchain..."
+            rustup toolchain install "${RUST_VERSION}"
           fi
-          rustup default ${{ inputs.rust-version }}
+          rustup default "${RUST_VERSION}"
         fi
 
         # Ensure cargo is in PATH
@@ -298,12 +300,14 @@ runs:
 
     - name: Display environment info
       shell: bash
+      env:
+        ARCH: ${{ inputs.arch }}
       run: |
         echo "=== Build Environment Summary ==="
         echo "OS: $(lsb_release -d | cut -f2-)"
         echo "Kernel: $(uname -r)"
         echo "Architecture: $(uname -m)"
-        echo "Target architecture: ${{ inputs.arch }}"
+        echo "Target architecture: ${ARCH}"
         echo ""
         echo "=== Core Build Tools ==="
         source $HOME/.cargo/env || true

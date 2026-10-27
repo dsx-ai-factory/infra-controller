@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -41,7 +41,7 @@ use librms::{RackManagerError, RmsApi};
 use mac_address::MacAddress;
 use model::component_manager::{
     ComputeTrayComponent, ConfigureSwitchCertificateState, FirmwareState, NvSwitchComponent,
-    PowerAction, PowerShelfComponent,
+    PowerAction, PowerShelfComponent, SwitchCertificateFailure, SwitchCertificateNodeFailure,
 };
 use model::machine::PowerState;
 use model::rack::{
@@ -5008,36 +5008,130 @@ async fn rms_configure_switch_certificate(
             .map(|job| job.job_id.clone())
     });
 
-    let (success, error, job_id) = summarize_firmware_batch(
-        response.response,
-        node_job_id,
-        node_id.unwrap_or_default(),
-        "RMS switch certificate configuration failed",
-    );
-
-    if success {
-        job_id
-            .filter(|job_id| !job_id.trim().is_empty())
-            .ok_or_else(|| {
-                ComponentManagerError::OperationOutcomeUnknown(
-                    "RMS switch certificate configuration succeeded but returned no job id".into(),
-                )
-            })
+    let batch = response.response.ok_or_else(|| {
+        let jobs = response
+            .jobs
+            .iter()
+            .filter(|job| !job.job_id.trim().is_empty())
+            .map(|job| format!("node {}: job {}", job.node_id, job.job_id))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut message = "RMS switch certificate submission returned no batch result".to_string();
+        if !jobs.is_empty() {
+            message.push_str(&format!("; returned node jobs: {jobs}"));
+        }
+        ComponentManagerError::OperationOutcomeUnknown(message)
+    })?;
+    let job_id = node_job_id
+        .or_else(|| (!batch.job_id.trim().is_empty()).then_some(batch.job_id))
+        .filter(|id| !id.trim().is_empty());
+    let mut node_failures: Vec<_> = batch
+        .node_results
+        .into_iter()
+        .filter(|result| result.status != rms::ReturnCode::Success as i32)
+        .map(|result| SwitchCertificateNodeFailure {
+            job_id: response
+                .jobs
+                .iter()
+                .find(|job| job.node_id == result.node_id && !job.job_id.is_empty())
+                .map(|job| job.job_id.clone()),
+            node_id: result.node_id,
+            error_code: None,
+            message: result.error_message,
+        })
+        .collect();
+    node_failures.sort_by(|a, b| {
+        (&a.node_id, &a.job_id, a.error_code, &a.message).cmp(&(
+            &b.node_id,
+            &b.job_id,
+            b.error_code,
+            &b.message,
+        ))
+    });
+    if batch.status == rms::ReturnCode::Success as i32
+        && batch.stats.is_none_or(|stats| stats.failed_nodes == 0)
+        && node_failures.is_empty()
+    {
+        job_id.ok_or_else(|| {
+            ComponentManagerError::OperationOutcomeUnknown(
+                "RMS switch certificate configuration succeeded but returned no job id".into(),
+            )
+        })
     } else {
-        let error =
-            error.unwrap_or_else(|| "RMS switch certificate configuration failed".to_owned());
-
-        // A failed batch can still have accepted work. Its parent job covers
-        // only accepted children, so completion cannot prove every requested
-        // switch was updated. Retain the ID for operator reconciliation without
-        // allowing the full rack batch to proceed.
-        let error = match job_id.filter(|job_id| !job_id.trim().is_empty()) {
-            Some(job_id) => format!("{error}; RMS job ID: {job_id}"),
-            None => error,
-        };
-
-        Err(ComponentManagerError::OperationOutcomeUnknown(error))
+        // The parent may cover accepted children only. Retain its handle for
+        // reconciliation without treating partial acceptance as a successful batch.
+        Err(ComponentManagerError::SwitchCertificateSubmission {
+            summary: batch.message,
+            failure: Box::new(SwitchCertificateFailure {
+                job_id,
+                node_failures,
+            }),
+        })
     }
+}
+
+fn certificate_node_failures(
+    job_id: &str,
+    jobs: &[rms::JobStatus],
+) -> Result<Vec<SwitchCertificateNodeFailure>, ComponentManagerError> {
+    let mut pending = vec![job_id];
+    let mut visited = HashSet::new();
+    let mut failures = Vec::new();
+    while let Some(id) = pending.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        let Some(job) = jobs.iter().find(|job| job.job_id == id) else {
+            if id == job_id {
+                return Err(ComponentManagerError::Unavailable(format!(
+                    "RMS certificate job {id} results are not yet available"
+                )));
+            }
+            failures.push(SwitchCertificateNodeFailure {
+                node_id: String::new(),
+                job_id: Some(id.to_string()),
+                error_code: None,
+                message: "RMS returned no status for this child job".to_string(),
+            });
+            continue;
+        };
+        match rms::JobExecutionState::try_from(job.execution_state) {
+            Ok(rms::JobExecutionState::Completed | rms::JobExecutionState::Failed) => {}
+            state => {
+                let state_name = state.map_or("unknown", |state| state.as_str_name());
+                return Err(ComponentManagerError::Unavailable(format!(
+                    "RMS certificate job {id} has execution state {state_name} ({}); waiting for a known terminal state",
+                    job.execution_state
+                )));
+            }
+        }
+        pending.extend(job.child_job_ids.iter().map(String::as_str));
+        pending.extend(
+            jobs.iter()
+                .filter(|child| child.parent_job_id.as_deref() == Some(id))
+                .map(|child| child.job_id.as_str()),
+        );
+        if job.execution_state == rms::JobExecutionState::Failed as i32
+            && (job.node_id.as_ref().is_some_and(|id| !id.is_empty())
+                || (id != job_id && job.child_job_ids.is_empty()))
+        {
+            failures.push(SwitchCertificateNodeFailure {
+                node_id: job.node_id.clone().unwrap_or_default(),
+                job_id: Some(job.job_id.clone()),
+                error_code: Some(job.error_code),
+                message: job.error_message.clone(),
+            });
+        }
+    }
+    failures.sort_by(|a, b| {
+        (&a.node_id, &a.job_id, a.error_code, &a.message).cmp(&(
+            &b.node_id,
+            &b.job_id,
+            b.error_code,
+            &b.message,
+        ))
+    });
+    Ok(failures)
 }
 
 async fn rms_get_configure_switch_certificate_job_status(
@@ -5070,7 +5164,6 @@ async fn rms_get_configure_switch_certificate_job_status(
         } else {
             response.error_message
         };
-
         return Err(ComponentManagerError::NotFound(format!(
             "RMS could not report status for switch certificate job {job_id}: {detail}"
         )));
@@ -5081,18 +5174,41 @@ async fn rms_get_configure_switch_certificate_job_status(
             emit(RmsSwitchCertificateJobStateUnrecognized);
             ConfigureSwitchCertificateState::InProgress
         });
-    let error = if matches!(state, ConfigureSwitchCertificateState::Failed) {
-        Some(
-            (!response.error_message.is_empty())
-                .then_some(response.error_message)
-                .or((!response.message.is_empty()).then_some(response.message))
-                .unwrap_or_else(|| "switch certificate configuration failed".to_owned()),
+    let (error, failure) = if state == ConfigureSwitchCertificateState::Failed {
+        let jobs = red::instrumented(
+            "rms",
+            "get_job_status",
+            client.get_job_status(rms::GetJobStatusRequest {
+                job_id: job_id.to_string(),
+                include_child_job_states: true,
+            }),
+        )
+        .await
+        .map_err(|error| {
+            ComponentManagerError::Unavailable(format!(
+                "failed to read RMS certificate node failures; retrying observation: {error}"
+            ))
+        })?;
+        let node_failures = certificate_node_failures(job_id, &jobs.job_states)?;
+        let error = (!response.error_message.is_empty())
+            .then_some(response.error_message)
+            .or_else(|| (!response.message.is_empty()).then_some(response.message));
+        (
+            error,
+            Some(SwitchCertificateFailure {
+                job_id: Some(job_id.to_string()),
+                node_failures,
+            }),
         )
     } else {
-        None
+        (None, None)
     };
 
-    Ok(ConfigureSwitchCertificateJobStatus { state, error })
+    Ok(ConfigureSwitchCertificateJobStatus {
+        state,
+        error,
+        failure,
+    })
 }
 
 impl RmsBackend {
@@ -6730,38 +6846,226 @@ mod tests {
             .await
             .expect_err("RMS did not accept the complete certificate batch");
 
-            let ComponentManagerError::OperationOutcomeUnknown(message) = error else {
-                panic!("expected an unknown certificate submission outcome");
-            };
+            match error {
+                ComponentManagerError::OperationOutcomeUnknown(_) => {
+                    assert!(expected_job_id.is_none())
+                }
+                ComponentManagerError::SwitchCertificateSubmission { failure, .. } => {
+                    assert_eq!(failure.job_id.as_deref(), expected_job_id);
+                }
+                other => panic!("unexpected submission error: {other}"),
+            }
+        }
+    }
 
-            if let Some(job_id) = expected_job_id {
-                assert!(message.contains(job_id));
+    #[tokio::test]
+    async fn switch_certificate_missing_batch_preserves_returned_job_handles() {
+        let mock = MockRmsApi::new();
+        mock.enqueue_configure_switch_certificate(Ok(rms::ConfigureSwitchCertificateResponse {
+            response: None,
+            jobs: vec![
+                rms::ConfigureSwitchCertificateJobInfo {
+                    node_id: "switch-a".to_string(),
+                    job_id: "child-a".to_string(),
+                },
+                rms::ConfigureSwitchCertificateJobInfo {
+                    node_id: "switch-b".to_string(),
+                    job_id: "child-b".to_string(),
+                },
+            ],
+        }))
+        .await;
+
+        let error = rms_configure_switch_certificate(
+            &mock,
+            vec![rms::NodeInfo::default()],
+            Some("switch-a"),
+            None,
+            None,
+        )
+        .await
+        .expect_err("child handles alone do not prove successful submission");
+
+        let ComponentManagerError::OperationOutcomeUnknown(message) = error else {
+            panic!("missing batch result must preserve the unknown outcome");
+        };
+        assert!(message.contains("returned no batch result"));
+        for expected in ["node switch-a: job child-a", "node switch-b: job child-b"] {
+            assert!(message.contains(expected), "missing {expected}: {message}");
+        }
+    }
+
+    #[test]
+    fn switch_certificate_nested_jobs_keep_multiple_failures_for_one_node() {
+        let jobs = vec![
+            rms::JobStatus {
+                job_id: "gateway".into(),
+                child_job_ids: vec!["parent".into()],
+                execution_state: rms::JobExecutionState::Failed as i32,
+                ..Default::default()
+            },
+            rms::JobStatus {
+                job_id: "parent".into(),
+                child_job_ids: vec!["a".into(), "b".into()],
+                execution_state: rms::JobExecutionState::Failed as i32,
+                ..Default::default()
+            },
+            rms::JobStatus {
+                job_id: "b".into(),
+                node_id: Some("node".into()),
+                execution_state: rms::JobExecutionState::Failed as i32,
+                error_code: 999,
+                ..Default::default()
+            },
+            rms::JobStatus {
+                job_id: "a".into(),
+                node_id: Some("node".into()),
+                execution_state: rms::JobExecutionState::Failed as i32,
+                error_code: rms::JobError::Timeout as i32,
+                ..Default::default()
+            },
+        ];
+        let failures = certificate_node_failures("gateway", &jobs).unwrap();
+        assert_eq!(failures.len(), 2);
+        assert_eq!(failures[0].job_id.as_deref(), Some("a"));
+        assert_eq!(failures[1].job_id.as_deref(), Some("b"));
+        assert_eq!(failures[1].error_code, Some(999));
+    }
+
+    #[test]
+    fn switch_certificate_children_preserve_each_failure_and_require_terminal_results() {
+        let parent = rms::JobStatus {
+            job_id: "parent".into(),
+            child_job_ids: vec!["a".into(), "b".into()],
+            execution_state: rms::JobExecutionState::Failed as i32,
+            ..Default::default()
+        };
+        let child = |id: &str, code: i32| rms::JobStatus {
+            job_id: id.into(),
+            node_id: Some(format!("node-{id}")),
+            parent_job_id: Some("parent".into()),
+            execution_state: rms::JobExecutionState::Failed as i32,
+            error_code: code,
+            error_message: format!("certificate installation failed on node-{id}"),
+            ..Default::default()
+        };
+        let a = child("a", rms::JobError::Timeout as i32);
+        let b = child("b", rms::JobError::Unauthenticated as i32);
+        let failure_a = SwitchCertificateNodeFailure {
+            node_id: "node-a".into(),
+            job_id: Some("a".into()),
+            error_code: Some(rms::JobError::Timeout as i32),
+            message: "certificate installation failed on node-a".into(),
+        };
+        let failure_b = SwitchCertificateNodeFailure {
+            node_id: "node-b".into(),
+            job_id: Some("b".into()),
+            error_code: Some(rms::JobError::Unauthenticated as i32),
+            message: "certificate installation failed on node-b".into(),
+        };
+        let cases = [
+            (
+                "both failures despite reversed response order",
+                vec![parent.clone(), b.clone(), a.clone()],
+                Ok(vec![failure_a.clone(), failure_b]),
+            ),
+            (
+                "missing declared child",
+                vec![parent.clone(), a.clone()],
+                Ok(vec![
+                    SwitchCertificateNodeFailure {
+                        node_id: String::new(),
+                        job_id: Some("b".into()),
+                        error_code: None,
+                        message: "RMS returned no status for this child job".into(),
+                    },
+                    failure_a,
+                ]),
+            ),
+            (
+                "child still running",
+                vec![
+                    parent.clone(),
+                    a.clone(),
+                    rms::JobStatus {
+                        execution_state: rms::JobExecutionState::Running as i32,
+                        ..b.clone()
+                    },
+                ],
+                Err("RMS certificate job b has execution state JOB_EXECUTION_STATE_RUNNING (2)"),
+            ),
+            (
+                "parent absent",
+                vec![a.clone(), b.clone()],
+                Err("RMS certificate job parent results are not yet available"),
+            ),
+            (
+                "unknown child state",
+                vec![
+                    parent,
+                    a,
+                    rms::JobStatus {
+                        execution_state: 999,
+                        ..b
+                    },
+                ],
+                Err("RMS certificate job b has execution state unknown (999)"),
+            ),
+        ];
+        for (scenario, jobs, expected) in cases {
+            let result = certificate_node_failures("parent", &jobs);
+            match expected {
+                Err(expected_error) => {
+                    let Err(ComponentManagerError::Unavailable(message)) = result else {
+                        panic!("{scenario}: expected a retryable diagnostic lookup failure");
+                    };
+                    assert!(message.contains(expected_error), "{scenario}: {message}");
+                }
+                Ok(failures) => assert_eq!(result.unwrap(), failures, "{scenario}"),
             }
         }
     }
 
     #[tokio::test]
     async fn switch_certificate_job_not_found_is_reported() {
-        let mock = MockRmsApi::new();
+        for (error_message, message, expected) in [
+            (
+                "job expired from RMS history",
+                "lookup failed",
+                "job expired from RMS history",
+            ),
+            (
+                "",
+                "job not found in RMS history",
+                "job not found in RMS history",
+            ),
+            ("", "", "job was not found"),
+        ] {
+            let mock = MockRmsApi::new();
+            mock.enqueue_get_configure_switch_certificate_job_status(Ok(
+                rms::GetConfigureSwitchCertificateJobStatusResponse {
+                    status: rms::ReturnCode::Failure as i32,
+                    error_message: error_message.to_string(),
+                    message: message.to_string(),
+                    ..Default::default()
+                },
+            ))
+            .await;
 
-        mock.enqueue_get_configure_switch_certificate_job_status(Ok(
-            rms::GetConfigureSwitchCertificateJobStatusResponse {
-                status: rms::ReturnCode::Failure as i32,
-                message: "job not found".to_string(),
-                ..Default::default()
-            },
-        ))
-        .await;
+            let error = rms_get_configure_switch_certificate_job_status(&mock, "cert-job-1")
+                .await
+                .expect_err("a missing RMS job must be reported");
 
-        let error = rms_get_configure_switch_certificate_job_status(&mock, "cert-job-1")
-            .await
-            .expect_err("a missing RMS job must be reported");
-
-        assert!(matches!(
-            error,
-            ComponentManagerError::NotFound(message)
-                if message.contains("cert-job-1") && message.contains("job not found")
-        ));
+            let ComponentManagerError::NotFound(detail) = error else {
+                panic!("expected a missing RMS job error");
+            };
+            assert_eq!(
+                detail,
+                format!(
+                    "RMS could not report status for switch certificate job cert-job-1: {expected}"
+                )
+            );
+        }
     }
 
     #[test]

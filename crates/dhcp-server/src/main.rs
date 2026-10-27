@@ -27,15 +27,18 @@ use ::rpc::forge_tls_client::ForgeClientConfig;
 use carbide_dhcp_server::cache::{self, CacheEntry};
 use carbide_dhcp_server::errors::DhcpError;
 use carbide_dhcp_server::metrics::{
-    DhcpPacketDropped, DhcpTimestampFileFailed, DhcpV6ListenerUnavailable, DhcpV6ReplySent,
-    DhcpV6RequestDropped, DropReason, V6DropReason, record_v6_request_received,
+    DhcpPacketDropped, DhcpTimestampFileFailed, DhcpV6ListenerUnavailable, DhcpV6RequestDropped,
+    DropReason, V6DropReason, record_v6_request_received,
 };
 use carbide_dhcp_server::modes::DhcpMode;
 use carbide_dhcp_server::modes::controller::Controller;
 use carbide_dhcp_server::modes::dpu::{Dpu, get_host_config};
-use carbide_dhcp_server::{Config, packet_handler, packet_handler_v6, util};
+use carbide_dhcp_server::{
+    Config, ReplyStatus, packet_handler, packet_handler_v6, util,
+    validate_stateful_lifetimes_for_host,
+};
 use carbide_instrument::emit;
-use carbide_rpc_utils::dhcp::{DhcpConfig, DhcpTimestamps, DhcpTimestampsFilePath};
+use carbide_rpc_utils::dhcp::{DhcpConfig, DhcpTimestamps, DhcpTimestampsFilePath, ServiceConfig};
 use chrono::Utc;
 use command_line::{Args, ServerMode};
 use forge_tls::client_config::ClientCert;
@@ -54,6 +57,39 @@ use util::{get_socket, get_socket_v6};
 
 struct Server {
     socket: Arc<UdpSocket>,
+}
+
+/// Pauses one source-matched IPv4 packet task so tests can observe listener-owned drainage.
+#[cfg(test)]
+struct PacketTaskPause {
+    source: SocketAddr,
+    started: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+/// Holds the one-shot pause used to distinguish listener-owned packet work from detached tasks.
+#[cfg(test)]
+static IPV4_PACKET_TASK_PAUSE: std::sync::Mutex<Option<PacketTaskPause>> =
+    std::sync::Mutex::new(None);
+
+/// Pauses before UDP processing only for the source selected by the listener-ownership test.
+#[cfg(test)]
+async fn pause_ipv4_packet_task_for_test(source: SocketAddr) {
+    let pause = {
+        let mut configured = IPV4_PACKET_TASK_PAUSE.lock().unwrap();
+        if configured
+            .as_ref()
+            .is_some_and(|pause| pause.source == source)
+        {
+            configured.take()
+        } else {
+            None
+        }
+    };
+    if let Some(pause) = pause {
+        let _ = pause.started.send(());
+        let _ = pause.release.await;
+    }
 }
 
 /// Values shared by packets received on one DHCPv6 listener.
@@ -89,6 +125,63 @@ impl std::fmt::Display for ListenerFailure {
     }
 }
 
+/// Loads durable host activity when possible while keeping DHCP listeners available after
+/// timestamp-file damage.
+fn initialize_dhcp_timestamps(path: DhcpTimestampsFilePath) -> DhcpTimestamps {
+    let path_context = path.path_str().to_string();
+    let mut timestamps = DhcpTimestamps::new(path);
+
+    // Timestamp history is advisory, so corruption must not take packet service down.
+    if let Err(error) = timestamps.initialize_file() {
+        emit(DhcpTimestampFileFailed::Initialization {
+            dhcp_timestamps_path: path_context,
+            error: error.to_string(),
+        });
+    }
+    timestamps
+}
+
+/// Reaps completed packet tasks during normal service so the listener retains only bounded active
+/// work.
+fn reap_packet_tasks(packet_tasks: &mut JoinSet<()>, family: &str, interface: &str) {
+    while let Some(result) = packet_tasks.try_join_next() {
+        if let Err(error) = result {
+            tracing::warn!(%error, family, interface_name = interface, "DHCP packet task failed");
+        }
+    }
+}
+
+/// Aborts and joins packet work before a listener returns so replacement cannot outlive an old
+/// socket write.
+async fn abort_and_join_packet_tasks(
+    packet_tasks: &mut JoinSet<()>,
+    family: &str,
+    interface: &str,
+) {
+    packet_tasks.abort_all();
+    while let Some(result) = packet_tasks.join_next().await {
+        if let Err(error) = result
+            && !error.is_cancelled()
+        {
+            tracing::warn!(%error, family, interface_name = interface, "DHCP packet task failed");
+        }
+    }
+}
+
+/// Creates an IPv4 socket while allowing generation cancellation to interrupt setup retries,
+/// preventing reloads from waiting on a retired interface.
+async fn get_ipv4_socket_before_cancellation(
+    listen_address: core::net::SocketAddrV4,
+    interface: String,
+    cancel: &CancellationToken,
+) -> Option<Result<UdpSocket, DhcpError>> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => None,
+        result = get_socket(listen_address, interface) => Some(result),
+    }
+}
+
 /// Serve an immutable configuration until cancellation or the last required
 /// listener exits, without rereading files changed by the agent.
 async fn run_dhcp_generation(
@@ -97,6 +190,8 @@ async fn run_dhcp_generation(
     config__: Config,
     v6_port: u16,
 ) {
+    // Attach retirement to every response from this immutable generation so reload can suppress in-flight sends.
+    let config__ = Arc::new(config__.with_reply_retirement(cancel_token.clone()));
     let ipv4_enabled = match config__.ipv4() {
         Ok(ipv4) => ipv4.is_some(),
         Err(error) => {
@@ -105,30 +200,16 @@ async fn run_dhcp_generation(
         }
     };
 
-    let dhcp_timestamps = Arc::new(Mutex::new({
-        let dhcp_timestamps_path = if let ServerMode::Dpu = args.mode {
+    let dhcp_timestamps = Arc::new(Mutex::new(initialize_dhcp_timestamps(
+        // Binary tests exercise live DPU generations without reading or replacing the host's production history.
+        if cfg!(test) {
+            DhcpTimestampsFilePath::NotSet
+        } else if let ServerMode::Dpu = args.mode {
             DhcpTimestampsFilePath::HbnTmp
         } else {
             DhcpTimestampsFilePath::NotSet
-        };
-        let dhcp_timestamps_path_context = dhcp_timestamps_path.path_str().to_string();
-        let d = DhcpTimestamps::new(dhcp_timestamps_path);
-
-        // It looks like we can only expect the file to be present
-        // if something has successfully DHCP'ed, after write() has been
-        // called at least once.  That means there's a possible window of time
-        // where the file might be _expected_ to not exist, but read() will complain
-        // and pollute the logs. We could have read() skip NotFound errors, but that
-        // could be misleading in other scenarios.  Let's just "init" the file.
-        if let Err(e) = d.write() {
-            emit(DhcpTimestampFileFailed::Initialization {
-                dhcp_timestamps_path: dhcp_timestamps_path_context,
-                error: e.to_string(),
-            });
-            return;
-        }
-        d
-    }));
+        },
+    )));
 
     // Each family has an independent packet-processing limit across all interfaces.
     let rate_limiter_ = Arc::new(tokio::sync::Semaphore::new(
@@ -145,12 +226,12 @@ async fn run_dhcp_generation(
     // In case of Controller, there will be only 1 interface.
     for interface in args.interfaces {
         let v6_interface = interface.clone();
-        let v6_config = config__.clone();
+        let v6_config = Arc::clone(&config__);
         let v6_mode = args.mode.clone();
         let v6_timestamps = dhcp_timestamps.clone();
         let v6_rate_limiter = v6_rate_limiter_.clone();
         let v6_cancel = cancel_token.clone();
-        let config_ = config__.clone();
+        let config_ = Arc::clone(&config__);
         let args_mode = args.mode.clone();
         let listen_address = args.listen_addr;
         let dhcp_timestamps_ = dhcp_timestamps.clone();
@@ -161,7 +242,27 @@ async fn run_dhcp_generation(
             v4_tasks.spawn(async move {
                 let handler: Arc<Box<dyn DhcpMode>> = Arc::new(get_mode(&args_mode));
 
-                let socket = get_socket(listen_address, interface.clone()).await;
+                let Some(socket_result) = get_ipv4_socket_before_cancellation(
+                    listen_address,
+                    interface.clone(),
+                    &cancel,
+                )
+                .await
+                else {
+                    return;
+                };
+                let socket = match socket_result {
+                    Ok(socket) => socket,
+                    Err(error) => {
+                        tracing::error!(
+                            %listen_address,
+                            interface_name = interface.as_str(),
+                            %error,
+                            "DHCP socket setup failed"
+                        );
+                        return;
+                    }
+                };
                 tracing::info!(
                     %listen_address,
                     interface_name = interface.as_str(),
@@ -178,13 +279,14 @@ async fn run_dhcp_generation(
                 let machine_cache_ = Arc::new(Mutex::new(LruCache::new(
                     std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
                 )));
-
+                let mut packet_tasks = JoinSet::new();
                 // Listen on each interface and process it.
                 // The select! monitors both the UDP socket and the cancellation token so that
                 // the loop exits promptly when a config reload is triggered from the gRPC server.
                 loop {
                     let mut buf = [0; 1500];
                     tokio::select! {
+                        biased;
                         _ = cancel.cancelled() => {
                             tracing::info!(
                                 interface_name = interface.as_str(),
@@ -212,11 +314,32 @@ async fn run_dhcp_generation(
                                         interface_name = interface.as_str(),
                                         "Recreating the socket"
                                     );
-                                    server.socket =
-                                        Arc::new(get_socket(listen_address, interface.clone()).await);
+                                    let Some(socket_result) = get_ipv4_socket_before_cancellation(
+                                        listen_address,
+                                        interface.clone(),
+                                        &cancel,
+                                    )
+                                    .await
+                                    else {
+                                        break;
+                                    };
+                                    let socket = match socket_result {
+                                        Ok(socket) => socket,
+                                        Err(error) => {
+                                            tracing::error!(
+                                                %listen_address,
+                                                interface_name = interface.as_str(),
+                                                %error,
+                                                "Socket recreation failed"
+                                            );
+                                            break;
+                                        }
+                                    };
+                                    server.socket = Arc::new(socket);
                                     continue;
                                 }
                             };
+                            reap_packet_tasks(&mut packet_tasks, "IPv4", &interface);
 
                             // We never close this semaphore, so if an error is returned it should be
                             // TryAcquireError::NoPermits; Not checking explicitly.
@@ -240,19 +363,21 @@ async fn run_dhcp_generation(
                                 continue;
                             }
 
-                            let config = config_.clone();
+                            let config = Arc::clone(&config_);
                             let mut machine_cache = machine_cache_.clone();
                             let iface = interface.clone();
                             let handler_ = handler.clone();
                             let dhcp_timestamps = dhcp_timestamps_.clone();
                             let socket = server.socket.clone();
 
-                            tokio::spawn(async move {
+                            packet_tasks.spawn(async move {
+                                #[cfg(test)]
+                                pause_ipv4_packet_task_for_test(addr).await;
                                 process(
                                     addr,
                                     socket,
                                     &buf,
-                                    config.clone(),
+                                    config,
                                     &**handler_,
                                     &iface,
                                     &mut machine_cache,
@@ -264,6 +389,8 @@ async fn run_dhcp_generation(
                         }
                     }
                 }
+                // Cancellation closes admission before aborting and joining every accepted packet.
+                abort_and_join_packet_tasks(&mut packet_tasks, "IPv4", &interface).await;
             });
         }
 
@@ -331,8 +458,6 @@ async fn supervise_listener_tasks(
                 }
 
                 cancel_token.cancel();
-                v4_tasks.abort_all();
-                v6_tasks.abort_all();
                 break Some(failure);
             }
             Some(result) = v6_tasks.join_next(), if !v6_tasks.is_empty() => {
@@ -365,9 +490,7 @@ async fn supervise_listener_tasks(
         }
     };
 
-    // Join every listener task. TODO(dhcp-reload): DHCPv4 and DHCPv6 packet tasks
-    // remain detached, so they can retain old sockets and config and send stale
-    // replies after reload.
+    // Every normally exiting listener aborts and joins its packet tasks before returning.
     while v4_tasks.join_next().await.is_some() {}
     while v6_tasks.join_next().await.is_some() {}
 
@@ -417,7 +540,7 @@ fn validate_v6_source_port(packet: &[u8], source: &SocketAddrV6) -> Result<(), D
 /// Run the independent DHCPv6 receive loop for one configured interface.
 async fn run_dhcp_v6_listener(
     interface: String,
-    config: Config,
+    config: Arc<Config>,
     mode: ServerMode,
     cancel: CancellationToken,
     rate_limiter: Arc<tokio::sync::Semaphore>,
@@ -461,19 +584,21 @@ async fn run_dhcp_v6_listener(
     let machine_cache = Arc::new(Mutex::new(LruCache::new(cache_size)));
     let mut context = V6ListenerContext {
         socket,
-        config: Arc::new(config),
+        config,
         handler,
         interface,
         machine_cache,
         dhcp_timestamps,
     };
+    let mut packet_tasks = JoinSet::new();
 
     // DHCPv6 has a four-byte base header, so it intentionally does not use
     // the DHCPv4 path's 236-byte BOOTP minimum. Keep one full-size UDP buffer
     // per listener so relay options cannot be silently truncated at Ethernet MTU.
     let mut buffer = vec![0; usize::from(u16::MAX)];
-    loop {
+    'receive: loop {
         tokio::select! {
+            biased;
             _ = cancel.cancelled() => {
                 tracing::info!(
                     interface_name = context.interface,
@@ -491,7 +616,7 @@ async fn run_dhcp_v6_listener(
                             "DHCPv6 socket receive failed"
                         );
                         let recreated = tokio::select! {
-                            _ = cancel.cancelled() => return,
+                            _ = cancel.cancelled() => break 'receive,
                             result = get_socket_v6(
                                 listen_address,
                                 &context.interface,
@@ -505,7 +630,7 @@ async fn run_dhcp_v6_listener(
                                     interface_name: context.interface.clone(),
                                     error: error.to_string(),
                                 });
-                                return;
+                                break 'receive;
                             }
                         }
                         continue;
@@ -515,16 +640,19 @@ async fn run_dhcp_v6_listener(
                 let Some(permit) = admit_v6_packet(&buffer[..length], source, &rate_limiter) else {
                     continue;
                 };
+                reap_packet_tasks(&mut packet_tasks, "IPv6", &context.interface);
 
                 let packet = buffer[..length].to_vec();
                 let packet_context = context.clone();
-                tokio::spawn(async move {
+                packet_tasks.spawn(async move {
                     process_v6(source, &packet, packet_context).await;
                     drop(permit);
                 });
             }
         }
     }
+    // Cancellation closes admission before aborting and joining every accepted packet.
+    abort_and_join_packet_tasks(&mut packet_tasks, "IPv6", &context.interface).await;
 }
 
 /// Initialises the tracing subscriber with per-crate log-level overrides and
@@ -650,6 +778,35 @@ async fn discard_staged(path: &str) -> Result<(), DhcpError> {
     }
 }
 
+/// Retires and joins the running generation before starting its validated immutable successor,
+/// ensuring stale responses fail their final send guard.
+async fn replace_generation(
+    args: &Args,
+    config: Config,
+    cancel_token: &mut Option<CancellationToken>,
+    dhcp_handle: &mut Option<tokio::task::JoinHandle<()>>,
+    v6_port: u16,
+) {
+    if let (Some(ct), Some(h)) = (cancel_token.take(), dhcp_handle.take()) {
+        tracing::info!("Stopping current DHCP server");
+        ct.cancel();
+        if let Err(error) = h.await {
+            tracing::warn!(%error, "Previous DHCP generation failed during replacement");
+        }
+    }
+
+    let ct = CancellationToken::new();
+    let handle = tokio::spawn(run_dhcp_generation(
+        args.clone(),
+        ct.clone(),
+        config,
+        v6_port,
+    ));
+    tracing::info!("DHCP server (re)started with updated config");
+    *cancel_token = Some(ct);
+    *dhcp_handle = Some(handle);
+}
+
 /// Promotes staged config files and (re)starts the DHCP server.
 ///
 /// If no `_new` files exist and `force_start` is false the restart is skipped.
@@ -657,11 +814,12 @@ async fn discard_staged(path: &str) -> Result<(), DhcpError> {
 /// is started even if the config on disk has not changed. Candidate files are
 /// validated and promoted before replacing the running generation.
 /// Rejection leaves that generation running with its immutable config.
-async fn handle_reload(
+async fn handle_reload_with_service_config(
     args: &Args,
     cancel_token: &mut Option<CancellationToken>,
     dhcp_handle: &mut Option<tokio::task::JoinHandle<()>>,
     force_start: bool,
+    service_config: ServiceConfig,
     v6_port: u16,
 ) -> Result<(), DhcpError> {
     if args.interfaces.is_empty() {
@@ -696,7 +854,9 @@ async fn handle_reload(
             path.clone()
         }
     });
-    let config = load_config(args, candidate_dhcp, candidate_host).await?;
+    let config = load_config(args, candidate_dhcp, candidate_host, true)
+        .await?
+        .with_service_config(service_config);
     let identity = config.server_identifier()?;
     server_identity::persist(&args.dhcp_config, &identity).await?;
 
@@ -711,25 +871,29 @@ async fn handle_reload(
     }
     promote_configs(&replacements).await?;
 
-    if let (Some(ct), Some(h)) = (cancel_token.take(), dhcp_handle.take()) {
-        tracing::info!("Stopping current DHCP server");
-        ct.cancel();
-        if let Err(error) = h.await {
-            tracing::warn!(%error, "Previous DHCP generation failed during replacement");
-        }
-    }
-
-    let ct = CancellationToken::new();
-    let handle = tokio::spawn(run_dhcp_generation(
-        args.clone(),
-        ct.clone(),
-        config,
-        v6_port,
-    ));
-    tracing::info!("DHCP server (re)started with updated config");
-    *cancel_token = Some(ct);
-    *dhcp_handle = Some(handle);
+    replace_generation(args, config, cancel_token, dhcp_handle, v6_port).await;
     Ok(())
+}
+
+/// Reloads test generations without service reservations so existing reload tests remain focused on
+/// file and listener behavior.
+#[cfg(test)]
+async fn handle_reload(
+    args: &Args,
+    cancel_token: &mut Option<CancellationToken>,
+    dhcp_handle: &mut Option<tokio::task::JoinHandle<()>>,
+    force_start: bool,
+    v6_port: u16,
+) -> Result<(), DhcpError> {
+    handle_reload_with_service_config(
+        args,
+        cancel_token,
+        dhcp_handle,
+        force_start,
+        ServiceConfig::default(),
+        v6_port,
+    )
+    .await
 }
 
 /// Restore earlier files if a later promotion fails; packet service still uses
@@ -776,6 +940,87 @@ async fn promote_configs(paths: &[String]) -> Result<(), DhcpError> {
     Ok(())
 }
 
+/// Keeps every field from one configuration replacement together while the control loop validates
+/// and applies it.
+struct ConfigReplacement {
+    dhcp_yaml: String,
+    host_yaml: Option<String>,
+    interfaces: Vec<String>,
+    service_config: ServiceConfig,
+}
+
+/// Stages one caller-validated replacement and activates its service reservations atomically with
+/// the new listener generation.
+async fn apply_update_with_service_config(
+    args: &mut Args,
+    replacement: ConfigReplacement,
+    active_service_config: &mut ServiceConfig,
+    active_interfaces: &mut Vec<String>,
+    cancel_token: &mut Option<CancellationToken>,
+    dhcp_handle: &mut Option<tokio::task::JoinHandle<()>>,
+    v6_port: u16,
+) -> Result<(), ApplyError> {
+    let ConfigReplacement {
+        dhcp_yaml,
+        host_yaml,
+        interfaces,
+        service_config,
+    } = replacement;
+    let service_changed = *active_service_config != service_config;
+    let mut candidate_args = args.clone();
+    candidate_args.interfaces = interfaces;
+    candidate_args
+        .validate_interfaces()
+        .map_err(ApplyError::InvalidConfig)?;
+    handle_update_config(&candidate_args, dhcp_yaml, host_yaml).await?;
+
+    // Requests from older Cores can omit listener inventory. Keep their file update staged, but
+    // replace a changed service set on the interfaces still owned by the running generation.
+    if candidate_args.interfaces.is_empty() {
+        if service_changed {
+            if dhcp_handle.is_some() {
+                let mut generation_args = args.clone();
+                generation_args.interfaces.clone_from(active_interfaces);
+                let live_dhcp = generation_args.dhcp_config.clone();
+                let live_host = generation_args.host_config.clone();
+                let config = load_config(&generation_args, &live_dhcp, live_host, true)
+                    .await
+                    .map_err(ApplyError::Internal)?
+                    .with_service_config(service_config.clone());
+                replace_generation(&generation_args, config, cancel_token, dhcp_handle, v6_port)
+                    .await;
+            }
+            *active_service_config = service_config;
+        }
+        *args = candidate_args;
+        return Ok(());
+    }
+
+    // Service reservations live only in immutable generation config, so a service-only replacement must force restart.
+    let force =
+        dhcp_handle.is_none() || args.interfaces != candidate_args.interfaces || service_changed;
+    handle_reload_with_service_config(
+        &candidate_args,
+        cancel_token,
+        dhcp_handle,
+        force,
+        service_config.clone(),
+        v6_port,
+    )
+    .await
+    .map_err(|error| match error {
+        DhcpError::InvalidDhcpV6Lifetimes { .. } => ApplyError::InvalidConfig(error),
+        error => ApplyError::Internal(error),
+    })?;
+    active_interfaces.clone_from(&candidate_args.interfaces);
+    *active_service_config = service_config;
+    *args = candidate_args;
+    Ok(())
+}
+
+/// Applies test updates with an empty service replacement so established control-loop tests retain
+/// their original scope.
+#[cfg(test)]
 async fn apply_update(
     args: &mut Args,
     dhcp_yaml: String,
@@ -785,21 +1030,23 @@ async fn apply_update(
     dhcp_handle: &mut Option<tokio::task::JoinHandle<()>>,
     v6_port: u16,
 ) -> Result<(), ApplyError> {
-    let force = dhcp_handle.is_none() || args.interfaces != interfaces;
-    let mut candidate_args = args.clone();
-    candidate_args.interfaces = interfaces;
-    candidate_args
-        .validate_interfaces()
-        .map_err(ApplyError::InvalidConfig)?;
-    handle_update_config(&candidate_args, dhcp_yaml, host_yaml).await?;
-    handle_reload(&candidate_args, cancel_token, dhcp_handle, force, v6_port)
-        .await
-        .map_err(|error| match error {
-            DhcpError::InvalidDhcpV6Lifetimes { .. } => ApplyError::InvalidConfig(error),
-            error => ApplyError::Internal(error),
-        })?;
-    *args = candidate_args;
-    Ok(())
+    let mut active_service_config = ServiceConfig::default();
+    let mut active_interfaces = args.interfaces.clone();
+    apply_update_with_service_config(
+        args,
+        ConfigReplacement {
+            dhcp_yaml,
+            host_yaml,
+            interfaces,
+            service_config: ServiceConfig::default(),
+        },
+        &mut active_service_config,
+        &mut active_interfaces,
+        cancel_token,
+        dhcp_handle,
+        v6_port,
+    )
+    .await
 }
 
 /// Runs the DHCP server under gRPC control.
@@ -840,9 +1087,14 @@ async fn run_with_grpc_control(
     // Four queued requests plus one active request bound accepted work. Update
     // admission is nonblocking; an accepted update waits for its apply result.
     let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::channel::<ControlRequest>(4);
+    let retained_host_config_path = if matches!(args.mode, ServerMode::Dpu) {
+        args.host_config.clone()
+    } else {
+        None
+    };
 
     tokio::spawn(async move {
-        run_grpc_server(grpc_listen_addr, ctrl_tx).await;
+        run_grpc_server(grpc_listen_addr, ctrl_tx, retained_host_config_path).await;
     });
 
     run_control_loop(args, ctrl_rx, v6_port).await
@@ -860,6 +1112,8 @@ async fn run_control_loop(
     // that watches the handle pends forever while the server is not yet running.
     let mut cancel_token: Option<CancellationToken> = None;
     let mut dhcp_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let mut active_service_config = ServiceConfig::default();
+    let mut active_interfaces = Vec::new();
 
     if tokio::fs::try_exists(&args.dhcp_config)
         .await
@@ -877,6 +1131,7 @@ async fn run_control_loop(
                     v6_port,
                 )));
                 cancel_token = Some(ct);
+                active_interfaces.clone_from(&args.interfaces);
             }
             Err(error) => tracing::error!(
                 %error,
@@ -923,14 +1178,28 @@ async fn run_control_loop(
                 };
 
                 match msg {
-                    ControlRequest::UpdateAndReload { dhcp_yaml, host_yaml, interfaces, applied } => {
+                    ControlRequest::UpdateAndReload {
+                        dhcp_yaml,
+                        host_yaml,
+                        interfaces,
+                        service_config,
+                        applied,
+                    } => {
                         // Skip abandoned queued work. Once apply begins, finish it
                         // even if the caller's deadline expires midway through.
                         if applied.is_closed() {
                             continue;
                         }
-                        let result = apply_update(
-                            &mut args, dhcp_yaml, host_yaml, interfaces,
+                        let result = apply_update_with_service_config(
+                            &mut args,
+                            ConfigReplacement {
+                                dhcp_yaml,
+                                host_yaml,
+                                interfaces,
+                                service_config,
+                            },
+                            &mut active_service_config,
+                            &mut active_interfaces,
                             &mut cancel_token, &mut dhcp_handle, v6_port,
                         ).await;
                         if let Err(error) = &result {
@@ -949,6 +1218,8 @@ async fn run_control_loop(
                         } else {
                             tracing::info!("StopServer: DHCP server was not running");
                         }
+                        active_service_config = ServiceConfig::default();
+                        active_interfaces.clear();
                     }
                 }
             }
@@ -966,7 +1237,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     args.validate_interfaces()?;
 
     if let Some(candidate) = &args.validate_config {
-        load_config(&args, candidate, args.host_config.clone()).await?;
+        load_config(&args, candidate, args.host_config.clone(), false).await?;
         return Ok(());
     }
 
@@ -1034,7 +1305,7 @@ fn get_mode(args_mode: &ServerMode) -> Box<dyn DhcpMode> {
 }
 
 async fn init(args: Args) -> Result<Config, DhcpError> {
-    load_config(&args, &args.dhcp_config, args.host_config.clone()).await
+    load_config(&args, &args.dhcp_config, args.host_config.clone(), false).await
 }
 
 async fn read_dhcp_config(live_path: &str, candidate_path: &str) -> Result<DhcpConfig, DhcpError> {
@@ -1073,6 +1344,7 @@ async fn load_config(
     args: &Args,
     candidate_dhcp: &str,
     candidate_host: Option<String>,
+    allow_missing_host: bool,
 ) -> Result<Config, DhcpError> {
     let forge_client_config = forge_client_config(args)?;
     let dhcp_config = read_dhcp_config(&args.dhcp_config, candidate_dhcp).await?;
@@ -1080,36 +1352,37 @@ async fn load_config(
     let host_config;
     if let ServerMode::Dpu = args.mode {
         let host_path = candidate_host.clone();
-        host_config = get_host_config(candidate_host)
-            .await
-            .map_err(|error| match host_path {
-                Some(path) => DhcpError::ConfigFile {
-                    path,
-                    source: Box::new(error),
-                },
-                None => error,
-            })?;
+        host_config = match get_host_config(candidate_host).await {
+            Ok(host_config) => host_config,
+            // Controlled replacements may omit host.yaml because service reservations are served
+            // independently, while unmatched DPU requests fail closed without host data.
+            Err(DhcpError::MissingArgument(_)) if allow_missing_host => None,
+            Err(DhcpError::IoError(error))
+                if allow_missing_host && error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                None
+            }
+            Err(error) => {
+                return Err(match host_path {
+                    Some(path) => DhcpError::ConfigFile {
+                        path,
+                        source: Box::new(error),
+                    },
+                    None => error,
+                });
+            }
+        };
     } else {
         host_config = None;
     };
 
-    let config = Config::new(
+    validate_stateful_lifetimes_for_host(&dhcp_config, host_config.as_ref())?;
+    Ok(Config::new(
         dhcp_config,
         host_config,
         args.relay_response_port,
         forge_client_config,
-    );
-    if config.host_config().is_some_and(|host| {
-        host.host_ip_addresses.values().any(|interface| {
-            interface
-                .ipv6
-                .as_ref()
-                .is_some_and(|ipv6| ipv6.address.is_some())
-        })
-    }) {
-        config.stateful_lifetimes()?;
-    }
-    Ok(config)
+    ))
 }
 
 fn forge_client_config(args: &Args) -> Result<ForgeClientConfig, DhcpError> {
@@ -1145,7 +1418,7 @@ async fn process(
     addr: SocketAddr,
     socket: Arc<UdpSocket>,
     buf: &[u8],
-    config: Config,
+    config: Arc<Config>,
     handler: &dyn DhcpMode,
     circuit_id: &str, // interface name
     machine_cache: &mut Arc<Mutex<LruCache<String, CacheEntry>>>,
@@ -1192,14 +1465,21 @@ async fn process(
     };
 
     let dest_address = handler.get_destination_address(&packet);
-    if let Err(err) = packet.send(dest_address, socket).await {
-        emit(DhcpPacketDropped {
-            reason: DropReason::SendFailed,
-            error: err,
-        });
+    let records_host_activity = packet.records_host_activity();
+    let should_record = match packet.send(dest_address, socket).await {
+        Ok(ReplyStatus::Sent) => records_host_activity,
+        Ok(ReplyStatus::Retired | ReplyStatus::NoReply) => false,
+        Err(err) => {
+            emit(DhcpPacketDropped {
+                reason: DropReason::SendFailed,
+                error: err,
+            });
+            records_host_activity
+        }
+    };
+    if should_record {
+        record_dhcp_timestamp(&config, dhcp_timestamps).await;
     }
-
-    record_dhcp_timestamp(&config, dhcp_timestamps).await;
 }
 
 /// Process one DHCPv6 datagram and send its response to the exact UDP source.
@@ -1250,21 +1530,20 @@ async fn process_v6(source: SocketAddr, packet: &[u8], mut context: V6ListenerCo
     };
 
     tracing::debug!(destination_address = %source, "Sending DHCPv6 packet");
-    match context
-        .socket
-        .send_to(response.encoded_packet(), source)
-        .await
-    {
-        Ok(_) => emit(DhcpV6ReplySent {
-            message_type: response.message_type,
-            destination_address: source,
-        }),
-        Err(error) => emit(DhcpV6RequestDropped {
-            reason: V6DropReason::SendFailed,
-            error: error.to_string(),
-        }),
+    let should_record = match response.send(&context.socket, source).await {
+        Ok(ReplyStatus::Sent) => true,
+        Ok(ReplyStatus::Retired | ReplyStatus::NoReply) => false,
+        Err(error) => {
+            emit(DhcpV6RequestDropped {
+                reason: V6DropReason::SendFailed,
+                error: error.to_string(),
+            });
+            true
+        }
+    };
+    if should_record {
+        record_dhcp_timestamp(&context.config, context.dhcp_timestamps.clone()).await;
     }
-    record_dhcp_timestamp(&context.config, context.dhcp_timestamps.clone()).await;
 }
 
 /// Record that the DPU-side interface has served a DHCP request.
@@ -1294,8 +1573,12 @@ mod test {
 
     use carbide_dhcp_server::errors::DhcpError;
     use carbide_dhcp_server::modes::V6Outcome;
+    use carbide_dhcp_server::modes::dpu::Dpu;
     use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
-    use carbide_rpc_utils::dhcp::{DhcpTimestamps, DhcpTimestampsFilePath};
+    use carbide_rpc_utils::dhcp::{
+        DhcpTimestamps, DhcpTimestampsFilePath, ServiceConfig, ServiceInterfaceReservations,
+        ServiceLink, ServiceLinkV4, ServiceReservation,
+    };
     use carbide_test_support::value_scenarios;
     use chrono::{DateTime, Utc};
     use dhcproto::v4::{DhcpOption, Message, MessageType, OptionCode};
@@ -1305,7 +1588,7 @@ mod test {
     use rpc::forge::{DhcpDiscovery, DhcpRecord};
     use tempfile::TempDir;
     use tokio::net::UdpSocket;
-    use tokio::sync::{Mutex, oneshot};
+    use tokio::sync::{Mutex, Notify, oneshot};
     use tokio::task::JoinSet;
     use tokio::time::{Duration, timeout};
     use tokio_util::sync::CancellationToken;
@@ -1314,15 +1597,62 @@ mod test {
     use crate::cache::CacheEntry;
     use crate::command_line::{Args, ServerMode};
     use crate::{
-        Config, DhcpMode, ListenerFailure, admit_v6_packet, cache, forge_client_config,
-        handle_reload, init, packet_handler, process, supervise_listener_tasks,
-        validate_v6_source_port,
+        Config, DhcpMode, ListenerFailure, ReplyStatus, admit_v6_packet, cache,
+        forge_client_config, handle_reload, init, packet_handler, process,
+        supervise_listener_tasks, validate_v6_source_port,
     };
 
     const TEST_SOURCE_ADDRESS: SocketAddr =
         SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 10), 68));
     const TEST_CLIENT_MAC: &[u8] = &[0x00, 0x1b, 0x63, 0x84, 0x45, 0xe6];
     const TEST_CLIENT_MAC_TEXT: &str = "00:1b:63:84:45:e6";
+
+    /// Serializes tests that intentionally mutate the fixed test timestamp path.
+    static TEST_TIMESTAMP_FILE_LOCK: Mutex<()> = Mutex::const_new(());
+
+    /// Encodes one relayed service DISCOVER so live-listener tests can receive replies on an
+    /// unprivileged loopback port.
+    fn encode_service_discover(mac_address: [u8; 6], transaction_id: u32) -> Vec<u8> {
+        let mut request = Message::new(
+            Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::LOCALHOST,
+            &mac_address,
+        );
+        request.set_xid(transaction_id);
+        request
+            .opts_mut()
+            .insert(DhcpOption::MessageType(MessageType::Discover));
+        let mut encoded = Vec::new();
+        request
+            .encode(&mut dhcproto::Encoder::new(&mut encoded))
+            .unwrap();
+        encoded
+    }
+
+    /// Signals each real IPv4 listener bind so replacement tests do not mistake startup latency for
+    /// service silence.
+    struct Ipv4ListenerReady {
+        ready: Arc<Notify>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Ipv4ListenerReady {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            event.record(
+                &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
+                    if field.name() == "message" && format!("{value:?}") == "DHCP server listening"
+                    {
+                        self.ready.notify_one();
+                    }
+                },
+            );
+        }
+    }
 
     #[derive(Debug)]
     struct TestArm {}
@@ -1569,6 +1899,31 @@ mod test {
         }
     }
 
+    /// Verifies a retired generation skips IPv4 socket retries so replacement is not stalled by an
+    /// unavailable interface.
+    #[tokio::test]
+    async fn cancelled_generation_does_not_wait_for_ipv4_socket_retries() {
+        let directory = TempDir::new().unwrap();
+        // An impossible Linux interface name would otherwise enter the two-second retry delay.
+        let args = make_reload_args(&directory, vec!["missing/test".to_string()]);
+        let mut dhcp = ipv6_only_config();
+        dhcp.carbide_dhcp_server = Some(Ipv4Addr::LOCALHOST);
+        dhcp.carbide_provisioning_server_ipv4 = Some(Ipv4Addr::LOCALHOST);
+        let config = Config::new(dhcp, None, 67, forge_client_config(&args).unwrap());
+
+        // Cancel before startup so socket setup and retirement are simultaneously eligible.
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        // Retirement must complete before the first socket retry delay.
+        timeout(
+            Duration::from_secs(1),
+            super::run_dhcp_generation(args, cancel, config, 0),
+        )
+        .await
+        .expect("cancelled generation waited for IPv4 socket retries");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn failed_apply_retains_live_files_and_generation() {
         let empty_host =
@@ -1689,9 +2044,7 @@ mod test {
                 )
                 .await
                 .unwrap();
-                // On this single-threaded runtime, abort before another await
-                // can poll the replacement and write production DPU timestamps.
-                // Token cancellation alone does not skip that initialization.
+                // Stop the replacement immediately because this retry case proves publication without needing live listeners.
                 let replacement = handle.take().unwrap();
                 replacement.abort();
                 assert!(replacement.await.unwrap_err().is_cancelled());
@@ -1772,9 +2125,7 @@ mod test {
         )
         .await
         .unwrap();
-        // Abort before yielding on this single-threaded runtime: generation
-        // initialization writes production DPU timestamps even when cancelled.
-        // Persistence and packet handling below do not need a live listener.
+        // Stop the generation because persistence and packet reconstruction below do not require live listener sockets.
         let generation = handle.unwrap();
         generation.abort();
         token.unwrap().cancel();
@@ -1925,11 +2276,16 @@ mod test {
         );
     }
 
-    /// Verifies both forms of last-listener v4 completion fail the generation.
+    /// Verifies both forms of last-listener v4 completion cancel and await sibling listener cleanup
+    /// before failure returns.
     #[tokio::test]
     async fn listener_supervision_fails_when_the_last_v4_listener_exits() {
-        // Exercise normal return and panic because Tokio reports them through different paths.
-        for should_panic in [false, true] {
+        for (scenario, should_panic) in [
+            // A normal return reports listener loss without a task failure.
+            ("normal return", false),
+            // A panic reports listener loss through Tokio's JoinError path.
+            ("panic", true),
+        ] {
             let cancel_token = CancellationToken::new();
             let mut v4_tasks = JoinSet::new();
             let (completion_tx, completion_rx) = oneshot::channel();
@@ -1945,9 +2301,14 @@ mod test {
                 .await
                 .expect("synthetic v4 listener reached its exit");
 
-            // Keep a sibling pending so the test catches the former join_all masking behavior.
+            // Model the production v6 listener by completing its cleanup only after generation cancellation.
             let mut v6_tasks = JoinSet::new();
-            v6_tasks.spawn(std::future::pending::<()>());
+            let v6_cancel = cancel_token.clone();
+            let (v6_cleanup_tx, mut v6_cleanup_rx) = oneshot::channel();
+            v6_tasks.spawn(async move {
+                v6_cancel.cancelled().await;
+                v6_cleanup_tx.send(()).unwrap();
+            });
 
             // Verify supervision reports the exact failure form and tears down the generation.
             let result = timeout(
@@ -1961,15 +2322,21 @@ mod test {
                 cancel_token.is_cancelled(),
                 "unexpected v4 completion must cancel its generation"
             );
+            v6_cleanup_rx
+                .try_recv()
+                .expect("supervision must join v6 listener cleanup before returning");
             match (should_panic, result) {
                 (false, Err(ListenerFailure::Returned)) => {}
                 (true, Err(ListenerFailure::Join(_))) => {}
-                (_, other) => panic!("unexpected v4 supervision result: {other:?}"),
+                (_, other) => {
+                    panic!("unexpected v4 supervision result for {scenario}: {other:?}")
+                }
             }
         }
     }
 
-    /// Verifies one failed v4 interface preserves healthy siblings until the last one exits.
+    /// Verifies one failed v4 interface preserves healthy siblings until the last one exits so a
+    /// partial interface failure cannot interrupt remaining service.
     #[tokio::test]
     async fn listener_supervision_preserves_siblings_until_the_last_v4_listener_exits() {
         for (scenario, should_panic) in [
@@ -2001,8 +2368,12 @@ mod test {
                     .expect("supervision test releases the last v4 listener");
             });
 
+            // Model the production v6 listener, which exits through cancellation cleanup after the last v4 listener fails.
             let mut v6_tasks = JoinSet::new();
-            v6_tasks.spawn(std::future::pending::<()>());
+            let v6_cancel = cancel_token.clone();
+            v6_tasks.spawn(async move {
+                v6_cancel.cancelled().await;
+            });
 
             let ((result, was_cancelled), logs) = capture_logs_async(async {
                 let supervision =
@@ -2020,6 +2391,7 @@ mod test {
                     "{scenario} from one v4 listener must not cancel the generation"
                 );
 
+                // Release the final healthy v4 listener so supervision must cancel and fail the generation.
                 last_exit_tx
                     .send(())
                     .expect("last synthetic v4 listener is waiting for release");
@@ -2258,6 +2630,168 @@ mod test {
         handle.unwrap().await.unwrap();
     }
 
+    /// Verifies an empty listener inventory clears active services while retaining remembered
+    /// interfaces and deferring DHCP promotion, preventing an omitted inventory from retaining
+    /// service access.
+    #[tokio::test(flavor = "current_thread")]
+    async fn empty_interface_update_clears_active_service_reservations() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        // Serialize the live OFFER producer and observe both real IPv4 listener binds on this runtime thread.
+        let _metrics_guard = MetricsCapture::start();
+        let listener_ready = Arc::new(Notify::new());
+        let subscriber = tracing_subscriber::registry().with(Ipv4ListenerReady {
+            ready: Arc::clone(&listener_ready),
+        });
+        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+        // Start a DPU generation with one active service reservation on an unprivileged loopback socket.
+        let directory = TempDir::new().unwrap();
+        let listener_reservation = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let SocketAddr::V4(listener_address) = listener_reservation.local_addr().unwrap() else {
+            panic!("loopback listener must have an IPv4 address");
+        };
+        let reply_receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let SocketAddr::V4(reply_address) = reply_receiver.local_addr().unwrap() else {
+            panic!("reply receiver must bind an IPv4 address");
+        };
+        let mut args = make_reload_args(&directory, vec!["lo".to_string()]);
+        args.mode = ServerMode::Dpu;
+        args.listen_addr = listener_address;
+        args.relay_response_port = reply_address.port();
+        let mut live_config = ipv6_only_config();
+        live_config.carbide_dhcp_server = Some(Ipv4Addr::LOCALHOST);
+        live_config.carbide_provisioning_server_ipv4 = Some(Ipv4Addr::LOCALHOST);
+        let live = serde_yaml::to_string(&live_config).unwrap();
+        tokio::fs::write(&args.dhcp_config, &live).await.unwrap();
+        // Change only the API URL so staged DHCP data remains distinguishable from the service-only restart.
+        live_config.carbide_api_url = Some("https://api.example.com".to_string());
+        let candidate = serde_yaml::to_string(&live_config).unwrap();
+        let old_cancel = CancellationToken::new();
+        let mut token = Some(old_cancel.clone());
+        let mut active_service_config =
+            ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+                receiving_interface: "lo".to_string(),
+                reservations: vec![ServiceReservation {
+                    attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
+                    interface_ordinal: 0,
+                    internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),
+                    mac_address: "02:00:00:00:00:01".parse().unwrap(),
+                    link: ServiceLink::Ipv4(ServiceLinkV4 {
+                        address: "192.0.2.11".parse().unwrap(),
+                        prefix: "192.0.2.10/31".parse().unwrap(),
+                        gateway: "192.0.2.10".parse().unwrap(),
+                    }),
+                }],
+            }])
+            .unwrap();
+        let mut active_interfaces = args.interfaces.clone();
+        let old_config = super::load_config(&args, &args.dhcp_config, None, true)
+            .await
+            .unwrap()
+            .with_service_config(active_service_config.clone());
+        drop(listener_reservation);
+        let mut handle = Some(tokio::spawn(super::run_dhcp_generation(
+            args.clone(),
+            old_cancel.clone(),
+            old_config,
+            0,
+        )));
+
+        // Wait for the old listener and prove the reservation is active before removing it.
+        timeout(Duration::from_secs(5), listener_ready.notified())
+            .await
+            .expect("initial IPv4 listener did not become ready");
+        let reply_sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        reply_sender
+            .send_to(
+                &encode_service_discover([0x02, 0, 0, 0, 0, 1], 1),
+                listener_address,
+            )
+            .await
+            .unwrap();
+        let mut response = [0; 1500];
+        let (length, _) = timeout(
+            Duration::from_secs(1),
+            reply_receiver.recv_from(&mut response),
+        )
+        .await
+        .expect("active reservation did not answer")
+        .unwrap();
+        let response = Message::decode(&mut Decoder::new(&response[..length])).unwrap();
+        assert_eq!(response.xid(), 1);
+        assert_eq!(response.yiaddr(), "192.0.2.11".parse::<Ipv4Addr>().unwrap());
+        assert_eq!(response.opts().msg_type(), Some(MessageType::Offer));
+
+        // Clear services while omitting the next listener inventory, which must not promote the staged file.
+        super::apply_update_with_service_config(
+            &mut args,
+            super::ConfigReplacement {
+                dhcp_yaml: candidate.clone(),
+                host_yaml: None,
+                interfaces: vec![],
+                service_config: ServiceConfig::default(),
+            },
+            &mut active_service_config,
+            &mut active_interfaces,
+            &mut token,
+            &mut handle,
+            0,
+        )
+        .await
+        .unwrap();
+
+        // Wait for the successor bind so silence below proves removal rather than listener startup latency.
+        timeout(Duration::from_secs(5), listener_ready.notified())
+            .await
+            .expect("successor IPv4 listener did not become ready");
+
+        // The applied state clears services, retains the remembered interface, and leaves the candidate file deferred.
+        assert!(old_cancel.is_cancelled());
+        assert_eq!(active_service_config, ServiceConfig::default());
+        assert_eq!(active_interfaces, ["lo"]);
+        assert!(args.interfaces.is_empty());
+        assert_eq!(
+            tokio::fs::read_to_string(&args.dhcp_config).await.unwrap(),
+            live
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(format!("{}_new", args.dhcp_config))
+                .await
+                .unwrap(),
+            candidate
+        );
+        assert!(!token.as_ref().unwrap().is_cancelled());
+
+        // Send the removed identity once through the successor and ignore any unrelated queued transaction.
+        reply_sender
+            .send_to(
+                &encode_service_discover([0x02, 0, 0, 0, 0, 1], 2),
+                listener_address,
+            )
+            .await
+            .unwrap();
+        let removed_response = timeout(Duration::from_millis(250), async {
+            loop {
+                let mut response = [0; 1500];
+                let (length, _) = reply_receiver.recv_from(&mut response).await.unwrap();
+                let response = Message::decode(&mut Decoder::new(&response[..length])).unwrap();
+                if response.xid() == 2 {
+                    break response;
+                }
+            }
+        })
+        .await;
+        assert!(
+            removed_response.is_err(),
+            "cleared service reservation unexpectedly received a response"
+        );
+
+        // Stop the successor before its temporary files and sockets leave test scope.
+        token.unwrap().cancel();
+        handle.unwrap().await.unwrap();
+    }
+
     #[tokio::test]
     async fn unchanged_config_discards_staging_but_new_interfaces_restart() {
         let directory = TempDir::new().unwrap();
@@ -2316,6 +2850,350 @@ mod test {
         );
         token.unwrap().cancel();
         handle.unwrap().await.unwrap();
+    }
+
+    /// Verifies production replacement retires a removed client's prepared response while retaining
+    /// the survivor, preventing the removed identity from responding after replacement.
+    #[tokio::test]
+    async fn service_replacement_retires_removed_client_and_keeps_survivor() {
+        // Serialize this live OFFER producer with process-global metric-delta assertions in the binary.
+        let _metrics_guard = MetricsCapture::start();
+
+        // Reserve loopback transport while keeping files and interfaces unchanged so only service replacement triggers restart.
+        let directory = TempDir::new().unwrap();
+        let listener_reservation = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let SocketAddr::V4(listener_address) = listener_reservation.local_addr().unwrap() else {
+            panic!("loopback listener must have an IPv4 address");
+        };
+        let reply_receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let SocketAddr::V4(reply_address) = reply_receiver.local_addr().unwrap() else {
+            panic!("reply receiver must bind an IPv4 address");
+        };
+        let mut args = make_reload_args(&directory, vec!["lo".to_string()]);
+        args.mode = ServerMode::Dpu;
+        args.listen_addr = listener_address;
+        args.relay_response_port = reply_address.port();
+        // Enable IPv4 so the removed reservation can produce a real response before replacement.
+        let mut live_config = ipv6_only_config();
+        live_config.carbide_dhcp_server = Some(Ipv4Addr::LOCALHOST);
+        live_config.carbide_provisioning_server_ipv4 = Some(Ipv4Addr::LOCALHOST);
+        let live = serde_yaml::to_string(&live_config).unwrap();
+        tokio::fs::write(&args.dhcp_config, &live).await.unwrap();
+        let old_cancel = CancellationToken::new();
+        let mut token = Some(old_cancel.clone());
+        // The first reservation is removed and therefore drives the retirement assertion.
+        let removed = ServiceReservation {
+            attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
+            interface_ordinal: 0,
+            internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),
+            mac_address: TEST_CLIENT_MAC_TEXT.parse().unwrap(),
+            link: ServiceLink::Ipv4(ServiceLinkV4 {
+                address: "192.0.2.11".parse().unwrap(),
+                prefix: "192.0.2.10/31".parse().unwrap(),
+                gateway: "192.0.2.10".parse().unwrap(),
+            }),
+        };
+        // The adjacent reservation survives to prove replacement does not clear the whole slot.
+        let survivor = ServiceReservation {
+            attachment_id: "33333333-3333-3333-3333-333333333333".parse().unwrap(),
+            interface_ordinal: 0,
+            internal_uuid: "44444444-4444-4444-4444-444444444444".parse().unwrap(),
+            mac_address: "02:00:00:00:00:02".parse().unwrap(),
+            link: ServiceLink::Ipv4(ServiceLinkV4 {
+                address: "192.0.2.13".parse().unwrap(),
+                prefix: "192.0.2.12/31".parse().unwrap(),
+                gateway: "192.0.2.12".parse().unwrap(),
+            }),
+        };
+        let mut active_service_config =
+            ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+                receiving_interface: "lo".to_string(),
+                reservations: vec![removed.clone(), survivor.clone()],
+            }])
+            .unwrap();
+        let replacement = ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+            receiving_interface: "lo".to_string(),
+            reservations: vec![survivor.clone()],
+        }])
+        .unwrap();
+        let mut active_interfaces = args.interfaces.clone();
+        // Prepare one response from the same immutable snapshot passed to the old generation.
+        let old_config = super::load_config(&args, &args.dhcp_config, None, true)
+            .await
+            .unwrap()
+            .with_service_config(active_service_config.clone())
+            .with_reply_retirement(old_cancel.clone());
+        let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
+            std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
+        )));
+        let retiring_response = packet_handler::process_packet(
+            &get_byte_stream(Ipv4Addr::UNSPECIFIED, None, MessageType::Discover, None),
+            TEST_SOURCE_ADDRESS,
+            &old_config,
+            "lo",
+            &Dpu {},
+            &mut machine_cache,
+        )
+        .await
+        .unwrap();
+        drop(listener_reservation);
+        let mut handle = Some(tokio::spawn(super::run_dhcp_generation(
+            args.clone(),
+            old_cancel.clone(),
+            old_config,
+            0,
+        )));
+
+        // Apply the one-client full replacement through the production update function.
+        super::apply_update_with_service_config(
+            &mut args,
+            super::ConfigReplacement {
+                dhcp_yaml: live,
+                host_yaml: None,
+                interfaces: vec!["lo".to_string()],
+                service_config: replacement,
+            },
+            &mut active_service_config,
+            &mut active_interfaces,
+            &mut token,
+            &mut handle,
+            0,
+        )
+        .await
+        .unwrap();
+
+        // The update retires the old generation and records only the survivor in the applied service set.
+        assert!(old_cancel.is_cancelled());
+        assert!(
+            active_service_config
+                .get("lo", &removed.mac_address)
+                .is_none()
+        );
+        assert_eq!(
+            active_service_config
+                .get("lo", &survivor.mac_address)
+                .map(|reservation| reservation.internal_uuid),
+            Some(survivor.internal_uuid)
+        );
+        assert!(!token.as_ref().unwrap().is_cancelled());
+
+        // Send through the successor generation so the surviving reservation proves publication rather than only map mutation.
+        let reply_sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let survivor_discover = encode_service_discover(survivor.mac_address.bytes(), 1);
+        let survivor_offer = timeout(Duration::from_secs(5), async {
+            loop {
+                reply_sender
+                    .send_to(&survivor_discover, listener_address)
+                    .await
+                    .unwrap();
+                let mut buffer = [0; 1500];
+                if let Ok(Ok((length, _))) = timeout(
+                    Duration::from_millis(50),
+                    reply_receiver.recv_from(&mut buffer),
+                )
+                .await
+                {
+                    let response = Message::decode(&mut Decoder::new(&buffer[..length])).unwrap();
+                    if response.xid() == 1 {
+                        break response;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("successor generation did not answer the surviving reservation");
+        assert_eq!(
+            survivor_offer.yiaddr(),
+            "192.0.2.13".parse::<Ipv4Addr>().unwrap()
+        );
+        assert_eq!(survivor_offer.opts().msg_type(), Some(MessageType::Offer));
+
+        // Once successor readiness is proven, the removed reservation must remain silent without host fallback.
+        let removed_discover = encode_service_discover(removed.mac_address.bytes(), 2);
+        reply_sender
+            .send_to(&removed_discover, listener_address)
+            .await
+            .unwrap();
+        let removed_response = timeout(Duration::from_millis(100), async {
+            loop {
+                let mut buffer = [0; 1500];
+                let (length, _) = reply_receiver.recv_from(&mut buffer).await.unwrap();
+                let response = Message::decode(&mut Decoder::new(&buffer[..length])).unwrap();
+                if response.xid() == 2 {
+                    break response;
+                }
+            }
+        })
+        .await;
+        assert!(
+            removed_response.is_err(),
+            "removed reservation unexpectedly received a response"
+        );
+
+        // A real service response prepared from the removed snapshot retains its generation retirement token.
+        let sender = Arc::new(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap());
+        let retirement_receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let SocketAddr::V4(destination) = retirement_receiver.local_addr().unwrap() else {
+            panic!("test receiver must bind an IPv4 address");
+        };
+        let status = retiring_response.send(destination, sender).await.unwrap();
+        assert_eq!(status, ReplyStatus::Retired);
+        let mut buffer = [0; 512];
+        assert!(
+            timeout(
+                Duration::from_millis(10),
+                retirement_receiver.recv_from(&mut buffer)
+            )
+            .await
+            .is_err()
+        );
+        // Stop the successor before its temporary files and sockets leave test scope.
+        token.unwrap().cancel();
+        handle.unwrap().await.unwrap();
+    }
+
+    /// Verifies the packet-task drain helper aborts and joins a prepared service response so
+    /// listener shutdown cannot return with stale transport work.
+    #[tokio::test]
+    async fn packet_task_drain_joins_prepared_service_response() {
+        // The exact MAC and IPv4 link drive packet selection; the remaining identities only satisfy validation.
+        let service_config = ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+            receiving_interface: "vlan200".to_string(),
+            reservations: vec![ServiceReservation {
+                attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
+                interface_ordinal: 0,
+                internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),
+                mac_address: TEST_CLIENT_MAC_TEXT.parse().unwrap(),
+                link: ServiceLink::Ipv4(ServiceLinkV4 {
+                    address: "192.0.2.11".parse().unwrap(),
+                    prefix: "192.0.2.10/31".parse().unwrap(),
+                    gateway: "192.0.2.10".parse().unwrap(),
+                }),
+            }],
+        }])
+        .unwrap();
+        let config = init(get_test_args())
+            .await
+            .unwrap()
+            .with_service_config(service_config);
+        let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
+            std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
+        )));
+        let response = packet_handler::process_packet(
+            &get_byte_stream(Ipv4Addr::UNSPECIFIED, None, MessageType::Discover, None),
+            TEST_SOURCE_ADDRESS,
+            &config,
+            "vlan200",
+            &Dpu {},
+            &mut machine_cache,
+        )
+        .await
+        .unwrap();
+        let sender = Arc::new(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap());
+        let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let SocketAddr::V4(destination) = receiver.local_addr().unwrap() else {
+            panic!("test receiver must bind an IPv4 address");
+        };
+        // Pause the accepted packet task before transport so shutdown must cancel rather than merely reap it.
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let metrics = MetricsCapture::start();
+        let mut packet_tasks = JoinSet::new();
+        packet_tasks.spawn(async move {
+            started_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            response.send(destination, sender).await.unwrap();
+        });
+        started_rx.await.unwrap();
+
+        // Run the same abort-and-join operation used after both listener receive loops stop admitting packets.
+        super::abort_and_join_packet_tasks(&mut packet_tasks, "IPv4", "vlan200").await;
+
+        // Joined cancellation drops the paused transport without a datagram or successful-reply accounting.
+        assert!(packet_tasks.is_empty());
+        assert!(release_tx.send(()).is_err());
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_dhcp_replies_sent_total",
+                &[("message_type", "offer")]
+            ),
+            0.0
+        );
+        let mut buffer = [0; 512];
+        assert!(
+            timeout(Duration::from_millis(10), receiver.recv_from(&mut buffer))
+                .await
+                .is_err()
+        );
+    }
+
+    /// Verifies the production IPv4 listener owns each admitted packet task so generation
+    /// cancellation cannot leave detached transport work.
+    #[tokio::test]
+    async fn generation_cancellation_joins_listener_owned_packet_task() {
+        // Reserve an unprivileged loopback port and load a service-only-capable DPU generation.
+        let directory = TempDir::new().unwrap();
+        let listener_reservation = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let SocketAddr::V4(listener_address) = listener_reservation.local_addr().unwrap() else {
+            panic!("loopback listener must have an IPv4 address");
+        };
+        let mut args = make_reload_args(&directory, vec!["lo".to_string()]);
+        args.mode = ServerMode::Dpu;
+        args.listen_addr = listener_address;
+        let mut dhcp_config = ipv6_only_config();
+        dhcp_config.carbide_dhcp_server = Some(Ipv4Addr::LOCALHOST);
+        dhcp_config.carbide_provisioning_server_ipv4 = Some(Ipv4Addr::LOCALHOST);
+        tokio::fs::write(
+            &args.dhcp_config,
+            serde_yaml::to_string(&dhcp_config).unwrap(),
+        )
+        .await
+        .unwrap();
+        let config = super::load_config(&args, &args.dhcp_config, None, true)
+            .await
+            .unwrap();
+        drop(listener_reservation);
+
+        // Pause the exact packet admitted from this source inside the listener-owned JoinSet task.
+        let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let source = sender.local_addr().unwrap();
+        let (started_tx, mut started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        *super::IPV4_PACKET_TASK_PAUSE.lock().unwrap() = Some(super::PacketTaskPause {
+            source,
+            started: started_tx,
+            release: release_rx,
+        });
+        let cancellation = CancellationToken::new();
+        let generation = tokio::spawn(super::run_dhcp_generation(
+            args,
+            cancellation.clone(),
+            config,
+            0,
+        ));
+        let packet = get_byte_stream(Ipv4Addr::UNSPECIFIED, None, MessageType::Discover, None);
+        timeout(Duration::from_secs(5), async {
+            loop {
+                sender.send_to(&packet, listener_address).await.unwrap();
+                tokio::select! {
+                    result = &mut started_rx => {
+                        result.expect("listener packet task must reach the transport pause");
+                        break;
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+            }
+        })
+        .await
+        .expect("IPv4 listener did not admit the test packet");
+
+        // Generation completion must abort and join the paused task rather than leave it detached.
+        cancellation.cancel();
+        timeout(Duration::from_secs(1), generation)
+            .await
+            .expect("generation did not drain its packet task")
+            .unwrap();
+        assert!(release_tx.send(()).is_err());
     }
 
     /// force_start=true must start the server even when no `_new` files are staged.
@@ -2424,6 +3302,7 @@ mod test {
                             dhcp_yaml: dhcp_yaml.clone(),
                             host_yaml: None,
                             interfaces: vec!["lo".to_string()],
+                            service_config: ServiceConfig::default(),
                             applied,
                         })
                         .await
@@ -2484,6 +3363,7 @@ mod test {
                 dhcp_yaml: serde_yaml::to_string(&ipv6_only_config()).unwrap(),
                 host_yaml: None,
                 interfaces: vec!["lo".to_string()],
+                service_config: ServiceConfig::default(),
                 applied: abandoned,
             })
             .await
@@ -2494,6 +3374,7 @@ mod test {
                 dhcp_yaml: "[".to_string(),
                 host_yaml: None,
                 interfaces: vec!["lo".to_string()],
+                service_config: ServiceConfig::default(),
                 applied,
             })
             .await
@@ -2928,8 +3809,13 @@ mod test {
         assert_eq!(packet.yiaddr(), Ipv4Addr::from([10, 217, 132, 204]));
     }
 
+    /// Verifies recorded host activity survives generation initialization and later writes merge
+    /// with retained history so restart cannot erase lifecycle evidence.
     #[tokio::test]
-    async fn test_send_metadata_to_agent() {
+    async fn host_activity_survives_generation_initialization() {
+        let _timestamp_file_guard = TEST_TIMESTAMP_FILE_LOCK.lock().await;
+        // Serialize this host OFFER with zero-delta assertions over the process-global reply metric.
+        let _metrics_guard = MetricsCapture::start();
         let byte_stream =
             get_byte_stream(Ipv4Addr::new(0, 0, 0, 0), None, MessageType::Discover, None);
         let handler: Box<dyn DhcpMode> = Box::new(Test {});
@@ -2952,9 +3838,9 @@ mod test {
         let before_dhcp = Utc::now();
         let udp_socket_addr: SocketAddrV4 = "127.0.0.1:1236".parse().unwrap();
         let dhcp_timestamps = Arc::new(Mutex::new({
-            let d = DhcpTimestamps::new(DhcpTimestampsFilePath::Test);
+            let mut d = DhcpTimestamps::new(DhcpTimestampsFilePath::Test);
             // Init the file like we would do during live operation.
-            d.write().unwrap();
+            d.initialize_file().unwrap();
             d
         }));
 
@@ -2964,11 +3850,12 @@ mod test {
             .read()
             .unwrap();
 
+        // Process one host DISCOVER to record the activity that generation initialization must preserve.
         process(
             "1.2.3.4:0".parse().unwrap(),
             Arc::new(UdpSocket::bind(udp_socket_addr).await.unwrap()),
             &byte_stream,
-            config.clone(),
+            Arc::new(config.clone()),
             &*handler,
             "vlan100",
             &mut machine_cache,
@@ -2976,6 +3863,7 @@ mod test {
         )
         .await;
 
+        // Confirm the DISCOVER updated both the in-memory map and its durable timestamp file.
         let dhcp_timestamps = dhcp_timestamps.lock().await;
 
         let timestamp = dhcp_timestamps
@@ -2993,7 +3881,204 @@ mod test {
             .parse()
             .unwrap();
 
-        assert!(before_dhcp < file_timestamp)
+        assert!(before_dhcp < file_timestamp);
+
+        // Reinitialize as a new generation would, with an empty in-memory map.
+        let mut restarted_timestamps = DhcpTimestamps::new(DhcpTimestampsFilePath::Test);
+        restarted_timestamps.initialize_file().unwrap();
+
+        // Existing host activity must survive in the replacement generation's write state.
+        assert_eq!(
+            restarted_timestamps.get_timestamp(&config.host_config().unwrap().host_interface_id),
+            dhcp_timestamps_new.get_timestamp(&config.host_config().unwrap().host_interface_id)
+        );
+
+        // Writing a different host after restart must merge with, rather than replace, the loaded activity.
+        let additional_host = "22222222-2222-2222-2222-222222222222".parse().unwrap();
+        restarted_timestamps.add_timestamp(additional_host, "2026-10-21T00:00:00Z".to_string());
+        restarted_timestamps.write().unwrap();
+        let mut merged_timestamps = DhcpTimestamps::new(DhcpTimestampsFilePath::Test);
+        merged_timestamps.read().unwrap();
+
+        // The durable map retains both the pre-restart host and the new observation.
+        assert_eq!(
+            merged_timestamps.get_timestamp(&config.host_config().unwrap().host_interface_id),
+            dhcp_timestamps_new.get_timestamp(&config.host_config().unwrap().host_interface_id)
+        );
+        assert_eq!(
+            merged_timestamps
+                .get_timestamp(&additional_host)
+                .map(String::as_str),
+            Some("2026-10-21T00:00:00Z")
+        );
+    }
+
+    /// Verifies malformed timestamp history degrades to an empty writable map because advisory
+    /// activity must not prevent listener startup.
+    #[tokio::test]
+    async fn malformed_timestamp_history_is_nonfatal() {
+        let _timestamp_file_guard = TEST_TIMESTAMP_FILE_LOCK.lock().await;
+        // Install invalid durable JSON at the path used by the test timestamp backend.
+        let path = DhcpTimestampsFilePath::Test.path_str();
+        if std::fs::exists(path).unwrap() {
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::write(path, b"not timestamp JSON").unwrap();
+
+        // Initialize through the generation helper that owns the nonfatal failure policy.
+        let (mut timestamps, logs) = capture_logs_async(async {
+            super::initialize_dhcp_timestamps(DhcpTimestampsFilePath::Test)
+        })
+        .await;
+
+        // The failure remains observable while the returned map can recover on its next host write.
+        assert!(logs.iter().any(|entry| {
+            entry.metadata_name == "dhcp_timestamp_file_failed"
+                && entry.field("operation") == Some("initialize")
+        }));
+        let host_interface_id = "11111111-1111-1111-1111-111111111111".parse().unwrap();
+        assert!(timestamps.get_timestamp(&host_interface_id).is_none());
+        // Record one host after recovery to prove the reset timestamp map remains writable.
+        timestamps.add_timestamp(host_interface_id, "2026-10-21T00:00:00Z".to_string());
+        timestamps.write().unwrap();
+        let mut recovered = DhcpTimestamps::new(DhcpTimestampsFilePath::Test);
+        recovered.read().unwrap();
+        assert_eq!(
+            recovered
+                .get_timestamp(&host_interface_id)
+                .map(String::as_str),
+            Some("2026-10-21T00:00:00Z")
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    /// Verifies a service ACK traverses binary packet processing without updating host activity so
+    /// service traffic cannot extend the tenant-host lifecycle.
+    #[tokio::test]
+    async fn service_packets_do_not_record_host_activity() {
+        // Attach a service reservation to an existing host interface so an erroneous timestamp update is observable.
+        let service_config = ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+            receiving_interface: "vlan200".to_string(),
+            reservations: vec![ServiceReservation {
+                attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
+                interface_ordinal: 0,
+                internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),
+                mac_address: TEST_CLIENT_MAC_TEXT.parse().unwrap(),
+                link: ServiceLink::Ipv4(ServiceLinkV4 {
+                    address: "192.0.2.11".parse().unwrap(),
+                    prefix: "192.0.2.10/31".parse().unwrap(),
+                    gateway: "192.0.2.10".parse().unwrap(),
+                }),
+            }],
+        }])
+        .unwrap();
+        // Route the ACK to a bound loopback relay socket so send success is independent of runner routing.
+        let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let SocketAddr::V4(relay_destination) = receiver.local_addr().unwrap() else {
+            panic!("the loopback relay must bind an IPv4 address");
+        };
+        let mut args = get_test_args();
+        args.relay_response_port = relay_destination.port();
+        let config = init(args)
+            .await
+            .unwrap()
+            .with_service_config(service_config);
+        let host_interface_id = config.host_config().unwrap().host_interface_id;
+        let timestamps = Arc::new(Mutex::new(DhcpTimestamps::new(
+            DhcpTimestampsFilePath::NotSet,
+        )));
+        let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
+            std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
+        )));
+
+        // Process an address-matched REQUEST whose chaddr resolves to the service reservation.
+        let (_, logs) = capture_logs_async(process(
+            TEST_SOURCE_ADDRESS,
+            Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap()),
+            &get_byte_stream(
+                "192.0.2.11".parse().unwrap(),
+                Some(*relay_destination.ip()),
+                MessageType::Request,
+                None,
+            ),
+            Arc::new(config),
+            &Dpu {},
+            "vlan200",
+            &mut machine_cache,
+            timestamps.clone(),
+        ))
+        .await;
+
+        // A sent-reply Event proves the timestamp assertion cannot pass because packet processing failed early.
+        assert!(logs.iter().any(|entry| {
+            entry.metadata_name == "dhcp_server_reply_sent"
+                && entry.field("message_type") == Some("ack")
+        }));
+
+        // Service traffic must remain absent from the host activity record used by lifecycle decisions.
+        assert!(
+            timestamps
+                .lock()
+                .await
+                .get_timestamp(&host_interface_id)
+                .is_none()
+        );
+    }
+
+    /// Verifies a retired host response cannot advance host activity because obsolete generations
+    /// must not influence lifecycle decisions.
+    #[tokio::test]
+    async fn retired_host_response_does_not_record_activity() {
+        // Retire an otherwise valid host generation before its DISCOVER reaches the final socket write.
+        let cancellation = CancellationToken::new();
+        let config = init(get_test_args())
+            .await
+            .unwrap()
+            .with_reply_retirement(cancellation.clone());
+        let host_interface_id = config.host_config().unwrap().host_interface_id;
+        let timestamps = Arc::new(Mutex::new(DhcpTimestamps::new(
+            DhcpTimestampsFilePath::NotSet,
+        )));
+        let mut machine_cache = Arc::new(Mutex::new(LruCache::new(
+            std::num::NonZeroUsize::new(cache::MACHINE_CACHE_SIZE).unwrap(),
+        )));
+
+        // Retire the generation before processing so the final send cannot record success or host activity.
+        cancellation.cancel();
+
+        // Process through the binary send and timestamp path rather than calling the packet transport directly.
+        let metrics = MetricsCapture::start();
+        let (_, logs) = capture_logs_async(process(
+            TEST_SOURCE_ADDRESS,
+            Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap()),
+            &get_byte_stream(Ipv4Addr::UNSPECIFIED, None, MessageType::Discover, None),
+            Arc::new(config),
+            &Test {},
+            "vlan200",
+            &mut machine_cache,
+            timestamps.clone(),
+        ))
+        .await;
+
+        // Retirement suppresses reply accounting and the host activity side effect together.
+        assert!(
+            logs.iter()
+                .all(|entry| entry.metadata_name != "dhcp_server_reply_sent")
+        );
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_dhcp_replies_sent_total",
+                &[("message_type", "offer")]
+            ),
+            0.0
+        );
+        assert!(
+            timestamps
+                .lock()
+                .await
+                .get_timestamp(&host_interface_id)
+                .is_none()
+        );
     }
 
     #[tokio::test]

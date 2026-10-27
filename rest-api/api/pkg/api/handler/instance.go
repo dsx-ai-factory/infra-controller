@@ -549,7 +549,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 
 	// Verify if site is ready
 	stDAO := cdbm.NewSiteDAO(cih.dbSession)
-	site, err := stDAO.GetByID(ctx, nil, vpc.SiteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, vpc.SiteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "The Site where this Instance is being created could not be found", nil)
@@ -1209,7 +1209,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to reload VPC power configuration", nil)
 			}
 			vpc = lockedVPC
-			lockedSite, lockErr := stDAO.GetByID(ctx, tx, vpc.SiteID, nil, false)
+			lockedSite, lockErr := stDAO.GetByID(ctx, tx, vpc.SiteID, nil, false, false)
 			if lockErr != nil {
 				logger.Error().Err(lockErr).Str("siteID", vpc.SiteID.String()).Msg("failed to reload Site after acquiring the VPC power lock")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to reload Site power configuration", nil)
@@ -4905,7 +4905,7 @@ func (gih GetInstanceHandler) Handle(c echo.Context) error {
 
 	// Get Site for this Instance
 	siteDAO := cdbm.NewSiteDAO(gih.dbSession)
-	site, err := siteDAO.GetByID(ctx, nil, instance.SiteID, nil, false)
+	site, err := siteDAO.GetByID(ctx, nil, instance.SiteID, nil, false, false)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Site DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site for Instance", nil)

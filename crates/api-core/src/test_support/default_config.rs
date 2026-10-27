@@ -330,6 +330,7 @@ pub fn get() -> CarbideConfig {
             enabled: true,
             svpc_enabled: true,
             astra_enabled: false,
+            partial_multiplane: Default::default(),
             subnet_ip: Ipv4Addr::UNSPECIFIED,
             subnet_mask: EwEthersConfig::default_subnet_mask(),
             astra: Default::default(),

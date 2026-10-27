@@ -1240,6 +1240,7 @@ mod tests {
         // Automatic callers defer non-Ready racks; operator callers may
         // explicitly opt into recovering a rack from Error.
         let error_state = RackState::Error {
+            certificate_failure: None,
             cause: "test".into(),
             recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
         };

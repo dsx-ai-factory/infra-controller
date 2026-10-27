@@ -435,6 +435,71 @@ pub(in crate::tests) mod tests {
     }
 
     #[crate::sqlx_test]
+    async fn test_sku_create_distinguishes_large_persisted_memory(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        use std::collections::BTreeMap;
+
+        use rpc::forge::forge_server::Forge;
+        use rpc::forge::{SkuComponentMemory, SkuComponents, SkuList, SkusByIdsRequest};
+
+        let env = create_test_env(pool).await;
+        let mut expected_memory_by_id = BTreeMap::new();
+
+        // Separate RPCs make the second create compare against a committed SKU.
+        // Both totals exceed `u32`: narrow arithmetic would panic, and wrapping
+        // or saturation would make them appear equal.
+        for (sku_id, count) in [("first-large-memory", 2), ("second-large-memory", 4)] {
+            let memory = vec![SkuComponentMemory {
+                memory_type: "DDR5".to_string(),
+                capacity_mb: 1_u32 << 31,
+                count,
+            }];
+            let sku = rpc::forge::Sku {
+                id: sku_id.to_string(),
+                schema_version: CURRENT_SKU_VERSION,
+                components: Some(SkuComponents {
+                    memory: memory.clone(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let created = env
+                .api
+                .create_sku(tonic::Request::new(SkuList { skus: vec![sku] }))
+                .await?
+                .into_inner();
+            assert_eq!(created.ids, vec![sku_id.to_string()]);
+            expected_memory_by_id.insert(sku_id.to_string(), memory);
+        }
+
+        // Reload both definitions to check that their large values survive storage.
+        let saved_skus = env
+            .api
+            .find_skus_by_ids(tonic::Request::new(SkusByIdsRequest {
+                ids: expected_memory_by_id.keys().cloned().collect(),
+            }))
+            .await?
+            .into_inner()
+            .skus;
+        assert_eq!(saved_skus.len(), expected_memory_by_id.len());
+        let saved_memory_by_id = saved_skus
+            .into_iter()
+            .map(|sku| {
+                (
+                    sku.id,
+                    sku.components
+                        .expect("saved SKU should have components")
+                        .memory,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(saved_memory_by_id, expected_memory_by_id);
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
     pub(in crate::tests) async fn test_sku_create_duplicate_id_returns_already_exists(
         pool: sqlx::PgPool,
     ) -> Result<(), eyre::Error> {

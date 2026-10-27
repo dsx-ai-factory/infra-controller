@@ -52,11 +52,14 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_bmc_proxy_redirects_total</td><td>counter</td><td>Number of BMC redirect responses observed by configured mode, response status, target classification, and proxy disposition</td></tr>
 <tr><td>carbide_bmc_proxy_slo_missed_total</td><td>counter</td><td>Number of windows of requests in which a class with a latency target missed it at a BMC, each cutting the slots classes without a target may hold there, by request class</td></tr>
 <tr><td>carbide_bmc_proxy_switch_probe_denied_total</td><td>counter</td><td>Number of times nico-api denied the proxy&#39;s FindSwitchIds probe for the switch at a proxied address, after which the proxy resolves every address as a BMC&#39;s until it probes again</td></tr>
+<tr><td>carbide_bmc_proxy_switch_tls_certificate_out_of_validity_total</td><td>counter</td><td>Number of times a load or check of the tls.switch files found a certificate in them expired or not yet valid, by the file holding it</td></tr>
+<tr><td>carbide_bmc_proxy_switch_tls_reload_failures_total</td><td>counter</td><td>Number of failed reloads of the tls.switch client identity and CA bundle the proxy uses for switches&#39; NVOS interfaces; the previously loaded ones stay in use</td></tr>
 <tr><td>carbide_bmc_proxy_tls_connection_attempted_total</td><td>counter</td><td>Number of inbound TLS connection attempts</td></tr>
 <tr><td>carbide_bmc_proxy_tls_connection_fail_total</td><td>counter</td><td>Number of failed inbound connections, by failure reason</td></tr>
 <tr><td>carbide_bmc_proxy_tls_connection_success_total</td><td>counter</td><td>Number of successful TLS connections</td></tr>
 <tr><td>carbide_bmc_proxy_tls_reload_failures_total</td><td>counter</td><td>Number of failed inbound TLS identity and trust-root reloads</td></tr>
 <tr><td>carbide_bmc_proxy_upstream_auth_retries_total</td><td>counter</td><td>Number of forwarded requests replayed once with freshly resolved BMC credentials after the BMC rejected the proxy&#39;s cached credential, by HTTP method</td></tr>
+<tr><td>carbide_bmc_proxy_upstream_certificate_rejected_total</td><td>counter</td><td>Number of attempts the proxy did not send because the target&#39;s certificate failed verification against tls.switch</td></tr>
 <tr><td>carbide_bmc_proxy_upstream_request_duration_milliseconds</td><td>histogram</td><td>Duration of requests the proxy forwarded to BMCs, by HTTP method and upstream status class; the _count series, split by status, gives the request and outcome rates.</td></tr>
 <tr><td>carbide_bmc_session_cleanup_failures_total</td><td>counter</td><td>Number of BMC session cleanup failures, by operation.</td></tr>
 <tr><td>carbide_bmc_session_lockout_breaker_transitions_total</td><td>counter</td><td>Number of BMC session lockout-avoidance breaker transitions.</td></tr>

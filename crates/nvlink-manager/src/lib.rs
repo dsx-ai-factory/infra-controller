@@ -78,10 +78,14 @@ use tracing::Instrument;
 /// Default NMX-M instance identifier for credentials and client lookup when none is specified.
 pub const DEFAULT_NMX_M_NAME: &str = "default";
 
-/// Multicast groups limit for new NMX-C partitions. Must be a multiple of 4. Assuming at most 1
-/// partition per tray and 18 tray default partitions, this is floor(1024 / 18) rounded down
+/// Multicast groups limit for new tenant NMX-C partitions. Must be a multiple of 4. Assuming at
+/// most 1 partition per tray and 18 tray default partitions, this is floor(1024 / 18) rounded down
 /// to the nearest multiple of 4.
 const NMX_C_PARTITION_MULTICAST_GROUPS_LIMIT: u32 = 56;
+
+/// Multicast groups limit for new tray default partitions (`tray_partition_{slot}`). Must be a
+/// multiple of 4.
+const TRAY_PARTITION_MULTICAST_GROUPS_LIMIT: u32 = 16;
 
 /// Idle time between two partition monitor iterations.
 ///
@@ -1120,7 +1124,7 @@ impl NvLinkManager {
         )
         .start(join_set, cancel_token.clone())?;
 
-        if self.config.nmx_c_certificate_rotation.enabled {
+        if self.config.certificate_rotation_enabled() {
             let switch_cert_monitor = switch_cert_monitor::SwitchCertificateMonitor::new(
                 self.db_pool,
                 self.meter,
@@ -3039,7 +3043,8 @@ impl NvlPartitionMonitor {
                 let start_time = std::time::Instant::now();
                 let result = match &operation.operation_type {
                     NmxcPartitionOperationType::Create => {
-                        let name = if operation.name.starts_with("tray_partition_") {
+                        let is_tray_partition = operation.name.starts_with("tray_partition_");
+                        let name = if is_tray_partition {
                             operation.name.chars().take(240).collect::<String>()
                         } else {
                             let name = format!(
@@ -3057,7 +3062,11 @@ impl NvlPartitionMonitor {
                         let request = nmx_c_create_partition_request(
                             name.clone(),
                             &operation.gpu_uids,
-                            NMX_C_PARTITION_MULTICAST_GROUPS_LIMIT,
+                            if is_tray_partition {
+                                TRAY_PARTITION_MULTICAST_GROUPS_LIMIT
+                            } else {
+                                NMX_C_PARTITION_MULTICAST_GROUPS_LIMIT
+                            },
                         );
                         match nmxc_client.create_partition(request.clone()).await {
                             Err(e) if e.is_nmx_resource_exhausted() => {

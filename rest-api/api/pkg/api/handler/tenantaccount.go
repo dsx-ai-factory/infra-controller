@@ -963,7 +963,7 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 			ts, gerr := tsDAO.GetByTenantIDAndSiteID(ctx, tx, *ta.TenantID, siteID, []string{"Site"})
 			if gerr != nil {
 				if errors.Is(gerr, cdb.ErrDoesNotExist) {
-					site, serr := cdbm.NewSiteDAO(utah.dbSession).GetByID(ctx, tx, siteID, nil, false)
+					site, serr := cdbm.NewSiteDAO(utah.dbSession).GetByID(ctx, tx, siteID, nil, false, false)
 					if serr != nil && !errors.Is(serr, cdb.ErrDoesNotExist) {
 						return serr
 					}

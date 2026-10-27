@@ -26,14 +26,14 @@ for the role and interface model.
 
 | Task | Role | Interface |
 | --- | --- | --- |
-| Enable NVLink; NMX-C connection and TLS settings | Operator | **TOML** (`[nvlink_config]`) — Day 0 / rare |
+| Enable NVLink; override NMX-C connection and TLS settings | Operator | **TOML** (`[nvlink_config]`) — Day 0 / rare |
 | Fallback NMX-C endpoints (per chassis serial) | Operator | `nico-admin-cli nvlink-nmxc-endpoints ...` (gRPC) — not in REST |
 | Create / update / delete an NVLink Logical Partition | Tenant | **REST** `.../nico/nvlink-logical-partition` · `nicocli nvlink-logical-partition create` |
 | Assign or change an instance's GPUs' partition | Tenant | **REST** `.../nico/instance` (`nvLinkInterfaces`) · `nicocli instance update` |
 | Inspect a machine's GPU domain placement (triage) | Operator | `nico-admin-cli machine nvlink-info show <MACHINE_ID>` (gRPC) |
 
 The operator NMX setup (the first two rows) is detailed under
-[Enabling NMX-C-based NVLink Partitioning](#enabling-nmx-c-based-nvlink-partitioning).
+[Configuring NMX-C-based NVLink Partitioning](#configuring-nmx-c-based-nvlink-partitioning).
 Certificate lifecycle setup and alerting are described in
 [NMX-C Certificate Monitoring and Rotation](../operations/nvlink-certificate-rotation.md).
 The tenant rows are the REST / `nicocli` flow described next.
@@ -227,7 +227,7 @@ When a host is force-deleted, the instance running on it is implicitly
 released and the above cleanup path runs. Operators do not need to detach
 NVLink configuration manually before force-deleting.
 
-### Enabling NMX-C-based NVLink Partitioning
+### Configuring NMX-C-based NVLink Partitioning
 
 NMX-C is the supported gRPC control path for NVLink partition management.
 
@@ -238,16 +238,18 @@ available temporarily so existing scripts receive a clear unsupported error;
 they do not modify credentials.
 </Note>
 
-Configure the NMX-C client under `[nvlink_config]`:
+Enable NVLink partitioning, and configure the NMX-C client when the defaults
+described below do not fit the site, under `[nvlink_config]`:
 
 ```toml
 [nvlink_config]
 enabled = true
 monitor_run_interval = "60s"
 
-# TLS material for NMX-C. The CA path is required by the certificate
-# monitor. Configure the client certificate and key together when NMX-C
-# requires mTLS.
+# TLS material for NMX-C. The CA path defaults when nico-api finds a
+# ca.crt (see below); otherwise set it, because the certificate monitor
+# requires it. Configure the client certificate and key together when
+# NMX-C requires mTLS.
 nmx_c_tls_ca_cert_path     = "/etc/nico/nmxc/ca.pem"
 nmx_c_tls_client_cert_path = "/etc/nico/nmxc/client.crt"
 nmx_c_tls_client_key_path  = "/etc/nico/nmxc/client.key"
@@ -259,12 +261,50 @@ allow_insecure = false
 
 | Field | Purpose |
 | ----- | ------- |
-| `nmx_c_tls_ca_cert_path` | Optional PEM containing additional CAs for normal NMX-C connectivity. The certificate monitor requires this file and does not use the system trust store |
+| `nmx_c_tls_ca_cert_path` | PEM containing the CAs that verify NMX-C over HTTPS. It is the only trust source: neither the partition monitor nor the certificate monitor uses the system trust store |
 | `nmx_c_tls_client_cert_path` | Optional client certificate for mTLS to NMX-C |
 | `nmx_c_tls_client_key_path` | Optional client key matching the certificate above |
 | `nmx_c_tls_authority` | Optional override for the expected server name during certificate verification (SNI / hostname check) |
 | `nmx_c_endpoint_port` | Optional gRPC port used when deriving an endpoint from a switch NVOS IP; defaults to `9370` |
 | `allow_insecure` | Development option that can select plaintext HTTP for rack-derived endpoints when no client certificate and key are configured. It does not disable certificate-monitor TLS verification |
+
+`enabled` defaults to `false`. Set it to `true` in the site configuration,
+or set the nico-api Helm chart value `nvlink.enabled`, which the site
+configuration overrides. The certificate monitor's
+`nmx_c_certificate_rotation.enabled` follows `enabled` unless it is set.
+
+<Warning>
+On a rack with running instances, the first partition monitor pass removes
+the NMX-C default partition and any NMX-C partition NICo did not create, so
+those instances lose NVLink connectivity until tenants configure NVLink
+partitions through NICo. Enable partitioning before instances are created, or
+schedule the change accordingly.
+</Warning>
+
+When either setting is `true`, `nico-api` fills in unset TLS settings at
+startup:
+
+- **Client certificate, key, and authority.** When none of the four
+  `nmx_c_tls_*` keys is set, `nico-api` uses `tls.crt` and `tls.key` from the
+  nico-api Helm chart's `nvSwitchTls.nicoClient` mount,
+  `/var/run/secrets/nvswitch-client`, and sets `nmx_c_tls_authority` to
+  `initial_domain_name`. Setting any `nmx_c_tls_*` key disables these three
+  defaults.
+- **CA bundle.** When `nmx_c_tls_ca_cert_path` is unset and NMX-C is reached
+  over HTTPS, `nico-api` uses `ca.crt` from that mount, or else
+  `/var/run/secrets/nico-roots/ca.crt`. This applies regardless of the other
+  keys.
+
+The authority default only works when `initial_domain_name` is set and
+matches a DNS SAN of the certificate NMX-C presents. On switches whose server
+certificate is issued by RMS, set it to the same value as RMS's
+`apiServer.dnsDomain`. Without it, `nico-api` verifies each NMX-C endpoint
+against its own host, the switch NVOS IP for rack endpoints, and the TLS
+handshake fails for certificates that carry only a DNS name.
+
+The
+[`NvLinkConfig` reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md#nvlinkconfig)
+describes exactly when each default applies.
 
 Rack-associated machines use the NVOS IP of a ready Fabric Manager
 control-plane switch in the rack. Machines without a rack association use an

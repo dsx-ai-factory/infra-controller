@@ -20,7 +20,9 @@ use std::sync::Arc;
 
 use carbide_dhcp_common::VendorClass;
 use carbide_instrument::emit;
-use carbide_rpc_utils::dhcp::{DhcpV4Config, HostConfig, InterfaceInfo};
+use carbide_rpc_utils::dhcp::{
+    DhcpV4Config, HostConfig, InterfaceInfo, ServiceLink, ServiceLinkV4,
+};
 use dhcproto::v4::relay::{RelayAgentInformation, RelayCode, RelayInfo};
 use dhcproto::v4::{Decodable, Decoder, DhcpOption, Message, MessageType, OptionCode};
 use dhcproto::{Encodable, Encoder};
@@ -34,7 +36,7 @@ use crate::cache::CacheEntry;
 use crate::errors::DhcpError;
 use crate::metrics::{DhcpReplySent, DhcpRequestReceived, MessageTypeLabel};
 use crate::modes::DhcpMode;
-use crate::{Config, util};
+use crate::{Config, ReplyRetirement, ReplyStatus, util};
 
 const PKT_TYPE_OP_REQUEST: u8 = 1;
 const BOOTP_CHADDR_LEN: u8 = 16;
@@ -172,6 +174,24 @@ impl DecodedPacket {
         .ok()
     }
 
+    /// Returns option 50 only when it has the expected address form so service REQUEST validation
+    /// cannot accept unrelated option data.
+    fn requested_ip_address(&self) -> Option<Ipv4Addr> {
+        match self.packet.opts().get(OptionCode::RequestedIpAddress) {
+            Some(DhcpOption::RequestedIpAddress(address)) => Some(*address),
+            _ => None,
+        }
+    }
+
+    /// Copies the caller's option 61 so service responses preserve client-selected identity without
+    /// using it for reservation lookup.
+    fn client_identifier(&self) -> Option<Vec<u8>> {
+        match self.packet.opts().get(OptionCode::ClientIdentifier) {
+            Some(DhcpOption::ClientIdentifier(identifier)) => Some(identifier.clone()),
+            _ => None,
+        }
+    }
+
     fn get_discovery_request(&self, handler: &dyn DhcpMode, circuit_id: &str) -> DhcpDiscovery {
         DhcpDiscovery {
             mac_address: util::u8_to_mac(self.packet.chaddr()),
@@ -212,12 +232,14 @@ impl DecodedPacket {
 
 pub struct Packet {
     encoded_packet: Vec<u8>,
-    sent_packet: Message,
+    sent_packet: Option<Message>,
     dst_address: Ipv4Addr,
     dst_port: u16,
     /// The reply's DHCP message type (an Offer, an Ack, a Nak), as the
     /// bounded label the send path counts lease grants under.
-    message_type: MessageTypeLabel,
+    message_type: Option<MessageTypeLabel>,
+    service_response: bool,
+    reply_retirement: ReplyRetirement,
 }
 
 impl Packet {
@@ -229,38 +251,60 @@ impl Packet {
     pub(super) fn dst_address(&self) -> SocketAddrV4 {
         SocketAddrV4::new(self.dst_address, self.dst_port)
     }
+
+    /// Returns whether a sent reply belongs to host DHCP and should update the host activity
+    /// timestamp.
+    pub fn records_host_activity(&self) -> bool {
+        self.sent_packet.is_some() && !self.service_response
+    }
 }
 
 impl Packet {
+    /// Sends a prepared response through its listener generation, returning `NoReply` or `Retired`
+    /// without socket or metric effects.
     pub async fn send(
         &self,
         dst_address: SocketAddrV4,
         socket: Arc<UdpSocket>,
-    ) -> Result<(), String> {
-        if let Err(error) = socket.send_to(&self.encoded_packet, dst_address).await {
-            tracing::debug!(
-                packet.send = %self.sent_packet,
-                destination_address = %dst_address,
-                error = %error,
-                "Failed to send DHCP packet"
-            );
-            return Err(error.to_string());
+    ) -> Result<ReplyStatus, String> {
+        let Some(sent_packet) = self.sent_packet.as_ref() else {
+            return Ok(ReplyStatus::NoReply);
+        };
+        let status = match self
+            .reply_retirement
+            .send_to(&socket, &self.encoded_packet, dst_address.into())
+            .await
+        {
+            Ok(status) => status,
+            Err(error) => {
+                tracing::debug!(
+                    packet.send = %sent_packet,
+                    destination_address = %dst_address,
+                    error = %error,
+                    "Failed to send DHCP packet"
+                );
+                return Err(error.to_string());
+            }
+        };
+        // A retired generation must not log or count a response that never reached the socket.
+        if status == ReplyStatus::Retired {
+            return Ok(status);
         }
 
         emit(DhcpReplySent {
-            message_type: self.message_type,
+            message_type: self.message_type.unwrap_or(MessageTypeLabel::Other),
             destination_address: dst_address,
-            xid: i64::from(self.sent_packet.xid()),
-            broadcast_flag: self.sent_packet.flags().broadcast(),
-            ciaddr: self.sent_packet.ciaddr(),
-            yiaddr: self.sent_packet.yiaddr(),
-            siaddr: self.sent_packet.siaddr(),
-            giaddr: self.sent_packet.giaddr(),
-            chaddr: util::u8_to_mac(self.sent_packet.chaddr()),
+            xid: i64::from(sent_packet.xid()),
+            broadcast_flag: sent_packet.flags().broadcast(),
+            ciaddr: sent_packet.ciaddr(),
+            yiaddr: sent_packet.yiaddr(),
+            siaddr: sent_packet.siaddr(),
+            giaddr: sent_packet.giaddr(),
+            chaddr: util::u8_to_mac(sent_packet.chaddr()),
         });
-        tracing::debug!(packet.send = %self.sent_packet, "Sent DHCP packet");
+        tracing::debug!(packet.send = %sent_packet, "Sent DHCP packet");
 
-        Ok(())
+        Ok(status)
     }
 }
 
@@ -323,6 +367,42 @@ pub async fn process_packet(
     decoded_packet.is_this_for_us(config)?;
 
     let msg_type = msg_type?;
+    let client_mac = util::u8_to_mac(decoded_packet.packet.chaddr());
+    // Resolve static service reservations before host discovery; DPU lookup fails closed on
+    // configured service interfaces.
+    if let Some(reservation) = handler.service_reservation(config, circuit_id, &client_mac)? {
+        let ServiceLink::Ipv4(link) = &reservation.link else {
+            return Err(DhcpError::InvalidInput(format!(
+                "IPv6 service reservation {} cannot answer DHCPv4",
+                reservation.internal_uuid
+            )));
+        };
+        let Some(packet) =
+            create_service_reply_packet(&decoded_packet, link, config, ipv4, msg_type)?
+        else {
+            let (dst_address, dst_port) =
+                decoded_packet.decide_dst_ip(msg_type, config.relay_response_port);
+            return Ok(Packet {
+                encoded_packet: Vec::new(),
+                sent_packet: None,
+                dst_address,
+                dst_port,
+                message_type: None,
+                service_response: true,
+                reply_retirement: config.reply_retirement.clone(),
+            });
+        };
+        // A direct NAK rejects ciaddr, so sending the rejection to that address could make it unreachable.
+        let (dst_address, dst_port) = if packet.opts().msg_type() == Some(MessageType::Nak)
+            && decoded_packet.packet.giaddr().is_unspecified()
+        {
+            (Ipv4Addr::BROADCAST, 68)
+        } else {
+            decoded_packet.decide_dst_ip(msg_type, config.relay_response_port)
+        };
+        return encode_packet(packet, dst_address, dst_port, true, config);
+    }
+
     let dhcp_response = handler
         .discover_dhcp(
             decoded_packet.get_discovery_request(handler, circuit_id),
@@ -343,31 +423,132 @@ pub async fn process_packet(
         msg_type,
     )?;
 
-    // Read the type off the reply itself: create_dhcp_reply_packet answers a
-    // Request with either an Ack or a Nak.
+    encode_packet(packet, dst_address, dst_port, false, config)
+}
+
+/// Encodes one DHCPv4 response with its immutable generation guard so every caller shares the same
+/// retirement check.
+fn encode_packet(
+    packet: Message,
+    dst_address: Ipv4Addr,
+    dst_port: u16,
+    service_response: bool,
+    config: &Config,
+) -> Result<Packet, DhcpError> {
     let reply_message_type = packet
         .opts()
         .msg_type()
         .map_or(MessageTypeLabel::Other, MessageTypeLabel::from);
-
     let mut encoded_packet = Vec::new();
-    let mut e = Encoder::new(&mut encoded_packet);
-    if let Err(error) = packet.encode(&mut e) {
-        tracing::debug!(
-            packet.encode = %packet,
-            error = %error,
-            "Failed to encode DHCP packet"
-        );
+    let mut encoder = Encoder::new(&mut encoded_packet);
+    if let Err(error) = packet.encode(&mut encoder) {
+        tracing::debug!(packet.encode = %packet, error = %error, "Failed to encode DHCP packet");
         return Err(error.into());
     }
-
     Ok(Packet {
         encoded_packet,
-        sent_packet: packet,
+        sent_packet: Some(packet),
         dst_address,
         dst_port,
-        message_type: reply_message_type,
+        message_type: Some(reply_message_type),
+        service_response,
+        reply_retirement: config.reply_retirement.clone(),
     })
+}
+
+/// Builds a minimal fixed-address DHCPv4 service response so host identity, DNS, PXE, and MTU data
+/// never cross into a service VRF.
+fn create_service_reply_packet(
+    src: &DecodedPacket,
+    link: &ServiceLinkV4,
+    config: &Config,
+    ipv4: DhcpV4Config,
+    dhcp_msg_type: MessageType,
+) -> Result<Option<Message>, DhcpError> {
+    let reply_message_type = match dhcp_msg_type {
+        MessageType::Discover => MessageType::Offer,
+        MessageType::Request => {
+            // A bound ciaddr identifies renewals; otherwise option 50 identifies selecting and INIT-REBOOT requests.
+            let requested_address = if src.packet.ciaddr().is_unspecified() {
+                src.requested_ip_address()
+            } else {
+                Some(src.packet.ciaddr())
+            };
+            if requested_address != Some(link.address) {
+                return service_nak_packet(src, ipv4.server).map(Some);
+            }
+            MessageType::Ack
+        }
+        // A service address is statically owned, so RELEASE has no allocation state to mutate or acknowledge.
+        MessageType::Release => return Ok(None),
+        MessageType::Decline => {
+            return Err(DhcpError::DhcpDeclineMessage(
+                src.packet.ciaddr().to_string(),
+                util::u8_to_mac(src.packet.chaddr()),
+            ));
+        }
+        _ => return Err(DhcpError::UnhandledMessageType(dhcp_msg_type)),
+    };
+
+    let mut message = Message::default();
+    message
+        .set_opcode(dhcproto::v4::Opcode::BootReply)
+        .set_htype(dhcproto::v4::HType::Eth)
+        .set_hops(0)
+        .set_xid(src.packet.xid())
+        .set_secs(0)
+        .set_flags(src.packet.flags())
+        .set_ciaddr(src.packet.ciaddr())
+        .set_yiaddr(link.address)
+        .set_siaddr(Ipv4Addr::UNSPECIFIED)
+        .set_giaddr(src.packet.giaddr())
+        .set_chaddr(src.packet.chaddr());
+
+    message
+        .opts_mut()
+        .insert(DhcpOption::MessageType(reply_message_type));
+    message
+        .opts_mut()
+        .insert(DhcpOption::SubnetMask(link.prefix.mask()));
+    message
+        .opts_mut()
+        .insert(DhcpOption::Router(vec![link.gateway]));
+    message.opts_mut().insert(DhcpOption::AddressLeaseTime(
+        config.dhcp_config.lease_time_secs,
+    ));
+    message
+        .opts_mut()
+        .insert(DhcpOption::ServerIdentifier(ipv4.server));
+    message
+        .opts_mut()
+        .insert(DhcpOption::Renewal(config.dhcp_config.renewal_time_secs));
+    message.opts_mut().insert(DhcpOption::Rebinding(
+        config.dhcp_config.rebinding_time_secs,
+    ));
+
+    if let Some(client_identifier) = src.client_identifier() {
+        message
+            .opts_mut()
+            .insert(DhcpOption::ClientIdentifier(client_identifier));
+    }
+    Ok(Some(message))
+}
+
+/// Builds a service-specific NAK without provisioning-server data or rejected ciaddr so invalid
+/// client state and host PXE connectivity are not echoed.
+fn service_nak_packet(
+    src: &DecodedPacket,
+    carbide_dhcp_server: Ipv4Addr,
+) -> Result<Message, DhcpError> {
+    let mut message = nak_packet(
+        src,
+        Ipv4Addr::UNSPECIFIED,
+        carbide_dhcp_server,
+        src.client_identifier(),
+    )?;
+    // The rejected address is not valid client state and must not be echoed in a service NAK.
+    message.set_ciaddr(Ipv4Addr::UNSPECIFIED);
+    Ok(message)
 }
 
 fn create_dhcp_reply_packet(
@@ -398,7 +579,12 @@ fn create_dhcp_reply_packet(
         MessageType::Request if src.packet.ciaddr() == allocated_address => MessageType::Ack,
         // This means allocated IP address is not same as requested by the client. Send NAK.
         MessageType::Request => {
-            return nak_packet(src, ipv4.provisioning_server, ipv4.server);
+            return nak_packet(
+                src,
+                ipv4.provisioning_server,
+                ipv4.server,
+                Some(ethernet_client_identifier(src)),
+            );
         }
         MessageType::Decline => {
             return Err(DhcpError::DhcpDeclineMessage(
@@ -501,12 +687,7 @@ fn create_dhcp_reply_packet(
         config.host_config.as_ref(),
     )));
 
-    let mut client_identifier: Vec<u8> = Vec::with_capacity(src.packet.chaddr().len() + 1);
-    client_identifier.push(1); // ethernet
-    src.packet
-        .chaddr()
-        .iter()
-        .for_each(|x| client_identifier.push(*x));
+    let client_identifier = ethernet_client_identifier(src);
     msg.opts_mut()
         .insert(DhcpOption::ClientIdentifier(client_identifier));
 
@@ -574,6 +755,7 @@ fn nak_packet(
     src: &DecodedPacket,
     carbide_provisioning_server_ipv4: Ipv4Addr,
     carbide_dhcp_server: Ipv4Addr,
+    client_identifier: Option<Vec<u8>>,
 ) -> Result<Message, DhcpError> {
     // https://www.ietf.org/rfc/rfc2131.txt
     let mut msg = Message::default();
@@ -592,18 +774,23 @@ fn nak_packet(
     msg.opts_mut()
         .insert(DhcpOption::MessageType(MessageType::Nak));
 
-    let mut client_identifier: Vec<u8> = Vec::with_capacity(src.packet.chaddr().len() + 1);
-    client_identifier.push(1); // ethernet
-    src.packet
-        .chaddr()
-        .iter()
-        .for_each(|x| client_identifier.push(*x));
-    msg.opts_mut()
-        .insert(DhcpOption::ClientIdentifier(client_identifier));
+    if let Some(client_identifier) = client_identifier {
+        msg.opts_mut()
+            .insert(DhcpOption::ClientIdentifier(client_identifier));
+    }
     msg.opts_mut()
         .insert(DhcpOption::ServerIdentifier(carbide_dhcp_server));
 
     Ok(msg)
+}
+
+/// Builds the legacy Ethernet option 61 used by host DHCP replies so service echo behavior does not
+/// alter host compatibility.
+fn ethernet_client_identifier(src: &DecodedPacket) -> Vec<u8> {
+    let mut identifier = Vec::with_capacity(src.packet.chaddr().len() + 1);
+    identifier.push(1);
+    identifier.extend_from_slice(src.packet.chaddr());
+    identifier
 }
 
 fn get_mtu(circuit_id: &str, host_config: Option<&HostConfig>) -> u16 {
