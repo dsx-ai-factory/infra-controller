@@ -27,16 +27,16 @@ use crate::config::MetricsConfig;
 use crate::endpoint::BmcAddr;
 use crate::metrics::MetricsManager;
 use crate::otlp::convert::build_metrics_export_request;
-use crate::otlp::metrics::{AggregationTemporality, metric};
+use crate::otlp::metrics::{AggregationTemporality, metric, number_data_point};
 use crate::sink::{
     CollectorEvent, DataSink, EventContext, MetricSample, MetricSemantics, PrometheusSink,
 };
 
 /// `hardware_metric_exposition` exports source fixtures through `PrometheusSink`
-/// and checks Prometheus and OTLP metadata separately.
+/// and checks metadata and readings in both Prometheus and OTLP exports.
 /// The returned text feeds the generated catalogue in `test_integration`.
 /// Metrics setup, Redfish decoding and forwarding, and text export failures
-/// return `HealthError`. Inventory or exporter metadata mismatches panic,
+/// return `HealthError`. Inventory or exported metric mismatches panic,
 /// including missing gNMI samples after logged sink failures.
 pub fn hardware_metric_exposition() -> Result<String, HealthError> {
     let prefix = MetricsConfig::default().prefix;
@@ -107,6 +107,7 @@ pub fn hardware_metric_exposition() -> Result<String, HealthError> {
             &legacy_name,
             "gauge",
             "Metrics forwarded through sink pipeline",
+            sample.value,
         );
         let legacy = otlp_metrics[legacy_name.as_str()];
         assert_eq!(legacy.description, "", "{legacy_name}");
@@ -115,11 +116,19 @@ pub fn hardware_metric_exposition() -> Result<String, HealthError> {
             panic!("{legacy_name} must remain an OTLP gauge");
         };
         assert_eq!(gauge.data_points.len(), 1, "{legacy_name}");
+        let expected_value = Some(number_data_point::Value::AsDouble(sample.value));
+        assert_eq!(gauge.data_points[0].value, expected_value, "{legacy_name}");
 
         if let MetricSemantics::CumulativeCounter { description, .. } = sample.semantics {
             assert!(!description.trim().is_empty(), "{legacy_name}");
             let alias_name = format!("{legacy_name}_total");
-            assert_prometheus_family(&exposition, &alias_name, "counter", description);
+            assert_prometheus_family(
+                &exposition,
+                &alias_name,
+                "counter",
+                description,
+                sample.value,
+            );
             let counter = otlp_metrics[alias_name.as_str()];
             assert_eq!(counter.description, description, "{alias_name}");
             assert_eq!(counter.unit, sample.unit, "{alias_name}");
@@ -127,6 +136,7 @@ pub fn hardware_metric_exposition() -> Result<String, HealthError> {
                 panic!("{alias_name} must be an OTLP sum");
             };
             assert_eq!(sum.data_points.len(), 1, "{alias_name}");
+            assert_eq!(sum.data_points[0].value, expected_value, "{alias_name}");
             assert_eq!(sum.data_points[0].start_time_unix_nano, 0, "{alias_name}");
             assert_eq!(
                 sum.data_points[0].attributes,
@@ -181,7 +191,13 @@ impl DataSink for CatalogueSink {
     }
 }
 
-fn assert_prometheus_family(exposition: &str, name: &str, ty: &str, help: &str) {
+fn assert_prometheus_family(
+    exposition: &str,
+    name: &str,
+    ty: &str,
+    help: &str,
+    expected_value: f64,
+) {
     assert!(
         exposition
             .lines()
@@ -194,12 +210,17 @@ fn assert_prometheus_family(exposition: &str, name: &str, ty: &str, help: &str) 
             .any(|line| line == format!("# TYPE {name} {ty}")),
         "missing TYPE for {name}",
     );
-    assert!(
-        exposition
-            .lines()
-            .any(|line| line.starts_with(&format!("{name}{{"))),
-        "missing sample for {name}",
-    );
+    let row = exposition
+        .lines()
+        .find(|line| line.starts_with(&format!("{name}{{")))
+        .unwrap_or_else(|| panic!("missing sample for {name}"));
+    let value = row
+        .rsplit_once(' ')
+        .expect("metric sample value")
+        .1
+        .parse::<f64>()
+        .expect("numeric metric sample");
+    assert_eq!(value, expected_value, "{name}");
 }
 
 const EXPECTED_SOURCE_NAMES: [&str; 31] = [

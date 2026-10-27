@@ -353,6 +353,7 @@ fn mock_resources() -> HashMap<String, MockResponse> {
         "Processor metrics",
         json!({
             "BandwidthPercent": 42.0,
+            "PowerLimitThrottleDuration": "PT1.25S",
             "CoreVoltage": {
                 "DataSourceUri": "/redfish/v1/Chassis/CH0/Sensors/CPU0_Voltage",
                 "Reading": 1.2

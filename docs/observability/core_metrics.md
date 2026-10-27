@@ -163,7 +163,9 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_hardware_health_hw_metric_pcie_unsupported_request_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_pcie_unsupported_request_count_total</td><td>counter</td><td>Number of unsupported PCIe requests received by the device</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_power_limit_throttle_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_power_limit_throttle_seconds_total</td><td>counter</td><td>Number of seconds the processor has throttled due to a power limit since reset</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_thermal_limit_throttle_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_thermal_limit_throttle_seconds_total</td><td>counter</td><td>Number of seconds the processor has throttled due to a thermal limit since reset</td></tr>
 <tr><td>carbide_hardware_health_inventory_last_success_time_seconds</td><td>gauge</td><td>Unix timestamp of the last successful NICo inventory reconciliation</td></tr>
 <tr><td>carbide_hardware_health_inventory_refresh_failures_total</td><td>counter</td><td>Number of authoritative hardware inventory refreshes that failed.</td></tr>
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_in_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
