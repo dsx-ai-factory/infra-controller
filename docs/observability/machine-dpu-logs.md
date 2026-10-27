@@ -68,16 +68,20 @@ flowchart TB
 
 ### 2.1 How it works
 
-When a user connects to a machine's BMC console through nico-ssh-console, the proxy:
+SSH Console maintains BMC connections independently of interactive client
+sessions, using SSH or IPMI SOL according to the BMC. With console logging
+enabled, the proxy:
 
-1. Establishes an SSH session to the BMC
-2. Captures all serial console output (stdout from the BMC session)
-3. Strips ANSI escape sequences for cleaner logs
-4. Writes timestamped output to a local file
-5. Rotates files when they exceed the configured size
+1. Captures serial console output from the BMC session
+2. Strips ANSI escape sequences for cleaner logs
+3. Writes timestamped output to a local file
+4. Rotates files when they exceed the configured size
 
 Console logging runs for the duration of each BMC session. When the session ends, the logger
 writes a closing timestamp and flushes the file.
+
+For service setup and interactive access, see
+[SSH Console Setup and Access](../configuration/ssh-console.md).
 
 ### 2.2 Log file location and naming
 
