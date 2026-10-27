@@ -23,6 +23,7 @@ pub(in crate::tests) mod common;
 mod component_manager;
 mod component_power_details;
 mod dhcp_cross_family_regression_test;
+mod dhcp_option_set;
 mod dpf;
 mod dpu_machine_update;
 mod dpu_nic_firmware;
