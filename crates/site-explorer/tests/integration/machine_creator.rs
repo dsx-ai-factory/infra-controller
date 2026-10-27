@@ -1637,7 +1637,8 @@ async fn test_create_machines_repairs_an_ingested_host_after_the_cap_is_spent(
     let ingested_host = ingestible_host(ExpectedMachineData::default()).with_dpu_count(NUM_DPUS);
     let oob_mac = ingested_host.dpus[0].oob_mac_address;
     dhcp_discover_dpu_oob_iface(env.api(), env.underlay_segment, oob_mac).await;
-    let (ingested, endpoints) = register_ingestible_hosts(&env, &[ingested_host.clone()]).await?;
+    let (ingested, endpoints) =
+        register_ingestible_hosts(&env, std::slice::from_ref(&ingested_host)).await?;
     explorer.insert_endpoints(endpoints);
     explorer.run_single_iteration().await?;
     assert!(interface_machine_id(&env.pool, oob_mac).await?.is_some());

@@ -150,10 +150,12 @@ instead of spreading its budget over many, at the cost of more runs and their
 fixed per-run phases. Hosts that already have a machine and need only the
 steady-state repair come after every host that still needs one. A repair takes
 one of the `machine_creation_concurrency` slots and does not count toward
-`machines_created_per_run`, so the repairs of a run are made even when the cap
-binds. The `carbide_site_explorer_rack_host_fill_count` gauge reports, by
-`kind`, the racks with expected hosts, the racks whose hosts all have a
-machine, and the racks the last run could complete. `[site_explorer]
+`machines_created_per_run`, so the repairs of a run are made even after the
+run has created its `machines_created_per_run` hosts. The
+`carbide_site_explorer_rack_host_fill_count` gauge reports, by `kind`, the
+racks with expected hosts, the racks whose hosts all have a machine, and the
+racks whose missing hosts the last run had all identified, so it could
+complete them. `[site_explorer]
 switch_and_power_shelf_pass_interval` (default `15m`) sets the minimum time
 between switch and power shelf creation passes during the host creation phase.
 A pass starts once the interval has elapsed and the host creations in flight
