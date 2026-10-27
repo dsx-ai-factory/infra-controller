@@ -215,7 +215,7 @@ async fn invoke_power_operation(
 
     let component_manager = ctx.services.component_manager.as_ref().ok_or_else(|| {
         StateHandlerError::GenericError(eyre::eyre!(
-            "Machine {host_machine_id} maintenance ({operation_label}): component manager not configured"
+            "machine {host_machine_id} maintenance ({operation_label}): component manager not configured"
         ))
     })?;
 
@@ -227,7 +227,7 @@ async fn invoke_power_operation(
     .await
     .map_err(|cause| {
         StateHandlerError::GenericError(eyre::eyre!(
-            "Machine {host_machine_id} maintenance ({operation_label}): {cause}"
+            "machine {host_machine_id} maintenance ({operation_label}): {cause}"
         ))
     })?;
 
@@ -267,7 +267,7 @@ async fn invoke_power_operation(
                 "Machine power control returned a non-success result",
             );
             Err(StateHandlerError::GenericError(eyre::eyre!(
-                "Machine {host_machine_id} maintenance ({operation_label}): power control failed: {summary}"
+                "machine {host_machine_id} maintenance ({operation_label}): power control failed: {summary}"
             )))
         }
         Err(error) => {
@@ -279,7 +279,7 @@ async fn invoke_power_operation(
                 "Machine power control transport error",
             );
             let context = format!(
-                "Machine {host_machine_id} maintenance ({operation_label}): power control failed: {error}"
+                "machine {host_machine_id} maintenance ({operation_label}): power control failed: {error}"
             );
             Err(StateHandlerError::GenericError(
                 eyre::Report::new(error).wrap_err(context),
