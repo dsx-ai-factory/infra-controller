@@ -68,7 +68,9 @@ struct RedfishSimState {
     /// Fail one power-state read without changing the host's actual power.
     next_power_state_error: Option<String>,
     /// Fail the next matching power action before changing the host's power.
-    next_power_action_error: Option<(SystemPowerControl, String)>,
+    next_power_action_error: Option<(SystemPowerControl, RedfishError)>,
+    /// Value of `ac_powercycle_supported_by_power`. Defaults to `false`.
+    ac_powercycle_supported: bool,
     next_chassis_reset_error: Option<RedfishError>,
     job_state_sequence: VecDeque<JobState>,
     /// Offset (in seconds) applied to the BMC `DateTime` returned by
@@ -439,7 +441,22 @@ impl RedfishSim {
 
     /// Fail the next matching power action, recording the attempt but applying no change.
     pub fn fail_next_power_action(&self, action: SystemPowerControl, error: &str) {
-        self.state.lock().unwrap().next_power_action_error = Some((action, error.to_string()));
+        self.fail_next_power_action_with(
+            action,
+            RedfishError::GenericError {
+                error: error.to_string(),
+            },
+        );
+    }
+
+    /// Fail the next matching power action with the supplied error.
+    pub fn fail_next_power_action_with(&self, action: SystemPowerControl, error: RedfishError) {
+        self.state.lock().unwrap().next_power_action_error = Some((action, error));
+    }
+
+    /// Set whether clients report AC power cycle support through `power`.
+    pub fn set_ac_powercycle_supported(&self, supported: bool) {
+        self.state.lock().unwrap().ac_powercycle_supported = supported;
     }
 
     /// Fail one chassis reset with the supplied error, recording the attempt.
@@ -882,7 +899,7 @@ impl Redfish for RedfishSimClient {
                     .unwrap()
                     .actions
                     .push(RedfishSimAction::PowerFailed(action));
-                return Err(RedfishError::GenericError { error });
+                return Err(error);
             }
             let host_state = state.hosts.get_mut(&self._host).unwrap();
             host_state.power = power_state;
@@ -892,7 +909,7 @@ impl Redfish for RedfishSimClient {
     }
 
     fn ac_powercycle_supported_by_power(&self) -> bool {
-        false
+        self.state.lock().unwrap().ac_powercycle_supported
     }
 
     fn bmc_reset<'a>(
