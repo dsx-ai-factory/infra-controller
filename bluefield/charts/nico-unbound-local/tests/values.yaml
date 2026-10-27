@@ -1,0 +1,40 @@
+# Fixture for helm lint and the helm-unittest suites beside it. The addresses are
+# documentation ranges, not the resolver endpoints nico-api renders.
+image:
+  repository: example.invalid/nico-unbound
+dnsLocal:
+  image:
+    repository: example.invalid/nvmetal-carbide-aarch64
+endpoints:
+  ipv4: 198.51.100.251
+  ipv6: 2001:db8::251
+unboundConfig: |
+  server:
+      interface: 198.51.100.251
+      interface: 2001:db8::251
+      ip-freebind: yes
+      port: 53
+      do-ip6: yes
+      do-udp: yes
+      do-tcp: yes
+      access-control: 0.0.0.0/0 allow
+      access-control: ::0/0 allow
+      username: ""
+      chroot: ""
+      directory: "/tmp"
+      pidfile: ""
+      do-daemonize: no
+      use-syslog: no
+      logfile: ""
+      module-config: "iterator"
+      msg-cache-size: 4m
+      rrset-cache-size: 8m
+      serve-expired: no
+      domain-insecure: "nico.internal."
+  forward-zone:
+      name: "nico.internal."
+      forward-addr: 127.0.0.1@5353
+      forward-first: no
+  forward-zone:
+      name: "."
+      forward-addr: 192.0.2.53

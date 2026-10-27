@@ -1,0 +1,83 @@
+### DPF contract ###
+# Filled by the DPUService controller from the DPUService spec: placement
+# (nodeSelector), pod labels and annotations (including the Multus annotation
+# that attaches the service-VPC slot interface), update strategy and
+# resources. The chart renders no placement and no resource requests or
+# limits of its own: with nodeSelector unset the DaemonSet has no affinity,
+# and with resources empty the containers carry none.
+serviceDaemonSet:
+  nodeSelector:
+  labels: {}
+  annotations: {}
+  updateStrategy: {}
+  resources: {}
+
+### Values nico-api renders once per resolver registration ###
+# nico-api owns unboundConfig, endpoints, both images and the nico-dns-local
+# settings. It renders them into the registration's chart values, identical
+# on every DPU of that registration. Nothing below is per site or per DPU and
+# an operator does not edit these values directly.
+
+# Complete native Unbound configuration, mounted read-only at
+# /etc/unbound/unbound.conf. Required and nonblank. A change restarts the
+# pods and clears their caches. The default security context runs as UID 0
+# with no chroot, so the configuration sets username and chroot to "".
+unboundConfig: ""
+
+# Fixed resolver endpoints every instance in the VPC queries. Both are
+# required. nico-dns-local adds them to the slot interface at startup and the
+# rendered unboundConfig listens on them only.
+endpoints:
+  ipv4: ""
+  ipv6: ""
+
+# Name of the service-VPC slot interface inside the pod. The extension-service
+# controller fixes this name (SERVICE_VPC_INTERFACE_NAME) for every service-VPC
+# attachment, so it is a chart default and nico-api never renders it.
+interfaceName: svc0
+
+# Unbound container image. The repository is required.
+image:
+  repository: ""
+  pullPolicy: IfNotPresent
+  # Empty uses the chart appVersion.
+  tag: ""
+
+# nico-dns-local: nico-dns in its VPC-scoped mode, the only authority Unbound
+# consults for the private zone. It authenticates to nico-api with node tokens
+# from the DPU agent socket, as nico-fmds does, so the pod mounts only the
+# published root CA directory and the agent socket directory, never the
+# machine key.
+dnsLocal:
+  # Image holding /opt/nico/nico-dns or /opt/carbide/carbide-dns, such as the
+  # arm64 release container. The repository is required.
+  image:
+    repository: ""
+    pullPolicy: IfNotPresent
+    tag: ""
+  # Address nico-dns-local listens on for Unbound's private-zone forwards.
+  # The rendered unboundConfig forwards the zone here.
+  listenAddress: 127.0.0.1:5353
+  # nico-api address. The site .forge zone serves this renamed alias beside
+  # carbide-api.forge, the name nico-fmds defaults to.
+  apiUri: https://nico-api.forge
+
+imagePullSecrets: []
+
+# Container security. unbound binds port 53 and needs nothing else.
+# nico-dns-local adds the endpoint addresses to the slot interface, which
+# needs NET_ADMIN as in the nico-fmds chart; both run as UID 0 like nico-fmds.
+securityContext:
+  unbound:
+    runAsUser: 0
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
+      add: [NET_BIND_SERVICE]
+  dnsLocal:
+    runAsUser: 0
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: [ALL]
+      add: [NET_ADMIN]

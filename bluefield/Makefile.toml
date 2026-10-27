@@ -660,6 +660,15 @@ script = '''
     helm package ${REPO_ROOT}/bluefield/charts/carbide-fmds -d ${REPO_ROOT}/target/charts/
 '''
 
+[tasks.helm-package-unbound-local]
+category = "Build"
+description = "Package the nico-unbound-local Helm chart"
+workspace = false
+script = '''
+    mkdir -p ${REPO_ROOT}/target/charts/
+    helm package ${REPO_ROOT}/bluefield/charts/nico-unbound-local -d ${REPO_ROOT}/target/charts/
+'''
+
 [tasks.helm-package-all]
 category = "Build"
 description = "Package all Carbide DPF Helm charts"
@@ -669,6 +678,7 @@ dependencies = [
   "helm-package-carbide-dpu-agent",
   "helm-package-carbide-dhcp-server",
   "helm-package-carbide-fmds",
+  "helm-package-unbound-local",
 ]
 
 [tasks.docker-build-otelcol]
@@ -730,6 +740,17 @@ script = '''
 '''
 dependencies = ["build-fmds"]
 
+[tasks.docker-build-unbound]
+category = "Build"
+description = "Build the Unbound container image for arm64"
+workspace = false
+script = '''
+    docker build --platform=linux/arm64 \
+        -t ${CARBIDE_IMAGE_REGISTRY:-nvcr.io/nvidia/carbide}/nico-unbound:${DPU_AGENT_PKG_VERSION} \
+        -f ${REPO_ROOT}/bluefield/containers/unbound/Dockerfile \
+        ${REPO_ROOT}
+'''
+
 [tasks.docker-build-all]
 category = "Build"
 description = "Build all Carbide DPF container images for arm64"
@@ -740,4 +761,5 @@ dependencies = [
   "docker-build-dhcp-server",
   "docker-build-dpu-otel-agent",
   "docker-build-fmds",
+  "docker-build-unbound",
 ]

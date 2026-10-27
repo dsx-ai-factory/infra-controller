@@ -1,0 +1,64 @@
+suite: values Core must render
+templates:
+  - daemonset.yaml
+tests:
+  # Each case supplies every required value but one. The chart has no
+  # defaults for these because nico-api owns them; values.schema.json rejects
+  # a missing or blank one at render time, so no resolver starts with no
+  # configuration or no endpoint. The patterns name the schema path.
+  - it: rejects a missing unboundConfig
+    set:
+      image.repository: x
+      dnsLocal.image.repository: y
+      endpoints: {ipv4: a, ipv6: b}
+    asserts:
+      - failedTemplate:
+          errorPattern: "at '/unboundConfig'"
+
+  - it: rejects a blank unboundConfig
+    set:
+      unboundConfig: " \n"
+      image.repository: x
+      dnsLocal.image.repository: y
+      endpoints: {ipv4: a, ipv6: b}
+    asserts:
+      - failedTemplate:
+          errorPattern: "at '/unboundConfig'"
+
+  - it: rejects a missing IPv4 endpoint
+    set:
+      unboundConfig: "server:\n"
+      image.repository: x
+      dnsLocal.image.repository: y
+      endpoints: {ipv6: b}
+    asserts:
+      - failedTemplate:
+          errorPattern: "at '/endpoints/ipv4'"
+
+  - it: rejects a missing IPv6 endpoint
+    set:
+      unboundConfig: "server:\n"
+      image.repository: x
+      dnsLocal.image.repository: y
+      endpoints: {ipv4: a}
+    asserts:
+      - failedTemplate:
+          errorPattern: "at '/endpoints/ipv6'"
+
+  - it: rejects a missing Unbound image repository
+    set:
+      unboundConfig: "server:\n"
+      dnsLocal.image.repository: y
+      endpoints: {ipv4: a, ipv6: b}
+    asserts:
+      - failedTemplate:
+          errorPattern: "at '/image/repository'"
+
+  - it: rejects a missing nico-dns-local image repository
+    set:
+      unboundConfig: "server:\n"
+      image.repository: x
+      endpoints: {ipv4: a, ipv6: b}
+    asserts:
+      - failedTemplate:
+          errorPattern: "at '/dnsLocal/image/repository'"

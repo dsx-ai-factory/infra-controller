@@ -1,0 +1,156 @@
+{{/*
+  nico-dns-local authenticates with node tokens only, so its trust paths are
+  the DPU agent's defaults and not values: the agent publishes the root CA
+  under /opt/forge/pub and serves its socket under /opt/forge/run, and has no
+  flag to be told otherwise (see the nico-fmds chart's useNodeTokens notes).
+*/}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "nico-unbound-local.labels" . | nindent 4 }}
+    {{- with .Values.serviceDaemonSet.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.serviceDaemonSet.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.serviceDaemonSet.updateStrategy }}
+  updateStrategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "nico-unbound-local.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- with .Values.serviceDaemonSet.annotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        checksum/config: {{ .Values.unboundConfig | sha256sum }}
+      labels:
+        {{- include "nico-unbound-local.selectorLabels" . | nindent 8 }}
+        {{- with .Values.serviceDaemonSet.labels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.serviceDaemonSet.nodeSelector }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            {{- toYaml . | nindent 12 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        # The agent publishes the root CA after the pod can be scheduled; wait
+        # for it so nico-dns-local does not fail its first connection.
+        - name: wait-for-root-ca
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /busybox/sh
+            - -c
+            - |
+              echo "Waiting for root CA in /opt/forge/pub ..."
+              while [ ! -f /opt/forge/pub/forge_root.pem ]; do
+                sleep 5
+              done
+              echo "Root CA found."
+          volumeMounts:
+            - name: nico-certs-pub
+              mountPath: /opt/forge/pub
+              readOnly: true
+      containers:
+        - name: unbound
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext.unbound | nindent 12 }}
+          {{- with .Values.serviceDaemonSet.resources }}
+          resources:
+            limits:
+              {{- toYaml . | nindent 14 }}
+            requests:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+          ports:
+            - name: dns-udp
+              containerPort: 53
+              protocol: UDP
+            - name: dns-tcp
+              containerPort: 53
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/unbound
+              readOnly: true
+        - name: nico-dns-local
+          image: "{{ .Values.dnsLocal.image.repository }}:{{ .Values.dnsLocal.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.dnsLocal.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext.dnsLocal | nindent 12 }}
+          # Picks nico-dns (--nico-url) or carbide-dns (--api-uri) based on
+          # which binary is in the image, as the site nico-dns chart does. The
+          # API address arrives through NICO_API so the shell never interprets
+          # a rendered value.
+          command:
+            - /bin/sh
+            - -c
+            - |
+              if [ -x /opt/nico/nico-dns ]; then
+                exec /opt/nico/nico-dns run --nico-url="${NICO_API}" "$@"
+              else
+                exec /opt/carbide/carbide-dns run --api-uri="${NICO_API}" "$@"
+              fi
+            - --
+          args:
+            - "--listen={{ .Values.dnsLocal.listenAddress }}"
+            - --root-ca-path=/opt/forge/pub/forge_root.pem
+            - --node-token-socket=/opt/forge/run/agent.sock
+            - "--interface-name={{ .Values.interfaceName }}"
+            - "--endpoint-ipv4={{ .Values.endpoints.ipv4 }}"
+            - "--endpoint-ipv6={{ .Values.endpoints.ipv6 }}"
+          env:
+            - name: NICO_API
+              value: {{ .Values.dnsLocal.apiUri | quote }}
+            - name: RUST_BACKTRACE
+              value: "full"
+            - name: RUST_LIB_BACKTRACE
+              value: "0"
+            - name: RUST_LOG
+              value: "info"
+          volumeMounts:
+            # The bearer token is the credential, so this container gets the
+            # trust anchor and nothing else. pub/ holds only the CA and is a
+            # directory mount so the agent's atomic republish of a rotated CA
+            # reaches a running pod.
+            - name: nico-certs-pub
+              mountPath: /opt/forge/pub
+              readOnly: true
+            # Connecting to a unix socket does not write to the filesystem, so
+            # a read-only mount works; the socket's own mode gates access.
+            - name: nico-agent-run
+              mountPath: /opt/forge/run
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}
+        # No credentials-directory volume: nothing in this pod is entitled to
+        # the machine key.
+        - name: nico-certs-pub
+          hostPath:
+            path: /opt/forge/pub
+            type: DirectoryOrCreate
+        - name: nico-agent-run
+          hostPath:
+            path: /opt/forge/run
+            type: DirectoryOrCreate

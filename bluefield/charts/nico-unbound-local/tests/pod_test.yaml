@@ -1,0 +1,153 @@
+suite: resolver pod
+templates:
+  - daemonset.yaml
+values:
+  - ./values.yaml
+tests:
+  # The pod is one Unbound process and one nico-dns-local process. Unbound
+  # only binds port 53; nico-dns-local only adds the endpoint addresses to the
+  # slot interface, which is why NET_ADMIN sits on it and not on Unbound.
+  - it: runs unbound and nico-dns-local with split privileges
+    asserts:
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+      - notExists:
+          path: spec.template.spec.hostNetwork
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 2
+      - equal:
+          path: spec.template.spec.containers[0].name
+          value: unbound
+      - notExists:
+          path: spec.template.spec.containers[0].args
+      - equal:
+          path: spec.template.spec.containers[0].securityContext
+          value:
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              add: [NET_BIND_SERVICE]
+      - equal:
+          path: spec.template.spec.containers[0].ports
+          value:
+            - name: dns-udp
+              containerPort: 53
+              protocol: UDP
+            - name: dns-tcp
+              containerPort: 53
+              protocol: TCP
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts
+          value:
+            - name: config
+              mountPath: /etc/unbound
+              readOnly: true
+      - equal:
+          path: spec.template.spec.containers[1].name
+          value: nico-dns-local
+      - equal:
+          path: spec.template.spec.containers[1].securityContext.capabilities
+          value:
+            drop: [ALL]
+            add: [NET_ADMIN]
+      - notExists:
+          path: spec.template.spec.containers[1].ports
+
+  # Every flag nico-dns-local needs comes from values or the agent's fixed
+  # paths; the endpoint and interface flags are what make the pod a VPC's
+  # resolver rather than a generic DNS server. The API address reaches the
+  # shell through NICO_API, never by interpolation into the script.
+  - it: passes the scoped-mode flags to nico-dns-local
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].command[0]
+          value: /bin/sh
+      - matchRegex:
+          path: spec.template.spec.containers[1].command[2]
+          pattern: '(?m)^\s*exec /opt/nico/nico-dns run --nico-url="\$\{NICO_API\}" "\$@"\s*$'
+      - matchRegex:
+          path: spec.template.spec.containers[1].command[2]
+          pattern: '(?m)^\s*exec /opt/carbide/carbide-dns run --api-uri="\$\{NICO_API\}" "\$@"\s*$'
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: NICO_API
+            value: https://nico-api.forge
+      - equal:
+          path: spec.template.spec.containers[1].command[3]
+          value: --
+      - equal:
+          path: spec.template.spec.containers[1].args
+          value:
+            - --listen=127.0.0.1:5353
+            - --root-ca-path=/opt/forge/pub/forge_root.pem
+            - --node-token-socket=/opt/forge/run/agent.sock
+            - --interface-name=svc0
+            - --endpoint-ipv4=198.51.100.251
+            - --endpoint-ipv6=2001:db8::251
+
+  # Token mode as in nico-fmds: the trust anchor and the agent socket are the
+  # only host paths in the pod, and the credentials directory is never
+  # mounted, so the machine key is absent rather than merely read-only.
+  - it: mounts only the published CA and the agent socket for nico-dns-local
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].volumeMounts
+          value:
+            - name: nico-certs-pub
+              mountPath: /opt/forge/pub
+              readOnly: true
+            - name: nico-agent-run
+              mountPath: /opt/forge/run
+              readOnly: true
+      - equal:
+          path: spec.template.spec.volumes
+          value:
+            - name: config
+              configMap:
+                name: RELEASE-NAME
+            - name: nico-certs-pub
+              hostPath:
+                path: /opt/forge/pub
+                type: DirectoryOrCreate
+            - name: nico-agent-run
+              hostPath:
+                path: /opt/forge/run
+                type: DirectoryOrCreate
+
+  # The init container gates nico-dns-local on the CA the agent publishes,
+  # reusing the Unbound image's busybox shell so no third image is needed.
+  - it: waits for the published root CA before starting
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.initContainers
+          count: 1
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: example.invalid/nico-unbound:0.1.0  # the unbound image; no third image
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: '/opt/forge/pub/forge_root\.pem'
+      - equal:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          value:
+            - name: nico-certs-pub
+              mountPath: /opt/forge/pub
+              readOnly: true
+
+  # Placement and sizing belong to DPF: with nothing supplied the DaemonSet
+  # carries no affinity, nodeSelector or resource requests and limits.
+  - it: renders no placement or resources of its own
+    asserts:
+      - notExists:
+          path: spec.template.spec.affinity
+      - notExists:
+          path: spec.template.spec.nodeSelector
+      - notExists:
+          path: spec.template.spec.containers[0].resources
+      - notExists:
+          path: spec.template.spec.containers[1].resources
