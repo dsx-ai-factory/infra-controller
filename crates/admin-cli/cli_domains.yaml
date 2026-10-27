@@ -60,6 +60,7 @@ network:
   - resource-pool
   - nvl-domain
   - spx-partition
+  - spx-maintenance
 
 tenant:
   - tenant

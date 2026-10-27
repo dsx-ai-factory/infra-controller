@@ -95,6 +95,7 @@ pub(super) mod secrets;
 pub(super) mod site_explorer;
 pub(super) mod site_prefix;
 pub(super) mod sku;
+pub(super) mod spx_multiplane;
 pub(super) mod spx_partition;
 mod static_address_metrics;
 pub(super) mod svpc;

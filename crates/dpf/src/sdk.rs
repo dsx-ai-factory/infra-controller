@@ -896,6 +896,7 @@ async fn create_dpu_flavor_template<R: DpuFlavorTemplateRepository>(
         dhcp_acl_interfaces,
         &config.extra_bfcfg_parameters,
         config.enable_delay_host_init,
+        !config.partial_multiplane_disabled,
     )?;
     let name = template.unique_name(&config.flavor_name)?;
     template.metadata.name = Some(name.clone());

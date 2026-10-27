@@ -174,6 +174,7 @@ async fn astra_failure_reports_without_blocking_network_configuration_and_recove
         loopback_ip_override: Some("2001:db8::1"),
         astra_config: Some(rpc::forge::AstraConfig {
             astra_attachments: vec![expected_attachment.clone()],
+            ..Default::default()
         }),
         ..Default::default()
     }));
@@ -237,7 +238,11 @@ async fn astra_failure_reports_without_blocking_network_configuration_and_recove
             })
             .await?;
             eyre::ensure!(
-                failed.astra_config_status == Some(rpc::forge::AstraConfigStatus::default()),
+                failed.astra_config_status == Some(rpc::forge::AstraConfigStatus {
+                    is_attachment_status_present: Some(true),
+                    is_maintenance_status_present: Some(false),
+                    ..Default::default()
+                }),
                 "failed astra attempt omitted its explicit unsuccessful report: {failed:?}"
             );
             eyre::ensure!(

@@ -413,6 +413,20 @@ impl Forge for Api {
         crate::handlers::spx_partition::find_by_ids(self, request).await
     }
 
+    async fn get_machine_spx_multiplane(
+        &self,
+        request: Request<rpc::MachineSpxMultiplaneRequest>,
+    ) -> Result<Response<rpc::MachineSpxMultiplane>, Status> {
+        crate::handlers::spx_multiplane::get(self, request).await
+    }
+
+    async fn update_machine_spx_multiplane_maintenance(
+        &self,
+        request: Request<rpc::MachineSpxMultiplaneMaintenanceUpdateRequest>,
+    ) -> Result<Response<rpc::MachineSpxMultiplane>, Status> {
+        crate::handlers::spx_multiplane::update(self, request).await
+    }
+
     async fn find_ib_partition_ids(
         &self,
         request: Request<rpc::IbPartitionSearchFilter>,
