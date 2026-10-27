@@ -1,0 +1,27 @@
+---
+tags: ["unreleased", "deployment", "helm"]
+---
+
+## nico-api schema migration is no longer a Helm hook — unreleased
+
+The `nico-api` schema migration Job and the database-config ConfigMap were `pre-install,pre-upgrade` Helm hooks. Helm applies hooks before every ordinary manifest in the same release, so neither could reach anything that release creates — the namespace, the datastore, or the Secret the Job reads its credentials from. That suited `setup.sh`, where PostgreSQL comes from an earlier release, but it made the chart impossible to install in one release alongside a database.
+
+Both are ordinary manifests now. The Job is applied alongside the datastore and waits by retrying, with `restartPolicy: OnFailure` and the new `nico-api.migrationJob.backoffLimit` (default 12) bounding the attempts. Its name carries the release revision, because a Job's pod template is immutable and a fixed name cannot be re-applied on upgrade.
+
+The Argo CD hook annotations and sync waves are unchanged, so sites deploying through Argo CD see no difference.
+
+### Before upgrading
+
+<Warning title="The database ConfigMap needs adopting into the release">
+Helm never stamped the hook-created `<namespace>-nico-database-config` ConfigMap with ownership metadata, and it refuses to adopt an unowned object: `exists and cannot be imported into the current release: invalid ownership metadata`. `setup.sh` adopts it automatically before the Core upgrade. A manual `helm upgrade` fails until you adopt it yourself — follow the [2.4-to-2.5 upgrade note](../../docs/manuals/upgrade.md#24--25-nico-api-migration-job-and-database-configmap-are-no-longer-helm-hooks).
+</Warning>
+
+<Warning title="The old migration Job is orphaned, not replaced">
+The Job is renamed to `nico-api-migrate-<revision>`, so the hook-created `nico-api-migrate` Job does not collide and Helm will not remove it. `setup.sh` deletes it; delete it by hand after a manual upgrade.
+</Warning>
+
+### New and changed configuration
+
+| Setting | Change |
+| --- | --- |
+| `nico-api.migrationJob.backoffLimit` | New. Retries before the migration Job is marked failed. Default `12`. Raise it where the datastore is slow to accept connections. |
