@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -880,21 +881,9 @@ func (uvh UpdateVPCHandler) Handle(c echo.Context) error {
 			}
 			dpsNewGroup = *apiRequest.PowerResourceGroup
 			if strings.TrimSpace(dpsOldGroup) != strings.TrimSpace(dpsNewGroup) {
-				instances, _, derr := cdbm.NewInstanceDAO(uvh.dbSession).GetAll(ctx, tx, cdbm.InstanceFilterInput{VpcIDs: []uuid.UUID{vpc.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
-				if derr != nil {
-					logger.Error().Err(derr).Str("vpcID", vpc.ID.String()).Msg("failed to retrieve VPC instances for DPS migration")
-					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve VPC instances for DPS migration", nil)
-				}
-				assignments := make([]powerutil.MachinePowerAssignment, 0, len(instances))
-				for _, instance := range instances {
-					if instance.MachineID == nil {
-						return cutil.NewAPIError(http.StatusConflict, "Cannot change the power resource group while a VPC instance has no machine", nil)
-					}
-					assignment := powerutil.MachinePowerAssignment{MachineID: *instance.MachineID}
-					if instance.PowerProfile != nil {
-						assignment.PowerProfile = *instance.PowerProfile
-					}
-					assignments = append(assignments, assignment)
+				assignments, apiErr := vpcPowerAssignments(ctx, tx, uvh.dbSession, logger, vpc)
+				if apiErr != nil {
+					return apiErr
 				}
 				externalID, derr := dpsclient.ExternalIDFromVPCID(vpc.ID.String())
 				if derr != nil {
@@ -1779,6 +1768,29 @@ func (gavh GetAllVPCHandler) Handle(c echo.Context) error {
 	logger.Info().Msg("finishing API handler")
 
 	return c.JSON(http.StatusOK, apiVpcs)
+}
+
+// vpcPowerAssignments returns the DPS Machine assignments for the VPC owner's Instances that
+// use the VPC. Another Tenant's Instance can attach a secondary Interface to the VPC, but its
+// Machine belongs to its own VPC's power resource group, so it stays out.
+func vpcPowerAssignments(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, logger zerolog.Logger, vpc *cdbm.Vpc) ([]powerutil.MachinePowerAssignment, *cutil.APIError) {
+	instances, _, err := cdbm.NewInstanceDAO(dbSession).GetAll(ctx, tx, cdbm.InstanceFilterInput{TenantIDs: []uuid.UUID{vpc.TenantID}, VpcIDs: []uuid.UUID{vpc.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+	if err != nil {
+		logger.Error().Err(err).Str("vpcID", vpc.ID.String()).Msg("failed to retrieve VPC instances for DPS migration")
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve VPC instances for DPS migration", nil)
+	}
+	assignments := make([]powerutil.MachinePowerAssignment, 0, len(instances))
+	for _, instance := range instances {
+		if instance.MachineID == nil {
+			return nil, cutil.NewAPIError(http.StatusConflict, "Cannot change the power resource group while a VPC instance has no machine", nil)
+		}
+		assignment := powerutil.MachinePowerAssignment{MachineID: *instance.MachineID}
+		if instance.PowerProfile != nil {
+			assignment.PowerProfile = *instance.PowerProfile
+		}
+		assignments = append(assignments, assignment)
+	}
+	return assignments, nil
 }
 
 // ~~~~~ Delete Handler ~~~~~ //

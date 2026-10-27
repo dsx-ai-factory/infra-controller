@@ -17,6 +17,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -4648,6 +4649,64 @@ func TestNewDeleteVPCHandler(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := NewDeleteVPCHandler(tt.args.dbSession, tt.args.tc, scp, tt.args.cfg, nil)
 			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestVpcPowerAssignments(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testSiteInitDB(t)
+	defer dbSession.Close()
+
+	common.TestSetupSchema(t, dbSession)
+
+	ipOrg := "test-provider-org"
+	tnOrg1 := "test-tenant-org-1"
+	tnOrg2 := "test-tenant-org-2"
+	tnOrgRoles := []string{authz.TenantAdminRole}
+
+	ipu := testVPCBuildUser(t, dbSession, "test-starfleet-id-1", ipOrg, []string{authz.ProviderAdminRole})
+	ip := testVPCSiteBuildInfrastructureProvider(t, dbSession, "test-infrastructure-provider", ipOrg, ipu)
+	tnu1 := testVPCBuildUser(t, dbSession, "test-starfleet-id-2", tnOrg1, tnOrgRoles)
+	tn1 := testVPCBuildTenant(t, dbSession, "test-tenant-1", tnOrg1, tnu1)
+	tnu2 := testVPCBuildUser(t, dbSession, "test-starfleet-id-3", tnOrg2, tnOrgRoles)
+	tn2 := testVPCBuildTenant(t, dbSession, "test-tenant-2", tnOrg2, tnu2)
+	st := testVPCBuildSite(t, dbSession, ip, "test-site-1", false, true, cdbm.SiteStatusRegistered, ipu)
+
+	ownerVpc := testVPCBuildVPC(t, dbSession, "test-owner-vpc", ip, tn1, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu1)
+	crossTenantVpc := testVPCBuildVPC(t, dbSession, "test-cross-tenant-vpc", ip, tn2, st, cutil.GetPtr(cdbm.VpcFNN), nil, nil, cdbm.VpcStatusReady, tnu2)
+
+	ownerMachine := testInstanceBuildMachine(t, dbSession, ip.ID, st.ID, cutil.GetPtr(true), nil)
+	testInstanceBuildInstance(t, dbSession, "test-owner-instance", tn1.ID, ip.ID, st.ID, nil, ownerVpc.ID, &ownerMachine.ID, nil, nil, cdbm.InstanceStatusReady)
+	crossTenantMachine := testInstanceBuildMachine(t, dbSession, ip.ID, st.ID, cutil.GetPtr(true), nil)
+	crossTenantInstance := testInstanceBuildInstance(t, dbSession, "test-cross-tenant-instance", tn2.ID, ip.ID, st.ID, nil, crossTenantVpc.ID, &crossTenantMachine.ID, nil, nil, cdbm.InstanceStatusReady)
+
+	// The cross-Tenant Instance attaches a secondary Interface to the owner's VPC.
+	_, err := cdbm.NewInterfaceDAO(dbSession).Create(ctx, nil, cdbm.InterfaceCreateInput{
+		InstanceID: crossTenantInstance.ID,
+		VpcID:      &ownerVpc.ID,
+		Status:     cdbm.InterfaceStatusReady,
+		CreatedBy:  tnu2.ID,
+	})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		vpc      *cdbm.Vpc
+		machines []string
+	}{
+		{name: "VPC owner's group leaves out a cross-Tenant attachment", vpc: ownerVpc, machines: []string{ownerMachine.ID}},
+		{name: "cross-Tenant Instance stays in its own VPC's group", vpc: crossTenantVpc, machines: []string{crossTenantMachine.ID}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assignments, apiErr := vpcPowerAssignments(ctx, nil, dbSession, zerolog.Nop(), tc.vpc)
+			require.Nil(t, apiErr)
+			machines := make([]string, 0, len(assignments))
+			for _, assignment := range assignments {
+				machines = append(machines, assignment.MachineID)
+			}
+			assert.ElementsMatch(t, tc.machines, machines)
 		})
 	}
 }

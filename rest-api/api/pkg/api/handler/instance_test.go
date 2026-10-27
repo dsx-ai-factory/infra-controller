@@ -5102,6 +5102,15 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	instCrossTenantRemove, crossTenantIfcRemoveID := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-remove", crossTenantVpcUpdateA)
 	instCrossTenantAdd, _ := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-add", nil)
 	instCrossTenantRetarget, _ := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-retarget", crossTenantVpcUpdateA)
+	instCrossTenantPartialRemove, crossTenantIfcKeptID := buildCrossTenantVpcUpdateInstance("test-instance-cross-tenant-partial-remove", crossTenantVpcUpdateA)
+	crossTenantIfcDropped, dropErr := cdbm.NewInterfaceDAO(dbSession).Create(ctx, nil, cdbm.InterfaceCreateInput{
+		InstanceID:      instCrossTenantPartialRemove.ID,
+		VpcID:           &crossTenantVpcUpdateB.ID,
+		VpcIPFamilyMode: cutil.GetPtr(cdbm.InterfaceVpcIPFamilyModeIPv4Only),
+		Status:          cdbm.InterfaceStatusReady,
+		CreatedBy:       tnu1.ID,
+	})
+	require.NoError(t, dropErr)
 
 	vpcSelectionIPBlock := common.TestBuildVpcPrefixIPBlock(t, dbSession, "testipb-vpc-selection-update", st3, ip, &tn1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "192.181.0.0", 24, cdbm.IPBlockProtocolVersionV4, false, cdbm.IPBlockStatusReady, tnu1)
 	assert.NotNil(t, vpcSelectionIPBlock)
@@ -5654,6 +5663,8 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		// Optional hook after a successful Handle (e.g. assert persisted DB state).
 		afterHandle            func(t *testing.T)
 		ethernetReconciliation *ethernetReconciliationExpectation
+		// respSecondaryVpcIDs overrides the expected response when a dropped Interface is still Deleting.
+		respSecondaryVpcIDs []string
 	}
 
 	tests := []struct {
@@ -7436,6 +7447,41 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			},
 		},
 		{
+			name: "dropping one of two cross-Tenant Interfaces succeeds after capability revocation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIInstanceUpdateRequest{
+					SecondaryVpcIDs: []string{crossTenantVpcUpdateA.ID.String()},
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpcSelection.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							VpcID:      cutil.GetPtr(crossTenantVpcUpdateA.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+						},
+					},
+				},
+				reqInstance: instCrossTenantPartialRemove.ID.String(),
+				reqOrg:      tnOrg1,
+				reqUser:     tnu1,
+				respCode:    http.StatusOK,
+				ethernetReconciliation: &ethernetReconciliationExpectation{
+					rowCount:    3,
+					readyIDs:    []uuid.UUID{crossTenantIfcKeptID},
+					deletingIDs: []uuid.UUID{crossTenantIfcDropped.ID},
+				},
+				respSecondaryVpcIDs: []string{crossTenantVpcUpdateA.ID.String(), crossTenantVpcUpdateB.ID.String()},
+			},
+		},
+		{
 			name: "adding a cross-Tenant Interface fails after capability revocation",
 			fields: fields{
 				dbSession: dbSession,
@@ -8938,7 +8984,9 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				}
 			}
 
-			if tt.args.reqData.SecondaryVpcIDs != nil {
+			if tt.args.respSecondaryVpcIDs != nil {
+				assert.ElementsMatch(t, tt.args.respSecondaryVpcIDs, rst.SecondaryVpcIDs)
+			} else if tt.args.reqData.SecondaryVpcIDs != nil {
 				assert.ElementsMatch(t, tt.args.reqData.SecondaryVpcIDs, rst.SecondaryVpcIDs)
 			}
 
