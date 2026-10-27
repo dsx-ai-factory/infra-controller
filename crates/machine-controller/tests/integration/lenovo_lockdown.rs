@@ -113,7 +113,11 @@ async fn decommission_waits_for_runtime_unlock_boot_without_restarting_again(poo
         machine.current_state(),
         &deconfiguring(DeconfiguringHostState::RebootAfterLockdown)
     );
-    assert_eq!(machine.status.last_reboot_requested.unwrap(), requested);
+    // Restart verification can update its bookkeeping while this step waits.
+    // The reboot request itself must retain its identity and mode.
+    let current = machine.status.last_reboot_requested.unwrap();
+    assert_eq!(current.time, requested.time);
+    assert_eq!(current.mode, requested.mode);
     assert!(
         env.redfish_sim
             .actions_since(&timepoint)
