@@ -18,7 +18,8 @@ automatic updates.
 
 ## Components covered
 
-The classic, non-DPF reprovisioning path uses the following Redfish inventory:
+The classic reprovisioning path, without DOCA Platform Framework (DPF), uses
+the following Redfish inventory:
 
 | Component | Redfish inventory match | Role in the workflow |
 |---|---|---|
@@ -73,22 +74,75 @@ NICo automatically selects a host only when all of the following are true:
 | Health | The aggregate host health report has no alerts. |
 | Existing work | The host is not already in another machine-update workflow, and none of its DPUs already has a reprovisioning request. |
 | Site capacity | The shared `machine_updater.max_concurrent_machine_updates_*` policy has room for another host. DPU and host firmware work use the same budget. |
+| DPF compatibility | If NICo selects DPF reprovisioning for a host provisioned through DPF, the requested DPU set passes the compatibility checks below. Classic reprovisioning skips these checks. |
+
+Before compatibility checks, DPF drift discovery requires
+`DPFOperatorConfig/dpfoperatorconfig` to report `Ready=True` for its current
+generation. It considers a DPU only when
+`svc.dpu.nvidia.com/owned-by-dpudeployment` is
+`<namespace>_<deployment-name>` for an existing `DPUDeployment` reporting
+`DPUSetsReconciled=True` for its current generation. For both resources, the
+condition's `observedGeneration` must equal `metadata.generation`. DPUs omitted
+by these discovery filters have not reached compatibility checks.
+
+For hosts already provisioned through DPF, NICo checks compatibility when it
+selects DPF reprovisioning. Machine Update Manager checks before creating
+requests. A deferred candidate consumes no shared update capacity. Each check
+has a 30-second deadline covering database pool waits, inventory reads, and
+DPF label reads. Automatic checks also share a 30-second budget per scheduling
+pass. After it expires, remaining DPF candidates are deferred; classic
+candidates remain eligible.
 
 When the host is eligible, Machine Update Manager creates a reprovisioning
-request on each drifted DPU. The managed-host controller adds a
-`HostUpdateInProgress` health alert with `PreventAllocations`, restarts the
-selected DPUs, and enters DPU reprovisioning.
+request on each drifted DPU. Before starting these requests on an unassigned
+`Ready` host using the DPF path, the managed-host controller checks
+compatibility again. Operator requests on this path receive the same check
+before starting.
+Incompatibility, missing required inventory, an unavailable DPF client, read
+errors, or a timeout defer the update before the managed-host controller
+restarts hardware. Separate admin power operations, including the Flow
+reprovisioning workflow's host power cycle, do not use this check.
 
-```mermaid
-flowchart TD
-    A["Read discovered DPU NIC version"] --> B{"Version is accepted?"}
-    B -- Yes --> C["No action"]
-    B -- No --> D{"Host is healthy, Ready, and within the update budget?"}
-    D -- No --> E["Report as unavailable and retry later"]
-    D -- Yes --> F["Create DPU reprovisioning request"]
-    F --> G["Mark host unavailable for allocation"]
-    G --> H["Reprovision DPU and verify firmware"]
-```
+On deferral at this second check, the host remains `Ready`. NICo withdraws an
+automatic request only if it still matches the unstarted request that was
+checked. This frees shared update capacity, and Machine Update Manager
+reevaluates the drift on a later pass. An operator request remains queued for
+another check.
+
+After a successful check, NICo reloads the host and requests under database
+locks. If another operation has changed them or holds a required DPU lock,
+NICo waits for a later controller iteration. Pending higher-priority work,
+such as decommissioning, also prevents a new start.
+
+For these DPF hosts, NICo persists the requests' `started_at`
+timestamps and adds a `HostUpdateInProgress` health alert with
+`PreventAllocations` before restarting hardware. NICo rejects clearing a
+started request and allocating its host, including when allocation permits
+unhealthy machines. If a hardware restart fails or the controller process
+restarts, NICo retries the started requests without repeating the compatibility
+check or replacing their start timestamps.
+Execution still validates DPF deployment labels.
+
+Classic reprovisioning and a host's first conversion from classic management
+to DPF skip these checks. For those paths, NICo records the start timestamps
+and the same update health alert when it transitions to `DPUReprovision`, after
+issuing the DPU restarts.
+
+The compatibility checks select one deployment type from attached DPU
+hardware and host platform information. For BF4 DPUs, expected `CX9` NIC
+inventory, when declared, selects the Astra deployment. NICo then validates
+an existing `DPUNode`'s deployment labels. The check does not compare declared
+DPU counts or identities with attached DPUs. A missing `DPUNode` does not block
+this check, and passing does not establish resource existence or deployment
+readiness.
+
+Migration from the `Bf3` deployment to `Bf3Gb200` requires requests for every
+attached DPU. If only a subset is outdated, automatic selection defers the
+update. Use a host-level request for this migration. A complete started request
+can migrate while every DPU is still in the DPF `Reprovisioning` substate.
+Started partial requests, or requests with a DPU already past that substate,
+continue under the verified `Bf3` source deployment. A later complete request
+can perform the migration.
 
 ### Reprovisioning and verification
 
@@ -139,9 +193,9 @@ the classic Redfish component comparison afterward.
 
 ## Assigned hosts and operator requests
 
-An assigned host is not eligible for automatic DPU NIC selection. Its drift
-contributes to the unavailable count until the host returns to top-level
-`Ready`.
+An assigned host is not eligible for automatic DPU NIC selection. Classic DPU
+drift contributes to the unavailable count until the host returns to top-level
+`Ready`. The unavailable count excludes DPF drift.
 
 An operator can
 [request DPU reprovisioning explicitly](api:PATCH/v2/org/:org/nico/machine/:machineId/dpu/reprovision).
@@ -155,11 +209,15 @@ nico-admin-cli -a <core-api-url> dpu reprovision set \
   --update-message "<ticket-or-maintenance-reference>"
 ```
 
-Passing a host ID requests reprovisioning for all attached DPUs. Passing a DPU
-ID requests it only for that DPU. On an unassigned `Ready` host, the controller
-can start the request directly. On an assigned host, the request waits for
-tenant reboot approval or the configured `instance_autoreboot_period`, as
-described in
+Passing a host ID requests reprovisioning for all attached DPUs. A host
+provisioned through DPF with multiple DPUs requires the host ID for `set` and
+`clear`. Other hosts also accept a DPU ID for those operations. `restart`
+always requires the host ID.
+On an unassigned `Ready` host already provisioned through DPF, the controller
+checks compatibility before starting an unstarted request on the DPF path.
+Assigned hosts on the DPF path use execution-time label validation. Assigned
+hosts wait for tenant reboot approval or the configured
+`instance_autoreboot_period`, as described in
 [Assigned hosts need reboot approval](host-firmware.md#assigned-hosts-need-reboot-approval).
 
 The CLI still accepts `--update-firmware`, but the current DPU state machine
@@ -189,14 +247,24 @@ nico-admin-cli -a <core-api-url> managed-host show <host-machine-id>
 
 The following metrics provide the site-wide view:
 
-| Metric | Meaning |
-|---|---|
-| `carbide_pending_dpu_nic_firmware_update_count` | Drifted DPUs attached to hosts currently eligible for automatic selection. |
-| `carbide_unavailable_dpu_nic_firmware_update_count` | Drifted classic DPUs whose host is not currently eligible. |
-| `carbide_running_dpu_updates_count` | DPU reprovisioning requests marked as firmware updates that have started. |
-| `carbide_dpu_firmware_version_count{firmware_version="..."}` | DPUs grouped by the firmware version reported in their DPU hardware information. |
-| `carbide_firmware_updates_total{target="dpu_nic",phase="started"}` | Automatic DPU NIC update starts. This target does not emit a `completed` phase. |
-| `carbide_firmware_update_failures_total{target="dpu_nic",cause="wrong_version_after_update"}` | Reprovisioning returned to `Ready`, but the reported NIC version is still outside the accepted list. |
+- `carbide_pending_dpu_nic_firmware_update_count`: Classic and DPF drifted
+  DPUs on hosts that are `Ready`, have no health alerts, and have no DPU
+  reprovisioning request. Capacity and DPF compatibility are not applied.
+- `carbide_unavailable_dpu_nic_firmware_update_count`: Drifted classic DPUs
+  on hosts that are not in top-level `Ready`, have aggregate health alerts, or
+  have a reprovisioning request on any attached DPU.
+- `carbide_running_dpu_updates_count`: DPU reprovisioning requests marked as
+  firmware updates that have started.
+- `carbide_dpu_firmware_version_count`: DPUs grouped by the `firmware_version`
+  reported in their DPU hardware information.
+- `carbide_firmware_updates_total`: For `target="dpu_nic"` and
+  `phase="started"`, counts committed automatic host update batches, once per
+  host regardless of DPU count. If requests are withdrawn before start and
+  created again, that host counts again. This target does not emit a `completed`
+  phase.
+- `carbide_firmware_update_failures_total`: For `target="dpu_nic"` and
+  `cause="wrong_version_after_update"`, classic reprovisioning returned to
+  `Ready`, but the reported NIC version is still outside the accepted list.
 
 ## Recover a stalled update
 
@@ -210,7 +278,40 @@ problem.
 | `WaitingForNetworkInstall` does not advance | Check the DPU's UEFI HTTP boot, PXE requests in `nico-pxe`, and whether the DPU agent starts from the installed image. |
 | `VerifyFirmareVersions` keeps waiting | Compare BMC, ERoT/CEC, and NIC Redfish inventory with `dpu_models`. A mismatch usually means that the deployed BFB and configured baseline do not describe the same release. |
 | `WaitingForNetworkConfig` does not advance | Check DPU agent health and whether the managed-host network configuration versions are synchronized. |
-| The host returned to `Ready`, but the update marker remains | Check the NIC version against `dpu_nic_firmware_update_versions`. NICo deliberately retains the update health marker when the resulting NIC version is not accepted. |
+| DPF drift persists with no request, or an operator request remains unstarted | Check the deferral reason in `nico-api` logs and the managed-host handler outcome. Verify the host BMC MAC, DPU hardware inventory, host platform, expected `CX9` NIC inventory, `DPUNode` labels, and DPF connectivity. Automatic requests are withdrawn or never created; operator requests remain queued. |
+| A DPF request has started, but the host remains `Ready` | Inspect the handler error for a failed DPU restart. Restore DPU BMC connectivity or credentials as indicated by that error. NICo retries automatically with the saved start timestamp. The request remains started and the host remains unavailable for allocation during retries. |
+| NICo reports a DPF provisioning failure after observing `Error` | Inspect the DPU status and conditions in the managed-host failure state and its state history. After recovery leaves the failed state, the saved history retains the observation. |
+| A classic host returned to `Ready`, but the update marker remains | Check the NIC version against `dpu_nic_firmware_update_versions`. NICo retains the update health marker when the resulting NIC version is not accepted. |
+
+When NICo observes a terminal DPU `Error`, it records the DPU identity,
+deployment owner label, flavor reference, BFB or `BlueFieldSoftware` reference,
+and status, including conditions. These details appear in the managed-host
+failure state, including the instance failure state for assigned hosts, and in
+state history. They do not populate the separate **Failure Details** field.
+Status fields unknown to NICo's DPF client are not retained. State history
+keeps up to 250 entries.
+
+For deployments other than `Bf3Gb200`, NICo waits while the DPU is missing or
+deleting. A DPU without status produces a handler error. When the selected
+deployment is `Bf3Gb200`, including initial provisioning and migration, NICo
+requires exactly one matching deployment that is not marked for deletion.
+During target observation, missing or ambiguous selection and unsupported
+`DPUFlavorTemplate` use produce a terminal migration failure without a DPU
+failure observation.
+
+During source cleanup at the parked migration checkpoint, missing or ambiguous
+source or target deployments instead produce handler errors. The host remains
+parked and retries cleanup on later controller iterations.
+
+For `Bf3Gb200`, NICo waits for `DPUSetsReconciled=True` for its
+current generation. Every requested DPU must exist, have a unique identity,
+belong to that deployment, not be marked for deletion, and report a status.
+Until these conditions hold, NICo keeps waiting without saving a partial DPU
+failure observation.
+A `Ready` DPU whose flavor or provisioning source does not match the target
+can instead produce a migration failure without a DPU failure observation.
+NICo captures errors during polling; it cannot recover a resource deleted
+before it observed and saved that failure.
 
 Restart an active or failed reprovisioning flow for all requested DPUs on a
 host:
@@ -219,6 +320,15 @@ host:
 nico-admin-cli -a <core-api-url> dpu reprovision restart \
   --id <host-machine-id>
 ```
+
+For a started reprovisioning flow, `restart` begins reprovisioning again for
+the requested DPUs without repeating the compatibility check before start.
+It can reset the reprovisioning substate and start timestamps. A started DPF
+request still in `Ready` follows the automatic retry behavior described above.
+An unstarted request on an unassigned `Ready` host already provisioned through
+DPF still receives the compatibility check when NICo selects DPF reprovisioning.
+Execution on the DPF path validates deployment labels and fails if they are
+incompatible.
 
 Clear a request only when it has not started:
 

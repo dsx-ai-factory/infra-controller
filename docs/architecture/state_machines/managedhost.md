@@ -406,6 +406,12 @@ stateDiagram-v2
 
 ## Ready State Details (Ready)
 
+A host already provisioned through DPF can remain in `Ready` while NICo checks
+compatibility or retries a failed DPU restart.
+Refer to [DPU Firmware Updates](../../operations/firmware-updates/dpu-firmware.md#eligibility-and-scheduling)
+for the DPF start checks, saved start timestamps, and retry behavior. The DPU
+reprovisioning transition in the following diagram shows the classic path.
+
 Shows what can happen in Ready state:
 
 ```mermaid
@@ -768,7 +774,9 @@ stateDiagram-v2
 
 ## DPU Reprovision State Details (DpuReprovisionState)
 
-Shows the DPU firmware reprovision process:
+The following diagram shows the classic DPU firmware reprovision process.
+For DPF reprovisioning, refer to
+[DPU Firmware Updates](../../operations/firmware-updates/dpu-firmware.md#eligibility-and-scheduling).
 
 ```mermaid
 stateDiagram-v2
