@@ -29,7 +29,7 @@ const (
 	sitePrefixNameMaxLength          = 256
 )
 
-// ManageSitePrefix reconciles reported Core roots without inferring absence.
+// ManageSitePrefix reconciles Core SitePrefixes and their absence.
 type ManageSitePrefix struct {
 	dbSession *cdb.Session
 }
@@ -42,9 +42,12 @@ func NewManageSitePrefix(session *cdb.Session) ManageSitePrefix {
 // UpdateSitePrefixesInDB reconciles each reported prefix in its own transaction.
 // It looks up the active IP Block, creates, adopts, or restores one when missing, then
 // applies lifecycle without changing REST metadata or the block's Site, owner, or CIDR.
-// Unreconcilable entries are logged and skipped; later entries still proceed.
-// Publication, absence processing, and retiring the legacy importer belong to
-// the follow-up SitePrefix publication and retirement implementation.
+// Eligible final pages also reconcile absent linked blocks: free operator roots
+// retire with IPAM, allocated roots unlink, and tenant blocks retire only when
+// Deleting (otherwise becoming Error). Recent blocks are protected.
+// Per-entry reconciliation errors are logged and skipped; later entries still
+// proceed. Invalid inventory, page-level lookup failures, and cancellation return
+// errors so the workflow can report or retry the failed collection.
 func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, siteID uuid.UUID, inventory *corev1.SitePrefixInventory) error {
 	logger := log.With().Str("Activity", "UpdateSitePrefixesInDB").Str("Site ID", siteID.String()).Logger()
 	logger.Info().Msg("starting activity")
@@ -101,14 +104,15 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 			return ctx.Err()
 		}
 		// Validate per entry so a malformed report cannot hold back the rest of
-		// the page. Page IDs do not imply absence.
+		// the page.
 		err := validatePrefix(prefix)
 		if err != nil {
 			logger.Warn().Err(err).Str("Site Prefix ID", prefix.GetId().GetValue()).
 				Msg("received invalid SitePrefix")
 			continue
 		}
-		// Keep one prefix's IP Block, IPAM changes, and status detail atomic.
+		// Keep one prefix's changes atomic, except retirement cleanup uses a
+		// savepoint so a cleanup failure preserves the Deleting lifecycle.
 		// A failed prefix must not roll back earlier prefixes in the page.
 		isLockContention := false
 		id := uuid.MustParse(prefix.GetId().GetValue()) // validated before the transaction
@@ -142,6 +146,10 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 					block = nil
 				}
 			}
+			// The snapshot's Core identity must still own this row after locking.
+			if block != nil && (block.SitePrefixID == nil || *block.SitePrefixID != id) {
+				return nil
+			}
 			var tenantID *uuid.UUID
 			if prefix.Status.Authority == corev1.SitePrefixAuthority_SITE_PREFIX_AUTHORITY_TENANT_MANAGED {
 				tenants, _, err := cdbm.NewTenantDAO(manager.dbSession).GetAll(ctx, tx,
@@ -169,6 +177,10 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 				if err != nil {
 					return err
 				}
+				// Active tenant deletions wait for absence; a delayed report must not cancel them.
+				if block.TenantID != nil && block.Status == cdbm.IPBlockStatusDeleting {
+					return nil
+				}
 			}
 
 			// REST owns metadata after creation, including on adopted and restored
@@ -185,6 +197,9 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 				if err != nil {
 					return err
 				}
+			}
+			if block.Managed && block.TenantID == nil && status == cdbm.IPBlockStatusDeleting {
+				return manager.removeOperatorRoot(ctx, tx, block, false, logger)
 			}
 			reconciledBlock = block
 			return nil
@@ -210,8 +225,9 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 			existingBlockMap[id] = reconciledBlock
 		}
 	}
+	err = manager.reconcileAbsence(ctx, site, inventory, logger)
 	logger.Info().Msg("completing activity")
-	return ctx.Err()
+	return err
 }
 
 // createOrUpdateSitePrefixFromSite creates, adopts, or restores the IP Block for
@@ -254,7 +270,15 @@ func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Con
 			return nil, err
 		}
 		if existingBlock.Deleted == nil {
-			return dao.GetByIDForUpdate(ctx, tx, existingBlock.ID)
+			block, err := dao.GetByIDForUpdate(ctx, tx, existingBlock.ID)
+			if err != nil {
+				return nil, err
+			}
+			// Another inventory may have started tenant deletion after the page snapshot.
+			if block.TenantID != nil && block.Status == cdbm.IPBlockStatusDeleting {
+				return nil, nil
+			}
+			return block, nil
 		}
 		// REST soft-deleted this block while Core still reports its SitePrefix ID.
 		if prefix.Status.LifecycleState == corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING {

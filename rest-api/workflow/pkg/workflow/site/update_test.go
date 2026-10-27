@@ -5,6 +5,8 @@ package site
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,79 +14,74 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
+	"go.temporal.io/sdk/worker"
+	"go.temporal.io/sdk/workflow"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/durationpb"
 
+	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
 	siteActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/site"
 )
 
 func TestUpdateSiteConfigInventory(t *testing.T) {
+	t.Run("predecessor history replay", func(t *testing.T) {
+		checkSiteConfigHistory(t, UpdateSiteConfigInventory, "pre_retirement_site_config_v1.json")
+	})
 	type testCase struct {
+		legacyHistory        bool
 		name                 string
 		siteIDStr            string
 		prefixes             []string
 		buildVersion         string
 		updateSiteInDBErr    error
-		updateIPBlocksErr    error
 		wantErr              bool
 		wantErrContains      []string
 		expectUpdateSiteInDB bool
-		expectUpdateIPBlocks bool
 		expectRecordLatency  bool
 		recordLatencyFailed  bool
 	}
 
 	tests := []testCase{
 		{
-			name:                 "Success",
-			prefixes:             []string{"10.0.0.0/16", "2001:db8::/64"},
-			buildVersion:         "1.2.3",
-			expectUpdateSiteInDB: true,
-			expectUpdateIPBlocks: true,
-			expectRecordLatency:  true,
-		},
-		{
-			name:                 "UpdateIPBlocksInDBFails",
+			name:                 "LegacyImporterFailureAfterMetadataSuccess",
+			legacyHistory:        true,
 			prefixes:             []string{"10.0.0.0/16"},
-			buildVersion:         "1.2.3",
-			updateIPBlocksErr:    errors.New("failed to update Site IP Blocks"),
 			wantErr:              true,
-			wantErrContains:      []string{"failed to update Site IP Blocks"},
+			wantErrContains:      []string{"legacy importer failed"},
 			expectUpdateSiteInDB: true,
-			expectUpdateIPBlocks: true,
 			expectRecordLatency:  true,
 			recordLatencyFailed:  true,
 		},
 		{
-			// UpdateSiteInDB failures do not stop the workflow from creating Site
-			// fabric IP Blocks, but they still fail the inventory workflow.
-			name:                 "UpdateSiteInDBFailsContinues",
+			name:                 "LegacyHistoryPreservesImporterCommandAndBothErrors",
+			legacyHistory:        true,
+			prefixes:             []string{"10.0.0.0/16"},
+			updateSiteInDBErr:    errors.New("failed to update Site metadata"),
+			wantErr:              true,
+			wantErrContains:      []string{"failed to update Site metadata", "legacy importer failed"},
+			expectUpdateSiteInDB: true,
+			expectRecordLatency:  true,
+			recordLatencyFailed:  true,
+		},
+		{
+			name:                 "Success",
+			prefixes:             []string{"10.0.0.0/16", "2001:db8::/64"},
+			buildVersion:         "1.2.3",
+			expectUpdateSiteInDB: true,
+			expectRecordLatency:  true,
+		},
+		{
+			name:                 "UpdateSiteInDBFails",
 			prefixes:             []string{"10.0.0.0/16"},
 			buildVersion:         "1.2.3",
 			updateSiteInDBErr:    errors.New("failed to update Site metadata"),
 			wantErr:              true,
 			wantErrContains:      []string{"failed to update Site metadata"},
 			expectUpdateSiteInDB: true,
-			expectUpdateIPBlocks: true,
-			expectRecordLatency:  true,
-			recordLatencyFailed:  true,
-		},
-		{
-			name:              "BothInventoryUpdatesFail",
-			prefixes:          []string{"10.0.0.0/16"},
-			buildVersion:      "1.2.3",
-			updateSiteInDBErr: errors.New("failed to update Site metadata"),
-			updateIPBlocksErr: errors.New("failed to update Site IP Blocks"),
-			wantErr:           true,
-			wantErrContains: []string{
-				"failed to update Site metadata",
-				"failed to update Site IP Blocks",
-			},
-			expectUpdateSiteInDB: true,
-			expectUpdateIPBlocks: true,
 			expectRecordLatency:  true,
 			recordLatencyFailed:  true,
 		},
@@ -121,16 +118,23 @@ func TestUpdateSiteConfigInventory(t *testing.T) {
 
 			var siteManager siteActivity.ManageSite
 			var metricsManager cwm.ManageInventoryMetrics
+			env.RegisterActivity(siteManager.UpdateIPBlocksInDBFromFabricPrefixes)
+			if tt.legacyHistory {
+				env.OnGetVersion(retireSiteFabricImporterChangeID, workflow.DefaultVersion, 1).Return(workflow.DefaultVersion)
+				env.OnActivity(siteManager.UpdateIPBlocksInDBFromFabricPrefixes, mock.Anything, siteID, tt.prefixes).
+					Return(temporal.NewNonRetryableApplicationError("legacy importer failed", "test", nil)).Once()
+			} else {
+				env.OnActivity(siteManager.UpdateIPBlocksInDBFromFabricPrefixes, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+				t.Cleanup(func() {
+					env.AssertNotCalled(t, "UpdateIPBlocksInDBFromFabricPrefixes", mock.Anything, mock.Anything, mock.Anything)
+				})
+			}
 
 			if tt.expectUpdateSiteInDB {
 				env.RegisterActivity(siteManager.UpdateSiteInDB)
 				// V1 carries no Site Agent build info, so the activity receives a typed nil.
 				env.OnActivity(siteManager.UpdateSiteInDB, mock.Anything, siteID, buildInfo,
 					(*corev1.SiteAgentBuildInfo)(nil)).Return(tt.updateSiteInDBErr)
-			}
-			if tt.expectUpdateIPBlocks {
-				env.RegisterActivity(siteManager.UpdateIPBlocksInDBFromFabricPrefixes)
-				env.OnActivity(siteManager.UpdateIPBlocksInDBFromFabricPrefixes, mock.Anything, siteID, tt.prefixes).Return(tt.updateIPBlocksErr)
 			}
 			if tt.expectRecordLatency {
 				env.RegisterActivity(metricsManager.RecordLatency)
@@ -162,23 +166,46 @@ func TestUpdateSiteConfigInventory(t *testing.T) {
 }
 
 func TestUpdateSiteConfigInventoryV2(t *testing.T) {
+	t.Run("predecessor history replay", func(t *testing.T) {
+		checkSiteConfigHistory(t, UpdateSiteConfigInventoryV2, "pre_retirement_site_config_v2.json")
+	})
 	type testCase struct {
+		legacyHistory        bool
 		name                 string
 		siteIDStr            string
 		prefixes             []string
 		buildVersion         string
 		siteAgentBuildInfo   *corev1.SiteAgentBuildInfo
 		updateSiteInDBErr    error
-		updateIPBlocksErr    error
 		wantErr              bool
 		wantErrContains      []string
 		expectUpdateSiteInDB bool
-		expectUpdateIPBlocks bool
 		expectRecordLatency  bool
 		recordLatencyFailed  bool
 	}
 
 	tests := []testCase{
+		{
+			name:                 "LegacyImporterFailureAfterMetadataSuccess",
+			legacyHistory:        true,
+			prefixes:             []string{"10.0.0.0/16"},
+			wantErr:              true,
+			wantErrContains:      []string{"legacy importer failed"},
+			expectUpdateSiteInDB: true,
+			expectRecordLatency:  true,
+			recordLatencyFailed:  true,
+		},
+		{
+			name:                 "LegacyHistoryPreservesImporterCommandAndBothErrors",
+			legacyHistory:        true,
+			prefixes:             []string{"10.0.0.0/16"},
+			updateSiteInDBErr:    errors.New("failed to update Site metadata"),
+			wantErr:              true,
+			wantErrContains:      []string{"failed to update Site metadata", "legacy importer failed"},
+			expectUpdateSiteInDB: true,
+			expectRecordLatency:  true,
+			recordLatencyFailed:  true,
+		},
 		{
 			name:         "Success",
 			prefixes:     []string{"10.0.0.0/16", "2001:db8::/64"},
@@ -189,7 +216,6 @@ func TestUpdateSiteConfigInventoryV2(t *testing.T) {
 				FlowEnabled:       proto.Bool(true),
 			},
 			expectUpdateSiteInDB: true,
-			expectUpdateIPBlocks: true,
 			expectRecordLatency:  true,
 		},
 		{
@@ -199,13 +225,10 @@ func TestUpdateSiteConfigInventoryV2(t *testing.T) {
 			prefixes:             []string{"10.0.0.0/16"},
 			buildVersion:         "1.2.3",
 			expectUpdateSiteInDB: true,
-			expectUpdateIPBlocks: true,
 			expectRecordLatency:  true,
 		},
 		{
-			// UpdateSiteInDB failures do not stop the workflow from creating Site fabric IP
-			// Blocks, but they still fail the inventory workflow.
-			name:                 "UpdateSiteInDBFailsContinues",
+			name:                 "UpdateSiteInDBFails",
 			prefixes:             []string{"10.0.0.0/16"},
 			buildVersion:         "1.2.3",
 			siteAgentBuildInfo:   &corev1.SiteAgentBuildInfo{Version: "2.0.0"},
@@ -213,24 +236,6 @@ func TestUpdateSiteConfigInventoryV2(t *testing.T) {
 			wantErr:              true,
 			wantErrContains:      []string{"failed to update Site metadata"},
 			expectUpdateSiteInDB: true,
-			expectUpdateIPBlocks: true,
-			expectRecordLatency:  true,
-			recordLatencyFailed:  true,
-		},
-		{
-			name:               "BothInventoryUpdatesFail",
-			prefixes:           []string{"10.0.0.0/16"},
-			buildVersion:       "1.2.3",
-			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{Version: "2.0.0"},
-			updateSiteInDBErr:  errors.New("failed to update Site metadata"),
-			updateIPBlocksErr:  errors.New("failed to update Site IP Blocks"),
-			wantErr:            true,
-			wantErrContains: []string{
-				"failed to update Site metadata",
-				"failed to update Site IP Blocks",
-			},
-			expectUpdateSiteInDB: true,
-			expectUpdateIPBlocks: true,
 			expectRecordLatency:  true,
 			recordLatencyFailed:  true,
 		},
@@ -271,6 +276,17 @@ func TestUpdateSiteConfigInventoryV2(t *testing.T) {
 
 			var siteManager siteActivity.ManageSite
 			var metricsManager cwm.ManageInventoryMetrics
+			env.RegisterActivity(siteManager.UpdateIPBlocksInDBFromFabricPrefixes)
+			if tt.legacyHistory {
+				env.OnGetVersion(retireSiteFabricImporterChangeID, workflow.DefaultVersion, 1).Return(workflow.DefaultVersion)
+				env.OnActivity(siteManager.UpdateIPBlocksInDBFromFabricPrefixes, mock.Anything, siteID, tt.prefixes).
+					Return(temporal.NewNonRetryableApplicationError("legacy importer failed", "test", nil)).Once()
+			} else {
+				env.OnActivity(siteManager.UpdateIPBlocksInDBFromFabricPrefixes, mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+				t.Cleanup(func() {
+					env.AssertNotCalled(t, "UpdateIPBlocksInDBFromFabricPrefixes", mock.Anything, mock.Anything, mock.Anything)
+				})
+			}
 
 			if tt.expectUpdateSiteInDB {
 				env.RegisterActivity(siteManager.UpdateSiteInDB)
@@ -278,10 +294,6 @@ func TestUpdateSiteConfigInventoryV2(t *testing.T) {
 				// which is what the pointer carries here when the case leaves it unset.
 				env.OnActivity(siteManager.UpdateSiteInDB, mock.Anything, siteID, buildInfo,
 					tt.siteAgentBuildInfo).Return(tt.updateSiteInDBErr)
-			}
-			if tt.expectUpdateIPBlocks {
-				env.RegisterActivity(siteManager.UpdateIPBlocksInDBFromFabricPrefixes)
-				env.OnActivity(siteManager.UpdateIPBlocksInDBFromFabricPrefixes, mock.Anything, siteID, tt.prefixes).Return(tt.updateIPBlocksErr)
 			}
 			if tt.expectRecordLatency {
 				env.RegisterActivity(metricsManager.RecordLatency)
@@ -311,4 +323,21 @@ func TestUpdateSiteConfigInventoryV2(t *testing.T) {
 			}
 		})
 	}
+}
+
+func checkSiteConfigHistory(t *testing.T, workflowFunc any, filename string) {
+	t.Helper()
+	historyPath := filepath.Join("testdata", filename)
+	history, err := os.ReadFile(historyPath)
+	require.NoError(t, err)
+	require.Contains(t, string(history), "UpdateIPBlocksInDBFromFabricPrefixes")
+	replayer, err := worker.NewWorkflowReplayerWithOptions(worker.WorkflowReplayerOptions{
+		DataConverter: ctemporal.DataConverter(),
+	})
+	require.NoError(t, err)
+	replayer.RegisterWorkflow(workflowFunc)
+	// Captured from 8cfc35bdf0b9f2aacbf061437cb5aa3137fcdca5 on a local Temporal server
+	// with successful metadata, importer, and latency activities. The importer
+	// command must remain replayable after new workflows stop scheduling it.
+	require.NoError(t, replayer.ReplayWorkflowHistoryFromJSONFile(nil, historyPath))
 }

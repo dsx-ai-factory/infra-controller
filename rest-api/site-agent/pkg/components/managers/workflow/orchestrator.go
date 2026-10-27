@@ -253,8 +253,15 @@ func workflowOrchestrator() (*workflowtypes.WorkerStatus, error) {
 		return nil, err
 	}
 
-	// Only the Site publisher is required. Other registration failures are logged,
-	// but the worker still starts so successfully registered workflows can run.
+	// SitePrefix inventory is the sole fabric-prefix reconciler for new workflows.
+	// Fail startup like the Site publisher so liveness can trigger a retry.
+	err = ManagerAccess.API.SitePrefix.RegisterPublisher()
+	if err != nil {
+		return nil, err
+	}
+
+	// Other registration failures are logged, but the worker still starts so
+	// successfully registered workflows can run.
 	logRegistrationError := func(registration string, err error) {
 		if err != nil {
 			log.Error().Err(err).Str("registration", registration).Msg("Failed to register workflow handler")

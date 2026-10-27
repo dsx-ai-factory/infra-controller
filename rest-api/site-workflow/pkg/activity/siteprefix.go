@@ -184,7 +184,8 @@ func validateSitePrefixBatch(requestedIDs []*corev1.SitePrefixId, sitePrefixes [
 	return nil
 }
 
-// sitePrefixPagedInventory adds the run timestamp and complete ID set to one page.
+// sitePrefixPagedInventory adds the run timestamp and collector-selected IDs to one page.
+// The shared collector uses itemIDsForPage to pass the complete ID set only on the final page.
 func sitePrefixPagedInventory(allItemIDs []*corev1.SitePrefixId, pagedItems []*corev1.SitePrefix,
 	input *pagedInventoryInput, reportedAt *timestamppb.Timestamp) *corev1.SitePrefixInventory {
 	itemIDs := make([]string, 0, len(allItemIDs))

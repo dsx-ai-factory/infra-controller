@@ -606,6 +606,12 @@ func (p *Prefix) Network() (netip.Addr, error) {
 	return ipprefix.Addr(), nil
 }
 
+// HasAllocations reports user-acquired addresses or child prefixes, excluding
+// the network and broadcast addresses reserved when a prefix is created.
+func (p *Prefix) HasAllocations() bool {
+	return p.hasIPs() || p.acquiredPrefixes() > 0
+}
+
 // hasIPs will return true if there are allocated IPs
 func (p *Prefix) hasIPs() bool {
 	ipprefix, err := netip.ParsePrefix(p.Cidr)
