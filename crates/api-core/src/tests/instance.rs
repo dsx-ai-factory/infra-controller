@@ -8273,9 +8273,14 @@ async fn test_instance_creation_when_reprovision_is_triggered_parallel(
         dpf_managed: false,
     };
 
-    db::dpu_machine_update::trigger_reprovisioning_for_managed_host(&mut txn, &[machine_update])
+    assert!(
+        db::dpu_machine_update::trigger_reprovisioning_for_managed_host(
+            &mut txn,
+            &[machine_update]
+        )
         .await
-        .unwrap();
+        .unwrap()
+    );
     txn.commit().await.unwrap();
 
     advance_created_instance_into_ready_state(&env, &mh).await;

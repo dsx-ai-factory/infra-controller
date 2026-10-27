@@ -286,6 +286,21 @@ pub async fn lock_by_id_for_update(
     Ok(())
 }
 
+/// Locks a machine without waiting for another writer. Returns false when the
+/// row is absent or locked; the caller must release any locks it already holds.
+pub async fn try_lock_by_id_for_update(
+    txn: &mut PgConnection,
+    id: &MachineId,
+) -> Result<bool, DatabaseError> {
+    let query = "SELECT id FROM machines WHERE id = $1 FOR UPDATE SKIP LOCKED";
+    sqlx::query_scalar::<_, MachineId>(query)
+        .bind(id)
+        .fetch_optional(txn)
+        .await
+        .map(|id| id.is_some())
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 pub async fn find_existing_machine(
     txn: &mut PgConnection,
     macaddr: MacAddress,

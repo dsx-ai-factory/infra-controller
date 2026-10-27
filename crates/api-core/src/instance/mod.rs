@@ -1970,6 +1970,11 @@ fn not_allocatable_error(
                 "machine {machine_id} has a pending boot configuration; retry after it has been applied"
             ))
         }
+        NotAllocatableReason::DpuReprovisioningStarted => {
+            CarbideError::FailedPrecondition(format!(
+                "machine {machine_id} has started DPU reprovisioning; retry after it has completed"
+            ))
+        }
         NotAllocatableReason::NoDpuSnapshots => {
             CarbideError::internal(format!("machine {machine_id} has no DPU. cannot allocate"))
         }
@@ -2208,7 +2213,11 @@ pub(crate) async fn batch_allocate_instances(
             })?;
 
         if let Err(e) = mh_snapshot.is_usable_as_instance(request.allow_unhealthy_machine) {
-            if matches!(&e, NotAllocatableReason::PendingBootConfiguration) {
+            if matches!(
+                &e,
+                NotAllocatableReason::PendingBootConfiguration
+                    | NotAllocatableReason::DpuReprovisioningStarted
+            ) {
                 tracing::info!(
                     %machine_id,
                     error = %e,
@@ -3799,23 +3808,34 @@ mod tests {
     }
 
     #[test]
-    fn pending_boot_configuration_has_a_safe_allocation_error() {
+    fn allocation_preconditions_have_retryable_errors() {
         let machine_id: carbide_uuid::machine::StableHostMachineId =
             "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"
                 .parse()
                 .unwrap();
 
-        assert!(matches!(
-            not_allocatable_error(
-                machine_id,
-                NotAllocatableReason::PendingBootConfiguration,
-            ),
-            CarbideError::FailedPrecondition(message)
-                if message
-                    == format!(
+        check_cases(
+            [
+                Case {
+                    scenario: "pending boot configuration requires convergence",
+                    input: NotAllocatableReason::PendingBootConfiguration,
+                    expect: Yields(format!(
                         "machine {machine_id} has a pending boot configuration; retry after it has been applied"
-                    )
-        ));
+                    )),
+                },
+                Case {
+                    scenario: "started DPU reprovisioning requires completion",
+                    input: NotAllocatableReason::DpuReprovisioningStarted,
+                    expect: Yields(format!(
+                        "machine {machine_id} has started DPU reprovisioning; retry after it has completed"
+                    )),
+                },
+            ],
+            |reason| match not_allocatable_error(machine_id, reason) {
+                CarbideError::FailedPrecondition(message) => Ok(message),
+                error => Err(error.to_string()),
+            },
+        );
     }
 
     /// Verifies instance attachment rejects baseline services before checking
