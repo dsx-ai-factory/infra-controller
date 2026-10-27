@@ -140,8 +140,9 @@ impl<'a, R: DpuRepository, DE, RB, RD, MN, ER> DpuWatcherBuilder<'a, R, DE, RB, 
 
     /// Register a callback for DPU events.
     ///
-    /// The callback is invoked on every observed update to a DPU, not only
-    /// on phase transitions. The handler must be idempotent.
+    /// The callback is invoked on every observed DPU update with both status
+    /// and phase present, not only on phase transitions. Updates missing either
+    /// are skipped. The handler must be idempotent.
     pub fn on_dpu_event<F, Fut>(self, callback: F) -> DpuWatcherBuilder<'a, R, F, RB, RD, MN, ER>
     where
         F: Fn(DpuEvent) -> Fut + Send + Sync + 'static,
