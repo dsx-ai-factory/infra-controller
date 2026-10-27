@@ -255,12 +255,38 @@ type SiteSQLDAO struct {
 
 // GetByID returns a Site by its ID
 func (ssd SiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool, forUpdate bool) (_ *Site, retErr error) {
-	lock := ""
+	if forUpdate && tx == nil {
+		return nil, fmt.Errorf("%w: locking a Site requires a transaction", db.ErrInvalidValue)
+	}
+	// Create a child span and set the attributes for current request
+	ctx, stDAOSpan := cotel.StartSpan(ctx, "SiteDAO.GetByID")
+	defer func() { cotel.EndSpan(stDAOSpan, retErr) }()
+	cotel.SetAttribute(stDAOSpan, attribute.String("id", id.String()))
+
+	st := &Site{}
+
+	query := db.GetIDB(tx, ssd.dbSession).NewSelect().Model(st).Where("st.id = ?", id)
 	if forUpdate {
 		// Exclude Site deletion while allowing child inserts to check their Site foreign key.
-		lock = "NO KEY UPDATE OF st"
+		query = query.For("NO KEY UPDATE OF st")
 	}
-	return ssd.getByID(ctx, tx, id, includeRelations, includeDeleted, lock)
+	for _, relation := range includeRelations {
+		query = query.Relation(relation)
+	}
+
+	if includeDeleted {
+		query = query.WhereDeleted()
+	}
+
+	err := query.Scan(ctx)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, db.ErrDoesNotExist
+		}
+		return nil, err
+	}
+
+	return st, nil
 }
 
 // siteTenantIPBlockLockID coordinates tenant IP Block mutations with Site deletion
@@ -296,40 +322,6 @@ func (ssd SiteSQLDAO) GetByIDForTenantIPBlockMutation(ctx context.Context, tx *d
 		return nil, err
 	}
 	return ssd.GetByID(ctx, tx, id, nil, false, false)
-}
-
-func (ssd SiteSQLDAO) getByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool, lock string) (_ *Site, retErr error) {
-	if lock != "" && tx == nil {
-		return nil, fmt.Errorf("%w: locking a Site requires a transaction", db.ErrInvalidValue)
-	}
-	// Create a child span and set the attributes for current request
-	ctx, stDAOSpan := cotel.StartSpan(ctx, "SiteDAO.GetByID")
-	defer func() { cotel.EndSpan(stDAOSpan, retErr) }()
-	cotel.SetAttribute(stDAOSpan, attribute.String("id", id.String()))
-
-	st := &Site{}
-
-	query := db.GetIDB(tx, ssd.dbSession).NewSelect().Model(st).Where("st.id = ?", id)
-	if lock != "" {
-		query = query.For(lock)
-	}
-	for _, relation := range includeRelations {
-		query = query.Relation(relation)
-	}
-
-	if includeDeleted {
-		query = query.WhereDeleted()
-	}
-
-	err := query.Scan(ctx)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, db.ErrDoesNotExist
-		}
-		return nil, err
-	}
-
-	return st, nil
 }
 
 func (ssd SiteSQLDAO) setQueryWithFilter(filter SiteFilterInput, query *bun.SelectQuery, siteDAOSpan otrace.Span) (*bun.SelectQuery, error) {

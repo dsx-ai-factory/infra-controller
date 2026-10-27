@@ -245,7 +245,7 @@ func testIPBlockBuildAllocationConstraint(t *testing.T, dbSession *cdb.Session, 
 
 func TestCreateIPBlockHandler_Handle(t *testing.T) {
 	t.Run("tenant operation logs", func(t *testing.T) { checkTenantIPBlockLogs(t, http.MethodPost, "Create") })
-	t.Run("tenant lifecycle", checkTenantIPBlockLifecycle)
+	t.Run("tenant lifecycle", func(t *testing.T) { checkTenantIPBlockLifecycle(t, http.MethodPost) })
 	t.Run("tenant dispatch", func(t *testing.T) {
 		checkTenantIPBlockDispatch(t, http.MethodPost)
 	})
@@ -721,6 +721,7 @@ func TestCreateIPBlockHandler_Handle(t *testing.T) {
 }
 
 func TestUpdateIPBlockHandler_Handle(t *testing.T) {
+	t.Run("tenant lifecycle", func(t *testing.T) { checkTenantIPBlockLifecycle(t, http.MethodPatch) })
 	t.Run("tenant operation logs", func(t *testing.T) { checkTenantIPBlockLogs(t, http.MethodPatch, "Update") })
 	t.Run("tenant dispatch", func(t *testing.T) {
 		checkTenantIPBlockDispatch(t, http.MethodPatch)
@@ -2280,6 +2281,7 @@ func TestDerivedIPBlockHandler_GetAll(t *testing.T) {
 }
 
 func TestDeleteIPBlockHandler_Handle(t *testing.T) {
+	t.Run("tenant lifecycle", func(t *testing.T) { checkTenantIPBlockLifecycle(t, http.MethodDelete) })
 	t.Run("tenant operation logs", func(t *testing.T) { checkTenantIPBlockLogs(t, http.MethodDelete, "Delete") })
 	t.Run("tenant dispatch", func(t *testing.T) {
 		checkTenantIPBlockDispatch(t, http.MethodDelete)

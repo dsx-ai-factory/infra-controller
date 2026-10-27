@@ -77,6 +77,7 @@ type tenantIPBlockFixture struct {
 	nextError          error
 	commitOnError      bool
 	lastCreatedID      uuid.UUID
+	beforeUpdate       func()
 	nextWait           bool
 	requestTimeout     time.Duration
 	failMethod         string
@@ -145,12 +146,20 @@ func newTenantIPBlockFixture(t *testing.T) *tenantIPBlockFixture {
 			require.NoError(t, protojson.Unmarshal(request.RequestJSON, req))
 			require.Equal(t, f.core.Id.Value, req.GetId().GetValue())
 			require.Equal(t, f.tenant.Org, req.TenantOrganizationId)
-			require.Equal(t, f.core.Version, req.GetIfVersionMatch())
+			require.NotNil(t, req.IfVersionMatch)
+			if f.beforeUpdate != nil {
+				f.beforeUpdate()
+				f.beforeUpdate = nil
+			}
+			if req.GetIfVersionMatch() != f.core.Version {
+				return tenantIPBlockRun{err: tp.NewNonRetryableApplicationError("stale SitePrefix version", swe.ErrTypeNICoFailedPrecondition, nil)}, nil
+			}
 			require.NotNil(t, req.Metadata)
 			if !apply {
 				return result, nil
 			}
 			f.core.Metadata = req.Metadata
+			f.core.Version = uuid.NewString()
 			data, err = protojson.Marshal(f.core)
 		case deleteTenantIPBlockMethod:
 			req := &corev1.SitePrefixDeletionRequest{}
@@ -225,13 +234,15 @@ func readTenantIPBlock(t *testing.T, r *httptest.ResponseRecorder, code int) mod
 	require.NoError(t, json.Unmarshal(r.Body.Bytes(), &result))
 	return result
 }
-func checkTenantIPBlockLifecycle(t *testing.T) {
+func checkTenantIPBlockLifecycle(t *testing.T, method string) {
 	t.Helper()
 	for _, row := range []struct {
-		name  string
-		check func(*testing.T, *tenantIPBlockFixture)
+		// An empty method shares failure cases between PATCH and DELETE.
+		method string
+		name   string
+		check  func(*testing.T, *tenantIPBlockFixture)
 	}{
-		{"Core latency does not block routine Site updates", func(t *testing.T, f *tenantIPBlockFixture) {
+		{http.MethodPost, "Core latency does not block routine Site updates", func(t *testing.T, f *tenantIPBlockFixture) {
 			f.duringCore = func() {
 				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 				defer cancel()
@@ -248,7 +259,7 @@ func checkTenantIPBlockLifecycle(t *testing.T) {
 			}
 			readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
 		}},
-		{"capability writer prevents Core admission and is rechecked after commit", func(t *testing.T, f *tenantIPBlockFixture) {
+		{http.MethodPost, "capability writer prevents Core admission and is rechecked after commit", func(t *testing.T, f *tenantIPBlockFixture) {
 			ctx := context.Background()
 			tx, err := cdb.BeginTx(ctx, f.session, nil)
 			require.NoError(t, err)
@@ -261,7 +272,7 @@ func checkTenantIPBlockLifecycle(t *testing.T) {
 			require.Equal(t, http.StatusPreconditionFailed, f.request(t, http.MethodPost, "", f.body()).Code)
 			require.Empty(t, f.calls)
 		}},
-		{"inventory skips an in-flight prefix and reconciles the rest of the page", func(t *testing.T, f *tenantIPBlockFixture) {
+		{http.MethodPost, "inventory skips an in-flight prefix and reconciles the rest of the page", func(t *testing.T, f *tenantIPBlockFixture) {
 			for _, method := range []string{http.MethodPost, http.MethodPatch, http.MethodDelete} {
 				t.Run(method, func(t *testing.T) {
 					path := ""
@@ -307,7 +318,7 @@ func checkTenantIPBlockLifecycle(t *testing.T) {
 				})
 			}
 		}},
-		{"create metadata deletion and inventory", func(t *testing.T, f *tenantIPBlockFixture) {
+		{http.MethodPost, "create metadata deletion and inventory", func(t *testing.T, f *tenantIPBlockFixture) {
 			result := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
 			require.Equal(t, cdbm.IPBlockStatusProvisioning, result.Status)
 			require.False(t, result.Managed)
@@ -344,7 +355,7 @@ func checkTenantIPBlockLifecycle(t *testing.T) {
 
 			require.Equal(t, http.StatusAccepted, f.request(t, http.MethodDelete, "/"+result.ID, nil).Code)
 		}},
-		{"Core create timeout rolls back and inventory recovers the same ID", func(t *testing.T, f *tenantIPBlockFixture) {
+		{http.MethodPost, "Core create timeout rolls back and inventory recovers the same ID", func(t *testing.T, f *tenantIPBlockFixture) {
 			f.nextWait = true
 			f.requestTimeout = time.Second
 			require.Equal(t, http.StatusGatewayTimeout, f.request(t, http.MethodPost, "", f.body()).Code)
@@ -357,7 +368,7 @@ func checkTenantIPBlockLifecycle(t *testing.T) {
 			result := readTenantIPBlock(t, f.request(t, http.MethodGet, "/"+f.core.Id.Value, nil), http.StatusOK)
 			require.Equal(t, f.core.Id.Value, result.ID)
 		}},
-		{"definitive create rejection rolls back and releases admission", func(t *testing.T, f *tenantIPBlockFixture) {
+		{http.MethodPost, "definitive create rejection rolls back and releases admission", func(t *testing.T, f *tenantIPBlockFixture) {
 			for _, failure := range []struct {
 				name, kind, message string
 				code                int
@@ -378,7 +389,7 @@ func checkTenantIPBlockLifecycle(t *testing.T) {
 			}
 			readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
 		}},
-		{"an admitted create remains removable after association removal", func(t *testing.T, f *tenantIPBlockFixture) {
+		{http.MethodPost, "an admitted create remains removable after association removal", func(t *testing.T, f *tenantIPBlockFixture) {
 			f.duringCore = func() {
 				dao := cdbm.NewTenantSiteDAO(f.session)
 				association, err := dao.GetByTenantIDAndSiteID(context.Background(), nil, f.tenant.ID, f.site.ID, nil)
@@ -390,7 +401,7 @@ func checkTenantIPBlockLifecycle(t *testing.T) {
 			require.Equal(t, http.StatusBadRequest, f.request(t, http.MethodPatch, "/"+created.ID, map[string]any{"name": "after-removal"}).Code)
 			require.Equal(t, http.StatusAccepted, f.request(t, http.MethodDelete, "/"+created.ID, nil).Code)
 		}},
-		{"inconsistent Core ownership prevents metadata mutation", func(t *testing.T, f *tenantIPBlockFixture) {
+		{http.MethodPatch, "inconsistent Core ownership prevents metadata mutation", func(t *testing.T, f *tenantIPBlockFixture) {
 			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
 			f.core.Config.TenantOrganizationId = cutil.GetPtr("other-tenant")
 			calls := len(f.calls)
@@ -406,7 +417,22 @@ func checkTenantIPBlockLifecycle(t *testing.T) {
 			require.Equal(t, created.Name, persisted.Name)
 			require.Equal(t, created.Status, persisted.Status)
 		}},
-		{"mutation failures roll back REST changes", func(t *testing.T, f *tenantIPBlockFixture) {
+
+		{http.MethodPatch, "concurrent Core update rejects the stale version and permits retry", func(t *testing.T, f *tenantIPBlockFixture) {
+			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
+			f.beforeUpdate = func() { f.core.Version = "external-v2" }
+			response := f.request(t, http.MethodPatch, "/"+created.ID, map[string]any{"name": "retried-name"})
+			require.Equal(t, http.StatusPreconditionFailed, response.Code, response.Body.String())
+			require.Equal(t, "external-v2", f.core.Version)
+			require.Equal(t, created.Name, f.core.Metadata.Name)
+			persisted := readTenantIPBlock(t, f.request(t, http.MethodGet, "/"+created.ID, nil), http.StatusOK)
+			require.Equal(t, created.Name, persisted.Name)
+			require.Equal(t, created.Status, persisted.Status)
+			updated := readTenantIPBlock(t, f.request(t, http.MethodPatch, "/"+created.ID, map[string]any{"name": "retried-name"}), http.StatusOK)
+			require.Equal(t, "retried-name", updated.Name)
+			require.NotEqual(t, "external-v2", f.core.Version)
+		}},
+		{"", "mutation failures roll back REST changes", func(t *testing.T, f *tenantIPBlockFixture) {
 			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
 			for _, mutation := range []struct {
 				method, coreMethod string
@@ -416,9 +442,11 @@ func checkTenantIPBlockLifecycle(t *testing.T) {
 			}{
 				{http.MethodPatch, updateTenantIPBlockMethod, map[string]any{"description": "committed-in-core"}, swe.ErrTypeNICoUnavailable, http.StatusServiceUnavailable},
 				{http.MethodPatch, findTenantIPBlockMethod, map[string]any{"name": "lookup-failed"}, swe.ErrTypeNICoDenied, http.StatusForbidden},
-				{http.MethodPatch, updateTenantIPBlockMethod, map[string]any{"name": "stale-version"}, swe.ErrTypeNICoFailedPrecondition, http.StatusPreconditionFailed},
 				{http.MethodDelete, deleteTenantIPBlockMethod, nil, swe.ErrTypeNICoUnavailable, http.StatusServiceUnavailable},
 			} {
+				if mutation.method != method {
+					continue
+				}
 				before := proto.Clone(f.core)
 				f.commitOnError = mutation.errorType == swe.ErrTypeNICoUnavailable
 				f.failMethod = mutation.coreMethod
@@ -433,13 +461,14 @@ func checkTenantIPBlockLifecycle(t *testing.T) {
 				require.Equal(t, created.Name, persisted.Name)
 				require.Equal(t, created.Status, persisted.Status)
 				if mutation.method == http.MethodPatch && mutation.errorType == swe.ErrTypeNICoUnavailable {
+					require.NotEqual(t, before.(*corev1.SitePrefix).Version, f.core.Version, "uncertain committed update advances the version")
 					f.failMethod = ""
 					created = readTenantIPBlock(t, f.request(t, http.MethodPatch, "/"+created.ID, map[string]any{"name": "confirmed"}), http.StatusOK)
 					require.Equal(t, "committed-in-core", *created.Description)
 				}
 			}
 		}},
-		{"privacy and allocation ownership", func(t *testing.T, f *tenantIPBlockFixture) {
+		{http.MethodPost, "privacy and allocation ownership", func(t *testing.T, f *tenantIPBlockFixture) {
 			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
 			allocated, err := cdbm.NewIPBlockDAO(f.session).Create(context.Background(), nil, cdbm.IPBlockCreateInput{
 				Name: "allocated", SiteID: f.site.ID, InfrastructureProviderID: f.site.InfrastructureProviderID, TenantID: &f.tenant.ID,
@@ -483,7 +512,7 @@ func checkTenantIPBlockLifecycle(t *testing.T) {
 			require.Equal(t, http.StatusNotFound, f.request(t, http.MethodGet, "/"+created.ID, nil).Code)
 			require.Len(t, f.calls, calls)
 		}},
-		{"capability association and strict request validation", func(t *testing.T, f *tenantIPBlockFixture) {
+		{http.MethodPost, "capability association and strict request validation", func(t *testing.T, f *tenantIPBlockFixture) {
 			_, err := cdbm.NewSiteDAO(f.session).Update(context.Background(), nil, cdbm.SiteUpdateInput{SiteID: f.site.ID, Status: cutil.GetPtr(cdbm.SiteStatusError)})
 			require.NoError(t, err)
 			require.Equal(t, http.StatusBadRequest, f.request(t, http.MethodPost, "", f.body()).Code)
@@ -516,7 +545,7 @@ func checkTenantIPBlockLifecycle(t *testing.T) {
 			require.Equal(t, existing.Body.String(), unknown.Body.String())
 			require.Empty(t, f.calls)
 		}},
-		{"generated SDK tenant IP Block round trip", func(t *testing.T, f *tenantIPBlockFixture) {
+		{http.MethodPost, "generated SDK tenant IP Block round trip", func(t *testing.T, f *tenantIPBlockFixture) {
 			server := httptest.NewServer(f.router)
 			defer server.Close()
 			cfg := sdk.NewConfiguration()
@@ -561,7 +590,7 @@ func checkTenantIPBlockLifecycle(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, http.StatusAccepted, response.StatusCode)
 		}},
-		{"retirement survives removal of the last Allocation", func(t *testing.T, f *tenantIPBlockFixture) {
+		{http.MethodDelete, "retirement survives removal of the last Allocation", func(t *testing.T, f *tenantIPBlockFixture) {
 			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
 			allocation := common.TestBuildAllocation(t, f.session, f.site, f.tenant, "last-allocation", f.providerUser)
 			tenantUser := f.user
@@ -576,7 +605,7 @@ func checkTenantIPBlockLifecycle(t *testing.T) {
 			require.Equal(t, http.StatusAccepted, f.request(t, http.MethodDelete, "/"+created.ID, nil).Code)
 			require.Equal(t, corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING, f.core.Status.LifecycleState)
 		}},
-		{"validation includes actionable field errors", func(t *testing.T, f *tenantIPBlockFixture) {
+		{http.MethodPost, "validation includes actionable field errors", func(t *testing.T, f *tenantIPBlockFixture) {
 			body := f.body()
 			body.Prefix = "8.8.8.0"
 			response := f.request(t, http.MethodPost, "", body)
@@ -587,7 +616,7 @@ func checkTenantIPBlockLifecycle(t *testing.T) {
 			require.Equal(t, http.StatusBadRequest, response.Code)
 			require.Contains(t, response.Body.String(), "description")
 		}},
-		{"Location follows the mounted route", func(t *testing.T, f *tenantIPBlockFixture) {
+		{http.MethodPost, "Location follows the mounted route", func(t *testing.T, f *tenantIPBlockFixture) {
 			data, err := json.Marshal(f.body())
 			require.NoError(t, err)
 			req := httptest.NewRequest(http.MethodPost, "/custom/org/tenant/carbide/ipblock", strings.NewReader(string(data)))
@@ -597,7 +626,7 @@ func checkTenantIPBlockLifecycle(t *testing.T) {
 			created := readTenantIPBlock(t, rec, http.StatusCreated)
 			require.Equal(t, req.URL.Path+"/"+created.ID, rec.Header().Get("Location"))
 		}},
-		{"lost first retirement response remains retryable after Core removal", func(t *testing.T, f *tenantIPBlockFixture) {
+		{http.MethodDelete, "lost first retirement response remains retryable after Core removal", func(t *testing.T, f *tenantIPBlockFixture) {
 			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
 			f.nextWait = true
 			f.requestTimeout = time.Second
@@ -612,7 +641,7 @@ func checkTenantIPBlockLifecycle(t *testing.T) {
 			require.NotEmpty(t, got.StatusHistory)
 			require.Equal(t, cutil.GetPtr("Core reported SitePrefix absent; waiting for inventory"), got.StatusHistory[0].Message)
 		}},
-		{"restored deletion remains removable through the public API", func(t *testing.T, f *tenantIPBlockFixture) {
+		{http.MethodDelete, "restored deletion remains removable through the public API", func(t *testing.T, f *tenantIPBlockFixture) {
 			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
 			require.Equal(t, http.StatusAccepted, f.request(t, http.MethodDelete, "/"+created.ID, nil).Code)
 			id := uuid.MustParse(created.ID)
@@ -632,6 +661,9 @@ func checkTenantIPBlockLifecycle(t *testing.T) {
 			require.Equal(t, http.StatusAccepted, f.request(t, http.MethodDelete, "/"+created.ID, nil).Code)
 		}},
 	} {
+		if row.method != method && (row.method != "" || method == http.MethodPost) {
+			continue
+		}
 		t.Run(row.name, func(t *testing.T) { row.check(t, newTenantIPBlockFixture(t)) })
 	}
 }
