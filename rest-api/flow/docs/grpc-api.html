@@ -539,6 +539,14 @@
                 </li>
 
                 <li>
+                  <a href="#v1.GetRackPowerDetailsRequest"><span class="badge">M</span>GetRackPowerDetailsRequest</a>
+                </li>
+
+                <li>
+                  <a href="#v1.GetRackPowerDetailsResponse"><span class="badge">M</span>GetRackPowerDetailsResponse</a>
+                </li>
+
+                <li>
                   <a href="#v1.GetRackRuleAssociationRequest"><span class="badge">M</span>GetRackRuleAssociationRequest</a>
                 </li>
 
@@ -883,6 +891,14 @@
                 </li>
 
                 <li>
+                  <a href="#v1.PowerTaskReference"><span class="badge">M</span>PowerTaskReference</a>
+                </li>
+
+                <li>
+                  <a href="#v1.PowerTaskReferenceList"><span class="badge">M</span>PowerTaskReferenceList</a>
+                </li>
+
+                <li>
                   <a href="#v1.PowerTaskWaitingContext"><span class="badge">M</span>PowerTaskWaitingContext</a>
                 </li>
 
@@ -911,7 +927,27 @@
                 </li>
 
                 <li>
+                  <a href="#v1.RackMemberPowerActions"><span class="badge">M</span>RackMemberPowerActions</a>
+                </li>
+
+                <li>
                   <a href="#v1.RackPosition"><span class="badge">M</span>RackPosition</a>
+                </li>
+
+                <li>
+                  <a href="#v1.RackPowerCoverage"><span class="badge">M</span>RackPowerCoverage</a>
+                </li>
+
+                <li>
+                  <a href="#v1.RackPowerDetails"><span class="badge">M</span>RackPowerDetails</a>
+                </li>
+
+                <li>
+                  <a href="#v1.RackPowerOperations"><span class="badge">M</span>RackPowerOperations</a>
+                </li>
+
+                <li>
+                  <a href="#v1.RackPowerSummary"><span class="badge">M</span>RackPowerSummary</a>
                 </li>
 
                 <li>
@@ -924,6 +960,14 @@
 
                 <li>
                   <a href="#v1.RackTargets"><span class="badge">M</span>RackTargets</a>
+                </li>
+
+                <li>
+                  <a href="#v1.RackTrayPowerDetails"><span class="badge">M</span>RackTrayPowerDetails</a>
+                </li>
+
+                <li>
+                  <a href="#v1.RackTrayPowerOperations"><span class="badge">M</span>RackTrayPowerOperations</a>
                 </li>
 
                 <li>
@@ -1145,6 +1189,10 @@
 
                 <li>
                   <a href="#v1.RackOrderByField"><span class="badge">E</span>RackOrderByField</a>
+                </li>
+
+                <li>
+                  <a href="#v1.RackPowerState"><span class="badge">E</span>RackPowerState</a>
                 </li>
 
                 <li>
@@ -4214,6 +4262,54 @@ and returns OperationRun.stats. </p></td>
                 <tr>
                   <td>rack</td>
                   <td><a href="#v1.Rack">Rack</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetRackPowerDetailsRequest">GetRackPowerDetailsRequest</h3>
+        <p>Uses the external rack ID, as GetRackInfoByID does. Empty IDs return</p><p>InvalidArgument and unknown IDs NotFound; internal Flow UUIDs are not selectors.</p><p>Inventory failures return Internal for internal errors and Unavailable for</p><p>other dependency failures. A missing rack value or response encoding failure</p><p>returns Internal. Caller cancellation returns Canceled; an expired inventory</p><p>read or caller deadline returns DeadlineExceeded.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>External rack ID, not a rack name or internal Flow UUID. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetRackPowerDetailsResponse">GetRackPowerDetailsResponse</h3>
+        <p>Whole rack results; oversized responses fail with ResourceExhausted rather</p><p>than omitting members or tasks. The encoded proxy budget is 1,991,680 bytes.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>details</td>
+                  <td><a href="#v1.RackPowerDetails">RackPowerDetails</a></td>
                   <td></td>
                   <td><p> </p></td>
                 </tr>
@@ -7383,7 +7479,7 @@ On a Waiting task, absence means the service did not provide context. </p></td>
 
 
         <h3 id="v1.PowerTaskDetailsList">PowerTaskDetailsList</h3>
-        <p>Outstanding power tasks for the tray's current Flow rack, ordered by created_at,</p><p>then task ID, ascending. Missing rack assignment returns NotLinked. Tasks from</p><p>a former rack are excluded. Only recorded selections or power-shelf tasks</p><p>affecting this rack are included; tasks with no recorded targets are excluded.</p><p>More than 256 outstanding rack power tasks makes this entire section unavailable,</p><p>even if fewer target this tray. Error is absent on success, including empty;</p><p>entries is empty on failure. Entries contain only power tasks; other task kinds</p><p>can appear as brief waiting-context references. Execution reports are excluded.</p>
+        <p>Outstanding power tasks, ordered by created_at then task ID, ascending.</p><p>Rack results include every outstanding task with full recorded targets.</p><p>Tray results include only recorded selections or power-shelf tasks affecting</p><p>the tray's current Flow rack. Tasks with no targets or from a former rack are</p><p>excluded from tray results; missing rack assignment returns NotLinked.</p><p>More than 256 outstanding rack power tasks makes this entire section unavailable,</p><p>even if fewer target a requested tray. Error is absent on success, including</p><p>empty; entries is empty on failure. Entries contain only power tasks; other</p><p>task kinds can appear as brief waiting-context references. Execution reports</p><p>are excluded.</p>
 
 
           <table class="field-table">
@@ -7395,6 +7491,68 @@ On a Waiting task, absence means the service did not provide context. </p></td>
                 <tr>
                   <td>entries</td>
                   <td><a href="#v1.PowerTaskDetails">PowerTaskDetails</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.PowerDetailsReadError">PowerDetailsReadError</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.PowerTaskReference">PowerTaskReference</h3>
+        <p>The full operation and recorded targets are stored once in the rack task list.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>relevance</td>
+                  <td><a href="#v1.PowerTaskRelevance">PowerTaskRelevance</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.PowerTaskReferenceList">PowerTaskReferenceList</h3>
+        <p>References follow rack task order. Error is absent on a successful empty list;</p><p>supported members mirror a failed rack task read, with no entries in that case.</p><p>Unsupported component types always return Unsupported with no entries.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>entries</td>
+                  <td><a href="#v1.PowerTaskReference">PowerTaskReference</a></td>
                   <td>repeated</td>
                   <td><p> </p></td>
                 </tr>
@@ -7638,6 +7796,51 @@ conflict_strategy is CONFLICT_STRATEGY_QUEUE. </p></td>
 
 
 
+        <h3 id="v1.RackMemberPowerActions">RackMemberPowerActions</h3>
+        <p>One member's action result; its absence or failure is never a successful empty</p><p>list. Individual Core actions retain their order: Active before Pending.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>flow_component_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>core_component_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p>Absent until the inventory member has a managed Core identity. </p></td>
+                </tr>
+
+                <tr>
+                  <td>component_type</td>
+                  <td><a href="#v1.ComponentType">ComponentType</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>details</td>
+                  <td><a href="#v1.PowerActionDetails">PowerActionDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.RackPosition">RackPosition</h3>
         <p></p>
 
@@ -7665,6 +7868,199 @@ conflict_strategy is CONFLICT_STRATEGY_QUEUE. </p></td>
                 <tr>
                   <td>host_id</td>
                   <td><a href="#int32">int32</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.RackPowerCoverage">RackPowerCoverage</h3>
+        <p>These mutually exclusive categories sum to total. A summary value must always</p><p>be interpreted alongside coverage, especially when desired policy is absent.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>total</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>known</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>unknown</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Explicit Unknown hardware observations; always zero for desired policy. </p></td>
+                </tr>
+
+                <tr>
+                  <td>unavailable</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Failed, unsupported, unlinked or malformed reads, not an Off observation. </p></td>
+                </tr>
+
+                <tr>
+                  <td>not_applicable</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Core reports that stored desired policy does not apply to this member. </p></td>
+                </tr>
+
+                <tr>
+                  <td>no_policy</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Core found no stored policy. A managed target reported NotFound counts
+as unavailable instead. </p></td>
+                </tr>
+
+                <tr>
+                  <td>disabled_policy</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>A stored PowerManagerDisabled policy; it does not vote as On or Off. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.RackPowerDetails">RackPowerDetails</h3>
+        <p>Summaries are synthesized from member evidence, not a rack hardware reading or</p><p>a new desired rack policy. Inventory and all child reads share at most 30 seconds</p><p>from this RPC's entry, capped one second before an earlier caller deadline. Caller</p><p>cancellation fails the RPC; dependency failures remain visible in each member.</p><p>Core batches run sequentially by component type; if earlier reads consume the</p><p>budget, later members report DeadlineExceeded without another Core call.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>flow_rack_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p>Flow inventory UUID used by task records. </p></td>
+                </tr>
+
+                <tr>
+                  <td>external_rack_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>External rack identifier accepted by this RPC and rack inventory APIs. </p></td>
+                </tr>
+
+                <tr>
+                  <td>actual</td>
+                  <td><a href="#v1.RackPowerSummary">RackPowerSummary</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>desired</td>
+                  <td><a href="#v1.RackPowerSummary">RackPowerSummary</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>operations</td>
+                  <td><a href="#v1.RackPowerOperations">RackPowerOperations</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>trays</td>
+                  <td><a href="#v1.RackTrayPowerDetails">RackTrayPowerDetails</a></td>
+                  <td>repeated</td>
+                  <td><p>Every current, non-deleted inventory member, including unlinked and
+unsupported types, ordered by component_type enum value, then
+flow_component_id ascending.
+Unsupported types report Unsupported in Core and task-reference sections. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.RackPowerOperations">RackPowerOperations</h3>
+        <p>Compiled actions preserve each member's identity and availability, including</p><p>successful empty action lists. Actions follow the same order as trays.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>actions</td>
+                  <td><a href="#v1.RackMemberPowerActions">RackMemberPowerActions</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>tasks</td>
+                  <td><a href="#v1.PowerTaskDetailsList">PowerTaskDetailsList</a></td>
+                  <td></td>
+                  <td><p>Each outstanding task occurs once by ID, ordered by created_at then UUID.
+Full recorded targets remain, including moved, removed and empty selections.
+Relevance is unspecified here; it is recorded on each member&#39;s references. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.RackPowerSummary">RackPowerSummary</h3>
+        <p>Different known states produce Mixed even when other evidence is missing.</p><p>Otherwise actual requires every member to have the same known state; desired</p><p>requires agreement among enabled policies and no unreadable policy sections.</p><p>No members or no known applicable states produces Unknown. NotApplicable,</p><p>NoPolicy and DisabledPolicy do not vote in desired agreement.</p><p>Unsupported inventory types remain unavailable: their presence prevents an</p><p>otherwise agreeing subset from claiming a known state for the whole rack.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>state</td>
+                  <td><a href="#v1.RackPowerState">RackPowerState</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>coverage</td>
+                  <td><a href="#v1.RackPowerCoverage">RackPowerCoverage</a></td>
                   <td></td>
                   <td><p> </p></td>
                 </tr>
@@ -7794,6 +8190,96 @@ conflict_strategy is CONFLICT_STRATEGY_QUEUE. </p></td>
                   <td>targets</td>
                   <td><a href="#v1.RackTarget">RackTarget</a></td>
                   <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.RackTrayPowerDetails">RackTrayPowerDetails</h3>
+        <p>Member observations, policies and actions use the GetTrayPowerDetails meanings.</p><p>The enclosing rack supplies rack identity; unsupported inventory types remain</p><p>visible with section errors, and locally invalid Core IDs fail only that member's</p><p>Core sections. Task references point to complete RackPowerOperations.tasks.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>flow_component_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>core_component_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p>Absent until the inventory member has a managed Core identity. </p></td>
+                </tr>
+
+                <tr>
+                  <td>component_type</td>
+                  <td><a href="#v1.ComponentType">ComponentType</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>actual</td>
+                  <td><a href="#v1.PowerActualDetails">PowerActualDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>desired</td>
+                  <td><a href="#v1.PowerDesiredDetails">PowerDesiredDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>operations</td>
+                  <td><a href="#v1.RackTrayPowerOperations">RackTrayPowerOperations</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.RackTrayPowerOperations">RackTrayPowerOperations</h3>
+        <p>One member's Core actions and references to the rack's full Flow task records.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>actions</td>
+                  <td><a href="#v1.PowerActionDetails">PowerActionDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>tasks</td>
+                  <td><a href="#v1.PowerTaskReferenceList">PowerTaskReferenceList</a></td>
+                  <td></td>
                   <td><p> </p></td>
                 </tr>
 
@@ -10017,7 +10503,7 @@ graceful restart</p></td>
               <tr>
                 <td>POWER_DETAILS_READ_ERROR_UNSPECIFIED</td>
                 <td>0</td>
-                <td><p>Not emitted as an error by this RPC.</p></td>
+                <td><p>Not emitted as an error by power-details RPCs.</p></td>
               </tr>
 
               <tr>
@@ -10036,7 +10522,8 @@ sections, or a Flow rack assignment for tasks.</p></td>
               <tr>
                 <td>POWER_DETAILS_READ_ERROR_UNSUPPORTED</td>
                 <td>3</td>
-                <td><p>Core lacks the RPC or did not provide this section.</p></td>
+                <td><p>Core lacks the RPC or did not provide this section, or the inventory
+component type does not support power details.</p></td>
               </tr>
 
               <tr>
@@ -10048,7 +10535,8 @@ sections, or a Flow rack assignment for tasks.</p></td>
               <tr>
                 <td>POWER_DETAILS_READ_ERROR_READ_FAILED</td>
                 <td>5</td>
-                <td><p>The dependency returned an error other than unsupported/deadline.</p></td>
+                <td><p>The dependency returned an error other than unsupported/deadline, or a
+stored managed ID cannot be decoded as the requested Core component type.</p></td>
               </tr>
 
               <tr>
@@ -10061,15 +10549,16 @@ value, or task data that cannot be converted to the declared operation.</p></td>
               <tr>
                 <td>POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED</td>
                 <td>7</td>
-                <td><p>The rack power-task count, waiting-context task count, or encoded response
-exceeded its documented bound.</p></td>
+                <td><p>The rack power-task count, waiting-context task count, or encoded tray
+response exceeded its documented bound. Oversized rack responses instead
+fail the whole RPC with ResourceExhausted.</p></td>
               </tr>
 
           </tbody>
         </table>
 
         <h3 id="v1.PowerTaskRelevance">PowerTaskRelevance</h3>
-        <p>Why this task is included for the requested tray.</p>
+        <p>Why this task is included for the requested tray; unspecified at rack scope.</p>
         <table class="enum-table">
           <thead>
             <tr><td>Name</td><td>Number</td><td>Description</td></tr>
@@ -10162,6 +10651,67 @@ exceeded its documented bound.</p></td>
                 <td>RACK_ORDER_BY_FIELD_MODEL</td>
                 <td>3</td>
                 <td><p>Order by model</p></td>
+              </tr>
+
+          </tbody>
+        </table>
+
+        <h3 id="v1.RackPowerState">RackPowerState</h3>
+        <p>Known observed values plus Mixed for disagreement. Desired uses only On, Off,</p><p>Unknown or Mixed; disabled management is coverage, never a desired Off vote.</p>
+        <table class="enum-table">
+          <thead>
+            <tr><td>Name</td><td>Number</td><td>Description</td></tr>
+          </thead>
+          <tbody>
+
+              <tr>
+                <td>RACK_POWER_STATE_UNKNOWN</td>
+                <td>0</td>
+                <td><p>No known applicable state, or incomplete evidence prevents agreement
+without a proven disagreement among known states.</p></td>
+              </tr>
+
+              <tr>
+                <td>RACK_POWER_STATE_ON</td>
+                <td>1</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>RACK_POWER_STATE_OFF</td>
+                <td>2</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>RACK_POWER_STATE_POWERING_ON</td>
+                <td>3</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>RACK_POWER_STATE_POWERING_OFF</td>
+                <td>4</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>RACK_POWER_STATE_PAUSED</td>
+                <td>5</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>RACK_POWER_STATE_RESET</td>
+                <td>6</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>RACK_POWER_STATE_MIXED</td>
+                <td>7</td>
+                <td><p>At least two known applicable member states disagree. Missing evidence
+does not override that disagreement.</p></td>
               </tr>
 
           </tbody>
@@ -10883,6 +11433,15 @@ When pagination is omitted, offset defaults to 0 and limit defaults to 100.</p><
                 <td><p>Reads live Core power details and outstanding Flow power tasks independently.
 This is not an atomic snapshot and does not change power or task state.
 Caller cancellation fails the RPC; child read failures remain section errors.</p></td>
+              </tr>
+
+              <tr>
+                <td>GetRackPowerDetails</td>
+                <td><a href="#v1.GetRackPowerDetailsRequest">GetRackPowerDetailsRequest</a></td>
+                <td><a href="#v1.GetRackPowerDetailsResponse">GetRackPowerDetailsResponse</a></td>
+                <td><p>Reads full current rack membership once, with batched Core details and one
+outstanding task read. This is informational, not an atomic snapshot.
+It does not change power or task state.</p></td>
               </tr>
 
           </tbody>

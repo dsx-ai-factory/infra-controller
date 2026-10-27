@@ -95,6 +95,8 @@
   - [GetRackInfoByIDRequest](#v1-GetRackInfoByIDRequest)
   - [GetRackInfoBySerialRequest](#v1-GetRackInfoBySerialRequest)
   - [GetRackInfoResponse](#v1-GetRackInfoResponse)
+  - [GetRackPowerDetailsRequest](#v1-GetRackPowerDetailsRequest)
+  - [GetRackPowerDetailsResponse](#v1-GetRackPowerDetailsResponse)
   - [GetRackRuleAssociationRequest](#v1-GetRackRuleAssociationRequest)
   - [GetRackRuleAssociationResponse](#v1-GetRackRuleAssociationResponse)
   - [GetRacksForNVLDomainRequest](#v1-GetRacksForNVLDomainRequest)
@@ -181,6 +183,8 @@
   - [PowerResetRackRequest](#v1-PowerResetRackRequest)
   - [PowerTaskDetails](#v1-PowerTaskDetails)
   - [PowerTaskDetailsList](#v1-PowerTaskDetailsList)
+  - [PowerTaskReference](#v1-PowerTaskReference)
+  - [PowerTaskReferenceList](#v1-PowerTaskReferenceList)
   - [PowerTaskWaitingContext](#v1-PowerTaskWaitingContext)
   - [PurgeComponentRequest](#v1-PurgeComponentRequest)
   - [PurgeComponentResponse](#v1-PurgeComponentResponse)
@@ -188,10 +192,17 @@
   - [PurgeRackResponse](#v1-PurgeRackResponse)
   - [QueueOptions](#v1-QueueOptions)
   - [Rack](#v1-Rack)
+  - [RackMemberPowerActions](#v1-RackMemberPowerActions)
   - [RackPosition](#v1-RackPosition)
+  - [RackPowerCoverage](#v1-RackPowerCoverage)
+  - [RackPowerDetails](#v1-RackPowerDetails)
+  - [RackPowerOperations](#v1-RackPowerOperations)
+  - [RackPowerSummary](#v1-RackPowerSummary)
   - [RackRuleAssociation](#v1-RackRuleAssociation)
   - [RackTarget](#v1-RackTarget)
   - [RackTargets](#v1-RackTargets)
+  - [RackTrayPowerDetails](#v1-RackTrayPowerDetails)
+  - [RackTrayPowerOperations](#v1-RackTrayPowerOperations)
   - [RemoveTaskScheduleScopeRequest](#v1-RemoveTaskScheduleScopeRequest)
   - [ResumeOperationRunRequest](#v1-ResumeOperationRunRequest)
   - [ResumeTaskScheduleRequest](#v1-ResumeTaskScheduleRequest)
@@ -247,6 +258,7 @@
   - [PowerTaskRelevance](#v1-PowerTaskRelevance)
   - [RackFilterField](#v1-RackFilterField)
   - [RackOrderByField](#v1-RackOrderByField)
+  - [RackPowerState](#v1-RackPowerState)
   - [ScheduleSpecType](#v1-ScheduleSpecType)
   - [TaskExecutorType](#v1-TaskExecutorType)
   - [TaskKind](#v1-TaskKind)
@@ -1175,6 +1187,32 @@ GetComponents - retrieves components from local database
 | ----- | ---- | ----- | ----------- |
 | rack | [Rack](#v1-Rack) |  |  |
 
+<a name="v1-GetRackPowerDetailsRequest"></a>
+
+### GetRackPowerDetailsRequest
+
+Uses the external rack ID, as GetRackInfoByID does. Empty IDs return
+InvalidArgument and unknown IDs NotFound; internal Flow UUIDs are not selectors.
+Inventory failures return Internal for internal errors and Unavailable for
+other dependency failures. A missing rack value or response encoding failure
+returns Internal. Caller cancellation returns Canceled; an expired inventory
+read or caller deadline returns DeadlineExceeded.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [string](#string) |  | External rack ID, not a rack name or internal Flow UUID. |
+
+<a name="v1-GetRackPowerDetailsResponse"></a>
+
+### GetRackPowerDetailsResponse
+
+Whole rack results; oversized responses fail with ResourceExhausted rather
+than omitting members or tasks. The encoded proxy budget is 1,991,680 bytes.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| details | [RackPowerDetails](#v1-RackPowerDetails) |  |  |
+
 <a name="v1-GetRackRuleAssociationRequest"></a>
 
 ### GetRackRuleAssociationRequest
@@ -2083,18 +2121,44 @@ Informational task details with recorded identities, not inferred live targets.
 
 ### PowerTaskDetailsList
 
-Outstanding power tasks for the tray&#39;s current Flow rack, ordered by created_at,
-then task ID, ascending. Missing rack assignment returns NotLinked. Tasks from
-a former rack are excluded. Only recorded selections or power-shelf tasks
-affecting this rack are included; tasks with no recorded targets are excluded.
+Outstanding power tasks, ordered by created_at then task ID, ascending.
+Rack results include every outstanding task with full recorded targets.
+Tray results include only recorded selections or power-shelf tasks affecting
+the tray&#39;s current Flow rack. Tasks with no targets or from a former rack are
+excluded from tray results; missing rack assignment returns NotLinked.
 More than 256 outstanding rack power tasks makes this entire section unavailable,
-even if fewer target this tray. Error is absent on success, including empty;
-entries is empty on failure. Entries contain only power tasks; other task kinds
-can appear as brief waiting-context references. Execution reports are excluded.
+even if fewer target a requested tray. Error is absent on success, including
+empty; entries is empty on failure. Entries contain only power tasks; other
+task kinds can appear as brief waiting-context references. Execution reports
+are excluded.
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | entries | [PowerTaskDetails](#v1-PowerTaskDetails) | repeated |  |
+| error | [PowerDetailsReadError](#v1-PowerDetailsReadError) | optional |  |
+
+<a name="v1-PowerTaskReference"></a>
+
+### PowerTaskReference
+
+The full operation and recorded targets are stored once in the rack task list.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [UUID](#v1-UUID) |  |  |
+| relevance | [PowerTaskRelevance](#v1-PowerTaskRelevance) |  |  |
+
+<a name="v1-PowerTaskReferenceList"></a>
+
+### PowerTaskReferenceList
+
+References follow rack task order. Error is absent on a successful empty list;
+supported members mirror a failed rack task read, with no entries in that case.
+Unsupported component types always return Unsupported with no entries.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| entries | [PowerTaskReference](#v1-PowerTaskReference) | repeated |  |
 | error | [PowerDetailsReadError](#v1-PowerDetailsReadError) | optional |  |
 
 <a name="v1-PowerTaskWaitingContext"></a>
@@ -2172,6 +2236,20 @@ QueueOptions controls how a task behaves when a conflict is detected.
 | rack_profile_id | [string](#string) | optional | Core rack profile mirrored by expected inventory sync. |
 | nvl_domain_external_ids | [string](#string) | repeated | Public rack-group domain identities. |
 
+<a name="v1-RackMemberPowerActions"></a>
+
+### RackMemberPowerActions
+
+One member&#39;s action result; its absence or failure is never a successful empty
+list. Individual Core actions retain their order: Active before Pending.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| flow_component_id | [UUID](#v1-UUID) |  |  |
+| core_component_id | [string](#string) | optional | Absent until the inventory member has a managed Core identity. |
+| component_type | [ComponentType](#v1-ComponentType) |  |  |
+| details | [PowerActionDetails](#v1-PowerActionDetails) |  |  |
+
 <a name="v1-RackPosition"></a>
 
 ### RackPosition
@@ -2181,6 +2259,72 @@ QueueOptions controls how a task behaves when a conflict is detected.
 | slot_id | [int32](#int32) |  |  |
 | tray_idx | [int32](#int32) |  |  |
 | host_id | [int32](#int32) |  |  |
+
+<a name="v1-RackPowerCoverage"></a>
+
+### RackPowerCoverage
+
+These mutually exclusive categories sum to total. A summary value must always
+be interpreted alongside coverage, especially when desired policy is absent.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| total | [uint32](#uint32) |  |  |
+| known | [uint32](#uint32) |  |  |
+| unknown | [uint32](#uint32) |  | Explicit Unknown hardware observations; always zero for desired policy. |
+| unavailable | [uint32](#uint32) |  | Failed, unsupported, unlinked or malformed reads, not an Off observation. |
+| not_applicable | [uint32](#uint32) |  | Core reports that stored desired policy does not apply to this member. |
+| no_policy | [uint32](#uint32) |  | Core found no stored policy. A managed target reported NotFound counts as unavailable instead. |
+| disabled_policy | [uint32](#uint32) |  | A stored PowerManagerDisabled policy; it does not vote as On or Off. |
+
+<a name="v1-RackPowerDetails"></a>
+
+### RackPowerDetails
+
+Summaries are synthesized from member evidence, not a rack hardware reading or
+a new desired rack policy. Inventory and all child reads share at most 30 seconds
+from this RPC&#39;s entry, capped one second before an earlier caller deadline. Caller
+cancellation fails the RPC; dependency failures remain visible in each member.
+Core batches run sequentially by component type; if earlier reads consume the
+budget, later members report DeadlineExceeded without another Core call.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| flow_rack_id | [UUID](#v1-UUID) |  | Flow inventory UUID used by task records. |
+| external_rack_id | [string](#string) |  | External rack identifier accepted by this RPC and rack inventory APIs. |
+| actual | [RackPowerSummary](#v1-RackPowerSummary) |  |  |
+| desired | [RackPowerSummary](#v1-RackPowerSummary) |  |  |
+| operations | [RackPowerOperations](#v1-RackPowerOperations) |  |  |
+| trays | [RackTrayPowerDetails](#v1-RackTrayPowerDetails) | repeated | Every current, non-deleted inventory member, including unlinked and unsupported types, ordered by component_type enum value, then flow_component_id ascending. Unsupported types report Unsupported in Core and task-reference sections. |
+
+<a name="v1-RackPowerOperations"></a>
+
+### RackPowerOperations
+
+Compiled actions preserve each member&#39;s identity and availability, including
+successful empty action lists. Actions follow the same order as trays.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| actions | [RackMemberPowerActions](#v1-RackMemberPowerActions) | repeated |  |
+| tasks | [PowerTaskDetailsList](#v1-PowerTaskDetailsList) |  | Each outstanding task occurs once by ID, ordered by created_at then UUID. Full recorded targets remain, including moved, removed and empty selections. Relevance is unspecified here; it is recorded on each member&#39;s references. |
+
+<a name="v1-RackPowerSummary"></a>
+
+### RackPowerSummary
+
+Different known states produce Mixed even when other evidence is missing.
+Otherwise actual requires every member to have the same known state; desired
+requires agreement among enabled policies and no unreadable policy sections.
+No members or no known applicable states produces Unknown. NotApplicable,
+NoPolicy and DisabledPolicy do not vote in desired agreement.
+Unsupported inventory types remain unavailable: their presence prevents an
+otherwise agreeing subset from claiming a known state for the whole rack.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| state | [RackPowerState](#v1-RackPowerState) |  |  |
+| coverage | [RackPowerCoverage](#v1-RackPowerCoverage) |  |  |
 
 <a name="v1-RackRuleAssociation"></a>
 
@@ -2218,6 +2362,35 @@ RackTargets contains one or more rack targets
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | targets | [RackTarget](#v1-RackTarget) | repeated |  |
+
+<a name="v1-RackTrayPowerDetails"></a>
+
+### RackTrayPowerDetails
+
+Member observations, policies and actions use the GetTrayPowerDetails meanings.
+The enclosing rack supplies rack identity; unsupported inventory types remain
+visible with section errors, and locally invalid Core IDs fail only that member&#39;s
+Core sections. Task references point to complete RackPowerOperations.tasks.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| flow_component_id | [UUID](#v1-UUID) |  |  |
+| core_component_id | [string](#string) | optional | Absent until the inventory member has a managed Core identity. |
+| component_type | [ComponentType](#v1-ComponentType) |  |  |
+| actual | [PowerActualDetails](#v1-PowerActualDetails) |  |  |
+| desired | [PowerDesiredDetails](#v1-PowerDesiredDetails) |  |  |
+| operations | [RackTrayPowerOperations](#v1-RackTrayPowerOperations) |  |  |
+
+<a name="v1-RackTrayPowerOperations"></a>
+
+### RackTrayPowerOperations
+
+One member&#39;s Core actions and references to the rack&#39;s full Flow task records.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| actions | [PowerActionDetails](#v1-PowerActionDetails) |  |  |
+| tasks | [PowerTaskReferenceList](#v1-PowerTaskReferenceList) |  |  |
 
 <a name="v1-RemoveTaskScheduleScopeRequest"></a>
 
@@ -2902,20 +3075,20 @@ Dependency error strings and credentials are never included.
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
-| POWER_DETAILS_READ_ERROR_UNSPECIFIED | 0 | Not emitted as an error by this RPC. |
+| POWER_DETAILS_READ_ERROR_UNSPECIFIED | 0 | Not emitted as an error by power-details RPCs. |
 | POWER_DETAILS_READ_ERROR_NOT_LINKED | 1 | The section lacks its required identity: a managed Core ID for Core sections, or a Flow rack assignment for tasks. |
 | POWER_DETAILS_READ_ERROR_NOT_CONFIGURED | 2 | Flow has no NICo provider client. |
-| POWER_DETAILS_READ_ERROR_UNSUPPORTED | 3 | Core lacks the RPC or did not provide this section. |
+| POWER_DETAILS_READ_ERROR_UNSUPPORTED | 3 | Core lacks the RPC or did not provide this section, or the inventory component type does not support power details. |
 | POWER_DETAILS_READ_ERROR_DEADLINE_EXCEEDED | 4 | A child read exceeded its caller or provider deadline. |
-| POWER_DETAILS_READ_ERROR_READ_FAILED | 5 | The dependency returned an error other than unsupported/deadline. |
+| POWER_DETAILS_READ_ERROR_READ_FAILED | 5 | The dependency returned an error other than unsupported/deadline, or a stored managed ID cannot be decoded as the requested Core component type. |
 | POWER_DETAILS_READ_ERROR_INVALID_RESPONSE | 6 | A dependency returned the wrong identity/cardinality, an absent required value, or task data that cannot be converted to the declared operation. |
-| POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED | 7 | The rack power-task count, waiting-context task count, or encoded response exceeded its documented bound. |
+| POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED | 7 | The rack power-task count, waiting-context task count, or encoded tray response exceeded its documented bound. Oversized rack responses instead fail the whole RPC with ResourceExhausted. |
 
 <a name="v1-PowerTaskRelevance"></a>
 
 ### PowerTaskRelevance
 
-Why this task is included for the requested tray.
+Why this task is included for the requested tray; unspecified at rack scope.
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
@@ -2948,6 +3121,24 @@ RackOrderByField represents the supported order by field types for rack queries
 | RACK_ORDER_BY_FIELD_NAME | 1 | Order by rack name |
 | RACK_ORDER_BY_FIELD_MANUFACTURER | 2 | Order by manufacturer |
 | RACK_ORDER_BY_FIELD_MODEL | 3 | Order by model |
+
+<a name="v1-RackPowerState"></a>
+
+### RackPowerState
+
+Known observed values plus Mixed for disagreement. Desired uses only On, Off,
+Unknown or Mixed; disabled management is coverage, never a desired Off vote.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| RACK_POWER_STATE_UNKNOWN | 0 | No known applicable state, or incomplete evidence prevents agreement without a proven disagreement among known states. |
+| RACK_POWER_STATE_ON | 1 |  |
+| RACK_POWER_STATE_OFF | 2 |  |
+| RACK_POWER_STATE_POWERING_ON | 3 |  |
+| RACK_POWER_STATE_POWERING_OFF | 4 |  |
+| RACK_POWER_STATE_PAUSED | 5 |  |
+| RACK_POWER_STATE_RESET | 6 |  |
+| RACK_POWER_STATE_MIXED | 7 | At least two known applicable member states disagree. Missing evidence does not override that disagreement. |
 
 <a name="v1-ScheduleSpecType"></a>
 
@@ -3081,6 +3272,7 @@ Task kinds include rack lifecycle work not represented by OperationType.
 | AdvanceOperationRunPhase | [AdvanceOperationRunPhaseRequest](#v1-AdvanceOperationRunPhaseRequest) | [OperationRun](#v1-OperationRun) |  |
 | CancelOperationRun | [CancelOperationRunRequest](#v1-CancelOperationRunRequest) | [OperationRun](#v1-OperationRun) |  |
 | GetTrayPowerDetails | [GetTrayPowerDetailsRequest](#v1-GetTrayPowerDetailsRequest) | [GetTrayPowerDetailsResponse](#v1-GetTrayPowerDetailsResponse) | Reads live Core power details and outstanding Flow power tasks independently. This is not an atomic snapshot and does not change power or task state. Caller cancellation fails the RPC; child read failures remain section errors. |
+| GetRackPowerDetails | [GetRackPowerDetailsRequest](#v1-GetRackPowerDetailsRequest) | [GetRackPowerDetailsResponse](#v1-GetRackPowerDetailsResponse) | Reads full current rack membership once, with batched Core details and one outstanding task read. This is informational, not an atomic snapshot. It does not change power or task state. |
 
 ## Scalar Value Types
 

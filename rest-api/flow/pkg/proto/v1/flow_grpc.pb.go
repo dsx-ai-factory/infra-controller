@@ -100,6 +100,7 @@ const (
 	Flow_AdvanceOperationRunPhase_FullMethodName = "/v1.Flow/AdvanceOperationRunPhase"
 	Flow_CancelOperationRun_FullMethodName       = "/v1.Flow/CancelOperationRun"
 	Flow_GetTrayPowerDetails_FullMethodName      = "/v1.Flow/GetTrayPowerDetails"
+	Flow_GetRackPowerDetails_FullMethodName      = "/v1.Flow/GetRackPowerDetails"
 )
 
 // FlowClient is the client API for Flow service.
@@ -204,6 +205,10 @@ type FlowClient interface {
 	// This is not an atomic snapshot and does not change power or task state.
 	// Caller cancellation fails the RPC; child read failures remain section errors.
 	GetTrayPowerDetails(ctx context.Context, in *GetTrayPowerDetailsRequest, opts ...grpc.CallOption) (*GetTrayPowerDetailsResponse, error)
+	// Reads full current rack membership once, with batched Core details and one
+	// outstanding task read. This is informational, not an atomic snapshot.
+	// It does not change power or task state.
+	GetRackPowerDetails(ctx context.Context, in *GetRackPowerDetailsRequest, opts ...grpc.CallOption) (*GetRackPowerDetailsResponse, error)
 }
 
 type flowClient struct {
@@ -984,6 +989,16 @@ func (c *flowClient) GetTrayPowerDetails(ctx context.Context, in *GetTrayPowerDe
 	return out, nil
 }
 
+func (c *flowClient) GetRackPowerDetails(ctx context.Context, in *GetRackPowerDetailsRequest, opts ...grpc.CallOption) (*GetRackPowerDetailsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetRackPowerDetailsResponse)
+	err := c.cc.Invoke(ctx, Flow_GetRackPowerDetails_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // FlowServer is the server API for Flow service.
 // All implementations must embed UnimplementedFlowServer
 // for forward compatibility.
@@ -1086,6 +1101,10 @@ type FlowServer interface {
 	// This is not an atomic snapshot and does not change power or task state.
 	// Caller cancellation fails the RPC; child read failures remain section errors.
 	GetTrayPowerDetails(context.Context, *GetTrayPowerDetailsRequest) (*GetTrayPowerDetailsResponse, error)
+	// Reads full current rack membership once, with batched Core details and one
+	// outstanding task read. This is informational, not an atomic snapshot.
+	// It does not change power or task state.
+	GetRackPowerDetails(context.Context, *GetRackPowerDetailsRequest) (*GetRackPowerDetailsResponse, error)
 	mustEmbedUnimplementedFlowServer()
 }
 
@@ -1326,6 +1345,9 @@ func (UnimplementedFlowServer) CancelOperationRun(context.Context, *CancelOperat
 }
 func (UnimplementedFlowServer) GetTrayPowerDetails(context.Context, *GetTrayPowerDetailsRequest) (*GetTrayPowerDetailsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetTrayPowerDetails not implemented")
+}
+func (UnimplementedFlowServer) GetRackPowerDetails(context.Context, *GetRackPowerDetailsRequest) (*GetRackPowerDetailsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetRackPowerDetails not implemented")
 }
 func (UnimplementedFlowServer) mustEmbedUnimplementedFlowServer() {}
 func (UnimplementedFlowServer) testEmbeddedByValue()              {}
@@ -2734,6 +2756,24 @@ func _Flow_GetTrayPowerDetails_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Flow_GetRackPowerDetails_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetRackPowerDetailsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).GetRackPowerDetails(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_GetRackPowerDetails_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).GetRackPowerDetails(ctx, req.(*GetRackPowerDetailsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Flow_ServiceDesc is the grpc.ServiceDesc for Flow service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -3048,6 +3088,10 @@ var Flow_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetTrayPowerDetails",
 			Handler:    _Flow_GetTrayPowerDetails_Handler,
+		},
+		{
+			MethodName: "GetRackPowerDetails",
+			Handler:    _Flow_GetRackPowerDetails_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
