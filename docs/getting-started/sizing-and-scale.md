@@ -7,7 +7,7 @@ and how to size the site controller for a given fleet. It was requested in
 The detailed record of the 250-rack measurement and the ingestion settings it
 needed stay on
 [Large Site Sizing and Settings](../development/large-site-sizing-and-settings.md).
-Rows marked to be determined (`TBD`) have no measurement yet. The scaling
+Rows marked to be determined (`TBD`) have no measurement. The scaling
 area owns them, and a figure is published through the rule in
 [Release Notes](#release-notes) when one exists.
 
@@ -29,23 +29,30 @@ host is a compute tray: a GB200 NVL72 rack has 18.
 | Status | Meaning |
 |---|---|
 | Field deployment | Measured on sites running NICo. Figures come from the site controller's own metrics over a 7-day window, collected on 2026-10-13 from 33 sites of 1 to 1,930 hosts each. The dataset includes a one-host demo site and a 31-host lab site. 25 of the sites run the v0.10 line, 6 the v2.0 line, and 2 the v2.1 line. The dataset did not collect rack, switch tray, or power shelf counts, so those field rows are `TBD`. |
-| Hardware lab | Measured against real hardware in a lab. No published figure has this status yet. |
+| Hardware lab | Measured against real hardware in a lab. No published figure has this status. |
 | Simulation | Measured on a 3-node site controller against a simulated fleet: machine-a-tron baseboard management controllers (BMCs) and agents behind the protocol gateway, with the DOCA Platform Framework (DPF) simulator. Refer to [Machine-a-tron Scale Testing](../development/machine-a-tron-scale-testing.md). A simulation exercises the control plane: discovery, machine creation, the state controllers, rack setup through the Rack Management Service (RMS) mock, and NVLink partition creation through the NMX Controller (NMX-C) mock. It does not exercise device timing, firmware flashing, the DPU data plane, or tenant workloads. |
 | Simulation, pre-release build | A simulation on a build that is not a release. The figure cannot be reproduced from a release. Refer to the note that follows the legend. |
-| Planned certification | A scale that a repeatable release benchmark is planned to gate on. The certification plan is not yet public, so no row carries this status. The scaling test history is in the closed [issue 3723](https://github.com/dsx-ai-factory/infra-controller/issues/3723), [issue 3290](https://github.com/dsx-ai-factory/infra-controller/issues/3290), and [issue 4009](https://github.com/dsx-ai-factory/infra-controller/issues/4009), and the open work is owned by the scaling area. |
-| Roadmap | A target with no measurement yet. |
+| Planned certification | A scale that a repeatable release benchmark is planned to gate on. The certification plan has not been published, so no row carries this status. The scaling test history is in the closed [issue 3723](https://github.com/dsx-ai-factory/infra-controller/issues/3723), [issue 3290](https://github.com/dsx-ai-factory/infra-controller/issues/3290), and [issue 4009](https://github.com/dsx-ai-factory/infra-controller/issues/4009), and the open work is owned by the scaling area. |
+| Roadmap | A target with no measurement. |
 
-The NICo version column names the release line the figure was measured on. The
-field rows name the line the measured site ran, and the field fits in [Site
-Controller Sizing by Fleet Size](#site-controller-sizing-by-fleet-size) mix the
-three lines of the dataset, with 25 of the 33 sites on the v0.10 line. The
-simulated fleets of 400 and 556 racks ran on pre-release builds: `main` at
-the time plus a set of scaling fixes. The 400-rack run and the earlier
-556-rack run were on one build of the v2.4 line. The later 556-rack run was
-on a build of the v2.5 line, taken from `main` after the v2.4 release branch
-was cut. The 556-rack fleet ran to completion twice, on the earlier and the
-later build, and its figures below are from the later run unless the earlier
-run is named. Most of the fixes have since merged: [pull request
+Times count from fleet-up, the point at which every simulator pod is Ready,
+the protocol gateway answers, and the controller has published every pod's
+Services, so every simulated BMC address is reachable. The simulation rows and
+the sections that follow use that clock. Refer to
+[Machine-a-tron Scale Testing](../development/machine-a-tron-scale-testing.md).
+
+The NICo version column names the release line the figure was measured on. The field rows name the line the measured site ran, and the
+field fits in [Site Controller Sizing by Fleet
+Size](#site-controller-sizing-by-fleet-size) mix the three lines of the
+dataset, with 25 of the 33 sites on the v0.10 line. The simulated fleets of
+400 and 556 racks ran on pre-release builds. The 400-rack run and the earlier
+556-rack run ran a build of the v2.4 line: `main` before the v2.4 release
+branch was cut, with scaling fixes applied. The later 556-rack run ran a build
+of the v2.5 line, taken from `main` after the v2.4 release branch was cut,
+with the scaling fixes named on this page and pull request 8142 applied. The
+556-rack fleet ran to completion twice, on the earlier and the later build,
+and its figures below are from the later run unless the earlier run is named.
+The scaling fixes are [pull request
 7847](https://github.com/dsx-ai-factory/infra-controller/pull/7847), [pull
 request 7848](https://github.com/dsx-ai-factory/infra-controller/pull/7848),
 [pull request
@@ -59,22 +66,21 @@ request 8081](https://github.com/dsx-ai-factory/infra-controller/pull/8081),
 request 8100](https://github.com/dsx-ai-factory/infra-controller/pull/8100).
 Rack-ordered machine creation in the site explorer, with its
 `machine_creation_concurrency` and `switch_and_power_shelf_pass_interval`
-keys and the `admin_lock_admission_permits` configuration key, which the runs
-set to 32, is in [pull request
-8142](https://github.com/dsx-ai-factory/infra-controller/pull/8142), not yet
-merged. The v2.4 build also carried changes that were later dropped. The v2.5
-build is `main` at the time plus fixes that have since merged and the pull
-request 8142 commit, with nothing dropped. The figures from those builds
-cannot be reproduced from a release. The release notes of the shipping
-release state which of those changes are included.
+keys and the `admin_lock_admission_permits` configuration key, which the later
+556-rack run set to 32, is [pull request
+8142](https://github.com/dsx-ai-factory/infra-controller/pull/8142). The v2.4
+build also carried changes that were dropped before release. The v2.5 build is
+`main` plus the listed fixes and pull request 8142, with nothing dropped. The
+figures from either build cannot be reproduced from a release, and each
+release's notes state which of these changes it includes.
 
 ## Single Site Controller Scale Table
 
 | Dimension | Figure | Status | Validation method | NICo version |
 |---|---|---|---|---|
-| Hosts under management | 10,008 | Simulation, pre-release build | Two completed runs of 556 GB200 NVL72 racks with 2 DPUs per tray. In the later run all 30,024 machines were created 2.2 hours after every BMC was reachable, and every host, DPU, switch tray, and power shelf reached `ready`, the last rack at 7.9 hours, with no nico-api restart. That run did not read the Postgres `oom_kill` counter, but the primary's working set never reset to baseline and the same pod stayed primary throughout. The earlier run of the same fleet, on the v2.4 build with 16 CPU limits on the Postgres primary and nico-api, had its last rack `ready` at 10.5 hours with no nico-api restart and no Postgres out-of-memory kill. | v2.5 pre-release build for the later run and v2.4 for the earlier run |
-| Hosts under management | 7,200 | Simulation, pre-release build | One run of 400 GB200 NVL72 racks. All 21,600 machines were created 1.7 hours after every BMC was reachable and the last rack was `ready` at 6.9 hours. | v2.4 pre-release build |
-| Hosts under management | 4,500 | Simulation | 250 GB200 NVL72 racks, measured in several runs. All racks were `ready` 3.9 to 5.1 hours after every BMC was reachable at machine state controller concurrency 80 to 140, and 20 hours at the default concurrency. Refer to [Large Site Sizing and Settings](../development/large-site-sizing-and-settings.md#time-to-ready-is-a-concurrency-setting). | v2.3 line |
+| Hosts under management | 10,008 | Simulation, pre-release build | Two completed runs of 556 GB200 NVL72 racks with 2 DPUs per tray. In the later run all 30,024 machines were created 2.3 hours after fleet-up, and every host, DPU, switch tray, and power shelf reached `ready`, the last rack at 7.9 hours, with no nico-api restart. That run did not read the Postgres `oom_kill` counter, but the primary's working set never reset to baseline and the same pod stayed primary throughout. The earlier run of the same fleet, on the v2.4 build with 16 CPU limits on the Postgres primary and nico-api, had its last rack `ready` at 10.5 hours with no nico-api restart and no Postgres out-of-memory kill. | v2.5 pre-release build for the later run and v2.4 for the earlier run |
+| Hosts under management | 7,200 | Simulation, pre-release build | One run of 400 GB200 NVL72 racks. All 21,600 machines were created 1.7 hours after fleet-up and the last rack was `ready` at 6.9 hours. | v2.4 pre-release build |
+| Hosts under management | 4,500 | Simulation | 250 GB200 NVL72 racks, measured in several runs. All racks were `ready` 3.9 to 5.1 hours after fleet-up at machine state controller concurrency 80 to 140, and 20 hours at the default concurrency. Refer to [Large Site Sizing and Settings](../development/large-site-sizing-and-settings.md#time-to-ready-is-a-concurrency-setting). | v2.3 line |
 | Hosts under management | 1,930 | Field deployment | The largest single site in the dataset. It is a CPU and storage site with one DPU per host and no GPUs, on 3 site controller nodes with 256 logical CPUs and 1 TiB of memory each. | v2.0 line |
 | Machines (hosts plus DPUs) | 30,024 | Simulation, pre-release build | The 556-rack fleet: 10,008 hosts and 20,016 DPUs. NICo manages each host and each DPU as a machine. | v2.5 pre-release build |
 | DPUs | 20,016 | Simulation, pre-release build | The 556-rack fleet. DPU provisioning went through the DPF simulator, so the DPU control path was exercised and the Host Based Networking (HBN) data plane was not. | v2.5 pre-release build |
@@ -82,14 +88,14 @@ release state which of those changes are included.
 | DPUs in one HBN fabric | 10,000 | Roadmap | Target of [issue 2940](https://github.com/dsx-ai-factory/infra-controller/issues/2940). The fabric-side limits are confirmed with the HBN and DPF owners before NICo publishes a figure. | Not released |
 | GPUs | 40,032 | Simulation, pre-release build | The 556-rack fleet: 4 GPUs per compute tray in the simulated discovery inventory, 72 per rack, with one NVLink partition created per host through the NMX-C mock. GPU health and telemetry were not exercised. | v2.5 pre-release build |
 | GPUs | 2,037 | Field deployment | GPUs reported by the largest GPU site in the dataset, on 388 hosts. | v2.0 line |
-| NVLink switch trays | 5,004 | Simulation, pre-release build | The 556-rack fleet, 9 per rack, all `ready` 4.2 hours after every BMC was reachable in the later run and 4.9 hours in the earlier run. | v2.5 pre-release build for the later run and v2.4 for the earlier run |
+| NVLink switch trays | 5,004 | Simulation, pre-release build | The 556-rack fleet, 9 per rack, all `ready` 4.3 hours after fleet-up in the later run and 4.9 hours in the earlier run. | v2.5 pre-release build for the later run and v2.4 for the earlier run |
 | NVLink switch trays | TBD | Field deployment | Not collected in the dataset. | |
-| Power shelves | 4,448 | Simulation, pre-release build | The 556-rack fleet, 8 per rack, all `ready` 1.8 hours after every BMC was reachable in both runs. | v2.5 pre-release build for the later run and v2.4 for the earlier run |
+| Power shelves | 4,448 | Simulation, pre-release build | The 556-rack fleet, 8 per rack, all `ready` 1.8 hours after fleet-up in both runs. | v2.5 pre-release build for the later run and v2.4 for the earlier run |
 | Power shelves | TBD | Field deployment | Not collected in the dataset. | |
 | Physical racks | 556 | Simulation, pre-release build | The 556-rack runs. | v2.5 pre-release build for the later run and v2.4 for the earlier run |
 | Physical racks | 250 | Simulation | The 250-rack runs behind the 4,500-host row. | v2.3 line |
 | Physical racks | TBD | Field deployment | Not collected in the dataset. | |
-| NVLink partitions | 10,008 | Simulation, pre-release build | The later 556-rack run: one partition per host created through the NMX-C mock, 0 failed, 0 timed out, and the 556 default partitions removed. The partition monitor averaged 10 seconds per pass over the run and 14 to 19 seconds per pass with 164 to 505 racks `ready`, with a peak 10-minute mean of 24 seconds as the last racks went `ready`, against its 60-second interval. No pass overran the interval. The longest pass is not known because the pass-time histogram tops out at 10 seconds. In the earlier run the monitor averaged 17 seconds per pass, ran 27 to 33 seconds per pass with 554 to 555 racks `ready`, and overran the interval 8 times. | v2.5 pre-release build for the later run and v2.4 for the earlier run |
+| NVLink partitions | 10,008 | Simulation, pre-release build | The later 556-rack run: one partition per host created through the NMX-C mock, 0 failed, 0 timed out, and the 556 default partitions removed. The partition monitor averaged 10.4 seconds per pass over the run and 14 to 19 seconds per pass with 164 to 505 racks `ready`, with a peak 10-minute mean of 24 seconds as the last racks went `ready`, against its 60-second interval. No pass overran the interval. The longest pass is not known because the pass-time histogram tops out at 10 seconds. In the earlier run the monitor averaged 17.1 seconds per pass, ran 27 to 33 seconds per pass with 554 to 555 racks `ready`, reached 10-minute window means of up to 42 seconds, and overran the interval 8 times. | v2.5 pre-release build for the later run and v2.4 for the earlier run |
 | BMC endpoints explored | 39,476 | Simulation, pre-release build | The 556-rack fleet: 71 BMC endpoints per rack. | v2.5 pre-release build |
 | Concurrent tenant VPCs | TBD | Field deployment | Not collected in the dataset, and no tenant virtual private cloud (VPC) or instance journey has run in a simulation at scale. The count is bounded by the Virtual Extensible LAN (VXLAN) network identifier (VNI) pool ranges the operator configures. Refer to [Related Limits](#related-limits). | |
 
@@ -167,15 +173,16 @@ limits apply to the whole fleet at once. The 556-rack fleet was run on the
 later build with admission control enabled at raised limits, 512 requests in
 flight and 8192 pending in total, 8 and 64 per client, and the 5-second
 timeout: nico-api rejected 97.4 million of 113.4 million API calls in 8 hours,
-86 percent, most of them agent polls, 1,386 of the 30,024 machines and no
-rack reached `ready`, and the simulator pods restarted at startup on the
-rejections. The same fleet on the same build with admission control disabled
-is the 7.9-hour run above. Disable admission control for a simulated fleet,
-and keep it enabled on real hardware, where each host and DPU agent has its
-own identity. On a real fleet of this size the total limits are shared by
-every client, and the polls of 30,000 host and DPU agents count against them.
-The figures on this page do not measure admission control on real hardware,
-so watch the `carbide_api_admission_rejected_total` counter as a fleet grows.
+86 percent, most of them DPU agent calls, 1,386 of the 30,024 machines and
+no rack reached `ready`, and the simulator pods restarted 16 times at
+startup on the rejections. The same fleet on the same build with admission
+control disabled is the 7.9-hour run above. Disable admission control for a
+simulated fleet, and keep it enabled on real hardware, where each host and DPU
+agent has its own identity. On a real fleet of this size the total limits are
+shared by every client, and the polls of 30,000 host and DPU agents count
+against them. The figures on this page do not measure admission control on
+real hardware, so watch the `carbide_api_admission_rejected_total` counter as
+a fleet grows.
 
 ## Site Controller Sizing by Fleet Size
 
@@ -242,8 +249,7 @@ set `machine_creation_concurrency` 8, so one explorer iteration creates 8
 hosts at a time, `admin_lock_admission_permits` 32, and
 `switch_and_power_shelf_pass_interval` 5m, so switches and power shelves are
 created every 5 minutes during the host creation phase. Those three keys are
-in [pull request 8142](https://github.com/dsx-ai-factory/infra-controller/pull/8142)
-and are not on `main` yet.
+in [pull request 8142](https://github.com/dsx-ai-factory/infra-controller/pull/8142).
 
 ## Multiple Site Controllers
 
