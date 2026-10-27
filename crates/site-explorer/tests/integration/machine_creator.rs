@@ -976,13 +976,9 @@ async fn test_explored_host_admin_address_pass_waits_for_admission(
     Ok(())
 }
 
-/// Every permit of the admin-lock admission gate: `ADMIN_LOCK_ADMISSION` of
-/// them, 16 by default.
+/// Every permit of the admin-lock admission gate.
 async fn hold_every_admin_lock_admission_permit() -> Vec<tokio::sync::OwnedSemaphorePermit> {
-    let permits = std::env::var("ADMIN_LOCK_ADMISSION")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(16);
+    let permits = db::machine_interface::admin_lock_admission_permits();
     let mut held = Vec::with_capacity(permits);
     for _ in 0..permits {
         held.push(db::machine_interface::admin_lock_admission().await);
@@ -1229,10 +1225,11 @@ async fn test_create_machines_respects_the_per_run_cap_under_concurrency(
     Ok(())
 }
 
-/// With the admin segments held exclusively, exactly
-/// `machine_creation_concurrency` creations wait on the shared segment lock
-/// while the other hosts stay queued in memory; releasing the segments lets
-/// every host through.
+/// With the admin segments held exclusively, exactly the effective creation
+/// concurrency of creations (`machine_creation_concurrency`, clamped below
+/// the admission permits) wait on the shared segment lock while the other
+/// hosts stay queued in memory. Releasing the segments lets every host
+/// through.
 #[sqlx_test]
 async fn test_create_machines_bounds_in_flight_creations_by_the_configured_concurrency(
     pool: PgPool,
@@ -1241,6 +1238,12 @@ async fn test_create_machines_bounds_in_flight_creations_by_the_configured_concu
     const SHARED_LOCK_REQUEST: &str = "pg_advisory_xact_lock_shared(";
 
     let env = Env::new(pool).await;
+    // Mirrors `creation_concurrency` in the machine creator.
+    let expected_in_flight = CONCURRENCY.min(
+        db::machine_interface::admin_lock_admission_permits()
+            .saturating_sub(1)
+            .max(1),
+    );
     let hosts = (0..5)
         .map(|_| ingestible_host(ExpectedMachineData::default()))
         .collect::<Vec<_>>();
@@ -1270,9 +1273,9 @@ async fn test_create_machines_bounds_in_flight_creations_by_the_configured_concu
                 result.map(|hosts| hosts.len())
             )
         }
-        blocked = wait_for_blocked_queries(&env.pool, gate_pid, SHARED_LOCK_REQUEST, CONCURRENCY) => blocked,
+        blocked = wait_for_blocked_queries(&env.pool, gate_pid, SHARED_LOCK_REQUEST, expected_in_flight) => blocked,
     };
-    assert_eq!(blocked, CONCURRENCY);
+    assert_eq!(blocked, expected_in_flight);
     // The other hosts wait in memory: nothing more queues on the segments
     // while the iteration keeps running, and no host has a machine yet.
     tokio::select! {
@@ -1286,7 +1289,7 @@ async fn test_create_machines_bounds_in_flight_creations_by_the_configured_concu
     }
     assert_eq!(
         count_blocked_queries(&env.pool, gate_pid, SHARED_LOCK_REQUEST).await,
-        CONCURRENCY
+        expected_in_flight
     );
     assert_eq!(ingested_host_count(&env.pool, &fixtures).await?, 0);
 
@@ -1445,6 +1448,78 @@ async fn test_create_machines_continues_when_the_rack_pre_creation_fails(
     Ok(())
 }
 
+/// A failed creation attempt frees its cap slot: with one creation per run,
+/// the host after the one whose attempt failed is created in the same
+/// iteration.
+#[sqlx_test]
+async fn test_create_machines_moves_on_after_a_failed_attempt_within_the_cap(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let rack_a = RackId::new(format!("rack-a-{}", uuid::Uuid::new_v4()));
+    let rack_b = RackId::new(format!("rack-b-{}", uuid::Uuid::new_v4()));
+    create_expected_racks(&env.pool, &[&rack_a, &rack_b]).await?;
+    let rack_host = |rack_id: &RackId| {
+        ingestible_host(ExpectedMachineData {
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
+        })
+    };
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            machines_created_per_run: 1,
+            machine_creation_concurrency: 1,
+            ..Default::default()
+        },
+    );
+
+    // Rack A's host sorts first. Its DPU report carries no machine id, so its
+    // creation transaction fails before it writes anything.
+    let (failing_host, endpoints) = register_ingestible_hosts(&env, &[rack_host(&rack_a)]).await?;
+    explorer.insert_endpoints(endpoints);
+    let dpu_bmc_ip = failing_host[0].host.dpus[0].bmc_ip;
+    let dpu_endpoint = db::explored_endpoints::find_by_ips(&env.pool, vec![dpu_bmc_ip])
+        .await?
+        .pop()
+        .expect("the DPU endpoint is registered");
+    let mut dpu_report = dpu_endpoint.report.clone();
+    dpu_report.machine_id = None;
+    let mut txn = env.pool.begin().await?;
+    let write = db::explored_endpoints::try_update(
+        dpu_bmc_ip,
+        dpu_endpoint.report_version,
+        &dpu_report,
+        false,
+        txn.as_mut(),
+    )
+    .await?;
+    assert_eq!(write, db::ConditionalWrite::Applied(()));
+    txn.commit().await?;
+    let (healthy_host, endpoints) = register_ingestible_hosts(&env, &[rack_host(&rack_b)]).await?;
+    explorer.insert_endpoints(endpoints);
+
+    let metrics = MetricsCapture::start();
+    explorer.run_single_iteration().await?;
+
+    assert_eq!(
+        metrics.histogram_count_delta(
+            "carbide_site_explorer_managed_host_creation_latency_milliseconds",
+            &[("outcome", "failed")]
+        ),
+        1
+    );
+    assert_eq!(ingested_host_count(&env.pool, &failing_host).await?, 0);
+    assert_eq!(
+        ingested_host_count(&env.pool, &healthy_host).await?,
+        1,
+        "the failed attempt frees its cap slot for the next host"
+    );
+
+    Ok(())
+}
+
 /// Creates the expected rack rows for `rack_ids`.
 async fn create_expected_racks(
     pool: &PgPool,
@@ -1534,6 +1609,86 @@ async fn test_create_machines_completes_the_closest_rack_first(
             "expected kind {kind} = {count} in {rack_fill:?}"
         );
     }
+
+    Ok(())
+}
+
+/// A repair takes no cap slot: with one creation per run, an ingested host
+/// explored this run is repaired in the same iteration whose cap the first new
+/// host spends, while the second new host waits.
+#[sqlx_test]
+async fn test_create_machines_repairs_an_ingested_host_after_the_cap_is_spent(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const NUM_DPUS: usize = 2;
+
+    let env = Env::new(pool).await;
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            machines_created_per_run: 1,
+            machine_creation_concurrency: 1,
+            ..Default::default()
+        },
+    );
+
+    // The OOB interface exists before creation, so creation links it.
+    let ingested_host = ingestible_host(ExpectedMachineData::default()).with_dpu_count(NUM_DPUS);
+    let oob_mac = ingested_host.dpus[0].oob_mac_address;
+    dhcp_discover_dpu_oob_iface(env.api(), env.underlay_segment, oob_mac).await;
+    let (ingested, endpoints) = register_ingestible_hosts(&env, &[ingested_host.clone()]).await?;
+    explorer.insert_endpoints(endpoints);
+    explorer.run_single_iteration().await?;
+    assert!(interface_machine_id(&env.pool, oob_mac).await?.is_some());
+
+    // Unlink the OOB interface, move the admin address to the dormant link,
+    // and request the host BMC's exploration so the next run revisits the host.
+    unlink_machine_interface(&env.pool, oob_mac).await?;
+    let repair = leave_admin_address_on_dormant_link(&env.pool, &ingested_host).await?;
+    let mut txn = env.pool.begin().await?;
+    db::explored_endpoints::request_exploration_for_addresses(
+        &[ingested[0].host.host_bmc_ip],
+        txn.as_mut(),
+    )
+    .await?;
+    txn.commit().await?;
+
+    // Rack A's host sorts first, so it takes the one cap slot.
+    let rack_a = RackId::new(format!("rack-a-{}", uuid::Uuid::new_v4()));
+    let rack_b = RackId::new(format!("rack-b-{}", uuid::Uuid::new_v4()));
+    create_expected_racks(&env.pool, &[&rack_a, &rack_b]).await?;
+    let rack_host = |rack_id: &RackId| {
+        ingestible_host(ExpectedMachineData {
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
+        })
+    };
+    let (rack_a_host, endpoints) = register_ingestible_hosts(&env, &[rack_host(&rack_a)]).await?;
+    explorer.insert_endpoints(endpoints);
+    let (rack_b_host, endpoints) = register_ingestible_hosts(&env, &[rack_host(&rack_b)]).await?;
+    explorer.insert_endpoints(endpoints);
+
+    explorer.run_single_iteration().await?;
+
+    assert_eq!(ingested_host_count(&env.pool, &rack_a_host).await?, 1);
+    assert_eq!(
+        ingested_host_count(&env.pool, &rack_b_host).await?,
+        0,
+        "the cap admits one new host"
+    );
+    assert!(
+        interface_machine_id(&env.pool, oob_mac).await?.is_some(),
+        "the repair runs once the cap is spent"
+    );
+    let dormant = db::machine_interface::find_one(&env.pool, repair.dormant_link_id).await?;
+    assert!(dormant.addresses.is_empty(), "{dormant:?}");
+    assert_host_links_reconciled(&env.pool, &ingested_host, NUM_DPUS).await?;
+    assert_eq!(
+        network_config_version(&env.pool, &repair.host_machine_id).await?,
+        repair.version_before + 1,
+        "the repaired admin config is republished"
+    );
 
     Ok(())
 }

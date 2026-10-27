@@ -138,25 +138,28 @@ while it runs. The
 has both contracts.
 
 Two further behaviors decide when racks complete rather than how fast hosts
-are created. Site Explorer dispatches the hosts of one run in rack order: the
-racks the run can complete first, then the racks with the fewest hosts
-missing, with one rack's hosts kept together. Up to
-`machine_creation_concurrency` creations are in flight at once, so the last
-hosts of one rack overlap the first hosts of the next. A smaller
-`machines_created_per_run` therefore makes each run finish a few racks instead
-of spreading its budget over many, at the cost of more runs and their fixed
-per-run phases. Hosts that already
-have a machine and need only the steady-state repair come after every host
-that still needs one, so while `machines_created_per_run` binds, those repairs
-wait for a run with spare cap. The
-`carbide_site_explorer_rack_host_fill_count` gauge reports, by `kind`, the
-racks with expected hosts, the racks whose hosts all have a machine, and the
-racks the last run could complete. `[site_explorer]
-switch_and_power_shelf_pass_interval` (default `15m`) runs the switch and
-power shelf creation pass at that interval during the host creation phase as
-well as at the end of the run, so switches and shelves that complete
-preingestion while hosts are being created do not wait for the end of a long
-run.
+are created. Site Explorer dispatches the hosts of one run in rack order:
+racks with the fewest expected hosts still lacking a machine once this run's
+hosts are created come first, so the racks the run completes lead. Racks equal
+on that count are ordered by how many hosts lack a machine now, then by rack
+id, with one rack's hosts kept together, and hosts without an expected rack
+come last. Up to `machine_creation_concurrency` creations are in flight at
+once, so the last hosts of one rack overlap the first hosts of the next. A
+smaller `machines_created_per_run` therefore makes each run finish a few racks
+instead of spreading its budget over many, at the cost of more runs and their
+fixed per-run phases. Hosts that already have a machine and need only the
+steady-state repair come after every host that still needs one. A repair takes
+one of the `machine_creation_concurrency` slots and does not count toward
+`machines_created_per_run`, so the repairs of a run are made even when the cap
+binds. The `carbide_site_explorer_rack_host_fill_count` gauge reports, by
+`kind`, the racks with expected hosts, the racks whose hosts all have a
+machine, and the racks the last run could complete. `[site_explorer]
+switch_and_power_shelf_pass_interval` (default `15m`) sets the minimum time
+between switch and power shelf creation passes during the host creation phase.
+A pass starts once the interval has elapsed and the host creations in flight
+have finished, and one more pass runs at the end of the run, so switches and
+shelves that complete preingestion while hosts are being created wait about
+one interval rather than for the end of a long run.
 
 The TOML keys are nico-api configuration: the chart's base file merged with the
 site config overlay `siteConfig.nicoApiSiteConfig`. Set them in the overlay.

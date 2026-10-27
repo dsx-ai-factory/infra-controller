@@ -113,13 +113,15 @@ impl MachineCreator {
 
     /// Starts creating a new ManagedHost (Host `Machine` and DPU `Machine`
     /// pair) for each ManagedHost that was identified and that doesn't have a
-    /// corresponding `Machine` yet; `CreationRun::create_hosts` drives it.
+    /// corresponding `Machine` yet. `CreationRun::create_hosts` drives it.
     ///
     /// A host whose BMC and DPU BMCs are all in `ingested_bmc_ips` only enters the
     /// per-host transaction when one of its endpoints is in `explored_this_run`, so
     /// the steady-state repair in `create_managed_host` follows the exploration
-    /// rotation. A host with any BMC still missing a machine always enters it.
-    pub(crate) fn creation_run<'a>(
+    /// rotation. Such a repair takes a concurrency slot and no slot of
+    /// `machines_created_per_run`. A host with any BMC still missing a machine
+    /// always enters the transaction and counts toward the cap.
+    pub(super) fn creation_run<'a>(
         &'a self,
         explored_managed_hosts: &'a mut [IdentifiedManagedHost],
         expected_explored_endpoint_index: &'a ExploredEndpointIndex,
@@ -128,25 +130,32 @@ impl MachineCreator {
     ) -> CreationRun<'a> {
         let mut skipped_existing_hosts = 0usize;
         let mut pending = Vec::new();
+        let mut repairs = Vec::new();
         let mut racks_to_ensure = BTreeSet::new();
         for identified in explored_managed_hosts.iter_mut() {
-            if needs_managed_host_transaction(
+            if !needs_managed_host_transaction(
                 &identified.explored_host,
                 ingested_bmc_ips,
                 explored_this_run,
             ) {
-                let host_bmc_ip = &identified.explored_host.host_bmc_ip;
-                if !ingested_bmc_ips.contains(host_bmc_ip)
-                    && let Some(rack_id) = expected_explored_endpoint_index
-                        .matched_expected_machine(host_bmc_ip)
-                        .and_then(|expected| expected.data.rack_id.as_ref())
-                {
-                    racks_to_ensure.insert(rack_id.clone());
-                }
-                pending.push(identified);
-            } else {
                 skipped_existing_hosts += 1;
+                continue;
             }
+            if host_bmc_ips(&identified.explored_host)
+                .all(|bmc_ip| ingested_bmc_ips.contains(bmc_ip))
+            {
+                repairs.push(identified);
+                continue;
+            }
+            let host_bmc_ip = &identified.explored_host.host_bmc_ip;
+            if !ingested_bmc_ips.contains(host_bmc_ip)
+                && let Some(rack_id) = expected_explored_endpoint_index
+                    .matched_expected_machine(host_bmc_ip)
+                    .and_then(|expected| expected.data.rack_id.as_ref())
+            {
+                racks_to_ensure.insert(rack_id.clone());
+            }
+            pending.push(identified);
         }
         if skipped_existing_hosts > 0 {
             tracing::info!(
@@ -159,6 +168,7 @@ impl MachineCreator {
             creator: self,
             expected_explored_endpoint_index,
             pending: pending.into_iter().peekable(),
+            repairs: repairs.into_iter().peekable(),
             budget: CreationBudget::new(
                 self.config.machines_created_per_run,
                 self.creation_concurrency,
@@ -214,7 +224,7 @@ impl MachineCreator {
         .await;
         if let Err(error) = result {
             tracing::warn!(
-                racks = rack_ids.len(),
+                rack_count = rack_ids.len(),
                 %error,
                 "Could not ensure the racks before dispatching their hosts; the host transactions retry"
             );
@@ -1559,10 +1569,16 @@ struct CreationAttempt {
 
 /// The hosts of one run that still need a creation attempt, with the run's
 /// creation budget. Built by `MachineCreator::creation_run`.
-pub(crate) struct CreationRun<'a> {
+pub(super) struct CreationRun<'a> {
     creator: &'a MachineCreator,
     expected_explored_endpoint_index: &'a ExploredEndpointIndex,
+    /// Hosts with a BMC still without a machine, in creation order. Each
+    /// attempt counts toward the cap.
     pending: Peekable<std::vec::IntoIter<&'a mut IdentifiedManagedHost>>,
+    /// Ingested hosts explored this run, revisited for the steady-state
+    /// repair after the pending hosts. An attempt takes a concurrency slot
+    /// and no cap slot.
+    repairs: Peekable<std::vec::IntoIter<&'a mut IdentifiedManagedHost>>,
     budget: CreationBudget,
     /// Distinct racks of the pending hosts still without a machine, in id
     /// order. The first `create_hosts` call takes and creates them.
@@ -1573,12 +1589,13 @@ pub(crate) struct CreationRun<'a> {
 
 /// Why `CreationRun::create_hosts` returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CreationProgress {
-    /// Every pending host within the cap has had its attempt.
+pub(super) enum CreationProgress {
+    /// Every pending host within the cap and every repair has had its attempt.
     Done,
-    /// `switch_and_power_shelf_pass_interval` has elapsed and hosts remain
-    /// within the cap. Nothing is in flight, so the caller can run the switch
-    /// and power shelf pass and call `create_hosts` again.
+    /// `switch_and_power_shelf_pass_interval` has elapsed and hosts remain to
+    /// dispatch: pending hosts within the cap, or repairs. Nothing is in
+    /// flight, so the caller can run the switch and power shelf pass and call
+    /// `create_hosts` again.
     PassDue,
 }
 
@@ -1587,22 +1604,29 @@ impl<'a> CreationRun<'a> {
     /// at once, each in its own transaction under its own admission permit,
     /// and awaits every in-flight creation before returning.
     /// `machines_created_per_run` is applied at dispatch and counts in-flight
-    /// creations. The first call creates the racks the pending hosts need
-    /// before it dispatches anything. Once
+    /// creations. The repairs follow the pending hosts and take a concurrency
+    /// slot only, so an exhausted cap does not defer them. The first call
+    /// creates the racks the pending hosts need before it dispatches anything,
+    /// unless the cap lets it dispatch no pending host. Once
     /// `switch_and_power_shelf_pass_interval` has elapsed since the run
     /// started or since the last pass, dispatching stops, the in-flight
-    /// creations drain, and this returns `PassDue` while hosts remain within
-    /// the cap; a zero interval never pauses.
-    pub(crate) async fn create_hosts(
+    /// creations drain, and this returns `PassDue` while hosts remain to
+    /// dispatch. A zero interval never pauses.
+    pub(super) async fn create_hosts(
         &mut self,
         metrics: &mut SiteExplorationMetrics,
     ) -> CreationProgress {
         let creator = self.creator;
         let expected_explored_endpoint_index = self.expected_explored_endpoint_index;
         let racks_to_ensure = std::mem::take(&mut self.racks_to_ensure);
-        if !racks_to_ensure.is_empty() {
+        if !racks_to_ensure.is_empty() && !self.budget.exhausted() {
             creator.ensure_racks_before_dispatch(&racks_to_ensure).await;
         }
+        let creation_attempt = move |identified: &'a mut IdentifiedManagedHost| {
+            let expected_machine = expected_explored_endpoint_index
+                .matched_expected_machine(&identified.explored_host.host_bmc_ip);
+            creator.create_identified_host(identified, expected_machine)
+        };
         let mut in_flight = FuturesUnordered::new();
         let mut pass_due = false;
         loop {
@@ -1610,10 +1634,15 @@ impl<'a> CreationRun<'a> {
                 let Some(identified) = self.pending.next() else {
                     break;
                 };
-                let expected_machine = expected_explored_endpoint_index
-                    .matched_expected_machine(&identified.explored_host.host_bmc_ip);
                 self.budget.dispatched();
-                in_flight.push(creator.create_identified_host(identified, expected_machine));
+                in_flight.push(creation_attempt(identified));
+            }
+            while !pass_due && self.budget.can_dispatch_repair() {
+                let Some(identified) = self.repairs.next() else {
+                    break;
+                };
+                self.budget.dispatched();
+                in_flight.push(creation_attempt(identified));
             }
             let Some(attempt) = in_flight.next().await else {
                 break;
@@ -1628,7 +1657,9 @@ impl<'a> CreationRun<'a> {
             }
         }
 
-        if pass_due && self.pending.peek().is_some() && !self.budget.exhausted() {
+        let hosts_remain = (self.pending.peek().is_some() && !self.budget.exhausted())
+            || self.repairs.peek().is_some();
+        if pass_due && hosts_remain {
             self.last_pass = Instant::now();
             CreationProgress::PassDue
         } else {
@@ -1638,8 +1669,9 @@ impl<'a> CreationRun<'a> {
 }
 
 /// The per-run creation cap applied at dispatch. In-flight creations count
-/// against the cap, so `created` never exceeds it; a finished attempt that
-/// created nothing frees its slot and keeps the cap.
+/// against the cap, so `created` never exceeds it, and a finished attempt
+/// that created nothing frees its slot and keeps the cap. A repair takes a
+/// concurrency slot and no cap slot.
 #[derive(Debug)]
 struct CreationBudget {
     cap: u64,
@@ -1660,7 +1692,12 @@ impl CreationBudget {
 
     /// Whether another creation may start now.
     fn can_dispatch(&self) -> bool {
-        self.in_flight < self.concurrency && !self.exhausted()
+        self.can_dispatch_repair() && !self.exhausted()
+    }
+
+    /// Whether another repair may start now. It needs a concurrency slot only.
+    fn can_dispatch_repair(&self) -> bool {
+        self.in_flight < self.concurrency
     }
 
     /// Whether the cap leaves nothing more to dispatch, counting in-flight
@@ -2169,6 +2206,7 @@ mod tests {
         dispatched: usize,
         created: u64,
         can_dispatch: bool,
+        can_dispatch_repair: bool,
         exhausted: bool,
     }
 
@@ -2187,6 +2225,7 @@ mod tests {
                         dispatched: 2,
                         created: 0,
                         can_dispatch: false,
+                        can_dispatch_repair: true,
                         exhausted: true,
                     },
                 },
@@ -2201,6 +2240,7 @@ mod tests {
                         dispatched: 2,
                         created: 0,
                         can_dispatch: true,
+                        can_dispatch_repair: true,
                         exhausted: false,
                     },
                 },
@@ -2215,6 +2255,7 @@ mod tests {
                         dispatched: 2,
                         created: 2,
                         can_dispatch: false,
+                        can_dispatch_repair: true,
                         exhausted: true,
                     },
                 },
@@ -2229,7 +2270,38 @@ mod tests {
                         dispatched: 1,
                         created: 1,
                         can_dispatch: true,
+                        can_dispatch_repair: true,
                         exhausted: false,
+                    },
+                },
+                Check {
+                    scenario: "a repair takes a concurrency slot",
+                    input: BudgetCase {
+                        cap: 4,
+                        concurrency: 1,
+                        finished: vec![],
+                    },
+                    expect: BudgetState {
+                        dispatched: 1,
+                        created: 0,
+                        can_dispatch: false,
+                        can_dispatch_repair: false,
+                        exhausted: false,
+                    },
+                },
+                Check {
+                    scenario: "a zero cap dispatches no creation and still admits a repair",
+                    input: BudgetCase {
+                        cap: 0,
+                        concurrency: 3,
+                        finished: vec![],
+                    },
+                    expect: BudgetState {
+                        dispatched: 0,
+                        created: 0,
+                        can_dispatch: false,
+                        can_dispatch_repair: true,
+                        exhausted: true,
                     },
                 },
             ],
@@ -2251,6 +2323,7 @@ mod tests {
                     dispatched,
                     created: budget.created,
                     can_dispatch: budget.can_dispatch(),
+                    can_dispatch_repair: budget.can_dispatch_repair(),
                     exhausted: budget.exhausted(),
                 }
             },

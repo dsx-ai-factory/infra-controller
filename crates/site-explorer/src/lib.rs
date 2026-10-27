@@ -1416,7 +1416,7 @@ impl SiteExplorer {
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    hosts = uningested_host_ips.len(),
+                    uningested_host_count = uningested_host_ips.len(),
                     "Site Explorer could not look up the machine interfaces of the uningested hosts"
                 );
                 HashMap::new()
@@ -2339,17 +2339,13 @@ impl SiteExplorer {
         // Any transaction touching multiple explored_endpoints needs to sort them the same way to
         // avoid deadlocks: sort by IP.
         exploration_results.sort_by_key(|result| result.endpoint.address);
-        let explored_this_run = ExploredThisRun {
-            endpoints: exploration_results
-                .iter()
-                .map(|result| result.endpoint.address)
-                .collect(),
-            refreshed: exploration_results
-                .iter()
-                .filter(|result| result.result.is_ok())
-                .map(|result| result.endpoint.address)
-                .collect(),
-        };
+        let probed_endpoints: HashSet<IpAddr> = exploration_results
+            .iter()
+            .map(|result| result.endpoint.address)
+            .collect();
+        // An endpoint counts as refreshed once the database accepts its
+        // report, so a report rejected as stale is not trusted later.
+        let mut refreshed_endpoints = HashSet::new();
         metrics.record_phase_latency("update_explored_endpoints_probe", probe_start.elapsed());
         for EndpointExplorationTaskResult { steps, .. } in &exploration_results {
             metrics
@@ -2467,6 +2463,7 @@ impl SiteExplorer {
                             match report_write {
                                 ConditionalWrite::Applied(()) => {
                                     attester_inventory::record(&report, &mut txn).await?;
+                                    refreshed_endpoints.insert(address);
                                 }
                                 ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
                                     // Skip transient remediation: it would use
@@ -2521,6 +2518,7 @@ impl SiteExplorer {
                             .await?;
                             attester_inventory::record(&report, &mut txn).await?;
                             insert_endpoint_attempts += 1;
+                            refreshed_endpoints.insert(address);
                         }
                         Err(e) => {
                             // If an endpoint exploration failed we still track the result in the database
@@ -2560,6 +2558,10 @@ impl SiteExplorer {
         }
 
         txn.commit().await?;
+        let explored_this_run = ExploredThisRun {
+            endpoints: probed_endpoints,
+            refreshed: refreshed_endpoints,
+        };
         metrics.record_phase_latency("update_explored_endpoints_persist", persist_start.elapsed());
         metrics.record_update_explored_endpoints_count(
             "insert_endpoint_attempts",

@@ -297,3 +297,42 @@ impl ExploredEndpointIndexBuilder {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use model::expected_machine::ExpectedMachineData;
+
+    use super::*;
+
+    /// An expected machine counts toward its rack whether or not an interface
+    /// was found for it, a machine without a rack is not counted, and the
+    /// other expected entities are not counted.
+    #[test]
+    fn expected_hosts_per_rack_counts_expected_machines_with_a_rack() {
+        let rack_a = RackId::new("rack-a");
+        let machine = |mac: &str, rack_id: Option<&RackId>| ExpectedMachine {
+            id: None,
+            bmc_mac_address: mac.parse().unwrap(),
+            data: ExpectedMachineData {
+                rack_id: rack_id.cloned(),
+                ..Default::default()
+            },
+        };
+        let index = ExploredEndpointIndex::builder(Vec::new(), Vec::new())
+            .with_expected_machines(vec![
+                machine("02:00:00:00:00:01", Some(&rack_a)),
+                machine("02:00:00:00:00:02", Some(&rack_a)),
+                machine("02:00:00:00:00:03", None),
+            ])
+            .with_expected_switches(vec![ExpectedSwitch {
+                bmc_mac_address: "02:00:00:00:00:04".parse().unwrap(),
+                ..Default::default()
+            }])
+            .build();
+
+        assert_eq!(
+            index.expected_hosts_per_rack(),
+            HashMap::from([(&rack_a, 2)])
+        );
+    }
+}

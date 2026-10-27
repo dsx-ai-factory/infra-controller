@@ -119,18 +119,17 @@ impl InventoryCreator {
             let rack_host_fill = rack_order::order_hosts_by_rack_completion(
                 identified_hosts,
                 |bmc_ip| {
-                    expected_endpoint_index
-                        .matched_expected_machine(bmc_ip)
-                        .and_then(|expected| expected.data.rack_id.as_ref())
+                    let expected = expected_endpoint_index.matched_expected_machine(bmc_ip)?;
+                    Some((&expected.bmc_mac_address, expected.data.rack_id.as_ref()?))
                 },
                 &expected_endpoint_index.expected_hosts_per_rack(),
                 already_ingested_bmc_ips,
             );
             metrics.rack_host_fill = Some(rack_host_fill);
             tracing::info!(
-                racks_expected = rack_host_fill.expected,
-                racks_with_all_hosts_ingested = rack_host_fill.all_hosts_ingested,
-                racks_completable_this_run = rack_host_fill.completable_this_run,
+                expected_rack_count = rack_host_fill.expected,
+                all_hosts_ingested_rack_count = rack_host_fill.all_hosts_ingested,
+                completable_this_run_rack_count = rack_host_fill.completable_this_run,
                 "Ordered the identified hosts by rack completion"
             );
 
@@ -152,7 +151,7 @@ impl InventoryCreator {
                     machine_creator::CreationProgress::Done => break,
                     machine_creator::CreationProgress::PassDue => {
                         tracing::info!(
-                            created_machines = metrics.created_machines,
+                            created_machine_count = metrics.created_machines,
                             "Running the switch and power shelf pass between host creations"
                         );
                         if let Err(error) = self
@@ -219,11 +218,15 @@ impl InventoryCreator {
 
     /// Identifies and creates the power shelves and switches whose endpoints
     /// have completed preingestion. Runs once at the end of every run and,
-    /// while hosts are still being created, every
-    /// `switch_and_power_shelf_pass_interval`, so a switch or shelf is created
-    /// within that interval of completing preingestion instead of after the
-    /// host creation phase. The per-run latency totals and the per-run caps
-    /// accumulate over the passes of one run.
+    /// while hosts are still being created, each time
+    /// `switch_and_power_shelf_pass_interval` has elapsed since the run
+    /// started or since the previous pass and the in-flight host creations
+    /// have finished, so a switch or shelf that completes preingestion during
+    /// a long host creation phase waits about one interval instead of for the
+    /// end of the phase. The interval is checked when a host attempt completes
+    /// and restarts when the pass becomes due, before the pass runs. The
+    /// per-run latency totals and the per-run caps accumulate over the passes
+    /// of one run.
     async fn create_switches_and_power_shelves(
         &self,
         metrics: &mut SiteExplorationMetrics,

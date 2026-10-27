@@ -108,12 +108,15 @@ pub struct SiteExplorerConfig {
     #[serde(default = "SiteExplorerConfig::default_machine_creation_concurrency")]
     pub machine_creation_concurrency: u64,
 
-    /// How often, while `create_machines` still has hosts to create in a run,
-    /// Site Explorer runs an extra identify-and-create pass for the switches
-    /// and power shelves whose endpoints have completed preingestion. The
-    /// pass also runs once at the end of every run, and
+    /// The minimum time between the extra identify-and-create passes for the
+    /// switches and power shelves whose endpoints have completed preingestion
+    /// while `create_machines` still has hosts to create in a run. A pass
+    /// starts once this interval has elapsed since the run started or since
+    /// the previous pass and the host creations already in flight have
+    /// finished. The pass also runs once at the end of every run, and
     /// `switches_created_per_run` and `power_shelves_created_per_run` count
-    /// across all passes of a run. `0s` disables the extra passes.
+    /// across all passes of a run. `0s` disables the extra passes. Read at
+    /// startup. A change needs a restart.
     #[serde(
         default = "SiteExplorerConfig::default_switch_and_power_shelf_pass_interval",
         deserialize_with = "deserialize_duration",

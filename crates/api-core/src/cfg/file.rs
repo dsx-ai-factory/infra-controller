@@ -207,9 +207,9 @@ pub struct CarbideConfig {
     /// Permits of the admission gate in front of the admin-segment advisory
     /// locks: how many flows (DHCP discovery, machine discovery, Site
     /// Explorer machine creation) may hold an open transaction while waiting
-    /// on those locks. Must be 1 to 256; startup rejects other values. When
+    /// on those locks. Must be 1 to 256, and startup rejects other values. When
     /// unset, the `ADMIN_LOCK_ADMISSION` environment variable applies, then
-    /// 16. Read at startup; a change needs a restart.
+    /// 16. Read at startup. A change needs a restart.
     #[serde(default)]
     pub admin_lock_admission_permits: Option<usize>,
 

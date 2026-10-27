@@ -19,14 +19,18 @@
 //!
 //! A rack becomes usable once every expected host, switch, and power shelf in
 //! it has a machine, so the order in which hosts are created decides when
-//! racks complete. The identify phase produces hosts in hash order; this
-//! module replaces that with a rack-affine order so each run dispatches the
-//! racks it can complete before the racks it cannot.
+//! racks complete. The identify phase produces hosts in hash order, and this
+//! module replaces that with a rack-affine order. Racks with the fewest
+//! expected hosts still lacking a machine once this run's hosts are created
+//! come first, so the racks the run completes lead. Racks equal on that count
+//! are ordered by how many hosts lack a machine now, then by rack id, with one
+//! rack's hosts kept together, and hosts without an expected rack come last.
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use carbide_uuid::rack::RackId;
+use mac_address::MacAddress;
 
 use crate::IdentifiedManagedHost;
 
@@ -53,14 +57,17 @@ enum RackRank<'a> {
         missing_after_run: usize,
         /// Expected hosts of the rack without a machine now.
         missing_now: usize,
-        rack_id: &'a str,
+        rack_id: &'a RackId,
     },
     Unracked,
 }
 
 /// Ascending sort key of an identified host. Hosts that still need a machine
-/// come first, then the racks this run completes, then the racks closest to
-/// complete; one rack's hosts stay contiguous and the BMC IP settles ties.
+/// come first. Among them, the racks with the fewest expected hosts still
+/// lacking a machine after this run's creations come first, then the racks
+/// with fewer hosts lacking a machine now, then rack id, so one rack's hosts
+/// stay contiguous, and hosts without an expected rack come last. The BMC IP
+/// settles ties.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct CreationOrderKey<'a> {
     ingested: bool,
@@ -71,37 +78,45 @@ struct CreationOrderKey<'a> {
 /// Sorts `hosts` into creation order and returns the rack fill the order was
 /// computed from.
 ///
-/// `rack_of` resolves a host BMC IP to its expected rack, and
-/// `expected_hosts_per_rack` counts the expected hosts of every rack.
-/// `ingested_bmc_ips` holds every BMC address that already belongs to a
-/// machine; a DPU BMC address resolves to no rack, so it is not counted.
+/// `host_of` resolves a host BMC IP to the BMC MAC address and expected rack
+/// of its expected machine, and `expected_hosts_per_rack` counts the expected
+/// hosts of every rack. `ingested_bmc_ips` holds every BMC address that
+/// already belongs to a machine. A DPU BMC address resolves to no host, so it
+/// is not counted. A BMC may hold one address per IP family, so hosts are
+/// counted by their BMC MAC address rather than by address.
 pub(crate) fn order_hosts_by_rack_completion<'a>(
     hosts: &mut [IdentifiedManagedHost],
-    rack_of: impl Fn(&IpAddr) -> Option<&'a RackId>,
+    host_of: impl Fn(&IpAddr) -> Option<(&'a MacAddress, &'a RackId)>,
     expected_hosts_per_rack: &HashMap<&'a RackId, usize>,
     ingested_bmc_ips: &HashSet<IpAddr>,
 ) -> RackHostFill {
-    let mut ingested_per_rack: HashMap<&RackId, usize> = HashMap::new();
+    let mut ingested_per_rack: HashMap<&RackId, HashSet<&MacAddress>> = HashMap::new();
     for bmc_ip in ingested_bmc_ips {
-        if let Some(rack_id) = rack_of(bmc_ip) {
-            *ingested_per_rack.entry(rack_id).or_default() += 1;
+        if let Some((bmc_mac, rack_id)) = host_of(bmc_ip) {
+            ingested_per_rack
+                .entry(rack_id)
+                .or_default()
+                .insert(bmc_mac);
         }
     }
-    let mut candidates_per_rack: HashMap<&RackId, usize> = HashMap::new();
+    let mut candidates_per_rack: HashMap<&RackId, HashSet<&MacAddress>> = HashMap::new();
     for host in hosts.iter() {
         let bmc_ip = &host.explored_host.host_bmc_ip;
         if !ingested_bmc_ips.contains(bmc_ip)
-            && let Some(rack_id) = rack_of(bmc_ip)
+            && let Some((bmc_mac, rack_id)) = host_of(bmc_ip)
         {
-            *candidates_per_rack.entry(rack_id).or_default() += 1;
+            candidates_per_rack
+                .entry(rack_id)
+                .or_default()
+                .insert(bmc_mac);
         }
     }
 
     let mut fill = RackHostFill::default();
     let mut missing_per_rack: HashMap<&RackId, (usize, usize)> = HashMap::new();
     for (rack_id, &expected) in expected_hosts_per_rack {
-        let ingested = ingested_per_rack.get(rack_id).copied().unwrap_or(0);
-        let candidates = candidates_per_rack.get(rack_id).copied().unwrap_or(0);
+        let ingested = ingested_per_rack.get(rack_id).map_or(0, HashSet::len);
+        let candidates = candidates_per_rack.get(rack_id).map_or(0, HashSet::len);
         let missing_now = expected.saturating_sub(ingested);
         let missing_after_run = missing_now.saturating_sub(candidates);
         fill.expected += 1;
@@ -115,14 +130,14 @@ pub(crate) fn order_hosts_by_rack_completion<'a>(
 
     hosts.sort_by_cached_key(|host| {
         let host_bmc_ip = host.explored_host.host_bmc_ip;
-        let rack = rack_of(&host_bmc_ip)
-            .and_then(|rack_id| {
+        let rack = host_of(&host_bmc_ip)
+            .and_then(|(_, rack_id)| {
                 missing_per_rack
                     .get(rack_id)
                     .map(|&(missing_after_run, missing_now)| RackRank::Racked {
                         missing_after_run,
                         missing_now,
-                        rack_id: rack_id.as_str(),
+                        rack_id,
                     })
             })
             .unwrap_or(RackRank::Unracked);
@@ -151,6 +166,9 @@ mod tests {
         ingested: Vec<(&'static str, &'static str)>,
         /// Expected host count per rack.
         expected: Vec<(&'static str, usize)>,
+        /// Second addresses of dual-stack BMCs, as (address, the first
+        /// address of the same BMC). Every other address is a BMC of its own.
+        same_bmc: Vec<(&'static str, &'static str)>,
     }
 
     #[derive(Debug, PartialEq)]
@@ -202,6 +220,22 @@ mod tests {
             rack_of_ip.insert(bmc_ip, rack_by_name[rack_id]);
             ingested_bmc_ips.insert(bmc_ip);
         }
+        // One MAC per BMC, shared by the addresses `same_bmc` joins.
+        let first_address_of: HashMap<IpAddr, IpAddr> = case
+            .same_bmc
+            .iter()
+            .map(|(address, first)| (address.parse().unwrap(), first.parse().unwrap()))
+            .collect();
+        let mut mac_of_first_address: HashMap<IpAddr, MacAddress> = HashMap::new();
+        let mut mac_of_ip: HashMap<IpAddr, MacAddress> = HashMap::new();
+        for &bmc_ip in rack_of_ip.keys() {
+            let first_address = first_address_of.get(&bmc_ip).copied().unwrap_or(bmc_ip);
+            let next = mac_of_first_address.len() as u8;
+            let mac = *mac_of_first_address
+                .entry(first_address)
+                .or_insert(MacAddress::new([0x02, 0, 0, 0, 0, next]));
+            mac_of_ip.insert(bmc_ip, mac);
+        }
         let mut hosts: Vec<IdentifiedManagedHost> = case
             .hosts
             .iter()
@@ -210,7 +244,11 @@ mod tests {
 
         let fill = order_hosts_by_rack_completion(
             &mut hosts,
-            |bmc_ip| rack_of_ip.get(bmc_ip).copied(),
+            |bmc_ip| {
+                rack_of_ip
+                    .get(bmc_ip)
+                    .map(|rack_id| (&mac_of_ip[bmc_ip], *rack_id))
+            },
             &expected_hosts_per_rack,
             &ingested_bmc_ips,
         );
@@ -231,16 +269,17 @@ mod tests {
                     scenario: "a rack this run completes sorts before one it cannot",
                     input: OrderCase {
                         hosts: vec![
-                            ("10.0.0.21", Some("rack-b")),
                             ("10.0.0.11", Some("rack-a")),
-                            ("10.0.0.22", Some("rack-b")),
-                            ("10.0.0.12", Some("rack-a")),
+                            ("10.0.0.21", Some("rack-z")),
+                            ("10.0.0.22", Some("rack-z")),
+                            ("10.0.0.23", Some("rack-z")),
                         ],
                         ingested: vec![],
-                        expected: vec![("rack-a", 2), ("rack-b", 3)],
+                        expected: vec![("rack-a", 2), ("rack-z", 3)],
+                        same_bmc: vec![],
                     },
                     expect: Ordered {
-                        bmc_ips: ips(&["10.0.0.11", "10.0.0.12", "10.0.0.21", "10.0.0.22"]),
+                        bmc_ips: ips(&["10.0.0.21", "10.0.0.22", "10.0.0.23", "10.0.0.11"]),
                         fill: RackHostFill {
                             expected: 2,
                             all_hosts_ingested: 0,
@@ -252,15 +291,16 @@ mod tests {
                     scenario: "among completable racks the one with fewer hosts to create goes first",
                     input: OrderCase {
                         hosts: vec![
-                            ("10.0.0.21", Some("rack-b")),
-                            ("10.0.0.22", Some("rack-b")),
-                            ("10.0.0.13", Some("rack-a")),
+                            ("10.0.0.11", Some("rack-a")),
+                            ("10.0.0.12", Some("rack-a")),
+                            ("10.0.0.23", Some("rack-b")),
                         ],
-                        ingested: vec![("10.0.0.11", "rack-a"), ("10.0.0.12", "rack-a")],
-                        expected: vec![("rack-a", 3), ("rack-b", 2)],
+                        ingested: vec![("10.0.0.21", "rack-b"), ("10.0.0.22", "rack-b")],
+                        expected: vec![("rack-a", 2), ("rack-b", 3)],
+                        same_bmc: vec![],
                     },
                     expect: Ordered {
-                        bmc_ips: ips(&["10.0.0.13", "10.0.0.21", "10.0.0.22"]),
+                        bmc_ips: ips(&["10.0.0.23", "10.0.0.11", "10.0.0.12"]),
                         fill: RackHostFill {
                             expected: 2,
                             all_hosts_ingested: 0,
@@ -274,14 +314,15 @@ mod tests {
                         hosts: vec![
                             ("10.0.0.21", Some("rack-b")),
                             ("10.0.0.11", Some("rack-a")),
-                            ("10.0.0.22", Some("rack-b")),
-                            ("10.0.0.12", Some("rack-a")),
+                            ("10.0.0.22", Some("rack-a")),
+                            ("10.0.0.12", Some("rack-b")),
                         ],
                         ingested: vec![],
                         expected: vec![("rack-a", 4), ("rack-b", 4)],
+                        same_bmc: vec![],
                     },
                     expect: Ordered {
-                        bmc_ips: ips(&["10.0.0.11", "10.0.0.12", "10.0.0.21", "10.0.0.22"]),
+                        bmc_ips: ips(&["10.0.0.11", "10.0.0.22", "10.0.0.12", "10.0.0.21"]),
                         fill: RackHostFill {
                             expected: 2,
                             all_hosts_ingested: 0,
@@ -299,6 +340,7 @@ mod tests {
                         ],
                         ingested: vec![],
                         expected: vec![("rack-a", 1)],
+                        same_bmc: vec![],
                     },
                     expect: Ordered {
                         bmc_ips: ips(&["10.0.0.11", "10.0.0.3", "10.0.0.9"]),
@@ -315,6 +357,7 @@ mod tests {
                         hosts: vec![("10.0.0.11", Some("rack-a")), ("10.0.0.21", Some("rack-b"))],
                         ingested: vec![("10.0.0.11", "rack-a")],
                         expected: vec![("rack-a", 1), ("rack-b", 1)],
+                        same_bmc: vec![],
                     },
                     expect: Ordered {
                         bmc_ips: ips(&["10.0.0.21", "10.0.0.11"]),
@@ -335,6 +378,7 @@ mod tests {
                         ],
                         ingested: vec![("10.0.0.11", "rack-a")],
                         expected: vec![("rack-a", 3), ("rack-b", 1)],
+                        same_bmc: vec![],
                     },
                     expect: Ordered {
                         bmc_ips: ips(&["10.0.0.21", "10.0.0.12", "10.0.0.11"]),
@@ -351,6 +395,7 @@ mod tests {
                         hosts: vec![("10.0.0.12", Some("rack-a")), ("10.0.0.11", Some("rack-a"))],
                         ingested: vec![],
                         expected: vec![("rack-a", 2)],
+                        same_bmc: vec![],
                     },
                     expect: Ordered {
                         bmc_ips: ips(&["10.0.0.11", "10.0.0.12"]),
@@ -367,12 +412,47 @@ mod tests {
                         hosts: vec![],
                         ingested: vec![("10.0.0.11", "rack-a")],
                         expected: vec![("rack-a", 1), ("rack-b", 2)],
+                        same_bmc: vec![],
                     },
                     expect: Ordered {
                         bmc_ips: ips(&[]),
                         fill: RackHostFill {
                             expected: 2,
                             all_hosts_ingested: 1,
+                            completable_this_run: 0,
+                        },
+                    },
+                },
+                Check {
+                    scenario: "an ingested host with two addresses counts once",
+                    input: OrderCase {
+                        hosts: vec![("10.0.0.12", Some("rack-a"))],
+                        ingested: vec![("10.0.0.11", "rack-a"), ("fd00::11", "rack-a")],
+                        expected: vec![("rack-a", 2)],
+                        same_bmc: vec![("fd00::11", "10.0.0.11")],
+                    },
+                    expect: Ordered {
+                        bmc_ips: ips(&["10.0.0.12"]),
+                        fill: RackHostFill {
+                            expected: 1,
+                            all_hosts_ingested: 0,
+                            completable_this_run: 1,
+                        },
+                    },
+                },
+                Check {
+                    scenario: "two candidate endpoints of one BMC count once",
+                    input: OrderCase {
+                        hosts: vec![("10.0.0.11", Some("rack-a")), ("fd00::11", Some("rack-a"))],
+                        ingested: vec![],
+                        expected: vec![("rack-a", 2)],
+                        same_bmc: vec![("fd00::11", "10.0.0.11")],
+                    },
+                    expect: Ordered {
+                        bmc_ips: ips(&["10.0.0.11", "fd00::11"]),
+                        fill: RackHostFill {
+                            expected: 1,
+                            all_hosts_ingested: 0,
                             completable_this_run: 0,
                         },
                     },

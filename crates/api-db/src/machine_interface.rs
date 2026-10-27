@@ -2562,8 +2562,8 @@ pub fn configure_admin_lock_admission(permits: Option<usize>) {
     let requested = gate.permits;
     if ADMIN_LOCK_ADMISSION.set(gate).is_err() && admin_lock_admission_permits() != requested {
         tracing::warn!(
-            requested,
-            active = admin_lock_admission_permits(),
+            requested_permit_count = requested,
+            active_permit_count = admin_lock_admission_permits(),
             "admin-lock admission permits are already set; keeping the active count"
         );
     }
