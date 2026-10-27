@@ -1142,12 +1142,12 @@ impl From<DpuStatusPhase> for DpuPhase {
     }
 }
 
-/// Event emitted on DPU resource changes with both status and phase present.
+/// Event emitted on named DPU resource changes with status and phase present.
 ///
-/// This event fires for every observed DPU update with both status and phase
-/// present, not only when the phase transitions. Updates missing either are
-/// skipped. Handlers must be idempotent and tolerate receiving the same phase
-/// multiple times.
+/// This event fires for every observed DPU update with `metadata.name`, `status`,
+/// and `status.phase` present, not only when the phase transitions. Updates
+/// missing any of these are skipped. Handlers must be idempotent and tolerate
+/// receiving the same phase multiple times.
 #[derive(Debug, Clone)]
 pub struct DpuEvent {
     /// Name of the DPU resource.
