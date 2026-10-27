@@ -2077,6 +2077,7 @@ async fn test_deleted_vpc_prefix_cannot_allocate_new_instance_interface(
                 network: Some(single_interface_network_config_with_vpc_prefix(id)),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
