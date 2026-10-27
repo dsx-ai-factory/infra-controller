@@ -24,6 +24,7 @@ use nv_redfish::resource::State;
 use nv_redfish::schema::leak_detector::{DetectorState, LeakDetector};
 
 use crate::HealthError;
+use crate::bmc::CollectorSweep;
 use crate::collectors::{IterationResult, PeriodicCollector};
 use crate::endpoint::BmcEndpoint;
 use crate::sink::{
@@ -38,6 +39,7 @@ pub struct LeakDetectorCollectorConfig {
 
 pub struct LeakDetectorCollector<B: Bmc> {
     bmc: Arc<B>,
+    endpoint: Arc<BmcEndpoint>,
     event_context: EventContext,
     state: Option<LeakDetectorCollectorState>,
     data_sink: Option<Arc<dyn DataSink>>,
@@ -65,6 +67,7 @@ where
             EventContext::from_endpoint(endpoint.as_ref(), "leak_detector_collector");
         Ok(Self {
             bmc,
+            endpoint,
             event_context,
             state: None,
             data_sink: config.data_sink,
@@ -142,7 +145,9 @@ where
         let fetch_failures = unreadable.len();
         let report = build_health_report(detectors, &unreadable, &self.event_context);
 
-        self.emit_event(CollectorEvent::HealthReport(Arc::new(report)));
+        if should_publish(&report, fetch_failures, self.endpoint.bmc.collector_sweep()) {
+            self.emit_event(CollectorEvent::HealthReport(Arc::new(report)));
+        }
 
         Ok(IterationResult {
             refresh_triggered,
@@ -193,7 +198,7 @@ where
     }
 
     /// Fetches every discovered detector, returning the ones that could be read
-    /// along with the ids of the ones that could not.
+    /// along with the ids and errors of the ones that could not.
     ///
     /// A detector the BMC serves in a shape this client cannot decode costs its
     /// own leak reporting instead of every other detector on the endpoint. It is
@@ -206,19 +211,15 @@ where
     async fn fetch_leak_detectors(
         &self,
         detector_ids: &[ODataId],
-    ) -> (Vec<Arc<LeakDetector>>, Vec<ODataId>) {
+    ) -> (Vec<Arc<LeakDetector>>, Vec<(ODataId, String)>) {
         let mut detectors = Vec::new();
         let mut unreadable = Vec::new();
         for detector_id in detector_ids {
             match self.bmc.get::<LeakDetector>(detector_id).await {
                 Ok(detector) => detectors.push(detector),
                 Err(error) => {
-                    tracing::warn!(
-                        ?error,
-                        detector = %detector_id,
-                        "Failed to fetch leak detector; it is reported as unreadable"
-                    );
-                    unreadable.push(detector_id.clone());
+                    tracing::warn!(?error, detector = %detector_id, "Failed to fetch leak detector");
+                    unreadable.push((detector_id.clone(), error.to_string()));
                 }
             }
         }
@@ -229,7 +230,7 @@ where
 
 fn build_health_report(
     detectors: Vec<Arc<LeakDetector>>,
-    unreadable: &[ODataId],
+    unreadable: &[(ODataId, String)],
     context: &EventContext,
 ) -> HealthReport {
     let mut successes = Vec::new();
@@ -278,12 +279,12 @@ fn build_health_report(
     // A detector this client could not read has unknown state, not healthy
     // state. Reporting it as a sensor failure keeps that distinction visible to
     // leak classification, which would otherwise see only a shorter batch.
-    for detector_id in unreadable {
+    for (detector_id, error) in unreadable {
         alerts.push(HealthReportAlert {
             attribution: None,
             probe_id: Probe::LeakDetection,
             target: Some(detector_id.to_string()),
-            message: format!("Leak detector '{detector_id}' could not be read"),
+            message: format!("Leak detector '{detector_id}' could not be read: {error}"),
             classifications: vec![Classification::SensorFailure],
         });
     }
@@ -295,6 +296,19 @@ fn build_health_report(
         alerts,
         target: context.health_report_target(),
     }
+}
+
+/// Whether to publish a pass's report. Reads that failed while the BMC
+/// connection circuit is open say nothing about the detectors, so the previous
+/// report is kept unless this pass still read a leak.
+fn should_publish(report: &HealthReport, fetch_failures: usize, sweep: CollectorSweep) -> bool {
+    fetch_failures == 0
+        || sweep == CollectorSweep::Full
+        || report.alerts.iter().any(|alert| {
+            alert
+                .classifications
+                .contains(&Classification::LeakDetector)
+        })
 }
 
 fn detector_target(detector: &LeakDetector) -> String {
@@ -620,7 +634,10 @@ mod tests {
         let detectors = vec![Arc::new(
             serde_json::from_str::<LeakDetector>(readable).expect("valid leak detector"),
         )];
-        let unreadable = [ODataId::from(format!("{DETECTORS_PATH}/leakage2"))];
+        let unreadable = [(
+            ODataId::from(format!("{DETECTORS_PATH}/leakage2")),
+            "invalid type: floating point `0.0`, expected i64".to_string(),
+        )];
 
         let report: ReportSummary = build_health_report(detectors, &unreadable, &context()).into();
 
@@ -634,11 +651,71 @@ mod tests {
                 vec![AlertSummary {
                     probe_id: Probe::LeakDetection,
                     target: Some(format!("{DETECTORS_PATH}/leakage2")),
-                    message: format!("Leak detector '{DETECTORS_PATH}/leakage2' could not be read"),
+                    message: format!(
+                        "Leak detector '{DETECTORS_PATH}/leakage2' could not be read: invalid type: floating point `0.0`, expected i64"
+                    ),
                     classifications: vec![Classification::SensorFailure],
                 }],
             ),
             "an unreadable detector must stay visible instead of silently shortening the batch"
+        );
+    }
+
+    #[test]
+    fn unreachable_bmc_keeps_previous_report_unless_a_leak_was_read() {
+        let critical = r#"{
+            "@odata.id": "/redfish/v1/Chassis/System/LeakDetectors/Critical",
+            "Id": "Critical",
+            "Name": "Critical leak detector",
+            "DetectorState": "Critical",
+            "Status": { "Health": "Critical", "State": "Enabled" }
+        }"#;
+        let unreadable = [(
+            ODataId::from(format!("{DETECTORS_PATH}/leakage1")),
+            "BMC is unreachable".to_string(),
+        )];
+        // input: (fetch failures, circuit sweep, whether a detector read a leak)
+        check_values(
+            [
+                Check {
+                    scenario: "every detector was read",
+                    input: (0, CollectorSweep::Full, false),
+                    expect: true,
+                },
+                Check {
+                    scenario: "the BMC answered but a detector could not be decoded",
+                    input: (1, CollectorSweep::Full, false),
+                    expect: true,
+                },
+                Check {
+                    scenario: "reads failed while the connection circuit is open",
+                    input: (1, CollectorSweep::Skip, false),
+                    expect: false,
+                },
+                Check {
+                    scenario: "reads failed while the circuit waits for a probe",
+                    input: (1, CollectorSweep::Probe, false),
+                    expect: false,
+                },
+                Check {
+                    scenario: "a leak read before the connection failed is still published",
+                    input: (1, CollectorSweep::Skip, true),
+                    expect: true,
+                },
+            ],
+            |(fetch_failures, sweep, leak)| {
+                let detectors = if leak {
+                    vec![Arc::new(
+                        serde_json::from_str::<LeakDetector>(critical)
+                            .expect("valid leak detector"),
+                    )]
+                } else {
+                    Vec::new()
+                };
+                let report =
+                    build_health_report(detectors, &unreadable[..fetch_failures], &context());
+                should_publish(&report, fetch_failures, sweep)
+            },
         );
     }
 
@@ -702,7 +779,7 @@ mod tests {
             .iter()
             .map(|detector| detector.odata_id().to_string())
             .collect();
-        let unreadable_ids: Vec<String> = unreadable.iter().map(ToString::to_string).collect();
+        let unreadable_ids: Vec<String> = unreadable.iter().map(|(id, _)| id.to_string()).collect();
         assert_eq!(
             (fetched_ids, unreadable_ids),
             (
