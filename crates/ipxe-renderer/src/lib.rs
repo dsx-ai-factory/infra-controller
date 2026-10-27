@@ -1263,18 +1263,28 @@ mod tests {
                  set nico-pxe-base http://${next-server}\n\
                  goto ${nico-after-network}" => true,
             }
-            "IPv6 binds the leased address before using the inherited endpoint" {
+            "IPv6 prefers the leased address over SLAAC" {
                 ":configure_ipv6\n\
                  ifconf -c ipv6 || exit 1\n\
-                 isset ${netX.dhcpv6/ip6} || goto missing_ipv6_lease\n\
-                 isset ${cwuri} || goto missing_boot_uri\n\
+                 isset ${netX.dhcpv6/ip6} || goto configure_slaac\n\
                  set http-source6 ${netX.dhcpv6/ip6}%${netX/ifname}\n\
+                 goto ipv6_ready" => true,
+            }
+            "SLAAC fallback binds the NDP address on the selected interface" {
+                ":configure_slaac\n\
+                 isset ${netX.ndp/ip6} || goto missing_ipv6_address\n\
+                 set http-source6 ${netX.ndp/ip6}%${netX/ifname}\n\
+                 :ipv6_ready" => true,
+            }
+            "both IPv6 sources require an inherited endpoint" {
+                ":ipv6_ready\n\
+                 isset ${cwuri} || goto missing_boot_uri\n\
                  clear nico-pxe-base\n\
                  goto ${nico-after-network}" => true,
             }
             "missing prerequisites diagnose and return to firmware" {
-                ":missing_ipv6_lease\n\
-                 echo NICo IPv6 boot requires a stateful DHCPv6 lease.\n\
+                ":missing_ipv6_address\n\
+                 echo NICo IPv6 boot requires a DHCPv6 lease or SLAAC address.\n\
                  exit 1" => true,
                 ":missing_boot_uri\n\
                  echo NICo IPv6 boot requires an inherited HTTP boot URI.\n\
