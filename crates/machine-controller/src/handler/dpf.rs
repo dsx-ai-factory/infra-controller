@@ -20,10 +20,13 @@
 //! 2. Wait for watcher callbacks (DPU ready, reboot required)
 //! 3. Handle cleanup on error/reprovisioning
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::net::IpAddr;
 
-use carbide_dpf::{DpfError, DpuDeploymentType, DpuPhase, dpu_node_cr_name};
+use carbide_dpf::{
+    DpfError, DpuDeploymentType, DpuFailureObservation, DpuPhase, DpuPhaseObservation,
+    dpu_node_cr_name,
+};
 use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
 use libredfish::SystemPowerControl;
 use model::expected_machine::ExpectedMachine;
@@ -465,6 +468,79 @@ fn make_failure_state(
     }
 }
 
+fn dpf_provisioning_failed(
+    state: &ManagedHostStateSnapshot,
+    dpu_id: DpuMachineId,
+    failure: Option<&DpuFailureObservation>,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    tracing::error!(
+        machine_id = %state.host_snapshot.id,
+        dpu_machine_id = %dpu_id,
+        "DPU entered error phase during DPF provisioning"
+    );
+    let mut err = format!("DPU {dpu_id} entered error phase during DPF provisioning");
+    if let Some(failure) = failure {
+        let diagnostics = serde_json::to_string(failure)
+            .map_err(DpfError::from)
+            .map_err(dpf_error)?;
+        err.push_str(": ");
+        err.push_str(&diagnostics);
+    }
+    let details = FailureDetails {
+        cause: FailureCause::DpfProvisioning { err },
+        failed_at: chrono::Utc::now(),
+        source: FailureSource::StateMachineArea(StateMachineArea::MainFlow),
+    };
+    Ok(StateHandlerOutcome::transition(make_failure_state(
+        state,
+        details,
+        dpu_id.into(),
+    )))
+}
+
+fn dpf_failure_from_observations<'a>(
+    state: &ManagedHostStateSnapshot,
+    dpus: impl IntoIterator<Item = &'a DpuMachine>,
+    observations: &BTreeMap<String, DpuPhaseObservation>,
+) -> Result<Option<StateHandlerOutcome<ManagedHostState>>, StateHandlerError> {
+    for dpu in dpus {
+        if let Some(observation) = observations.get(&dpf_id(dpu)?)
+            && observation.phase == DpuPhase::Error
+        {
+            return dpf_provisioning_failed(state, dpu.id, observation.failure.as_ref()).map(Some);
+        }
+    }
+    Ok(None)
+}
+
+fn dpus_waiting_for_ready(
+    state: &ManagedHostStateSnapshot,
+    current_dpu_id: DpuMachineId,
+) -> impl Iterator<Item = &DpuMachine> {
+    // An untouched peer or one still in `Reprovisioning` can retain an old
+    // `Error` until its CR is deleted. Its readiness becomes actionable in
+    // `WaitingForReady`.
+    state.dpu_snapshots.iter().filter(move |dpu| {
+        if dpu.id == current_dpu_id {
+            return true;
+        }
+        match &state.managed_state {
+            ManagedHostState::DPUInit { dpu_states } => matches!(
+                dpu_states.states.get(&dpu.id),
+                Some(DpuInitState::DpfStates {
+                    state: DpfState::WaitingForReady { .. }
+                })
+            ),
+            _ => matches!(
+                state.managed_state.as_reprovision_state(&dpu.id),
+                Some(ReprovisionState::DpfStates {
+                    substate: DpfState::WaitingForReady { .. }
+                })
+            ),
+        }
+    })
+}
+
 fn dpf_cr_creation_failed(
     state: &ManagedHostStateSnapshot,
     err: &StateHandlerError,
@@ -677,8 +753,8 @@ async fn handle_dpf_handle_reboot(
     }
 }
 
-/// Handle DpfState::WaitingForReady: release hold, reboot handling,
-/// phase/error checks, and per-DPU transition to DeviceReady.
+/// Handle `DpfState::WaitingForReady`: record failures, release the hold,
+/// handle reboots, and advance ready DPUs to `DeviceReady`.
 async fn handle_dpf_waiting_for_ready(
     state: &ManagedHostStateSnapshot,
     dpu_snapshot: &DpuMachine,
@@ -694,19 +770,37 @@ async fn handle_dpf_waiting_for_ready(
     // deterministic DPU name. Read ownership, phase, and Ready conformance from
     // one observation scoped to the target so an old source DPU cannot release
     // the hold, trigger a reboot, or satisfy target readiness.
-    let current_phase = match if deployment_type == DEPLOYMENT_MIGRATION_TARGET {
+    let observation = if deployment_type == DEPLOYMENT_MIGRATION_TARGET {
         let dpu_device_names = dpu_device_names(state)?;
-        dpf_sdk
-            .get_dpu_phases_for_deployment_type(&dpu_device_names, &node_name, deployment_type)
-            .await
-            .map(|phases| phases.and_then(|phases| phases.get(&dpu_device_name).cloned()))
+        let observations = dpf_sdk
+            .get_dpu_phase_observations_for_deployment_type(
+                &dpu_device_names,
+                &node_name,
+                deployment_type,
+            )
+            .await;
+        // The shared hold and reboot affect every DPU. Save an observed peer
+        // failure before selecting the DPU whose substate we are advancing.
+        if let Ok(Some(observations)) = &observations
+            && let Some(failure) = dpf_failure_from_observations(
+                state,
+                dpus_waiting_for_ready(state, dpu_machine_id),
+                observations,
+            )?
+        {
+            return Ok(failure);
+        }
+        observations.map(|observations| {
+            observations.and_then(|mut observations| observations.remove(&dpu_device_name))
+        })
     } else {
         dpf_sdk
-            .get_dpu_phase(&dpu_device_name, &node_name)
+            .get_dpu_phase_observation(&dpu_device_name, &node_name)
             .await
             .map(Some)
-    } {
-        Ok(Some(phase)) => phase,
+    };
+    let observation = match observation {
+        Ok(Some(observation)) => observation,
         Ok(None) => {
             return Ok(StateHandlerOutcome::wait(
                 "Waiting for DPF to recreate the DPU from the GB200 deployment".to_string(),
@@ -725,16 +819,40 @@ async fn handle_dpf_waiting_for_ready(
         Err(err) => return Err(dpf_error(err)),
     };
 
-    // A DPU with a deletionTimestamp is a terminating old CR (get_dpu_phase maps that to
-    // Deleting; its status.phase is still stale, often Ready or Error). Do nothing until
-    // the operator has deleted it and created the fresh CR: don't release the maintenance
-    // hold, don't trigger a reboot, and don't read Ready/Error off it. This is what lets a
-    // reprovision of an *errored* DPU proceed instead of immediately re-failing on the old
-    // CR's stale Error phase.
+    let current_phase = observation.phase;
+
+    // `deletionTimestamp` overrides stale `Ready` or `Error` status. Wait for the
+    // replacement CR before releasing the hold or triggering a reboot, so an old
+    // `Error` cannot fail the new provisioning attempt.
     if current_phase == DpuPhase::Deleting {
         return Ok(StateHandlerOutcome::wait(
             "DPU CR is being deleted (reprovision in progress); waiting for the new CR".to_string(),
         ));
+    }
+
+    // Save terminal diagnostics without DPUNode hold or reboot calls. An error
+    // from either operation must not prevent us from recording this failure.
+    if current_phase == DpuPhase::Error {
+        return dpf_provisioning_failed(state, dpu_snapshot.id, observation.failure.as_ref());
+    }
+
+    if deployment_type != DEPLOYMENT_MIGRATION_TARGET {
+        // Check `WaitingForReady` peers before shared hold or reboot calls.
+        for peer in dpus_waiting_for_ready(state, dpu_machine_id) {
+            if peer.id == dpu_machine_id {
+                continue;
+            }
+            match dpf_sdk
+                .get_dpu_phase_observation(&dpf_id(peer)?, &node_name)
+                .await
+            {
+                Ok(observation) if observation.phase == DpuPhase::Error => {
+                    return dpf_provisioning_failed(state, peer.id, observation.failure.as_ref());
+                }
+                Ok(_) | Err(DpfError::NotFound { .. }) => {}
+                Err(error) => return Err(dpf_error(error)),
+            }
+        }
     }
 
     dpf_sdk
@@ -778,30 +896,8 @@ async fn handle_dpf_waiting_for_ready(
         return Ok(StateHandlerOutcome::transition(next));
     }
 
-    if current_phase == carbide_dpf::DpuPhase::Error {
-        tracing::error!(
-            machine_id = %state.host_snapshot.id,
-            dpu_machine_id = %dpu_snapshot.id,
-            "DPU entered error phase during DPF provisioning"
-        );
-        let details = FailureDetails {
-            cause: FailureCause::DpfProvisioning {
-                err: format!(
-                    "DPU {} entered error phase during DPF provisioning",
-                    dpu_snapshot.id
-                ),
-            },
-            failed_at: chrono::Utc::now(),
-            source: FailureSource::StateMachineArea(StateMachineArea::MainFlow),
-        };
-        return Ok(StateHandlerOutcome::transition(make_failure_state(
-            state,
-            details,
-            dpu_snapshot.id.into(),
-        )));
-    }
     // wait for dpf to report that the dpu is ready
-    if current_phase != carbide_dpf::DpuPhase::Ready {
+    if current_phase != DpuPhase::Ready {
         return update_phase_detail_or_wait(
             state,
             &dpu_machine_id,
@@ -899,18 +995,26 @@ pub(super) async fn handle_dpf_deployment_migration(
         .await
         .map_err(dpf_error)?;
 
-    // Keep the durable parked state until one DPF observation contains every
-    // target DPU. Controllers from before migration support ignore this state,
+    // Keep the durable parked state until every target DPU has been
+    // observed. Controllers from before migration support ignore this state,
     // so they cannot accept a source DPU recreated during the selector handoff.
     match dpf_sdk
-        .get_dpu_phases_for_deployment_type(
+        .get_dpu_phase_observations_for_deployment_type(
             &dpu_device_names,
             &node_name,
             DEPLOYMENT_MIGRATION_TARGET,
         )
         .await
     {
-        Ok(Some(_)) => {}
+        Ok(Some(observations)) => {
+            // The next iteration may observe a replacement CR. Preserve a
+            // terminal failure from this target set before leaving the checkpoint.
+            if let Some(failure) =
+                dpf_failure_from_observations(state, &state.dpu_snapshots, &observations)?
+            {
+                return Ok(failure);
+            }
+        }
         Ok(None) | Err(DpfError::NotFound { .. }) => {
             return Ok(StateHandlerOutcome::wait(
                 "Waiting for DPF to recreate every DPU from the GB200 deployment".to_string(),
@@ -1163,6 +1267,142 @@ mod tests {
     use model::test_support::machine_snapshot::managed_host_state_snapshot;
 
     use super::*;
+
+    /// Both reprovision wrappers must include a waiting peer so its failure
+    /// can be recorded before shared host actions.
+    #[test]
+    fn waiting_peers_remain_eligible_during_reprovisioning() {
+        let state = managed_host_state_snapshot();
+        let current_dpu_id = state.dpu_snapshots[0].id;
+        let dpu_ids = state
+            .dpu_snapshots
+            .iter()
+            .map(|dpu| dpu.id)
+            .collect::<Vec<_>>();
+        let dpu_states = DpuReprovisionStates {
+            states: dpu_ids
+                .iter()
+                .map(|dpu_id| {
+                    (
+                        *dpu_id,
+                        ReprovisionState::DpfStates {
+                            substate: DpfState::WaitingForReady { phase_detail: None },
+                        },
+                    )
+                })
+                .collect(),
+        };
+
+        check_values(
+            [
+                Check {
+                    scenario: "unassigned reprovisioning",
+                    input: ManagedHostState::DPUReprovision {
+                        dpu_states: dpu_states.clone(),
+                    },
+                    expect: dpu_ids.clone(),
+                },
+                Check {
+                    scenario: "assigned reprovisioning",
+                    input: ManagedHostState::Assigned {
+                        instance_state: InstanceState::DPUReprovision { dpu_states },
+                    },
+                    expect: dpu_ids,
+                },
+            ],
+            |managed_state| {
+                let state = ManagedHostStateSnapshot {
+                    managed_state,
+                    ..managed_host_state_snapshot()
+                };
+                dpus_waiting_for_ready(&state, current_dpu_id)
+                    .map(|dpu| dpu.id)
+                    .collect::<Vec<_>>()
+            },
+        );
+    }
+
+    #[test]
+    fn test_assigned_dpf_failure_preserves_diagnostics() {
+        let mut state = managed_host_state_snapshot();
+        let dpu_id = state.dpu_snapshots[1].id;
+        state.managed_state = ManagedHostState::Assigned {
+            instance_state: InstanceState::DPUReprovision {
+                dpu_states: DpuReprovisionStates {
+                    states: state
+                        .dpu_snapshots
+                        .iter()
+                        .map(|dpu| {
+                            (
+                                dpu.id,
+                                ReprovisionState::DpfStates {
+                                    substate: DpfState::WaitingForReady { phase_detail: None },
+                                },
+                            )
+                        })
+                        .collect(),
+                },
+            },
+        };
+        let failure = DpuFailureObservation {
+            name: Some("failed-dpu".to_string()),
+            namespace: Some("dpf-system".to_string()),
+            uid: Some("failed-uid".to_string()),
+            resource_version: Some("123".to_string()),
+            generation: Some(7),
+            deployment: Some("dpf-system_bf3".to_string()),
+            dpu_node_name: "failed-node".to_string(),
+            dpu_device_name: "failed-device".to_string(),
+            dpu_flavor: "bf3-flavor".to_string(),
+            bfb: Some("bf3-bfb".to_string()),
+            blue_field_software: None,
+            status: serde_json::from_value(serde_json::json!({
+                "phase": "Error",
+                "previousPhase": "Update Firmware",
+                "redfishTaskId": "42",
+                "conditions": [{
+                    "type": "FirmwareReady",
+                    "status": "False",
+                    "reason": "TaskNotFound",
+                    "message": "Redfish task disappeared",
+                    "lastTransitionTime": "2026-09-30T01:02:03Z",
+                }],
+            }))
+            .expect("valid failure status fixture"),
+        };
+
+        let result = dpf_provisioning_failed(&state, dpu_id, Some(&failure))
+            .expect("build assigned DPF failure");
+        let StateHandlerOutcome::Transition {
+            next_state:
+                ManagedHostState::Assigned {
+                    instance_state:
+                        InstanceState::Failed {
+                            details:
+                                FailureDetails {
+                                    cause: FailureCause::DpfProvisioning { err },
+                                    ..
+                                },
+                            machine_id,
+                        },
+                },
+            ..
+        } = result
+        else {
+            panic!("expected Assigned/Failed transition");
+        };
+        assert_eq!(machine_id, dpu_id.into());
+        let prefix = format!("DPU {dpu_id} entered error phase during DPF provisioning: ");
+        let diagnostics: serde_json::Value = serde_json::from_str(
+            err.strip_prefix(&prefix)
+                .expect("failure should identify the failed DPU"),
+        )
+        .expect("failure suffix should contain diagnostics JSON");
+        assert_eq!(
+            diagnostics,
+            serde_json::to_value(&failure).expect("serialize expected failure diagnostics")
+        );
+    }
 
     #[test]
     fn exploration_pause_tracks_all_dpus_and_allocation_modes() {
