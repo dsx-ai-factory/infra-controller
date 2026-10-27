@@ -86,10 +86,6 @@ metadata:
   namespace: {{ include "nico-api.namespace" . }}
   annotations:
     argocd.argoproj.io/sync-wave: "-10"
-    helm.sh/hook: pre-install,pre-upgrade
-    helm.sh/hook-weight: "-10"
-    helm.sh/hook-delete-policy: before-hook-creation
-    helm.sh/resource-policy: keep
   labels:
     {{- include "nico-api.labels" . | nindent 4 }}
 data:

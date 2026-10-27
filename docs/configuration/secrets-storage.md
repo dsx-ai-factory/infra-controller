@@ -28,7 +28,7 @@ The secrets KEK is the secrets store's own key; it is unrelated to the machine-i
 
 These points apply to a new site and to a migration alike.
 
-**Database tables.** The journal lives in the `secrets` table, and the import and re-wrap leases are in `work_locks`. Both are created by the database migrations, which the `nico-api` chart runs in its `nico-api-migrate` Job before install and before upgrade, so a first install can include `[secrets]` from the start. An existing site must run the release's migrations before adding the section, and if you run migrations outside the chart, run them first.
+**Database tables.** The journal lives in the `secrets` table, and the import and re-wrap leases are in `work_locks`. Both are created by the database migrations, which the `nico-api` chart runs in its `nico-api-migrate-<revision>` Job on every install and upgrade, so a first install can include `[secrets]` from the start. An existing site must run the release's migrations before adding the section, and if you run migrations outside the chart, run them first.
 
 **Where the section goes.** The chart has no dedicated values for `[secrets]`. Put the section in the site TOML that the chart renders from `siteConfig.nicoApiSiteConfig`; in the reference installation that value is `nico-api.siteConfig.nicoApiSiteConfig` in `helm-prereqs/values/nico-core.yaml`.
 
