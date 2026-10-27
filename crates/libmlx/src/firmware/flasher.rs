@@ -18,6 +18,7 @@
 //! Preparation, firmware mutation, activation, and observation for one device.
 
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -78,6 +79,7 @@ impl VerificationBudget {
 /// `FirmwareProgress` records recovery points before execution can advance.
 /// Returning an error stops the workflow at that boundary, including when a
 /// command succeeded but its completion could not be recorded.
+#[cfg(target_os = "linux")]
 #[async_trait::async_trait]
 pub(crate) trait FirmwareProgress: Send + Sync {
     /// Reject further reads after the owner loses its persistence guarantee,
@@ -99,7 +101,7 @@ pub(crate) trait FirmwareProgress: Send + Sync {
 
 /// `FirmwareProgressEvent` exposes staging and execution boundaries to the
 /// durable operation owner. Tool discovery does not replace a mutation's state.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(target_os = "linux")]
 pub(crate) enum FirmwareProgressEvent {
     Prepare,
     Prepared {
@@ -169,6 +171,7 @@ pub struct FirmwareFlasher {
     firmware_spec: FirmwareSpec,
     dry_run: bool,
     executor: FirmwareToolExecutor,
+    #[cfg(target_os = "linux")]
     progress: Option<Arc<dyn FirmwareProgress>>,
     preparation_cancel: Option<(String, watch::Receiver<Option<String>>)>,
     checked_update: bool,
@@ -198,6 +201,7 @@ impl FirmwareFlasher {
             firmware_spec: spec.clone(),
             dry_run: false,
             executor,
+            #[cfg(target_os = "linux")]
             progress: None,
             preparation_cancel: None,
             checked_update: false,
@@ -206,7 +210,7 @@ impl FirmwareFlasher {
 
     /// `with_progress` lets the operation owner persist boundaries around the
     /// existing apply pipeline without implementing a second execution path.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(target_os = "linux")]
     pub(crate) fn with_progress(mut self, progress: Arc<dyn FirmwareProgress>) -> Self {
         self.progress = Some(progress);
         self
@@ -214,6 +218,7 @@ impl FirmwareFlasher {
 
     /// Select the source and preflight policy for checked updates. The operation
     /// owner verifies expected hashes in the durable `Prepared` callback.
+    #[cfg(target_os = "linux")]
     pub(super) fn with_update_validation(mut self) -> Self {
         self.checked_update = true;
         self
@@ -222,7 +227,7 @@ impl FirmwareFlasher {
     /// `with_preparation_cancel` permits dropping pre-mutation staging and
     /// interrupting verification retry waits. In-flight tools remain awaited.
     /// The operation owner sends this signal after persisting cancellation.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(target_os = "linux")]
     pub(crate) fn with_preparation_cancel(
         mut self,
         operation_id: String,
@@ -243,6 +248,7 @@ impl FirmwareFlasher {
     /// any configuration or firmware mutation. Legacy sources provide no digest
     /// contract; preparation checks file readability, not authenticity.
     pub async fn prepare(&self, spec: &FlashSpec) -> FirmwareResult<PreparedFirmware> {
+        #[cfg(target_os = "linux")]
         self.record_progress(FirmwareProgressEvent::Prepare).await?;
         let firmware = spec.build_firmware_source()?;
         let configuration = spec.build_device_conf_source()?;
@@ -251,6 +257,7 @@ impl FirmwareFlasher {
         let directory = tempfile::Builder::new()
             .prefix("firmware-")
             .tempdir_in(cache_dir)?;
+        #[cfg(target_os = "linux")]
         let directory_path = directory.path().to_path_buf();
         let mut prepared = PreparedFirmware {
             image: directory.path().join("image"),
@@ -283,6 +290,7 @@ impl FirmwareFlasher {
             prepared.retain = false;
             return Err(error);
         }
+        #[cfg(target_os = "linux")]
         self.record_progress(FirmwareProgressEvent::Prepared {
             directory: directory_path,
             image: prepared.image.clone(),
@@ -430,6 +438,7 @@ impl FirmwareFlasher {
     /// `observe_version` records the query boundary and the returned version
     /// before comparison, preserving the evidence when verification fails.
     async fn observe_version(&self, budget: Option<&VerificationBudget>) -> FirmwareResult<String> {
+        #[cfg(target_os = "linux")]
         self.record_progress(FirmwareProgressEvent::ObservingVersion)
             .await?;
         // Keep the version actually returned by the final query. Admission
@@ -446,6 +455,7 @@ impl FirmwareFlasher {
         .fw_version_current
         .filter(|version| is_usable_literal(version))
         .ok_or(FirmwarePreflightError::UnknownFirmwareVersion)?;
+        #[cfg(target_os = "linux")]
         self.record_progress(FirmwareProgressEvent::ObservedVersion(observation.clone()))
             .await?;
         Ok(observation)
@@ -529,6 +539,7 @@ impl FirmwareFlasher {
             }
             // Keep the staged inputs until the owner has recorded success.
             // Losing that write must leave the same inputs for reconciliation.
+            #[cfg(target_os = "linux")]
             self.record_progress(FirmwareProgressEvent::Complete(report.clone()))
                 .await?;
             FirmwareResult::Ok(())
@@ -624,6 +635,7 @@ impl FirmwareFlasher {
     /// A failed receipt write remains distinct from durable cancellation.
     async fn wait_for_stop(&self) -> FirmwareError {
         let failed = async {
+            #[cfg(target_os = "linux")]
             if let Some(progress) = &self.progress {
                 return progress.wait_for_failure().await;
             }
@@ -708,6 +720,7 @@ impl FirmwareFlasher {
             tracing::info!(%command, "dry run firmware command");
             return Ok(format!("[DRY RUN] {command}"));
         }
+        #[cfg(target_os = "linux")]
         if phase == FirmwarePhase::ToolDiscovery {
             if let Some(progress) = &self.progress {
                 progress.check()?;
@@ -729,6 +742,7 @@ impl FirmwareFlasher {
                 source: AttemptError::nonzero(command, output),
             });
         }
+        #[cfg(target_os = "linux")]
         if phase != FirmwarePhase::ToolDiscovery {
             self.record_progress(FirmwareProgressEvent::Completed(phase))
                 .await?;
@@ -739,6 +753,7 @@ impl FirmwareFlasher {
 
     /// `record_progress` gates advancement on the owner's receipt write.
     /// Dry-run never publishes evidence of a real operation.
+    #[cfg(target_os = "linux")]
     async fn record_progress(&self, event: FirmwareProgressEvent) -> FirmwareResult<()> {
         if !self.dry_run
             && let Some(progress) = &self.progress
@@ -2226,6 +2241,7 @@ esac
             firmware_spec: firmware_spec(),
             dry_run: false,
             executor: FirmwareToolExecutor::default(),
+            #[cfg(target_os = "linux")]
             progress: None,
             preparation_cancel: None,
             checked_update: false,
