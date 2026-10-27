@@ -244,14 +244,12 @@ FROM ${CONTAINER_RUNTIME} AS mat-protocol-gateway
 
 ARG TARGETARCH
 
-RUN mkdir -p /opt/carbide
-
 COPY --from=mat-protocol-gateway-builder /out/mat-protocol-gateway.sha256sum /tmp/mat-protocol-gateway.sha256sum
 
 RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
     --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
-    cp /cargo-target/debug/mat-protocol-gateway /opt/carbide/mat-protocol-gateway \
-    && test "$(sha256sum < /opt/carbide/mat-protocol-gateway)" = "$(cat /tmp/mat-protocol-gateway.sha256sum)" \
+    cp /cargo-target/debug/mat-protocol-gateway /mat-protocol-gateway \
+    && test "$(sha256sum < /mat-protocol-gateway)" = "$(cat /tmp/mat-protocol-gateway.sha256sum)" \
     && rm /tmp/mat-protocol-gateway.sha256sum
 
 # nico-postgres-exporter runtime image
