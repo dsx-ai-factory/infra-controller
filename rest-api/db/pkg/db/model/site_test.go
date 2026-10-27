@@ -14,7 +14,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
@@ -255,7 +254,7 @@ func TestSiteSQLDAO_GetByID(t *testing.T) {
 	}
 }
 
-func TestSiteSQLDAO_GetByIDForShare(t *testing.T) {
+func TestSiteSQLDAO_GetByIDForTenantIPBlockMutation(t *testing.T) {
 	session := util.GetTestDBSession(t, false)
 	defer session.Close()
 	setupSchema(t, session)
@@ -272,21 +271,21 @@ func TestSiteSQLDAO_GetByIDForShare(t *testing.T) {
 		check func(*testing.T)
 	}{
 		{"requires a transaction", func(t *testing.T) {
-			_, err := dao.GetByIDForShare(ctx, nil, site.ID)
+			_, err := dao.GetByIDForTenantIPBlockMutation(ctx, nil, site.ID)
 			require.ErrorIs(t, err, db.ErrInvalidValue)
 		}},
 		{"concurrent readers exclude eligibility updates", func(t *testing.T) {
 			reader, err := db.BeginTx(ctx, session, nil)
 			require.NoError(t, err)
 			defer func() { _ = reader.Rollback() }()
-			_, err = dao.GetByIDForShare(ctx, reader, site.ID)
+			_, err = dao.GetByIDForTenantIPBlockMutation(ctx, reader, site.ID)
 			require.NoError(t, err)
 			other, err := db.BeginTx(ctx, session, nil)
 			require.NoError(t, err)
 			defer func() { _ = other.Rollback() }()
 			_, err = other.GetBunTx().ExecContext(ctx, "SET LOCAL lock_timeout = '100ms'")
 			require.NoError(t, err)
-			got, err := dao.GetByIDForShare(ctx, other, site.ID)
+			got, err := dao.GetByIDForTenantIPBlockMutation(ctx, other, site.ID)
 			require.NoError(t, err)
 			require.Equal(t, site.ID, got.ID)
 			require.NoError(t, other.Rollback())
@@ -296,13 +295,53 @@ func TestSiteSQLDAO_GetByIDForShare(t *testing.T) {
 			_, err = writer.GetBunTx().ExecContext(ctx, "SET LOCAL lock_timeout = '100ms'")
 			require.NoError(t, err)
 			_, err = dao.Update(ctx, writer, SiteUpdateInput{SiteID: site.ID, Config: &SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(false)}})
-			var pgErr *pgconn.PgError
-			require.ErrorAs(t, err, &pgErr)
-			require.Equal(t, "55P03", pgErr.Code)
+			require.ErrorIs(t, err, db.ErrXactAdvisoryLockFailed)
 			require.NoError(t, writer.Rollback())
 			require.NoError(t, reader.Rollback())
 			_, err = dao.Update(ctx, nil, SiteUpdateInput{SiteID: site.ID, Config: &SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(false)}})
 			require.NoError(t, err)
+		}},
+		{"routine writes proceed but deletion is fenced for both transaction modes", func(t *testing.T) {
+			reader, err := db.BeginTx(ctx, session, nil)
+			require.NoError(t, err)
+			defer func() { _ = reader.Rollback() }()
+			_, err = dao.GetByIDForTenantIPBlockMutation(ctx, reader, site.ID)
+			require.NoError(t, err)
+			writeCtx, cancel := context.WithTimeout(ctx, time.Second)
+			defer cancel()
+			updated, err := dao.Update(writeCtx, nil, SiteUpdateInput{SiteID: site.ID, Status: cutil.GetPtr(SiteStatusError), Config: &SiteConfigUpdateInput{NetworkSecurityGroup: cutil.GetPtr(true)}})
+			require.NoError(t, err)
+			require.Equal(t, SiteStatusError, updated.Status)
+			require.True(t, updated.Config.NetworkSecurityGroup)
+			for _, supplied := range []bool{false, true} {
+				var writer *db.Tx
+				if supplied {
+					writer, err = db.BeginTx(ctx, session, nil)
+					require.NoError(t, err)
+				}
+				require.ErrorIs(t, dao.Delete(ctx, writer, site.ID), db.ErrXactAdvisoryLockFailed)
+				_, err = dao.Update(ctx, writer, SiteUpdateInput{SiteID: site.ID, Config: &SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(true)}})
+				require.ErrorIs(t, err, db.ErrXactAdvisoryLockFailed)
+				if writer != nil {
+					require.NoError(t, writer.Rollback())
+				}
+			}
+		}},
+		{"exclusive lifecycle writer prevents admission until commit", func(t *testing.T) {
+			writer, err := db.BeginTx(ctx, session, nil)
+			require.NoError(t, err)
+			defer func() { _ = writer.Rollback() }()
+			_, err = dao.Update(ctx, writer, SiteUpdateInput{SiteID: site.ID, Config: &SiteConfigUpdateInput{TenantSitePrefix: cutil.GetPtr(false)}})
+			require.NoError(t, err)
+			reader, err := db.BeginTx(ctx, session, nil)
+			require.NoError(t, err)
+			defer func() { _ = reader.Rollback() }()
+			_, err = dao.GetByIDForTenantIPBlockMutation(ctx, reader, site.ID)
+			require.ErrorIs(t, err, db.ErrXactAdvisoryLockFailed)
+			require.NoError(t, writer.Commit())
+			got, err := dao.GetByIDForTenantIPBlockMutation(ctx, reader, site.ID)
+			require.NoError(t, err)
+			require.False(t, got.Config.TenantSitePrefix)
 		}},
 		{"missing and deleted Sites are excluded", func(t *testing.T) {
 			require.NoError(t, dao.Delete(ctx, nil, site.ID))
@@ -310,7 +349,7 @@ func TestSiteSQLDAO_GetByIDForShare(t *testing.T) {
 			require.NoError(t, err)
 			defer func() { _ = tx.Rollback() }()
 			for _, id := range []uuid.UUID{site.ID, uuid.New()} {
-				_, err = dao.GetByIDForShare(ctx, tx, id)
+				_, err = dao.GetByIDForTenantIPBlockMutation(ctx, tx, id)
 				require.ErrorIs(t, err, db.ErrDoesNotExist)
 			}
 		}},

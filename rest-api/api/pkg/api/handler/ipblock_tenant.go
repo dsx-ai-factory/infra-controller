@@ -138,21 +138,26 @@ func (h tenantIPBlockHandler) handle(c echo.Context) error {
 	deletionStarted := false
 	statusMessage := "Core accepted tenant IP Block mutation; waiting for inventory"
 	err = cdb.WithTx(ctx, h.dbSession, func(tx *cdb.Tx) error {
-		// Inventory takes the Site lock before the IP Block lock. Keep the same
-		// ordering while coordinating with Site deletion and capability updates.
-		// Shared locks allow unrelated tenant mutations to proceed concurrently.
-		lockedSite, err := cdbm.NewSiteDAO(h.dbSession).GetByIDForShare(ctx, tx, site.ID)
+		lockedSite, err := cdbm.NewSiteDAO(h.dbSession).GetByIDForTenantIPBlockMutation(ctx, tx, site.ID)
 		if err != nil {
 			return err
 		}
 		if lockedSite.Status != cdbm.SiteStatusRegistered {
 			return cutil.NewAPIError(http.StatusBadRequest, "Site is not Registered", nil)
 		}
+		prefixID := uuid.New()
+		if method != http.MethodPost {
+			prefixID = *block.SitePrefixID
+		}
+		err = tx.TryAcquireAdvisoryLock(ctx, cdbm.SitePrefixIPBlockLockID(site.ID, prefixID), nil)
+		if err != nil {
+			return err
+		}
 		if method == http.MethodPost {
 			if lockedSite.Config == nil || !lockedSite.Config.TenantSitePrefix {
 				return cutil.NewAPIError(http.StatusPreconditionFailed, "Tenant-created IP Blocks are disabled for this Site", nil)
 			}
-			id := uuid.New()
+			id := prefixID
 			block, err = dao.Create(ctx, tx, cdbm.IPBlockCreateInput{IPBlockID: &id, SitePrefixID: &id, Managed: cutil.GetPtr(false), TenantID: &tenant.ID,
 				Name: createRequest.Name, Description: createRequest.Description, SiteID: site.ID, InfrastructureProviderID: site.InfrastructureProviderID,
 				Prefix: createRequest.Prefix, PrefixLength: createRequest.PrefixLength, ProtocolVersion: cdbm.IPBlockProtocolVersionV4,
@@ -241,6 +246,9 @@ func (h tenantIPBlockHandler) handle(c echo.Context) error {
 	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return cutil.NewAPIErrorResponse(c, http.StatusGatewayTimeout, "Tenant IP Block request timed out", nil)
+		}
+		if errors.Is(err, cdb.ErrXactAdvisoryLockFailed) {
+			return cutil.NewAPIErrorResponse(c, http.StatusConflict, "Site or IP Block is being modified; retry the request", nil)
 		}
 		return common.HandleTxError(c, logger, err, "Failed to mutate tenant IP Block")
 	}

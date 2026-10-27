@@ -150,7 +150,6 @@ type APIIPBlockUpdateRequest struct {
 
 // Validate ensure the values passed in request are acceptable
 func (ipbur APIIPBlockUpdateRequest) Validate() error {
-	fmt.Printf("%v", ipbur)
 	return validation.ValidateStruct(&ipbur,
 		validation.Field(&ipbur.Name,
 			// length validation rule accepts empty string as valid, hence, required is needed

@@ -114,7 +114,13 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 		id := uuid.MustParse(prefix.GetId().GetValue()) // validated before the transaction
 		var reconciledBlock *cdbm.IPBlock
 		err = cdb.WithTx(ctx, manager.dbSession, func(tx *cdb.Tx) error {
-			err := tx.TryAcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, siteID), nil)
+			// Never hold a Site-wide lock while waiting for an in-flight Core call.
+			err := tx.AcquireAdvisoryLock(ctx, cdbm.SitePrefixIPBlockLockID(siteID, id), false)
+			if err != nil {
+				isLockContention = errors.Is(err, cdb.ErrXactAdvisoryLockFailed)
+				return err
+			}
+			err = tx.TryAcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, siteID), nil)
 			if err != nil {
 				// The retry aggregate includes earlier failures; classify its last attempt.
 				lastErr := errors.Unwrap(err)
@@ -195,7 +201,7 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 		if err != nil {
 			if isLockContention {
 				logger.Warn().Err(err).Str("Site Prefix ID", prefix.GetId().GetValue()).
-					Msg("skipping SitePrefix after bounded Site fabric lock contention retries")
+					Msg("skipping SitePrefix due to mutation or Site fabric lock contention")
 				continue
 			}
 			var applicationErr *temporal.ApplicationError

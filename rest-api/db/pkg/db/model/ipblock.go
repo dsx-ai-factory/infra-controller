@@ -78,6 +78,12 @@ var (
 	}
 )
 
+// SitePrefixIPBlockLockID coordinates a tenant mutation with inventory for one
+// Core prefix. Inventory takes this guard before any Site-wide or row locks.
+func SitePrefixIPBlockLockID(siteID, prefixID uuid.UUID) uint64 {
+	return db.GetAdvisoryLockIDFromString("site-prefix-ip-block:" + siteID.String() + ":" + prefixID.String())
+}
+
 // SiteFabricIPBlockLockID returns the advisory lock shared by Site Config
 // prefix import, root IP Block creation, and SitePrefix inventory reconciliation
 // for one Site.

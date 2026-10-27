@@ -231,8 +231,8 @@ func (s *Site) BeforeCreateTable(ctx context.Context, query *bun.CreateTableQuer
 type SiteDAO interface {
 	//
 	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool, forUpdate bool) (*Site, error)
-	// GetByIDForShare protects Site eligibility while allowing concurrent readers.
-	GetByIDForShare(ctx context.Context, tx *db.Tx, id uuid.UUID) (*Site, error)
+	// GetByIDForTenantIPBlockMutation fences Site deletion and tenant prefix capability changes.
+	GetByIDForTenantIPBlockMutation(ctx context.Context, tx *db.Tx, id uuid.UUID) (*Site, error)
 	//
 	GetAll(ctx context.Context, tx *db.Tx, filter SiteFilterInput, page paginator.PageInput, includeRelations []string) (sites []Site, total int, err error)
 	// GetCount returns total count of rows for specified filter
@@ -261,10 +261,24 @@ func (ssd SiteSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, incl
 	return ssd.getByID(ctx, tx, id, includeRelations, includeDeleted, lock)
 }
 
-// GetByIDForShare protects Site eligibility until the caller's transaction ends.
-// Concurrent shared readers do not block one another; Site updates and deletion wait.
-func (ssd SiteSQLDAO) GetByIDForShare(ctx context.Context, tx *db.Tx, id uuid.UUID) (*Site, error) {
-	return ssd.getByID(ctx, tx, id, nil, false, "SHARE OF st")
+// siteTenantIPBlockLockID coordinates tenant IP Block mutations with Site deletion
+// and explicit tenant prefix capability changes. Routine Site updates do not use it.
+func siteTenantIPBlockLockID(id uuid.UUID) uint64 {
+	return db.GetAdvisoryLockIDFromString("site-tenant-ip-blocks:" + id.String())
+}
+
+// GetByIDForTenantIPBlockMutation reads an active Site under a shared lifecycle
+// guard. Status is checked at admission; routine status and inventory writers
+// remain free to update the Site while the mutation calls Core.
+func (ssd SiteSQLDAO) GetByIDForTenantIPBlockMutation(ctx context.Context, tx *db.Tx, id uuid.UUID) (*Site, error) {
+	if tx == nil {
+		return nil, fmt.Errorf("%w: locking a Site requires a transaction", db.ErrInvalidValue)
+	}
+	err := tx.TryAcquireSharedAdvisoryLock(ctx, siteTenantIPBlockLockID(id), nil)
+	if err != nil {
+		return nil, err
+	}
+	return ssd.GetByID(ctx, tx, id, nil, false, false)
 }
 
 func (ssd SiteSQLDAO) getByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string, includeDeleted bool, lock string) (_ *Site, retErr error) {
@@ -470,35 +484,21 @@ func (ssd SiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input SiteUpdateInp
 
 	updatedFields := []string{}
 
-	// If Config is not nil, there's a chance we'll need to
-	// do two separate UPDATEs, so we need to make sure we wrap
-	// things in a txn if one wasn't provided.
-	// If we end up with another case like this, we should either
-	// simply create a txn if tx is nil or switch this function to
-	// use SetColumn for all fields.
-
-	// We're going to intentionally close over this variable.
-	// If input.Config == nil OR we were handed a txn by the caller,
-	// then this will do nothing.
-	// Otherwise, this will control whether we should commit/rollback
-	// the txn we created in this function.  We'll set this to true
-	// as the very last step just before we return.
-	commitInternalTx := false
-
-	var err error
+	// Config updates may use two statements and must commit atomically.
 	if input.Config != nil && tx == nil {
-		tx, err = db.BeginTx(ctx, ssd.dbSession, &sql.TxOptions{})
+		var updated *Site
+		err := db.WithTx(ctx, ssd.dbSession, func(inner *db.Tx) error {
+			var err error
+			updated, err = ssd.Update(ctx, inner, input)
+			return err
+		})
+		return updated, err
+	}
+	if input.Config != nil && input.Config.TenantSitePrefix != nil {
+		err := tx.TryAcquireAdvisoryLock(ctx, siteTenantIPBlockLockID(input.SiteID), nil)
 		if err != nil {
 			return nil, err
 		}
-
-		defer func() {
-			if commitInternalTx {
-				tx.Commit()
-			} else {
-				tx.Rollback()
-			}
-		}()
 	}
 
 	st := &Site{
@@ -631,8 +631,6 @@ func (ssd SiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input SiteUpdateInp
 		return nil, err
 	}
 
-	commitInternalTx = true
-
 	return ust, nil
 }
 
@@ -643,7 +641,16 @@ func (ssd SiteSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retE
 	defer func() { cotel.EndSpan(stDAOSpan, retErr) }()
 	cotel.SetAttribute(stDAOSpan, attribute.String("id", id.String()))
 
-	_, err := db.GetIDB(tx, ssd.dbSession).NewDelete().Model((*Site)(nil)).Where("id = ?", id).Exec(ctx)
+	if tx == nil {
+		return db.WithTx(ctx, ssd.dbSession, func(inner *db.Tx) error {
+			return ssd.Delete(ctx, inner, id)
+		})
+	}
+	err := tx.TryAcquireAdvisoryLock(ctx, siteTenantIPBlockLockID(id), nil)
+	if err != nil {
+		return err
+	}
+	_, err = db.GetIDB(tx, ssd.dbSession).NewDelete().Model((*Site)(nil)).Where("id = ?", id).Exec(ctx)
 	if err != nil {
 		return err
 	}
