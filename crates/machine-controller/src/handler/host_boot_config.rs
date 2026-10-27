@@ -542,41 +542,7 @@ mod tests {
 
         // Explicit-target stages do not need prediction data. A short-timeout
         // unreachable pool makes an accidental lookup fail promptly.
-        let db_pool = sqlx::postgres::PgPoolOptions::new()
-            .acquire_timeout(Duration::from_millis(50))
-            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
-            .unwrap();
-        let mut services = MachineStateHandlerServices {
-            db_pool: db_pool.clone(),
-            db_reader: db_pool.into(),
-            redfish_client_pool: redfish_sim.clone(),
-            bmc_credential_ops: redfish_sim.clone(),
-            ipmi_tool: carbide_ipmi::test_support(),
-            site_config: Arc::new(MachineStateHandlerSiteConfig::test_default()),
-            component_manager: None,
-            credential_manager: Arc::new(TestCredentialManager::default()),
-            per_object_metrics_registry: PerObjectMetricsRegistry::new(
-                Vec::new(),
-                Duration::from_secs(60),
-            ),
-            per_object_info: None,
-            bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
-                db::credential_rotation::CredentialRotationType::Bmc,
-            ),
-            host_uefi_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
-                db::credential_rotation::CredentialRotationType::HostUefi,
-            ),
-            dpu_uefi_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
-                db::credential_rotation::CredentialRotationType::DpuUefi,
-            ),
-            dpu_bmc_service_rotation_gate:
-                carbide_credential_rotation::RotationGate::new_for_family(
-                    db::credential_rotation::CredentialRotationType::DpuBmcService,
-                ),
-            nic_lockdown_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
-                db::credential_rotation::CredentialRotationType::LockdownIkm,
-            ),
-        };
+        let mut services = test_services(redfish_sim.clone());
         let mut metrics = MachineMetrics::default();
         let mut pending_db_writes = DbWriteBatch::new();
         let mut ctx = StateHandlerContext {

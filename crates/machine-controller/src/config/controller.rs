@@ -55,6 +55,49 @@ where
     Ok(duration)
 }
 
+/// Hard maximum for the BIOS
+/// settle timeout, below the
+/// BootConfiguring SLA.
+const BIOS_APPLY_SETTLE_TIMEOUT_MAX_MINUTES: i64 = 60;
+
+/// Hard maximum for the first
+/// DPU restart delay.
+const DPU_FIRST_RESTART_DELAY_MAX_MINUTES: i64 = 30;
+
+fn at_most<E: serde::de::Error>(duration: Duration, max_minutes: i64) -> Result<Duration, E> {
+    if duration > Duration::minutes(max_minutes) {
+        return Err(E::custom(format!(
+            "duration must be at most {max_minutes} minutes"
+        )));
+    }
+    Ok(duration)
+}
+
+/// Positive and at most the
+/// settle timeout maximum.
+fn deserialize_bios_apply_settle_timeout<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    at_most(
+        deserialize_positive_duration_chrono(deserializer)?,
+        BIOS_APPLY_SETTLE_TIMEOUT_MAX_MINUTES,
+    )
+}
+
+/// Positive and at most the
+/// restart delay maximum.
+fn deserialize_dpu_first_restart_delay<'de, D>(
+    deserializer: D,
+) -> Result<Option<Duration>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_option_positive_duration_chrono(deserializer)?
+        .map(|duration| at_most(duration, DPU_FIRST_RESTART_DELAY_MAX_MINUTES))
+        .transpose()
+}
+
 /// MachineStateController related config.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -147,7 +190,7 @@ pub struct MachineStateControllerConfig {
     /// finishes anyway.
     #[serde(
         default = "MachineStateControllerConfig::bios_apply_settle_timeout_default",
-        deserialize_with = "deserialize_positive_duration_chrono",
+        deserialize_with = "deserialize_bios_apply_settle_timeout",
         serialize_with = "as_duration"
     )]
     pub bios_apply_settle_timeout: Duration,
@@ -155,7 +198,7 @@ pub struct MachineStateControllerConfig {
     /// restart; unset keeps five minutes.
     #[serde(
         default,
-        deserialize_with = "deserialize_option_positive_duration_chrono",
+        deserialize_with = "deserialize_dpu_first_restart_delay",
         serialize_with = "as_option_duration"
     )]
     pub dpu_first_restart_delay: Option<Duration>,
@@ -258,5 +301,46 @@ impl Default for MachineStateControllerConfig {
                 MachineStateControllerConfig::bios_apply_settle_timeout_default(),
             dpu_first_restart_delay: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Deserialize)]
+    struct SettleTimeout {
+        #[serde(deserialize_with = "deserialize_bios_apply_settle_timeout")]
+        value: Duration,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct FirstRestartDelay {
+        #[serde(default, deserialize_with = "deserialize_dpu_first_restart_delay")]
+        value: Option<Duration>,
+    }
+
+    #[test]
+    fn bios_apply_settle_timeout_is_bounded() {
+        let parse = |value: &str| {
+            serde_json::from_str::<SettleTimeout>(&format!(r#"{{"value":"{value}"}}"#))
+                .map(|parsed| parsed.value)
+        };
+        assert_eq!(parse("60m").unwrap(), Duration::minutes(60));
+        assert!(parse("61m").is_err());
+        assert!(parse("0s").is_err());
+    }
+
+    #[test]
+    fn dpu_first_restart_delay_is_bounded() {
+        let parse =
+            |json: &str| serde_json::from_str::<FirstRestartDelay>(json).map(|parsed| parsed.value);
+        assert_eq!(parse("{}").unwrap(), None);
+        assert_eq!(
+            parse(r#"{"value":"30m"}"#).unwrap(),
+            Some(Duration::minutes(30))
+        );
+        assert!(parse(r#"{"value":"31m"}"#).is_err());
+        assert!(parse(r#"{"value":"0s"}"#).is_err());
     }
 }
