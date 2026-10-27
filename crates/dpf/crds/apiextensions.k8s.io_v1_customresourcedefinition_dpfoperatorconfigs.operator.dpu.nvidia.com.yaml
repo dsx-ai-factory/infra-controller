@@ -72,7 +72,9 @@ spec:
                       It contains the image for the controller and its resource requirements.
                     properties:
                       image:
-                        description: Image is a reference to a container image.
+                        description: |-
+                          Image is a reference to a container image.
+                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
@@ -135,7 +137,9 @@ spec:
                       It contains the image for the CoreDNS container and its resource requirements.
                     properties:
                       image:
-                        description: Image is a reference to a container image.
+                        description: |-
+                          Image is a reference to a container image.
+                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
@@ -222,7 +226,9 @@ spec:
                       It contains the image for the controller and its resource requirements.
                     properties:
                       image:
-                        description: Image is a reference to a container image.
+                        description: |-
+                          Image is a reference to a container image.
+                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
@@ -282,7 +288,7 @@ spec:
                     description: |-
                       Image overrides the container image used by the DPUDetector Container.
 
-                      Deprecated: This field is deprecated and will be removed with v27.1.0.
+                      Deprecated: This field is deprecated and will be removed with v31.0.0.
                       Use the new field `daemon` instead.
                     pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                     type: string
@@ -300,7 +306,9 @@ spec:
                       It contains the image for the controller and its resource requirements.
                     properties:
                       image:
-                        description: Image is a reference to a container image.
+                        description: |-
+                          Image is a reference to a container image.
+                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
@@ -352,6 +360,17 @@ spec:
                             type: object
                         type: object
                     type: object
+                  defaultServiceDaemonSetMaxUnavailable:
+                    description: |-
+                      DefaultServiceDaemonSetMaxUnavailable specifies the fallback maxUnavailable for
+                      ServiceDaemonSet rolling updates. It defaults to 30000 and is applied when
+                      serviceDaemonSet.updateStrategy is omitted or its rollingUpdate.maxUnavailable
+                      is unset and maxSurge is unset or zero. If maxSurge is nonzero, an omitted maxUnavailable
+                      is left unset. Explicit maxUnavailable values and OnDelete strategies
+                      are preserved. Lower this value to limit the number of unavailable pods during updates.
+                    format: int32
+                    minimum: 1
+                    type: integer
                   disable:
                     description: Disable ensures the component is not deployed when
                       set to true.
@@ -373,7 +392,7 @@ spec:
                     description: |-
                       Image overrides the container image used by the DPUService controller.
 
-                      Deprecated: This field is deprecated and will be removed with v27.1.0.
+                      Deprecated: This field is deprecated and will be removed with v31.0.0.
                       Use the new field `controller` instead.
                     pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                     type: string
@@ -401,7 +420,9 @@ spec:
                       Note: The resources for the CNI container are not configurable.
                     properties:
                       image:
-                        description: Image is a reference to a container image.
+                        description: |-
+                          Image is a reference to a container image.
+                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                     type: object
@@ -411,7 +432,9 @@ spec:
                       It contains the image for the Flannel Daemon container and its resource requirements.
                     properties:
                       image:
-                        description: Image is a reference to a container image.
+                        description: |-
+                          Image is a reference to a container image.
+                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
@@ -478,7 +501,7 @@ spec:
                     description: |-
                       Images overrides the container images used by flannel
 
-                      Deprecated: This field is deprecated and will be removed with v27.1.0.
+                      Deprecated: This field is deprecated and will be removed with v31.0.0.
                       Use the new fields `cni` and `daemon` instead.
                     properties:
                       flannelCNI:
@@ -514,7 +537,9 @@ spec:
                       It contains the image for the controller and its resource requirements.
                     properties:
                       image:
-                        description: Image is a reference to a container image.
+                        description: |-
+                          Image is a reference to a container image.
+                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
@@ -570,6 +595,30 @@ spec:
                     description: Disable ensures the component is not deployed when
                       set to true.
                     type: boolean
+                  dpuClusterImages:
+                    description: |-
+                      DPUClusterImages configures the images of Kamaji-managed DPU clusters.
+                      It is applied only when a Kamaji cluster is first created and is not changed for existing clusters.
+                    properties:
+                      addonsRepository:
+                        description: |-
+                          AddonsRepository is the image repository the addon images of the DPU cluster, e.g. kube-proxy, are
+                          pulled from. For example, for the repository example.com/k8s, kube-proxy is pulled from
+                          example.com/k8s/kube-proxy.
+                          The Kamaji defaults are used if this is not set.
+                        maxLength: 255
+                        pattern: ^(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*$
+                        type: string
+                      hostedControlPlaneRepository:
+                        description: |-
+                          HostedControlPlaneRepository is the image repository the hosted control plane images of the DPU cluster are
+                          pulled from: kube-apiserver, kube-controller-manager and kube-scheduler. For example, for the
+                          repository example.com/k8s, kube-apiserver is pulled from example.com/k8s/kube-apiserver.
+                          This is registry.k8s.io by default.
+                        maxLength: 255
+                        pattern: ^(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*$
+                        type: string
+                    type: object
                   etcdEncryptionAtRest:
                     description: |-
                       EtcdEncryptionAtRest configures encryption at rest for the etcd datastore of
@@ -632,7 +681,7 @@ spec:
                     description: |-
                       Image overrides the container image used by the Kamaji Cluster Manager.
 
-                      Deprecated: This field is deprecated and will be removed with v27.1.0.
+                      Deprecated: This field is deprecated and will be removed with v31.0.0.
                       Use the new field `controller` instead.
                     pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                     type: string
@@ -671,7 +720,9 @@ spec:
                           It contains the image for kube-state-metrics and its resource requirements.
                         properties:
                           image:
-                            description: Image is a reference to a container image.
+                            description: |-
+                              Image is a reference to a container image.
+                              If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                             pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                             type: string
                           resources:
@@ -744,7 +795,9 @@ spec:
                           It contains the image for node-problem-detector and its resource requirements.
                         properties:
                           image:
-                            description: Image is a reference to a container image.
+                            description: |-
+                              Image is a reference to a container image.
+                              If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                             pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                             type: string
                           resources:
@@ -817,7 +870,9 @@ spec:
                           It contains the image for opentelemetry-collector and its resource requirements.
                         properties:
                           image:
-                            description: Image is a reference to a container image.
+                            description: |-
+                              Image is a reference to a container image.
+                              If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                             pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                             type: string
                           resources:
@@ -885,29 +940,184 @@ spec:
                           Logging contains the configuration for the opentelemetry-collector logging component.
                           If not specified, logging will not be streamed.
                         properties:
+                          caSecretRef:
+                            description: |-
+                              CASecretRef references a Secret that contains the PEM-encoded CA certificate bundle
+                              (under the "ca.crt" key) used to verify the endpoint's TLS certificate. Set it when the
+                              endpoint serves a certificate issued by a private CA. The Secret may live in any namespace,
+                              for example alongside the endpoint's cert-manager Certificate; if its namespace is empty,
+                              the DPFOperatorConfig namespace is used.
+                              If not specified, TLS endpoints are verified against the system CA pool.
+                              Changes to the Secret content are applied on the next reconciliation of the DPFOperatorConfig.
+                            properties:
+                              key:
+                                description: |-
+                                  Key is the Secret data key that holds the PEM-encoded CA certificate bundle.
+                                  If unset, "ca.crt" is used, matching the key that cert-manager writes.
+                                maxLength: 253
+                                minLength: 1
+                                type: string
+                              name:
+                                description: Name is the name of the Secret holding
+                                  the CA certificate bundle.
+                                maxLength: 253
+                                minLength: 1
+                                type: string
+                              namespace:
+                                description: |-
+                                  Namespace is the namespace of the Secret holding the CA certificate bundle.
+                                  If unset, the DPFOperatorConfig namespace is used.
+                                maxLength: 63
+                                minLength: 1
+                                type: string
+                            required:
+                            - name
+                            type: object
                           endpoint:
                             description: |-
-                              Endpoint is the OTLP endpoint where the DPU cluster opentelemetry-collector sends data to.
-                              This could be the management cluster's opentelemetry-collector endpoint.
-                              If not specified, nothing will be forwarded from DPU clusters.
+                              Endpoint is the OTLP endpoint data is sent to. This could be the management cluster's
+                              opentelemetry-collector endpoint.
+                              If not specified, nothing will be exported for this signal.
+                              For the http transport the endpoint must include the scheme, e.g. "https://host:4318".
+                              For the grpc transport the endpoint is "host:4317", optionally prefixed with a
+                              scheme ("https://host:4317") to enforce TLS.
+                            type: string
+                          transport:
+                            description: Transport is the OTLP transport used to export
+                              data to the endpoint.
+                            enum:
+                            - http
+                            - grpc
                             type: string
                         required:
                         - endpoint
                         type: object
+                        x-kubernetes-validations:
+                        - message: caSecretRef cannot be used with a plaintext http://
+                            endpoint
+                          rule: '!has(self.caSecretRef) || !self.endpoint.startsWith(''http://'')'
                       metrics:
                         description: |-
                           Metrics contains the configuration for the opentelemetry-collector metrics component.
                           If not specified, metrics will not be streamed from DPU clusters.
                         properties:
+                          caSecretRef:
+                            description: |-
+                              CASecretRef references a Secret that contains the PEM-encoded CA certificate bundle
+                              (under the "ca.crt" key) used to verify the endpoint's TLS certificate. Set it when the
+                              endpoint serves a certificate issued by a private CA. The Secret may live in any namespace,
+                              for example alongside the endpoint's cert-manager Certificate; if its namespace is empty,
+                              the DPFOperatorConfig namespace is used.
+                              If not specified, TLS endpoints are verified against the system CA pool.
+                              Changes to the Secret content are applied on the next reconciliation of the DPFOperatorConfig.
+                            properties:
+                              key:
+                                description: |-
+                                  Key is the Secret data key that holds the PEM-encoded CA certificate bundle.
+                                  If unset, "ca.crt" is used, matching the key that cert-manager writes.
+                                maxLength: 253
+                                minLength: 1
+                                type: string
+                              name:
+                                description: Name is the name of the Secret holding
+                                  the CA certificate bundle.
+                                maxLength: 253
+                                minLength: 1
+                                type: string
+                              namespace:
+                                description: |-
+                                  Namespace is the namespace of the Secret holding the CA certificate bundle.
+                                  If unset, the DPFOperatorConfig namespace is used.
+                                maxLength: 63
+                                minLength: 1
+                                type: string
+                            required:
+                            - name
+                            type: object
                           endpoint:
                             description: |-
-                              Endpoint is the OTLP endpoint where the DPU cluster opentelemetry-collector sends metrics to.
-                              This could be the management cluster's opentelemetry-collector endpoint.
-                              If not specified, metrics will not be forwarded from DPU clusters.
+                              Endpoint is the OTLP endpoint data is sent to. This could be the management cluster's
+                              opentelemetry-collector endpoint.
+                              If not specified, nothing will be exported for this signal.
+                              For the http transport the endpoint must include the scheme, e.g. "https://host:4318".
+                              For the grpc transport the endpoint is "host:4317", optionally prefixed with a
+                              scheme ("https://host:4317") to enforce TLS.
+                            type: string
+                          transport:
+                            description: Transport is the OTLP transport used to export
+                              data to the endpoint.
+                            enum:
+                            - http
+                            - grpc
                             type: string
                         required:
                         - endpoint
                         type: object
+                        x-kubernetes-validations:
+                        - message: caSecretRef cannot be used with a plaintext http://
+                            endpoint
+                          rule: '!has(self.caSecretRef) || !self.endpoint.startsWith(''http://'')'
+                      tracing:
+                        description: |-
+                          Tracing contains the configuration for exporting distributed traces from DPF controllers.
+                          If not specified, DPF controllers will not export trace spans.
+                        properties:
+                          caSecretRef:
+                            description: |-
+                              CASecretRef references a Secret that contains the PEM-encoded CA certificate bundle
+                              (under the "ca.crt" key) used to verify the endpoint's TLS certificate. Set it when the
+                              endpoint serves a certificate issued by a private CA. The Secret may live in any namespace,
+                              for example alongside the endpoint's cert-manager Certificate; if its namespace is empty,
+                              the DPFOperatorConfig namespace is used.
+                              If not specified, TLS endpoints are verified against the system CA pool.
+                              Changes to the Secret content are applied on the next reconciliation of the DPFOperatorConfig.
+                            properties:
+                              key:
+                                description: |-
+                                  Key is the Secret data key that holds the PEM-encoded CA certificate bundle.
+                                  If unset, "ca.crt" is used, matching the key that cert-manager writes.
+                                maxLength: 253
+                                minLength: 1
+                                type: string
+                              name:
+                                description: Name is the name of the Secret holding
+                                  the CA certificate bundle.
+                                maxLength: 253
+                                minLength: 1
+                                type: string
+                              namespace:
+                                description: |-
+                                  Namespace is the namespace of the Secret holding the CA certificate bundle.
+                                  If unset, the DPFOperatorConfig namespace is used.
+                                maxLength: 63
+                                minLength: 1
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          endpoint:
+                            description: |-
+                              Endpoint is the OTLP endpoint data is sent to. This could be the management cluster's
+                              opentelemetry-collector endpoint.
+                              If not specified, nothing will be exported for this signal.
+                              For the http transport the endpoint must include the scheme, e.g. "https://host:4318".
+                              For the grpc transport the endpoint is "host:4317", optionally prefixed with a
+                              scheme ("https://host:4317") to enforce TLS.
+                            type: string
+                          transport:
+                            description: Transport is the OTLP transport used to export
+                              data to the endpoint.
+                            enum:
+                            - http
+                            - grpc
+                            type: string
+                        required:
+                        - endpoint
+                        type: object
+                        x-kubernetes-validations:
+                        - message: caSecretRef cannot be used with a plaintext http://
+                            endpoint
+                          rule: '!has(self.caSecretRef) || !self.endpoint.startsWith(''http://'')'
                     type: object
                 type: object
               multus:
@@ -919,7 +1129,9 @@ spec:
                       It contains the image for the controller and its resource requirements.
                     properties:
                       image:
-                        description: Image is a reference to a container image.
+                        description: |-
+                          Image is a reference to a container image.
+                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
@@ -986,7 +1198,7 @@ spec:
                     description: |-
                       Image overrides the container image used by the Multus Container.
 
-                      Deprecated: This field is deprecated and will be removed with v27.1.0.
+                      Deprecated: This field is deprecated and will be removed with v31.0.0.
                       Use the new field `cni` instead.
                     pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                     type: string
@@ -1042,7 +1254,9 @@ spec:
                       It contains the image for the controller and its resource requirements.
                     properties:
                       image:
-                        description: Image is a reference to a container image.
+                        description: |-
+                          Image is a reference to a container image.
+                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
@@ -1106,14 +1320,16 @@ spec:
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                         type: string
                       image:
-                        description: Image overrides the container image for the SRIOV
-                          device plugin.
+                        description: |-
+                          Image overrides the container image for the SRIOV device plugin.
+                          If neither a tag nor a digest is set, the tag and digest of the default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       initImage:
                         description: |-
                           InitImage overrides the container image for the init container
                           that generates device plugin configuration.
+                          If neither a tag nor a digest is set, the tag and digest of the default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                     type: object
@@ -1140,7 +1356,9 @@ spec:
                       It contains the image for the controller and its resource requirements.
                     properties:
                       image:
-                        description: Image is a reference to a container image.
+                        description: |-
+                          Image is a reference to a container image.
+                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
@@ -1207,7 +1425,7 @@ spec:
                     description: |-
                       Image overrides the container image used by the NVIPAM controller.
 
-                      Deprecated: This field is deprecated and will be removed with v27.1.0.
+                      Deprecated: This field is deprecated and will be removed with v31.0.0.
                       Use the new field `controller` instead.
                     pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                     type: string
@@ -1217,7 +1435,9 @@ spec:
                       It contains the image for the node and its resource requirements.
                     properties:
                       image:
-                        description: Image is a reference to a container image.
+                        description: |-
+                          Image is a reference to a container image.
+                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
@@ -1377,8 +1597,14 @@ spec:
                     type: boolean
                   provisioningIssuerCASecretName:
                     description: |-
-                      ProvisioningIssuerCASecretName overrides the CA secret used by the provisioning Issuer during
-                      controlled CA rotation workflows. When unset, the default issuer secret is used.
+                      ProvisioningIssuerCASecretName overrides the CA secret of the provisioning Issuer during a
+                      rotation. The provisioning certificates are signed by the platform intermediate CA now, and a
+                      rotation of it is driven by cert-manager rather than by repointing an Issuer, so this only
+                      still pins the provisioning Issuer of the CA chain the platform intermediate CA is taking
+                      over from, on a cluster the upgrade has not finished migrating. It has no effect once that
+                      chain is gone, which is every cluster installed since.
+
+                      Deprecated: This field is deprecated and will be removed with v31.0.0.
                     minLength: 1
                     type: string
                 type: object
@@ -1394,7 +1620,9 @@ spec:
                       It contains the image for the controller and its resource requirements.
                     properties:
                       image:
-                        description: Image is a reference to a container image.
+                        description: |-
+                          Image is a reference to a container image.
+                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
@@ -1461,7 +1689,7 @@ spec:
                     description: |-
                       Image overrides the container image used by the OVS CNI.
 
-                      Deprecated: This field is deprecated and will be removed with v27.1.0.
+                      Deprecated: This field is deprecated and will be removed with v31.0.0.
                       Use the new field `cni` instead.
                     pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                     type: string
@@ -1501,7 +1729,9 @@ spec:
                       It contains the image for the controller and its resource requirements.
                     properties:
                       image:
-                        description: Image is a reference to a container image.
+                        description: |-
+                          Image is a reference to a container image.
+                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
@@ -1567,6 +1797,17 @@ spec:
                       a DMS API must respond, 0 is unlimited
                     minimum: 1
                     type: integer
+                  dpuMaxConcurrentReconciles:
+                    default: 1
+                    description: |-
+                      DPUMaxConcurrentReconciles specifies the maximum number of DPU objects that the
+                      provisioning DPU controller may reconcile concurrently. Reconciles for the same
+                      DPU remain serialized by the controller workqueue.
+                      When unset, the provisioning controller defaults to 1, matching the previous
+                      single-worker behavior. Raise this to overlap I/O-bound provisioning of different DPUs.
+                    format: int32
+                    minimum: 1
+                    type: integer
                   enableDynamicBFCFGTemplates:
                     description: |-
                       EnableDynamicBFCFGTemplates enables runtime discovery of bf.cfg templates via ConfigMaps.
@@ -1596,7 +1837,7 @@ spec:
                     description: |-
                       Image overrides the container image used by the Provisioning controller.
 
-                      Deprecated: This field is deprecated and will be removed with v27.1.0.
+                      Deprecated: This field is deprecated and will be removed with v31.0.0.
                       Use the new field `controller` instead.
                     pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                     type: string
@@ -1674,8 +1915,9 @@ spec:
                     type: integer
                   maxUnavailableDPUNodes:
                     default: 50
-                    description: MaxUnavailableDPUNodes is the maximum number of DPUNodes
-                      that are unavailable during the node effect period.
+                    description: |-
+                      MaxUnavailableDPUNodes is the maximum number of DPUNodes that are unavailable during the node effect period.
+                      It is also used as the maximum number of unavailable DPUs when controlling DPUSet rolling-update deletion.
                     format: int32
                     minimum: 1
                     type: integer
@@ -1695,6 +1937,17 @@ spec:
                     format: duration
                     pattern: ^([0-9]+(h|m|s|ms|us|µs|ns))+$
                     type: string
+                  nodeJoinTokenTTL:
+                    description: |-
+                      NodeJoinTokenTTL is the lifetime of the kubeadm bootstrap token created for
+                      a DPU node to join its DPUCluster. When unset, the provisioning controller
+                      defaults to 3h.
+                    format: duration
+                    pattern: ^([0-9]+(h|m|s|ms|us|µs|ns))+$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: must be greater than zero
+                      rule: self == null || duration(self) > duration('0s')
                   osInstallRetries:
                     description: |-
                       OSInstallRetries is the maximum number of retryable OS installation attempts in zero-trust mode
@@ -1705,7 +1958,7 @@ spec:
                     type: integer
                   osInstallTimeout:
                     description: |-
-                      OSInstallTimeout is the maximum time allowed for OS installation in zero-trust mode.
+                      OSInstallTimeout is the maximum time allowed for OS installation.
                       If the installation exceeds this timeout, the DPU will transition to an error state.
                       When unset, the provisioning controller defaults to 60m.
                     format: duration
@@ -1729,6 +1982,7 @@ spec:
                           By default, the BFB Registry can be accessed via its Service.
                           For non-kubernetes environments, this must be set due to the lack of kubelet on worker nodes.
                           For zero-trust environments, this must be set so that the BFB Registry can be accessed from DPU BMC.
+
                           Deprecated: Address is deprecated and will be removed in a future release.
                         pattern: ^https?://
                         type: string
@@ -1742,7 +1996,8 @@ spec:
                       port:
                         description: |-
                           Port is the port on which the registry instances will listen
-                          Deprecated: Address is deprecated and will be removed in a future release.
+
+                          Deprecated: Port is deprecated and will be removed in a future release.
                         maximum: 65535
                         minimum: 1
                         type: integer
@@ -1769,6 +2024,33 @@ spec:
                 description: Security groups configuration for security-related components
                   managed by the DPF Operator.
                 properties:
+                  certManagement:
+                    description: |-
+                      CertManagement configures the certificate authority that the provisioning certificates of DPF
+                      chain up to, and the trust bundle their consumers validate peers against. If unset, DPF signs
+                      them with a self-signed CA of its own.
+                    properties:
+                      trustBundleConfigMapName:
+                        default: dpf-ca-trust-bundle
+                        description: |-
+                          TrustBundleConfigMapName is the ConfigMap holding the CA certificate(s) that DPF components
+                          validate their peers against.
+
+                          Name it when the chart is anchored to an authority of your own, the mode in which the content of
+                          the bundle is yours to provide. With the self-signed root of DPF the operator generates the
+                          content itself, under this name. To trust additional CAs alongside the root of DPF, merge them
+                          into the ConfigMap directly, DPF preserves certificates it did not add.
+
+                          The name is fixed once the config exists. It reaches each DPU in the provisioning configuration
+                          it is installed with, so renaming it later would leave the DPUs already provisioned reading a
+                          ConfigMap DPF no longer maintains, holding trust material that silently stops being updated.
+                          That is enforced on the spec rather than here, because leaving this field out falls back to a
+                          name too, and a rule on the field cannot see a rename that adds or removes it.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                    type: object
                   kata:
                     description: |-
                       Kata is the configuration for Kata Containers.
@@ -1786,7 +2068,9 @@ spec:
                           It contains the image for the kata-deploy container.
                         properties:
                           image:
-                            description: Image is a reference to a container image.
+                            description: |-
+                              Image is a reference to a container image.
+                              If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                             pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                             type: string
                         type: object
@@ -1850,6 +2134,36 @@ spec:
                       spiffe configures the SPIFFE-based DPU Agent identity flow. Edits are accepted post-bootstrap
                       but do NOT retro-apply to already-provisioned DPUs.
                     properties:
+                      csiDriver:
+                        description: csiDriver contains the configuration for the
+                          SPIFFE CSI driver deployed to the DPU clusters.
+                        properties:
+                          driver:
+                            description: |-
+                              driver contains the configuration for the SPIFFE CSI driver container.
+                              It contains the image for the container.
+                            properties:
+                              image:
+                                description: |-
+                                  Image is a reference to a container image.
+                                  If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                                pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
+                                type: string
+                            type: object
+                          nodeDriverRegistrar:
+                            description: |-
+                              nodeDriverRegistrar contains the configuration for the node-driver-registrar container
+                              that registers the SPIFFE CSI driver with the kubelet.
+                              It contains the image for the container.
+                            properties:
+                              image:
+                                description: |-
+                                  Image is a reference to a container image.
+                                  If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                                pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
+                                type: string
+                            type: object
+                        type: object
                       dpuAgentExchangedSPIFFEIDTemplate:
                         description: |-
                           DPUAgentExchangedSPIFFEIDTemplate renders the post-exchange SPIFFE ID subject. It receives
@@ -2185,7 +2499,9 @@ spec:
                           for the KMS plugin DaemonSet.
                         properties:
                           image:
-                            description: Image is a reference to a container image.
+                            description: |-
+                              Image is a reference to a container image.
+                              If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                             pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                             type: string
                           resources:
@@ -2333,7 +2649,9 @@ spec:
                       It contains the image for the controller and its resource requirements.
                     properties:
                       image:
-                        description: Image is a reference to a container image.
+                        description: |-
+                          Image is a reference to a container image.
+                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
@@ -2400,7 +2718,7 @@ spec:
                     description: |-
                       Image overrides the container image used by the ServiceChainSet Controller.
 
-                      Deprecated: This field is deprecated and will be removed with v27.1.0.
+                      Deprecated: This field is deprecated and will be removed with v31.0.0.
                       Use the new field `controller` instead.
                     pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                     type: string
@@ -2427,7 +2745,9 @@ spec:
                       It contains the image for the controller and its resource requirements.
                     properties:
                       image:
-                        description: Image is a reference to a container image.
+                        description: |-
+                          Image is a reference to a container image.
+                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
@@ -2494,7 +2814,7 @@ spec:
                     description: |-
                       Image overrides the container image used by the SFC controller.
 
-                      Deprecated: This field is deprecated and will be removed with v27.1.0.
+                      Deprecated: This field is deprecated and will be removed with v31.0.0.
                       Use the new field `controller` instead.
                     pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                     type: string
@@ -2512,13 +2832,75 @@ spec:
               sriovDevicePlugin:
                 description: SRIOVDevicePlugin is the configuration for the SRIOVDevicePlugin
                 properties:
+                  configInit:
+                    description: |-
+                      ConfigInit contains the configuration for the SR-IOV Device Plugin config-init container.
+                      It contains the image for the init container and its resource requirements.
+                    properties:
+                      image:
+                        description: |-
+                          Image is a reference to a container image.
+                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
+                        pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
+                        type: string
+                      resources:
+                        description: |-
+                          Resources defines the memory and CPU resource requests and limits for the component.
+                          This field is optional, and if not set, the component will use the default resource.
+                        properties:
+                          limits:
+                            description: Limits defines the resource limits for the
+                              component.
+                            properties:
+                              cpu:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: CPU is the amount of CPU requested by
+                                  the component.
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              memory:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: Memory is the amount of Memory requested
+                                  by the component.
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                            type: object
+                          requests:
+                            description: Requests defines the resource requests for
+                              the component.
+                            properties:
+                              cpu:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: CPU is the amount of CPU requested by
+                                  the component.
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                              memory:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: Memory is the amount of Memory requested
+                                  by the component.
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                            type: object
+                        type: object
+                    type: object
                   deviceplugin:
                     description: |-
                       DevicePlugin contains the configuration for the SRIOV Device Plugin component.
                       It contains the image for the controller and its resource requirements.
                     properties:
                       image:
-                        description: Image is a reference to a container image.
+                        description: |-
+                          Image is a reference to a container image.
+                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
@@ -2585,7 +2967,7 @@ spec:
                     description: |-
                       Image overrides the container image used by the SRIOV Device Plugin container.
 
-                      Deprecated: This field is deprecated and will be removed with v27.1.0.
+                      Deprecated: This field is deprecated and will be removed with v31.0.0.
                       Use the new field `deviceplugin` instead.
                     pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                     type: string
@@ -2603,7 +2985,9 @@ spec:
                       It contains the image for the controller and its resource requirements.
                     properties:
                       image:
-                        description: Image is a reference to a container image.
+                        description: |-
+                          Image is a reference to a container image.
+                          If neither a tag nor a digest is set, the tag and digest of the component's default image are used.
                         pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                         type: string
                       resources:
@@ -2663,7 +3047,7 @@ spec:
                     description: |-
                       Image overrides the container image used by the Static Cluster Manager.
 
-                      Deprecated: This field is deprecated and will be removed with v27.1.0.
+                      Deprecated: This field is deprecated and will be removed with v31.0.0.
                       Use the new field `controller` instead.
                     pattern: ^((?:(?:(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9])(?:\.(?:[a-zA-Z0-9]|[a-zA-Z0-9][a-zA-Z0-9-]*[a-zA-Z0-9]))*|\[(?:[a-fA-F0-9:]+)\])(?::[0-9]+)?/)?[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|[-]+)[a-z0-9]+)*)*)(?::([\w][\w.-]{0,127}))?(?:@([A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*[:][[:xdigit:]]{32,}))?$
                     type: string
@@ -2723,6 +3107,16 @@ spec:
                 || self.kamajiClusterManager.etcdEncryptionAtRest.provider != ''vaultKMS''
                 || (has(self.security) && has(self.security.vaultKMS) && (!has(self.security.vaultKMS.disable)
                 || self.security.vaultKMS.disable == false))'
+            - message: 'spec.security.certManagement.trustBundleConfigMapName is immutable,
+                including the default it falls back to when the certManagement block
+                is absent: the name reaches each DPU in the provisioning configuration
+                it is installed with, so changing it leaves the DPUs already provisioned
+                reading a ConfigMap DPF no longer maintains'
+              rule: '(has(self.security) && has(self.security.certManagement) && has(self.security.certManagement.trustBundleConfigMapName)
+                ? self.security.certManagement.trustBundleConfigMapName : ''dpf-ca-trust-bundle'')
+                == (has(oldSelf.security) && has(oldSelf.security.certManagement)
+                && has(oldSelf.security.certManagement.trustBundleConfigMapName) ?
+                oldSelf.security.certManagement.trustBundleConfigMapName : ''dpf-ca-trust-bundle'')'
           status:
             description: DPFOperatorConfigStatus defines the observed state of DPFOperatorConfig
             properties:
@@ -2788,6 +3182,66 @@ spec:
                   the object the last time it was patched.
                 format: int64
                 type: integer
+              security:
+                description: |-
+                  Security records what the operator has rolled out for the security-related components it
+                  manages. It is grouped the way spec.security groups their configuration, so that what was
+                  asked for and what is in effect are read at the same path.
+                properties:
+                  certManagement:
+                    description: CertManagement records what the operator has rolled
+                      out for the provisioning PKI.
+                    properties:
+                      anchor:
+                        description: |-
+                          Anchor is the certificate authority the provisioning PKI has been rolled out against, recorded
+                          once the platform intermediate CA has been applied under it and every peer that has to validate
+                          the chain below it trusts that chain.
+
+                          It is what the anchor chosen in the dpf-operator Helm chart is compared against, so a change of
+                          authority is reported for as long as the rollout of it is outstanding rather than only by the
+                          reconcile that first observed it.
+
+                          Nothing rolled out yet is reported by leaving it out altogether.
+                        properties:
+                          group:
+                            description: Group of the issuer, which is the API group
+                              of cert-manager.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                          kind:
+                            description: |-
+                              Kind of the issuer, either Issuer for one in the namespace of the DPFOperatorConfig or
+                              ClusterIssuer for a cluster scoped one.
+                            enum:
+                            - Issuer
+                            - ClusterIssuer
+                            type: string
+                          name:
+                            description: Name of the issuer.
+                            maxLength: 253
+                            minLength: 1
+                            type: string
+                        type: object
+                      trustBundleHash:
+                        description: |-
+                          TrustBundleHash is the hash the CA trust bundle carried when Anchor was recorded as rolled
+                          out, refreshed by every reconcile that rolls the same authority out again.
+
+                          It is the reference point a change of authority is measured against. cert-manager reissues the
+                          platform intermediate CA on its own schedule, so the bundle published at the moment such a
+                          change is observed is still the one every peer already trusts, and convergence measured
+                          against it would call the rotation over before a single peer had seen the new chain. Recording
+                          it stops there for as long as the rotation is outstanding, which leaves it holding exactly
+                          that bundle.
+
+                          No bundle published yet is reported by leaving it out altogether.
+                        maxLength: 128
+                        minLength: 1
+                        type: string
+                    type: object
+                type: object
               targetVersion:
                 description: |-
                   TargetVersion is the version of the DPF Operator that is being deployed. It differs from

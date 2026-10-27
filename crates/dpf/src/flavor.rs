@@ -631,6 +631,8 @@ fn flavor_bf4_with_topology(
             ..Default::default()
         },
         spec: DpuFlavorSpec {
+            scalable_functions: None,
+            virtual_functions: None,
             dpu_mode: Some(DpuFlavorDpuMode::ZeroTrust),
             dpu_resources: None,
             bfcfg_parameters: Some(bfcfg_parameters),
@@ -715,9 +717,12 @@ pub(crate) fn flavor_bf4_astra_with_topology(
         config_files: Some(get_bf4_astra_config_files(proxy, dhcp_acl_interfaces)?),
         containerd_config: Some(DpuFlavorContainerdConfig {
             registry_endpoint: None,
+            sandbox_image: None,
         }),
         dpu_mode: None,
         dpu_resources: None,
+        scalable_functions: None,
+        virtual_functions: None,
         ew_nic_configurations: Some(bf4_astra_ew_nic_configurations()),
         grub: Some(bf4_astra_grub_params()),
         host_network_interface_configs: None,
@@ -943,6 +948,8 @@ fn default_flavor_with_topology(
         spec: DpuFlavorSpec {
             dpu_mode: Some(DpuFlavorDpuMode::ZeroTrust),
             dpu_resources: None,
+            scalable_functions: None,
+            virtual_functions: None,
             bfcfg_parameters: Some(bfcfg_parameters),
             config_files: Some(get_config_files(
                 proxy,
