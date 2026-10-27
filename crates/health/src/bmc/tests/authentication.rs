@@ -3,11 +3,54 @@
 
 use super::*;
 
+/// End the current cooldown, keeping its escalation level.
 pub(super) fn expire(client: &BmcClient) {
+    let backoff = open_backoff(client).unwrap_or(AUTH_CIRCUIT_INITIAL_BACKOFF);
     client.authentication.lock().unwrap().state = CircuitState::Open {
         until: Instant::now() - Duration::from_secs(1),
-        backoff: AUTH_CIRCUIT_BACKOFF,
+        backoff,
     };
+}
+
+fn open_backoff(client: &BmcClient) -> Option<Duration> {
+    match client.authentication.lock().unwrap().state {
+        CircuitState::Open { backoff, .. } => Some(backoff),
+        CircuitState::Closed | CircuitState::Probing { .. } => None,
+    }
+}
+
+#[tokio::test]
+async fn failed_recoveries_escalate_cooldown_until_credentials_are_accepted() {
+    let client = test_client();
+    let (op, _) = scripted_op(vec![Err(auth_error()), Err(auth_error())]);
+    client.read_with_auth_retry(true, op).await.unwrap_err();
+    assert_eq!(open_backoff(&client), Some(AUTH_CIRCUIT_INITIAL_BACKOFF));
+
+    // A public-root success and the protected read after it are one attempt.
+    expire(&client);
+    let (op, _) = scripted_op(vec![Ok("root")]);
+    client.read_with_auth_retry(false, op).await.unwrap();
+    let (op, _) = scripted_op(vec![Err(auth_error())]);
+    client.read_with_auth_retry(true, op).await.unwrap_err();
+    assert_eq!(open_backoff(&client), Some(Duration::from_secs(120)));
+
+    for expected in [240, 300, 300] {
+        expire(&client);
+        let (op, _) = scripted_op(vec![Err(auth_error())]);
+        client.read_with_auth_retry(true, op).await.unwrap_err();
+        assert_eq!(open_backoff(&client), Some(Duration::from_secs(expected)));
+    }
+
+    expire(&client);
+    let (op, _) = scripted_op(vec![Ok("accepted")]);
+    client.read_with_auth_retry(true, op).await.unwrap();
+    let (op, _) = scripted_op(vec![Err(auth_error()), Err(auth_error())]);
+    client.read_with_auth_retry(true, op).await.unwrap_err();
+    assert_eq!(
+        open_backoff(&client),
+        Some(AUTH_CIRCUIT_INITIAL_BACKOFF),
+        "accepted credentials reset escalation"
+    );
 }
 
 #[tokio::test]

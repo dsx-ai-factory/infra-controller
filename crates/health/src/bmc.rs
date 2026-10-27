@@ -63,16 +63,18 @@ const CIRCUIT_MAX_BACKOFF: Duration = Duration::from_secs(300);
 /// deliberately longer than a BMC connect timeout.
 const CIRCUIT_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Fixed per-BMC authentication cooldown after rejected credentials or an
-/// inconclusive recovery. One read may refresh and probe after 60 seconds.
-const AUTH_CIRCUIT_BACKOFF: Duration = Duration::from_secs(60);
+/// First per-BMC authentication cooldown after rejected credentials or an
+/// inconclusive recovery. Each failed recovery doubles it up to
+/// [`CIRCUIT_MAX_BACKOFF`], so an account that stays rejected costs fewer login
+/// attempts than a BMC lockout threshold allows.
+const AUTH_CIRCUIT_INITIAL_BACKOFF: Duration = Duration::from_secs(60);
 
 /// How long a credential fetch the provider failed is remembered before another
 /// caller may drive the provider again for this endpoint.
 ///
 /// Nothing else damps a provider failure: no request reaches the BMC, so the
 /// connection circuit never trips. The value matches
-/// [`AUTH_CIRCUIT_BACKOFF`]: a sweep against
+/// [`AUTH_CIRCUIT_INITIAL_BACKOFF`]: a sweep against
 /// an endpoint whose credentials cannot be issued costs one provider call, and a
 /// provider that recovers is noticed within a couple of collection intervals.
 const CREDENTIAL_FETCH_FAILURE_COOLDOWN: Duration = Duration::from_secs(60);
@@ -172,16 +174,21 @@ impl AuthenticationProbe<'_> {
             .authentication
             .lock()
             .expect("auth circuit poisoned");
+        let CircuitState::Probing { backoff, .. } = circuit.state else {
+            return;
+        };
         if circuit.epoch != self.epoch {
             return;
         }
         circuit.protected_probe_pending = !protected;
         circuit.state = if protected {
+            tracing::info!(endpoint = ?self.client.addr,
+                "BMC accepted credentials; closing authentication circuit");
             CircuitState::Closed
         } else {
             CircuitState::Open {
-                until: Instant::now() + AUTH_CIRCUIT_BACKOFF,
-                backoff: AUTH_CIRCUIT_BACKOFF,
+                until: Instant::now() + backoff,
+                backoff,
             }
         };
     }
@@ -194,11 +201,16 @@ impl Drop for AuthenticationProbe<'_> {
             .authentication
             .lock()
             .expect("auth circuit poisoned");
-        if circuit.epoch == self.epoch && matches!(circuit.state, CircuitState::Probing { .. }) {
+        if circuit.epoch != self.epoch {
+            return;
+        }
+        if let CircuitState::Probing { backoff, .. } = circuit.state {
             circuit.state = CircuitState::Open {
-                until: Instant::now() + AUTH_CIRCUIT_BACKOFF,
-                backoff: AUTH_CIRCUIT_BACKOFF,
+                until: Instant::now() + backoff,
+                backoff,
             };
+            tracing::info!(endpoint = ?self.client.addr, backoff_seconds = backoff.as_secs(),
+                "BMC authentication not recovered; authentication circuit stays open");
         }
     }
 }
@@ -675,13 +687,21 @@ impl BmcClient {
         &'a self,
         circuit: &mut AuthenticationCircuit,
     ) -> AuthenticationProbe<'a> {
+        // `backoff` is the cooldown applied if this probe fails. A protected read
+        // that follows a public-root success continues the same attempt, so it
+        // does not escalate.
+        let backoff = match circuit.state {
+            CircuitState::Open { backoff, .. } if circuit.protected_probe_pending => backoff,
+            CircuitState::Open { backoff, .. } => (backoff * 2).min(CIRCUIT_MAX_BACKOFF),
+            CircuitState::Closed | CircuitState::Probing { .. } => AUTH_CIRCUIT_INITIAL_BACKOFF,
+        };
         circuit.epoch += 1;
         circuit.protected_probe_pending = false;
         // Unlike connection probes, an authentication probe has a Drop owner.
         // Its lease cannot expire while refresh or the request is still active.
         circuit.state = CircuitState::Probing {
             deadline: Instant::now() + CIRCUIT_PROBE_TIMEOUT,
-            backoff: AUTH_CIRCUIT_BACKOFF,
+            backoff,
         };
         AuthenticationProbe {
             client: self,
