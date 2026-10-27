@@ -284,7 +284,7 @@ impl Redfish for InstrumentedRedfish {
         fn is_bios_setup<'a>(&'a self, boot_interface: Option<BootInterfaceRef<'a>>) -> bool;
         fn set_machine_password_policy<'a>(&'a self) -> ();
         fn lockdown<'a>(&'a self, target: EnabledDisabled) -> ();
-        fn lockdown_requires_host_reboot<'a>(&'a self) -> bool;
+        fn lockdown_has_boot_latched_controls<'a>(&'a self) -> bool;
         fn lockdown_status<'a>(&'a self) -> Status;
         fn setup_serial_console<'a>(&'a self) -> ();
         fn serial_console_status<'a>(&'a self) -> Status;
@@ -504,13 +504,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_lockdown_reboot_requirement_is_delegated_without_caching() {
+    async fn boot_latched_lockdown_capability_is_delegated_without_caching() {
         let sim = RedfishSim::default();
         let client = sim_client(&sim).await;
         for required in [false, true] {
-            sim.set_lockdown_requires_host_reboot(required);
+            sim.set_lockdown_has_boot_latched_controls(required);
             assert_eq!(
-                client.lockdown_requires_host_reboot().await.unwrap(),
+                client.lockdown_has_boot_latched_controls().await.unwrap(),
                 required
             );
         }

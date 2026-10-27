@@ -11705,9 +11705,9 @@ impl HostUpgradeState {
             // a retry cannot skip the reboot after observing the new value.
             if matches!(scenario, HostFirmwareScenario::Ready)
                 && redfish_client
-                    .lockdown_requires_host_reboot()
+                    .lockdown_has_boot_latched_controls()
                     .await
-                    .map_err(|e| redfish_error("lockdown_requires_host_reboot", e))?
+                    .map_err(|e| redfish_error("lockdown_has_boot_latched_controls", e))?
             {
                 return Ok(StateHandlerOutcome::transition(
                     ManagedHostState::HostInit {

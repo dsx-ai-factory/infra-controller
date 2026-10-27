@@ -56,7 +56,7 @@ async fn setup(pool: PgPool, boot_wait: chrono::Duration) -> (Env, TestManagedHo
 #[sqlx_test]
 async fn decommission_retries_runtime_unlock_reboot_before_advancing(pool: PgPool) {
     let (mut env, mh) = setup(pool, chrono::Duration::zero()).await;
-    env.redfish_sim.set_lockdown_requires_host_reboot(true);
+    env.redfish_sim.set_lockdown_has_boot_latched_controls(true);
     let timepoint = env.redfish_sim.timepoint();
     env.run_single_iteration().await;
     let reboot = deconfiguring(DeconfiguringHostState::RebootAfterLockdown);
@@ -96,7 +96,7 @@ async fn decommission_retries_runtime_unlock_reboot_before_advancing(pool: PgPoo
 #[sqlx_test]
 async fn decommission_waits_for_runtime_unlock_boot_without_restarting_again(pool: PgPool) {
     let (mut env, mh) = setup(pool, chrono::Duration::hours(1)).await;
-    env.redfish_sim.set_lockdown_requires_host_reboot(true);
+    env.redfish_sim.set_lockdown_has_boot_latched_controls(true);
     env.run_single_iteration().await;
     env.run_single_iteration().await;
     let requested = mh

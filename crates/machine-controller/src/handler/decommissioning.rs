@@ -123,17 +123,17 @@ pub(super) async fn handle_deconfiguring_host(
                 .services
                 .create_redfish_client_from_machine(machine)
                 .await?;
-            let requires_reboot = redfish_client
-                .lockdown_requires_host_reboot()
+            let has_boot_latched_controls = redfish_client
+                .lockdown_has_boot_latched_controls()
                 .await
                 .map_err(|error| {
                     StateHandlerError::GenericError(eyre::eyre!(
-                        "failed to determine full lockdown reboot requirement: {error}"
+                        "failed to discover boot-latched lockdown controls: {error}"
                     ))
                 })?;
             // Release boot-latched runtime protection when handing the server
             // back, rather than only opening its BMC configuration interface.
-            let unlock = if requires_reboot {
+            let unlock = if has_boot_latched_controls {
                 redfish_client.lockdown(EnabledDisabled::Disabled).await
             } else {
                 redfish_client.lockdown_bmc(EnabledDisabled::Disabled).await
@@ -147,7 +147,7 @@ pub(super) async fn handle_deconfiguring_host(
                 }
             }
 
-            let next = if requires_reboot || machine.bmc_vendor().is_supermicro() {
+            let next = if has_boot_latched_controls || machine.bmc_vendor().is_supermicro() {
                 DeconfiguringHostState::RebootAfterLockdown
             } else {
                 DeconfiguringHostState::ClearSuperNicLockdown
@@ -165,15 +165,15 @@ pub(super) async fn handle_deconfiguring_host(
                 .services
                 .create_redfish_client_from_machine(machine)
                 .await?;
-            let requires_reboot = redfish_client
-                .lockdown_requires_host_reboot()
+            let has_boot_latched_controls = redfish_client
+                .lockdown_has_boot_latched_controls()
                 .await
                 .map_err(|error| {
                     StateHandlerError::GenericError(eyre::eyre!(
-                        "failed to determine full lockdown reboot requirement: {error}"
+                        "failed to discover boot-latched lockdown controls: {error}"
                     ))
                 })?;
-            if requires_reboot {
+            if has_boot_latched_controls {
                 // Keep this persisted step until the requested reboot has had
                 // time to apply runtime policy. Do not restart on every tick.
                 if let Some(reboot) = &machine.status.last_reboot_requested
@@ -206,7 +206,7 @@ pub(super) async fn handle_deconfiguring_host(
                     "failed to reboot host after disabling BMC lockdown: {error}"
                 ))
             })?;
-            if requires_reboot {
+            if has_boot_latched_controls {
                 return Ok(StateHandlerOutcome::wait(
                     "Host restart requested to release runtime EFI protection".to_string(),
                 ));

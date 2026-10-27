@@ -527,7 +527,7 @@ async fn cold_firmware_download_preserves_request_until_check_completes(pool: Pg
 
     // An explicit completed check still clears the request. Use the fixture's
     // installed version so this tests completion without a simulated flash.
-    env.redfish_sim.set_lockdown_requires_host_reboot(true);
+    env.redfish_sim.set_lockdown_has_boot_latched_controls(true);
     config
         .components
         .get_mut(&FirmwareComponentType::Bmc)
