@@ -289,7 +289,7 @@ impl BfbRepository for InitializationMock {
         let mut bfb_with_status = bfb.clone();
         bfb_with_status.status = Some(BfbStatus {
             file_name: None,
-            phase: BfbStatusPhase::Ready,
+            phase: Some(BfbStatusPhase::Ready),
             versions: None,
             conditions: None,
             observed_generation: None,
