@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
 	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/core/claim"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -78,8 +79,13 @@ func (h *KeycloakProcessor) ProcessToken(c echo.Context, tokenStr string, jwksCo
 	// Get org name from URL path parameter
 	reqOrgName := c.Param("orgName")
 
-	// Set isServiceAccount in context based on clientId
-	isServiceAccount := claims.GetClientId() != "" && jwksConfig.ServiceAccount
+	// A client is a service account only if it holds both Provider Admin and Tenant Admin
+	// for the requested org. A service account org is set up as its own Provider, which a
+	// Tenant's client holding only Tenant Admin must never become.
+	reqOrg, hasReqOrg := tokenOrgData[reqOrgName]
+	isServiceAccount := claims.GetClientId() != "" && jwksConfig.ServiceAccount && hasReqOrg &&
+		authz.ValidateUserRolesInOrg(reqOrg, nil, authz.ProviderAdminRole) &&
+		authz.ValidateUserRolesInOrg(reqOrg, nil, authz.TenantAdminRole)
 	config.SetIsServiceAccountInContext(c, isServiceAccount)
 
 	ctx := c.Request().Context()

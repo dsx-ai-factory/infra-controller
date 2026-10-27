@@ -414,7 +414,7 @@ Key fields:
 - `realm` is the Keycloak realm.
 - `clientID` is the OAuth client ID.
 - `clientSecretPath` is the file path where the client secret is mounted.
-- `serviceAccount` enables service account features.
+- `serviceAccount` enables service account features. When set to `true`, `client_credentials` tokens are accepted, and a token is treated as a service account only when it holds both `PROVIDER_ADMIN` and `TENANT_ADMIN` in the requested org. When set to `false`, a token with a `client_id` claim is rejected with `401`.
 
 Create the client secret in Kubernetes before enabling Keycloak:
 
