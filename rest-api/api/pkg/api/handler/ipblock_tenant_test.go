@@ -611,8 +611,10 @@ func checkTenantIPBlockLifecycle(t *testing.T, method string) {
 			response := f.request(t, http.MethodPost, "", body)
 			require.Equal(t, http.StatusBadRequest, response.Code)
 			require.Contains(t, response.Body.String(), "RFC1918")
+		}},
+		{http.MethodPatch, "validation includes actionable field errors", func(t *testing.T, f *tenantIPBlockFixture) {
 			created := readTenantIPBlock(t, f.request(t, http.MethodPost, "", f.body()), http.StatusCreated)
-			response = f.request(t, http.MethodPatch, "/"+created.ID, map[string]any{"description": strings.Repeat("x", 1025)})
+			response := f.request(t, http.MethodPatch, "/"+created.ID, map[string]any{"description": strings.Repeat("x", 1025)})
 			require.Equal(t, http.StatusBadRequest, response.Code)
 			require.Contains(t, response.Body.String(), "description")
 		}},
