@@ -60,10 +60,16 @@ async fn only_protected_success_closes_authentication() {
         ("public root", false, Ok("body"), false),
         ("credentials rejected", true, Err(auth_error()), false),
         (
-            "inconclusive server error",
+            "server error answers without 401",
             true,
             Err(HealthError::HttpError("HTTP 500".into())),
-            false,
+            true,
+        ),
+        (
+            "forbidden resource answers without 401",
+            true,
+            Err(forbidden_error()),
+            true,
         ),
     ];
     for (scenario, protected, outcome, closes) in cases {
@@ -90,6 +96,87 @@ async fn only_protected_success_closes_authentication() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn unreachable_probe_does_not_escalate_authentication_cooldown() {
+    // A released ephemeral port refuses the probe's real connection.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = BmcAddr {
+        ip: "127.0.0.1".parse().unwrap(),
+        port: Some(listener.local_addr().unwrap().port()),
+        ..test_addr()
+    };
+    drop(listener);
+    let (provider, _) =
+        CountingProvider::new(BmcCredentials::SessionToken { token: "t".into() }, None);
+    let client = test_bmc(reqwest(), addr, provider, None, 0, None).unwrap();
+    expire(&client);
+    let sensor = ODataId::from("/redfish/v1/Chassis/1/Sensors/1".to_string());
+    client.get::<TestEntity>(&sensor).await.unwrap_err();
+    assert_eq!(
+        open_backoff(&client),
+        Some(AUTH_CIRCUIT_INITIAL_BACKOFF),
+        "no login was rejected"
+    );
+    assert_eq!(client.collector_sweep(), CollectorSweep::Skip);
+}
+
+#[tokio::test]
+async fn authentication_recovery_waits_for_the_connection_circuit() {
+    let client = test_client();
+    expire(&client);
+    client.set_circuit_for_test(CircuitState::Open {
+        until: Instant::now() + Duration::from_secs(60),
+        backoff: Duration::from_secs(60),
+    });
+    assert_eq!(client.collector_sweep(), CollectorSweep::Skip);
+    let (op, attempts) = scripted_op(vec![]);
+    client.read_with_auth_retry(true, op).await.unwrap_err();
+    assert_eq!(attempts.load(AtomicOrdering::SeqCst), 0);
+    assert_eq!(
+        client.collector_sweep(),
+        CollectorSweep::Skip,
+        "the refused read did not claim the authentication probe"
+    );
+
+    client.set_circuit_for_test(CircuitState::Closed);
+    assert_eq!(client.collector_sweep(), CollectorSweep::Probe);
+    let (op, _) = scripted_op(vec![Ok("recovered")]);
+    assert_eq!(
+        client.read_with_auth_retry(true, op).await.unwrap(),
+        "recovered"
+    );
+    assert_eq!(client.collector_sweep(), CollectorSweep::Full);
+}
+
+#[tokio::test]
+async fn rejected_write_refreshes_credentials_for_the_next_read() {
+    let (provider, calls) =
+        CountingProvider::new(BmcCredentials::SessionToken { token: "t".into() }, None);
+    let client = test_bmc(reqwest(), test_addr(), provider, None, 0, None).unwrap();
+    client.ensure_credentials().await.unwrap();
+    client
+        .guarded(async { Err::<(), _>(auth_error()) })
+        .await
+        .expect_err("writes are not replayed");
+    assert_eq!(
+        client.collector_sweep(),
+        CollectorSweep::Probe,
+        "refreshed credentials are tested without waiting out the cooldown"
+    );
+    let (op, attempts) = scripted_op(vec![Ok("accepted")]);
+    assert_eq!(
+        client.read_with_auth_retry(true, op).await.unwrap(),
+        "accepted"
+    );
+    assert_eq!(attempts.load(AtomicOrdering::SeqCst), 1);
+    assert_eq!(
+        calls.load(AtomicOrdering::SeqCst),
+        3,
+        "initial fetch, the write's refresh, and the probe's refresh"
+    );
+    assert!(client.check_authentication(None).is_ok());
 }
 
 #[test]

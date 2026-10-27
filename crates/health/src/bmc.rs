@@ -160,15 +160,21 @@ struct AuthenticationCircuit {
     protected_probe_pending: bool,
 }
 
-/// Owns refresh and probe together. Dropping a cancelled or unsuccessful probe
-/// restores cooldown, so recovery cannot latch or fan out across collectors.
+/// Owns refresh and probe together. Dropping a cancelled or rejected probe
+/// restores an escalated cooldown, so recovery cannot latch or fan out across
+/// collectors. Outcomes that say nothing about the credentials are recorded
+/// explicitly and do not escalate.
 struct AuthenticationProbe<'a> {
     client: &'a BmcClient,
     epoch: u64,
+    /// Cooldown to restore when the probe never tested the credentials.
+    previous_backoff: Duration,
+    previous_protected_probe_pending: bool,
 }
 
 impl AuthenticationProbe<'_> {
-    fn succeeded(&self, protected: bool) {
+    /// Finish the probe if it still owns the circuit.
+    fn finish(&self, finish: impl FnOnce(&mut AuthenticationCircuit, Duration)) {
         let mut circuit = self
             .client
             .authentication
@@ -177,20 +183,47 @@ impl AuthenticationProbe<'_> {
         let CircuitState::Probing { backoff, .. } = circuit.state else {
             return;
         };
-        if circuit.epoch != self.epoch {
+        if circuit.epoch == self.epoch {
+            finish(&mut circuit, backoff);
+        }
+    }
+
+    /// The BMC answered without a 401. Only a protected resource proves the
+    /// credentials; a public root leaves that to the next protected read.
+    fn succeeded(&self, protected: bool) {
+        if !protected {
+            self.await_protected_read();
             return;
         }
-        circuit.protected_probe_pending = !protected;
-        circuit.state = if protected {
+        self.finish(|circuit, _| {
             tracing::info!(endpoint = ?self.client.addr,
                 "BMC accepted credentials; closing authentication circuit");
-            CircuitState::Closed
-        } else {
-            CircuitState::Open {
+            circuit.protected_probe_pending = false;
+            circuit.state = CircuitState::Closed;
+        });
+    }
+
+    /// Let the next protected read probe without waiting out the cooldown.
+    fn await_protected_read(&self) {
+        self.finish(|circuit, backoff| {
+            circuit.protected_probe_pending = true;
+            circuit.state = CircuitState::Open {
                 until: Instant::now() + backoff,
                 backoff,
-            }
-        };
+            };
+        });
+    }
+
+    /// The probe never reached the BMC, or credentials could not be fetched,
+    /// so no login was rejected. Restore the cooldown without escalating it.
+    fn inconclusive(&self) {
+        self.finish(|circuit, _| {
+            circuit.protected_probe_pending = self.previous_protected_probe_pending;
+            circuit.state = CircuitState::Open {
+                until: Instant::now() + self.previous_backoff,
+                backoff: self.previous_backoff,
+            };
+        });
     }
 }
 
@@ -219,6 +252,8 @@ struct AttemptFailure<'a> {
     error: HealthError,
     generation: u64,
     probe: Option<AuthenticationProbe<'a>>,
+    /// The request reached the BMC and got an HTTP-level answer.
+    answered: bool,
 }
 
 /// The most recent credential fetch the provider failed for this endpoint.
@@ -615,6 +650,7 @@ impl BmcClient {
                 error,
                 generation,
                 probe,
+                ..
             }) => {
                 if let Some(probe) = probe {
                     return self
@@ -633,7 +669,9 @@ impl BmcClient {
                         "Failed to refresh BMC credentials after authentication error");
                     return Err(error);
                 }
-                self.guarded(op()).await
+                self.attempt(&op, None)
+                    .await
+                    .map_err(|failure| failure.error)
             }
         }
     }
@@ -652,6 +690,7 @@ impl BmcClient {
     {
         if let Err(error) = self.refresh_credentials(&original_error, generation).await {
             tracing::warn!(error = ?error, endpoint = ?self.addr, "BMC authentication recovery failed");
+            probe.inconclusive();
             return Err(original_error);
         }
         match self.attempt(op, Some(&probe)).await {
@@ -660,8 +699,16 @@ impl BmcClient {
                 Ok(value)
             }
             Err(failure) => {
-                tracing::warn!(error = ?failure.error, endpoint = ?self.addr,
-                    "Retry after BMC credential refresh also failed");
+                // Only another 401 is a verdict on the credentials. Dropping the
+                // probe then escalates the cooldown.
+                if is_credential_rejection(&failure.error) {
+                    tracing::warn!(error = ?failure.error, endpoint = ?self.addr,
+                        "BMC rejected refreshed credentials");
+                } else if failure.answered {
+                    probe.succeeded(protected);
+                } else {
+                    probe.inconclusive();
+                }
                 Err(failure.error)
             }
         }
@@ -671,9 +718,13 @@ impl BmcClient {
         &self,
         protected: bool,
     ) -> Result<Option<AuthenticationProbe<'_>>, HealthError> {
+        // A probe the connection circuit would refuse cannot test credentials;
+        // leave the authentication cooldown untouched until the BMC is reachable.
+        let unreachable = self.connection_sweep() == CollectorSweep::Skip;
         let mut circuit = self.authentication.lock().expect("auth circuit poisoned");
         match circuit.state {
             CircuitState::Closed => Ok(None),
+            CircuitState::Open { .. } if unreachable => Err(self.circuit_open_error()),
             CircuitState::Open { until, .. }
                 if Instant::now() >= until || (protected && circuit.protected_probe_pending) =>
             {
@@ -690,10 +741,16 @@ impl BmcClient {
         // `backoff` is the cooldown applied if this probe fails. A protected read
         // that follows a public-root success continues the same attempt, so it
         // does not escalate.
-        let backoff = match circuit.state {
-            CircuitState::Open { backoff, .. } if circuit.protected_probe_pending => backoff,
-            CircuitState::Open { backoff, .. } => (backoff * 2).min(CIRCUIT_MAX_BACKOFF),
+        let previous_backoff = match circuit.state {
+            CircuitState::Open { backoff, .. } => backoff,
             CircuitState::Closed | CircuitState::Probing { .. } => AUTH_CIRCUIT_INITIAL_BACKOFF,
+        };
+        let previous_protected_probe_pending = circuit.protected_probe_pending;
+        let backoff = match circuit.state {
+            CircuitState::Open { .. } if !previous_protected_probe_pending => {
+                (previous_backoff * 2).min(CIRCUIT_MAX_BACKOFF)
+            }
+            _ => previous_backoff,
         };
         circuit.epoch += 1;
         circuit.protected_probe_pending = false;
@@ -706,6 +763,8 @@ impl BmcClient {
         AuthenticationProbe {
             client: self,
             epoch: circuit.epoch,
+            previous_backoff,
+            previous_protected_probe_pending,
         }
     }
 
@@ -756,11 +815,13 @@ impl BmcClient {
                 error,
                 generation,
                 probe: None,
+                answered: false,
             });
         }
         let result = op().await;
+        let answered = !result.as_ref().is_err_and(is_connection_error);
         if let Err(error) = &result
-            && is_connection_error(error)
+            && !answered
         {
             self.trip_circuit(error);
         } else {
@@ -780,6 +841,7 @@ impl BmcClient {
                 error,
                 generation,
                 probe: recovery,
+                answered,
             }
         })
     }
@@ -825,15 +887,28 @@ impl BmcClient {
         })
     }
 
-    /// Writes share admission and rejection handling, but never replay. Their
-    /// unused recovery token restores cooldown for a later read to probe.
+    /// Writes share admission and rejection handling, but never replay. A 401
+    /// still refreshes credentials, so the next protected read can test them
+    /// without waiting out the cooldown.
     async fn guarded<T>(
         &self,
         op: impl std::future::Future<Output = Result<T, HealthError>>,
     ) -> Result<T, HealthError> {
-        self.attempt(|| op, None)
-            .await
-            .map_err(|failure| failure.error)
+        let failure = match self.attempt(|| op, None).await {
+            Ok(value) => return Ok(value),
+            Err(failure) => failure,
+        };
+        if let Some(probe) = failure.probe {
+            match self
+                .refresh_credentials(&failure.error, Some(failure.generation))
+                .await
+            {
+                Ok(()) => probe.await_protected_read(),
+                Err(error) => tracing::warn!(error = ?error, endpoint = ?self.addr,
+                    "Failed to refresh BMC credentials after a rejected write"),
+            }
+        }
+        Err(failure.error)
     }
 
     /// Gate an attempt against the circuit. Returns the fast-fail error while the
@@ -932,20 +1007,32 @@ impl BmcClient {
     }
 
     /// Choose a full batch, a single recovery read, or no work based on both
-    /// connection and authentication state. During authentication cooldown or an
-    /// active recovery, skip the batch to avoid a warning for each resource.
+    /// connection and authentication state. Either circuit can veto the sweep,
+    /// so an authentication probe is not offered while the BMC is unreachable.
+    /// During authentication cooldown or an active recovery, skip the batch to
+    /// avoid a warning for each resource.
     pub fn collector_sweep(&self) -> CollectorSweep {
-        let authentication = self.authentication.lock().expect("auth circuit poisoned");
-        match authentication.state {
-            CircuitState::Closed => {}
-            CircuitState::Open { until, .. }
-                if Instant::now() >= until || authentication.protected_probe_pending =>
-            {
-                return CollectorSweep::Probe;
+        let authentication = {
+            let circuit = self.authentication.lock().expect("auth circuit poisoned");
+            match circuit.state {
+                CircuitState::Closed => CollectorSweep::Full,
+                CircuitState::Open { until, .. }
+                    if Instant::now() >= until || circuit.protected_probe_pending =>
+                {
+                    CollectorSweep::Probe
+                }
+                _ => CollectorSweep::Skip,
             }
-            _ => return CollectorSweep::Skip,
+        };
+        match (authentication, self.connection_sweep()) {
+            (CollectorSweep::Skip, _) | (_, CollectorSweep::Skip) => CollectorSweep::Skip,
+            (CollectorSweep::Probe, _) | (_, CollectorSweep::Probe) => CollectorSweep::Probe,
+            (CollectorSweep::Full, CollectorSweep::Full) => CollectorSweep::Full,
         }
-        drop(authentication);
+    }
+
+    /// The connection circuit's sweep decision, without claiming its probe.
+    fn connection_sweep(&self) -> CollectorSweep {
         // Fast path: a closed circuit runs normally and never takes the lock.
         if !self.circuit_tripped.load(Ordering::Acquire) {
             return CollectorSweep::Full;
@@ -3843,8 +3930,8 @@ mod tests {
         );
         assert_eq!(
             provider_calls.load(AtomicOrdering::SeqCst),
-            1,
-            "mutating calls do not run the refresh-and-retry path at all"
+            2,
+            "a rejected write refreshes credentials without replaying"
         );
         server.join().expect("test server thread");
     }
