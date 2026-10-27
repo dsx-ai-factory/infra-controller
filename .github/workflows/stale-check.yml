@@ -20,7 +20,7 @@ jobs:
       pull-requests: write
     timeout-minutes: 10
     steps:
-      - uses: dsx-ai-factory/dsx-github-actions/.github/actions/stale-check@d064e8779c341b8966dc811b2ae375c14b378738
+      - uses: dsx-ai-factory/dsx-github-actions/.github/actions/stale-check@803f81b0431a6814ffffc68172e272485fbc18c9
         # Refer to https://github.com/dsx-ai-factory/dsx-github-actions/blob/main/docs/actions/stale-check.md for more details
         with:
           days-before-issue-stale: '-1'

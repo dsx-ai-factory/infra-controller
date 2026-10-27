@@ -58,7 +58,7 @@ jobs:
 
       - name: Test Temporal chart addresses
         if: matrix.chart == 'rest-api/temporal-helm/temporal'
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@fdc2fa4b5f14ae570f290218f102f9b4aad3b26e
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@803f81b0431a6814ffffc68172e272485fbc18c9
         with:
           plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
           registry-password: ${{ secrets.NVCR_STG_TOKEN }}
@@ -87,7 +87,7 @@ jobs:
         if: matrix.chart == 'helm/rest/nico-rest' && inputs.ngc_path != ''
         # Keep install-yq-action at v1.1.1 to match the pinned helm-package-push action:
         # https://github.com/dsx-ai-factory/dsx-github-actions/blob/7de619729962a6bd5e8355b6fb3582a22517d7e5/.github/actions/helm-package-push/action.yml#L64
-        uses: dcarbone/install-yq-action@64b1b9eb28920bb1a4c13c05321df284f9a8f940 # v1.1.1
+        uses: dcarbone/install-yq-action@4075b4dca348d74bd83f2bf82d30f25d7c54539b # v1.3.1
         with:
           version: v4.35.1
 
@@ -111,7 +111,7 @@ jobs:
 
       - name: Package and push Helm chart to NGC
         if: ${{ inputs.ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@7de619729962a6bd5e8355b6fb3582a22517d7e5
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@803f81b0431a6814ffffc68172e272485fbc18c9
         with:
           chart-path: ${{ steps.prepare-umbrella.outputs.chart_path || matrix.chart }}
           chart-version: ${{ inputs.chart_version }}
