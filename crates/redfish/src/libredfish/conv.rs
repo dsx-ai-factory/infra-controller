@@ -41,6 +41,7 @@ impl IntoLibredfish<libredfish::model::update_service::ComponentType> for Firmwa
             FirmwareComponentType::CombinedBmcUefi => ComponentType::Unknown,
             FirmwareComponentType::Gpu => ComponentType::Unknown,
             FirmwareComponentType::Cx7 => ComponentType::Unknown,
+            FirmwareComponentType::Drive { .. } => ComponentType::Unknown,
             FirmwareComponentType::Unknown => ComponentType::Unknown,
         }
     }
