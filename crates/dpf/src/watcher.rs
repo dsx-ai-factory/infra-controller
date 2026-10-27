@@ -324,12 +324,15 @@ where
             let Some(status) = &dpu.status else {
                 return Ok(());
             };
+            let Some(status_phase) = &status.phase else {
+                return Ok(());
+            };
             let Some(dpu_name) = &dpu.metadata.name else {
                 return Ok(());
             };
 
             let device_name = dpu.spec.dpu_device_name.clone();
-            let phase = DpuPhase::from(status.phase.clone());
+            let phase = DpuPhase::from(status_phase.clone());
             let node_name = dpu.spec.dpu_node_name.clone();
 
             (cbs.dpu_event)(DpuEvent {
@@ -340,7 +343,7 @@ where
             })
             .await?;
 
-            if matches!(status.phase, DpuStatusPhase::NodeEffect) {
+            if matches!(status_phase, DpuStatusPhase::NodeEffect) {
                 (cbs.maintenance)(MaintenanceEvent {
                     dpu_name: dpu_name.clone(),
                     node_name: node_name.clone(),
@@ -348,7 +351,7 @@ where
                 .await?;
             }
 
-            if matches!(status.phase, DpuStatusPhase::Ready) {
+            if matches!(status_phase, DpuStatusPhase::Ready) {
                 (cbs.ready)(DpuReadyEvent {
                     dpu_name: dpu_name.clone(),
                     device_name: device_name.clone(),
@@ -357,7 +360,7 @@ where
                 .await?;
             }
 
-            if matches!(status.phase, DpuStatusPhase::Error) {
+            if matches!(status_phase, DpuStatusPhase::Error) {
                 (cbs.error)(DpuErrorEvent {
                     dpu_name: dpu_name.clone(),
                     device_name: device_name.clone(),
@@ -366,7 +369,7 @@ where
                 .await?;
             }
 
-            if matches!(status.phase, DpuStatusPhase::Rebooting) {
+            if matches!(status_phase, DpuStatusPhase::Rebooting) {
                 let Some(host_bmc_ip) = dpu.spec.bmc_ip.as_deref().and_then(|ip| ip.parse().ok())
                 else {
                     tracing::warn!(dpu_name = %dpu_name, "Skipping reboot event with missing or invalid BMC IP");
