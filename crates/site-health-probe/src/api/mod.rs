@@ -523,7 +523,11 @@ fn list_units(api: &ApiState, filter: &Filter, page: Page) -> Result<UnitsRespon
         .filter(|u| asked.is_empty() || asked.contains(u.id.as_str()))
         .filter(|u| spec.matches(u))
         .filter(|u| after.as_ref().is_none_or(|key| sort_key(u) > *key));
-    let units: Vec<Unit> = matching.by_ref().take(limit as usize).cloned().collect();
+    let units: Vec<Unit> = matching
+        .by_ref()
+        .take(limit as usize)
+        .map(|unit| Unit::clone(unit))
+        .collect();
     let next_cursor = match (matching.next(), units.last()) {
         (Some(_), Some(last)) => {
             // A first page registers its snapshot for retention, even one

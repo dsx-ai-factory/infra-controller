@@ -15,18 +15,25 @@
  * limitations under the License.
  */
 
-//! A soak of the state path at the size of a 250-rack site, on tokio's
-//! paused clock: device sweeps of 4,500 hosts with two DPUs each, 2,250
-//! switches, 2,000 power shelves and 250 racks, with host states and
-//! versions changing between sweeps, clients paging between and across
-//! sweeps, and the registry scraped. Retained state must plateau: kept
-//! snapshots, snapshots still alive anywhere, the label sets the collector
-//! tracks, the series count, and the heap bytes the test thread holds.
+//! Leak soaks of the state path, on tokio's paused clock, at 250 racks
+//! (4,500 hosts with two DPUs each, 2,250 switches, 2,000 power shelves) and
+//! at 1,000 racks (18,000 hosts, 9,000 switches, 8,000 shelves, an instance
+//! per host). Each runs 500 device sweeps while the site churns: host states,
+//! models and BMC versions change, a block of hosts is removed and comes back
+//! with the same IDs, reads fail, sweeps are cancelled, clients page across
+//! publications and abandon cursors, and every publication is scraped and
+//! JSON-encoded while it lands.
 //!
-//! Slow in a debug build, so ignored by default. Bytes are counted per
-//! thread, and the test runs on its own thread, so other tests running
-//! meanwhile do not change its count:
-//! `cargo test -p carbide-site-health-probe soak -- --ignored --nocapture`.
+//! Pass rule: every sweep keeps exactly the current and the kept snapshots
+//! alive within budget. After warm-up the retained heap has a least-squares
+//! slope of at most 1 KiB per sweep. The final quiescent state (the starting
+//! fixture, cursors expired, retired labels gone) holds no more bytes and no
+//! more allocations than the same state measured right after warm-up.
+//!
+//! Heap is what the test thread holds above the fake site, counted by the
+//! allocator below. It is not RSS. Slow, so ignored by default. Run alone in
+//! a release build:
+//! `cargo test --release -p carbide-site-health-probe soak -- --ignored --nocapture --test-threads=1`.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -35,33 +42,41 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use carbide_site_health_probe_api::{Family, UnitsResponse};
+use carbide_site_health_probe_api::{Family, Unit, UnitsResponse};
 use prometheus::core::{Collector, Desc};
 use prometheus::proto::MetricFamily;
+use rpc::forge::TenantState;
 
 use crate::api::{ApiState, router};
 use crate::config::{ReaderConfig, StateConfig};
 use crate::e2e_tests::get;
 use crate::framework::{ObservationRecorder, Probe};
-use crate::gate::CallGate;
+use crate::gate::{CallError, CallGate};
 use crate::nico::fake::{self, FakeConnector, FakeNico, FakeSite};
 use crate::readers::devices::{DEVICE_FAMILIES, DevicesReader};
 use crate::snapshot::{AnySnapshot, FailureKind, Reader, SnapshotSink};
 use crate::state::store::SnapshotStore;
-use crate::state_metrics::{CountingSink, StateCollector};
+use crate::state_metrics::{CountingSink, RETIRE_AFTER, StateCollector, units_of};
 use crate::summary::SummaryState;
 
-/// Counts the heap bytes each thread holds: what it allocated minus what
-/// it freed.
+/// Counts the heap bytes and allocations each thread holds: what it
+/// allocated minus what it freed.
 struct CountingAllocator;
 
 thread_local! {
     static LIVE: Cell<i64> = const { Cell::new(0) };
+    static PEAK: Cell<i64> = const { Cell::new(0) };
+    static ALLOCATIONS: Cell<i64> = const { Cell::new(0) };
 }
 
-fn count(delta: i64) {
+fn count(bytes: i64, allocations: i64) {
     // Unavailable while the thread is torn down; those frees go uncounted.
-    let _ = LIVE.try_with(|live| live.set(live.get() + delta));
+    let _ = LIVE.try_with(|live| {
+        let now = live.get() + bytes;
+        live.set(now);
+        let _ = PEAK.try_with(|peak| peak.set(peak.get().max(now)));
+    });
+    let _ = ALLOCATIONS.try_with(|live| live.set(live.get() + allocations));
 }
 
 /// Heap bytes the current thread holds.
@@ -69,9 +84,19 @@ fn live_bytes() -> i64 {
     LIVE.with(Cell::get)
 }
 
+/// Allocations the current thread holds.
+fn live_allocations() -> i64 {
+    ALLOCATIONS.with(Cell::get)
+}
+
+/// The most heap bytes the current thread held since the last call.
+fn take_peak() -> i64 {
+    PEAK.with(|peak| peak.replace(live_bytes()))
+}
+
 // SAFETY: Every allocation operation delegates to `System` without changing pointer,
-// layout, size, or return-value semantics. The added bookkeeping touches only a
-// const-initialized thread-local `Cell` with no destructor, so it neither allocates
+// layout, size, or return-value semantics. The added bookkeeping touches only
+// const-initialized thread-local `Cell`s with no destructor, so it neither allocates
 // nor unwinds, and `System`'s `GlobalAlloc` guarantees remain intact.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -79,13 +104,13 @@ unsafe impl GlobalAlloc for CountingAllocator {
         // `GlobalAlloc::alloc`; it is forwarded unchanged to `System`.
         let ptr = unsafe { System.alloc(layout) };
         if !ptr.is_null() {
-            count(layout.size() as i64);
+            count(layout.size() as i64, 1);
         }
         ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        count(-(layout.size() as i64));
+        count(-(layout.size() as i64), -1);
         // SAFETY: The caller guarantees that `ptr` is a live allocation from this
         // allocator and that `layout` matches it. Every allocation originates from
         // `System`, so forwarding both unchanged preserves provenance.
@@ -97,7 +122,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         // `GlobalAlloc::alloc_zeroed`; it is forwarded unchanged to `System`.
         let ptr = unsafe { System.alloc_zeroed(layout) };
         if !ptr.is_null() {
-            count(layout.size() as i64);
+            count(layout.size() as i64, 1);
         }
         ptr
     }
@@ -109,7 +134,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         // originates from `System`, and all arguments are forwarded unchanged.
         let new = unsafe { System.realloc(ptr, layout, new_size) };
         if !new.is_null() {
-            count(new_size as i64 - layout.size() as i64);
+            count(new_size as i64 - layout.size() as i64, 0);
         }
         new
     }
@@ -118,40 +143,81 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static GLOBAL: CountingAllocator = CountingAllocator;
 
-const HOSTS: u32 = 4_500;
-const SWITCHES: u32 = 2_250;
-const SHELVES: u32 = 2_000;
-const RACKS: u32 = 250;
-const SWEEPS: u32 = 30;
+/// A soak's site: hosts (two DPUs each), switches, power shelves, racks,
+/// and whether every host runs an instance.
+#[derive(Clone, Copy)]
+struct Scale {
+    hosts: u32,
+    switches: u32,
+    shelves: u32,
+    racks: u32,
+    instances: bool,
+}
+
+const RACKS_250: Scale = Scale {
+    hosts: 4_500,
+    switches: 2_250,
+    shelves: 2_000,
+    racks: 250,
+    instances: false,
+};
+
+const RACKS_1000: Scale = Scale {
+    hosts: 18_000,
+    switches: 9_000,
+    shelves: 8_000,
+    racks: 1_000,
+    instances: true,
+};
+
+const SWEEPS: u32 = 500;
+/// Sweeps before the leak checks start: three retention windows and the
+/// 15-minute label retirement, at least.
+const WARMUP: u32 = 20;
+/// Sweeps after the warm-up's quiescent check that refill the kept
+/// snapshots and label sets before the slope is fitted.
+const REWARM: u32 = 10;
 const INTERVAL: Duration = Duration::from_secs(120);
-/// Sweeps that fill the 15-minute retirement window, then the sweeps whose
-/// retained state must not exceed theirs.
-const WARM: std::ops::RangeInclusive<u32> = 9..=15;
-const STEADY: std::ops::RangeInclusive<u32> = 16..=SWEEPS;
 /// Hosts that leave Ready each sweep, a different block every sweep.
 const CHURN: u32 = 50;
-/// Hosts whose BMC version is new every sweep, so a `hosts` label set
-/// appears and retires every sweep.
+/// Hosts removed each sweep. The block removed one sweep comes back the
+/// next, with the same IDs.
+const REMOVED: u32 = 20;
+/// Hosts whose model and BMC version are new every sweep, so `hosts` label
+/// sets appear and retire all the time.
 const CANARIES: u32 = 5;
 const PAGE: u32 = 1_000;
+/// Every this many sweeps a switch read fails, which also fails the
+/// expected family.
+const FAIL_EVERY: u32 = 7;
+/// Every this many sweeps the sweep is cancelled at its timeout.
+const CANCEL_EVERY: u32 = 11;
+/// The retained heap may grow at most this much per sweep after warm-up.
+const MAX_SLOPE: f64 = 1024.0;
+/// What the final quiescent state may hold beyond the warm-up one.
+const QUIESCENT_BYTES: i64 = 1 << 20;
+const QUIESCENT_ALLOCATIONS: f64 = 0.001;
 
-fn site() -> FakeSite {
+fn site(scale: Scale) -> FakeSite {
     let mut site = FakeSite::default();
-    for i in 1..=HOSTS {
+    for i in 1..=scale.hosts {
         site.add_host(fake::host(i, "Ready", &[2 * i - 1, 2 * i]));
         site.expected_machines
             .push(fake::expected_machine(i, Some(i)));
+        if scale.instances {
+            site.add_instance(fake::instance(i, i, TenantState::Ready));
+        }
     }
-    for i in 1..=SWITCHES {
+    for i in 1..=scale.switches {
         site.add_switch(fake::switch(i, "ready"));
         site.expected_switches
             .push(fake::expected_switch(i, Some(i)));
     }
-    for i in 1..=SHELVES {
+    for i in 1..=scale.shelves {
         site.add_shelf(fake::shelf(i, "ready"));
         site.expected_shelves.push(fake::expected_shelf(i, Some(i)));
     }
-    for i in 1..=RACKS {
+    for i in 1..=scale.racks {
         site.add_rack(fake::rack(i, "ready"));
         site.expected_racks.push(fake::expected_rack(i));
         site.expected_rack_groups
@@ -160,31 +226,51 @@ fn site() -> FakeSite {
     site
 }
 
-/// Moves the site to sweep `k`: one block of hosts is not Ready, and the
-/// canaries report a BMC version no earlier sweep saw.
-fn churn(site: &mut FakeSite, k: u32) {
-    let blocks = HOSTS / CHURN;
-    let block = |k: u32| (k % blocks) * CHURN + 1..=(k % blocks) * CHURN + CHURN;
-    for i in 1..=HOSTS {
-        let host = site
-            .hosts
-            .get_mut(&fake::host_id(i).to_string())
-            .expect("host");
-        host.state = if block(k).contains(&i) {
+/// Moves the site to sweep `k`, or back to its starting fixture for `None`:
+/// one block of hosts is not Ready, one block is gone, and the canaries
+/// report a model and a BMC version that change every sweep.
+fn set_sweep(site: &mut FakeSite, scale: Scale, k: Option<u32>) {
+    let block = |size: u32| {
+        let blocks = scale.hosts / size;
+        k.map(|k| (k % blocks) * size + 1..=(k % blocks) * size + size)
+    };
+    let (churned, removed) = (block(CHURN), block(REMOVED));
+    for i in 1..=scale.hosts {
+        let id = fake::host_id(i).to_string();
+        if removed.as_ref().is_some_and(|r| r.contains(&i)) {
+            if let Some(host) = site.hosts.remove(&id) {
+                for dpu in host.dpu_ids {
+                    site.dpus.remove(&dpu.to_string());
+                }
+            }
+            continue;
+        }
+        let host = match site.hosts.get_mut(&id) {
+            Some(host) => host,
+            None => {
+                site.add_host(fake::host(i, "Ready", &[2 * i - 1, 2 * i]));
+                site.hosts.get_mut(&id).expect("host")
+            }
+        };
+        host.state = if churned.as_ref().is_some_and(|c| c.contains(&i)) {
             "HostInitializing/WaitingForDiscovery".to_string()
         } else {
             "Ready".to_string()
         };
         if i <= CANARIES {
-            host.bmc_version = Some(format!("canary-{k}"));
+            let fresh = fake::host(i, "Ready", &[]);
+            host.model = k.map_or(fresh.model, |k| Some(format!("model-{}", k % 60)));
+            host.bmc_version = k.map_or(fresh.bmc_version, |k| Some(format!("canary-{k}")));
         }
     }
 }
 
 /// Stores every delivery and remembers each published snapshot weakly, so
-/// the test sees whether a replaced snapshot is still alive anywhere.
+/// the test sees whether a replaced snapshot is still alive anywhere. Every
+/// publication is scraped and its first page JSON-encoded while it lands.
 struct Tracking {
     inner: CountingSink,
+    registry: prometheus::Registry,
     published: Mutex<Vec<(Family, Weak<dyn AnySnapshot>)>>,
 }
 
@@ -207,7 +293,17 @@ impl SnapshotSink for Tracking {
             .lock()
             .unwrap()
             .push((family, Arc::downgrade(&snap)));
+        if let Some(data) = units_of(snap.as_ref()) {
+            let page: Vec<&Unit> = data
+                .units
+                .iter()
+                .take(PAGE as usize)
+                .map(|u| &**u)
+                .collect();
+            drop(serde_json::to_vec(&page).expect("encode a page"));
+        }
         self.inner.publish(family, snap);
+        drop(self.registry.gather());
     }
 
     fn failed(&self, reader: Reader, family: Family, kind: FailureKind, error: &str) {
@@ -256,161 +352,276 @@ async fn first_page(app: &axum::Router, kind: &str) -> String {
     reply.expect("units reply").next_cursor.expect("more pages")
 }
 
-/// What one sweep left behind.
+/// What one sweep left behind, above the fake site.
 #[derive(Debug, Clone, Copy)]
 struct Retained {
-    kept: usize,
-    label_sets: usize,
-    series: usize,
     bytes: i64,
+    /// The most heap held during the sweep, its paging and scrapes.
+    peak: i64,
 }
 
-#[tokio::test(start_paused = true)]
-#[ignore = "slow: 30 sweeps at 250-rack size; run alone with --ignored"]
-async fn soak_retained_state_plateaus() {
-    let t0 = crate::clock::now();
-    let started = tokio::time::Instant::now();
-    let cfg = StateConfig::default();
-
-    let setup = metrics_endpoint::new_metrics_setup("site-health-probe", "test", false)
-        .expect("metrics setup");
-    let store = Arc::new(SnapshotStore::new(&cfg.paging));
-    let collector = Arc::new(StateCollector::new(
-        Arc::clone(&store),
-        t0,
-        cfg.nico_api.host_read,
-    ));
-    setup
-        .registry
-        .register(Box::new(Shared(Arc::clone(&collector))))
-        .expect("register");
-    let sink = Arc::new(Tracking {
-        inner: CountingSink::new(Arc::clone(&store), &setup.meter),
-        published: Mutex::new(Vec::new()),
+/// The least-squares slope of `points`, per step.
+fn slope(points: &[(f64, f64)]) -> f64 {
+    let n = points.len() as f64;
+    let (sx, sy) = points
+        .iter()
+        .fold((0.0, 0.0), |(sx, sy), (x, y)| (sx + x, sy + y));
+    let (mx, my) = (sx / n, sy / n);
+    let (num, den) = points.iter().fold((0.0, 0.0), |(num, den), (x, y)| {
+        (num + (x - mx) * (y - my), den + (x - mx) * (x - mx))
     });
+    num / den
+}
 
-    let nico = FakeNico::new(site());
-    let reader = DevicesReader::new(
-        ReaderConfig {
-            enabled: true,
-            interval: INTERVAL,
-            timeout: Duration::from_secs(600),
-        },
-        cfg.nico_api.batch_size,
-        Arc::new(FakeConnector(Arc::clone(&nico))),
-        Arc::new(CallGate::new(
-            "nico-api",
-            cfg.caps.calls_per_second,
-            cfg.caps.call_timeout,
-            cfg.caps.max_backoff,
-        )),
-        Arc::clone(&sink) as Arc<dyn SnapshotSink>,
-        t0,
-    );
-    let app = router(ApiState::new(
-        Arc::clone(&store),
-        &cfg,
-        SummaryState::unused(&cfg.metrics_store),
-    ));
-    let budget = cfg.paging.needed_for(INTERVAL);
+/// The soak's moving parts.
+struct Soak {
+    scale: Scale,
+    store: Arc<SnapshotStore>,
+    sink: Arc<Tracking>,
+    collector: Arc<StateCollector>,
+    registry: prometheus::Registry,
+    nico: Arc<FakeNico>,
+    reader: DevicesReader,
+    app: axum::Router,
+    rest_off: axum::Router,
+    /// Heap the fake site and the setup hold before the first sweep.
+    base: (i64, i64),
+}
 
-    let mut retained: BTreeMap<u32, Retained> = BTreeMap::new();
-    for k in 1..=SWEEPS {
-        tokio::time::sleep_until(started + INTERVAL * (k - 1)).await;
-        churn(&mut nico.site.lock().unwrap(), k);
+impl Soak {
+    fn new(scale: Scale) -> Self {
+        let t0 = crate::clock::now();
+        let cfg = StateConfig::default();
+        let setup = metrics_endpoint::new_metrics_setup("site-health-probe", "test", false)
+            .expect("metrics setup");
+        let store = Arc::new(SnapshotStore::new(&cfg.paging));
+        let collector = Arc::new(StateCollector::new(
+            Arc::clone(&store),
+            t0,
+            cfg.nico_api.host_read,
+        ));
+        setup
+            .registry
+            .register(Box::new(Shared(Arc::clone(&collector))))
+            .expect("register");
+        let sink = Arc::new(Tracking {
+            inner: CountingSink::new(Arc::clone(&store), &setup.meter),
+            registry: setup.registry.clone(),
+            published: Mutex::new(Vec::new()),
+        });
+        let nico = FakeNico::new(site(scale));
+        let reader = DevicesReader::new(
+            ReaderConfig {
+                enabled: true,
+                interval: INTERVAL,
+                timeout: Duration::from_secs(600),
+            },
+            cfg.nico_api.batch_size,
+            Arc::new(FakeConnector(Arc::clone(&nico))),
+            Arc::new(CallGate::new(
+                "nico-api",
+                cfg.caps.calls_per_second,
+                cfg.caps.call_timeout,
+                cfg.caps.max_backoff,
+            )),
+            Arc::clone(&sink) as Arc<dyn SnapshotSink>,
+            t0,
+        );
+        let app = router(ApiState::new(
+            Arc::clone(&store),
+            &cfg,
+            SummaryState::unused(&cfg.metrics_store),
+        ));
+        let mut off = cfg;
+        off.readers.rest_inventory.enabled = false;
+        let rest_off = router(ApiState::new(
+            Arc::clone(&store),
+            &off,
+            SummaryState::unused(&off.metrics_store),
+        ));
+        // The meter's instruments are created lazily; one gather sets them up
+        // before the baseline.
+        drop(setup.registry.gather());
+        Self {
+            scale,
+            store,
+            sink,
+            collector,
+            registry: setup.registry,
+            nico,
+            reader,
+            app,
+            rest_off,
+            base: (live_bytes(), live_allocations()),
+        }
+    }
+
+    /// One sweep `k` with its clients, failures and cancellations.
+    async fn sweep(&self, k: u32) {
+        set_sweep(&mut self.nico.site.lock().unwrap(), self.scale, Some(k));
         // A client starts paging hosts on the current snapshot and finishes
         // after the next one replaced it.
         let across = if k > 1 {
-            Some(first_page(&app, "host").await)
+            Some(first_page(&self.app, "host").await)
         } else {
             None
         };
+        if k.is_multiple_of(FAIL_EVERY) {
+            self.nico.fail_next(
+                "find_switches_by_ids",
+                CallError::Status("gRPC Internal".to_string()),
+            );
+        }
+        let recorder = ObservationRecorder::default();
+        let run = self.reader.run(&recorder);
+        if k.is_multiple_of(CANCEL_EVERY) {
+            // The scheduler drops a sweep at its timeout and records it.
+            tokio::select! {
+                _ = run => {}
+                () = tokio::time::sleep(Duration::from_secs(5)) => self.reader.timed_out(),
+            }
+        } else {
+            // Failed families keep their last snapshot.
+            let _ = run.await;
+        }
+        if let Some(cursor) = across {
+            page_all(&self.app, "host", Some(cursor)).await;
+        }
+        page_all(&self.app, "host", None).await;
+        // Abandoned listings.
+        let _dpus = first_page(&self.app, "dpu").await;
+        if self.scale.instances {
+            let _instances = first_page(&self.app, "instance").await;
+        }
+        let (on, _) = get::<serde_json::Value>(&self.app, "/v1/config").await;
+        assert_eq!(on, StatusCode::SERVICE_UNAVAILABLE, "no REST reader runs");
+        let (off, _) = get::<serde_json::Value>(&self.rest_off, "/v1/config").await;
+        assert_eq!(off, StatusCode::OK);
+        drop(self.registry.gather());
+        self.nico.clear_calls();
+    }
 
-        reader
+    /// Checks that each family keeps only its current snapshot and the
+    /// replaced ones still in their keep time.
+    fn check_alive(&self, k: u32) {
+        let budget = StateConfig::default().paging.needed_for(INTERVAL);
+        let alive = self.sink.alive();
+        for family in DEVICE_FAMILIES {
+            let kept = self.store.kept(family);
+            assert!(
+                kept <= budget,
+                "sweep {k}: {family:?} keeps {kept} replaced snapshots, budget {budget}"
+            );
+            if !matches!(family, Family::Host | Family::Dpu | Family::Instance) {
+                assert_eq!(kept, 0, "sweep {k}: {family:?} keeps unpaged snapshots");
+            }
+            let live = alive.get(&family).copied().unwrap_or_default();
+            assert!(
+                live == kept + 1 || live == kept,
+                "sweep {k}: {family:?} has {live} snapshots alive, {kept} kept"
+            );
+        }
+    }
+
+    /// Heap bytes and allocations in the starting fixture's quiescent state:
+    /// one clean sweep of it, every cursor and retired label expired, the
+    /// lazy expiry triggered and the registry gathered.
+    async fn quiescent(&self) -> (i64, i64) {
+        set_sweep(&mut self.nico.site.lock().unwrap(), self.scale, None);
+        self.reader
             .run(&ObservationRecorder::default())
             .await
-            .expect("complete sweep");
-
-        if let Some(cursor) = across {
-            assert_eq!(
-                page_all(&app, "host", Some(cursor)).await,
-                (HOSTS - PAGE) as usize,
-                "sweep {k}: paging across a publication"
-            );
-        }
-        // A client pages every host of the new snapshot, another abandons
-        // a DPU listing after its first page.
-        assert_eq!(page_all(&app, "host", None).await, HOSTS as usize);
-        let _abandoned = first_page(&app, "dpu").await;
-        let mut series = 0;
-        for _ in 0..2 {
-            series = setup
-                .registry
-                .gather()
-                .iter()
-                .map(|family| family.get_metric().len())
-                .sum();
-        }
-        nico.clear_calls();
-
-        let alive = sink.alive();
-        let mut kept = 0;
+            .expect("clean sweep");
+        let keep = Duration::from_secs(StateConfig::default().paging.keep_seconds);
+        tokio::time::sleep(keep.max(RETIRE_AFTER) + Duration::from_secs(1)).await;
         for family in DEVICE_FAMILIES {
-            let family_kept = store.kept(family);
-            assert!(
-                family_kept <= budget,
-                "sweep {k}: {family:?} keeps {family_kept} replaced snapshots, budget {budget}"
-            );
-            // Only hosts and DPUs get cursors; replaced snapshots of the
-            // other families are dropped at once.
-            if !matches!(family, Family::Host | Family::Dpu) {
-                assert_eq!(
-                    family_kept, 0,
-                    "sweep {k}: {family:?} keeps snapshots no cursor points into"
-                );
-            }
-            assert_eq!(
-                alive.get(&family).copied().unwrap_or_default(),
-                1 + family_kept,
-                "sweep {k}: {family:?} snapshots alive beyond the current and the kept ones"
-            );
-            kept += family_kept;
+            let _ = self.store.by_id(family, "expire-now");
         }
-        let now = Retained {
-            kept,
-            label_sets: collector.tracked_label_sets(),
-            series,
-            bytes: live_bytes(),
-        };
-        eprintln!(
-            "sweep {k:>2}: kept {:>2} snapshots, {:>4} label sets, {:>4} series, {:>6.1} MiB",
-            now.kept,
-            now.label_sets,
-            now.series,
-            now.bytes as f64 / f64::from(1 << 20)
-        );
-        retained.insert(k, now);
+        drop(self.registry.gather());
+        drop(self.registry.gather());
+        self.nico.clear_calls();
+        (live_bytes() - self.base.0, live_allocations() - self.base.1)
     }
+}
 
-    type Measure = fn(&Retained) -> i64;
-    let most = |range: std::ops::RangeInclusive<u32>, of: Measure| {
-        range.map(|k| of(&retained[&k])).max().expect("sweeps")
-    };
-    let checks: [(&str, Measure, i64); 4] = [
-        ("kept snapshots", |r| r.kept as i64, 0),
-        ("label sets", |r| r.label_sets as i64, 0),
-        ("series", |r| r.series as i64, 0),
-        // String lengths change with the canary versions; a leaked
-        // snapshot is megabytes.
-        ("heap bytes", |r| r.bytes, 1 << 20),
-    ];
-    for (what, of, slack) in checks {
-        let warm = most(WARM, of);
-        let steady = most(STEADY, of);
-        assert!(
-            steady <= warm + slack,
-            "{what} grew after the warm-up: {steady} after sweep {}, at most {warm} before",
-            WARM.end()
-        );
+/// Runs the soak at `scale` and checks the pass rule. Returns each sweep's
+/// retained heap and peak.
+async fn soak(name: &str, scale: Scale) -> BTreeMap<u32, Retained> {
+    let soak = Soak::new(scale);
+    let mib = |bytes: i64| bytes as f64 / f64::from(1 << 20);
+    eprintln!("{name}: fake site and setup {:.1} MiB", mib(soak.base.0));
+    let mut retained: BTreeMap<u32, Retained> = BTreeMap::new();
+    let mut warm = None;
+    // Like the scheduler, sweeps start at least an interval apart.
+    let mut next = tokio::time::Instant::now();
+    for k in 1..=SWEEPS {
+        tokio::time::sleep_until(next).await;
+        next = tokio::time::Instant::now() + INTERVAL;
+        take_peak();
+        soak.sweep(k).await;
+        soak.check_alive(k);
+        let now = Retained {
+            bytes: live_bytes() - soak.base.0,
+            peak: take_peak() - soak.base.0,
+        };
+        if k == 1 || k.is_multiple_of(50) || k == WARMUP {
+            eprintln!(
+                "{name} sweep {k:>3}: {:>6.1} MiB retained, peak {:>6.1} MiB, {} label sets",
+                mib(now.bytes),
+                mib(now.peak),
+                soak.collector.tracked_label_sets(),
+            );
+        }
+        retained.insert(k, now);
+        if k == WARMUP {
+            warm = Some(soak.quiescent().await);
+            next = tokio::time::Instant::now();
+        }
     }
+    let warm = warm.expect("warm-up baseline");
+    let last = soak.quiescent().await;
+    let peak = retained.values().map(|r| r.peak).max().expect("sweeps");
+    let steady: Vec<(f64, f64)> = retained
+        .range(WARMUP + REWARM..)
+        .map(|(k, r)| (f64::from(*k), r.bytes as f64))
+        .collect();
+    let slope = slope(&steady);
+    eprintln!(
+        "{name}: peak {:.1} MiB, slope {slope:.1} bytes per sweep, quiescent {:.1} MiB and \
+         {} allocations after warm-up, {:.1} MiB and {} at the end",
+        mib(peak),
+        mib(warm.0),
+        warm.1,
+        mib(last.0),
+        last.1
+    );
+    assert!(
+        slope <= MAX_SLOPE,
+        "{name}: retained heap grows {slope:.1} bytes per sweep after warm-up"
+    );
+    assert!(
+        last.0 <= warm.0 + QUIESCENT_BYTES,
+        "{name}: quiescent heap {} bytes at the end, {} after warm-up",
+        last.0,
+        warm.0
+    );
+    assert!(
+        last.1 as f64 <= warm.1 as f64 * (1.0 + QUIESCENT_ALLOCATIONS),
+        "{name}: {} quiescent allocations at the end, {} after warm-up",
+        last.1,
+        warm.1
+    );
+    retained
+}
+
+#[tokio::test(start_paused = true)]
+#[ignore = "slow: 500 sweeps at 250 racks; run alone in release with --ignored"]
+async fn soak_250_racks_full_read() {
+    soak("250 racks, full read", RACKS_250).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[ignore = "slow: 500 sweeps at 1,000 racks; run alone in release with --ignored"]
+async fn soak_1000_racks_full_read() {
+    soak("1,000 racks, full read", RACKS_1000).await;
 }

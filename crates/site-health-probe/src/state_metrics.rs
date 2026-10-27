@@ -444,7 +444,7 @@ pub(crate) fn family_series(family: Family, snap: &dyn AnySnapshot, series: &mut
 
 /// `units{type, stage, state}`: every unit is registered; ready and error
 /// units also count under their own stage.
-fn unit_series(units: &[Unit], series: &mut Series) {
+fn unit_series(units: &[Arc<Unit>], series: &mut Series) {
     for unit in units {
         let labels = |stage: Stage| vec![wire(unit.unit_type), wire(stage), unit.state.clone()];
         add(series, "units", labels(Stage::Registered), 1.0);
@@ -468,7 +468,7 @@ pub(crate) fn instance_type_label(host: &HostFields) -> String {
         .unwrap_or_else(|| NONE.to_string())
 }
 
-fn host_series(units: &[Unit], series: &mut Series) {
+fn host_series(units: &[Arc<Unit>], series: &mut Series) {
     for (unit, host) in units.iter().filter_map(|u| u.host.as_ref().map(|h| (u, h))) {
         let allocatable = host.allocatable.map_or_else(|| UNKNOWN.to_string(), flag);
         add(
@@ -499,7 +499,7 @@ fn host_series(units: &[Unit], series: &mut Series) {
     }
 }
 
-fn expected_series(units: &[Unit], series: &mut Series) {
+fn expected_series(units: &[Arc<Unit>], series: &mut Series) {
     for unit in units {
         let Some(expected) = &unit.expected else {
             continue;

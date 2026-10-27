@@ -25,7 +25,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use carbide_site_health_probe_api::{Family, Unit};
+use carbide_site_health_probe_api::{Family, Source, Unit, UnitType};
 
 use crate::gate::CallError;
 
@@ -99,21 +99,71 @@ impl<T: Send + Sync + 'static> AnySnapshot for FamilySnapshot<T> {
     }
 }
 
-/// The units of a unit family, sorted by `(source, type, id)`.
+/// The units of a unit family, sorted by `(source, type, id)`. A unit
+/// equal to the previous snapshot's unit of the same key is the same
+/// allocation, so kept snapshots cost only the units that changed.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct UnitsData {
-    pub units: Vec<Unit>,
+    pub units: Vec<Arc<Unit>>,
     /// Units whose state was not in the pinned state table, published as
     /// `other`.
     pub unknown_states: u64,
 }
 
 impl UnitsData {
-    pub(crate) fn new(mut units: Vec<Unit>, unknown_states: u64) -> Self {
-        units.sort_by(|a, b| (a.source, a.unit_type, &a.id).cmp(&(b.source, b.unit_type, &b.id)));
+    /// Units that share nothing with an earlier snapshot.
+    #[cfg(test)]
+    pub(crate) fn new(units: Vec<Unit>, unknown_states: u64) -> Self {
+        let mut builder = UnitsBuilder::new(&[]);
+        builder.extend(units);
+        builder.finish(unknown_states)
+    }
+}
+
+fn unit_key(unit: &Unit) -> (Source, UnitType, &str) {
+    (unit.source, unit.unit_type, &unit.id)
+}
+
+/// Builds a family's units one at a time, sharing each unit that equals the
+/// previous snapshot's unit of the same source, type and ID.
+pub(crate) struct UnitsBuilder<'a> {
+    previous: &'a [Arc<Unit>],
+    units: Vec<Arc<Unit>>,
+}
+
+impl<'a> UnitsBuilder<'a> {
+    /// `previous` is the units of the family's last published snapshot.
+    pub(crate) fn new(previous: &'a [Arc<Unit>]) -> Self {
         Self {
-            units,
+            previous,
+            units: Vec::with_capacity(previous.len()),
+        }
+    }
+
+    pub(crate) fn push(&mut self, unit: Unit) {
+        let found = self
+            .previous
+            .binary_search_by(|old| unit_key(old).cmp(&unit_key(&unit)));
+        self.units.push(match found {
+            Ok(i) if *self.previous[i] == unit => Arc::clone(&self.previous[i]),
+            _ => Arc::new(unit),
+        });
+    }
+
+    pub(crate) fn finish(mut self, unknown_states: u64) -> UnitsData {
+        self.units.sort_by(|a, b| unit_key(a).cmp(&unit_key(b)));
+        self.units.shrink_to_fit();
+        UnitsData {
+            units: self.units,
             unknown_states,
+        }
+    }
+}
+
+impl Extend<Unit> for UnitsBuilder<'_> {
+    fn extend<I: IntoIterator<Item = Unit>>(&mut self, units: I) {
+        for unit in units {
+            self.push(unit);
         }
     }
 }
@@ -234,5 +284,50 @@ pub(crate) mod testing {
                 .unwrap()
                 .push((reader, family, kind, error.to_string()));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_site_health_probe_api::Stage;
+
+    use super::*;
+
+    fn unit(id: &str, state: &str) -> Unit {
+        Unit {
+            id: id.to_string(),
+            unit_type: UnitType::Switch,
+            source: Source::NicoApi,
+            stage: Stage::Registered,
+            done: false,
+            state: state.to_string(),
+            reason: None,
+            bmc_ip: None,
+            host: None,
+            dpu: None,
+            instance: None,
+            expected: None,
+        }
+    }
+
+    #[test]
+    fn units_builder_shares_only_equal_units() {
+        let previous = UnitsData::new(vec![unit("a", "ready"), unit("b", "ready")], 0);
+        let mut units = UnitsBuilder::new(&previous.units);
+        units.extend([unit("c", "ready"), unit("b", "error"), unit("a", "ready")]);
+        let units = units.finish(1);
+        let ids: Vec<&str> = units.units.iter().map(|u| u.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b", "c"], "sorted by key");
+        assert!(
+            Arc::ptr_eq(&units.units[0], &previous.units[0]),
+            "a is unchanged"
+        );
+        assert!(
+            !Arc::ptr_eq(&units.units[1], &previous.units[1]),
+            "b changed"
+        );
+        assert_eq!(units.units[1].state, "error");
+        assert_eq!(units.units.capacity(), 3);
+        assert_eq!(units.unknown_states, 1);
     }
 }
