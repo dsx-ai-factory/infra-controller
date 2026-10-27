@@ -31,6 +31,7 @@ pub mod credential_rotation;
 pub mod db_read;
 pub mod desired_firmware;
 pub mod dhcp_entry;
+pub mod dhcp_option_set;
 pub mod dhcp_record;
 pub mod direct_dispatch_firmware_job;
 pub mod dns;

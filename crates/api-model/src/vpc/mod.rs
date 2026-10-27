@@ -26,6 +26,7 @@ pub use capability::{
 };
 use carbide_network::ip::IpAddressFamily;
 use carbide_network::virtualization::VpcVirtualizationType;
+use carbide_uuid::dhcp_option_set::DhcpOptionSetId;
 use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::network_security_group::NetworkSecurityGroupId;
 use carbide_uuid::nvlink::NvLinkLogicalPartitionId;
@@ -78,6 +79,7 @@ pub struct VpcConfig {
     pub tenant_keyset_id: Option<String>,
     pub network_virtualization_type: VpcVirtualizationType,
     pub network_security_group_id: Option<NetworkSecurityGroupId>,
+    pub dhcp_option_set_id: Option<DhcpOptionSetId>,
     pub default_nvlink_logical_partition_id: Option<NvLinkLogicalPartitionId>,
     pub vni: Option<i32>,
     pub routing_profile_type: Option<String>,
@@ -130,6 +132,7 @@ pub struct NewVpc {
     pub network_virtualization_type: VpcVirtualizationType,
     pub metadata: Metadata,
     pub network_security_group_id: Option<NetworkSecurityGroupId>,
+    pub dhcp_option_set_id: Option<DhcpOptionSetId>,
     pub routing_profile_type: Option<String>,
     pub routing_profile_overrides: Option<VpcRoutingProfileOverrides>,
     pub power_resource_group: Option<String>,
@@ -142,6 +145,7 @@ pub struct NewVpc {
 pub struct UpdateVpc {
     pub id: VpcId,
     pub network_security_group_id: Option<NetworkSecurityGroupId>,
+    pub dhcp_option_set_id: Option<DhcpOptionSetId>,
     pub routing_profile_overrides: Option<VpcRoutingProfileOverrides>,
     pub power_resource_group: Option<PowerResourceGroupUpdate>,
     pub if_version_match: Option<ConfigVersion>,
@@ -200,6 +204,7 @@ impl<'r> sqlx::FromRow<'r, PgRow> for Vpc {
                 tenant_organization_id: row.try_get("organization_id")?,
                 tenant_keyset_id: None, // TODO: fix this once DB gets updated
                 network_security_group_id: row.try_get("network_security_group_id")?,
+                dhcp_option_set_id: row.try_get("dhcp_option_set_id")?,
                 network_virtualization_type: row.try_get("network_virtualization_type")?,
                 routing_profile_type: row.try_get("routing_profile_type")?,
                 routing_profile_overrides: row

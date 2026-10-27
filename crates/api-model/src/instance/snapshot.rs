@@ -17,6 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use carbide_uuid::dhcp_option_set::DhcpOptionSetId;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::instance_type::InstanceTypeId;
 use carbide_uuid::machine::{HostMachineId, MachineId};
@@ -206,6 +207,7 @@ pub struct InstanceSnapshotPgJson {
     pub operating_system_id: Option<uuid::Uuid>,
     instance_type_id: Option<InstanceTypeId>,
     network_security_group_id: Option<NetworkSecurityGroupId>,
+    dhcp_option_set_id: Option<DhcpOptionSetId>,
     #[serde(default)]
     power_profile: Option<String>,
     extension_services_config: InstanceExtensionServicesConfig,
@@ -246,6 +248,7 @@ pub fn from_pg_json_and_os(
         spxconfig: value.spx_config,
         nvlink: value.nvlink_config,
         network_security_group_id: value.network_security_group_id,
+        dhcp_option_set_id: value.dhcp_option_set_id,
         extension_services: value.extension_services_config,
         power_profile: value.power_profile,
     };
@@ -372,6 +375,7 @@ impl TryFrom<InstanceSnapshotPgJson> for InstanceSnapshot {
             infiniband: value.ib_config,
             nvlink: value.nvlink_config,
             network_security_group_id: value.network_security_group_id,
+            dhcp_option_set_id: value.dhcp_option_set_id,
             extension_services: value.extension_services_config,
             spxconfig: value.spx_config,
             power_profile: value.power_profile,
@@ -528,6 +532,7 @@ mod tests {
             operating_system_id: None,
             instance_type_id: None,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             power_profile: None,
             extension_services_config: InstanceExtensionServicesConfig::default(),
             extension_services_config_version: version,

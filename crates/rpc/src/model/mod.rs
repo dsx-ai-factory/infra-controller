@@ -23,6 +23,7 @@ pub mod attestation;
 pub mod bmc_info;
 pub mod compute_allocation;
 pub mod controller_outcome;
+pub mod dhcp_option_set;
 pub mod dhcp_record;
 pub mod dns;
 pub mod dpa_interface;

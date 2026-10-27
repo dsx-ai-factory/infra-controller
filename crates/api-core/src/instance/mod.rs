@@ -2270,6 +2270,33 @@ pub(crate) async fn batch_allocate_instances(
         }
     }
 
+    let dhcp_option_set_validations: HashSet<_> = requests
+        .iter()
+        .filter_map(|r| {
+            r.config
+                .dhcp_option_set_id
+                .as_ref()
+                .map(|id| (id, &r.config.tenant.tenant_organization_id))
+        })
+        .collect();
+
+    for (id, tenant_org_id) in &dhcp_option_set_validations {
+        if db::dhcp_option_set::find_by_ids(
+            &mut txn,
+            std::slice::from_ref(id),
+            Some(tenant_org_id),
+            false,
+        )
+        .await?
+        .pop()
+        .is_none()
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "DhcpOptionSet `{id}` does not exist or is not owned by tenant `{tenant_org_id}`"
+            )));
+        }
+    }
+
     // Collect every requested service ID before resolving them while their
     // service and version rows are locked.
     let service_ids = requests

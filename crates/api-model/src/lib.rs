@@ -42,6 +42,7 @@ pub mod bmc_suppression;
 pub mod component_manager;
 pub mod compute_allocation;
 pub mod controller_outcome;
+pub mod dhcp_option_set;
 pub mod dhcp_record;
 pub mod dns;
 pub mod dpa_interface;

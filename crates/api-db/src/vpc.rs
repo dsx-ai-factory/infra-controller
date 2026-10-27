@@ -74,9 +74,9 @@ pub async fn persist(
                 "INSERT INTO vpcs (id, name, organization_id, network_security_group_id, version, network_virtualization_type,
                 description,
                 labels, routing_profile_type, routing_profile_overrides, vni, status, power_resource_group,
-                slaac_enabled)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-                RETURNING id, version, organization_id, network_security_group_id,
+                slaac_enabled, dhcp_option_set_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                RETURNING id, version, organization_id, network_security_group_id, dhcp_option_set_id,
                 network_virtualization_type, routing_profile_type, routing_profile_overrides,
                 power_resource_group, slaac_enabled, vni, status, name, description, labels,
                 created, updated, deleted";
@@ -95,6 +95,7 @@ pub async fn persist(
         .bind(sqlx::types::Json(&status))
         .bind(value.power_resource_group)
         .bind(value.slaac_enabled)
+        .bind(value.dhcp_option_set_id)
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
@@ -202,7 +203,7 @@ async fn find_by_inner<'a, C: ColumnInfo<'a, TableType = Vpc>>(
     row_lock: VpcRowLock,
 ) -> Result<Vec<Vpc>, DatabaseError> {
     let mut query = FilterableQueryBuilder::new(
-        "SELECT id, version, organization_id, network_security_group_id,
+        "SELECT id, version, organization_id, network_security_group_id, dhcp_option_set_id,
                 network_virtualization_type, routing_profile_type, routing_profile_overrides,
                 power_resource_group, slaac_enabled, vni, status, name, description, labels,
                 created, updated, deleted
@@ -239,7 +240,8 @@ pub async fn find_by<'a, C: ColumnInfo<'a, TableType = Vpc>>(
 }
 
 pub async fn find_by_vni(txn: &mut PgConnection, vni: i32) -> Result<Vec<Vpc>, DatabaseError> {
-    let query = "SELECT id, version, organization_id, network_security_group_id,
+    let query =
+        "SELECT id, version, organization_id, network_security_group_id, dhcp_option_set_id,
                 network_virtualization_type, routing_profile_type, routing_profile_overrides,
                 power_resource_group, slaac_enabled, vni, status, name, description, labels,
                 created, updated, deleted
@@ -258,7 +260,7 @@ pub async fn set_vni(value: &Vpc, txn: &mut PgConnection, vni: i32) -> DatabaseR
     let query = "UPDATE vpcs
             SET vni=$1, status=jsonb_set(status, '{vni}', to_jsonb($1::integer), true), updated=NOW()
             WHERE id=$2 AND deleted is null
-            RETURNING id, version, organization_id, network_security_group_id,
+            RETURNING id, version, organization_id, network_security_group_id, dhcp_option_set_id,
                 network_virtualization_type, routing_profile_type, routing_profile_overrides,
                 power_resource_group, slaac_enabled, vni, status, name, description, labels,
                 created, updated, deleted";
@@ -287,7 +289,7 @@ pub async fn change_routing_profile(
             status = jsonb_set(status, '{vni}', to_jsonb($2::integer), true),
             version = $3, updated = NOW()
         WHERE id = $4 AND version = $5 AND deleted IS NULL
-        RETURNING id, version, organization_id, network_security_group_id,
+        RETURNING id, version, organization_id, network_security_group_id, dhcp_option_set_id,
                 network_virtualization_type, routing_profile_type, routing_profile_overrides,
                 power_resource_group, slaac_enabled, vni, status, name, description, labels,
                 created, updated, deleted";
@@ -321,7 +323,7 @@ pub async fn find_by_segment(
     segment_id: NetworkSegmentId,
 ) -> Result<Option<Vpc>, DatabaseError> {
     let mut query = FilterableQueryBuilder::new(
-        "SELECT v.id, v.version, v.organization_id, v.network_security_group_id,
+        "SELECT v.id, v.version, v.organization_id, v.network_security_group_id, v.dhcp_option_set_id,
                 v.network_virtualization_type, v.routing_profile_type, v.routing_profile_overrides,
                 v.power_resource_group, v.slaac_enabled, v.vni, v.status, v.name, v.description,
                 v.labels, v.created, v.updated, v.deleted
@@ -411,7 +413,7 @@ pub async fn try_delete(txn: &mut PgConnection, id: VpcId) -> Result<Option<Vpc>
     }
 
     let query = "UPDATE vpcs SET updated=NOW(), deleted=NOW() WHERE id=$1 AND deleted IS NULL
-        RETURNING id, version, organization_id, network_security_group_id,
+        RETURNING id, version, organization_id, network_security_group_id, dhcp_option_set_id,
                 network_virtualization_type, routing_profile_type, routing_profile_overrides,
                 power_resource_group, slaac_enabled, vni, status, name, description, labels,
                 created, updated, deleted";
@@ -450,9 +452,10 @@ pub async fn update(value: &UpdateVpc, txn: &mut PgConnection) -> DatabaseResult
                 labels=$5::json,
                 routing_profile_overrides=COALESCE($6::jsonb, routing_profile_overrides),
                 power_resource_group=CASE WHEN $7 THEN $8 ELSE power_resource_group END,
+                dhcp_option_set_id=$11,
                 updated=NOW()
             WHERE id=$9 AND version=$10 AND deleted is null
-            RETURNING id, version, organization_id, network_security_group_id,
+            RETURNING id, version, organization_id, network_security_group_id, dhcp_option_set_id,
                 network_virtualization_type, routing_profile_type, routing_profile_overrides,
                 power_resource_group, slaac_enabled, vni, status, name, description, labels,
                 created, updated, deleted";
@@ -480,6 +483,7 @@ pub async fn update(value: &UpdateVpc, txn: &mut PgConnection) -> DatabaseResult
         .bind(power_resource_group)
         .bind(value.id)
         .bind(current_version)
+        .bind(value.dhcp_option_set_id)
         .fetch_one(txn)
         .await;
 
@@ -506,7 +510,7 @@ pub async fn update_virtualization(
     let query = "UPDATE vpcs
             SET version=$1, network_virtualization_type=$2, updated=NOW()
             WHERE id=$3 AND version=$4 AND deleted is null
-            RETURNING id, version, organization_id, network_security_group_id,
+            RETURNING id, version, organization_id, network_security_group_id, dhcp_option_set_id,
                 network_virtualization_type, routing_profile_type, routing_profile_overrides,
                 power_resource_group, slaac_enabled, vni, status, name, description, labels,
                 created, updated, deleted";
