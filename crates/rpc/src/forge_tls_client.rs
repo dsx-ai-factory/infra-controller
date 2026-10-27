@@ -237,9 +237,11 @@ impl ForgeClientConfig {
     }
 
     /// Makes every connection present the configured client certificate.
-    /// The certificate and key are read again for each connection, and by
-    /// default a pair that does not load connects without a client
-    /// certificate. With this set, such a connection fails instead.
+    /// The certificate and key are read each time a client is built, and by
+    /// default a pair that does not load builds a client that connects
+    /// without a client certificate. With this set, such a pair makes client
+    /// construction fail instead, and plaintext `http://` URLs are refused
+    /// because they carry no client certificate.
     #[must_use]
     pub fn require_client_cert(mut self) -> Self {
         self.require_client_cert = true;
@@ -805,15 +807,20 @@ impl<'a> ForgeTlsClient<'a> {
         http.set_connect_retries_max(self.forge_client_config.connect_retries_max);
         http.set_connect_retries_interval(self.forge_client_config.connect_retries_interval);
 
+        let require_cert = self.forge_client_config.require_client_cert;
         let connector = tower::ServiceBuilder::new()
             .layer_fn(move |s| {
                 let tls = tls.clone();
 
-                hyper_rustls::HttpsConnectorBuilder::new()
-                    .with_tls_config(tls)
-                    .https_or_http()
-                    .enable_http2()
-                    .wrap_connector(s)
+                let builder = hyper_rustls::HttpsConnectorBuilder::new().with_tls_config(tls);
+                // A plaintext connection carries no client cert, so a required
+                // one must not be allowed to fall back to it.
+                let builder = if require_cert {
+                    builder.https_only()
+                } else {
+                    builder.https_or_http()
+                };
+                builder.enable_http2().wrap_connector(s)
             })
             .service(http);
         Ok(connector)
@@ -993,16 +1000,15 @@ mod tests {
     use hyper::rt::Executor as _;
     use hyper_rustls::HttpsConnector;
     use hyper_util::rt::TokioExecutor;
+    use tower::ServiceExt as _;
     use tracing::Instrument as _;
 
     use super::*;
 
-    /// A client whose certificate or key no longer loads connects without a
-    /// client certificate by default, and refuses to when it requires one.
-    #[tokio::test]
-    async fn required_client_cert_that_does_not_load_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = |name: &str| dir.path().join(name).display().to_string();
+    /// Writes a self-signed root CA and client cert pair into `dir` and returns
+    /// a config that points at them.
+    fn config_with_client_cert(dir: &std::path::Path) -> ForgeClientConfig {
+        let path = |name: &str| dir.join(name).display().to_string();
         let key = rcgen::KeyPair::generate().unwrap();
         let cert = rcgen::CertificateParams::default()
             .self_signed(&key)
@@ -1018,6 +1024,16 @@ mod tests {
             }),
         );
         config.enforce_tls = true;
+        config
+    }
+
+    /// A client whose certificate or key no longer loads connects without a
+    /// client certificate by default, and refuses to when it requires one.
+    #[tokio::test]
+    async fn required_client_cert_that_does_not_load_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| dir.path().join(name).display().to_string();
+        let config = config_with_client_cert(dir.path());
         let required = config.clone().require_client_cert();
         let url = "https://127.0.0.1:1";
         let build =
@@ -1033,6 +1049,47 @@ mod tests {
         assert_eq!(
             refused.to_string(),
             "configuration error: the required client certificate and key do not load"
+        );
+    }
+
+    /// A plaintext URL carries no client certificate, so a client that
+    /// requires one refuses it where the default config still connects.
+    #[tokio::test]
+    async fn required_client_cert_refuses_plaintext_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_client_cert(dir.path());
+        let required = config.clone().require_client_cert();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let connect = |config| {
+            let (url, uri) = (url.clone(), url.parse::<Uri>().unwrap());
+            async move {
+                let connector = ForgeTlsClient::new(config)
+                    .build_https_client(url)
+                    .await
+                    .unwrap();
+                connector.oneshot(uri).await
+            }
+        };
+
+        assert!(
+            connect(&config).await.is_ok(),
+            "by default a plaintext URL connects"
+        );
+        tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("the default config reaches the listener")
+            .unwrap();
+
+        assert!(
+            connect(&required).await.is_err(),
+            "a required client cert is not bypassed over plaintext"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "the refused connection never reaches the listener"
         );
     }
 
