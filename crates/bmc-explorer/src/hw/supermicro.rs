@@ -44,10 +44,37 @@ pub const EXPECTED_BIOS_ATTRS_PREFIXES: [BiosAttr; 15] = [
     BiosAttr::new_any_str("SecurityDeviceSupport", &["Enabled", "Enable"]),
 ];
 
+/// Supermicro reports the BIOS version with its date, as
+/// "BIOS Date: 12/13/2024 Ver 2.0b". Returns the part after "Ver ", so that
+/// firmware versions compare correctly. Other versions are returned unchanged.
+pub(crate) fn firmware_version(version: &str) -> &str {
+    version
+        .strip_prefix("BIOS Date: ")
+        .and_then(|rest| rest.split_once(" Ver "))
+        .map_or(version, |(_, version)| version)
+}
+
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::value_scenarios;
+
     use super::*;
     use crate::hw::BiosAttrValue;
+
+    #[test]
+    fn firmware_version_keeps_only_the_bios_version() {
+        value_scenarios!(run = firmware_version;
+            "BIOS version with date" {
+                "BIOS Date: 12/13/2024 Ver 2.0b" => "2.0b",
+                "BIOS Date: 01/01/2025 Ver 2.4.V1" => "2.4.V1",
+            }
+            "other versions are unchanged" {
+                "01.03.41" => "01.03.41",
+                "CPLD_ID: 03E0 Rev: 0F" => "CPLD_ID: 03E0 Rev: 0F",
+                "Not Present" => "Not Present",
+            }
+        );
+    }
 
     #[test]
     fn intel_virtualization_accepts_both_value_vocabularies() {
