@@ -26,6 +26,10 @@ import (
 )
 
 func TestHTTPServiceRoutes(t *testing.T) {
+	previousVersion := Version
+	Version = "test-release"
+	t.Cleanup(func() { Version = previousVersion })
+
 	ctx := WithDefaultLogger(context.Background())
 
 	s := NewHTTPService("")
@@ -56,7 +60,7 @@ func TestHTTPServiceRoutes(t *testing.T) {
 	assert.Equal(t, http.StatusOK, code)
 
 	body, code = run("GET", "/version", "")
-	assert.Equal(t, "0.1.0\n", body)
+	assert.Equal(t, "test-release\n", body)
 	assert.Equal(t, http.StatusOK, code)
 
 	body, code = run("GET", "/metrics", "")

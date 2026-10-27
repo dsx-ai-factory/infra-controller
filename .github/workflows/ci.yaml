@@ -68,6 +68,9 @@ jobs:
       - name: Test CI final-gate checker
         run: python3 -B .github/ci/test_check_ci_gate.py
 
+      - name: Test Fern preview generation
+        run: python3 -B .github/ci/test_fern_docs_preview.py
+
       - name: Test secret-scan range resolver
         run: bash .github/ci/test-resolve-secret-scan-range.sh
 

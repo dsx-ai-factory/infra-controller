@@ -19,7 +19,7 @@ use std::str::FromStr;
 
 use ::rpc::forge::{
     AstraAttachment, AstraAttachmentOvs, AstraAttachmentVf, AstraConfig, AstraConfigStatus,
-    AstraPhase,
+    AstraMultiplaneInterface, AstraPhase,
 };
 use carbide_uuid::machine::DpuMachineId;
 use carbide_uuid::spx::NULL_SPX_PARTITION_ID;
@@ -45,17 +45,19 @@ use crate::api::Api;
 /// specified in the instance. Otherwise, we need to specify that each NIC should
 /// not be associated with any VNI. If the host state is WaitingForDpaToBeReady,
 /// we need to return the configuration specified in the instance.
-/// 1) Is dpa enabled in config? If not, return None.
-/// 2) Does the host associated with the DPU have any Astra NICs? If not, return None.
+/// 1) Both Ewethers and Astra must be enabled in the runtime config; otherwise, return None.
+/// 2) Every BF4 DPU has the host's declared CX9 logical ports as part in the expected machines db.
+///    Return None only when both declared ports and discovered Astra NICs are absent.
 /// 3) Is the host associated with the DPU an instance? If so, return asta_config based on spx_config in instance.
 /// 4) Otherwise, return astra_config with VNI set to 0 for each NIC.
 pub(super) async fn get_astra_config(
     api: &Api,
     snapshot: &ManagedHostStateSnapshot,
+    dpu_machine_id: DpuMachineId,
 ) -> Result<Option<AstraConfig>, Status> {
     if !api.runtime_config.is_ewethers_enabled() || !api.runtime_config.is_astra_enabled() {
         tracing::debug!(
-            "DPA is not enabled or Astra is not enabled, skipping Astra config retrieval"
+            "spx-maintenance: [controller] DPA is not enabled or Astra is not enabled, skipping Astra config retrieval"
         );
         return Ok(None);
     }
@@ -68,139 +70,204 @@ pub(super) async fn get_astra_config(
 
     let mut txn = api.txn_begin().await?;
 
+    // Include all declared ports on every config poll, even when their revisions
+    // are unchanged. Unlike Weave, Xplane does not store or return our revision.
+    // The agent reads each port's actual state and skips updates when it matches
+    // the configured mode, detecting drift even without a configuration change.
+    // An unset configured mode means observe only; the agent must not change it.
+    let is_bf4_dpu = snapshot
+        .dpu_snapshots
+        .iter()
+        .find(|dpu| dpu.id == dpu_machine_id)
+        .is_some_and(super::spx_multiplane::is_bf4_dpu);
+    let multiplane_interfaces = if is_bf4_dpu && api.runtime_config.is_partial_multiplane_enabled()
+    {
+        let configuration = match super::spx_multiplane::load_configuration(
+            &mut txn,
+            snapshot.host_snapshot.id,
+        )
+        .await
+        {
+            Ok(configuration) => configuration,
+            Err(error @ CarbideError::InvalidArgument(_)) => {
+                tracing::warn!(
+                    machine_id = %snapshot.host_snapshot.id,
+                    %dpu_machine_id,
+                    error = %error,
+                    "spx-maintenance: [controller] Omitting maintenance configuration from DPU poll: invalid multiplane declaration",
+                );
+                None
+            }
+            Err(error) => return Err(error.into()),
+        };
+        configuration
+            .map(|configuration| {
+                configuration
+                    .interfaces
+                    .into_iter()
+                    .map(|(logical_ifname, state)| AstraMultiplaneInterface {
+                        logical_ifname,
+                        cfg_maintenance_mode: state.cfg_maintenance_mode,
+                        reference: state.reference,
+                        revision: state.revision.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     let dpa_interfaces =
         db::dpa_interface::find_by_machine_id(&mut txn, snapshot.host_snapshot.id, search_config)
             .await?;
 
     txn.commit().await?;
 
-    if dpa_interfaces.is_empty() {
-        tracing::debug!(
+    let is_attachment_config_present = !dpa_interfaces.is_empty();
+    if !is_attachment_config_present && multiplane_interfaces.is_empty() {
+        tracing::info!(
             machine_id = %snapshot.host_snapshot.id,
-            "No Astra NICs found; skipping Astra config retrieval",
+            %dpu_machine_id,
+            "spx-maintenance: [controller] Not sending Astra config: no attachment configuration or eligible BF4 Astra maintenance configuration",
         );
         return Ok(None);
     }
 
     let mut astra_attachments = Vec::new();
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Failed to begin transaction: {e}"),
-        })?;
+    if is_attachment_config_present {
+        let mut txn =
+            api.database_connection
+                .begin()
+                .await
+                .map_err(|e| CarbideError::Internal {
+                    message: format!("Failed to begin transaction: {e}"),
+                })?;
 
-    let subnet_ip = api
-        .runtime_config
-        .get_dpa_subnet_ip()
-        .map_err(CarbideError::from)?;
-    let subnet_mask = api
-        .runtime_config
-        .get_dpa_subnet_mask()
-        .map_err(CarbideError::from)?;
+        let subnet_ip = api
+            .runtime_config
+            .get_dpa_subnet_ip()
+            .map_err(CarbideError::from)?;
+        let subnet_mask = api
+            .runtime_config
+            .get_dpa_subnet_mask()
+            .map_err(CarbideError::from)?;
 
-    for dpa_interface in dpa_interfaces {
-        if !dpa_interface.use_admin_network() {
-            let instance = snapshot.instance.as_ref();
-            let Some(instance) = instance else {
-                // If use_admin_network is false, we expect an instance to be associated with the host.
-                tracing::error!(
-                    dpa_interface_id = %dpa_interface.id,
-                    "DPA interface is not associated with an instance",
-                );
-                continue;
-            };
+        for dpa_interface in dpa_interfaces {
+            if !dpa_interface.use_admin_network() {
+                let instance = snapshot.instance.as_ref();
+                let Some(instance) = instance else {
+                    // If use_admin_network is false, we expect an instance to be associated with the host.
+                    tracing::error!(
+                        dpa_interface_id = %dpa_interface.id,
+                        "DPA interface is not associated with an instance",
+                    );
+                    continue;
+                };
 
-            // From the instance spxconfig, find the spx_attachments that match the dpa_interface.mac_address
-            // If we do not find a match, just continue and process other DPA interface objects.
-            let Some(spx_attachment) =
-                instance
-                    .config
-                    .spxconfig
-                    .spx_attachments
-                    .iter()
-                    .find(|attachment| {
-                        attachment.mac_address == Some(dpa_interface.mac_address.to_string())
-                    })
-            else {
-                tracing::info!(
-                    mac_address = %dpa_interface.mac_address,
-                    instance_id = %instance.id,
-                    "SPX attachment was not found",
-                );
-                continue;
-            };
+                // From the instance spxconfig, find the spx_attachments that match the dpa_interface.mac_address
+                // If we do not find a match, just continue and process other DPA interface objects.
+                let Some(spx_attachment) =
+                    instance
+                        .config
+                        .spxconfig
+                        .spx_attachments
+                        .iter()
+                        .find(|attachment| {
+                            attachment.mac_address == Some(dpa_interface.mac_address.to_string())
+                        })
+                else {
+                    tracing::info!(
+                        mac_address = %dpa_interface.mac_address,
+                        instance_id = %instance.id,
+                        "SPX attachment was not found",
+                    );
+                    continue;
+                };
 
-            // Now that we have the spx_attachment, get the spx_partition_id and query the database to get the DPA VNI.
-            let spx_partition_id = spx_attachment.spx_partition_id;
-            let dpa_vni = db::spx_partition::find_by(
-                txn.as_mut(),
-                ObjectColumnFilter::One(db::spx_partition::IdColumn, &spx_partition_id),
-            )
-            .await?;
-            if dpa_vni.is_empty() {
-                tracing::error!(
-                    %spx_partition_id,
-                    "SPX partition is not found",
-                );
-                continue;
-            }
+                // Now that we have the spx_attachment, get the spx_partition_id and query the database to get the DPA VNI.
+                let spx_partition_id = spx_attachment.spx_partition_id;
+                let dpa_vni = db::spx_partition::find_by(
+                    txn.as_mut(),
+                    ObjectColumnFilter::One(db::spx_partition::IdColumn, &spx_partition_id),
+                )
+                .await?;
+                if dpa_vni.is_empty() {
+                    tracing::error!(
+                        %spx_partition_id,
+                        "SPX partition is not found",
+                    );
+                    continue;
+                }
 
-            let dpa_vni = dpa_vni[0].vni.unwrap_or(0);
-            if dpa_vni == 0 {
-                tracing::error!(
-                    %spx_partition_id,
-                    "SPX partition has no DPA VNI",
-                );
-                continue;
-            }
+                let dpa_vni = dpa_vni[0].vni.unwrap_or(0);
+                if dpa_vni == 0 {
+                    tracing::error!(
+                        %spx_partition_id,
+                        "SPX partition has no DPA VNI",
+                    );
+                    continue;
+                }
 
-            // Now we can create the Astra attachment and add it to the Astra config.
-            let astra_attachment = AstraAttachment {
-                mac_address: dpa_interface.mac_address.to_string().to_lowercase(),
-                vni: dpa_vni as u32,
-                subnet_ipv4: subnet_ip.to_string(),
-                subnet_mask,
-                attachment_type: Some(spx_attachment.attachment_type.clone() as i32),
-                revision: instance.spx_config_version.to_string(),
-                attachment_vf: spx_attachment
-                    .attachment_vf
-                    .as_ref()
-                    .map(|vf| AstraAttachmentVf {
-                        vf_index: vf.vf_index,
+                // Now we can create the Astra attachment and add it to the Astra config.
+                let astra_attachment = AstraAttachment {
+                    mac_address: dpa_interface.mac_address.to_string().to_lowercase(),
+                    vni: dpa_vni as u32,
+                    subnet_ipv4: subnet_ip.to_string(),
+                    subnet_mask,
+                    attachment_type: Some(spx_attachment.attachment_type.clone() as i32),
+                    revision: instance.spx_config_version.to_string(),
+                    attachment_vf: spx_attachment.attachment_vf.as_ref().map(|vf| {
+                        AstraAttachmentVf {
+                            vf_index: vf.vf_index,
+                        }
                     }),
-                attachment_ovs: spx_attachment.attachment_ovs.as_ref().map(|ovs| {
-                    AstraAttachmentOvs {
-                        bridge_name: ovs.bridge_name.clone(),
-                        network_name: ovs.ovn_network_name.clone(),
-                    }
-                }),
-            };
+                    attachment_ovs: spx_attachment.attachment_ovs.as_ref().map(|ovs| {
+                        AstraAttachmentOvs {
+                            bridge_name: ovs.bridge_name.clone(),
+                            network_name: ovs.ovn_network_name.clone(),
+                        }
+                    }),
+                };
 
-            astra_attachments.push(astra_attachment);
-        } else {
-            let astra_attachment = AstraAttachment {
-                mac_address: dpa_interface.mac_address.to_string().to_lowercase(),
-                vni: 0,
-                subnet_ipv4: subnet_ip.to_string(),
-                subnet_mask,
-                attachment_type: None,
-                revision: dpa_interface.network_config.version.to_string(),
-                attachment_vf: None,
-                attachment_ovs: None,
-            };
+                astra_attachments.push(astra_attachment);
+            } else {
+                let astra_attachment = AstraAttachment {
+                    mac_address: dpa_interface.mac_address.to_string().to_lowercase(),
+                    vni: 0,
+                    subnet_ipv4: subnet_ip.to_string(),
+                    subnet_mask,
+                    attachment_type: None,
+                    revision: dpa_interface.network_config.version.to_string(),
+                    attachment_vf: None,
+                    attachment_ovs: None,
+                };
 
-            astra_attachments.push(astra_attachment);
+                astra_attachments.push(astra_attachment);
+            }
         }
+
+        txn.commit().await.map_err(|e| {
+            CarbideError::internal(format!("failed to commit astra config read: {e}"))
+        })?;
     }
 
-    txn.commit()
-        .await
-        .map_err(|e| CarbideError::internal(format!("failed to commit astra config read: {e}")))?;
+    tracing::info!(
+        machine_id = %snapshot.host_snapshot.id,
+        is_attachment_config_present,
+        attachment_count = astra_attachments.len(),
+        is_maintenance_config_present = !multiplane_interfaces.is_empty(),
+        maintenance_interface_count = multiplane_interfaces.len(),
+        "spx-maintenance: [controller] Sending Astra config to DPU",
+    );
 
-    Ok(Some(AstraConfig { astra_attachments }))
+    Ok(Some(AstraConfig {
+        astra_attachments,
+        is_maintenance_config_present: Some(!multiplane_interfaces.is_empty()),
+        multiplane_interfaces,
+        is_attachment_config_present: Some(is_attachment_config_present),
+    }))
 }
 
 /// `process_astra_config_status` replaces observations when Astra reporting is
@@ -214,7 +281,7 @@ pub(super) async fn process_astra_config_status(
 ) -> Result<(), Status> {
     if !api.runtime_config.is_ewethers_enabled() || !api.runtime_config.is_astra_enabled() {
         tracing::info!(
-            "DPA is not enabled or Astra is not enabled, skipping Astra config status processing"
+            "spx-maintenance: [controller] DPA is not enabled or Astra is not enabled, skipping Astra config status processing"
         );
         return Ok(());
     }
@@ -229,7 +296,30 @@ pub(super) async fn process_astra_config_status(
             id: dpu_machine_id.to_string(),
         })?;
 
+    let is_maintenance_status_processed = astra_config_status
+        .is_maintenance_status_present
+        .unwrap_or(true)
+        && api.runtime_config.is_partial_multiplane_enabled()
+        && snapshot
+            .dpu_snapshots
+            .iter()
+            .find(|dpu| dpu.id == *dpu_machine_id)
+            .is_some_and(super::spx_multiplane::is_bf4_dpu);
+    if is_maintenance_status_processed {
+        super::spx_multiplane::record_observations(
+            &mut txn,
+            snapshot.host_snapshot.id,
+            *dpu_machine_id,
+            &astra_config_status.multiplane_interfaces_status,
+        )
+        .await?;
+    }
     txn.commit().await?;
+    tracing::info!(%dpu_machine_id, machine_id = %snapshot.host_snapshot.id, reported_interface_count = astra_config_status.multiplane_interfaces_status.len(), is_attachment_status_present = ?astra_config_status.is_attachment_status_present, is_maintenance_status_present = ?astra_config_status.is_maintenance_status_present, is_maintenance_status_processed, "spx-maintenance: [controller] Committed Astra status processing");
+
+    if astra_config_status.is_attachment_status_present == Some(false) {
+        return Ok(());
+    }
 
     let mut txn = api
         .database_connection

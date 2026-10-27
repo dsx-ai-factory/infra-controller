@@ -30,6 +30,14 @@ name = "agent"
 name = "forge-dpu-agent"
 path = "src/main.rs"
 
+[[bin]]
+name = "xplane-maintenance-mock"
+path = "src/bin/xplane-maintenance-mock.rs"
+required-features = ["xplane-maintenance-mock"]
+
+[features]
+xplane-maintenance-mock = []
+
 [dependencies]
 
 # [local-dependencies]

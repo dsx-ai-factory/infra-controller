@@ -20,6 +20,16 @@ use thiserror::Error;
 // MlxError is a custom error type for Mellanox NIC operations.
 #[derive(Error, Debug)]
 pub enum MlxError {
+    /// A flint process started, but waiting for it failed. Callers must retain
+    /// exclusion because the process may still be accessing hardware.
+    #[error("flint {operation} process completion is unknown: {source}")]
+    ProcessUnsettled {
+        /// The operation name, never command arguments or a hardware key.
+        operation: &'static str,
+        /// The operating-system error returned while waiting for the process.
+        source: std::io::Error,
+    },
+
     /// A flint operation failed; the payload describes the failure.
     /// Key-taking operations omit raw tool output: unsuccessful exits include the
     /// operation and exit status, and execution failures include the operation and

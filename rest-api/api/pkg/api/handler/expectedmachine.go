@@ -518,7 +518,7 @@ func (gemh GetExpectedMachineHandler) Handle(c echo.Context) error {
 	site := expectedMachine.Site
 	if site == nil {
 		siteDAO := cdbm.NewSiteDAO(gemh.dbSession)
-		site, err = siteDAO.GetByID(ctx, nil, expectedMachine.SiteID, nil, false)
+		site, err = siteDAO.GetByID(ctx, nil, expectedMachine.SiteID, nil, false, false)
 		if err != nil {
 			logger.Error().Err(err).Msg("error retrieving Site from DB")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site details for Expected Machine due to DB error", nil)

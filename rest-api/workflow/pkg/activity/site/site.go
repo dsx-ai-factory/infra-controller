@@ -54,28 +54,6 @@ const (
 	siteFabricIPBlockReadyMsg = "IP Block is ready for use"
 )
 
-// privateIPPrefixes are the RFC 1918 and RFC 4193 ranges, which are not routed
-// on the public Internet.
-var privateIPPrefixes = []netip.Prefix{
-	netip.MustParsePrefix("10.0.0.0/8"),
-	netip.MustParsePrefix("172.16.0.0/12"),
-	netip.MustParsePrefix("192.168.0.0/16"),
-	netip.MustParsePrefix("fc00::/7"),
-}
-
-// getSiteFabricIPBlockRoutingType returns DatacenterOnly for a prefix that lies
-// entirely inside a private range, and Public for any other prefix. Checking the
-// address alone with netip.Addr.IsPrivate is not enough, since a prefix such as
-// 192.168.0.0/15 starts inside a private range but extends past it.
-func getSiteFabricIPBlockRoutingType(prefix netip.Prefix) string {
-	for _, privatePrefix := range privateIPPrefixes {
-		if privatePrefix.Bits() <= prefix.Bits() && privatePrefix.Contains(prefix.Addr()) {
-			return cdbm.IPBlockRoutingTypeDatacenterOnly
-		}
-	}
-	return cdbm.IPBlockRoutingTypePublic
-}
-
 // getSiteFabricIPBlockName returns the name UpdateIPBlocksInDBFromFabricPrefixes
 // gives the IP Block it creates for prefix.
 func getSiteFabricIPBlockName(prefix netip.Prefix) string {
@@ -109,7 +87,7 @@ func (mst ManageSite) UpdateSiteInDB(ctx context.Context, siteID uuid.UUID, core
 	logger.Info().Msg("starting activity")
 
 	siteDAO := cdbm.NewSiteDAO(mst.dbSession)
-	site, err := siteDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := siteDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			// If Site is not found, return a non-retryable error to prevent the workflow from retrying
@@ -201,7 +179,7 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 
 	// Check if site exists
 	siteDAO := cdbm.NewSiteDAO(mst.dbSession)
-	_, err := siteDAO.GetByID(ctx, nil, siteID, nil, false)
+	_, err := siteDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err != cdb.ErrDoesNotExist {
 			logger.Error().Err(err).Msg("failed to retrieve Site from DB by ID")
@@ -1046,7 +1024,7 @@ func (mst ManageSite) DeleteOrphanedSiteTemporalNamespaces(ctx context.Context) 
 		}
 
 		// Check that namespace refers to a deleted Site
-		_, err = stDAO.GetByID(ctx, nil, siteID, nil, true)
+		_, err = stDAO.GetByID(ctx, nil, siteID, nil, true, false)
 		if err != nil {
 			logger.Error().Err(err).Str("Namespace", namespace).Msg("Failed to retrieve deleted Site from DB, skipping namespace deletion")
 			continue
@@ -1090,7 +1068,7 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 	logger.Info().Msg("starting activity")
 
 	siteDAO := cdbm.NewSiteDAO(mst.dbSession)
-	dbSite, err := siteDAO.GetByID(ctx, nil, siteID, nil, false)
+	dbSite, err := siteDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to retrieve Site from DB by ID")
 		return err
@@ -1261,7 +1239,7 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 			address := prefix.Addr()
 			prefixAddr := address.String()
 			prefixLength := prefix.Bits()
-			routingType := getSiteFabricIPBlockRoutingType(prefix)
+			routingType := cdbm.GetSiteFabricIPBlockRoutingType(prefix)
 			protocolVersion := cdbm.IPBlockProtocolVersionV4
 			if !address.Is4() {
 				protocolVersion = cdbm.IPBlockProtocolVersionV6

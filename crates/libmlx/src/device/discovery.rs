@@ -16,7 +16,7 @@
  */
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -31,20 +31,24 @@ use crate::device::filters::DeviceFilter;
 use crate::runner::FirmwareToolExecutor;
 use crate::runner::attempt::AttemptError;
 use crate::runner::command_builder::CommandSpec;
+use crate::runner::error::MlxRunnerError;
 
 // Match the command runner's default for one query, including output collection.
 pub(crate) const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_QUERY_DIAGNOSTIC_BYTES: usize = 4096;
 
-/// Failures from supervised inventory queries, before validating hardware facts.
+/// Failures from inventory queries, before validating hardware facts.
 #[derive(Debug, Error)]
 pub enum DeviceDiscoveryError {
+    /// A direct synchronous query failed to start or collect its process result.
+    #[error("mlxfwmanager query failed: {0}")]
+    DirectQuery(#[from] MlxRunnerError),
     /// Process failure, including deadline, output-limit, and cleanup diagnostics.
     #[error("mlxfwmanager query failed: {0}")]
     QueryAttempt(#[from] AttemptError),
     /// The MST inventory query did not finish successfully within its limits.
     #[error("mst status failed: {0}")]
-    MstQueryAttempt(#[source] Box<AttemptError>),
+    MstQueryAttempt(#[source] MstQueryAttemptError),
     /// MST did not provide one unambiguous PCI address for a reported alias.
     #[error("invalid mst status result: {0}")]
     InvalidMstReport(String),
@@ -59,6 +63,46 @@ pub enum DeviceDiscoveryError {
         /// Tool diagnostics, limited to the first 4 KiB.
         stderr: String,
     },
+}
+
+/// An MST attempt failure stored without enlarging every discovery error.
+/// Its source exposes the concrete attempt, including process settlement evidence.
+#[derive(Debug)]
+pub struct MstQueryAttemptError(Box<AttemptError>);
+
+impl From<AttemptError> for MstQueryAttemptError {
+    fn from(error: AttemptError) -> Self {
+        Self(Box::new(error))
+    }
+}
+
+impl std::fmt::Display for MstQueryAttemptError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.0.as_ref(), formatter)
+    }
+}
+
+impl std::error::Error for MstQueryAttemptError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        // A boxed source's own source() skips AttemptError and loses its status
+        // and cleanup evidence. Expose the inner error itself to chain walkers.
+        Some(self.0.as_ref())
+    }
+}
+
+impl DeviceDiscoveryError {
+    /// Keep the String-returning discovery and report APIs' messages stable.
+    /// Callers deciding whether to release hardware access use the typed APIs
+    /// instead, so process completion evidence is not lost at that boundary.
+    pub(super) fn into_legacy_message(self) -> String {
+        match self {
+            Self::DirectQuery(MlxRunnerError::Io(source)) => {
+                format!("failed to build cmd: {source}")
+            }
+            Self::InvalidReport(message) => message,
+            error => error.to_string(),
+        }
+    }
 }
 
 // DevicesXml represents the root XML structure
@@ -134,12 +178,19 @@ struct GuidsXml {
 
 // discover_devices finds all devices using mlxfwmanager.
 pub fn discover_devices() -> Result<Vec<MlxDeviceInfo>, String> {
+    discover_devices_with_settlement().map_err(DeviceDiscoveryError::into_legacy_message)
+}
+
+/// `discover_devices_with_settlement` preserves process errors so callers
+/// holding hardware exclusion can distinguish an ordinary failure from a
+/// process whose termination could not be established. Like `discover_devices`,
+/// this synchronous query has no deadline; use the bounded API for supervised
+/// inventory.
+pub(crate) fn discover_devices_with_settlement() -> Result<Vec<MlxDeviceInfo>, DeviceDiscoveryError>
+{
     debug!("Running mlxfwmanager to discover devices");
 
-    let output = Command::new("mlxfwmanager")
-        .args(["--query-format", "xml"])
-        .output()
-        .map_err(|e| format!("failed to build cmd: {e}"))?;
+    let output = execute_direct_query(&["--query-format", "xml"])?;
 
     // In cases where DPUs are returned, it looks like DPUs that are
     // currently in lockdown won't return data to mlxfwmanager. The
@@ -151,15 +202,15 @@ pub fn discover_devices() -> Result<Vec<MlxDeviceInfo>, String> {
     // to parse the XML output.
     if !matches!(output.status.code(), Some(0) | Some(1)) {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
+        return Err(DeviceDiscoveryError::InvalidReport(format!(
             "mlxfwmanager failed with unexpected exit code: {stderr}"
-        ));
+        )));
     }
 
     {
         let xml_content = String::from_utf8_lossy(&output.stdout);
         warn!(xml = %xml_content, "mlxfwmanager XML output");
-        parse_mlxfwmanager_xml(&xml_content)
+        parse_mlxfwmanager_xml(&xml_content).map_err(DeviceDiscoveryError::InvalidReport)
     }
 }
 
@@ -167,12 +218,18 @@ pub fn discover_devices() -> Result<Vec<MlxDeviceInfo>, String> {
 // The actual XML returned is still "devices", but will only
 // contain the target device.
 pub fn discover_device(device: &str) -> Result<MlxDeviceInfo, String> {
+    discover_device_with_settlement(device).map_err(DeviceDiscoveryError::into_legacy_message)
+}
+
+/// `discover_device_with_settlement` preserves the process completion evidence
+/// for one device. This synchronous query has no deadline; use
+/// [`discover_pci_devices_bounded`] for supervised inventory.
+pub fn discover_device_with_settlement(
+    device: &str,
+) -> Result<MlxDeviceInfo, DeviceDiscoveryError> {
     debug!(device, "Running mlxfwmanager to discover device");
 
-    let output = Command::new("mlxfwmanager")
-        .args(["--dev", device, "--query-format", "xml"])
-        .output()
-        .map_err(|e| format!("failed to build cmd: {e}"))?;
+    let output = execute_direct_query(&["--dev", device, "--query-format", "xml"])?;
 
     // In cases where DPUs are returned, it looks like DPUs that are
     // currently in lockdown won't return data to mlxfwmanager. The
@@ -184,24 +241,44 @@ pub fn discover_device(device: &str) -> Result<MlxDeviceInfo, String> {
     // to parse the XML output.
     if !matches!(output.status.code(), Some(0) | Some(1)) {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
+        return Err(DeviceDiscoveryError::InvalidReport(format!(
             "mlxfwmanager failed with unexpected exit code: {stderr}"
-        ));
+        )));
     }
 
     let xml_content = String::from_utf8_lossy(&output.stdout);
     debug!(xml = %xml_content, "mlxfwmanager XML output");
 
-    let devices = parse_mlxfwmanager_xml(&xml_content)?;
+    let devices =
+        parse_mlxfwmanager_xml(&xml_content).map_err(DeviceDiscoveryError::InvalidReport)?;
     if devices.len() > 1 {
-        return Err(format!(
+        return Err(DeviceDiscoveryError::InvalidReport(format!(
             "only expected a single device returned for device: {device}"
-        ));
+        )));
     }
     if devices.is_empty() {
-        return Err(format!("no devices returned for device: {device}"));
+        return Err(DeviceDiscoveryError::InvalidReport(format!(
+            "no devices returned for device: {device}"
+        )));
     }
     Ok(devices.into_iter().next().unwrap())
+}
+
+// Splitting spawn from wait keeps a lost child result from becoming an
+// ordinary discovery failure that authorizes another hardware operation.
+fn execute_direct_query(args: &[&str]) -> Result<Output, MlxRunnerError> {
+    let child = Command::new("mlxfwmanager")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .wait_with_output()
+        .map_err(|source| MlxRunnerError::ProcessUnsettled {
+            command: "mlxfwmanager query".to_string(),
+            source,
+        })
 }
 
 /// Query all devices with the same deadline and output limits as
@@ -250,7 +327,7 @@ async fn discover_pci_devices_with_programs(
         let output = executor
             .execute(&command, timeout)
             .await
-            .map_err(|error| DeviceDiscoveryError::MstQueryAttempt(Box::new(error)))?;
+            .map_err(|error| DeviceDiscoveryError::MstQueryAttempt(error.into()))?;
         let diagnostics = String::from_utf8_lossy(
             &output.stderr[..output.stderr.len().min(MAX_QUERY_DIAGNOSTIC_BYTES)],
         );

@@ -87,6 +87,9 @@ pub(super) fn component_manager_error_to_status(err: ComponentManagerError) -> S
         ComponentManagerError::Unsupported(msg) => Status::unimplemented(msg),
         ComponentManagerError::RejectedBeforeDispatch(msg) => Status::failed_precondition(msg),
         ComponentManagerError::OperationOutcomeUnknown(msg) => Status::unavailable(msg),
+        error @ ComponentManagerError::SwitchCertificateSubmission { .. } => {
+            Status::unavailable(error.to_string())
+        }
         ComponentManagerError::Internal(msg) => Status::internal(msg),
         ComponentManagerError::Transport(e) => Status::unavailable(format!("transport error: {e}")),
         ComponentManagerError::Status(s) => s,
@@ -6623,6 +6626,7 @@ mod tests {
         let mut rack = test_rack_with_job(Some(job));
         rack.controller_state = Versioned::new(
             RackState::Error {
+                certificate_failure: None,
                 cause: cause.to_string(),
                 recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
             },
@@ -6657,6 +6661,7 @@ mod tests {
         let mut rack = test_rack_with_job(Some(job));
         rack.controller_state = Versioned::new(
             RackState::Error {
+                certificate_failure: None,
                 cause: unrelated.to_string(),
                 recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
             },

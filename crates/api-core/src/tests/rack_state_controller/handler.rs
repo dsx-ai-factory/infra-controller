@@ -60,6 +60,7 @@ use model::switch::{
     SwitchConfig,
 };
 use model::test_support::ManagedHostConfig;
+use rpc::forge::forge_server::Forge;
 use state_controller::db_write_batch::DbWriteBatch;
 use state_controller::state_handler::{StateHandler, StateHandlerContext, StateHandlerOutcome};
 use tonic::Request;
@@ -1689,6 +1690,7 @@ async fn test_error_state_does_nothing(
     };
 
     let error_state = RackState::Error {
+        certificate_failure: None,
         cause: "test error".to_string(),
         recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
     };
@@ -5537,6 +5539,7 @@ async fn test_configure_nmx_cluster_failed_v2_job_requires_new_maintenance_reque
     assert!(matches!(
         rack.controller_state.value,
         RackState::Error {
+            certificate_failure: None,
             ref cause,
             recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
         } if cause == "ConfigureScaleUpFabricManager job failed-fabric-job failed: nmx-controller failed to start"
@@ -5593,7 +5596,19 @@ async fn test_configure_nmx_cluster_partial_certificate_submission_does_not_retr
             response: Some(rms::NodeBatchResponse {
                 status: rms::ReturnCode::Failure as i32,
                 job_id: "partial-certificate-job".to_string(),
-                message: "certificate batch rejected".to_string(),
+                message: "certificate batch rejected: switch enrollment incomplete".to_string(),
+                node_results: vec![
+                    rms::NodeOperationResult {
+                        node_id: "switch-a".into(),
+                        status: rms::ReturnCode::Failure as i32,
+                        error_message: "authentication failed on switch-a".into(),
+                    },
+                    rms::NodeOperationResult {
+                        node_id: "switch-b".into(),
+                        status: rms::ReturnCode::Failure as i32,
+                        error_message: "connection timed out".into(),
+                    },
+                ],
                 ..Default::default()
             }),
             jobs: Vec::new(),
@@ -5607,10 +5622,15 @@ async fn test_configure_nmx_cluster_partial_certificate_submission_does_not_retr
     assert!(matches!(
         rack.controller_state.value,
         RackState::Error {
+            certificate_failure: Some(ref failure),
             ref cause,
             recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
         }
-            if cause.contains("certificate batch rejected")
+            if failure.node_failures.len() == 2
+                && failure.job_id.as_deref() == Some("partial-certificate-job")
+                && failure.node_failures[0].message == "authentication failed on switch-a"
+                && failure.node_failures[1].message == "connection timed out"
+                && cause.contains("certificate batch rejected: switch enrollment incomplete")
                 && cause.contains("partial-certificate-job")
     ));
 
@@ -5837,8 +5857,55 @@ async fn test_configure_nmx_cluster_waits_for_certificate_job_and_stops_on_failu
         .queue_get_configure_switch_certificate_job_status_response(Ok(
             rms::GetConfigureSwitchCertificateJobStatusResponse {
                 status: rms::ReturnCode::Success as i32,
+                state: "failed".into(),
+                ..Default::default()
+            },
+        ))
+        .await;
+    env.rms_sim
+        .queue_get_job_status_response(Err(RackManagerError::ApiInvocationError(
+            tonic::Status::unavailable("diagnostic lookup interrupted"),
+        )))
+        .await;
+    env.run_rack_controller_iteration().await;
+    assert_persisted_switch_certificate_job(&env, &rack_id).await;
+
+    env.rms_sim
+        .queue_get_job_status_response(Ok(rms::GetJobStatusResponse {
+            job_states: vec![
+                rms::JobStatus {
+                    job_id: "configure-switch-certificate-job".into(),
+                    child_job_ids: vec!["child-a".into(), "child-b".into()],
+                    execution_state: rms::JobExecutionState::Failed as i32,
+                    ..Default::default()
+                },
+                rms::JobStatus {
+                    job_id: "child-a".into(),
+                    node_id: Some("switch-a".into()),
+                    execution_state: rms::JobExecutionState::Failed as i32,
+                    error_code: rms::JobError::Timeout as i32,
+                    error_message: "certificate installation timed out on switch-a".into(),
+                    ..Default::default()
+                },
+                rms::JobStatus {
+                    job_id: "child-b".into(),
+                    node_id: Some("switch-b".into()),
+                    execution_state: rms::JobExecutionState::Failed as i32,
+                    error_code: rms::JobError::Unauthenticated as i32,
+                    error_message: "authentication failed on switch-b".into(),
+                    ..Default::default()
+                },
+            ],
+        }))
+        .await;
+
+    env.rms_sim
+        .queue_get_configure_switch_certificate_job_status_response(Ok(
+            rms::GetConfigureSwitchCertificateJobStatusResponse {
+                status: rms::ReturnCode::Success as i32,
                 state: "failed".to_string(),
-                error_message: "certificate install failed".to_string(),
+                error_message: "certificate install failed: NVOS service did not restart"
+                    .to_string(),
                 ..Default::default()
             },
         ))
@@ -5850,8 +5917,75 @@ async fn test_configure_nmx_cluster_waits_for_certificate_job_and_stops_on_failu
 
     assert!(matches!(
         rack.controller_state.value,
-        RackState::Error { ref cause, .. } if cause.contains("certificate install failed")
+        RackState::Error { ref cause, .. }
+            if cause.contains("certificate install failed: NVOS service did not restart")
     ));
+
+    let RackState::Error {
+        certificate_failure: Some(ref failure),
+        recovery_policy,
+        ..
+    } = rack.controller_state.value
+    else {
+        panic!("certificate diagnostics must survive the database round trip");
+    };
+    assert_eq!(
+        recovery_policy,
+        RackErrorRecoveryPolicy::MaintenanceRequestRequired
+    );
+    assert!(rack.config.maintenance_requested.is_none());
+    assert_eq!(failure.node_failures.len(), 2);
+    assert_eq!(failure.node_failures[0].node_id, "switch-a");
+    assert_eq!(
+        failure.node_failures[0].message,
+        "certificate installation timed out on switch-a"
+    );
+    assert_eq!(failure.node_failures[1].node_id, "switch-b");
+    assert_eq!(
+        failure.node_failures[1].message,
+        "authentication failed on switch-b"
+    );
+    let expected_failure = serde_json::to_value(failure)?;
+    let response = env
+        .api
+        .find_racks_by_ids(tonic::Request::new(rpc::forge::RacksByIdsRequest {
+            rack_ids: vec![rack_id.clone()],
+        }))
+        .await?
+        .into_inner();
+    let lifecycle = response.racks[0]
+        .status
+        .as_ref()
+        .unwrap()
+        .lifecycle
+        .as_ref()
+        .unwrap();
+    let public_state: serde_json::Value = serde_json::from_str(&lifecycle.state)?;
+    assert_eq!(public_state["certificate_failure"], expected_failure);
+    let history = env
+        .api
+        .find_rack_state_histories(tonic::Request::new(rpc::forge::RackStateHistoriesRequest {
+            rack_ids: vec![rack_id.clone()],
+        }))
+        .await?
+        .into_inner();
+    assert!(history.histories[&rack_id.to_string()].records.iter().any(|record| {
+        serde_json::from_str::<serde_json::Value>(&record.state).unwrap()["certificate_failure"] == expected_failure
+    }));
+    assert_eq!(
+        env.rms_sim
+            .submitted_configure_switch_certificate_requests()
+            .await
+            .len(),
+        1
+    );
+    let diagnostic_requests = env.rms_sim.submitted_get_job_status_requests().await;
+    assert_eq!(diagnostic_requests.len(), 2);
+    assert!(
+        diagnostic_requests
+            .iter()
+            .all(|request| request.include_child_job_states)
+    );
 
     assert!(
         env.rms_sim
@@ -5865,7 +5999,7 @@ async fn test_configure_nmx_cluster_waits_for_certificate_job_and_stops_on_failu
         .submitted_get_configure_switch_certificate_job_status_requests()
         .await;
 
-    assert_eq!(status_requests.len(), 3);
+    assert_eq!(status_requests.len(), 4);
 
     assert!(
         status_requests
@@ -6077,6 +6211,7 @@ async fn test_configure_nmx_cluster_requires_usable_nvos_endpoint_before_rotatio
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
 
     assert!(matches!(rack.controller_state.value, RackState::Error {
+        certificate_failure: None,
         ref cause, recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
     } if cause.contains("no usable NVOS endpoint")));
 
@@ -6649,6 +6784,7 @@ async fn test_ready_with_failed_switch_transitions_to_error(
     match outcome {
         StateHandlerOutcome::Transition { next_state, .. } => match next_state {
             RackState::Error {
+                certificate_failure: None,
                 cause,
                 recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
             } => {
@@ -6728,6 +6864,7 @@ async fn test_ready_with_failed_power_shelf_transitions_to_error(
     match outcome {
         StateHandlerOutcome::Transition { next_state, .. } => match next_state {
             RackState::Error {
+                certificate_failure: None,
                 cause,
                 recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
             } => {
@@ -6809,6 +6946,7 @@ async fn test_error_recovers_to_ready_when_all_components_ready(
         pool.acquire().await?.as_mut(),
         &rack_id,
         RackState::Error {
+            certificate_failure: None,
             cause: "synthetic prior failure".to_string(),
             recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
         },
@@ -6869,6 +7007,7 @@ async fn test_error_stays_in_error_when_components_not_all_ready(
         pool.acquire().await?.as_mut(),
         &rack_id,
         RackState::Error {
+            certificate_failure: None,
             cause: "synthetic prior failure".to_string(),
             recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
         },

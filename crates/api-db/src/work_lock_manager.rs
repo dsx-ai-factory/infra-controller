@@ -18,8 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use carbide_instrument::{Event, LabelValue, emit};
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgConnection, PgPool, PgTransaction};
+use sqlx::{PgPool, PgTransaction};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
@@ -29,10 +28,6 @@ use crate::{DatabaseError, DatabaseResult};
 
 pub type WorkKey = String;
 pub type WorkerId = uuid::Uuid;
-
-#[derive(Debug, thiserror::Error)]
-#[error("WorkLockManager requires a writable database connection")]
-struct ReadOnlyWorkLockConnection;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
 enum WorkLockOperation {
@@ -242,43 +237,15 @@ pub async fn start(
 /// it can be used to update the work-lock table.
 async fn create_work_lock_pool(pool: &PgPool) -> DatabaseResult<PgPool> {
     let options = pool.options();
-    PgPoolOptions::new()
+    crate::writable_pool_options()
         .min_connections(1)
         .max_connections(1)
         .acquire_timeout(options.get_acquire_timeout())
         .idle_timeout(options.get_idle_timeout())
         .max_lifetime(options.get_max_lifetime())
-        // The writability query below also proves the connection is responsive.
-        .test_before_acquire(false)
-        .after_connect(|db, _metadata| {
-            Box::pin(async move { ensure_work_lock_connection_is_writable(db).await })
-        })
-        .before_acquire(|db, _metadata| {
-            Box::pin(async move {
-                match ensure_work_lock_connection_is_writable(db).await {
-                    Ok(()) => Ok(true),
-                    Err(_) => Ok(false),
-                }
-            })
-        })
         .connect_with(pool.connect_options().as_ref().clone())
         .await
         .map_err(DatabaseError::acquire)
-}
-
-async fn ensure_work_lock_connection_is_writable(db: &mut PgConnection) -> sqlx::Result<()> {
-    let read_only = sqlx::query_scalar("SELECT current_setting('transaction_read_only')::bool")
-        .fetch_one(db)
-        .await?;
-
-    if read_only {
-        tracing::warn!("Rejecting read-only WorkLockManager database connection");
-        return Err(sqlx::Error::Configuration(Box::new(
-            ReadOnlyWorkLockConnection,
-        )));
-    }
-
-    Ok(())
 }
 
 async fn run_loop(

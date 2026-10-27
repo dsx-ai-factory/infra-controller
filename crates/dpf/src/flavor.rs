@@ -381,7 +381,13 @@ fn bf4_pf_variable(controller_id: u8, pf_id: u8) -> String {
 }
 
 /// Builds the Astra OVS bootstrap while preserving its fixed xplane configuration.
-fn get_bf4_astra_ovs_defaults(topology: Option<&DpfInterceptBridging>) -> String {
+// The OVS scripts have strict checks to exit on failure. DPF will retry the
+// entire OVS scripts operation on failure. This includes the
+// initialize-sox-maintenance script for the newer cerebro based implementation.
+fn get_bf4_astra_ovs_defaults(
+    topology: Option<&DpfInterceptBridging>,
+    partial_multiplane_enabled: bool,
+) -> String {
     // Preserve the topology-free prefix and fixed body byte-for-byte so existing template hashes
     // remain stable, while resolving configured PF identities before the fixed scripts mutate OVS.
     let mut script = String::from("#!/bin/bash\n");
@@ -400,9 +406,16 @@ fn get_bf4_astra_ovs_defaults(topology: Option<&DpfInterceptBridging>) -> String
         "export -f _ovs-vsctl\n",
         "\n",
         "{{ if and .dpu_device_underlay_rows (index .dpu_device_underlay_rows 0).cerebro_ifname }}\n",
-        "# Execute xplane-network script to setup ovs bridges and netplan\n",
+        "# New-format inventory (Cerebro interface names): configure OVS, altnames, lldp and netplan,\n",
+        "# then initialize maintenance once if partial-multiplane is enabled.\n",
         "/usr/local/sbin/configure-xplane-network.sh || exit $?\n",
+    ));
+    if partial_multiplane_enabled {
+        script.push_str("/usr/local/sbin/initialize-spx-maintenance.sh || exit $?\n");
+    }
+    script.push_str(concat!(
         "{{ else }}\n",
+        "# Legacy MAC/IP inventory: configure networking without maintenance initialization.\n",
         "# 1. Configure OVS bridges and xplane ports\n",
     ));
     if topology.is_some() {
@@ -486,7 +499,7 @@ fn validate_proxy_string(value: &str, field: &str) -> Result<(), crate::error::D
 /// Build a DPUFlavor for BF3 or generic BF4. If `proxy` is set, a containerd proxy drop-in
 /// config file is appended so the DPU can pull images through the proxy.
 ///
-/// Astra uses [`flavor_bf4_astra`] because it is represented by a DPUFlavorTemplate.
+/// Production Astra initialization goes through [`crate::DpfSdk`] and builds a DPUFlavorTemplate.
 ///
 /// Returns `ConfigError` if any proxy string contains characters that would break the generated
 /// systemd `Environment="..."` lines (quotes, newlines, or other control characters).
@@ -666,17 +679,11 @@ fn flavor_bf4_with_topology(
     })
 }
 
-/// Builds the BF4 Astra DPUFlavorTemplate.
+/// Convenience builder for a BF4 Astra template without intercept bridging, with
+/// partial-multiplane maintenance enabled.
 ///
-/// The DPF operator renders this template for each DPU and creates the resulting DPUFlavor.
-///
-/// This direct entry point preserves the topology-free Astra flavor. Callers configuring
-/// intercept bridging should initialize through [`crate::DpfSdk`], which keeps the flavor and
-/// effective interface inventory aligned.
-///
-/// Astra declares no built-in `bfcfgParameters`, so the field stays absent unless the operator
-/// configures some. Keeping it absent holds the template hash of existing Astra sites unchanged,
-/// which is what stops an upgrade from reprovisioning Astra DPUs on its own.
+/// Used by tests in this repository. Production initialization goes through [`crate::DpfSdk`].
+/// which calls `flavor_bf4_astra_with_topology` with the resolved topology, interface inventory.
 pub fn flavor_bf4_astra(
     namespace: &str,
     proxy: &Option<DpfProxyDetails>,
@@ -692,13 +699,17 @@ pub fn flavor_bf4_astra(
         None,
         extra_bfcfg_parameters,
         enable_delay_host_init,
+        true,
     )
 }
 
-/// Builds an Astra flavor template from the resolved intercept topology and interface inventory.
+/// Production Astra template builder called by the SDK with the resolved topology, interface
+/// inventory, and site-level partial-multiplane setting. Topology and inventory may be absent.
 ///
 /// Keeping both inputs here ensures the OVS bootstrap and DHCP ACL consume the same PF/VF
 /// projection as the generated ServiceInterfaces and service chains.
+/// The DPF operator renders this template for each DPU and creates the resulting DPUFlavor.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn flavor_bf4_astra_with_topology(
     namespace: &str,
     proxy: &Option<DpfProxyDetails>,
@@ -707,12 +718,17 @@ pub(crate) fn flavor_bf4_astra_with_topology(
     dhcp_acl_interfaces: Option<&[DpuServiceInterfaceTemplateDefinition]>,
     extra_bfcfg_parameters: &[String],
     enable_delay_host_init: bool,
+    partial_multiplane_enabled: bool,
 ) -> Result<DPUFlavorTemplate, crate::error::DpfError> {
     reject_template_delimiters(extra_bfcfg_parameters)?;
     let flavor_spec = DpuFlavorSpec {
         bfcfg_parameters: (!extra_bfcfg_parameters.is_empty())
             .then(|| extra_bfcfg_parameters.to_vec()),
-        config_files: Some(get_bf4_astra_config_files(proxy, dhcp_acl_interfaces)?),
+        config_files: Some(get_bf4_astra_config_files(
+            proxy,
+            dhcp_acl_interfaces,
+            partial_multiplane_enabled,
+        )?),
         containerd_config: Some(DpuFlavorContainerdConfig {
             registry_endpoint: None,
         }),
@@ -726,7 +742,10 @@ pub(crate) fn flavor_bf4_astra_with_topology(
             enable_delay_host_init,
         )]),
         ovs: Some(DpuFlavorOvs {
-            raw_config_script: Some(get_bf4_astra_ovs_defaults(intercept_bridging)),
+            raw_config_script: Some(get_bf4_astra_ovs_defaults(
+                intercept_bridging,
+                partial_multiplane_enabled,
+            )),
         }),
         packages: Some(vec![]),
         sysctl: Some(DpuFlavorSysctl {
@@ -1304,6 +1323,7 @@ fn get_bf4_nvconfig(
 fn get_bf4_astra_config_files(
     proxy: &Option<DpfProxyDetails>,
     dhcp_acl_interfaces: Option<&[DpuServiceInterfaceTemplateDefinition]>,
+    partial_multiplane_enabled: bool,
 ) -> Result<Vec<DpuFlavorConfigFiles>, crate::error::DpfError> {
     let mut config_files = vec![
         DpuFlavorConfigFiles {
@@ -1448,6 +1468,17 @@ fn get_bf4_astra_config_files(
             r#type: Some(DpuFlavorConfigFilesType::AgentApplied),
         },
     ];
+
+    if partial_multiplane_enabled {
+        config_files.push(DpuFlavorConfigFiles {
+            content_from: None,
+            operation: Some(DpuFlavorConfigFilesOperation::Override),
+            path: "/usr/local/sbin/initialize-spx-maintenance.sh".to_string(),
+            permissions: Some("0755".to_string()),
+            raw: Some(initialize_spx_maintenance_script_raw()),
+            r#type: None,
+        });
+    }
 
     config_files.extend(hbn_apparmor_config_files());
 
@@ -1784,6 +1815,45 @@ fn ovs_cerebro_script_raw() -> &'static str {
     "#}
 }
 
+fn initialize_spx_maintenance_script_raw() -> String {
+    [
+        "{{ if and .dpu_device_underlay_rows (index .dpu_device_underlay_rows 0).cerebro_ifname }}",
+        indoc::indoc! {r#"
+            #!/bin/bash
+            set -euo pipefail
+
+            # Initialize once per provisioning and add a marker -
+            # this marker is intended to survive ordinary reboots but
+            # DPF reprovisioning, including re-ingestion after force delete, reinstalls
+            # the DPU OS, removes the marker so maintenance is initialized again. Skip initialization if the marker exists.
+            state_dir=/var/lib/nico
+            marker="$state_dir/spx-maintenance-initialized"
+            install -d -m 0755 "$state_dir"
+            [[ ! -e "$marker" ]] || exit 0
+
+            # Provisioning has already assigned altnames strictly. Resolve them again
+            # instead of reusing NETDEV_BY_INTERFACES to check that the live mappings exist.
+            # Check every OVS interface exists before applying one atomic transaction.
+            args=()
+            for rail in 0 1 2 3; do
+              for plane in 0 1 2 3 4 5 6 7; do
+                logical="eth_r${rail}_p${plane}"
+                netdev=$(ip -j link show dev "$logical" | jq -er '.[0].ifname')
+                ovs-vsctl --timeout=30 get Interface "$netdev" name >/dev/null
+                args+=(-- set Interface "$netdev" external_ids:spx-arc-maintenance=true)
+              done
+            done
+            ovs-vsctl --timeout=30 "${args[@]}"
+
+            # Failed initialization must be retried; never mark success before OVS commits.
+            touch "$marker"
+        "#},
+        "{{ else }}\n#!/bin/bash\n# Legacy inventory does not support partial-plane maintenance.\nexit 0\n",
+        "{{ end }}\n",
+    ]
+    .concat()
+}
+
 fn ovs_legacy_script_raw() -> &'static str {
     indoc::indoc! {r#"
         #!/bin/bash
@@ -1879,7 +1949,7 @@ fn configure_xplane_network_script_raw() -> String {
     // Go whitespace trimming here would remove the YAML block scalar's required newline.
     [
         "{{ if and .dpu_device_underlay_rows (index .dpu_device_underlay_rows 0).cerebro_ifname }}",
-        xplane_network_preamble_raw(),
+        xplane_network_preamble_script_raw(),
         &xplane_cerebro_network_script_raw(),
         "{{ else }}",
         &xplane_legacy_network_script_raw(),
@@ -1987,7 +2057,7 @@ fn xplane_legacy_network_script_raw() -> String {
     .to_string()
 }
 
-fn xplane_network_preamble_raw() -> &'static str {
+fn xplane_network_preamble_script_raw() -> &'static str {
     indoc::indoc! {r#"
         #!/bin/bash
         set -euo pipefail
@@ -2333,8 +2403,7 @@ fn xplane_build_netplan_tmp_configuration_script_raw() -> &'static str {
 
 fn xplane_execute_verified_network_configuration_script_raw() -> &'static str {
     indoc::indoc! {r#"
-        # At this point we have done as much verification can we can.
-        # Execute the changes and log if any failure.
+        # All altnames must be assigned before configuring OVS or installing LLDP/netplan files.
         for interface_name in "${ALTNAMES_TO_ADD[@]}"; do
             netdev_name="${NETDEV_BY_INTERFACES[$interface_name]}"
             # Recheck ownership because it may have changed since validation.
@@ -2345,12 +2414,12 @@ fn xplane_execute_verified_network_configuration_script_raw() -> &'static str {
                 [ "$owner" != "$netdev_name" ] || continue
                 if ! ip link property del dev "$owner" altname "$interface_name"; then
                     echo "configure-xplane-network.sh: failed to remove altname $interface_name from $owner" >&2
-                    continue
+                    exit 1
                 fi
             fi
             if ! ip link property add dev "$netdev_name" altname "$interface_name"; then
                 echo "configure-xplane-network.sh: failed to set altname $interface_name on $netdev_name" >&2
-                continue
+                exit 1
             fi
         done
 
@@ -2367,6 +2436,24 @@ fn xplane_execute_verified_network_configuration_script_raw() -> &'static str {
         systemctl daemon-reload
         systemctl restart lldpd.service
         netplan apply
+    "#}
+}
+
+fn xplane_write_netdev_logical_ifname_mapping_script_raw() -> &'static str {
+    indoc::indoc! {r#"
+        # Publish the verified logical-to-netdev mapping for the containerized agent.
+        # Mount the directory so atomic replacements remain visible to running pods.
+        NETDEV_MAPPING_FILE="${NETDEV_MAPPING_FILE:-/etc/nico/xplane/logical-to-netdev-mapping}"
+        install -d -m 0755 -- "$(dirname -- "$NETDEV_MAPPING_FILE")" || exit 1
+        mapping_tmp="$(mktemp "${NETDEV_MAPPING_FILE}.tmp.XXXXXX")" || exit 1
+        if ! (
+            for interface_name in "${INTERFACES[@]}"; do
+                printf '%s\t%s\n' "$interface_name" "${NETDEV_BY_INTERFACES[$interface_name]}" || exit 1
+            done
+        ) > "$mapping_tmp" || ! chmod 0644 "$mapping_tmp" || ! mv -fT -- "$mapping_tmp" "$NETDEV_MAPPING_FILE"; then
+            rm -f -- "$mapping_tmp"
+            exit 1
+        fi
     "#}
 }
 
@@ -2410,6 +2497,7 @@ fn xplane_cerebro_network_script_raw() -> String {
         // Execution: only after validation and generation succeed, apply the queued
         // altnames, configure OVS, install both files, and reload/apply the services.
         xplane_execute_verified_network_configuration_script_raw(),
+        xplane_write_netdev_logical_ifname_mapping_script_raw(),
         // Wait for the OOB address to return after netplan apply.
         xplane_oob_network_wait_script_raw(),
     ]
@@ -2626,7 +2714,7 @@ export -f run_stage ovs-vsctl
         // `{{ if ...cerebro_ifname }}` branch that DPF renders per device. Render the legacy
         // (non-Cerebro) branch here so the staged bash below is executable while still exercising
         // the fixed OVS, telemetry, and xplane ordering around the topology commands.
-        let template = get_bf4_astra_ovs_defaults(Some(&intercept_bridging()));
+        let template = get_bf4_astra_ovs_defaults(Some(&intercept_bridging()), true);
         let (prefix, after_if) = template
             .split_once("{{ if ")
             .expect("astra script must contain the cerebro branch guard");
@@ -2888,7 +2976,7 @@ done
     }
 
     #[test]
-    fn xplane_altname_application_rechecks_ownership_and_continues_on_failure() {
+    fn xplane_altname_application_rechecks_ownership_and_stops_on_failure() {
         let fixture =
             std::env::temp_dir().join(format!("carbide-dpf-altnames-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&fixture).unwrap();
@@ -2897,11 +2985,8 @@ done
             ("unassigned", "add target\nadd second\nnetplan\n"),
             ("new_owner", "del wrong\nadd target\nadd second\nnetplan\n"),
             ("now_correct", "add second\nnetplan\n"),
-            ("delete_failure", "del wrong\nadd second\nnetplan\n"),
-            (
-                "add_failure",
-                "del wrong\nadd target\nadd second\nnetplan\n",
-            ),
+            ("delete_failure", "del wrong\n"),
+            ("add_failure", "del wrong\nadd target\n"),
         ] {
             fs::write(&calls, "").unwrap();
             let setup = indoc::indoc! {r#"
@@ -2943,8 +3028,9 @@ done
                 .env("TEST_CASE", scenario)
                 .output()
                 .unwrap();
-            assert!(
+            assert_eq!(
                 output.status.success(),
+                !scenario.ends_with("failure"),
                 "{scenario}: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
@@ -3024,7 +3110,7 @@ done
             let ovs = fixture.join("ovs.sh");
             fs::write(&ovs, "printf 'ovs\\n' >> \"$TEST_CALLS\"\n").unwrap();
             let calls = fixture.join("calls");
-            let mut preamble = xplane_network_preamble_raw().to_string();
+            let mut preamble = xplane_network_preamble_script_raw().to_string();
             let start = preamble
                 .find("{{- range .dpu_device_underlay_rows }}")
                 .unwrap();
@@ -3067,6 +3153,10 @@ done
                 .arg("-c")
                 .arg(script)
                 .env("MAPPING_FILE", &mapping_file)
+                .env(
+                    "NETDEV_MAPPING_FILE",
+                    fixture.join("logical-to-netdev-mapping"),
+                )
                 .env("SYSFS_PCI_DEVICES_DIR", &sysfs)
                 .env("LLDP_FILE", &lldp)
                 .env("NETPLAN_FILE", &netplan)
@@ -3082,7 +3172,25 @@ done
                 String::from_utf8_lossy(&output.stderr)
             );
             let events = fs::read_to_string(&calls).unwrap_or_default();
+            let published_mapping = fixture.join("logical-to-netdev-mapping");
+            assert_eq!(published_mapping.exists(), succeeds, "{scenario}");
             if succeeds {
+                let expected_mapping: String = (0..32)
+                    .map(|index| {
+                        format!(
+                            "eth_r{}_p{}\tA{}p{}\n",
+                            index / 8,
+                            index % 8,
+                            index / 4,
+                            index % 4
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    fs::read_to_string(published_mapping).unwrap(),
+                    expected_mapping,
+                    "{scenario}"
+                );
                 assert_eq!(
                     events
                         .lines()
@@ -3140,6 +3248,63 @@ done
             }
             fs::remove_dir_all(fixture).unwrap();
         }
+    }
+
+    #[test]
+    fn xplane_netdev_mapping_publishes_atomically_and_preserves_previous_on_failure() {
+        let fixture = std::env::temp_dir().join(format!(
+            "carbide-dpf-netdev-mapping-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&fixture).unwrap();
+        let mapping = fixture.join("logical-to-netdev-mapping");
+        for failure in ["none", "write", "rename"] {
+            fs::write(&mapping, "original\n").unwrap();
+            let setup = indoc::indoc! {r#"
+                set -euo pipefail
+                INTERFACES=(eth_r0_p0 eth_r2_p6)
+                declare -A NETDEV_BY_INTERFACES=([eth_r0_p0]=A53p0 [eth_r2_p6]=A56p2)
+                printf() {
+                    if [ "$TEST_FAILURE" = write ]; then
+                        builtin printf 'partial write\n'
+                        return 1
+                    fi
+                    builtin printf "$@"
+                }
+                mv() {
+                    # The active file must remain untouched until the final rename.
+                    [ "$(cat "$NETDEV_MAPPING_FILE")" = original ] || exit 99
+                    [ "$TEST_FAILURE" != rename ] || return 1
+                    command mv "$@"
+                }
+            "#};
+            let output = Command::new("bash")
+                .arg("-c")
+                .arg(format!(
+                    "{setup}{}",
+                    xplane_write_netdev_logical_ifname_mapping_script_raw()
+                ))
+                .env("NETDEV_MAPPING_FILE", &mapping)
+                .env("TEST_FAILURE", failure)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.success(),
+                failure == "none",
+                "{failure}: {output:?}"
+            );
+            assert_eq!(
+                fs::read_to_string(&mapping).unwrap(),
+                if failure == "none" {
+                    "eth_r0_p0\tA53p0\neth_r2_p6\tA56p2\n"
+                } else {
+                    "original\n"
+                },
+                "{failure}"
+            );
+            assert_eq!(fs::read_dir(&fixture).unwrap().count(), 1, "{failure}");
+        }
+        fs::remove_dir_all(fixture).unwrap();
     }
 
     #[test]
@@ -3232,7 +3397,7 @@ done
     "#;
             // A conditional call suppresses Bash errexit inside the function:
             // failures must be checked explicitly before replacing the active file.
-            let preamble = xplane_network_preamble_raw();
+            let preamble = xplane_network_preamble_script_raw();
             let preamble = preamble
                 .split("# Build DPU_DEVICE_UNDERLAY_ROWS")
                 .next()
@@ -4007,12 +4172,12 @@ done
             ),
             // Topology-free Astra brackets its unchanged fixed OVS child.
             (
-                get_bf4_astra_ovs_defaults(None),
+                get_bf4_astra_ovs_defaults(None, true),
                 "/etc/mellanox/ovs-script.sh",
             ),
             // Topology-backed Astra must enable child errexit before creating topology state.
             (
-                get_bf4_astra_ovs_defaults(Some(&intercept_bridging())),
+                get_bf4_astra_ovs_defaults(Some(&intercept_bridging()), true),
                 "bash -e /etc/mellanox/ovs-script.sh",
             ),
         ] {
@@ -4041,7 +4206,7 @@ done
 
     #[test]
     fn astra_bootstrap_stops_before_post_hook_when_network_setup_fails() {
-        let template = get_bf4_astra_ovs_defaults(None);
+        let template = get_bf4_astra_ovs_defaults(None, true);
         let (prefix, branches) = template.split_once("{{ if ").unwrap();
         let (_, branches) = branches.split_once(" }}\n").unwrap();
         let (cerebro, legacy) = branches.split_once("{{ else }}\n").unwrap();
@@ -4074,7 +4239,7 @@ done
                 "bf4-generic",
             ),
             (
-                get_bf4_astra_config_files(&None, None).unwrap(),
+                get_bf4_astra_config_files(&None, None, true).unwrap(),
                 "bf4-astra",
             ),
         ] {
@@ -4625,10 +4790,21 @@ done
     #[test]
     fn bf4_astra_proxy_config_file_count() {
         value_scenarios!(
-            run = |p| {
-                let files = astra_flavor_spec(&p, true)
-                    .config_files
-                    .unwrap();
+            run = |(p, enabled)| {
+                let template = flavor_bf4_astra_with_topology(
+                    "astra-ns", &p, 128, None, None, &[], true, enabled,
+                ).unwrap();
+                let spec = flavor_spec_from_template(&template);
+                assert_eq!(
+                    spec.ovs.unwrap().raw_config_script.unwrap()
+                        .contains("/usr/local/sbin/initialize-spx-maintenance.sh"),
+                    enabled,
+                );
+                let files = spec.config_files.unwrap();
+                assert_eq!(
+                    files.iter().any(|file| file.path == "/usr/local/sbin/initialize-spx-maintenance.sh"),
+                    enabled,
+                );
                 let proxy_file_count = files
                     .iter()
                     .filter(|file| {
@@ -4638,12 +4814,15 @@ done
                     .count();
                 (files.len(), proxy_file_count)
             };
-            "no proxy keeps the fifteen Astra base files" {
-                None => (15, 0),
+            "no proxy keeps the sixteen Astra base files" {
+                (None, true) => (16, 0),
             }
 
             "configured proxy appends exactly one proxy file" {
-                proxy("http://proxy:3128", &["10.0.0.0/8", "localhost"]) => (16, 1),
+                (proxy("http://proxy:3128", &["10.0.0.0/8", "localhost"]), true) => (17, 1),
+            }
+            "disabled maintenance omits its initialization file and call" {
+                (None, false) => (15, 0),
             }
         );
     }

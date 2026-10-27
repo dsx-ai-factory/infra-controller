@@ -60,7 +60,7 @@ func TenantHasTargetedInstanceCreation(ctx context.Context, tx *db.Tx, dbSession
 		if err != nil {
 			if errors.Is(err, db.ErrDoesNotExist) {
 				siteDAO := NewSiteDAO(dbSession)
-				site, err := siteDAO.GetByID(ctx, tx, *siteID, nil, false)
+				site, err := siteDAO.GetByID(ctx, tx, *siteID, nil, false, false)
 				if err != nil {
 					return false, err
 				}

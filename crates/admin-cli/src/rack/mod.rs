@@ -53,3 +53,15 @@ pub(crate) enum Cmd {
     #[clap(about = "Show rack health history")]
     HealthHistory(health_history::Args),
 }
+
+fn certificate_failure(
+    state_json: &str,
+) -> Option<model::component_manager::SwitchCertificateFailure> {
+    match serde_json::from_str::<model::rack::RackState>(state_json).ok()? {
+        model::rack::RackState::Error {
+            certificate_failure,
+            ..
+        } => certificate_failure,
+        _ => None,
+    }
+}

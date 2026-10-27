@@ -16,7 +16,7 @@
  */
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 
 use crate::lockdown::error::{MlxError, MlxResult};
 use crate::runner::command_builder::CommandSpec;
@@ -64,13 +64,19 @@ impl FlintRunner {
     // find_flint attempts to find the flint executable in common locations.
     fn find_flint() -> MlxResult<String> {
         for path in &Self::CANDIDATE_PATHS {
-            if let Ok(output) = Command::new(path)
+            let Ok(mut child) = Command::new(path)
                 .arg("--version")
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .status()
-                && output.success()
-            {
+                .spawn()
+            else {
+                continue;
+            };
+            let status = child.wait().map_err(|source| MlxError::ProcessUnsettled {
+                operation: "version probe",
+                source,
+            })?;
+            if status.success() {
                 return Ok(path.to_string());
             }
         }
@@ -83,6 +89,23 @@ impl FlintRunner {
         format!("{} {}", self.flint_path, args.join(" "))
     }
 
+    /// Keep spawn failures distinct from lost completion evidence. Raw
+    /// arguments and output cannot enter these errors because keys may occur
+    /// in either one.
+    fn execute(command: &mut Command, operation: &'static str) -> MlxResult<Output> {
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| {
+                MlxError::CommandFailed(format!("failed to execute {operation}: {error}"))
+            })?;
+        child
+            .wait_with_output()
+            .map_err(|source| MlxError::ProcessUnsettled { operation, source })
+    }
+
     // query_device queries device information and hardware access status.
     pub fn query_device(&self, device_id: &str) -> MlxResult<String> {
         let args = ["-d", device_id, "q"];
@@ -91,10 +114,7 @@ impl FlintRunner {
             return Err(MlxError::DryRun(self.build_command(&args)));
         }
 
-        let output = Command::new(&self.flint_path)
-            .args(args)
-            .output()
-            .map_err(|e| MlxError::CommandFailed(format!("Failed to execute query: {e}")))?;
+        let output = Self::execute(Command::new(&self.flint_path).args(args), "query")?;
 
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -124,6 +144,7 @@ impl FlintRunner {
     /// [`MlxError::AlreadyUnlocked`] takes precedence over exit status when flint
     /// reports access already enabled. Other launch or exit failures return
     /// [`MlxError::CommandFailed`] without tool output, which may contain keys.
+    /// Failed completion collection returns [`MlxError::ProcessUnsettled`].
     pub fn enable_hw_access(&self, device_id: &str, key: &str) -> MlxResult<()> {
         if !Self::is_valid_key(key) {
             return Err(MlxError::InvalidKey);
@@ -140,10 +161,7 @@ impl FlintRunner {
         }
 
         let args = ["-d", device_id, "hw_access", "enable", key];
-        let output = Command::new(&self.flint_path)
-            .args(args)
-            .output()
-            .map_err(|e| MlxError::CommandFailed(format!("Failed to execute enable: {e}")))?;
+        let output = Self::execute(Command::new(&self.flint_path).args(args), "enable")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -170,6 +188,7 @@ impl FlintRunner {
     /// [`MlxError::AlreadyLocked`] takes precedence over exit status when flint
     /// reports access already disabled. Other launch or exit failures return
     /// [`MlxError::CommandFailed`] without tool output, which may contain keys.
+    /// Failed completion collection returns [`MlxError::ProcessUnsettled`].
     pub fn disable_hw_access(&self, device_id: &str, key: &str) -> MlxResult<()> {
         if !Self::is_valid_key(key) {
             return Err(MlxError::InvalidKey);
@@ -186,10 +205,7 @@ impl FlintRunner {
         }
 
         let args = ["-d", device_id, "hw_access", "disable", key];
-        let output = Command::new(&self.flint_path)
-            .args(args)
-            .output()
-            .map_err(|e| MlxError::CommandFailed(format!("Failed to execute disable: {e}")))?;
+        let output = Self::execute(Command::new(&self.flint_path).args(args), "disable")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -215,7 +231,8 @@ impl FlintRunner {
     /// [`MlxError::DryRun`] with the key redacted when dry-run is enabled.
     /// Launch or exit failures return [`MlxError::CommandFailed`] without tool
     /// output, which may contain keys. This operation does not classify Already
-    /// responses; any successful exit returns `Ok(())`.
+    /// responses; any successful exit returns `Ok(())`. Failed completion
+    /// collection returns [`MlxError::ProcessUnsettled`].
     pub fn set_key(&self, device_id: &str, key: &str) -> MlxResult<()> {
         if !Self::is_valid_key(key) {
             return Err(MlxError::InvalidKey);
@@ -231,10 +248,7 @@ impl FlintRunner {
         }
 
         let args = ["-d", device_id, "set_key", key];
-        let output = Command::new(&self.flint_path)
-            .args(args)
-            .output()
-            .map_err(|e| MlxError::CommandFailed(format!("Failed to execute set_key: {e}")))?;
+        let output = Self::execute(Command::new(&self.flint_path).args(args), "set_key")?;
 
         if !output.status.success() {
             return Err(MlxError::CommandFailed(format!(
@@ -390,6 +404,7 @@ mod coverage_tests {
     // Compare error variants without requiring MlxError to implement PartialEq.
     fn err_kind(e: &MlxError) -> &'static str {
         match e {
+            MlxError::ProcessUnsettled { .. } => "ProcessUnsettled",
             MlxError::CommandFailed(_) => "CommandFailed",
             MlxError::DeviceNotFound(_) => "DeviceNotFound",
             MlxError::InvalidDeviceId(_) => "InvalidDeviceId",

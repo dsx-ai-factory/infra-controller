@@ -1036,7 +1036,7 @@ client-certificate authentication is not used.
 | ------- | ------ | --------- | ------------- |
 | `max_network_security_group_size` | `u32` | `200` | Max expanded rules per NSG. |
 | `stateful_acls_enabled` | `bool` | `true` | Allow stateful NSG creation and stateless-to-stateful updates, and enable supporting NVUE configuration on DPUs. When disabled, existing stateful NSGs remain editable but behave statelessly. |
-| `policy_overrides` | `Vec<NetworkSecurityGroupRule>` | `[]` | NSG rules injected before user-defined rules. |
+| `policy_overrides` | `Vec<NetworkSecurityGroupRule>` | `[]` | Stateless site rules applied before tenant NSGs; add explicit return rules for bidirectional flows. See the [network security group manual](../../../../docs/manuals/networking/network_security_groups.md). |
 
 ### `FnnConfig`
 
@@ -1527,6 +1527,7 @@ warning. Nest them under `[ewethers_config.svpc]` in new configurations.
 | `enabled` | `bool` | `false` | Enable Cluster Interconnect Network. |
 | `svpc_enabled` | `bool` | `false` | Enable the SVPC path. Not mutually exclusive with `astra_enabled`. |
 | `astra_enabled` | `bool` | `false` | Enable the Astra path. Not mutually exclusive with `svpc_enabled`. |
+| `partial-multiplane` | `"enabled"` or `"disabled"` | `"enabled"` | Site-wide partial multiplane maintenance control. `"disabled"` rejects maintenance operator RPCs, stops maintenance configuration delivery and observation recording, and omits maintenance initialization from newly provisioned Astra flavors. Saved requests and current plane states are preserved. Maintenance delivery and observations require `enabled` and `astra_enabled` to be `true` and an eligible BF4 DPU. See [partial multiplane maintenance](../../../../docs/manuals/dpf.md#site-wide-partial-multiplane-maintenance). |
 | `subnet_ip` | `Ipv4Addr` | `0.0.0.0` | Base IPv4 address of the DPA overlay network. |
 | `subnet_mask` | `i32` | `11` | IPv4 CIDR prefix length (0–32) for the DPA overlay network; also sets Weave `underlayConfigMapData.overlayNetworkPrefixLength` in the generated `DPUServiceConfiguration`. If weave is configured, it uses the default `11` when this field or the entire `ewethers_config` section is omitted. A functional Astra/Weave deployment requires explicit ewethers configuration with the appropriate enable flags and intended overlay subnet address and mask. |
 | `astra` | `AstraConfig` | *(defaults)* | Astra settings (see [AstraConfig](#astraconfig)). |

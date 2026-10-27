@@ -52,7 +52,7 @@ func (mit ManageIpxeTemplate) UpdateIpxeTemplatesInDB(ctx context.Context, siteI
 
 	// Ensure site exists
 	stDAO := cdbm.NewSiteDAO(mit.dbSession)
-	_, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	_, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
 			logger.Warn().Err(err).Msg("Received inventory for unknown or deleted Site")
