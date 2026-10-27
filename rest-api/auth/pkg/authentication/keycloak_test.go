@@ -929,10 +929,11 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 				assert.Equal(t, "john.doe@testorg.com", *dbUser.Email)
 				assert.Equal(t, "John", *dbUser.FirstName)
 				assert.Equal(t, "Doe", *dbUser.LastName)
+				assert.False(t, config.GetIsServiceAccountFromContext(c))
 			},
 		},
 		{
-			name: "keycloak service account authentication",
+			name: "keycloak client with only Tenant Admin role is not a service account",
 			tokenClaims: &claim.KeycloakClaims{
 				Email:     "",
 				FirstName: "",
@@ -958,6 +959,47 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 				assert.True(t, ok)
 				assert.Equal(t, "service-account-123", *dbUser.AuxiliaryID) // Uses subject as auxiliary ID
 				assert.Equal(t, "service-client", *dbUser.FirstName)        // FirstName set to ClientId for service accounts
+				assert.False(t, config.GetIsServiceAccountFromContext(c))
+			},
+		},
+		{
+			name: "keycloak client with Provider Admin and Tenant Admin roles is a service account",
+			tokenClaims: &claim.KeycloakClaims{
+				ClientId: "bootstrap-client",
+				RealmAccess: claim.RealmAccess{
+					Roles: []string{"testorg:NICO_PROVIDER_ADMIN", "testorg:NICO_TENANT_ADMIN"},
+				},
+				RegisteredClaims: jwt.RegisteredClaims{
+					Subject:   "service-account-456",
+					Issuer:    jwksServer.URL + "/realms/nico",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+				},
+			},
+			path:    "/v2/org/testorg/user/current",
+			orgName: "testorg",
+			wantErr: false,
+			validateUser: func(t *testing.T, c echo.Context) {
+				assert.True(t, config.GetIsServiceAccountFromContext(c))
+			},
+		},
+		{
+			name: "keycloak client with Provider Admin in another org is not a service account",
+			tokenClaims: &claim.KeycloakClaims{
+				ClientId: "split-org-client",
+				RealmAccess: claim.RealmAccess{
+					Roles: []string{"otherorg:PROVIDER_ADMIN", "testorg:TENANT_ADMIN"},
+				},
+				RegisteredClaims: jwt.RegisteredClaims{
+					Subject:   "service-account-789",
+					Issuer:    jwksServer.URL + "/realms/nico",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+				},
+			},
+			path:    "/v2/org/testorg/user/current",
+			orgName: "testorg",
+			wantErr: false,
+			validateUser: func(t *testing.T, c echo.Context) {
+				assert.False(t, config.GetIsServiceAccountFromContext(c))
 			},
 		},
 		{

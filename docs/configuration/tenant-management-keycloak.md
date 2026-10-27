@@ -439,11 +439,13 @@ call creates the org's Tenant if it does not exist yet, and accepting fails with
 has a Tenant, which leaves the account's `tenantId` empty. Accepting fills it in with the
 org's Tenant, so an invitation that predates the Tenant needs no extra step.
 
-**A Tenant should not call `nicocli service-account current`.** In a deployment with
-`serviceAccount: true`, that endpoint creates an Infrastructure Provider, a Tenant, and
-an already-accepted Tenant Account for the calling org, which makes the org its own
-Provider instead of a Tenant of yours. It is the bootstrap path for the Provider org, not
-for an invited Tenant.
+**A Tenant's client should hold only `TENANT_ADMIN` in the Tenant org.** In a deployment
+with `serviceAccount: true`, NICo treats a `client_credentials` token as a service account
+only when it holds both `PROVIDER_ADMIN` and `TENANT_ADMIN` in the requested org, as the
+bundled `ncx-service` client does. For such a token, `nicocli service-account current`
+creates an Infrastructure Provider, a Tenant, and an already-accepted Tenant Account,
+which makes the org its own Provider instead of a Tenant of yours. For a client that holds
+only `TENANT_ADMIN`, it returns `enabled: false` and creates nothing.
 
 The order is:
 
