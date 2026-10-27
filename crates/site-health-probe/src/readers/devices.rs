@@ -188,10 +188,10 @@ struct Reads {
     machines: Result<(), Failure>,
     hosts: Result<CensusRead<HostDetail>, Failure>,
     dpus: Vec<String>,
-    switches: Result<CensusRead<forge::Switch>, Failure>,
-    shelves: Result<CensusRead<forge::PowerShelf>, Failure>,
-    racks: Result<CensusRead<forge::Rack>, Failure>,
-    instances: Result<CensusRead<forge::Instance>, Failure>,
+    switches: Result<CensusRead<LifecycleRow>, Failure>,
+    shelves: Result<CensusRead<LifecycleRow>, Failure>,
+    racks: Result<CensusRead<LifecycleRow>, Failure>,
+    instances: Result<CensusRead<InstanceRow>, Failure>,
     firmware: Result<Vec<HostReprovisioningListItem>, Failure>,
 }
 
@@ -322,42 +322,46 @@ impl Sweep<'_> {
                 "switches",
                 ("find_switch_ids", move || nico.switch_ids()),
                 ("find_switches_by_ids", move |ids: Vec<_>| async move {
-                    nico.switches_by_ids(&ids).await
+                    let rows = nico.switches_by_ids(&ids).await?;
+                    Ok(rows.into_iter().map(switch_row).collect())
                 }),
-                |s: &forge::Switch| s.id.map(|id| id.to_string()).unwrap_or_default(),
+                |r: &LifecycleRow| r.id.clone(),
             )
             .await
-            .map(drop_deleted(|s: &forge::Switch| s.deleted.is_some()));
+            .map(drop_deleted(|r: &LifecycleRow| r.deleted));
         let shelves = self
             .census(
                 "power shelves",
                 ("find_power_shelf_ids", move || nico.power_shelf_ids()),
                 ("find_power_shelves_by_ids", move |ids: Vec<_>| async move {
-                    nico.power_shelves_by_ids(&ids).await
+                    let rows = nico.power_shelves_by_ids(&ids).await?;
+                    Ok(rows.into_iter().map(shelf_row).collect())
                 }),
-                |s: &forge::PowerShelf| s.id.map(|id| id.to_string()).unwrap_or_default(),
+                |r: &LifecycleRow| r.id.clone(),
             )
             .await
-            .map(drop_deleted(|s: &forge::PowerShelf| s.deleted.is_some()));
+            .map(drop_deleted(|r: &LifecycleRow| r.deleted));
         let racks = self
             .census(
                 "racks",
                 ("find_rack_ids", move || nico.rack_ids()),
                 ("find_racks_by_ids", move |ids: Vec<_>| async move {
-                    nico.racks_by_ids(&ids).await
+                    let rows = nico.racks_by_ids(&ids).await?;
+                    Ok(rows.into_iter().map(rack_row).collect())
                 }),
-                |r: &forge::Rack| r.id.as_ref().map(ToString::to_string).unwrap_or_default(),
+                |r: &LifecycleRow| r.id.clone(),
             )
             .await
-            .map(drop_deleted(|r: &forge::Rack| r.deleted.is_some()));
+            .map(drop_deleted(|r: &LifecycleRow| r.deleted));
         let instances = self
             .census(
                 "instances",
                 ("find_instance_ids", move || nico.instance_ids()),
                 ("find_instances_by_ids", move |ids: Vec<_>| async move {
-                    nico.instances_by_ids(&ids).await
+                    let rows = nico.instances_by_ids(&ids).await?;
+                    Ok(rows.into_iter().map(InstanceRow::from).collect())
                 }),
-                |i: &forge::Instance| i.id.map(|id| id.to_string()).unwrap_or_default(),
+                |i: &InstanceRow| i.id.clone(),
             )
             .await;
         let expected = self.read_expected().await;
@@ -591,18 +595,27 @@ impl DevicesReader {
         // Firmware requests join to this sweep's hosts. Host units carry
         // their open request, so without the request read a host snapshot
         // could not tell "no request" from "unknown": the host family then
-        // keeps its last snapshot too.
-        let (requests, open) = match (firmware, &hosts) {
-            (Err(failure), _) => (Err(failure.clone()), Err(failure)),
-            (_, Err(failure)) => {
-                let failure = failure.needed_by(Family::HostFirmwareRequests);
-                (Err(failure.clone()), Err(failure))
+        // keeps its last snapshot too. Requests are delivered first, and
+        // only their open-request map waits for the hosts.
+        let mut open = None;
+        self.deliver_built(meta, Family::HostFirmwareRequests, failed, |previous| {
+            let joined = match (firmware, &hosts) {
+                (Err(failure), _) => {
+                    open = Some(Err(failure.needed_by(Family::Host)));
+                    return Err(failure);
+                }
+                (_, Err(failure)) => return Err(failure.needed_by(Family::HostFirmwareRequests)),
+                (Ok(items), Ok(read)) => firmware_requests(&items, &read.rows, previous),
+            };
+            open = Some(Ok(joined.open));
+            if joined.unjoinable > 0 {
+                return Err(Failure::unresolved(format!(
+                    "{} firmware requests name no host of this sweep",
+                    joined.unjoinable
+                )));
             }
-            (Ok(items), Ok(hosts)) => {
-                let joined = firmware_requests(&items, &hosts.rows);
-                (Ok((joined.units, joined.unjoinable)), Ok(joined.open))
-            }
-        };
+            Ok(joined.units)
+        });
         self.deliver_built(meta, Family::Dpu, failed, |previous| {
             match (&machines, &hosts) {
                 (Ok(()), Ok(read)) => Ok(dpu_units(&dpus, &read.rows, previous)),
@@ -612,31 +625,23 @@ impl DevicesReader {
         drop(dpus);
         self.deliver_built(meta, Family::Host, failed, |previous| match (hosts, open) {
             (Err(failure), _) => Err(failure),
-            (Ok(_), Err(failure)) => Err(failure.needed_by(Family::Host)),
-            (Ok(read), Ok(open)) => Ok(host_units(read.rows, &open, previous)),
-        });
-        self.deliver_built(meta, Family::HostFirmwareRequests, failed, |previous| {
-            let (units, unjoinable) = requests?;
-            if unjoinable > 0 {
-                return Err(Failure::unresolved(format!(
-                    "{unjoinable} firmware requests name no host of this sweep"
-                )));
-            }
-            let mut built = UnitsBuilder::new(previous);
-            built.extend(units);
-            Ok(built.finish(0))
+            (Ok(read), Some(Ok(open))) => Ok(host_units(read.rows, &open, previous)),
+            (Ok(_), Some(Err(failure))) => Err(failure),
+            (Ok(_), None) => Err(Failure::unresolved(
+                "the firmware request join did not run".to_string(),
+            )),
         });
         self.deliver_built(meta, Family::Expected, failed, |previous| {
             links.map(|links| expected_units(links, previous))
         });
         self.deliver_built(meta, Family::Switch, failed, |previous| {
-            switches.map(|r| lifecycle_units(UnitType::Switch, r.rows, switch_view, previous))
+            switches.map(|r| lifecycle_units(UnitType::Switch, r.rows, previous))
         });
         self.deliver_built(meta, Family::PowerShelf, failed, |previous| {
-            shelves.map(|r| lifecycle_units(UnitType::PowerShelf, r.rows, shelf_view, previous))
+            shelves.map(|r| lifecycle_units(UnitType::PowerShelf, r.rows, previous))
         });
         self.deliver_built(meta, Family::Rack, failed, |previous| {
-            racks.map(|r| lifecycle_units(UnitType::Rack, r.rows, rack_view, previous))
+            racks.map(|r| lifecycle_units(UnitType::Rack, r.rows, previous))
         });
         self.deliver_built(meta, Family::Instance, failed, |previous| {
             instances.map(|r| instance_units(r.rows, previous))
@@ -732,7 +737,7 @@ fn timestamp(ts: Option<rpc::Timestamp>) -> Option<DateTime<Utc>> {
 
 /// The open firmware requests joined to one host read.
 struct JoinedRequests {
-    units: Vec<Unit>,
+    units: UnitsData,
     /// Each joined host's open request.
     open: BTreeMap<String, FirmwareRequest>,
     /// Requests whose host is not in the host read: the request family is
@@ -740,12 +745,14 @@ struct JoinedRequests {
     unjoinable: usize,
 }
 
-/// Firmware request units, plus each open request by host ID.
+/// Firmware request units, built one at a time, plus each open request by
+/// host ID.
 fn firmware_requests(
     items: &[HostReprovisioningListItem],
     hosts: &BTreeMap<String, HostDetail>,
+    previous: &[Arc<Unit>],
 ) -> JoinedRequests {
-    let mut units = Vec::new();
+    let mut units = UnitsBuilder::new(previous);
     let mut open = BTreeMap::new();
     let mut unjoinable = 0;
     for item in items {
@@ -763,7 +770,7 @@ fn firmware_requests(
             continue;
         }
         let (category, _) = host_state(&host.state);
-        let mut fields = host_fields(host.clone(), None);
+        let mut fields = host_fields(host, None);
         fields.open_firmware_request = Some(request);
         units.push(Unit {
             id,
@@ -785,7 +792,7 @@ fn firmware_requests(
         });
     }
     JoinedRequests {
-        units,
+        units: units.finish(0),
         open,
         unjoinable,
     }
@@ -808,18 +815,18 @@ fn known_flag(known: &Known<Result<(), String>>) -> (Option<bool>, Option<String
 }
 
 /// The host fields of a unit, moved out of its read row.
-fn host_fields(host: HostDetail, open: Option<&FirmwareRequest>) -> HostFields {
+fn host_fields(host: &HostDetail, open: Option<&FirmwareRequest>) -> HostFields {
     let (allocatable, blocking_reason) = known_flag(&host.allocatable);
     let (update_eligible, update_blocking_reason) = known_flag(&host.update_eligible);
     HostFields {
-        vendor: host.vendor,
-        model: host.model,
-        instance_type: host.instance_type,
-        bmc_version: host.bmc_version,
-        uefi_version: host.uefi_version,
+        vendor: host.vendor.clone(),
+        model: host.model.clone(),
+        instance_type: host.instance_type.clone(),
+        bmc_version: host.bmc_version.clone(),
+        uefi_version: host.uefi_version.clone(),
         version_source: host.version_source,
         report_at: host.report_at,
-        report_error: host.report_error,
+        report_error: host.report_error.clone(),
         allocatable,
         blocking_reason,
         firmware_autoupdate: host.firmware_autoupdate,
@@ -827,8 +834,8 @@ fn host_fields(host: HostDetail, open: Option<&FirmwareRequest>) -> HostFields {
         update_blocking_reason,
         update_complete: host.update_complete,
         open_firmware_request: open.cloned(),
-        nvlink_domain: host.nvlink_domain,
-        rack_id: host.rack_id,
+        nvlink_domain: host.nvlink_domain.clone(),
+        rack_id: host.rack_id.clone(),
         dpu_ids: host.dpu_ids.iter().map(ToString::to_string).collect(),
     }
 }
@@ -859,15 +866,13 @@ fn host_units(
     previous: &[Arc<Unit>],
 ) -> UnitsData {
     let mut unknown = 0;
-    let units = hosts.into_iter().map(|(id, mut host)| {
+    let units = hosts.into_iter().map(|(id, host)| {
         let (category, known) = host_state(&host.state);
         if !known {
             unknown += 1;
         }
         let done = category == "Ready";
-        let reason = (!done).then(|| not_done_reason(&host.state, host.state_reason.as_deref()));
-        let bmc_ip = host.bmc_ip.take();
-        let fields = host_fields(host, open.get(&id));
+        let fields = host_fields(&host, open.get(&id));
         Unit {
             id,
             unit_type: UnitType::Host,
@@ -875,8 +880,8 @@ fn host_units(
             stage: stage(done, category == "Failed"),
             done,
             state: category.to_string(),
-            reason,
-            bmc_ip,
+            reason: (!done).then(|| not_done_reason(&host.state, host.state_reason.as_deref())),
+            bmc_ip: host.bmc_ip,
             host: Some(fields),
             dpu: None,
             instance: None,
@@ -946,43 +951,53 @@ fn dpu_units(
 /// The state of a DPU no host lists.
 pub(crate) const UNATTACHED: &str = "unattached";
 
-/// What a lifecycle-tracked device (switch, shelf, rack) shows.
-struct LifecycleView<'a> {
-    lifecycle: Option<&'a forge::LifecycleStatus>,
+/// What a lifecycle-tracked device (switch, shelf, rack) shows, kept from
+/// each by-ID batch instead of the whole record.
+struct LifecycleRow {
+    id: String,
+    lifecycle: Option<forge::LifecycleStatus>,
     bmc_ip: Option<String>,
+    deleted: bool,
 }
 
-fn switch_view(s: &forge::Switch) -> LifecycleView<'_> {
-    LifecycleView {
-        lifecycle: s.status.as_ref().and_then(|st| st.lifecycle.as_ref()),
-        bmc_ip: s.bmc_info.as_ref().and_then(|b| b.ip.clone()),
+fn switch_row(s: forge::Switch) -> LifecycleRow {
+    LifecycleRow {
+        id: s.id.map(|id| id.to_string()).unwrap_or_default(),
+        lifecycle: s.status.and_then(|st| st.lifecycle),
+        bmc_ip: s.bmc_info.and_then(|b| b.ip),
+        deleted: s.deleted.is_some(),
     }
 }
 
-fn shelf_view(s: &forge::PowerShelf) -> LifecycleView<'_> {
-    LifecycleView {
-        lifecycle: s.status.as_ref().and_then(|st| st.lifecycle.as_ref()),
-        bmc_ip: s.bmc_info.as_ref().and_then(|b| b.ip.clone()),
+fn shelf_row(s: forge::PowerShelf) -> LifecycleRow {
+    LifecycleRow {
+        id: s.id.map(|id| id.to_string()).unwrap_or_default(),
+        lifecycle: s.status.and_then(|st| st.lifecycle),
+        bmc_ip: s.bmc_info.and_then(|b| b.ip),
+        deleted: s.deleted.is_some(),
     }
 }
 
-fn rack_view(r: &forge::Rack) -> LifecycleView<'_> {
-    LifecycleView {
-        lifecycle: r.status.as_ref().and_then(|st| st.lifecycle.as_ref()),
+fn rack_row(r: forge::Rack) -> LifecycleRow {
+    LifecycleRow {
+        id: r.id.as_ref().map(ToString::to_string).unwrap_or_default(),
+        lifecycle: r.status.and_then(|st| st.lifecycle),
         bmc_ip: None,
+        deleted: r.deleted.is_some(),
     }
 }
 
-fn lifecycle_units<R>(
+fn lifecycle_units(
     unit_type: UnitType,
-    rows: BTreeMap<String, R>,
-    view: fn(&R) -> LifecycleView<'_>,
+    rows: BTreeMap<String, LifecycleRow>,
     previous: &[Arc<Unit>],
 ) -> UnitsData {
     let mut unknown = 0;
-    let units = rows.into_iter().map(|(id, row)| {
-        let view = view(&row);
-        let tag = view.lifecycle.and_then(|l| lifecycle_tag(&l.state));
+    let units = rows.into_iter().map(|(id, view)| {
+        let tag = view
+            .lifecycle
+            .as_ref()
+            .and_then(|l| lifecycle_tag(&l.state));
         if tag.is_none() {
             unknown += 1;
         }
@@ -990,6 +1005,7 @@ fn lifecycle_units<R>(
         let done = state == "ready";
         let message = view
             .lifecycle
+            .as_ref()
             .and_then(|l| l.state_reason.as_ref())
             .and_then(|r| r.outcome_msg.as_deref())
             .filter(|m| !m.is_empty());
@@ -1013,10 +1029,36 @@ fn lifecycle_units<R>(
     built.finish(unknown)
 }
 
-fn instance_units(rows: BTreeMap<String, forge::Instance>, previous: &[Arc<Unit>]) -> UnitsData {
+/// What an instance shows, kept from each by-ID batch instead of the whole
+/// record.
+struct InstanceRow {
+    id: String,
+    tenant_status: Option<forge::InstanceTenantStatus>,
+    name: Option<String>,
+    tenant: Option<String>,
+    host_id: Option<String>,
+}
+
+impl From<forge::Instance> for InstanceRow {
+    fn from(instance: forge::Instance) -> Self {
+        Self {
+            id: instance.id.map(|id| id.to_string()).unwrap_or_default(),
+            tenant_status: instance.status.and_then(|s| s.tenant),
+            name: instance.metadata.map(|m| m.name).filter(|n| !n.is_empty()),
+            tenant: instance
+                .config
+                .and_then(|c| c.tenant)
+                .map(|t| t.tenant_organization_id)
+                .filter(|t| !t.is_empty()),
+            host_id: instance.machine_id.map(|id| id.to_string()),
+        }
+    }
+}
+
+fn instance_units(rows: BTreeMap<String, InstanceRow>, previous: &[Arc<Unit>]) -> UnitsData {
     let mut unknown = 0;
     let units = rows.into_iter().map(|(id, instance)| {
-        let tenant_status = instance.status.as_ref().and_then(|s| s.tenant.as_ref());
+        let tenant_status = instance.tenant_status.as_ref();
         let state = match tenant_status.map(|t| forge::TenantState::try_from(t.state)) {
             Some(Ok(state)) => state.as_str_name().to_lowercase(),
             _ => {
@@ -1039,18 +1081,9 @@ fn instance_units(rows: BTreeMap<String, forge::Instance>, previous: &[Arc<Unit>
             host: None,
             dpu: None,
             instance: Some(InstanceFields {
-                name: instance
-                    .metadata
-                    .as_ref()
-                    .map(|m| m.name.clone())
-                    .filter(|n| !n.is_empty()),
-                tenant: instance
-                    .config
-                    .as_ref()
-                    .and_then(|c| c.tenant.as_ref())
-                    .map(|t| t.tenant_organization_id.clone())
-                    .filter(|t| !t.is_empty()),
-                host_id: instance.machine_id.map(|id| id.to_string()),
+                name: instance.name,
+                tenant: instance.tenant,
+                host_id: instance.host_id,
                 status: state.clone(),
             }),
             state,
@@ -1078,7 +1111,9 @@ struct Record {
     id: String,
     bmc_mac: Option<String>,
     explored: Option<String>,
-    devices: BTreeSet<String>,
+    /// Sorted and without repeats. Almost always one device, so a vector
+    /// costs far less than a set.
+    devices: Vec<String>,
 }
 
 impl Record {
@@ -1139,9 +1174,7 @@ impl Record {
             expected: Some(ExpectedFields {
                 record_type: self.record_type,
                 linked,
-                device_id: linked
-                    .then(|| self.devices.iter().next().cloned())
-                    .flatten(),
+                device_id: linked.then(|| self.devices.first().cloned()).flatten(),
                 bmc_mac: self.bmc_mac.clone(),
                 explored_address: self.explored.clone(),
             }),
@@ -1167,13 +1200,15 @@ fn link_records<'a>(
             id,
             bmc_mac: Some(row.bmc_mac.to_string()).filter(|m| !m.is_empty()),
             explored: None,
-            devices: BTreeSet::new(),
+            devices: Vec::new(),
         });
         if record.explored.is_none() {
             record.explored = row.explored.filter(|a| !a.is_empty()).map(str::to_string);
         }
-        if let Some(device) = row.device.filter(|d| census.contains(d)) {
-            record.devices.insert(device);
+        if let Some(device) = row.device.filter(|d| census.contains(d))
+            && let Err(at) = record.devices.binary_search(&device)
+        {
+            record.devices.insert(at, device);
         }
     }
     records.into_values().collect()

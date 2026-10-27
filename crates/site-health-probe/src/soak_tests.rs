@@ -20,13 +20,18 @@
 //! at 1,000 racks (18,000 hosts, 9,000 switches, 8,000 shelves, an instance
 //! per host). Each runs 500 device sweeps while the site churns: host states,
 //! models and BMC versions change, a block of hosts is removed and comes back
-//! with the same IDs, reads fail, sweeps are cancelled, clients page across
-//! publications and abandon cursors, and every publication is scraped and
-//! JSON-encoded while it lands.
+//! with the same IDs, a tenth of the hosts have open firmware requests, reads
+//! fail, a request names a gone host, sweeps are cancelled, clients page
+//! across publications and abandon cursors, and every publication is scraped
+//! and JSON-encoded while it lands. Only the API's REST reader flag is
+//! toggled: no REST inventory reader runs here.
 //!
-//! Pass rule: every sweep keeps exactly the current and the kept snapshots
-//! alive within budget. After warm-up the retained heap has a least-squares
-//! slope of at most 1 KiB per sweep. The final quiescent state (the starting
+//! Pass rule: every sweep ends as planned (complete, the planned families
+//! failed, or cancelled). Every family keeps exactly its current and its kept
+//! snapshots alive within budget, each family that should publish has this
+//! sweep's snapshot with the site's counts and changes, and the others keep
+//! their last one. After warm-up the retained heap has a least-squares slope
+//! of at most 1 KiB per sweep. The final quiescent state (the starting
 //! fixture, cursors expired, retired labels gone) holds no more bytes and no
 //! more allocations than the same state measured right after warm-up.
 //!
@@ -37,7 +42,7 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -192,6 +197,12 @@ const PAGE: u32 = 1_000;
 const FAIL_EVERY: u32 = 7;
 /// Every this many sweeps the sweep is cancelled at its timeout.
 const CANCEL_EVERY: u32 = 11;
+/// Every this many sweeps a firmware request names a removed host, which
+/// leaves the request family unresolved.
+const UNJOINABLE_EVERY: u32 = 13;
+/// One host in this many has an open firmware request, a different set
+/// every sweep.
+const REQUEST_ONE_IN: u32 = 10;
 /// The retained heap may grow at most this much per sweep after warm-up.
 const MAX_SLOPE: f64 = 1024.0;
 /// What the final quiescent state may hold beyond the warm-up one.
@@ -226,14 +237,72 @@ fn site(scale: Scale) -> FakeSite {
     site
 }
 
+/// How a sweep is planned to end.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Outcome {
+    Complete,
+    /// The switch read fails, so switches and expected records keep their
+    /// last snapshot. A request may also name a gone host.
+    Failed {
+        switches: bool,
+        unjoinable: bool,
+    },
+    /// Cancelled at its timeout while still reading.
+    Cancelled,
+}
+
+fn outcome(k: u32) -> Outcome {
+    if k.is_multiple_of(CANCEL_EVERY) {
+        return Outcome::Cancelled;
+    }
+    let (switches, unjoinable) = (
+        k.is_multiple_of(FAIL_EVERY),
+        k.is_multiple_of(UNJOINABLE_EVERY),
+    );
+    if switches || unjoinable {
+        Outcome::Failed {
+            switches,
+            unjoinable,
+        }
+    } else {
+        Outcome::Complete
+    }
+}
+
+/// The families a sweep ending as `outcome` leaves with their last snapshot.
+fn kept_back(outcome: Outcome) -> BTreeSet<Family> {
+    match outcome {
+        Outcome::Complete => BTreeSet::new(),
+        Outcome::Cancelled => DEVICE_FAMILIES.into_iter().collect(),
+        Outcome::Failed {
+            switches,
+            unjoinable,
+        } => {
+            let mut families = BTreeSet::new();
+            if switches {
+                families.extend([Family::Switch, Family::Expected]);
+            }
+            if unjoinable {
+                families.insert(Family::HostFirmwareRequests);
+            }
+            families
+        }
+    }
+}
+
+/// The hosts block `size` of sweep `k` covers.
+fn block(scale: Scale, size: u32, k: u32) -> std::ops::RangeInclusive<u32> {
+    let at = (k % (scale.hosts / size)) * size;
+    at + 1..=at + size
+}
+
 /// Moves the site to sweep `k`, or back to its starting fixture for `None`:
-/// one block of hosts is not Ready, one block is gone, and the canaries
-/// report a model and a BMC version that change every sweep.
-fn set_sweep(site: &mut FakeSite, scale: Scale, k: Option<u32>) {
-    let block = |size: u32| {
-        let blocks = scale.hosts / size;
-        k.map(|k| (k % blocks) * size + 1..=(k % blocks) * size + size)
-    };
+/// one block of hosts is not Ready, one block is gone, the canaries report a
+/// model and a BMC version that change every sweep, and a tenth of the hosts
+/// have open firmware requests. With `unjoinable` one request names a gone
+/// host.
+fn set_sweep(site: &mut FakeSite, scale: Scale, k: Option<u32>, unjoinable: bool) {
+    let block = |size: u32| k.map(|k| block(scale, size, k));
     let (churned, removed) = (block(CHURN), block(REMOVED));
     for i in 1..=scale.hosts {
         let id = fake::host_id(i).to_string();
@@ -263,6 +332,29 @@ fn set_sweep(site: &mut FakeSite, scale: Scale, k: Option<u32>) {
             host.bmc_version = k.map_or(fresh.bmc_version, |k| Some(format!("canary-{k}")));
         }
     }
+    site.firmware_requests.clear();
+    if let Some(k) = k {
+        site.firmware_requests.extend(
+            (1..=scale.hosts)
+                .filter(|i| (i + k).is_multiple_of(REQUEST_ONE_IN))
+                .filter(|i| removed.as_ref().is_none_or(|r| !r.contains(i)))
+                .map(|i| {
+                    fake::firmware_request(i, if i % 2 == 0 { "Automated" } else { "AdminCli" })
+                }),
+        );
+        if unjoinable && let Some(gone) = removed.as_ref().map(|r| *r.start()) {
+            site.firmware_requests
+                .push(fake::firmware_request(gone, "AdminCli"));
+        }
+    }
+}
+
+/// The open requests and present hosts of sweep `k`.
+fn requests(scale: Scale, k: u32) -> usize {
+    let removed = block(scale, REMOVED, k);
+    (1..=scale.hosts)
+        .filter(|i| (i + k).is_multiple_of(REQUEST_ONE_IN) && !removed.contains(i))
+        .count()
 }
 
 /// Stores every delivery and remembers each published snapshot weakly, so
@@ -384,6 +476,10 @@ struct Soak {
     reader: DevicesReader,
     app: axum::Router,
     rest_off: axum::Router,
+    /// Reader runs so far: the sequence number of the newest sweep.
+    runs: Cell<u64>,
+    /// Calls the last complete sweep made.
+    calls: Cell<usize>,
     /// Heap the fake site and the setup hold before the first sweep.
     base: (i64, i64),
 }
@@ -440,8 +536,9 @@ impl Soak {
             SummaryState::unused(&off.metrics_store),
         ));
         // The meter's instruments are created lazily; one gather sets them up
-        // before the baseline.
+        // before the baseline, which also holds the whole starting fixture.
         drop(setup.registry.gather());
+        set_sweep(&mut nico.site.lock().unwrap(), scale, None, false);
         Self {
             scale,
             store,
@@ -452,13 +549,34 @@ impl Soak {
             reader,
             app,
             rest_off,
+            runs: Cell::new(0),
+            calls: Cell::new(0),
             base: (live_bytes(), live_allocations()),
         }
     }
 
+    /// One reader run.
+    async fn run(&self) -> eyre::Result<()> {
+        self.runs.set(self.runs.get() + 1);
+        self.reader.run(&ObservationRecorder::default()).await
+    }
+
     /// One sweep `k` with its clients, failures and cancellations.
     async fn sweep(&self, k: u32) {
-        set_sweep(&mut self.nico.site.lock().unwrap(), self.scale, Some(k));
+        let planned = outcome(k);
+        let unjoinable = matches!(
+            planned,
+            Outcome::Failed {
+                unjoinable: true,
+                ..
+            }
+        );
+        set_sweep(
+            &mut self.nico.site.lock().unwrap(),
+            self.scale,
+            Some(k),
+            unjoinable,
+        );
         // A client starts paging hosts on the current snapshot and finishes
         // after the next one replaced it.
         let across = if k > 1 {
@@ -466,24 +584,30 @@ impl Soak {
         } else {
             None
         };
-        if k.is_multiple_of(FAIL_EVERY) {
+        if matches!(planned, Outcome::Failed { switches: true, .. }) {
             self.nico.fail_next(
                 "find_switches_by_ids",
                 CallError::Status("gRPC Internal".to_string()),
             );
         }
-        let recorder = ObservationRecorder::default();
-        let run = self.reader.run(&recorder);
-        if k.is_multiple_of(CANCEL_EVERY) {
+        if planned == Outcome::Cancelled {
             // The scheduler drops a sweep at its timeout and records it.
             tokio::select! {
-                _ = run => {}
+                _ = self.run() => panic!("sweep {k} ended before its timeout"),
                 () = tokio::time::sleep(Duration::from_secs(5)) => self.reader.timed_out(),
             }
         } else {
-            // Failed families keep their last snapshot.
-            let _ = run.await;
+            let result = self.run().await;
+            assert_eq!(
+                result.is_ok(),
+                planned == Outcome::Complete,
+                "sweep {k}: {result:?}"
+            );
+            if planned == Outcome::Complete {
+                self.calls.set(self.nico.starts().len());
+            }
         }
+        self.check(k, planned);
         if let Some(cursor) = across {
             page_all(&self.app, "host", Some(cursor)).await;
         }
@@ -493,6 +617,7 @@ impl Soak {
         if self.scale.instances {
             let _instances = first_page(&self.app, "instance").await;
         }
+        // Only the API's REST reader flag: no REST reader runs here.
         let (on, _) = get::<serde_json::Value>(&self.app, "/v1/config").await;
         assert_eq!(on, StatusCode::SERVICE_UNAVAILABLE, "no REST reader runs");
         let (off, _) = get::<serde_json::Value>(&self.rest_off, "/v1/config").await;
@@ -501,11 +626,15 @@ impl Soak {
         self.nico.clear_calls();
     }
 
-    /// Checks that each family keeps only its current snapshot and the
-    /// replaced ones still in their keep time.
-    fn check_alive(&self, k: u32) {
+    /// Checks every family after sweep `k` ended as `planned`: exactly its
+    /// current and kept snapshots alive within budget, this sweep's snapshot
+    /// with the site's counts where it should publish, its last snapshot and
+    /// the planned failure where it should not.
+    fn check(&self, k: u32, planned: Outcome) {
         let budget = StateConfig::default().paging.needed_for(INTERVAL);
         let alive = self.sink.alive();
+        let failing = kept_back(planned);
+        let present = (self.scale.hosts - REMOVED) as usize;
         for family in DEVICE_FAMILIES {
             let kept = self.store.kept(family);
             assert!(
@@ -515,11 +644,67 @@ impl Soak {
             if !matches!(family, Family::Host | Family::Dpu | Family::Instance) {
                 assert_eq!(kept, 0, "sweep {k}: {family:?} keeps unpaged snapshots");
             }
-            let live = alive.get(&family).copied().unwrap_or_default();
-            assert!(
-                live == kept + 1 || live == kept,
-                "sweep {k}: {family:?} has {live} snapshots alive, {kept} kept"
+            assert_eq!(
+                alive.get(&family).copied().unwrap_or_default(),
+                kept + 1,
+                "sweep {k}: {family:?} snapshots alive besides the current and the kept ones"
             );
+            let current = self.store.current(family).expect("a current snapshot");
+            let fresh = current.meta().seq == self.runs.get();
+            let attempt = self.store.last_attempt(family).expect("an attempt");
+            if failing.contains(&family) {
+                assert!(
+                    !fresh,
+                    "sweep {k}: {family:?} published although planned to fail"
+                );
+                let kind = attempt.failure.as_ref().map(|(kind, _)| *kind);
+                let want = match (planned, family) {
+                    (Outcome::Cancelled, _) => FailureKind::Timeout,
+                    (_, Family::HostFirmwareRequests) => FailureKind::Unresolved,
+                    _ => FailureKind::Rpc,
+                };
+                assert_eq!(kind, Some(want), "sweep {k}: {family:?}");
+                continue;
+            }
+            assert!(fresh, "sweep {k}: {family:?} did not publish this sweep");
+            assert!(
+                attempt.failure.is_none(),
+                "sweep {k}: {family:?} {attempt:?}"
+            );
+            let units = units_of(current.as_ref()).expect("units").units.as_slice();
+            let want = match family {
+                Family::Host => present,
+                Family::Dpu => 2 * present,
+                Family::Switch => self.scale.switches as usize,
+                Family::PowerShelf => self.scale.shelves as usize,
+                Family::Rack => self.scale.racks as usize,
+                Family::Instance if self.scale.instances => self.scale.hosts as usize,
+                Family::Instance => 0,
+                Family::Expected => {
+                    (self.scale.hosts
+                        + self.scale.switches
+                        + self.scale.shelves
+                        + 2 * self.scale.racks) as usize
+                }
+                Family::HostFirmwareRequests => requests(self.scale, k),
+                _ => units.len(),
+            };
+            assert_eq!(units.len(), want, "sweep {k}: {family:?} count");
+            if family == Family::Host {
+                // The changes of this sweep, not an older one.
+                let unit = |i: u32| {
+                    let id = fake::host_id(i).to_string();
+                    units.iter().find(|u| u.id == id)
+                };
+                if let Some(canary) = unit(1) {
+                    let model = canary.host.as_ref().and_then(|h| h.model.clone());
+                    assert_eq!(model, Some(format!("model-{}", k % 60)), "sweep {k}");
+                }
+                let churned = *block(self.scale, CHURN, k).start();
+                if let Some(unit) = unit(churned) {
+                    assert_eq!(unit.state, "HostInitializing", "sweep {k}: host {churned}");
+                }
+            }
         }
     }
 
@@ -527,11 +712,8 @@ impl Soak {
     /// one clean sweep of it, every cursor and retired label expired, the
     /// lazy expiry triggered and the registry gathered.
     async fn quiescent(&self) -> (i64, i64) {
-        set_sweep(&mut self.nico.site.lock().unwrap(), self.scale, None);
-        self.reader
-            .run(&ObservationRecorder::default())
-            .await
-            .expect("clean sweep");
+        set_sweep(&mut self.nico.site.lock().unwrap(), self.scale, None, false);
+        self.run().await.expect("clean sweep");
         let keep = Duration::from_secs(StateConfig::default().paging.keep_seconds);
         tokio::time::sleep(keep.max(RETIRE_AFTER) + Duration::from_secs(1)).await;
         for family in DEVICE_FAMILIES {
@@ -546,11 +728,12 @@ impl Soak {
 
 /// Runs the soak at `scale` and checks the pass rule. Returns each sweep's
 /// retained heap and peak.
-async fn soak(name: &str, scale: Scale) -> BTreeMap<u32, Retained> {
+async fn soak(name: &str, scale: Scale) -> Vec<Retained> {
+    // Allocated before the baseline, so the measurements never change it.
+    let mut retained: Vec<Retained> = Vec::with_capacity(SWEEPS as usize);
     let soak = Soak::new(scale);
     let mib = |bytes: i64| bytes as f64 / f64::from(1 << 20);
     eprintln!("{name}: fake site and setup {:.1} MiB", mib(soak.base.0));
-    let mut retained: BTreeMap<u32, Retained> = BTreeMap::new();
     let mut warm = None;
     // Like the scheduler, sweeps start at least an interval apart.
     let mut next = tokio::time::Instant::now();
@@ -559,20 +742,21 @@ async fn soak(name: &str, scale: Scale) -> BTreeMap<u32, Retained> {
         next = tokio::time::Instant::now() + INTERVAL;
         take_peak();
         soak.sweep(k).await;
-        soak.check_alive(k);
         let now = Retained {
             bytes: live_bytes() - soak.base.0,
             peak: take_peak() - soak.base.0,
         };
         if k == 1 || k.is_multiple_of(50) || k == WARMUP {
             eprintln!(
-                "{name} sweep {k:>3}: {:>6.1} MiB retained, peak {:>6.1} MiB, {} label sets",
+                "{name} sweep {k:>3}: {:>6.1} MiB retained, peak {:>6.1} MiB, {} label sets, \
+                 {} calls in a complete sweep",
                 mib(now.bytes),
                 mib(now.peak),
                 soak.collector.tracked_label_sets(),
+                soak.calls.get(),
             );
         }
-        retained.insert(k, now);
+        retained.push(now);
         if k == WARMUP {
             warm = Some(soak.quiescent().await);
             next = tokio::time::Instant::now();
@@ -580,10 +764,9 @@ async fn soak(name: &str, scale: Scale) -> BTreeMap<u32, Retained> {
     }
     let warm = warm.expect("warm-up baseline");
     let last = soak.quiescent().await;
-    let peak = retained.values().map(|r| r.peak).max().expect("sweeps");
-    let steady: Vec<(f64, f64)> = retained
-        .range(WARMUP + REWARM..)
-        .map(|(k, r)| (f64::from(*k), r.bytes as f64))
+    let peak = retained.iter().map(|r| r.peak).max().expect("sweeps");
+    let steady: Vec<(f64, f64)> = (WARMUP + REWARM..=SWEEPS)
+        .map(|k| (f64::from(k), retained[k as usize - 1].bytes as f64))
         .collect();
     let slope = slope(&steady);
     eprintln!(
