@@ -162,7 +162,6 @@ struct ReconciliationCase {
 enum ResultingState {
     Ready,
     Maintenance,
-    Failed,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -226,6 +225,9 @@ async fn enter_requested_state(
     operation: MachineMaintenanceOperation,
     entry_state: EntryState,
 ) {
+    if matches!(operation, MachineMaintenanceOperation::ChassisReset { .. }) {
+        set_operator_maintenance(env, host, true).await;
+    }
     let mut txn = env.test_harness.db_txn().await;
     let initial_state = match entry_state {
         EntryState::Ready => {
@@ -296,24 +298,12 @@ async fn reconcile(
     // Second iteration reconciles the operation with the backend.
     env.run_single_iteration().await;
     let machine = host.host.machine().await;
-    let uncertain_reset = matches!(case.operation, MachineMaintenanceOperation::Reset)
-        && !matches!(case.backend_outcome, BackendOutcome::Success);
-    if uncertain_reset {
-        let ManagedHostState::Failed { details, .. } = &machine.state.value else {
-            panic!("reset dispatch failure must stop automatic retries");
-        };
-        assert!(
-            matches!(&details.cause, FailureCause::UnhandledState { err }
-            if err.contains("reset outcome unknown"))
-        );
-        env.run_single_iteration().await;
-    } else if !matches!(case.backend_outcome, BackendOutcome::Success) {
+    if !matches!(case.backend_outcome, BackendOutcome::Success) {
         assert_retryable_failure(&entered, &machine);
     }
     let resulting_state = match machine.state.value {
         ManagedHostState::Ready => ResultingState::Ready,
         ManagedHostState::Maintenance { .. } => ResultingState::Maintenance,
-        ManagedHostState::Failed { .. } => ResultingState::Failed,
         other => return Err(format!("unexpected resulting state: {other:?}")),
     };
 
@@ -340,8 +330,6 @@ fn backend_cases() -> Vec<Case<ReconciliationCase, Observation, String>> {
                 BackendOutcome::TransportFailure,
             ] {
                 let succeeds = matches!(backend_outcome, BackendOutcome::Success);
-                let uncertain_reset =
-                    !succeeds && matches!(operation, MachineMaintenanceOperation::Reset);
                 cases.push(Case {
                     scenario: Box::leak(
                         format!("{operation:?} / {entry_state:?} / {backend_outcome:?}")
@@ -353,11 +341,9 @@ fn backend_cases() -> Vec<Case<ReconciliationCase, Observation, String>> {
                         backend_outcome,
                     },
                     expect: Outcome::Yields(Observation {
-                        request_cleared: succeeds || uncertain_reset,
+                        request_cleared: succeeds,
                         resulting_state: if succeeds {
                             ResultingState::Ready
-                        } else if uncertain_reset {
-                            ResultingState::Failed
                         } else {
                             ResultingState::Maintenance
                         },
@@ -427,17 +413,25 @@ async fn failed_power_operations_retry_after_controller_restart(pool: PgPool) {
     network_controller.create_admin_segment(&domain).await;
     let host = create_ready_host(&env, &underlay_segment).await;
 
-    for (failure, message) in [
-        (BackendOutcome::TransportFailure, "test transport failure"),
-        (BackendOutcome::NonSuccess, "RMS power operation timed out"),
-    ] {
-        enter_requested_state(
-            &env,
-            &host,
+    for (operation, failure, message) in [
+        (
             MachineMaintenanceOperation::PowerOn,
-            EntryState::Ready,
-        )
-        .await;
+            BackendOutcome::TransportFailure,
+            "test transport failure",
+        ),
+        (
+            MachineMaintenanceOperation::PowerOn,
+            BackendOutcome::NonSuccess,
+            "RMS power operation timed out",
+        ),
+        (
+            MachineMaintenanceOperation::Reset,
+            BackendOutcome::TransportFailure,
+            "test transport failure",
+        ),
+    ] {
+        let action = expected_action(operation.clone());
+        enter_requested_state(&env, &host, operation, EntryState::Ready).await;
         env.run_single_iteration().await;
         let entered = host.host.machine().await;
         backend.set_outcome(failure);
@@ -450,7 +444,7 @@ async fn failed_power_operations_retry_after_controller_restart(pool: PgPool) {
             panic!("expected a persisted error");
         };
         assert!(err.contains(message), "{err}");
-        assert_eq!(backend.take_actions(), vec![PowerAction::On]);
+        assert_eq!(backend.take_actions(), vec![action]);
 
         env = Env::builder(pool.clone())
             .with_component_manager(component_manager(backend.clone()))
@@ -461,7 +455,7 @@ async fn failed_power_operations_retry_after_controller_restart(pool: PgPool) {
         let completed = host.host.machine().await;
         assert_eq!(completed.state.value, ManagedHostState::Ready);
         assert!(completed.machine_maintenance_requested.is_none());
-        assert_eq!(backend.take_actions(), vec![PowerAction::On]);
+        assert_eq!(backend.take_actions(), vec![action]);
         env.run_single_iteration().await;
         assert!(backend.take_actions().is_empty());
     }
@@ -686,7 +680,7 @@ async fn preserves_replacement_maintenance_after_power_completion(pool: PgPool) 
 }
 
 #[sqlx_test]
-async fn chassis_reset_response_failure_does_not_redispatch(pool: PgPool) {
+async fn chassis_reset_response_failure_retries_until_success(pool: PgPool) {
     let mut env = Env::builder(pool).build().await;
     let domain = env.test_harness.test_domain().await;
     let network_controller = env.test_harness.network_controller();
@@ -703,6 +697,7 @@ async fn chassis_reset_response_failure_does_not_redispatch(pool: PgPool) {
     )
     .await;
     env.run_single_iteration().await;
+    let entered = host.host.machine().await;
     let timepoint = env.redfish_sim.timepoint();
     env.redfish_sim
         .fail_next_chassis_reset(libredfish::RedfishError::HTTPErrorCode {
@@ -712,18 +707,12 @@ async fn chassis_reset_response_failure_does_not_redispatch(pool: PgPool) {
         });
     env.run_single_iteration().await;
     let failed = host.host.machine().await;
-    let ManagedHostState::Failed { details, .. } = &failed.state.value else {
-        panic!("uncertain chassis reset must require operator intervention");
-    };
-    assert!(
-        matches!(&details.cause, FailureCause::UnhandledState { err }
-        if err.contains("reset outcome unknown"))
-    );
-    assert!(failed.machine_maintenance_requested.is_none());
+    assert_retryable_failure(&entered, &failed);
     env.run_single_iteration().await;
     let completed = host.host.machine().await;
-    assert_eq!(completed.state.value, failed.state.value);
+    assert_eq!(completed.state.value, ManagedHostState::Ready);
     assert!(completed.machine_maintenance_requested.is_none());
+    env.run_single_iteration().await;
     let attempts = env
         .redfish_sim
         .actions_since(&timepoint)
@@ -736,7 +725,79 @@ async fn chassis_reset_response_failure_does_not_redispatch(pool: PgPool) {
             )
         })
         .count();
-    assert_eq!(attempts, 1);
+    assert_eq!(attempts, 2);
+}
+
+async fn set_operator_maintenance(env: &Env, host: &TestManagedHost, enabled: bool) {
+    env.test_harness
+        .api()
+        .set_maintenance(tonic::Request::new(rpc::forge::MaintenanceRequest {
+            operation: if enabled {
+                rpc::forge::MaintenanceOperation::Enable.into()
+            } else {
+                rpc::forge::MaintenanceOperation::Disable.into()
+            },
+            host_id: Some(host.host.id.into()),
+            reference: Some("maintenance retry test".into()),
+        }))
+        .await
+        .unwrap();
+}
+
+#[sqlx_test]
+async fn chassis_reset_stops_when_operator_maintenance_is_disabled(pool: PgPool) {
+    let mut env = Env::builder(pool).build().await;
+    let domain = env.test_harness.test_domain().await;
+    let network_controller = env.test_harness.network_controller();
+    let underlay_segment = network_controller.create_underlay_segment(&domain).await;
+    network_controller.create_admin_segment(&domain).await;
+    let host = create_ready_host(&env, &underlay_segment).await;
+    for fail_first_attempt in [false, true] {
+        enter_requested_state(
+            &env,
+            &host,
+            MachineMaintenanceOperation::ChassisReset {
+                chassis_id: "HGX_Chassis_0".into(),
+            },
+            EntryState::Ready,
+        )
+        .await;
+        env.run_single_iteration().await;
+        if fail_first_attempt {
+            let entered = host.host.machine().await;
+            env.redfish_sim
+                .fail_next_chassis_reset(libredfish::RedfishError::HTTPErrorCode {
+                    url: "https://bmc/redfish/v1/Chassis/HGX_Chassis_0".into(),
+                    status_code: 504.try_into().unwrap(),
+                    response_body: "reset response lost after execution".into(),
+                });
+            env.run_single_iteration().await;
+            assert_retryable_failure(&entered, &host.host.machine().await);
+        }
+        set_operator_maintenance(&env, &host, false).await;
+        let timepoint = env.redfish_sim.timepoint();
+        env.run_single_iteration().await;
+        let stopped = host.host.machine().await;
+        let ManagedHostState::Failed { details, .. } = &stopped.state.value else {
+            panic!("disabled operator maintenance must stop chassis reset");
+        };
+        assert!(
+            matches!(&details.cause, FailureCause::UnhandledState { err }
+            if err.contains("operator maintenance mode is disabled"))
+        );
+        assert!(stopped.machine_maintenance_requested.is_none());
+        env.run_single_iteration().await;
+        assert!(
+            !env.redfish_sim
+                .actions_since(&timepoint)
+                .all_hosts()
+                .iter()
+                .any(|action| matches!(
+                    action,
+                    carbide_redfish::libredfish::test_support::RedfishSimAction::ChassisReset { .. }
+                ))
+        );
+    }
 }
 
 #[sqlx_test]
@@ -757,7 +818,7 @@ async fn chassis_reset_preserves_replacement_including_legacy_state(pool: PgPool
         chassis_id: "HGX_Chassis_0".into(),
     };
 
-    for legacy in [false, true] {
+    for (legacy, maintenance_enabled) in [(false, true), (true, true), (false, false)] {
         enter_requested_state(&env, &host, operation.clone(), EntryState::Ready).await;
         env.run_single_iteration().await;
         if legacy {
@@ -790,16 +851,29 @@ async fn chassis_reset_preserves_replacement_including_legacy_state(pool: PgPool
             .await
             .machine_maintenance_requested
             .unwrap();
+        if !maintenance_enabled {
+            set_operator_maintenance(&env, &host, false).await;
+        }
         let timepoint = env.redfish_sim.timepoint();
         env.run_single_iteration().await;
         let completed = host.host.machine().await;
-        assert_eq!(completed.state.value, ManagedHostState::Ready);
+        if maintenance_enabled {
+            assert_eq!(completed.state.value, ManagedHostState::Ready);
+        } else {
+            let ManagedHostState::Failed { details, .. } = &completed.state.value else {
+                panic!("disabled operator maintenance must stop chassis reset");
+            };
+            assert!(
+                matches!(&details.cause, FailureCause::UnhandledState { err }
+                if err.contains("operator maintenance mode is disabled"))
+            );
+        }
         assert_eq!(
             completed.machine_maintenance_requested,
             Some(replacement.clone())
         );
-        assert!(env.redfish_sim.actions_since(&timepoint).all_hosts().iter().any(|action| matches!(action,
-            carbide_redfish::libredfish::test_support::RedfishSimAction::ChassisReset { chassis_id, .. } if chassis_id == "HGX_Chassis_0")));
+        assert_eq!(env.redfish_sim.actions_since(&timepoint).all_hosts().iter().any(|action| matches!(action,
+            carbide_redfish::libredfish::test_support::RedfishSimAction::ChassisReset { chassis_id, .. } if chassis_id == "HGX_Chassis_0")), maintenance_enabled);
         env.run_single_iteration().await;
         assert_eq!(
             host.host.machine().await.state.value,
