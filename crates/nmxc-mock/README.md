@@ -45,7 +45,7 @@ NICo dials the mock by IP address, so hostname verification relies on
 `nico-machine-a-tron` chart therefore adds `mat-mock.nvidia.com` to every pod's
 certificate as an extra SAN (`certificate.extraDnsNames`); the CA is the one
 that issues those certificates, which in the standard deployment is the
-`nico-roots` CA nico-api already mounts. `dev/deployment/tilt/values.yaml`
+`nico-roots` CA nico-api already mounts. `dev/deployment/stack/values.yaml`
 carries this configuration for the local cluster.
 
 Each new domain boots with a factory partition (id 32766, named `Default`)

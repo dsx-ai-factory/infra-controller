@@ -83,6 +83,9 @@ tests:
           pattern: '"server-id":\s*\{\s*"type": "LL",\s*"htype": 1,\s*"identifier": "020000000001",\s*"persist": false\s*\}'
       - matchRegex:
           path: data["kea_config6.json"]
+          pattern: '"library": "/usr/lib/kea/hooks/libdhcp\.so"'
+      - matchRegex:
+          path: data["kea_config6.json"]
           pattern: '"rapid-commit": true'
       - matchRegex:
           path: data["kea_config6.json"]

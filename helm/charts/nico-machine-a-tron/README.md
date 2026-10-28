@@ -692,19 +692,75 @@ depends on that volume's reclaim policy.
 | `generic_ami` | Generic AMI BMC |
 | `generic_supermicro` | Generic Supermicro BMC |
 
+### Direct console DNS
+
+`service.ssh.headless` defaults to `false`. Setting it to `true` while
+`machineATron.mockBmcSshServer` is enabled creates one headless Service named
+`<chart-name>-<pod-name>-ssh` for each configured pod. It selects that pod and
+publishes its address without port translation. This lets the SSH console use
+individual machine ports reported by Redfish. A disabled mock SSH server or an
+unconfigured pod produces no headless Service. Other SSH Service settings and
+ports are unchanged.
+
 ### DHCP Relay Mode
 
 By default, machine-a-tron obtains IP addresses for simulated BMCs directly
 through the NICo API. DHCP relay mode exercises the real DHCP packet path
 by sending UDP DISCOVER/REQUEST packets to the nico-dhcp server.
 
+When supplying a complete TOML override through `configFiles.matConfigs`, these
+optional placeholders are expanded by Helm wherever they occur in that pod's
+string:
+
+| Placeholder | Replacement |
+| --- | --- |
+| `__NICO_DHCP_SERVER_ADDRESS__` | Explicit `dhcpRelay.serverAddress` (required for this placeholder) |
+| `__MAT_DHCP_LISTEN_PORT__` | `dhcpRelay.listenPort`, defaulting to 67 |
+| `__MAT_DHCP_SERVICE_IP__` | This pod's calculated relay ClusterIP |
+
+Using any placeholder requires nonempty `dhcpRelay.baseIP`; otherwise rendering
+fails. Overrides without these placeholders remain literal. The relay Service
+and container port use the same chart settings, including the existing sorted
+pod indexing for addresses. Set `dhcpRelay.serverAddress` to the DHCP server's
+IPv4 literal and port: MAT's UDP relay configuration requires `IPv4:port`.
+Generated relay configs also require this setting; there is no DNS fallback.
+
 **When to use:** Scale testing that needs to validate the DHCP server's packet
 handling under load, or when testing DHCP relay agent behavior.
 
 **Prerequisites:**
 
-- `nico-dhcp` must be deployed (default: `nico-system` namespace)
+- `nico-dhcp` must be deployed and reachable at its explicit IPv4 Service address
 - A dedicated ServiceCIDR for DHCP relay IPs (recommended)
+
+For a stable DHCP server endpoint, set these values in the
+[`nico-dhcp` chart](../nico-dhcp/values.yaml). With the umbrella chart, nest them
+under `nico-dhcp`:
+
+```yaml
+service:
+  clusterIP: 10.96.0.20
+config:
+  kea:
+    serverIdentifier: 10.96.0.20
+```
+
+Choose an available address from your cluster's ServiceCIDR; `10.96.0.20` is
+only an example. `service.clusterIP` defaults to empty for Kubernetes allocation
+and is immutable after creation. The separate `config.kea.serverIdentifier`
+sets DHCP option 54 so clients use that address for unicast renewals. Set MAT's
+`dhcpRelay.serverAddress` to the chosen address and UDP port; do not copy the
+example address unless it belongs to your DHCP Service. For an existing release,
+use its already-allocated ClusterIP; setting a different one fails the upgrade
+and requires planned Service recreation.
+
+The example is for an isolated in-cluster DHCP deployment. If
+`externalService.enabled` and its
+`metallb.universe.tf/loadBalancerIPs` annotation already advertise a stable VIP,
+MAT can target that VIP instead. Leave `config.kea.serverIdentifier` empty to
+retain the chart's VIP inference, or explicitly set it to that VIP. An explicit
+identifier overrides the annotation and must be reachable by every DHCP client
+using the release, including clients outside Kubernetes.
 
 **Setup:**
 
@@ -736,7 +792,7 @@ handling under load, or when testing DHCP relay agent behavior.
    dhcpRelay:
      baseIP: "10.96.127.10" # First relay IP (from mat-dhcp-services CIDR)
      listenPort: 67
-     # serverAddress: ""    # Optional: override DHCP server (default: nico-dhcp.nico-system.svc.cluster.local:67)
+     serverAddress: "10.96.0.20:67" # The nico-dhcp Service ClusterIP and UDP port
 
    pods:
      mat-0:
@@ -765,8 +821,10 @@ handling under load, or when testing DHCP relay agent behavior.
    - `server_address` points to nico-dhcp ClusterIP
    - `listen_address` binds to `0.0.0.0:<listenPort>`
    - `advertise_address` is the pod's relay Service ClusterIP
-3. All machine groups in that pod automatically use the relay IP as their
-   `oob_dhcp_relay_address` (any user-provided value is overridden)
+3. In generated configs, machine groups use the relay IP as their BMC link
+   selection address, overriding the configured group value. A full TOML
+   override retains its own group addresses; the chart only expands its
+   documented placeholders.
 4. Machine-a-tron sends DHCP packets with `giaddr` set to the advertise address
 5. nico-dhcp replies to the advertise address (the relay Service ClusterIP)
 6. The Service routes replies to the correct pod
@@ -778,8 +836,9 @@ handling under load, or when testing DHCP relay agent behavior.
 - Each pod must have a unique IP - the chart auto-increments from baseIP
 - The baseIP range must not overlap with BMC Services or other Kubernetes
   Services
-- When relay is enabled, you cannot use different `oob_dhcp_relay_address`
-  values per machine group within a pod - all machines share the pod's relay IP
+- Generated relay configs use one BMC link selection address per pod. Full
+  TOML overrides can specify per-group addresses for DHCP option 82 link
+  selection while retaining the pod's relay Service IP as the reply destination.
 
 **Disable relay mode:**
 

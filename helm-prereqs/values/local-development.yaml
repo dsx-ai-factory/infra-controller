@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Core prerequisites for the local development stack. Operators, Vault and
+# PostgreSQL are installed separately; no site bootstrap jobs run here.
+namespace: nico-system
+# Vault or helm --create-namespace already creates this namespace.
+createNamespace: false
+postgresql:
+  enabled: false
+  host: nico-pg-cluster-rw.nico-system.svc.cluster.local
+  port: 5432
+  database: nico_system_nico
+vault:
+  address: http://nico-vault.nico-system.svc.cluster.local:8200
+  token: root
+  kvMount: secrets
+  pkiMount: certs
+  configJob:
+    enabled: false
+  tls:
+    create: false
+certManager:
+  localCA:
+    enabled: true
+  siteRoot:
+    create: false
+  vaultAuthServiceAccount:
+    create: false
+  vaultIssuer:
+    create: false
+externalSecrets:
+  enabled: false
+azureSSOClientSecretSecret:
+  create: false
