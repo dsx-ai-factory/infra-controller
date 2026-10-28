@@ -571,10 +571,22 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 		CreatedBy:  consumerUser.ID,
 	})
 	require.NoError(t, err)
+	ownerOnConsumerVpc, err := ifcDAO.Create(ctx, nil, cdbm.InterfaceCreateInput{
+		InstanceID: ownerInstance.ID,
+		VpcID:      &consumerVpc.ID,
+		Status:     cdbm.InterfaceStatusReady,
+		CreatedBy:  ownerUser.ID,
+	})
+	require.NoError(t, err)
 
 	handler := NewGetAllInterfaceHandler(dbSession, &tmocks.Client{}, common.GetTestConfig(), nil)
+	ownerTenantID := ownerTenant.ID.String()
 	consumerTenantID := consumerTenant.ID.String()
-	checkInterfaces := func(wantIDs []string, wantForeignTenantIDs map[string]*string, pageSize int, checkDetails bool) func(*httptest.ResponseRecorder) {
+	type tenantOwnershipExpectation struct {
+		instanceTenantID *string
+		vpcTenantID      *string
+	}
+	checkInterfaces := func(wantIDs []string, wantTenantIDs map[string]tenantOwnershipExpectation, pageSize int, checkDetails bool) func(*httptest.ResponseRecorder) {
 		return func(rec *httptest.ResponseRecorder) {
 			var interfaces []model.APIInterface
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &interfaces))
@@ -585,8 +597,15 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 				interfacesByID[apiInterface.ID] = apiInterface
 			}
 			assert.ElementsMatch(t, wantIDs, gotIDs)
-			for interfaceID, foreignTenantID := range wantForeignTenantIDs {
-				assert.Equal(t, foreignTenantID, interfacesByID[interfaceID].ForeignTenantID)
+			var rawInterfaces []map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rawInterfaces))
+			for _, rawInterface := range rawInterfaces {
+				assert.Contains(t, rawInterface, "instanceTenantId")
+				assert.Contains(t, rawInterface, "vpcTenantId")
+			}
+			for interfaceID, tenantIDs := range wantTenantIDs {
+				assert.Equal(t, tenantIDs.instanceTenantID, interfacesByID[interfaceID].InstanceTenantID)
+				assert.Equal(t, tenantIDs.vpcTenantID, interfacesByID[interfaceID].VpcTenantID)
 			}
 
 			if checkDetails {
@@ -621,15 +640,33 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 			query:      url.Values{"pageSize": {"100"}, "orderBy": {"CREATED_ASC"}},
 			statusCode: http.StatusOK,
 			check: checkInterfaces(
-				[]string{ownerSubnetInterface.ID.String(), ownerDirect.ID.String(), crossTenantDirect.ID.String(), crossTenantPrefix.ID.String()},
-				map[string]*string{
-					ownerSubnetInterface.ID.String(): nil,
-					ownerDirect.ID.String():          nil,
-					crossTenantDirect.ID.String():    &consumerTenantID,
-					crossTenantPrefix.ID.String():    &consumerTenantID,
+				[]string{ownerSubnetInterface.ID.String(), ownerDirect.ID.String(), ownerOnConsumerVpc.ID.String(), crossTenantDirect.ID.String(), crossTenantPrefix.ID.String()},
+				map[string]tenantOwnershipExpectation{
+					ownerSubnetInterface.ID.String(): {},
+					ownerDirect.ID.String():          {},
+					ownerOnConsumerVpc.ID.String():   {instanceTenantID: &ownerTenantID, vpcTenantID: &consumerTenantID},
+					crossTenantDirect.ID.String():    {instanceTenantID: &consumerTenantID, vpcTenantID: &ownerTenantID},
+					crossTenantPrefix.ID.String():    {instanceTenantID: &consumerTenantID, vpcTenantID: &ownerTenantID},
 				},
 				100,
 				true,
+			),
+		},
+		{
+			name:       "cross-Tenant filter includes both ownership directions",
+			org:        ownerOrg,
+			user:       ownerUser,
+			query:      url.Values{"crossTenant": {"true"}},
+			statusCode: http.StatusOK,
+			check: checkInterfaces(
+				[]string{ownerOnConsumerVpc.ID.String(), crossTenantDirect.ID.String(), crossTenantPrefix.ID.String()},
+				map[string]tenantOwnershipExpectation{
+					ownerOnConsumerVpc.ID.String(): {instanceTenantID: &ownerTenantID, vpcTenantID: &consumerTenantID},
+					crossTenantDirect.ID.String():  {instanceTenantID: &consumerTenantID, vpcTenantID: &ownerTenantID},
+					crossTenantPrefix.ID.String():  {instanceTenantID: &consumerTenantID, vpcTenantID: &ownerTenantID},
+				},
+				cdbp.DefaultLimit,
+				false,
 			),
 		},
 		{
@@ -640,9 +677,9 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 			statusCode: http.StatusOK,
 			check: checkInterfaces(
 				[]string{crossTenantDirect.ID.String(), crossTenantPrefix.ID.String()},
-				map[string]*string{
-					crossTenantDirect.ID.String(): &consumerTenantID,
-					crossTenantPrefix.ID.String(): &consumerTenantID,
+				map[string]tenantOwnershipExpectation{
+					crossTenantDirect.ID.String(): {instanceTenantID: &consumerTenantID, vpcTenantID: &ownerTenantID},
+					crossTenantPrefix.ID.String(): {instanceTenantID: &consumerTenantID, vpcTenantID: &ownerTenantID},
 				},
 				cdbp.DefaultLimit,
 				false,
@@ -656,25 +693,25 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 			statusCode: http.StatusOK,
 			check: checkInterfaces(
 				[]string{ownerSubnetInterface.ID.String(), ownerDirect.ID.String()},
-				map[string]*string{
-					ownerSubnetInterface.ID.String(): nil,
-					ownerDirect.ID.String():          nil,
+				map[string]tenantOwnershipExpectation{
+					ownerSubnetInterface.ID.String(): {},
+					ownerDirect.ID.String():          {},
 				},
 				cdbp.DefaultLimit,
 				false,
 			),
 		},
 		{
-			name:       "foreign Tenant filter is constrained by visibility",
+			name:       "Instance Tenant filter is constrained by visibility",
 			org:        ownerOrg,
 			user:       ownerUser,
-			query:      url.Values{"foreignTenantId": {consumerTenant.ID.String()}},
+			query:      url.Values{"instanceTenantId": {consumerTenant.ID.String()}},
 			statusCode: http.StatusOK,
 			check: checkInterfaces(
 				[]string{crossTenantDirect.ID.String(), crossTenantPrefix.ID.String()},
-				map[string]*string{
-					crossTenantDirect.ID.String(): &consumerTenantID,
-					crossTenantPrefix.ID.String(): &consumerTenantID,
+				map[string]tenantOwnershipExpectation{
+					crossTenantDirect.ID.String(): {instanceTenantID: &consumerTenantID, vpcTenantID: &ownerTenantID},
+					crossTenantPrefix.ID.String(): {instanceTenantID: &consumerTenantID, vpcTenantID: &ownerTenantID},
 				},
 				cdbp.DefaultLimit,
 				false,
@@ -686,25 +723,31 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 			user:       consumerUser,
 			statusCode: http.StatusOK,
 			check: checkInterfaces(
-				[]string{crossTenantDirect.ID.String(), crossTenantPrefix.ID.String(), consumerOwn.ID.String()},
-				map[string]*string{
-					crossTenantDirect.ID.String(): nil,
-					crossTenantPrefix.ID.String(): nil,
-					consumerOwn.ID.String():       nil,
+				[]string{crossTenantDirect.ID.String(), crossTenantPrefix.ID.String(), consumerOwn.ID.String(), ownerOnConsumerVpc.ID.String()},
+				map[string]tenantOwnershipExpectation{
+					crossTenantDirect.ID.String():  {instanceTenantID: &consumerTenantID, vpcTenantID: &ownerTenantID},
+					crossTenantPrefix.ID.String():  {instanceTenantID: &consumerTenantID, vpcTenantID: &ownerTenantID},
+					consumerOwn.ID.String():        {},
+					ownerOnConsumerVpc.ID.String(): {instanceTenantID: &ownerTenantID, vpcTenantID: &consumerTenantID},
 				},
 				cdbp.DefaultLimit,
 				false,
 			),
 		},
 		{
-			name:       "inaccessible VPC filter returns an empty array",
+			name:       "other Tenant VPC filter returns caller-owned cross-Tenant Interface",
 			org:        ownerOrg,
 			user:       ownerUser,
 			query:      url.Values{"vpcId": {consumerVpc.ID.String()}},
 			statusCode: http.StatusOK,
-			check: func(rec *httptest.ResponseRecorder) {
-				assert.Equal(t, "[]", strings.TrimSpace(rec.Body.String()))
-			},
+			check: checkInterfaces(
+				[]string{ownerOnConsumerVpc.ID.String()},
+				map[string]tenantOwnershipExpectation{
+					ownerOnConsumerVpc.ID.String(): {instanceTenantID: &ownerTenantID, vpcTenantID: &consumerTenantID},
+				},
+				cdbp.DefaultLimit,
+				false,
+			),
 		},
 		{
 			name:       "owned VPC without Interfaces returns an empty array",
@@ -717,17 +760,22 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "conflicting cross-Tenant and foreign Tenant filters return an empty array",
+			name: "cross-Tenant and Instance Tenant filters compose",
 			org:  ownerOrg,
 			user: ownerUser,
 			query: url.Values{
-				"crossTenant":     {"true"},
-				"foreignTenantId": {ownerTenant.ID.String()},
+				"crossTenant":      {"true"},
+				"instanceTenantId": {ownerTenant.ID.String()},
 			},
 			statusCode: http.StatusOK,
-			check: func(rec *httptest.ResponseRecorder) {
-				assert.Equal(t, "[]", strings.TrimSpace(rec.Body.String()))
-			},
+			check: checkInterfaces(
+				[]string{ownerOnConsumerVpc.ID.String()},
+				map[string]tenantOwnershipExpectation{
+					ownerOnConsumerVpc.ID.String(): {instanceTenantID: &ownerTenantID, vpcTenantID: &consumerTenantID},
+				},
+				cdbp.DefaultLimit,
+				false,
+			),
 		},
 		{
 			name:       "invalid VPC ID is rejected",
@@ -737,10 +785,10 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 			statusCode: http.StatusBadRequest,
 		},
 		{
-			name:       "invalid foreign Tenant ID is rejected",
+			name:       "invalid Instance Tenant ID is rejected",
 			org:        ownerOrg,
 			user:       ownerUser,
-			query:      url.Values{"foreignTenantId": {"not-a-uuid"}},
+			query:      url.Values{"instanceTenantId": {"not-a-uuid"}},
 			statusCode: http.StatusBadRequest,
 		},
 		{

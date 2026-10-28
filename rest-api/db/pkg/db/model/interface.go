@@ -231,7 +231,7 @@ type InterfaceUpdateInput struct {
 // InterfaceFilterInput input parameters for Filter method
 type InterfaceFilterInput struct {
 	InstanceIDs       []uuid.UUID
-	ForeignTenantID   *uuid.UUID
+	InstanceTenantID  *uuid.UUID
 	VisibleToTenantID *uuid.UUID
 	CrossTenant       *bool
 	SubnetID          *uuid.UUID
@@ -353,10 +353,6 @@ func (ifcd InterfaceSQLDAO) setQueryWithFilter(filter InterfaceFilterInput, quer
 		}
 	}
 
-	if filter.CrossTenant != nil && filter.VisibleToTenantID == nil {
-		return query, fmt.Errorf("cross-Tenant Interface filtering requires a visibility Tenant")
-	}
-
 	if filter.VisibleToTenantID != nil {
 		tenantID := *filter.VisibleToTenantID
 		query = query.Where(`EXISTS (
@@ -393,15 +389,15 @@ func (ifcd InterfaceSQLDAO) setQueryWithFilter(filter InterfaceFilterInput, quer
 		cotel.SetAttribute(interfaceDAOSpan, attribute.String("visible_to_tenant_id", tenantID.String()))
 	}
 
-	if filter.ForeignTenantID != nil {
+	if filter.InstanceTenantID != nil {
 		query = query.Where(`EXISTS (
 			SELECT 1
 			FROM instance AS tenant_instance
 			WHERE tenant_instance.id = ifc.instance_id
 				AND tenant_instance.tenant_id = ?
 				AND tenant_instance.deleted IS NULL
-		)`, *filter.ForeignTenantID)
-		cotel.SetAttribute(interfaceDAOSpan, attribute.String("foreign_tenant_id", filter.ForeignTenantID.String()))
+		)`, *filter.InstanceTenantID)
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("instance_tenant_id", filter.InstanceTenantID.String()))
 	}
 
 	if filter.CrossTenant != nil {
@@ -410,17 +406,47 @@ func (ifcd InterfaceSQLDAO) setQueryWithFilter(filter InterfaceFilterInput, quer
 				SELECT 1
 				FROM instance AS cross_tenant_instance
 				WHERE cross_tenant_instance.id = ifc.instance_id
-					AND cross_tenant_instance.tenant_id <> ?
 					AND cross_tenant_instance.deleted IS NULL
-			)`, *filter.VisibleToTenantID)
+					AND (
+						EXISTS (
+							SELECT 1
+							FROM vpc AS cross_tenant_vpc
+							WHERE cross_tenant_vpc.id = ifc.vpc_id
+								AND cross_tenant_vpc.tenant_id <> cross_tenant_instance.tenant_id
+								AND cross_tenant_vpc.deleted IS NULL
+						)
+						OR EXISTS (
+							SELECT 1
+							FROM vpc_prefix AS cross_tenant_prefix
+							WHERE cross_tenant_prefix.id = ifc.vpc_prefix_id
+								AND cross_tenant_prefix.tenant_id <> cross_tenant_instance.tenant_id
+								AND cross_tenant_prefix.deleted IS NULL
+						)
+					)
+			)`)
 		} else {
 			query = query.Where(`EXISTS (
 				SELECT 1
 				FROM instance AS cross_tenant_instance
 				WHERE cross_tenant_instance.id = ifc.instance_id
-					AND cross_tenant_instance.tenant_id = ?
 					AND cross_tenant_instance.deleted IS NULL
-			)`, *filter.VisibleToTenantID)
+					AND NOT (
+						EXISTS (
+							SELECT 1
+							FROM vpc AS cross_tenant_vpc
+							WHERE cross_tenant_vpc.id = ifc.vpc_id
+								AND cross_tenant_vpc.tenant_id <> cross_tenant_instance.tenant_id
+								AND cross_tenant_vpc.deleted IS NULL
+						)
+						OR EXISTS (
+							SELECT 1
+							FROM vpc_prefix AS cross_tenant_prefix
+							WHERE cross_tenant_prefix.id = ifc.vpc_prefix_id
+								AND cross_tenant_prefix.tenant_id <> cross_tenant_instance.tenant_id
+								AND cross_tenant_prefix.deleted IS NULL
+						)
+					)
+			)`)
 		}
 		cotel.SetAttribute(interfaceDAOSpan, attribute.Bool("cross_tenant", *filter.CrossTenant))
 	}

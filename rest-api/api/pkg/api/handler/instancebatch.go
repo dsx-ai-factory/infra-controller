@@ -545,17 +545,18 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, interfaceVpcErr.Code, interfaceVpcErr.Message, interfaceVpcErr.Data)
 	}
 
-	// Attaching an Interface to another Tenant's VPC or VPC Prefix needs targetedInstanceCreation
+	// Attaching an Interface to another Tenant's VPC or VPC Prefix needs
+	// crossTenantInterfaceCreation
 	// at the Site. Check it before validating the selectors, so the errors can't reveal another
 	// Tenant's VPC state.
 	if model.HasCrossTenantInterface(apiRequest.Interfaces, tenant.ID, interfaceVpcIDMap, vpcPrefixIDMap) {
-		hasTargetedInstanceCreation, capErr := common.TenantHasTargetedInstanceCreation(ctx, nil, bcih.dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &site.ID})
+		hasCrossTenantInterfaceCreation, capErr := common.TenantHasCrossTenantInterfaceCreation(ctx, nil, bcih.dbSession, tenant, site.ID)
 		if capErr != nil {
-			logger.Error().Err(capErr).Msg("failed to resolve targetedInstanceCreation capability for cross-Tenant VPC attachment")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve targetedInstanceCreation capability, DB error", nil)
+			logger.Error().Err(capErr).Msg("failed to resolve crossTenantInterfaceCreation capability")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve crossTenantInterfaceCreation capability, DB error", nil)
 		}
-		if !hasTargetedInstanceCreation {
-			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have targetedInstanceCreation capability enabled", nil)
+		if !hasCrossTenantInterfaceCreation {
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have crossTenantInterfaceCreation capability enabled", nil)
 		}
 	}
 	if apiErr := model.ValidateInterfaceVpcs(interfaceVpcIDMap, apiRequest.Interfaces, site.ID); apiErr != nil {

@@ -24,6 +24,8 @@ const (
 	validationErrorDuplicateAccountCapability = "only one siteCapabilities entry with empty siteIds is allowed"
 	validationErrorMissingAccountCapability   = "exactly one siteCapabilities entry with empty siteIds is required"
 	validationErrorDuplicateSiteID            = "duplicate siteIds are not allowed across siteCapabilities entries"
+	validationErrorMissingCapability          = "at least one capability must be specified"
+	validationErrorCapabilityMissingDefault   = "capability is not present in the account-default entry"
 )
 
 var (
@@ -98,19 +100,21 @@ func (taur APITenantAccountUpdateRequest) HasSiteCapabilities() bool {
 	return taur.SiteCapabilities != nil
 }
 
-// APITenantAccountSiteCapability describes the TargetedInstanceCreation capability for
-// either the TenantAccount or an explicit site list. Used in responses.
+// APITenantAccountSiteCapability describes effective capability values for
+// either the TenantAccount default or an explicit site list.
 type APITenantAccountSiteCapability struct {
-	SiteIDs                  []string `json:"siteIds"`
-	TargetedInstanceCreation bool     `json:"targetedInstanceCreation"`
+	SiteIDs                      []string `json:"siteIds"`
+	TargetedInstanceCreation     bool     `json:"targetedInstanceCreation"`
+	CrossTenantInterfaceCreation bool     `json:"crossTenantInterfaceCreation"`
 }
 
 // APITenantAccountSiteCapabilityUpdate is the replace payload entry for Provider Admin
-// capability updates. targetedInstanceCreation must be present on every entry so an
-// omitted field cannot silently bind as false.
+// capability updates. Each capability is optional so callers can replace one
+// capability without changing the other.
 type APITenantAccountSiteCapabilityUpdate struct {
-	SiteIDs                  []string `json:"siteIds"`
-	TargetedInstanceCreation *bool    `json:"targetedInstanceCreation"`
+	SiteIDs                      []string `json:"siteIds"`
+	TargetedInstanceCreation     *bool    `json:"targetedInstanceCreation"`
+	CrossTenantInterfaceCreation *bool    `json:"crossTenantInterfaceCreation"`
 }
 
 // APITenantAccountSiteCapabilitiesUpdateRequest is the replace payload for Provider Admin
@@ -124,22 +128,26 @@ func (caps APITenantAccountSiteCapabilitiesUpdateRequest) Validate() error {
 	}
 
 	accountCapabilityCount := 0
+	accountCapabilityIndex := -1
 	seenSiteIDs := map[string]struct{}{}
 
 	for i, cap := range caps {
 		prefix := fmt.Sprintf("[%d]", i)
-		if err := validation.ValidateStruct(&cap,
-			validation.Field(&cap.TargetedInstanceCreation,
-				validation.NotNil.Error(validationErrorValueRequired)),
+		err := validation.ValidateStruct(&cap,
 			validation.Field(&cap.SiteIDs,
 				validation.Each(validationis.UUID.Error(validationErrorInvalidUUID)),
 			),
-		); err != nil {
+		)
+		if err != nil {
 			return validation.Errors{prefix: err}
+		}
+		if cap.TargetedInstanceCreation == nil && cap.CrossTenantInterfaceCreation == nil {
+			return validation.Errors{prefix: errors.New(validationErrorMissingCapability)}
 		}
 
 		if len(cap.SiteIDs) == 0 {
 			accountCapabilityCount++
+			accountCapabilityIndex = i
 		}
 
 		for _, siteID := range cap.SiteIDs {
@@ -163,6 +171,20 @@ func (caps APITenantAccountSiteCapabilitiesUpdateRequest) Validate() error {
 	}
 	if accountCapabilityCount > 1 {
 		return validation.Errors{"siteCapabilities": errors.New(validationErrorDuplicateAccountCapability)}
+	}
+
+	accountCapability := caps[accountCapabilityIndex]
+	for i, cap := range caps {
+		if len(cap.SiteIDs) == 0 {
+			continue
+		}
+		prefix := fmt.Sprintf("[%d]", i)
+		if cap.TargetedInstanceCreation != nil && accountCapability.TargetedInstanceCreation == nil {
+			return validation.Errors{prefix: fmt.Errorf("%s: targetedInstanceCreation", validationErrorCapabilityMissingDefault)}
+		}
+		if cap.CrossTenantInterfaceCreation != nil && accountCapability.CrossTenantInterfaceCreation == nil {
+			return validation.Errors{prefix: fmt.Errorf("%s: crossTenantInterfaceCreation", validationErrorCapabilityMissingDefault)}
+		}
 	}
 
 	return nil
@@ -266,17 +288,25 @@ func NewAPITenantAccount(dbta *cdbm.TenantAccount, dbsds []cdbm.StatusDetail, al
 		apiTenantAccount.Deprecations = append(apiTenantAccount.Deprecations, NewAPIDeprecation(deprecation))
 	}
 
-	accountDefault := dbta.Config.TargetedInstanceCreation
+	type capabilityVector struct {
+		targetedInstanceCreation     bool
+		crossTenantInterfaceCreation bool
+	}
+
+	accountDefault := capabilityVector{
+		targetedInstanceCreation:     dbta.Config.TargetedInstanceCreation,
+		crossTenantInterfaceCreation: dbta.Config.CrossTenantInterfaceCreation,
+	}
 	caps := []APITenantAccountSiteCapability{
 		{
-			SiteIDs:                  []string{},
-			TargetedInstanceCreation: accountDefault,
+			SiteIDs:                      []string{},
+			TargetedInstanceCreation:     accountDefault.targetedInstanceCreation,
+			CrossTenantInterfaceCreation: accountDefault.crossTenantInterfaceCreation,
 		},
 	}
 
 	if dbta.TenantID != nil {
-		enabledSiteIDs := []string{}
-		disabledSiteIDs := []string{}
+		groupedSiteIDs := map[capabilityVector][]string{}
 
 		for _, ts := range tenantSites {
 			// Fail closed: a TenantSite with a missing Site relation cannot be
@@ -284,33 +314,47 @@ func NewAPITenantAccount(dbta *cdbm.TenantAccount, dbsds []cdbm.StatusDetail, al
 			if ts.Site == nil || ts.Site.InfrastructureProviderID != dbta.InfrastructureProviderID {
 				continue
 			}
-			if ts.Config.TargetedInstanceCreation == nil {
+			effective := accountDefault
+			if ts.Config.TargetedInstanceCreation != nil {
+				effective.targetedInstanceCreation = *ts.Config.TargetedInstanceCreation
+			}
+			if ts.Config.CrossTenantInterfaceCreation != nil {
+				effective.crossTenantInterfaceCreation = *ts.Config.CrossTenantInterfaceCreation
+			}
+			if effective == accountDefault {
 				continue
 			}
-			override := *ts.Config.TargetedInstanceCreation
-			if override == accountDefault {
-				continue
-			}
-			if override {
-				enabledSiteIDs = append(enabledSiteIDs, ts.SiteID.String())
-			} else {
-				disabledSiteIDs = append(disabledSiteIDs, ts.SiteID.String())
-			}
+
+			groupedSiteIDs[effective] = append(groupedSiteIDs[effective], ts.SiteID.String())
 		}
 
-		slices.Sort(enabledSiteIDs)
-		slices.Sort(disabledSiteIDs)
-
-		if len(enabledSiteIDs) > 0 {
-			caps = append(caps, APITenantAccountSiteCapability{
-				SiteIDs:                  enabledSiteIDs,
-				TargetedInstanceCreation: true,
-			})
+		vectors := make([]capabilityVector, 0, len(groupedSiteIDs))
+		for vector := range groupedSiteIDs {
+			vectors = append(vectors, vector)
 		}
-		if len(disabledSiteIDs) > 0 {
+		slices.SortFunc(vectors, func(a, b capabilityVector) int {
+			if a.targetedInstanceCreation != b.targetedInstanceCreation {
+				if !a.targetedInstanceCreation {
+					return -1
+				}
+				return 1
+			}
+			if a.crossTenantInterfaceCreation != b.crossTenantInterfaceCreation {
+				if !a.crossTenantInterfaceCreation {
+					return -1
+				}
+				return 1
+			}
+			return 0
+		})
+
+		for _, vector := range vectors {
+			siteIDs := groupedSiteIDs[vector]
+			slices.Sort(siteIDs)
 			caps = append(caps, APITenantAccountSiteCapability{
-				SiteIDs:                  disabledSiteIDs,
-				TargetedInstanceCreation: false,
+				SiteIDs:                      siteIDs,
+				TargetedInstanceCreation:     vector.targetedInstanceCreation,
+				CrossTenantInterfaceCreation: vector.crossTenantInterfaceCreation,
 			})
 		}
 	}

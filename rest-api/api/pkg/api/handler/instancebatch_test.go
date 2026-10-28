@@ -290,7 +290,10 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 	// Tenant 1
 	tnu1 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-2", tnOrg, tnOrgRoles)
 	tn1 := testInstanceBuildTenant(t, dbSession, "test-tenant-1", tnOrg, tnu1)
-	tenantAccount := common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn1.ID, tnOrg, cdbm.TenantAccountStatusReady, tnu1)
+	tenantAccount := common.TestBuildTenantAccountWithCapabilities(t, dbSession, ip, &tn1.ID, tnOrg, cdbm.TenantAccountStatusReady, tnu1, cdbm.TenantAccountConfig{
+		TargetedInstanceCreation:     true,
+		CrossTenantInterfaceCreation: true,
+	})
 
 	// Tenant-Site association
 	ts1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn1.ID, st1.ID, tnu1.ID)
@@ -298,20 +301,20 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 	ts2 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn1.ID, st2.ID, tnu1.ID)
 	assert.NotNil(t, ts2)
 
-	disableTargetedInstanceCreation := func(t *testing.T) {
+	disableCrossTenantInterfaceCreation := func(t *testing.T) {
 		accountDAO := cdbm.NewTenantAccountDAO(dbSession)
 		_, err := accountDAO.Update(ctx, nil, cdbm.TenantAccountUpdateInput{
 			TenantAccountID: tenantAccount.ID,
-			Config: &cdbm.TenantAccountConfig{
-				TargetedInstanceCreation: false,
+			Config: &cdbm.TenantAccountConfigUpdate{
+				CrossTenantInterfaceCreation: cutil.GetPtr(false),
 			},
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() {
 			_, cleanupErr := accountDAO.Update(ctx, nil, cdbm.TenantAccountUpdateInput{
 				TenantAccountID: tenantAccount.ID,
-				Config: &cdbm.TenantAccountConfig{
-					TargetedInstanceCreation: true,
+				Config: &cdbm.TenantAccountConfigUpdate{
+					CrossTenantInterfaceCreation: cutil.GetPtr(true),
 				},
 			})
 			assert.NoError(t, cleanupErr)
@@ -587,7 +590,7 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "batch create rejects a cross-Tenant VPC attachment without targetedInstanceCreation",
+			name: "batch create rejects a cross-Tenant VPC attachment without crossTenantInterfaceCreation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -616,16 +619,16 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 					},
 				},
 				prepareReq: func(t *testing.T, _ *model.APIBatchInstanceCreateRequest) {
-					disableTargetedInstanceCreation(t)
+					disableCrossTenantInterfaceCreation(t)
 				},
 				reqOrg:   tnOrg,
 				reqUser:  tnu1,
 				respCode: http.StatusForbidden,
-				respMsg:  "Tenant does not have targetedInstanceCreation capability enabled",
+				respMsg:  "Tenant does not have crossTenantInterfaceCreation capability enabled",
 			},
 		},
 		{
-			name: "batch create does not reveal cross-Tenant VPC state without targetedInstanceCreation",
+			name: "batch create does not reveal cross-Tenant VPC state without crossTenantInterfaceCreation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -655,16 +658,16 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 					},
 				},
 				prepareReq: func(t *testing.T, _ *model.APIBatchInstanceCreateRequest) {
-					disableTargetedInstanceCreation(t)
+					disableCrossTenantInterfaceCreation(t)
 				},
 				reqOrg:   tnOrg,
 				reqUser:  tnu1,
 				respCode: http.StatusForbidden,
-				respMsg:  "Tenant does not have targetedInstanceCreation capability enabled",
+				respMsg:  "Tenant does not have crossTenantInterfaceCreation capability enabled",
 			},
 		},
 		{
-			name: "batch create permits a cross-Tenant VPC attachment with targetedInstanceCreation",
+			name: "batch create permits a cross-Tenant VPC attachment with crossTenantInterfaceCreation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,

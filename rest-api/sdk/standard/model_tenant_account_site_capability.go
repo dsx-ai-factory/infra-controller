@@ -22,12 +22,14 @@ import (
 // checks if the TenantAccountSiteCapability type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &TenantAccountSiteCapability{}
 
-// TenantAccountSiteCapability Effective TargetedInstanceCreation capability returned for the Tenant Account default or a group of Sites.
+// TenantAccountSiteCapability Effective Tenant capabilities returned for the Tenant Account default or a group of Sites.
 type TenantAccountSiteCapability struct {
-	// Empty for the account-default entry; otherwise the sorted Sites whose effective TargetedInstanceCreation value matches this entry.
+	// Empty for the account-default entry; otherwise the sorted Sites whose effective capability values match this entry.
 	SiteIds []string `json:"siteIds"`
-	// Whether TargetedInstanceCreation is enabled for the Tenant Account default or listed Sites. When true, Tenant Admins with a Ready Tenant Account on the Site's Infrastructure Provider may create Instances by Machine ID, perform related privileged actions on that Site, and attach non-primary Instance Interfaces to another Tenant's VPC or VPC Prefix on that Site.
+	// Whether TargetedInstanceCreation is enabled for the Tenant Account default or listed Sites. When true, Tenant Admins with a Ready Tenant Account on the Site's Infrastructure Provider may create Instances by Machine ID and perform related privileged actions on that Site.
 	TargetedInstanceCreation bool `json:"targetedInstanceCreation"`
+	// Whether cross-Tenant Interface creation is enabled for the Tenant Account default or listed Sites. When true, non-primary Instance Interfaces may select another Tenant's VPC or VPC Prefix on that Site.
+	CrossTenantInterfaceCreation bool `json:"crossTenantInterfaceCreation"`
 }
 
 type _TenantAccountSiteCapability TenantAccountSiteCapability
@@ -36,10 +38,11 @@ type _TenantAccountSiteCapability TenantAccountSiteCapability
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTenantAccountSiteCapability(siteIds []string, targetedInstanceCreation bool) *TenantAccountSiteCapability {
+func NewTenantAccountSiteCapability(siteIds []string, targetedInstanceCreation bool, crossTenantInterfaceCreation bool) *TenantAccountSiteCapability {
 	this := TenantAccountSiteCapability{}
 	this.SiteIds = siteIds
 	this.TargetedInstanceCreation = targetedInstanceCreation
+	this.CrossTenantInterfaceCreation = crossTenantInterfaceCreation
 	return &this
 }
 
@@ -99,6 +102,30 @@ func (o *TenantAccountSiteCapability) SetTargetedInstanceCreation(v bool) {
 	o.TargetedInstanceCreation = v
 }
 
+// GetCrossTenantInterfaceCreation returns the CrossTenantInterfaceCreation field value
+func (o *TenantAccountSiteCapability) GetCrossTenantInterfaceCreation() bool {
+	if o == nil {
+		var ret bool
+		return ret
+	}
+
+	return o.CrossTenantInterfaceCreation
+}
+
+// GetCrossTenantInterfaceCreationOk returns a tuple with the CrossTenantInterfaceCreation field value
+// and a boolean to check if the value has been set.
+func (o *TenantAccountSiteCapability) GetCrossTenantInterfaceCreationOk() (*bool, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return &o.CrossTenantInterfaceCreation, true
+}
+
+// SetCrossTenantInterfaceCreation sets field value
+func (o *TenantAccountSiteCapability) SetCrossTenantInterfaceCreation(v bool) {
+	o.CrossTenantInterfaceCreation = v
+}
+
 func (o TenantAccountSiteCapability) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -111,6 +138,7 @@ func (o TenantAccountSiteCapability) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["siteIds"] = o.SiteIds
 	toSerialize["targetedInstanceCreation"] = o.TargetedInstanceCreation
+	toSerialize["crossTenantInterfaceCreation"] = o.CrossTenantInterfaceCreation
 	return toSerialize, nil
 }
 
@@ -121,6 +149,7 @@ func (o *TenantAccountSiteCapability) UnmarshalJSON(data []byte) (err error) {
 	requiredProperties := []string{
 		"siteIds",
 		"targetedInstanceCreation",
+		"crossTenantInterfaceCreation",
 	}
 
 	allProperties := make(map[string]interface{})

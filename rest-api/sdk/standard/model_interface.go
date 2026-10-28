@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -27,8 +29,10 @@ type Interface struct {
 	Id *string `json:"id,omitempty"`
 	// ID of the associated Instance
 	InstanceId *string `json:"instanceId,omitempty"`
-	// ID of the Tenant that owns the associated Instance when it differs from the caller's Tenant; omitted for caller-owned Instances
-	ForeignTenantId *string `json:"foreignTenantId,omitempty"`
+	// ID of the Tenant that owns the associated Instance when it differs from the selected VPC or VPC Prefix owner; null when the owners match
+	InstanceTenantId NullableString `json:"instanceTenantId"`
+	// ID of the Tenant that owns the selected VPC or VPC Prefix when it differs from the Instance owner; null when the owners match
+	VpcTenantId NullableString `json:"vpcTenantId"`
 	// ID of the associated Subnet
 	SubnetId NullableString `json:"subnetId,omitempty"`
 	// ID of the VPC Prefix explicitly selected by the caller
@@ -63,12 +67,16 @@ type Interface struct {
 	Updated *time.Time `json:"updated,omitempty"`
 }
 
+type _Interface Interface
+
 // NewInterface instantiates a new Interface object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewInterface() *Interface {
+func NewInterface(instanceTenantId NullableString, vpcTenantId NullableString) *Interface {
 	this := Interface{}
+	this.InstanceTenantId = instanceTenantId
+	this.VpcTenantId = vpcTenantId
 	return &this
 }
 
@@ -144,36 +152,56 @@ func (o *Interface) SetInstanceId(v string) {
 	o.InstanceId = &v
 }
 
-// GetForeignTenantId returns the ForeignTenantId field value if set, zero value otherwise.
-func (o *Interface) GetForeignTenantId() string {
-	if o == nil || IsNil(o.ForeignTenantId) {
+// GetInstanceTenantId returns the InstanceTenantId field value
+// If the value is explicit nil, the zero value for string will be returned
+func (o *Interface) GetInstanceTenantId() string {
+	if o == nil || o.InstanceTenantId.Get() == nil {
 		var ret string
 		return ret
 	}
-	return *o.ForeignTenantId
+
+	return *o.InstanceTenantId.Get()
 }
 
-// GetForeignTenantIdOk returns a tuple with the ForeignTenantId field value if set, nil otherwise
+// GetInstanceTenantIdOk returns a tuple with the InstanceTenantId field value
 // and a boolean to check if the value has been set.
-func (o *Interface) GetForeignTenantIdOk() (*string, bool) {
-	if o == nil || IsNil(o.ForeignTenantId) {
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *Interface) GetInstanceTenantIdOk() (*string, bool) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ForeignTenantId, true
+	return o.InstanceTenantId.Get(), o.InstanceTenantId.IsSet()
 }
 
-// HasForeignTenantId returns a boolean if a field has been set.
-func (o *Interface) HasForeignTenantId() bool {
-	if o != nil && !IsNil(o.ForeignTenantId) {
-		return true
+// SetInstanceTenantId sets field value
+func (o *Interface) SetInstanceTenantId(v string) {
+	o.InstanceTenantId.Set(&v)
+}
+
+// GetVpcTenantId returns the VpcTenantId field value
+// If the value is explicit nil, the zero value for string will be returned
+func (o *Interface) GetVpcTenantId() string {
+	if o == nil || o.VpcTenantId.Get() == nil {
+		var ret string
+		return ret
 	}
 
-	return false
+	return *o.VpcTenantId.Get()
 }
 
-// SetForeignTenantId gets a reference to the given string and assigns it to the ForeignTenantId field.
-func (o *Interface) SetForeignTenantId(v string) {
-	o.ForeignTenantId = &v
+// GetVpcTenantIdOk returns a tuple with the VpcTenantId field value
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *Interface) GetVpcTenantIdOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.VpcTenantId.Get(), o.VpcTenantId.IsSet()
+}
+
+// SetVpcTenantId sets field value
+func (o *Interface) SetVpcTenantId(v string) {
+	o.VpcTenantId.Set(&v)
 }
 
 // GetSubnetId returns the SubnetId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -792,9 +820,8 @@ func (o Interface) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.InstanceId) {
 		toSerialize["instanceId"] = o.InstanceId
 	}
-	if !IsNil(o.ForeignTenantId) {
-		toSerialize["foreignTenantId"] = o.ForeignTenantId
-	}
+	toSerialize["instanceTenantId"] = o.InstanceTenantId.Get()
+	toSerialize["vpcTenantId"] = o.VpcTenantId.Get()
 	if o.SubnetId.IsSet() {
 		toSerialize["subnetId"] = o.SubnetId.Get()
 	}
@@ -844,6 +871,48 @@ func (o Interface) ToMap() (map[string]interface{}, error) {
 		toSerialize["updated"] = o.Updated
 	}
 	return toSerialize, nil
+}
+
+func (o *Interface) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"instanceTenantId",
+		"vpcTenantId",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	nullableRequiredProperties := map[string]struct{}{
+		"instanceTenantId": {},
+		"vpcTenantId":      {},
+	}
+	for _, requiredProperty := range requiredProperties {
+		_, nullable := nullableRequiredProperties[requiredProperty]
+		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varInterface := _Interface{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varInterface)
+
+	if err != nil {
+		return err
+	}
+
+	*o = Interface(varInterface)
+
+	return err
 }
 
 type NullableInterface struct {

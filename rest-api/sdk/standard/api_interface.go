@@ -26,17 +26,17 @@ import (
 type InterfaceAPIService service
 
 type ApiGetAllInterfacesRequest struct {
-	ctx             context.Context
-	ApiService      *InterfaceAPIService
-	org             string
-	vpcId           *string
-	crossTenant     *bool
-	foreignTenantId *string
-	status          *InterfaceStatus
-	includeRelation *string
-	pageNumber      *int32
-	pageSize        *int32
-	orderBy         *string
+	ctx              context.Context
+	ApiService       *InterfaceAPIService
+	org              string
+	vpcId            *string
+	crossTenant      *bool
+	instanceTenantId *string
+	status           *InterfaceStatus
+	includeRelation  *string
+	pageNumber       *int32
+	pageSize         *int32
+	orderBy          *string
 }
 
 // Filter by the selected VPC or the parent VPC of an explicitly selected VPC Prefix
@@ -51,9 +51,9 @@ func (r ApiGetAllInterfacesRequest) CrossTenant(crossTenant bool) ApiGetAllInter
 	return r
 }
 
-// Filter by the foreign Tenant that owns the consuming Instance, within the caller&#39;s visibility boundary
-func (r ApiGetAllInterfacesRequest) ForeignTenantId(foreignTenantId string) ApiGetAllInterfacesRequest {
-	r.foreignTenantId = &foreignTenantId
+// Filter by the Tenant that owns the consuming Instance, within the caller&#39;s visibility boundary
+func (r ApiGetAllInterfacesRequest) InstanceTenantId(instanceTenantId string) ApiGetAllInterfacesRequest {
+	r.instanceTenantId = &instanceTenantId
 	return r
 }
 
@@ -96,9 +96,9 @@ GetAllInterfaces Retrieve Tenant-visible Interfaces
 
 Retrieve current, non-deleted REST Interfaces visible to the caller's Tenant. Results include all Interfaces on the caller's Instances, plus Interfaces on other Tenants' Instances when they explicitly select a VPC owned by the caller or a VPC Prefix under one.
 
-`vpcId` filters by the directly selected VPC or the parent of an explicitly selected VPC Prefix. `crossTenant` is relative to the caller's Tenant: `true` returns only Interfaces on other Tenants' Instances and `false` returns only Interfaces on the caller's Instances. `foreignTenantId` filters by the foreign Tenant that owns the consuming Instance. Filters compose and may produce an empty result. A valid but inaccessible `vpcId` or `foreignTenantId` returns an empty list rather than disclosing resource existence.
+`vpcId` filters by the directly selected VPC or the parent of an explicitly selected VPC Prefix. `crossTenant: true` returns only Interfaces whose Instance and selected VPC or VPC Prefix have different owning Tenants; `false` returns only matching ownership. `instanceTenantId` filters by the Tenant that owns the consuming Instance. Filters compose and may produce an empty result. A valid but inaccessible `vpcId` or `instanceTenantId` returns an empty list rather than disclosing resource existence.
 
-The caller must have an organization membership and an authorization role with `TENANT_ADMIN` suffix. The `targetedInstanceCreation` capability is not required. A cross-Tenant result includes `foreignTenantId`; Interfaces on the caller's Instances omit it. The response uses the complete Interface representation, including addresses and routing data. Visibility does not grant authority over another Tenant's Instance, VPC, VPC Prefix, or security policy.
+The caller must have an organization membership and an authorization role with `TENANT_ADMIN` suffix. No cross-Tenant creation capability is required to list visible Interfaces. A cross-Tenant result includes non-null `instanceTenantId` and `vpcTenantId`; both are null when the owners match. The response uses the complete Interface representation, including addresses and routing data. Visibility does not grant authority over another Tenant's Instance, VPC, VPC Prefix, or security policy.
 
 Results are ordered by `created` ascending by default, with Interface `id` ascending as a stable tie-breaker. `orderBy` supports `status`, `created`, and `updated` in ascending or descending order; Interface `id` ascending remains the tie-breaker. An empty result is returned as `[]`.
 
@@ -143,8 +143,8 @@ func (a *InterfaceAPIService) GetAllInterfacesExecute(r ApiGetAllInterfacesReque
 	if r.crossTenant != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "crossTenant", r.crossTenant, "form", "")
 	}
-	if r.foreignTenantId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "foreignTenantId", r.foreignTenantId, "form", "")
+	if r.instanceTenantId != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "instanceTenantId", r.instanceTenantId, "form", "")
 	}
 	if r.status != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")

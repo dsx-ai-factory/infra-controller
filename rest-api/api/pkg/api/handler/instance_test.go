@@ -802,44 +802,47 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 	tn1 := testInstanceBuildTenant(t, dbSession, "test-tenant", tnOrg, tnu1)
 	// Privilege is resolved site-scoped. TenantSite associations without an
 	// explicit override inherit tn1's Ready TenantAccount default.
-	tenantAccount := common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn1.ID, tnOrg, cdbm.TenantAccountStatusReady, tnu1)
+	tenantAccount := common.TestBuildTenantAccountWithCapabilities(t, dbSession, ip, &tn1.ID, tnOrg, cdbm.TenantAccountStatusReady, tnu1, cdbm.TenantAccountConfig{
+		TargetedInstanceCreation:     true,
+		CrossTenantInterfaceCreation: true,
+	})
 
 	ts1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn1.ID, st1.ID, tnu1.ID)
 	assert.NotNil(t, ts1)
 
-	disableTargetedInstanceCreation := func(t *testing.T) {
+	disableCrossTenantInterfaceCreation := func(t *testing.T) {
 		accountDAO := cdbm.NewTenantAccountDAO(dbSession)
 		_, err := accountDAO.Update(ctx, nil, cdbm.TenantAccountUpdateInput{
 			TenantAccountID: tenantAccount.ID,
-			Config: &cdbm.TenantAccountConfig{
-				TargetedInstanceCreation: false,
+			Config: &cdbm.TenantAccountConfigUpdate{
+				CrossTenantInterfaceCreation: cutil.GetPtr(false),
 			},
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() {
 			_, cleanupErr := accountDAO.Update(ctx, nil, cdbm.TenantAccountUpdateInput{
 				TenantAccountID: tenantAccount.ID,
-				Config: &cdbm.TenantAccountConfig{
-					TargetedInstanceCreation: true,
+				Config: &cdbm.TenantAccountConfigUpdate{
+					CrossTenantInterfaceCreation: cutil.GetPtr(true),
 				},
 			})
 			assert.NoError(t, cleanupErr)
 		})
 	}
 
-	disableTargetedInstanceCreationAtSite := func(t *testing.T) {
+	disableCrossTenantInterfaceCreationAtSite := func(t *testing.T) {
 		siteDAO := cdbm.NewTenantSiteDAO(dbSession)
 		_, err := siteDAO.Update(ctx, nil, cdbm.TenantSiteUpdateInput{
 			TenantSiteID: ts1.ID,
 			Config: &cdbm.TenantSiteConfig{
-				TargetedInstanceCreation: cutil.GetPtr(false),
+				CrossTenantInterfaceCreation: cutil.GetPtr(false),
 			},
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() {
 			_, cleanupErr := siteDAO.Update(ctx, nil, cdbm.TenantSiteUpdateInput{
-				TenantSiteID: ts1.ID,
-				Config:       &cdbm.TenantSiteConfig{},
+				TenantSiteID:    ts1.ID,
+				ClearConfigKeys: []string{cdbm.TenantSiteConfigKeyCrossTenantInterfaceCreation},
 			})
 			assert.NoError(t, cleanupErr)
 		})
@@ -1807,7 +1810,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			verifyChildSpanner: true,
 		},
 		{
-			name: "cross-Tenant direct VPC attachment is forbidden without targetedInstanceCreation",
+			name: "cross-Tenant direct VPC attachment is forbidden without crossTenantInterfaceCreation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -1833,15 +1836,15 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 						},
 					},
 				},
-				prepareReq:  func(t *testing.T, _ *model.APIInstanceCreateRequest) { disableTargetedInstanceCreation(t) },
+				prepareReq:  func(t *testing.T, _ *model.APIInstanceCreateRequest) { disableCrossTenantInterfaceCreation(t) },
 				reqOrg:      tnOrg,
 				reqUser:     tnu1,
 				respCode:    http.StatusForbidden,
-				respMessage: "Tenant does not have targetedInstanceCreation capability enabled",
+				respMessage: "Tenant does not have crossTenantInterfaceCreation capability enabled",
 			},
 		},
 		{
-			name: "cross-Tenant VPC Prefix attachment is forbidden without targetedInstanceCreation",
+			name: "cross-Tenant VPC Prefix attachment is forbidden without crossTenantInterfaceCreation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -1866,15 +1869,15 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 						},
 					},
 				},
-				prepareReq:  func(t *testing.T, _ *model.APIInstanceCreateRequest) { disableTargetedInstanceCreation(t) },
+				prepareReq:  func(t *testing.T, _ *model.APIInstanceCreateRequest) { disableCrossTenantInterfaceCreation(t) },
 				reqOrg:      tnOrg,
 				reqUser:     tnu1,
 				respCode:    http.StatusForbidden,
-				respMessage: "Tenant does not have targetedInstanceCreation capability enabled",
+				respMessage: "Tenant does not have crossTenantInterfaceCreation capability enabled",
 			},
 		},
 		{
-			name: "cross-Tenant VPC Prefix state is not revealed without targetedInstanceCreation",
+			name: "cross-Tenant VPC Prefix state is not revealed without crossTenantInterfaceCreation",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -1899,11 +1902,11 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 						},
 					},
 				},
-				prepareReq:  func(t *testing.T, _ *model.APIInstanceCreateRequest) { disableTargetedInstanceCreation(t) },
+				prepareReq:  func(t *testing.T, _ *model.APIInstanceCreateRequest) { disableCrossTenantInterfaceCreation(t) },
 				reqOrg:      tnOrg,
 				reqUser:     tnu1,
 				respCode:    http.StatusForbidden,
-				respMessage: "Tenant does not have targetedInstanceCreation capability enabled",
+				respMessage: "Tenant does not have crossTenantInterfaceCreation capability enabled",
 			},
 		},
 		{
@@ -1940,7 +1943,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "targetedInstanceCreation permits cross-Tenant direct VPC and VPC Prefix attachments",
+			name: "crossTenantInterfaceCreation permits cross-Tenant direct VPC and VPC Prefix attachments",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -2030,11 +2033,11 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 						},
 					},
 				},
-				prepareReq:  func(t *testing.T, _ *model.APIInstanceCreateRequest) { disableTargetedInstanceCreationAtSite(t) },
+				prepareReq:  func(t *testing.T, _ *model.APIInstanceCreateRequest) { disableCrossTenantInterfaceCreationAtSite(t) },
 				reqOrg:      tnOrg,
 				reqUser:     tnu1,
 				respCode:    http.StatusForbidden,
-				respMessage: "Tenant does not have targetedInstanceCreation capability enabled",
+				respMessage: "Tenant does not have crossTenantInterfaceCreation capability enabled",
 			},
 		},
 		{
@@ -7508,7 +7511,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				reqOrg:      tnOrg1,
 				reqUser:     tnu1,
 				respCode:    http.StatusForbidden,
-				respMessage: cutil.GetPtr("Tenant does not have targetedInstanceCreation capability enabled"),
+				respMessage: cutil.GetPtr("Tenant does not have crossTenantInterfaceCreation capability enabled"),
 			},
 		},
 		{
@@ -7538,7 +7541,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				reqOrg:      tnOrg1,
 				reqUser:     tnu1,
 				respCode:    http.StatusForbidden,
-				respMessage: cutil.GetPtr("Tenant does not have targetedInstanceCreation capability enabled"),
+				respMessage: cutil.GetPtr("Tenant does not have crossTenantInterfaceCreation capability enabled"),
 			},
 		},
 		{
@@ -7568,7 +7571,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				reqOrg:      tnOrg1,
 				reqUser:     tnu1,
 				respCode:    http.StatusForbidden,
-				respMessage: cutil.GetPtr("Tenant does not have targetedInstanceCreation capability enabled"),
+				respMessage: cutil.GetPtr("Tenant does not have crossTenantInterfaceCreation capability enabled"),
 			},
 		},
 		{

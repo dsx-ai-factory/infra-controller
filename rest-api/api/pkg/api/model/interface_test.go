@@ -144,9 +144,9 @@ func TestAPIInterfaceGetAllRequest_Validate(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "no filters"},
-		{name: "valid IDs", request: APIInterfaceGetAllRequest{VpcID: &validID, ForeignTenantID: &validID}},
+		{name: "valid IDs", request: APIInterfaceGetAllRequest{VpcID: &validID, InstanceTenantID: &validID}},
 		{name: "invalid VPC ID", request: APIInterfaceGetAllRequest{VpcID: &invalidID}, wantErr: true},
-		{name: "invalid foreign Tenant ID", request: APIInterfaceGetAllRequest{ForeignTenantID: &invalidID}, wantErr: true},
+		{name: "invalid Instance Tenant ID", request: APIInterfaceGetAllRequest{InstanceTenantID: &invalidID}, wantErr: true},
 	}
 
 	for _, tc := range tests {

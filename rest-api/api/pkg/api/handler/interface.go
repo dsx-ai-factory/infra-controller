@@ -104,8 +104,8 @@ func NewGetAllInterfaceHandler(dbSession *cdb.Session, tc temporalClient.Client,
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param vpcId query string false "Filter by attached VPC ID"
-// @Param crossTenant query boolean false "Filter by whether the Instance belongs to another Tenant"
-// @Param foreignTenantId query string false "Filter by foreign Instance Tenant ID"
+// @Param crossTenant query boolean false "Filter by whether the Instance and selected VPC or VPC Prefix have different owning Tenants"
+// @Param instanceTenantId query string false "Filter by Instance owning Tenant ID"
 // @Param status query string false "Filter by status"
 // @Param includeRelation query string false "Related entities to include in response"
 // @Param pageNumber query integer false "Page number of results returned"
@@ -247,9 +247,9 @@ func (gaish GetAllInterfaceHandler) Handle(c echo.Context) error {
 			vpcID := uuid.MustParse(*request.VpcID)
 			filterInput.VpcID = &vpcID
 		}
-		if request.ForeignTenantID != nil {
-			foreignTenantID := uuid.MustParse(*request.ForeignTenantID)
-			filterInput.ForeignTenantID = &foreignTenantID
+		if request.InstanceTenantID != nil {
+			instanceTenantID := uuid.MustParse(*request.InstanceTenantID)
+			filterInput.InstanceTenantID = &instanceTenantID
 		}
 	}
 
@@ -263,16 +263,15 @@ func (gaish GetAllInterfaceHandler) Handle(c echo.Context) error {
 		OrderBy: pageRequest.OrderBy,
 	}
 
-	includeInstanceRelation := false
+	requestedRelations := make(map[string]bool, len(qIncludeRelations))
 	for _, relation := range qIncludeRelations {
-		if relation == cdbm.InstanceRelationName {
-			includeInstanceRelation = true
-			break
-		}
+		requestedRelations[relation] = true
 	}
 	queryRelations := append([]string{}, qIncludeRelations...)
-	if !instanceIDFromPath && !includeInstanceRelation {
-		queryRelations = append(queryRelations, cdbm.InstanceRelationName)
+	for _, relation := range []string{cdbm.InstanceRelationName, cdbm.VpcRelationName, cdbm.VpcPrefixRelationName} {
+		if !requestedRelations[relation] {
+			queryRelations = append(queryRelations, relation)
+		}
 	}
 
 	dbInterfaces, total, err := cdbm.NewInterfaceDAO(gaish.dbSession).GetAll(ctx, nil, filterInput, pageInput, queryRelations)
@@ -285,20 +284,37 @@ func (gaish GetAllInterfaceHandler) Handle(c echo.Context) error {
 	apiInterfaces := make([]model.APIInterface, 0, len(dbInterfaces))
 	for i := range dbInterfaces {
 		dbInterface := &dbInterfaces[i]
-		var foreignTenantID *string
-		if !instanceIDFromPath {
-			if dbInterface.Instance == nil {
-				logger.Error().Str("interfaceID", dbInterface.ID.String()).Msg("Interface is missing its Instance relation")
+		if dbInterface.Instance == nil {
+			logger.Error().Str("interfaceID", dbInterface.ID.String()).Msg("Interface is missing its Instance relation")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to build Interface response", nil)
+		}
+
+		var vpcTenantID *uuid.UUID
+		switch {
+		case dbInterface.VpcID != nil:
+			if dbInterface.Vpc == nil {
+				logger.Error().Str("interfaceID", dbInterface.ID.String()).Msg("Interface is missing its VPC relation")
 				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to build Interface response", nil)
 			}
-			if dbInterface.Instance.TenantID != tenant.ID {
-				foreignTenantID = cutil.GetPtr(dbInterface.Instance.TenantID.String())
+			vpcTenantID = &dbInterface.Vpc.TenantID
+		case dbInterface.VpcPrefixID != nil:
+			if dbInterface.VpcPrefix == nil {
+				logger.Error().Str("interfaceID", dbInterface.ID.String()).Msg("Interface is missing its VPC Prefix relation")
+				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to build Interface response", nil)
 			}
+			vpcTenantID = &dbInterface.VpcPrefix.TenantID
 		}
+
 		apiInterface := model.NewAPIInterface(dbInterface)
-		apiInterface.ForeignTenantID = foreignTenantID
-		if !includeInstanceRelation {
+		if vpcTenantID != nil && dbInterface.Instance.TenantID != *vpcTenantID {
+			apiInterface.InstanceTenantID = cutil.GetPtr(dbInterface.Instance.TenantID.String())
+			apiInterface.VpcTenantID = cutil.GetPtr(vpcTenantID.String())
+		}
+		if !requestedRelations[cdbm.InstanceRelationName] {
 			apiInterface.Instance = nil
+		}
+		if !requestedRelations[cdbm.VpcPrefixRelationName] {
+			apiInterface.VpcPrefix = nil
 		}
 		apiInterfaces = append(apiInterfaces, *apiInterface)
 	}

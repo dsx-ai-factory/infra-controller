@@ -694,8 +694,8 @@ func TestTenantSiteSQLDAO_Update(t *testing.T) {
 
 		tssd := TenantSiteSQLDAO{dbSession: dbSession}
 		got, err := tssd.Update(ctx, nil, TenantSiteUpdateInput{
-			TenantSiteID: tsWithOverride.ID,
-			Config:       &TenantSiteConfig{},
+			TenantSiteID:    tsWithOverride.ID,
+			ClearConfigKeys: []string{TenantSiteConfigKeyTargetedInstanceCreation},
 		})
 		assert.NoError(t, err)
 		assert.Nil(t, got.Config.TargetedInstanceCreation)

@@ -268,18 +268,18 @@ func (ifcr APIInterfaceCreateOrUpdateRequest) VpcIPFamilyMode() cdbm.InterfaceVp
 
 // APIInterfaceGetAllRequest captures optional filters for listing Interfaces.
 type APIInterfaceGetAllRequest struct {
-	VpcID           *string  `query:"vpcId"`
-	CrossTenant     *bool    `query:"crossTenant"`
-	ForeignTenantID *string  `query:"foreignTenantId"`
-	Status          *string  `query:"status"`
-	IncludeRelation []string `query:"includeRelation"`
+	VpcID            *string  `query:"vpcId"`
+	CrossTenant      *bool    `query:"crossTenant"`
+	InstanceTenantID *string  `query:"instanceTenantId"`
+	Status           *string  `query:"status"`
+	IncludeRelation  []string `query:"includeRelation"`
 }
 
 // Validate ensures Interface filter IDs are valid UUIDs.
 func (r APIInterfaceGetAllRequest) Validate() error {
 	return validation.ValidateStruct(&r,
 		validation.Field(&r.VpcID, validation.When(r.VpcID != nil, validationis.UUID)),
-		validation.Field(&r.ForeignTenantID, validation.When(r.ForeignTenantID != nil, validationis.UUID)),
+		validation.Field(&r.InstanceTenantID, validation.When(r.InstanceTenantID != nil, validationis.UUID)),
 	)
 }
 
@@ -289,8 +289,10 @@ type APIInterface struct {
 	ID string `json:"id"`
 	// InstanceID is the ID of the associated Instance
 	InstanceID string `json:"instanceId"`
-	// ForeignTenantID is the owning Tenant ID when the Instance belongs to another Tenant
-	ForeignTenantID *string `json:"foreignTenantId,omitempty"`
+	// InstanceTenantID is the Instance owner when it differs from the selected VPC or VPC Prefix owner
+	InstanceTenantID *string `json:"instanceTenantId"`
+	// VpcTenantID is the selected VPC or VPC Prefix owner when it differs from the Instance owner
+	VpcTenantID *string `json:"vpcTenantId"`
 	// Instance is the summary of the Instance
 	Instance *APIInstanceSummary `json:"instance,omitempty"`
 	// SubnetID is the ID of the associated Subnet

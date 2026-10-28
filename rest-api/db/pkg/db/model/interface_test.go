@@ -1297,12 +1297,12 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 				wantIDs: []uuid.UUID{callerOnCallerVpc.ID, callerOnOtherVpc.ID, callerSubnetOnly.ID, otherOnCallerVpc.ID},
 			},
 			{
-				name: "cross-Tenant true includes only other Tenants on owned VPCs",
+				name: "cross-Tenant true includes Interfaces whose Instance and VPC owners differ",
 				filter: InterfaceFilterInput{
 					VisibleToTenantID: &callerTenant.ID,
 					CrossTenant:       &crossTenant,
 				},
-				wantIDs: []uuid.UUID{otherOnCallerVpc.ID},
+				wantIDs: []uuid.UUID{callerOnOtherVpc.ID, otherOnCallerVpc.ID},
 			},
 			{
 				name: "cross-Tenant false includes only caller-owned Instances",
@@ -1310,13 +1310,13 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 					VisibleToTenantID: &callerTenant.ID,
 					CrossTenant:       &sameTenant,
 				},
-				wantIDs: []uuid.UUID{callerOnCallerVpc.ID, callerOnOtherVpc.ID, callerSubnetOnly.ID},
+				wantIDs: []uuid.UUID{callerOnCallerVpc.ID, callerSubnetOnly.ID},
 			},
 			{
 				name: "foreign Tenant filters within the visibility boundary",
 				filter: InterfaceFilterInput{
 					VisibleToTenantID: &callerTenant.ID,
-					ForeignTenantID:   &otherTenant.ID,
+					InstanceTenantID:  &otherTenant.ID,
 				},
 				wantIDs: []uuid.UUID{otherOnCallerVpc.ID},
 			},
@@ -1337,17 +1337,13 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 				wantIDs: []uuid.UUID{callerOnOtherVpc.ID},
 			},
 			{
-				name: "conflicting filters return no Interfaces",
+				name: "cross-Tenant and Instance Tenant filters compose",
 				filter: InterfaceFilterInput{
 					VisibleToTenantID: &callerTenant.ID,
-					ForeignTenantID:   &callerTenant.ID,
+					InstanceTenantID:  &callerTenant.ID,
 					CrossTenant:       &crossTenant,
 				},
-			},
-			{
-				name:      "cross-Tenant filter requires visibility Tenant",
-				filter:    InterfaceFilterInput{CrossTenant: &crossTenant},
-				wantError: true,
+				wantIDs: []uuid.UUID{callerOnOtherVpc.ID},
 			},
 		}
 
