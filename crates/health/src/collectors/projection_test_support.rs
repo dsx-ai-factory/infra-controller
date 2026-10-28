@@ -188,7 +188,14 @@ fn insert_telemetry_service(resources: &mut HashMap<String, MockResponse>) {
         "#MetricDefinition.v1_3_3.MetricDefinition",
         "GPU0_Temp",
         "GPU temperature",
-        json!({ "MetricDataType": "Decimal", "Units": "Cel" }),
+        json!({
+            "MetricDataType": "Decimal",
+            "Units": "Cel",
+            "MetricProperties": [
+                "/redfish/v1/Chassis/CH0/Sensors/GPU_0_Temp_0",
+                "/redfish/v1/Chassis/CH0/Thermal#/Sensors/GPU_1_Temp_0"
+            ]
+        }),
     );
 
     let report_paths = [report("PlatformEnvironmentMetrics"), report("StaleReport")];
@@ -230,7 +237,25 @@ fn insert_telemetry_service(resources: &mut HashMap<String, MockResponse>) {
                 { "MetricId": "NonFinite", "MetricValue": "NaN" },
                 { "MetricId": "Infinite", "MetricValue": "inf" },
                 // No id to name a series after.
-                { "MetricValue": "1" }
+                { "MetricValue": "1" },
+                // MetricProperty only, no MetricId (non-stale).
+                {
+                    "MetricProperty": "/redfish/v1/Chassis/CH0/Sensors/GPU_0_Temp_0",
+                    "MetricValue": "48.0",
+                    "Oem": { "Nvidia": { "MetricValueStale": false } }
+                },
+                // MetricProperty only with URI fragment, no MetricId.
+                {
+                    "MetricProperty": "/redfish/v1/Chassis/CH0/Thermal#/Sensors/GPU_1_Temp_0",
+                    "MetricValue": "52.0",
+                    "Oem": { "Nvidia": { "MetricValueStale": false } }
+                },
+                // MetricProperty only, marked stale per-value (must be dropped).
+                {
+                    "MetricProperty": "/redfish/v1/Chassis/CH0/Sensors/GPU_0_Power_0",
+                    "MetricValue": "612.5",
+                    "Oem": { "Nvidia": { "MetricValueStale": true } }
+                }
             ]
         }),
     );

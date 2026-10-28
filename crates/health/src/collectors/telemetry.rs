@@ -96,6 +96,29 @@ fn push_separator(out: &mut String) {
     }
 }
 
+/// Extract the property identifier leaf from a Redfish `MetricProperty` URI.
+///
+/// When a URI fragment exists (e.g. `#/0/PowerConsumedWatts` or
+/// `#/Sensors/GPU_0_Temp_0`), the target property is named in the fragment.
+/// When no fragment exists, the last path segment of the resource path is used.
+fn leaf_from_property(property: &str) -> &str {
+    match property.split_once('#') {
+        Some((path, fragment)) => {
+            let frag = fragment.trim_end_matches('/');
+            if frag.is_empty() {
+                path.trim_end_matches('/')
+            } else {
+                frag
+            }
+        }
+        None => property.trim_end_matches('/'),
+    }
+    .rsplit('/')
+    .next()
+    .filter(|s| !s.is_empty())
+    .unwrap_or("unknown")
+}
+
 pub struct TelemetryCollectorConfig {
     pub data_sink: Option<Arc<dyn DataSink>>,
 }
@@ -235,11 +258,19 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
         Some(
             definitions
                 .into_iter()
-                .filter_map(|definition| {
+                .flat_map(|definition| {
                     let raw = definition.raw();
                     let units = raw.units.clone().flatten()?;
-                    Some((raw.id.clone(), sanitize_unit(&units)))
+                    let unit = sanitize_unit(&units);
+                    let mut entries = vec![(raw.id.clone(), unit.clone())];
+                    if let Some(Some(properties)) = &raw.metric_properties {
+                        for prop in properties {
+                            entries.push((prop.clone(), unit.clone()));
+                        }
+                    }
+                    Some(entries)
                 })
+                .flatten()
                 .collect(),
         )
     }
@@ -266,9 +297,33 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
         let units = self.units.as_ref();
         let mut count = 0;
         for value in raw.metric_values.iter().flatten() {
-            let Some(metric_id) = value.metric_id.clone().flatten() else {
+            let metric_id = value.metric_id.clone().flatten();
+            let property = value.metric_property.clone().flatten();
+            if metric_id.is_none() && property.is_none() {
                 continue;
-            };
+            }
+
+            let is_stale = value
+                .oem
+                .as_ref()
+                .and_then(|oem| {
+                    oem.additional_properties
+                        .pointer("/Nvidia/MetricValueStale")
+                        .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s == "true")))
+                })
+                .unwrap_or(false);
+            if is_stale {
+                tracing::debug!(
+                    report_id,
+                    metric_id = metric_id.as_deref().unwrap_or(""),
+                    property = property.as_deref().unwrap_or(""),
+                    bmc_address = ?self.endpoint.addr,
+                    rack_id = self.event_context.rack_id().map(tracing::field::display),
+                    "Skipping metric value marked stale by the NVIDIA OEM extension"
+                );
+                continue;
+            }
+
             let Some(reading) = value.metric_value.as_ref().and_then(Option::as_ref) else {
                 continue;
             };
@@ -284,7 +339,8 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
             if !reading.is_finite() {
                 tracing::debug!(
                     report_id,
-                    metric_id,
+                    metric_id = metric_id.as_deref().unwrap_or(""),
+                    property = property.as_deref().unwrap_or(""),
                     reading,
                     bmc_address = ?self.endpoint.addr,
                     rack_id = self.event_context.rack_id().map(tracing::field::display),
@@ -294,7 +350,12 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
             }
 
             let unit = units
-                .and_then(|units| units.get(&metric_id))
+                .and_then(|units| {
+                    metric_id
+                        .as_deref()
+                        .and_then(|id| units.get(id))
+                        .or_else(|| property.as_deref().and_then(|prop| units.get(prop)))
+                })
                 .map_or(UNKNOWN_UNIT, String::as_str);
 
             let mut labels: Vec<MetricLabel> =
@@ -307,21 +368,28 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
             // keying on the id alone would drop every reading but the
             // last. This also matches the entity collectors, whose keys
             // are `{resource odata id}/{metric}`.
-            let property = value.metric_property.clone().flatten();
-            let key = match &property {
-                Some(property) => format!("{property}/{metric_id}"),
-                None => format!("{}/{metric_id}", report.raw().odata_id),
+            let key = match (property.as_deref(), metric_id.as_deref()) {
+                (Some(property), Some(metric_id)) => format!("{property}/{metric_id}"),
+                (Some(property), None) => property.to_string(),
+                (None, Some(metric_id)) => format!("{}/{metric_id}", report.raw().odata_id),
+                (None, None) => continue,
             };
-            if let Some(property) = property {
-                labels.push((Cow::Borrowed("metric_property"), property));
+            if let Some(ref property) = property {
+                labels.push((Cow::Borrowed("metric_property"), property.clone()));
             }
+
+            let metric_type = if let Some(ref metric_id) = metric_id {
+                metric_type_from_id(metric_id)
+            } else {
+                metric_type_from_id(leaf_from_property(property.as_deref().unwrap_or("")))
+            };
 
             self.emit_event(CollectorEvent::Metric(
                 MetricSample {
                     semantics: crate::sink::MetricSemantics::Gauge,
                     key,
                     name: METRIC_NAME.to_string(),
-                    metric_type: metric_type_from_id(&metric_id),
+                    metric_type,
                     unit: unit.to_string(),
                     value: reading,
                     labels,
@@ -397,6 +465,55 @@ mod tests {
                 },
             ],
             metric_type_from_id,
+        );
+    }
+
+    #[test]
+    fn leaf_from_property_cases() {
+        check_values(
+            [
+                Check {
+                    scenario: "fragment with numeric index",
+                    input: "/redfish/v1/Chassis/Tray_1/Power#/0/PowerConsumedWatts",
+                    expect: "PowerConsumedWatts",
+                },
+                Check {
+                    scenario: "fragment with sensor path",
+                    input: "/redfish/v1/Chassis/CH0/Thermal#/Sensors/GPU_0_Temp_0",
+                    expect: "GPU_0_Temp_0",
+                },
+                Check {
+                    scenario: "resource path without fragment",
+                    input: "/redfish/v1/Chassis/CH0/Sensors/GPU_0_Temp_0",
+                    expect: "GPU_0_Temp_0",
+                },
+                Check {
+                    scenario: "fragment with trailing slash",
+                    input: "/redfish/v1/Chassis/CH0/Thermal#/Sensors/GPU_0_Temp_0/",
+                    expect: "GPU_0_Temp_0",
+                },
+                Check {
+                    scenario: "empty fragment falls back to resource path",
+                    input: "/redfish/v1/Chassis/Tray_1/Power#",
+                    expect: "Power",
+                },
+                Check {
+                    scenario: "empty fragment with slash falls back to resource path",
+                    input: "/redfish/v1/Chassis/Tray_1/Power#/",
+                    expect: "Power",
+                },
+                Check {
+                    scenario: "empty input yields unknown",
+                    input: "",
+                    expect: "unknown",
+                },
+                Check {
+                    scenario: "root slash yields unknown",
+                    input: "/",
+                    expect: "unknown",
+                },
+            ],
+            leaf_from_property,
         );
     }
 
@@ -506,12 +623,14 @@ mod tests {
                            stale, non-numeric and non-finite values are dropped",
                 input: fixture.bmc(),
                 expect: Yields(ObservedIteration {
-                    entity_count: Some(3),
+                    entity_count: Some(5),
                     fetch_failures: 0,
                     metrics: {
                         const REPORT: &str =
                             "/redfish/v1/TelemetryService/MetricReports/PlatformEnvironmentMetrics";
                         const SENSORS: &str = "/redfish/v1/Chassis/CH0/Sensors";
+                        const THERMAL: &str =
+                            "/redfish/v1/Chassis/CH0/Thermal#/Sensors/GPU_1_Temp_0";
                         vec![
                             metric(
                                 &format!("{SENSORS}/GPU0_Temp/GPU0_Temp"),
@@ -524,6 +643,16 @@ mod tests {
                                 ],
                             ),
                             metric(
+                                &format!("{SENSORS}/GPU_0_Temp_0"),
+                                "gpu_0_temp_0",
+                                "celsius",
+                                48.0,
+                                &[
+                                    ("report_id", "PlatformEnvironmentMetrics"),
+                                    ("metric_property", &format!("{SENSORS}/GPU_0_Temp_0")),
+                                ],
+                            ),
+                            metric(
                                 &format!("{SENSORS}/TotalPower/TotalGPUPowerWatts"),
                                 "total_gpu_power_watts",
                                 "watts",
@@ -531,6 +660,16 @@ mod tests {
                                 &[
                                     ("report_id", "PlatformEnvironmentMetrics"),
                                     ("metric_property", &format!("{SENSORS}/TotalPower")),
+                                ],
+                            ),
+                            metric(
+                                THERMAL,
+                                "gpu_1_temp_0",
+                                "celsius",
+                                52.0,
+                                &[
+                                    ("report_id", "PlatformEnvironmentMetrics"),
+                                    ("metric_property", THERMAL),
                                 ],
                             ),
                             // Keyed off the report, because this value
@@ -601,6 +740,8 @@ mod tests {
                     unit_pairs(&[
                         ("fan_pwm", "unknown"),
                         ("gpu0_temp", "unknown"),
+                        ("gpu_0_temp_0", "unknown"),
+                        ("gpu_1_temp_0", "unknown"),
                         ("total_gpu_power_watts", "unknown"),
                     ]),
                 ),
@@ -609,6 +750,8 @@ mod tests {
                     unit_pairs(&[
                         ("fan_pwm", "unknown"),
                         ("gpu0_temp", "celsius"),
+                        ("gpu_0_temp_0", "celsius"),
+                        ("gpu_1_temp_0", "celsius"),
                         ("total_gpu_power_watts", "watts"),
                     ]),
                 ),
