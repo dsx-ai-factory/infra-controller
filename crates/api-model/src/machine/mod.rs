@@ -702,7 +702,7 @@ impl ManagedHostStateSnapshot {
         }
 
         if let Some(rack_overrides) = &self.rack_health_overrides {
-            let missing_component = health_report::HealthProbeId::missing_rack_component();
+            let rack_only_probes = [health_report::HealthProbeId::missing_rack_component()];
             for report in rack_overrides
                 .replace
                 .iter()
@@ -711,7 +711,9 @@ impl ManagedHostStateSnapshot {
                 // Inventory shortages are actionable at the rack, not on each host.
                 // Filter before merging so host-owned alerts remain untouched.
                 let mut report = report.clone();
-                report.alerts.retain(|alert| alert.id != missing_component);
+                report
+                    .alerts
+                    .retain(|alert| !rack_only_probes.contains(&alert.id));
                 output.merge(&report);
             }
         }
