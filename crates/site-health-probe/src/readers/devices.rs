@@ -814,7 +814,8 @@ fn known_flag(known: &Known<Result<(), String>>) -> (Option<bool>, Option<String
     }
 }
 
-/// The host fields of a unit, moved out of its read row.
+/// The host fields of a unit, copied from its read row. The row is dropped
+/// once its unit is built.
 fn host_fields(host: &HostDetail, open: Option<&FirmwareRequest>) -> HostFields {
     let (allocatable, blocking_reason) = known_flag(&host.allocatable);
     let (update_eligible, update_blocking_reason) = known_flag(&host.update_eligible);
@@ -1556,6 +1557,67 @@ mod tests {
         // Sharing never changes what a unit says.
         let rebuilt = UnitsData::new(second.units.iter().map(|u| Unit::clone(u)).collect(), 0);
         assert_eq!(rebuilt, second);
+    }
+
+    /// A family whose sweep fails keeps its last published units to share
+    /// against, so the next good sweep reuses them. A unit gone for one
+    /// sweep has no previous unit when it comes back, so it is a new one.
+    #[tokio::test(start_paused = true)]
+    async fn units_stay_shared_across_a_failed_sweep() {
+        let h = harness(small_site());
+        let switches = |h: &Harness| {
+            h.sink
+                .latest::<UnitsData>(Family::Switch)
+                .expect("switches")
+                .1
+        };
+        h.sweep().await.expect("first sweep");
+        let first = switches(&h);
+        assert_eq!(first.units.len(), 2);
+
+        h.nico.fail_next(
+            "find_switches_by_ids",
+            CallError::Status("Internal: db".to_string()),
+        );
+        assert!(h.sweep().await.is_err(), "the switch read fails");
+        assert_eq!(h.sink.failure_kinds(Family::Switch), vec![FailureKind::Rpc]);
+        assert_eq!(switches(&h), first, "the switch family keeps its snapshot");
+
+        h.sweep().await.expect("third sweep");
+        let third = switches(&h);
+        assert_eq!(third.units, first.units);
+        assert!(
+            first
+                .units
+                .iter()
+                .zip(&third.units)
+                .all(|(a, b)| Arc::ptr_eq(a, b)),
+            "the good sweep after the failed one shares the first sweep's units"
+        );
+
+        let gone = fake::switch_id(2).to_string();
+        let removed = h
+            .nico
+            .site
+            .lock()
+            .unwrap()
+            .switches
+            .remove(&gone)
+            .expect("switch 2");
+        h.sweep().await.expect("sweep without switch 2");
+        assert_eq!(switches(&h).units.len(), 1);
+        h.nico.site.lock().unwrap().add_switch(removed);
+        h.sweep().await.expect("sweep with switch 2 back");
+        let back = switches(&h);
+        assert_eq!(back.units, third.units, "the same switches again");
+        for (before, after) in third.units.iter().zip(&back.units) {
+            assert_eq!(
+                Arc::ptr_eq(before, after),
+                after.id != gone,
+                "only the switch that was gone is a new unit: {}",
+                after.id
+            );
+        }
     }
 
     /// The sweep's families are delivered one at a time. A scrape after
