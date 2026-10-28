@@ -2222,6 +2222,29 @@ pub(in crate::tests) mod tests {
         assert_eq!(actual_sku_json, returned_sku_json);
         assert_eq!(actual_sku_json, expected_sku_json);
 
+        let mut invalid_sku = expected_sku.clone();
+        invalid_sku.device_type = Some("x".repeat(257));
+        let error = db::sku::replace(&mut txn, &invalid_sku)
+            .await
+            .expect_err("overlong device type must fail the SKU update");
+        let DatabaseError::Sqlx(annotated) = &error else {
+            panic!("expected SQLx update error, got {error:?}");
+        };
+        let source = annotated
+            .source
+            .as_database_error()
+            .expect("SKU update should retain the PostgreSQL error");
+        assert_eq!(source.code().as_deref(), Some("22001"));
+        assert!(annotated.to_string().contains("replace sku: update"));
+
+        let saved_sku = db::sku::find(&mut txn, std::slice::from_ref(&expected_sku.id))
+            .await?
+            .remove(0);
+        assert_eq!(
+            serde_json::ser::to_string_pretty(&saved_sku)?,
+            returned_sku_json
+        );
+
         Ok(())
     }
 
@@ -2475,6 +2498,37 @@ pub(in crate::tests) mod tests {
                 case.scenario
             );
         }
+
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn test_replace_sku_rejects_missing_target(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        use rpc::forge::forge_server::Forge;
+
+        let env = create_test_env(pool.clone()).await;
+        let sku_id = "missing-sku";
+        let sku: rpc::forge::Sku = serde_json::from_str(FULL_SKU_DATA)?;
+        let error = env
+            .api
+            .replace_sku(tonic::Request::new(rpc::forge::Sku {
+                id: sku_id.to_string(),
+                schema_version: CURRENT_SKU_VERSION,
+                ..sku
+            }))
+            .await
+            .expect_err("missing replacement target should be rejected");
+
+        assert_eq!(error.code(), tonic::Code::NotFound);
+        assert_eq!(error.message(), format!("SKU not found: {sku_id}"));
+        assert!(
+            db::sku::find(pool.acquire().await?.as_mut(), &[sku_id])
+                .await?
+                .is_empty(),
+            "replacement must not create the missing SKU"
+        );
 
         Ok(())
     }

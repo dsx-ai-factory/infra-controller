@@ -1370,6 +1370,18 @@ type ForgeClient interface {
 	GetAllSkuIds(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*SkuIdList, error)
 	FindSkusByIds(ctx context.Context, in *SkusByIdsRequest, opts ...grpc.CallOption) (*SkuList, error)
 	UpdateSkuMetadata(ctx context.Context, in *SkuUpdateMetadataRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Replace the components and metadata of an existing SKU.
+	// Omitting `components` replaces the stored definition with empty values.
+	// Input `components.ethernet_devices` values are ignored; the response list
+	// is empty.
+	// Omitted description becomes empty; omitted device_type becomes unset.
+	// Preserves creation time and machine assignments, requests SKU verification,
+	// and returns the stored SKU with its associated machine IDs.
+	// The schema_version must equal the current SKU schema version. An empty ID,
+	// unsupported schema version, invalid storage constraints, or components
+	// matching another SKU return INVALID_ARGUMENT before absence is checked.
+	// A valid replacement that does not match another SKU returns NOT_FOUND
+	// when its target ID is absent. Other database failures return INTERNAL.
 	ReplaceSku(ctx context.Context, in *Sku, opts ...grpc.CallOption) (*Sku, error)
 	// Replace the complete component definition, preserving omitted metadata.
 	// Requests SKU verification and returns the replaced SKU with its associated machine IDs.
@@ -7928,6 +7940,18 @@ type ForgeServer interface {
 	GetAllSkuIds(context.Context, *emptypb.Empty) (*SkuIdList, error)
 	FindSkusByIds(context.Context, *SkusByIdsRequest) (*SkuList, error)
 	UpdateSkuMetadata(context.Context, *SkuUpdateMetadataRequest) (*emptypb.Empty, error)
+	// Replace the components and metadata of an existing SKU.
+	// Omitting `components` replaces the stored definition with empty values.
+	// Input `components.ethernet_devices` values are ignored; the response list
+	// is empty.
+	// Omitted description becomes empty; omitted device_type becomes unset.
+	// Preserves creation time and machine assignments, requests SKU verification,
+	// and returns the stored SKU with its associated machine IDs.
+	// The schema_version must equal the current SKU schema version. An empty ID,
+	// unsupported schema version, invalid storage constraints, or components
+	// matching another SKU return INVALID_ARGUMENT before absence is checked.
+	// A valid replacement that does not match another SKU returns NOT_FOUND
+	// when its target ID is absent. Other database failures return INTERNAL.
 	ReplaceSku(context.Context, *Sku) (*Sku, error)
 	// Replace the complete component definition, preserving omitted metadata.
 	// Requests SKU verification and returns the replaced SKU with its associated machine IDs.
