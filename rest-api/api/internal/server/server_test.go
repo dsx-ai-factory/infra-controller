@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -472,19 +473,43 @@ func Test_BodyLimit(t *testing.T) {
 
 	srv := InitAPIServer(cfg, dbSession, tc, tnc, scp, nil)
 
-	oversizedBody := make([]byte, 11<<20) // 11 MiB, exceeds the 10 MiB limit
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/%s/org/test-org/%s/site", cfg.GetAPIRouteVersion(), cfg.GetAPIName()), bytes.NewReader(oversizedBody))
-	req.Header.Set("Content-Type", "application/json")
-	srv.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
-
-	normalBody := []byte(`{"name":"test"}`)
-	rec2 := httptest.NewRecorder()
-	req2 := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/%s/org/test-org/%s/site", cfg.GetAPIRouteVersion(), cfg.GetAPIName()), bytes.NewReader(normalBody))
-	req2.Header.Set("Content-Type", "application/json")
-	srv.ServeHTTP(rec2, req2)
-	assert.NotEqual(t, http.StatusRequestEntityTooLarge, rec2.Code)
+	// io.MultiReader hides the body length, so httptest sends it without
+	// Content-Length, as a chunked request would arrive.
+	tests := []struct {
+		name       string
+		body       io.Reader
+		wantStatus int
+	}{
+		{
+			name:       "rejects a sized body over the limit",
+			body:       bytes.NewReader(make([]byte, cutil.MaxRequestBodyBytes+1)),
+			wantStatus: http.StatusRequestEntityTooLarge,
+		},
+		{
+			name:       "accepts a small sized body",
+			body:       bytes.NewReader([]byte(`{"name":"test"}`)),
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "rejects a chunked body over the limit",
+			body:       io.MultiReader(bytes.NewReader(make([]byte, cutil.MaxRequestBodyBytes+1))),
+			wantStatus: http.StatusRequestEntityTooLarge,
+		},
+		{
+			name:       "accepts a chunked body at the limit",
+			body:       io.MultiReader(bytes.NewReader(make([]byte, cutil.MaxRequestBodyBytes))),
+			wantStatus: http.StatusUnauthorized,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/%s/org/test-org/%s/site", cfg.GetAPIRouteVersion(), cfg.GetAPIName()), tt.body)
+			req.Header.Set("Content-Type", "application/json")
+			srv.ServeHTTP(rec, req)
+			assert.Equal(t, tt.wantStatus, rec.Code)
+		})
+	}
 }
 
 func Test_NotFoundHandler(t *testing.T) {
