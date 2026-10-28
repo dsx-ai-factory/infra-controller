@@ -723,8 +723,11 @@ managed host's BMC web UI shell, or another client on its network), confirm the
 service zone resolves.
 
 The loop below assumes stock agents and that your deployment publishes the
-listed records. For an image rebuilt with the rebranded PXE name, replace the
-complete `carbide-pxe.forge` hostname with `nico-pxe.nico`.
+listed records. For an image rebuilt with the rebranded names, replace the
+complete `carbide-api.forge` and `carbide-pxe.forge` hostnames with
+`nico-api.nico` and `nico-pxe.nico` in the loop and the reachability checks.
+If `external_api_url` is set, also check its hostname from the
+static-assignments segment.
 Before running it, replace `nico-static-pxe.nico` with the hostname from
 Scout's effective full-image URL, and add the hostname from its effective
 update URL if different. The `newrootfs=` and `pxe_uri=` arguments select
@@ -798,8 +801,11 @@ expanding the rollout to the rest of the fleet:
       managed DPUs, configured with a DHCP relay pointing to the `nico-dhcp`
       LoadBalancer VIP.
 - [ ] LoadBalancer VIPs assigned for `nico-api`, `nico-dhcp`, `nico-pxe`, `nico-dns` (one per replica), `nico-ssh-console-rs`, and `unbound`.
-- [ ] `unbound`'s `local_data.conf` ConfigMap contains A records for `nico-api`,
-      `nico-pxe`, `unbound`, and `otel-receiver` in the deployed `.nico` zone.
+- [ ] `unbound`'s `local_data.conf` ConfigMap contains A records for
+      `carbide-api.forge` and `carbide-pxe.forge` (`nico-api.nico` and
+      `nico-pxe.nico` for rebranded images), `unbound.nico`, and the OTel
+      receiver hostname set by `otlpSiteEndpoint` (default
+      `otel-receiver.forge`).
       The resolver can also resolve each hostname used by Scout's effective
       full-image and update URLs in the required address family. An unused
       `nico-static-pxe.nico` alias is optional. Include A records for the exact
