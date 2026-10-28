@@ -1289,7 +1289,7 @@ pub async fn batch_persist<'a>(
             separated.push_unseparated(",");
             separated.push_bind_unseparated(&value.config.power_profile);
             separated.push_unseparated(",");
-            separated.push_bind_unseparated(&value.config.dhcp_option_set_id);
+            separated.push_bind_unseparated(value.config.dhcp_option_set_id);
             separated.push_unseparated(")");
         }
 

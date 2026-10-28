@@ -37,7 +37,7 @@ pub async fn create(
             (id, tenant_organization_id, name, description, labels, options, version)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING id, tenant_organization_id, name, description, labels, options, version, created";
-    sqlx::query_as(query)
+    let result = sqlx::query_as(query)
         .bind(id)
         .bind(tenant_organization_id.to_string())
         .bind(&metadata.name)
@@ -47,7 +47,22 @@ pub async fn create(
         .bind(ConfigVersion::initial())
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e));
+    match result {
+        Err(err) if err.violates_constraint("dhcp_option_sets_pkey") => {
+            Err(DatabaseError::AlreadyFoundError {
+                kind: KIND,
+                id: id.to_string(),
+            })
+        }
+        Err(err) if err.violates_constraint("dhcp_option_sets_tenant_organization_id_fkey") => {
+            Err(DatabaseError::NotFoundError {
+                kind: "Tenant",
+                id: tenant_organization_id.to_string(),
+            })
+        }
+        result => result,
+    }
 }
 
 /// Returns the DhcpOptionSet records with the given IDs, optionally limited
