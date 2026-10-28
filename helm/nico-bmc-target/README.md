@@ -145,7 +145,8 @@ Without [managed DHCPv6](#managed-dhcpv6-and-router-advertisements), guests
 need explicit addresses and routes or another addressing service. Two target bridges on the same node can route directly;
 external IPv6 requires separately managed upstream and return routes.
 The same trust boundary as IPv4 applies: this is a privileged flat lab, not
-network isolation between tenants.
+network isolation between tenants. See the
+[IPv6 guest procedure](../../dev/deployment/lab/acceptance/README.md#two-instance-ipv6-routing).
 
 ## Managed DHCPv6 and router advertisements
 
@@ -360,8 +361,12 @@ bash dev/deployment/core-admin.sh \
 Run these commands from the repository root. Replace `kind-your-lab` and
 `MACHINE_ID` with the existing lab context and target ID; set
 `LOCAL_DEV_NAMESPACE` to the Core namespace if it differs from `nico-system`.
-Resume or release an assigned instance through Core. Require Ready and a live
-Scout response before allocating another instance:
+If the guest was running an installed instance, resume that instance or use the
+[recorded-instance cleanup](../../dev/deployment/lab/acceptance/README.md#repeat-the-instance-lifecycle)
+before starting a new lifecycle run. The cleanup requires that runner's saved
+journal; for a manually allocated instance, use the [instance release command](../../dev/deployment/lab/acceptance/README.md#allocate-and-recycle-an-instance)
+instead. A released target must be `Ready` with a
+successful live Scout ping before the runner allocates instances:
 
 ```bash
 bash dev/deployment/core-admin.sh scout-stream ping MACHINE_ID
@@ -465,6 +470,8 @@ through existing upstream routing; it does not establish Internet reachability.
 Packets destined for this target's subnet and exiting its bridge are exempt from
 NAT before kindnet's catch-all masquerade rule, preserving peer guest sources.
 This exemption does not add inbound forwarding permission or modify peer rules.
+See [two-instance checks](../../dev/deployment/lab/acceptance/README.md#two-instance-ipv4-connectivity)
+for the supported same-node topology.
 This isolated lab network is not a tenant security boundary.
 
 The relay accepts requests only from its guest bridge and replies from the

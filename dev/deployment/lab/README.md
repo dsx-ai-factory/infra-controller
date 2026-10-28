@@ -6,6 +6,23 @@ Ordinary Tilt development with machine-a-tron does not require KVM or this check
 On macOS, run it inside the Linux VM that will host the guests; running it on the
 macOS client reports an unsupported platform.
 
+For an end-to-end run, use this sequence:
+
+1. Prepare the Linux host and [capacity](#host-budget).
+2. Build [Scout](#scout-boot-artifacts), the [imager](#native-disk-imager), and the
+   [OS bundle](#package-the-native-guest-os).
+3. Deploy a fresh stack and two targets using [the validation procedure](validation.md).
+   Use [direct Helm validation](helm-validation.md) for the equivalent Helm path.
+4. Register targets and create the catalog as directed there, then run
+   [the two-instance lifecycle](acceptance/README.md#repeat-the-instance-lifecycle).
+5. Retain the evidence and complete [stop/discard](#stop-restart-and-discard-the-bmc-lab).
+
+The stack deployment is the same inside an isolated Linux VM and on a direct
+Linux VM or hardware host. Gateway connectivity is a separate host prerequisite;
+it does not select different Helm values. The sections below describe deployment helpers. The optional
+[acceptance tools](acceptance/README.md) own test resource creation, lifecycle
+execution, connectivity evidence and test cleanup.
+
 ## Ubuntu host setup
 
 For an existing Ubuntu 22.04 or newer checkout on native ARM64 or AMD64, prepare
@@ -378,6 +395,12 @@ admin scout-stream ping MACHINE_ID
 Use the ID from the target whose metadata name is `native-target-one`.
 A successful ping proves a live real-Scout response through Core. It does not
 prove OS installation, instance assignment, release, or tenant IPv6 connectivity.
+Continue with the [instance lifecycle checks](acceptance/README.md#allocate-and-recycle-an-instance)
+and [managed IPv6 connectivity checks](acceptance/README.md#two-instance-ipv6-routing).
+See [managed DHCPv6 guests](#managed-dhcpv6-guests) for dynamic IPv6 addressing.
+The [guest profile generator](acceptance/README.md#allocate-and-recycle-an-instance) supports an
+IPv6-only installed OS. SLAAC and Internet IPv6 need separate validation in
+[issue 8124](https://github.com/dsx-ai-factory/infra-controller/issues/8124).
 
 ### Stop, restart and discard the BMC lab
 
@@ -485,6 +508,57 @@ and a 15-second connection timeout; an established interactive session has no
 overall timeout. The helper returns the SSH exit status and reports validation
 or Kubernetes errors before connecting.
 
+## Package the native guest OS
+
+The native guest OS is a separate input from Scout and the disk imager. Given a
+trusted publisher SHA256 for the correct architecture's Ubuntu cloud qcow2
+image, extend a locally built Scout/imager bundle:
+
+```bash
+python3 dev/deployment/lab/build-os-artifact.py \
+  --boot-artifact-image nico-boot-artifacts:imager \
+  --source-url "$OS_IMAGE_URL" --sha256 "$OS_IMAGE_SHA256" \
+  --image nico-lab-os:validation --output /tmp/nico-os-validation
+```
+
+All five options are required and may appear in any order. Run on a native Linux
+or macOS ARM64/AMD64 client whose selected Linux Docker daemon has the same
+architecture. Python 3.9+, curl, Docker with local-image build support, and an
+existing parent bundle containing `ipxe.efi`, `scout.efi`, `scout.squashfs` and
+`qcow-imager.efi` are required. The command does not pull or rebuild the parent. The parent must retain a local
+tag; dangling images without tags are rejected so temporary-tag cleanup cannot
+remove the input image.
+The caller supplies an architecture-correct Ubuntu image with cloud-init and
+systemd-networkd; a digest and qcow2 header cannot prove its operating-system or
+CPU compatibility.
+
+`--source-url` accepts HTTP or HTTPS without credentials, query or fragment.
+`--sha256` is exactly 64 hexadecimal digits, case-insensitive. Verification uses
+that trusted digest; it does not retrieve a publisher signing key or select a
+release. `--image` is an explicit unqualified local `name:tag`, without a registry,
+namespace or digest; tags are at most 128 characters and an existing tag is rejected. `--output` must not exist, its
+parent must exist, and relative paths resolve from the current directory.
+Do not run concurrent builds for the same output tag.
+
+The resulting image preserves the selected parent's boot payloads and adds
+`ubuntu.img` under its native `aarch64/` or `x86_64/` directory. A temporary unique
+parent tag holds the inspected parent image ID during the build and is removed
+on completion or ordinary failure. Cleanup failures warn with the retained tag
+without replacing the build result. The output directory retains the verified
+`ubuntu.img` and `build-info.json`, including architecture, source digest, parent
+and output image IDs, and the PXE path. The builder verifies bytes and format
+before Docker builds the layer. Failures return nonzero and remove temporary
+downloads; the output directory and any completed image remain for diagnosis.
+Use a new output directory and tag for a fresh retry after inspection.
+
+Load the resulting bundle into the selected kind cluster and use that image as
+Tilt's `--boot-artifact-image`. The existing PXE init step copies its contents;
+append the manifest's `pxe_path` to the default origin
+`http://nico-pxe.nico-system.svc.cluster.local` or, for `--ipv6-boot`,
+`http://carbide-pxe.forge:8080`. Register that URL and the manifest's `sha256`
+with `os-image create` as described above. This
+step packages bytes only; it creates no catalog entry, VPC or instance.
+
 ## Managed DHCPv6 guests
 
 For DHCPv6, create the dedicated lab cluster with `setup-kind.sh --ip-family dual`
@@ -520,14 +594,16 @@ repeating `--prefix` in the fresh-site registration command. Use `--reserve-firs
 to exclude the bridge gateway, as in the IPv4 procedure. Do not recreate an
 existing segment or replace credentials to change a running site's configuration.
 
-For an installed guest, configure systemd-networkd for DHCPv4 and DHCPv6
-with router-advertisement acceptance on its provisioned interface.
+For the installed guest, use the [OS configuration generator](acceptance/README.md#allocate-and-recycle-an-instance)
+with `--network dual-stack`. It installs
+an early systemd-networkd file matched to the guest MAC, enables both DHCP
+families and RA acceptance, and reloads networkd after cloud-init writes it.
 
 This keeps IPv4 provisioning and installed IPv4 networking while exercising
 DHCPv6, including clients with non-MAC DUIDs. Read the allocated address from
 Core's instance network status and confirm the same dynamic address inside the
 guest before running the existing IPv6 connectivity checker. Do not assume the
-first available address or reuse the explicit fixture's `::10` address. Validate
+first available address or reuse an address from an earlier instance. Validate
 both peer directions, reboot, lease renewals and release with live Scout.
 
 The lease-handoff behavior is tracked independently in
