@@ -135,6 +135,8 @@ const (
 	ConfigKeycloakClientSecret = "keycloak.clientSecret"
 	// ConfigKeycloakServiceAccountEnabled is a feature flag for service account support
 	ConfigKeycloakServiceAccountEnabled = "keycloak.serviceAccount"
+	// ConfigKeycloakServiceAccountOrg is the one org whose clients can be service accounts
+	ConfigKeycloakServiceAccountOrg = "keycloak.serviceAccountOrg"
 
 	// ConfigRateLimiterEnabled is a feature flag for rate limiter
 	ConfigRateLimiterEnabled = "rateLimiter.enabled"
@@ -646,6 +648,7 @@ func (c *Config) ValidateIssuersConfig(issuers []IssuerConfig) error {
 	seenURLs := make(map[string]bool)
 	seenStaticOrgs := make(map[string]bool)
 	seenDynamicOrg := false
+	seenServiceAccountMapping := false
 	originCounts := make(map[string]int)
 
 	for i, issuer := range issuers {
@@ -732,6 +735,10 @@ func (c *Config) ValidateIssuersConfig(issuers []IssuerConfig) error {
 				if !c.GetEnvDisconnected() {
 					return fmt.Errorf("issuer %s: claimMapping %d: isServiceAccount is only supported in disconnected mode", issuer.Name, j)
 				}
+				if seenServiceAccountMapping {
+					return fmt.Errorf("issuer %s: claimMapping %d: only one claimMapping with isServiceAccount is allowed across all issuers", issuer.Name, j)
+				}
+				seenServiceAccountMapping = true
 			}
 
 			// Dynamic org mapping
@@ -1171,12 +1178,18 @@ func (c *Config) SetKeycloakServiceAccountEnabled(value bool) {
 	c.v.Set(ConfigKeycloakServiceAccountEnabled, value)
 }
 
+// GetKeycloakServiceAccountOrg gets the org whose Keycloak clients can be service accounts, lowercased
+// to match the org names NICo reads from realm roles
+func (c *Config) GetKeycloakServiceAccountOrg() string {
+	return strings.ToLower(strings.TrimSpace(c.v.GetString(ConfigKeycloakServiceAccountOrg)))
+}
+
 // GetOrInitKeycloakConfig gets the Keycloak configuration
 func (c *Config) GetOrInitKeycloakConfig() (*cauth.KeycloakConfig, error) {
 	if c.KeycloakConfig == nil {
 		if !c.GetKeycloakEnabled() {
 			log.Info().Msg("Keycloak is disabled in configuration")
-			return nil, errors.New("Keycloak is not enabled")
+			return nil, errors.New("keycloak is not enabled")
 		}
 
 		log.Info().Str("baseURL", c.GetKeycloakBaseURL()).
@@ -1193,6 +1206,7 @@ func (c *Config) GetOrInitKeycloakConfig() (*cauth.KeycloakConfig, error) {
 			c.GetKeycloakClientSecret(),
 			c.GetKeycloakRealm(),
 			c.GetKeycloakServiceAccountEnabled(),
+			c.GetKeycloakServiceAccountOrg(),
 		)
 		log.Info().Msg("Keycloak configuration created successfully")
 	}
@@ -1219,6 +1233,15 @@ func (c *Config) ValidateKeycloakConfig() error {
 
 	if c.GetKeycloakClientSecret() == "" && c.GetKeycloakClientSecretPath() == "" {
 		return fmt.Errorf("keycloak client secret or client secret path must be specified when Keycloak is enabled")
+	}
+
+	if c.GetKeycloakServiceAccountEnabled() {
+		if !c.GetEnvDisconnected() {
+			return fmt.Errorf("keycloak service account is only supported in disconnected mode")
+		}
+		if c.GetKeycloakServiceAccountOrg() == "" {
+			return fmt.Errorf("keycloak service account org must be specified when service account is enabled")
+		}
 	}
 
 	return nil
@@ -1288,11 +1311,17 @@ func (c *Config) WatchSecretFilePaths() {
 
 		// Add secret file paths to watcher
 		log.Info().Str("WatchSecretFilePaths", dbPassFileDir).Msg("adding db path for watcher")
-		watcher.Add(dbPassFileDir)
+		err = watcher.Add(dbPassFileDir)
+		if err != nil {
+			log.Error().Err(err).Str("WatchSecretFilePaths", dbPassFileDir).Msg("failed to add db path to watcher")
+		}
 
 		if c.GetKeycloakEnabled() {
 			log.Info().Str("WatchSecretFilePaths", keycloakClientSecretFileDir).Msg("adding keycloak client secret path for watcher")
-			watcher.Add(keycloakClientSecretFileDir)
+			err = watcher.Add(keycloakClientSecretFileDir)
+			if err != nil {
+				log.Error().Err(err).Str("WatchSecretFilePaths", keycloakClientSecretFileDir).Msg("failed to add keycloak client secret path to watcher")
+			}
 		}
 
 		initWG.Done()   // done initializing the watch in this go routine, so the parent routine can move on...

@@ -418,6 +418,20 @@ waiting for the DPUs, and restoring a database backup does not undo their networ
 changes. For the network-version and migration details, refer to the
 [configuration reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md#vpc-peering-deletion).
 
+### 2.4 → 2.5: Keycloak service account org is required
+
+**Impact:** A deployment with `keycloak.serviceAccount: true` fails to start unless it also sets `keycloak.serviceAccountOrg` and runs with `env.disconnected: true`. The chart defaults `env.disconnected` to `true`, and the `helm-prereqs` values already set `serviceAccountOrg: ncx`. Before upgrading a deployment that uses its own values file, set the org whose client holds both `PROVIDER_ADMIN` and `TENANT_ADMIN`:
+
+```yaml
+nico-rest-api:
+  config:
+    keycloak:
+      serviceAccount: true
+      serviceAccountOrg: ncx
+```
+
+Only that org's client is a service account, and only for requests to that org. A client credentials token from any other client is now accepted with the roles it holds, including with `serviceAccount: false`, where it used to get `401`. A config with more than one `isServiceAccount: true` claim mapping across custom issuers also fails to start.
+
 ### 2.3 → 2.4: Standalone Temporal/Keycloak PostgreSQL deprecated
 
 <Warning>

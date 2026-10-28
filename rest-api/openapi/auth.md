@@ -404,6 +404,7 @@ keycloak:
   clientID: nico-cloud
   clientSecretPath: /var/secrets/keycloak/client-secret
   serviceAccount: true
+  serviceAccountOrg: ncx
 ```
 
 Key fields:
@@ -414,7 +415,10 @@ Key fields:
 - `realm` is the Keycloak realm.
 - `clientID` is the OAuth client ID.
 - `clientSecretPath` is the file path where the client secret is mounted.
-- `serviceAccount` enables service account features. When set to `true`, `client_credentials` tokens are accepted, and a token is treated as a service account only when it holds both `PROVIDER_ADMIN` and `TENANT_ADMIN` in the requested org. When set to `false`, a token with a `client_id` claim is rejected with `401`.
+- `serviceAccount` enables service account features. When set to `true`, a `client_credentials` token that holds both `PROVIDER_ADMIN` and `TENANT_ADMIN` in `serviceAccountOrg` is accepted as a service account for requests to that org. It requires `env.disconnected: true` and `serviceAccountOrg`, otherwise the API fails to start. When set to `false`, no token is treated as a service account. Defaults to `false`.
+- `serviceAccountOrg` is the one org whose clients can be service accounts. It is required when `serviceAccount` is `true` and is compared in lowercase. A client holding both roles in any other org is not a service account.
+
+Any client in the realm can use `client_credentials` tokens, and each token is accepted with the roles it holds. Only the service account described above is set up as its org's own Provider and Tenant.
 
 Create the client secret in Kubernetes before enabling Keycloak:
 
@@ -443,7 +447,7 @@ Use these rules when reviewing a configuration before rollout:
 - The same issuer URL can only appear once.
 - Static `orgName` values must be unique across all issuers.
 - Static mappings require `orgDisplayName`.
-- Service account mappings are limited to one total in disconnected mode, or one per issuer URL in connected mode.
+- Only one service account mapping is allowed across all issuers, and only in disconnected mode.
 - Dynamic organization mappings are limited to one across all issuers.
 - Dynamic organizations cannot claim statically configured organization names.
 - Roles must be `TENANT_ADMIN`, `PROVIDER_ADMIN`, or both.

@@ -34358,9 +34358,11 @@ components:
             This is determined per request from how the token's issuer is configured
             at deployment time (the issuer config in the `nico-rest-api-config`
             ConfigMap); it cannot be toggled via the API. Rules by issuer origin:
-              - `keycloak`: true for a client-credentials (service-to-service) token —
-                i.e. the token carries a client ID — when the issuer is deployed with
-                `keycloak.serviceAccount: true`.
+              - `keycloak`: true for a client-credentials (service-to-service) token
+                that holds both `PROVIDER_ADMIN` and `TENANT_ADMIN` in the org set as
+                `keycloak.serviceAccountOrg`, on requests to that org, when the issuer
+                is deployed with `keycloak.serviceAccount: true`. Only permitted when
+                the API runs in disconnected mode.
               - `custom`: true when the `claimMapping` matched for this org sets
                 `isServiceAccount: true`. Only permitted when the API runs in
                 disconnected mode.
