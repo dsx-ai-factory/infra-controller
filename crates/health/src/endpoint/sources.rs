@@ -30,10 +30,10 @@ use crate::HealthError;
 use crate::bmc::{
     BmcClient, BmcLatencyInstrumentation, CredentialProvider, bmc_latency_endpoint_labels,
 };
-use crate::config::{StaticBmcEndpoint, StaticSwitchEndpointRole};
+use crate::config::{IdentityField, StaticBmcEndpoint, StaticSwitchEndpointRole};
 use crate::endpoint::{
-    BmcAddr, BmcEndpoint, BoxFuture, EndpointMetadata, EndpointSnapshot, EndpointSource,
-    InventorySnapshot, MachineData, PowerShelfData, SharedSystemUuid, SwitchData,
+    BmcAddr, BmcEndpoint, BoxFuture, EndpointIdentity, EndpointMetadata, EndpointSnapshot,
+    EndpointSource, InventorySnapshot, MachineData, PowerShelfData, SharedSystemUuid, SwitchData,
     SwitchEndpointRole,
 };
 use crate::metrics::BmcLatencyMetrics;
@@ -259,6 +259,8 @@ impl StaticEndpointSource {
                 }
             };
             let endpoint = BmcEndpoint {
+                hostname: cfg.hostname.clone(),
+                identity: None,
                 addr,
                 metadata,
                 rack_id,
@@ -278,13 +280,44 @@ impl EndpointSource for StaticEndpointSource {
     }
 }
 
+/// Merges sources and applies `endpoint_sources.identity` to every endpoint.
 pub struct CompositeEndpointSource {
     sources: Vec<Arc<dyn EndpointSource>>,
+    identity: Vec<IdentityField>,
 }
 
 impl CompositeEndpointSource {
-    pub fn new(sources: Vec<Arc<dyn EndpointSource>>) -> Self {
-        Self { sources }
+    pub fn new(sources: Vec<Arc<dyn EndpointSource>>, identity: Vec<IdentityField>) -> Self {
+        Self { sources, identity }
+    }
+
+    /// Sets each endpoint's identity, reusing the endpoint when it is
+    /// unchanged and skipping endpoints with none of the identity fields.
+    fn with_identity(&self, endpoints: Vec<Arc<BmcEndpoint>>) -> Vec<Arc<BmcEndpoint>> {
+        endpoints
+            .into_iter()
+            .filter_map(|endpoint| {
+                let Some(identity) = EndpointIdentity::resolve(
+                    &self.identity,
+                    endpoint.hostname.as_deref(),
+                    &endpoint.addr,
+                ) else {
+                    tracing::warn!(
+                        bmc_address = ?endpoint.addr,
+                        identity_fields = ?self.identity,
+                        rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                        "Endpoint has none of the configured identity fields; skipping"
+                    );
+                    return None;
+                };
+                if endpoint.identity() == identity {
+                    return Some(endpoint);
+                }
+                let mut endpoint = endpoint.as_ref().clone();
+                endpoint.identity = Some(identity);
+                Some(Arc::new(endpoint))
+            })
+            .collect()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -302,7 +335,7 @@ impl EndpointSource for CompositeEndpointSource {
                 all.append(&mut endpoints);
             }
 
-            Ok(all)
+            Ok(self.with_identity(all))
         })
     }
 
@@ -342,7 +375,7 @@ impl EndpointSource for CompositeEndpointSource {
                 };
 
             Ok(EndpointSnapshot {
-                endpoints,
+                endpoints: self.with_identity(endpoints),
                 inventory,
             })
         })
@@ -402,6 +435,7 @@ mod tests {
     async fn test_static_endpoint_source_filters_invalid_mac() {
         let configs = vec![
             StaticBmcEndpoint {
+                hostname: None,
                 ip: ip("10.0.0.1"),
                 port: Some(443),
                 mac: "00:11:22:33:44:55".to_string(),
@@ -413,6 +447,7 @@ mod tests {
                 labels: Default::default(),
             },
             StaticBmcEndpoint {
+                hostname: None,
                 ip: ip("10.0.0.2"),
                 port: Some(443),
                 mac: "not-a-mac".to_string(),
@@ -448,6 +483,7 @@ mod tests {
         let nvlink_domain_uuid = NvLinkDomainId::new();
 
         let configs = vec![StaticBmcEndpoint {
+            hostname: None,
             ip: ip("10.0.1.1"),
             port: Some(443),
             mac: "11:22:33:44:55:66".to_string(),
@@ -509,6 +545,7 @@ mod tests {
             .iter()
             .copied()
             .map(|(ip_address, mac_address, domain_uuid)| StaticBmcEndpoint {
+                hostname: None,
                 ip: ip(ip_address),
                 port: Some(443),
                 mac: mac_address.to_string(),
@@ -555,6 +592,7 @@ mod tests {
         let power_shelf_id = test_power_shelf_id("power-shelf-a");
         let domain_uuid = NvLinkDomainId::new();
         let configs = vec![StaticBmcEndpoint {
+            hostname: None,
             ip: ip("10.0.2.1"),
             port: Some(443),
             mac: "22:33:44:55:66:77".to_string(),
@@ -595,6 +633,7 @@ mod tests {
     async fn test_static_endpoint_without_power_shelf_serial_preserves_absence() {
         let power_shelf_id = test_power_shelf_id("power-shelf-without-serial");
         let configs = vec![StaticBmcEndpoint {
+            hostname: None,
             ip: ip("10.0.2.2"),
             port: Some(443),
             mac: "22:33:44:55:66:88".to_string(),
@@ -640,6 +679,7 @@ mod tests {
             .parse()
             .expect("valid NVLink domain UUID");
         let configs = vec![StaticBmcEndpoint {
+            hostname: None,
             ip: ip("10.0.1.2"),
             port: Some(443),
             mac: "11:22:33:44:55:11".to_string(),
@@ -696,6 +736,7 @@ mod tests {
     #[tokio::test]
     async fn test_static_machine_endpoint_omits_empty_driver_version() {
         let configs = vec![StaticBmcEndpoint {
+            hostname: None,
             ip: ip("10.0.1.3"),
             port: Some(443),
             mac: "11:22:33:44:55:12".to_string(),
@@ -736,6 +777,7 @@ mod tests {
     #[tokio::test]
     async fn test_static_endpoint_without_switch_serial_has_no_metadata() {
         let configs = vec![StaticBmcEndpoint {
+            hostname: None,
             ip: ip("10.0.0.1"),
             port: Some(443),
             mac: "aa:bb:cc:dd:ee:ff".to_string(),
@@ -815,7 +857,10 @@ mod tests {
         )];
         let source_ok = Arc::new(StaticEndpointSource::new(endpoints));
         let source_fail = Arc::new(FailingSource);
-        let composite = CompositeEndpointSource::new(vec![source_ok, source_fail]);
+        let composite = CompositeEndpointSource::new(
+            vec![source_ok, source_fail],
+            vec![IdentityField::Mac, IdentityField::Ip],
+        );
 
         let result = composite.fetch_bmc_hosts().await;
 
@@ -847,7 +892,10 @@ mod tests {
         let auxiliary = Arc::new(StaticEndpointSource::new(vec![
             auxiliary_endpoint.as_ref().clone(),
         ]));
-        let composite = CompositeEndpointSource::new(vec![authoritative, auxiliary]);
+        let composite = CompositeEndpointSource::new(
+            vec![authoritative, auxiliary],
+            vec![IdentityField::Mac, IdentityField::Ip],
+        );
 
         let snapshot = composite.fetch_snapshot().await.unwrap();
         let inventory = snapshot.inventory.unwrap().unwrap();
@@ -866,7 +914,10 @@ mod tests {
             components: Vec::new(),
             inventory_fails: true,
         });
-        let composite = CompositeEndpointSource::new(vec![authoritative]);
+        let composite = CompositeEndpointSource::new(
+            vec![authoritative],
+            vec![IdentityField::Mac, IdentityField::Ip],
+        );
 
         let snapshot = composite.fetch_snapshot().await.unwrap();
 

@@ -18,14 +18,16 @@
 mod cluster;
 mod model;
 mod sources;
+mod sql;
 
 pub use cluster::ClusterEndpointSource;
 pub use model::{
-    BmcAddr, BmcCredentials, BmcEndpoint, ComponentInventory, EndpointMetadata, EndpointSnapshot,
-    EndpointSource, InventorySnapshot, MachineData, PowerShelfData, RackInventory,
-    SharedSystemUuid, SwitchData, SwitchEndpointRole,
+    BmcAddr, BmcCredentials, BmcEndpoint, ComponentInventory, EndpointIdentity, EndpointMetadata,
+    EndpointSnapshot, EndpointSource, InventorySnapshot, MachineData, PowerShelfData,
+    RackInventory, SharedSystemUuid, SwitchData, SwitchEndpointRole,
 };
 pub use sources::{CompositeEndpointSource, StaticEndpointSource};
+pub(crate) use sql::SqlEndpointSource;
 
 pub use crate::bmc::{BoxFuture, CredentialProvider};
 
@@ -67,6 +69,8 @@ pub(crate) mod test_support {
             .expect("fixed-credential BmcClient construction is infallible"),
         );
         BmcEndpoint {
+            hostname: None,
+            identity: None,
             addr,
             metadata,
             rack_id,
@@ -102,6 +106,7 @@ mod tests {
 
     use super::test_support::{mac, test_endpoint};
     use super::*;
+    use crate::config::IdentityField;
 
     #[tokio::test]
     async fn test_static_endpoint_source_shares_arc_data() {
@@ -121,6 +126,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn composite_applies_identity_and_skips_unidentifiable_endpoints() {
+        let mut named = test_endpoint(mac("00:11:22:33:44:55"));
+        named.hostname = Some("bmc-01".to_string());
+        let unnamed = test_endpoint(mac("aa:bb:cc:dd:ee:ff"));
+        let source = Arc::new(StaticEndpointSource::new(vec![named, unnamed]));
+
+        let by_hostname =
+            CompositeEndpointSource::new(vec![source.clone()], vec![IdentityField::Hostname]);
+        let snapshot = by_hostname.fetch_snapshot().await.unwrap();
+        let hosts = by_hostname.fetch_bmc_hosts().await.unwrap();
+
+        for endpoints in [&snapshot.endpoints, &hosts] {
+            let keys: Vec<_> = endpoints.iter().map(|endpoint| endpoint.key()).collect();
+            assert_eq!(keys, ["host:bmc-01"]);
+        }
+    }
+
+    #[tokio::test]
     async fn test_composite_endpoint_source_preserves_arc_sharing() {
         let endpoints1 = vec![test_endpoint(mac("00:11:22:33:44:55"))];
         let endpoints2 = vec![test_endpoint(mac("aa:bb:cc:dd:ee:ff"))];
@@ -128,7 +151,10 @@ mod tests {
         let source1 = Arc::new(StaticEndpointSource::new(endpoints1));
         let source2 = Arc::new(StaticEndpointSource::new(endpoints2));
 
-        let composite = CompositeEndpointSource::new(vec![source1.clone(), source2.clone()]);
+        let composite = CompositeEndpointSource::new(
+            vec![source1.clone(), source2.clone()],
+            vec![IdentityField::Mac, IdentityField::Ip],
+        );
 
         let composite_result = composite.fetch_bmc_hosts().await.unwrap();
         let source1_result = source1.fetch_bmc_hosts().await.unwrap();

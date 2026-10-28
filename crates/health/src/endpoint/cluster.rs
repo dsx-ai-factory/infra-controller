@@ -481,6 +481,8 @@ fn build_endpoints(
             }
         };
         endpoints.push(Arc::new(BmcEndpoint {
+            hostname: Some(node.hostname),
+            identity: None,
             addr,
             metadata: None,
             rack_id,
