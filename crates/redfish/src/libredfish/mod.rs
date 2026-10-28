@@ -553,10 +553,18 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
             .create_client(
                 host,
                 port,
-                RedfishAuth::Direct(curr_user.to_string(), new_password),
+                RedfishAuth::Direct(curr_user.to_string(), new_password.clone()),
                 Some(vendor),
             )
             .await?;
+
+        if vendor == RedfishVendor::Lenovo {
+            vendored_client
+                .enable_ipmi_account_access("1", &new_password)
+                .await
+                .map_err(|err| redact_password(err, &new_password))
+                .map_err(RedfishClientCreationError::RedfishError)?;
+        }
 
         vendored_client
             .set_machine_password_policy()
@@ -1248,15 +1256,30 @@ mod tests {
         // Lenovo dispatches to account id "1"; seed it so the rotation succeeds.
         let sim = RedfishSim::default();
         sim.seed_user("1", "factory_pass");
+        sim.set_enforce_auth(true);
         sim.set_bmc_root_password(
             "127.0.0.1",
             Some(443),
             RedfishVendor::Lenovo,
-            Credentials::new("root", "factory_pass"),
+            Credentials::new("1", "factory_pass"),
             "site_pass".to_string(),
         )
         .await
         .expect("Lenovo rotation against account id 1 should succeed");
+        assert!(sim.ipmi_account_access_enabled("1"));
+        assert_eq!(
+            sim.auth_attempts(),
+            vec![
+                test_support::RedfishSimAuthAttempt {
+                    credentials: Credentials::new("1", "factory_pass"),
+                    authorized: true,
+                },
+                test_support::RedfishSimAuthAttempt {
+                    credentials: Credentials::new("1", "site_pass"),
+                    authorized: true,
+                },
+            ],
+        );
     }
 
     #[tokio::test]

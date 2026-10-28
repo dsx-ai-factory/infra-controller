@@ -51,6 +51,7 @@ const TRIGGER_EVIDENCE_TASK_ID: &str = "SpdmTriggerEvidenceTaskId";
 struct RedfishSimState {
     hosts: HashMap<String, RedfishSimHostState>,
     users: HashMap<String, String>,
+    ipmi_accounts: HashSet<String>,
     fw_version: Arc<String>,
     secure_boot: AtomicBool,
     no_component_integrities: bool,
@@ -504,6 +505,15 @@ impl RedfishSim {
 
     pub fn user_password(&self, account_id: &str) -> Option<String> {
         self.state.lock().unwrap().users.get(account_id).cloned()
+    }
+
+    #[cfg(test)]
+    pub(super) fn ipmi_account_access_enabled(&self, account_id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .ipmi_accounts
+            .contains(account_id)
     }
 
     /// Make `change_password` (the by-username path) fail with
@@ -1242,6 +1252,30 @@ impl Redfish for RedfishSimClient {
                 ));
             }
             state.users.insert(s_acct, new_pass.to_string());
+            Ok(())
+        })
+    }
+
+    fn enable_ipmi_account_access<'a>(
+        &'a self,
+        account_id: &'a str,
+        password: &'a str,
+    ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            self.authorize(&mut state, "AccountService/Accounts")?;
+            if !state
+                .users
+                .get(account_id)
+                .is_some_and(|current| current == password)
+            {
+                return Err(sim_http_error(
+                    http::StatusCode::BAD_REQUEST,
+                    "AccountService/Accounts",
+                    "sim: IPMI access requires the account's current password",
+                ));
+            }
+            state.ipmi_accounts.insert(account_id.to_string());
             Ok(())
         })
     }

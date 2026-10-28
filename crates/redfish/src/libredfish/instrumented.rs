@@ -431,6 +431,18 @@ impl Redfish for InstrumentedRedfish {
         ))
     }
 
+    fn enable_ipmi_account_access<'a>(
+        &'a self,
+        account_id: &'a str,
+        password: &'a str,
+    ) -> RedfishFuture<'a, Result<(), RedfishError>> {
+        Box::pin(self.instrumented_redfish(
+            "enable_ipmi_account_access",
+            [password],
+            self.inner.enable_ipmi_account_access(account_id, password),
+        ))
+    }
+
     fn create_user<'a>(
         &'a self,
         username: &'a str,
@@ -514,6 +526,18 @@ mod tests {
                 required
             );
         }
+    }
+
+    #[tokio::test]
+    async fn ipmi_account_access_is_delegated() {
+        let sim = RedfishSim::default();
+        sim.seed_user("1", "site_pass");
+        let client = sim_client(&sim).await;
+        client
+            .enable_ipmi_account_access("1", "site_pass")
+            .await
+            .unwrap();
+        assert!(sim.ipmi_account_access_enabled("1"));
     }
 
     #[tokio::test]
