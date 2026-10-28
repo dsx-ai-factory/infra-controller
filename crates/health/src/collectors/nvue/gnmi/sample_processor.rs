@@ -322,7 +322,7 @@ impl GnmiSampleProcessor {
                 };
 
                 entities.insert(("interface", iface));
-                self.process_interface_metric(&combined, iface, val);
+                self.process_interface_metric(&combined, iface, val, notification.timestamp);
             } else if let Some(comp) = find_elem_key_ref(&combined, "component", "name") {
                 let Some(val) = update.val.as_ref() else {
                     continue;
@@ -371,6 +371,7 @@ impl GnmiSampleProcessor {
         elems: &[&PathElem],
         iface_name: &str,
         val: &proto::TypedValue,
+        observed_at: i64,
     ) {
         // Prefix and update paths can split at different points. Classify the
         // complete path after `interface` for both broad and selected streams.
@@ -391,8 +392,29 @@ impl GnmiSampleProcessor {
                 oper_status_to_state(typed_value_to_string(val).as_deref()),
                 OPER_STATUS_STATES,
             ),
-            Some(InterfaceLeaf::Numeric(metric)) => match typed_value_to_f64(val) {
+            Some(InterfaceLeaf::Numeric(mut metric)) => match typed_value_to_f64(val) {
                 Some(value) => {
+                    // The seven OpenConfig `state/counters/*` leaves use their
+                    // interface's `last-clear` from this stream. Match the rooted
+                    // interface used when learning metadata; InfiniBand starts
+                    // stay unknown. Selected `interface_paths` cannot request
+                    // `last-clear`; their starts remain unknown unless the device
+                    // sends it on that stream.
+                    let is_openconfig_counter =
+                        leaf.len() == 3 && leaf[0].name == "state" && leaf[1].name == "counters";
+                    if let Some(interface) = openconfig_interface(elems)
+                        && is_openconfig_counter
+                        && let MetricSemantics::CumulativeCounter { start_time, .. } =
+                            &mut metric.semantics
+                    {
+                        *start_time = self
+                            .counter_epochs
+                            .lock()
+                            .expect(
+                                "counter epoch mutex poisoned; source metadata may be inconsistent",
+                            )
+                            .start_time(interface, observed_at);
+                    }
                     self.emit_iface(elems, metric, iface_name, value);
                 }
                 None => debug_unmapped_value(elems, val, metric.name, self.event_context.rack_id()),
@@ -871,10 +893,10 @@ fn openconfig_interface<'a>(elems: &[&'a PathElem]) -> Option<&'a str> {
 }
 
 /// `InterfaceCounterEpochs` keeps each interface's supplied `last-clear` for
-/// `MetricSemantics::CumulativeCounter`. `observed_at` is `Notification.timestamp`
-/// in Unix nanoseconds. Starts after their metadata observation are discarded;
-/// the accepted observation is retained. Counters observed before the metadata
-/// receive no start.
+/// OpenConfig `state/counters` cumulative counters. `observed_at` is
+/// `Notification.timestamp` in Unix nanoseconds. Starts after their metadata
+/// observation are discarded; the accepted observation is retained. Counters
+/// observed before the metadata receive no start.
 ///
 /// Positive timestamp ties allow replacement unless a nonpositive timestamp
 /// invalidated the epoch. Keyed deletes retain a tombstone to reject older replay.
@@ -979,10 +1001,6 @@ impl InterfaceCounterEpochs {
         });
     }
 
-    #[allow(
-        dead_code,
-        reason = "Exported counter starts are activated in https://github.com/dsx-ai-factory/infra-controller/issues/8014"
-    )]
     fn start_time(&self, interface: &str, observed_at: i64) -> Option<SystemTime> {
         let epoch = self.interfaces.get(interface)?;
         (epoch.observed_at <= observed_at)
@@ -1238,8 +1256,8 @@ fn classify_interface_leaf(elems: &[&PathElem]) -> Option<InterfaceLeaf> {
     }
 }
 
-// The static mappings have no per-interface last-clear timestamp. An
-// observation or connection time does not establish when counting began.
+// Static mappings start unknown. Source metadata is applied by
+// `process_interface_metric`; connection time does not establish a start.
 const fn interface_total(description: &'static str) -> MetricSemantics {
     MetricSemantics::CumulativeCounter {
         description,
@@ -2009,6 +2027,7 @@ mod tests {
 
         for path in [
             vec!["state", "counters"],
+            vec!["state", "counters", "last-clear"],
             vec!["phy-diag", "state", "unknown-leaf"],
             vec!["unexpected", "state", "oper-status"],
             vec!["phy-diag", "state", "rs-num-corr-err-bin16"],
@@ -2644,7 +2663,7 @@ mod tests {
     }
 
     #[test]
-    fn notification_metadata_replaces_deleted_epochs_without_changing_samples() {
+    fn notification_metadata_scopes_counter_starts() {
         let sink = Arc::new(CapturingSink::default());
         let mut processor = test_processor();
         processor.data_sink = Some(sink.clone());
@@ -2700,27 +2719,91 @@ mod tests {
         }
         assert!(sink.events.lock().expect("events").is_empty());
 
+        // A counter under another root cannot borrow the valid OpenConfig epoch,
+        // even when its interface name and leaf match.
+        unrelated.update[0].path.as_mut().expect("leaf path").elem[0].name = "in-errors".into();
+        unrelated.update[0].val = Some(make_typed_value_uint(6));
+        processor.process_notification(&unrelated);
+
+        // The counter appears before replacement metadata, but both belong to
+        // the same observation and must use the replacement start.
+        let mut replacement = notification.clone();
+        replacement.timestamp = 300;
+        replacement.update[0].val = Some(make_typed_value_uint(150));
+        replacement.update.insert(
+            0,
+            proto::Update {
+                path: Some(proto::Path {
+                    elem: vec![make_path_elem("in-errors", &[])],
+                    ..Default::default()
+                }),
+                val: Some(make_typed_value_uint(7)),
+                ..Default::default()
+            },
+        );
+        processor.process_notification(&replacement);
+
+        let mut nested = test_interface_update(
+            "nvl2",
+            &[
+                "subinterfaces",
+                "subinterface",
+                "state",
+                "counters",
+                "last-clear",
+            ],
+            make_typed_value_uint(175),
+        );
+        nested.path.as_mut().expect("nested path").elem[3]
+            .key
+            .insert("index".into(), "0".into());
         processor.process_notification(&proto::Notification {
-            timestamp: 200,
-            update: vec![test_interface_update(
-                "nvl0",
-                &["state", "counters", "in-errors"],
-                make_typed_value_uint(7),
-            )],
+            timestamp: 300,
+            update: vec![nested],
             ..Default::default()
         });
+
+        // Older observations cannot borrow newer metadata. Other interfaces
+        // keep their own starts, and subinterface metadata cannot supply one.
+        for (timestamp, interface, value) in [(250, "nvl0", 8), (300, "nvl1", 9), (300, "nvl2", 10)]
+        {
+            processor.process_notification(&proto::Notification {
+                timestamp,
+                update: vec![test_interface_update(
+                    interface,
+                    &["state", "counters", "in-errors"],
+                    make_typed_value_uint(value),
+                )],
+                ..Default::default()
+            });
+        }
         let events = sink.events.lock().expect("events");
-        let [(_, CollectorEvent::Metric(sample))] = events.as_slice() else {
-            panic!("expected one counter reading");
-        };
-        assert_eq!(sample.value, 7.0);
-        assert!(matches!(
-            sample.semantics,
-            MetricSemantics::CumulativeCounter {
-                start_time: None,
-                ..
-            }
-        ));
+        let samples = events
+            .iter()
+            .map(|(_, event)| {
+                let CollectorEvent::Metric(sample) = event else {
+                    panic!("expected a counter reading");
+                };
+                let MetricSemantics::CumulativeCounter { start_time, .. } = sample.semantics else {
+                    panic!("expected cumulative semantics");
+                };
+                (sample.key.as_str(), sample.value, start_time)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            samples,
+            [
+                ("interface_in_errors:nvl0", 6.0, None),
+                (
+                    "interface_in_errors:nvl0",
+                    7.0,
+                    Some(SystemTime::UNIX_EPOCH + Duration::from_nanos(150))
+                ),
+                ("interface_in_errors:nvl0", 8.0, None),
+                ("interface_in_errors:nvl1", 9.0, start),
+                ("interface_in_errors:nvl2", 10.0, None),
+            ]
+        );
         drop(events);
 
         // A new subscription must accept metadata older than the prior stream's
@@ -3684,7 +3767,8 @@ mod tests {
     }
 
     #[test]
-    fn only_selected_interface_counters_emit_cumulative_samples() {
+    fn interface_counters_emit_cumulative_samples_with_openconfig_starts() {
+        let start = SystemTime::UNIX_EPOCH + Duration::from_nanos(100);
         let mut expected = [
             ("state/counters/in-errors", "interface_in_errors", "count"),
             ("state/counters/out-errors", "interface_out_errors", "count"),
@@ -3758,12 +3842,32 @@ mod tests {
                     name.to_string(),
                     unit.to_string(),
                     7.0,
-                    None,
+                    path.starts_with("state/counters/").then_some(start),
                 ),
             }),
             |path| {
+                let sink = Arc::new(CapturingSink::default());
+                let mut processor = test_processor();
+                processor.data_sink = Some(sink.clone());
                 let tail = path.split('/').collect::<Vec<_>>();
-                let (sample, _) = run_interface_leaf(&tail, make_typed_value_uint(7));
+                processor.process_notification(&proto::Notification {
+                    timestamp: 200,
+                    update: vec![
+                        test_interface_update(
+                            "acp0",
+                            &["state", "counters", "last-clear"],
+                            make_typed_value_uint(100),
+                        ),
+                        test_interface_update("acp0", &tail, make_typed_value_uint(7)),
+                    ],
+                    ..Default::default()
+                });
+                let events = sink.events.lock().expect("events");
+                let [(context, CollectorEvent::Metric(sample))] = events.as_slice() else {
+                    panic!("{path}: expected one counter reading");
+                };
+                assert_eq!(sample.name, NVUE_GNMI_SAMPLE_STREAM_ID);
+                assert_eq!(context.collector_type, NVUE_GNMI_SAMPLE_STREAM_ID);
                 let MetricSemantics::CumulativeCounter {
                     description,
                     start_time,
@@ -3781,9 +3885,9 @@ mod tests {
                     "{path}: interface labels"
                 );
                 (
-                    sample.key,
-                    sample.metric_type,
-                    sample.unit,
+                    sample.key.clone(),
+                    sample.metric_type.clone(),
+                    sample.unit.clone(),
                     sample.value,
                     start_time,
                 )
