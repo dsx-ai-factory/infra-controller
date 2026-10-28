@@ -1,0 +1,70 @@
+suite: native lab DNS endpoints
+templates:
+  - templates/configmap.yaml
+  - templates/deployment.yaml
+  - templates/service.yaml
+tests:
+  - it: rewrites legacy provisioning names to the IPv6 companion Services
+    template: templates/configmap.yaml
+    release:
+      namespace: nico-system
+    asserts:
+      - matchRegex:
+          path: data.Corefile
+          pattern: 'rewrite name exact carbide-api.forge nico-api-external.nico-system.svc.cluster.local'
+      - matchRegex:
+          path: data.Corefile
+          pattern: 'rewrite name exact carbide-static-pxe.forge nico-pxe-external.nico-system.svc.cluster.local'
+      - matchRegex:
+          path: data.Corefile
+          pattern: 'forward . /etc/resolv.conf'
+  - it: follows explicitly configured companion Service names
+    template: templates/configmap.yaml
+    set:
+      apiService: api-v6
+      pxeService: boot-v6
+    release:
+      namespace: test-site
+    asserts:
+      - matchRegex:
+          path: data.Corefile
+          pattern: 'rewrite name exact carbide-api.forge api-v6.test-site.svc.cluster.local'
+      - matchRegex:
+          path: data.Corefile
+          pattern: 'rewrite name exact carbide-pxe.forge boot-v6.test-site.svc.cluster.local'
+  - it: exposes only IPv6 DNS over UDP and TCP
+    template: templates/service.yaml
+    asserts:
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: SingleStack
+      - equal:
+          path: spec.ipFamilies
+          value: [IPv6]
+      - equal:
+          path: spec.ports
+          value:
+            - name: dns-udp
+              port: 53
+              protocol: UDP
+              targetPort: 53
+            - name: dns-tcp
+              port: 53
+              protocol: TCP
+              targetPort: 53
+  - it: runs without Kubernetes credentials and with only the DNS bind capability
+    template: templates/deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext
+          value:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [NET_BIND_SERVICE]
+      - exists:
+          path: spec.template.metadata.annotations['checksum/config']

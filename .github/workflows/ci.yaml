@@ -2593,7 +2593,7 @@ jobs:
 
       - name: Install development test dependencies
         if: startsWith(github.ref, 'refs/heads/pull-request/')
-        run: sudo apt-get install -y --no-install-recommends jq openssh-client
+        run: sudo apt-get install -y --no-install-recommends jq openssh-client python3-tomli gnupg
 
       - name: Test shared deployment and provider suites
         if: startsWith(github.ref, 'refs/heads/pull-request/')
@@ -2603,6 +2603,7 @@ jobs:
             case "$test_file" in */test_setup_kind.py) continue ;; esac
             /usr/bin/python3 -B -m unittest discover -s dev/deployment/tests -p "${test_file##*/}"
           done
+          PYTHONPATH=dev/deployment/vfkit /usr/bin/python3 -B -m unittest discover -s dev/deployment/vfkit/tests
 
       - name: Install the shared kubectl version for rendering tests
         if: startsWith(github.ref, 'refs/heads/pull-request/')
@@ -2621,6 +2622,8 @@ jobs:
           plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
           registry-password: ${{ secrets.NVCR_TOKEN }}
           charts: >-
+            helm/nico-lab-dns
+            helm/nico-bmc-target
             helm/nico-dev-keycloak
 
       # Charts with tests must be listed explicitly.

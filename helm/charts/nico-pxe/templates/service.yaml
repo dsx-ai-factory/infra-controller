@@ -6,9 +6,18 @@ metadata:
   labels:
     {{- include "nico-pxe.labels" . | nindent 4 }}
 spec:
+  {{- with .Values.service.clusterIP }}
+  clusterIP: {{ . | quote }}
+  {{- end }}
   selector:
     {{- include "nico-pxe.selectorLabels" . | nindent 4 }}
   ports:
     - port: {{ .Values.service.port }}
       name: http
       protocol: TCP
+    {{- if .Values.service.bootPort }}
+    - port: {{ .Values.service.bootPort }}
+      name: boot
+      targetPort: {{ .Values.service.port }}
+      protocol: TCP
+    {{- end }}

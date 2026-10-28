@@ -826,7 +826,19 @@ An earlier draft of this Tilt setup deployed Core as one Helm release named
 helm uninstall nico -n nico-system
 ```
 
+Tilt retains the selected MAT or BMC mode in a `kube-system` ConfigMap before
+Core starts. An older cluster can acquire that marker automatically when its
+matching MAT/PXE Helm release exists and the opposite-mode release is absent.
+An opposite-mode release, or Core without either release, rejects startup on an
+unmarked cluster. If startup is rejected, use a separate new kind cluster while
+preserving the older cluster for inspection or recovery. An unmarked cluster
+without Core or either release is treated as new.
+Removing a marker or release does not convert retained site data between modes.
+
 ## Stop and remove
+
+For BMC-backed labs, follow the [BMC lifecycle instructions](../lab/README.md#stop-restart-and-discard-the-bmc-lab).
+The resource removal command below applies to the default MAT workflow.
 
 Stopping `tilt up` leaves the stack running. Remove Tilt-managed resources with:
 
@@ -865,3 +877,163 @@ export KUBECONFIG="$HOME/.kube/kind-nico-tilt.yaml"
 Use the chosen cluster name in all three commands when it differs from
 `nico-tilt`. The cluster deletion removes every workload and persistent volume
 in that cluster; a new cluster avoids retaining credentials for a deleted site.
+
+## Optional native guest lab
+
+BMC-backed guests need a Linux runtime that exposes native KVM. Before preparing
+that runtime, use the shared [lab preflight](../lab/README.md) to verify KVM
+access and an explicit host budget. Then use the standalone
+[native BMC target workflow](../../../helm/nico-bmc-target/README.md)
+to build and exercise one guest through its dedicated Tilt entrypoint.
+The default machine-a-tron workflow does not require this check.
+
+## Native BMC-backed Scout lab
+
+The opt-in `--bmc-lab` profile connects Core, DHCP and PXE to real Scout running
+in native KVM guests. It requires persistent Vault and a supplied boot-artifact
+image on a fresh kind cluster. Follow the
+[Scout admission workflow](../lab/README.md#connect-scout-to-the-tilt-stack)
+for image builds, target registration, BMC-specific stop/restart and full-discard
+instructions, retained-state boundaries and the live
+Scout check. Disk-installed instances use the
+[native imager](../lab/README.md#native-disk-imager).
+Ordinary Tilt development continues to use MAT by default.
+
+For the optional BMC lab, `--dhcpv6` enables the existing DHCP chart's IPv6 service
+on a single-node dual-stack cluster. It requires `--bmc-lab` and its persistent
+Vault/boot-artifact inputs. The flag enables `nico-dhcp.dhcp.v6Enabled` and uses
+server identifier `020000000006` only when `v6ServerIdentifier` is omitted. It
+preserves other `nico-dhcp.dhcp` settings in `values.yaml`, including the
+comma-separated IPv6 resolver list `v6DnsServers` and `v6LeaseTimers`. An omitted
+resolver list supplies no DNS server. Configure a resolver reachable from the
+guest networks before provisioning instances that need DNS, especially
+IPv6-only guests. These values use the same contract as the
+[DHCP chart](../../../helm/charts/nico-dhcp/values.yaml).
+
+Configure the target relay and managed RA through shared chart values; see [managed DHCPv6 guests](../lab/README.md#managed-dhcpv6-guests).
+The ordinary MAT workflow is unchanged.
+
+### IPv6 provisioning endpoints
+
+Add `--ipv6-endpoints` alongside `--dhcpv6` to expose IPv6 companion Services
+for API port 1079 and PXE HTTP port 80 and to deploy the lab resolver. The
+[IPv6 boot profile](#ipv6-boot-profile) changes the PXE port to 8080. The flag
+is false by default and requires the same BMC lab and dual-stack kind cluster
+as `--dhcpv6`. It leaves the internal Kubernetes Services in place.
+
+The resolver's IPv6 ClusterIP is allocated by Kubernetes. Set
+`nico-dhcp.dhcp.v6DnsServers` to that address in `values.yaml` before provisioning
+guests, then explicitly trigger the manual `nico-dhcp` resource in Tilt. Set `network.dhcpv6.defaultRoute: true` on each
+target, or provide a separate route from the guest to the IPv6 Service CIDR.
+Configure the target's DHCPv6 relay separately. Endpoint exposure alone preserves
+the default boot URLs and artifacts.
+
+#### DHCPv6 lease-handoff build dependency
+
+Repeated firmware, Scout, imager and installed-OS transitions require the
+[DHCPv6 lease-handoff fixes in PR #7934](https://github.com/dsx-ai-factory/infra-controller/pull/7934)
+until those changes are present on the source branch being built. Record the
+resolved integration revision when testing an unmerged combination. The lab
+helpers do not fetch or merge that dependency.
+
+The native build image from that dependency retains its patched package at
+`/opt/kea/kea-common.deb`. The shared development DHCP image installs that exact
+package after checking its name, pinned Kea version and native architecture.
+Both `make images-dev DEV_TARGET=dhcp` and Tilt use this packaging path. A build
+image without the package retains the distribution Kea library and does not
+establish the lease-handoff capability. An invalid supplied package fails the
+build; it does not fall back to the distribution copy.
+
+To verify the installed library bytes as well as both DHCP hook listeners, pass
+the native package extracted from the selected build image to the existing smoke
+check:
+
+```bash
+build_image=nico-dev-build:latest  # Use the actual DEV_BUILD_CONTAINER from the build.
+container=$(docker create "$build_image" /not-started)
+docker cp "$container:/opt/kea/kea-common.deb" /tmp/kea-common.deb
+docker rm "$container"
+bash dev/docker/tests/smoke_dhcp_image.sh nico-dev-dhcp:latest /tmp/kea-common.deb
+```
+
+The second argument is optional; without it, the smoke check tests tool presence,
+hook loading and isolated UDP listeners as before. With it, the check also
+requires the `kea-common` package name, installed version and native architecture
+to match and compares every packaged `libkea*.so*` regular file with the runtime
+copy. It copies the client-side package into a disposable container with networking
+disabled, so an SSH Docker context does not need shared client paths. For Tilt,
+use the exact resolved `build-container-localdev` image and deployed DHCP image
+from that build. CI extracts the package from its selected build image and runs
+this comparison when supplied; when the checkout contains the Kea package
+producer (`dev/docker/build-kea.sh`), a missing package fails CI. A compiler
+image from a lagging registry can therefore fail even if it starts normally:
+rebuild or publish the matching compiler image before retrying. This prevents
+a source checkout that requires the fix from silently testing stock libraries.
+This packaging check does not replace the real instance lifecycle.
+
+### IPv6 boot profile
+
+For a fresh lab dedicated to IPv6 provisioning, also select `--ipv6-boot`.
+The registered OS image URL must also be reachable over IPv6 by the imager.
+An IPv6-accessible lab image server is sufficient; external IPv6 is only needed
+when the image URL requires it.
+It defaults to false and requires `--ipv6-endpoints`. Disable IPv4 provisioning
+on **every** target (`network.provisioning.enabled: false`); this profile does
+not support mixing IPv4 and IPv6 boot clients. Keep DHCPv6 relay and managed RA
+enabled. Firmware can attempt DHCPv4 first, but must receive no DHCPv4 offer so
+it reaches IPv6 HTTP boot. The native UEFI firmware and the lab's embedded iPXE
+script support this path; other firmware is outside this lab's validation.
+
+This profile changes the PXE companion to port 8080 and supplies client-facing
+`https://carbide-api.forge:1079` and `http://carbide-pxe.forge:8080` URLs. Build
+both Scout and imager with their `--ipv6-boot` option before packaging the
+boot-artifact image. Copy their `*.network-profile` files alongside the EFI and
+squashfs files; Tilt's init command rejects mismatched or missing IPv6 markers
+before copying artifacts. Default builds retain their IPv4 resolver and URLs;
+older unmarked artifacts are accepted only by the default boot profile.
+
+With `--ipv6-boot`, the `ipv6-boot-endpoints` resource waits for `nico-pxe` and
+`nico-lab-dns`, then exports their allocated IPv6 addresses into
+`.local/CONTEXT/ipv6-endpoints.json`. DHCP depends on this export. The generated
+Helm values supply `dhcp.v6ProvisioningServer` and `dhcp.v6DnsServers`; this profile
+ignores explicit values for those two fields in `values.yaml`. Other DHCP
+settings, including lease timers, retain their existing precedence. Trigger the
+manual `nico-pxe` and `nico-dhcp` resources before powering on targets.
+After replacing either Service during a Tilt session, trigger
+`ipv6-boot-endpoints` successfully before triggering `nico-dhcp`; dependency
+ordering does not automatically rerun the exporter after a Service replacement.
+
+Direct Helm uses the same exporter after deploying the IPv6 PXE and DNS Services:
+
+```bash
+python3 dev/deployment/lab/endpoint-values.py \
+  --context kind-nico-lab --output "$HOME/nico-ipv6-endpoints.json"
+helm upgrade nico-dhcp helm/charts/nico-dhcp \
+  --kube-context kind-nico-lab --namespace nico-system --reuse-values \
+  --values "$HOME/nico-ipv6-endpoints.json" --wait --timeout 5m
+```
+
+This upgrade assumes the existing DHCP release already enables DHCPv6. Omit
+`--set` overrides for the two endpoint fields: Helm gives explicit flags
+precedence over values files. The exporter requires Python 3.9+ and kubectl.
+`--context` and `--output` are required; `--namespace` defaults to `nico-system`.
+It reads only the selected kind cluster's `nico-lab-dns` and `nico-pxe-external`
+Services, verifies their Helm release ownership, single-stack IPv6 addresses and
+DNS ports (UDP/TCP 53) or PXE port (TCP 8080), then writes JSON values. Parent
+directories are created; a changed file is atomically replaced with mode 0600.
+An unchanged file is left untouched. Lookup or validation failure returns nonzero
+and preserves the previous file; do not deploy that stale file after a failure.
+The helper neither changes cluster resources nor tests backend reachability.
+Run it again after Service replacement and before reconciling DHCP.
+
+BMC Service addresses and installed guest configuration are independent settings.
+Use the [lab DNS chart](../../../helm/nico-lab-dns/README.md) for name-resolution details.
+
+Keep both `--ipv6-endpoints` and `--ipv6-boot` enabled for the lifetime of the
+dedicated IPv6 boot lab cluster. Changing
+this profile in place is outside its support boundary: live Tilt argument
+changes and stopping/restarting Tilt can handle removed resources differently.
+Release the instances, then follow the
+[stop/restart/discard procedure](../lab/README.md#stop-restart-and-discard-the-bmc-lab)
+to stop both Tilt processes and discard the dedicated cluster. Create a fresh cluster for a
+different topology; do not remove the resolver while guests depend on it.
