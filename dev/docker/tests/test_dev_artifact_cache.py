@@ -22,7 +22,7 @@ class DevArtifactCacheTest(unittest.TestCase):
             'bmc-proxy': ('carbide-bmc-proxy',), 'dhcp': ('libdhcp.so',),
             'machine-a-tron': ('machine-a-tron',), 'ssh-console': ('ssh-console',),
             'mat-protocol-gateway': ('mat-protocol-gateway',),
-            'nico-postgres-exporter': ('nico-postgres-exporter',),
+            'nico-postgres-exporter': ('nico-postgres-exporter',), 'bmc-target': ('bmc-mock',),
         }
         for target, artifacts in targets.items():
             with self.subTest(target=target):

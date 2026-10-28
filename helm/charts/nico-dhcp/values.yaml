@@ -58,6 +58,13 @@ dhcp:
   v6ProvisioningServer: ""
   ## Boolean: permit a single REPLY only when the client requests Rapid Commit.
   v6RapidCommit: false
+  ## Finite DHCPv6 lease times in seconds. Omitted fields use these defaults.
+  ## preferredLifetime <= validLifetime; renewTimer < rebindTimer < validLifetime.
+  v6LeaseTimers:
+    preferredLifetime: 3600
+    validLifetime: 7200
+    renewTimer: 1800
+    rebindTimer: 2880
 
 ## Separate IPv6 relay VIP; ignored while dhcp.v6Enabled is false.
 v6ExternalService:

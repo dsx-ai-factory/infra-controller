@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+load('ext://helm_resource', 'helm_resource')
+
+# Allow Helm's five-minute wait to cover guest save and pod replacement.
+# Serialize Tilt updates; each runtime still validates the node's routes.
+update_settings(k8s_upsert_timeout_secs=360, max_parallel_updates=1)
+
+if not k8s_context().startswith('kind-'):
+    fail('The native target lab requires a selected kind context')
+
+repo_root = os.path.realpath(os.path.join(os.path.dirname(__file__), '../../..'))
+chart = os.path.join(repo_root, 'helm/nico-bmc-target')
+config.define_string('values')
+config.define_string('targets')
+config.define_string('namespace')
+config.define_string('release')
+options = config.parse()
+namespace = options.get('namespace', 'bmc-lab')
+if options.get('targets'):
+    if options.get('values') or options.get('release'):
+        fail('--targets cannot be combined with --values or --release')
+    plan_file = os.path.abspath(options['targets'])
+    plan = read_json(plan_file)
+    if type(plan) != 'dict' or len(plan) != 2:
+        fail('--targets must contain exactly two release-to-values-file entries')
+    for name, path in plan.items():
+        if type(path) != 'string' or not path:
+            fail('Each target entry must name a nonempty values-file path')
+    target_files = {name: path if path.startswith('/') else os.path.join(os.path.dirname(plan_file), path) for name, path in plan.items()}
+else:
+    if not options.get('values'):
+        fail('--values or --targets must name the target configuration and existing PVCs')
+    target_files = {options.get('release', 'target-one'): os.path.abspath(options['values'])}
+
+architecture = str(local(['docker', 'info', '--format', '{{.Architecture}}'], quiet=True)).strip()
+architectures = {'aarch64': 'arm64', 'arm64': 'arm64', 'x86_64': 'amd64', 'amd64': 'amd64'}
+targets = []
+images = []
+identities = {'claim': [], 'index': [], 'bmc': [], 'port': [], 'bridge': [], 'bridge6': []}
+# Validate every target before registering builds or deployments.
+for release in sorted(target_files.keys()):
+    values_file = target_files[release]
+    if not release or len(release) > 53 or release[0] not in 'abcdefghijklmnopqrstuvwxyz' or release[-1] == '-' or any([c not in 'abcdefghijklmnopqrstuvwxyz0123456789-' for c in [release[i] for i in range(len(release))]]):
+        fail('Target releases must be lowercase DNS labels starting with a letter, at most 53 characters')
+    values = read_yaml(values_file)
+    if architecture not in architectures or values.get('architecture', 'amd64') != architectures[architecture]:
+        fail('Target architecture must match the native Docker runtime')
+    identity = {
+        'claim': values.get('storage', {}).get('existingClaim', ''),
+        'index': values.get('target', {}).get('instanceIndex', 1),
+        'bmc': values.get('service', {}).get('clusterIP', ''),
+        'port': values.get('service', {}).get('targetPort', 2443),
+        'bridge': values.get('network', {}).get('bridgeAddress', '10.84.40.1/24'),
+    }
+    if values.get('network', {}).get('bridgeAddressV6'):
+        identity['bridge6'] = values['network']['bridgeAddressV6']
+    if not identity['claim'] or not identity['bmc']:
+        fail('Each target requires an existing PVC and an explicit BMC Service address')
+    for key, value in identity.items():
+        if value in identities[key]:
+            fail('Targets must have distinct ' + key + ' values')
+        identities[key].append(value)
+    image = values.get('image', {}).get('repository', 'nico-bmc-target')
+    if image not in images:
+        images.append(image)
+    targets.append((release, values_file, image))
+
+for image in images:
+    custom_build(
+        image,
+        command='make images-dev DEV_TARGET=bmc-target DEV_IMAGE="$EXPECTED_REF"',
+        dir=repo_root,
+        deps=[os.path.join(repo_root, path) for path in [
+            'Makefile', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo',
+            'include', 'crates', 'dev/docker',
+            'dev/deployment/lab/preflight.py', 'dev/deployment/lab/target.py',
+            'dev/deployment/lab/network.py', 'dev/deployment/lab/dhcp6_relay.py',
+        ]],
+        ignore=['tests/'],
+    )
+for release, values_file, image in targets:
+    helm_resource(
+        release,
+        chart=chart,
+        release_name=release,
+        namespace=namespace,
+        deps=[chart, values_file],
+        image_deps=[image],
+        image_keys=[('image.repository', 'image.tag')],
+        flags=['--values', values_file, '--wait', '--timeout=5m'],
+        labels=['lab'],
+    )

@@ -12,4 +12,6 @@ rest/
 nico-flow/
 # Local development Keycloak is a separate release, not an umbrella subchart.
 nico-dev-keycloak/
+nico-lab-dns/
+nico-bmc-target/
 nico-dev-prereqs/

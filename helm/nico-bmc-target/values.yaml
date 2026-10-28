@@ -1,0 +1,47 @@
+# Local development only. The selected Linux node must provide native KVM.
+architecture: amd64
+nodeName: ""
+# UID of kube-system in this cluster; checked by Helm and retained with the disk.
+clusterUID: ""
+image:
+  repository: nico-bmc-target
+  tag: latest
+  pullPolicy: IfNotPresent
+storage:
+  # Created and deleted separately from the release; must support POSIX locks.
+  existingClaim: ""
+target:
+  # Unique within the site; also determines the generated host/BMC MAC identities.
+  instanceIndex: 1
+  memoryMiB: 4096
+  # Requires an explicitly reserved 2 MiB HugeTLB pool on the Linux host.
+  hugepages: false
+  cpus: 2
+  diskGiB: 24
+network:
+  # Dedicated guest bridge in the selected node's network namespace.
+  bridgeAddress: 10.84.40.1/24
+  # Optional routed IPv6 /64; requires IPv6 forwarding on the node.
+  bridgeAddressV6: ""
+  dhcpv6:
+    # Empty disables DHCPv6 relay and router advertisements. Requires bridgeAddressV6.
+    server: ""
+    # Selected kind node IPv6 pod CIDR; prevents DHCPv6 relay source-port translation.
+    podCIDR: ""
+    # Opt in only with separately configured upstream routing.
+    defaultRoute: false
+  provisioning:
+    enabled: false
+    # Existing IPv4 DHCP Service and the selected kind node's IPv4 pod CIDR.
+    dhcpServer: ""
+    podCIDR: ""
+    uplink: eth0
+service:
+  # Reserve an unused IPv4 or IPv6 address in the cluster's Service CIDR.
+  clusterIP: ""
+  # Must be free on the selected node. Service port 443 maps to this listener.
+  targetPort: 2443
+resources:
+  requests:
+    cpu: "2"
+    # Memory defaults to guest RAM + 1 GiB, or 1 GiB with HugeTLB backing.

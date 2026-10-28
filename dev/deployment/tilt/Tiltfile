@@ -40,8 +40,32 @@ config.define_bool('dsx-exchange')
 config.define_bool('observability')
 config.define_bool('dpf')
 config.define_bool('persistent-vault')
+config.define_bool('bmc-lab')
+config.define_bool('dhcpv6')
+config.define_bool('ipv6-endpoints')
+config.define_bool('ipv6-boot')
+config.define_string('boot-artifact-image')
 options = config.parse()
 persistent_vault = options.get('persistent-vault', False)
+bmc_lab = options.get('bmc-lab', False)
+boot_artifact_image = options.get('boot-artifact-image', '')
+dhcpv6 = options.get('dhcpv6', False)
+ipv6_endpoints = options.get('ipv6-endpoints', False)
+ipv6_boot = options.get('ipv6-boot', False)
+if ipv6_boot and not ipv6_endpoints:
+    fail('--ipv6-boot requires --ipv6-endpoints')
+if ipv6_endpoints and not dhcpv6:
+    fail('--ipv6-endpoints requires --dhcpv6')
+if dhcpv6:
+    if not bmc_lab:
+        fail('--dhcpv6 requires --bmc-lab')
+    nodes = decode_json(str(local(['kubectl', '--context', cluster_context, 'get', 'nodes', '-o', 'json'], quiet=True)))
+    if len(nodes['items']) != 1 or not any([':' in cidr for cidr in nodes['items'][0]['spec'].get('podCIDRs', [])]):
+        fail('--dhcpv6 requires a single-node dual-stack kind cluster')
+if bmc_lab and (not persistent_vault or not boot_artifact_image):
+    fail('--bmc-lab requires --persistent-vault and --boot-artifact-image')
+if boot_artifact_image and not bmc_lab:
+    fail('--boot-artifact-image requires --bmc-lab')
 enable_mcp = options.get('mcp', profiles['mcp'])
 enable_rest = options.get('rest', profiles['rest']) or enable_mcp
 enable_dsx_exchange = options.get('dsx-exchange', profiles['dsxExchange'])
@@ -58,6 +82,11 @@ if enable_rest and (rest_global['certificate']['issuerRef'].get('kind') != 'Clus
 prereqs_values_file = os.path.join(repo_root, 'helm-prereqs/values/local-development.yaml')
 prereqs_values = read_yaml(prereqs_values_file)
 core_namespace = prereqs_values['namespace']
+site_mode = os.path.join(stack_dir, 'site-mode.py')
+site_mode_command = ['python3', site_mode, '--context', cluster_context, '--namespace', core_namespace,
+                     '--mode', 'bmc' if bmc_lab else 'mat']
+local(site_mode_command + ['check'], quiet=True)
+local_resource('local-site-mode', site_mode_command + ['claim'], deps=[site_mode], labels=['infrastructure'])
 vault_bootstrap = os.path.join(stack_dir, 'vault-bootstrap.py')
 vault_command = ['python3', vault_bootstrap, '--context', cluster_context, '--namespace', core_namespace]
 local(vault_command + ['check-mode', '--mode', 'persistent' if persistent_vault else 'ephemeral'], quiet=True)
@@ -71,7 +100,7 @@ observability_namespace = local_config['observabilityNamespace']
 machine_a_tron_dhcp_pod = development['machineATronDhcp']['podName']
 machine_a_tron_values = all_values['nico-machine-a-tron']
 selected_mat_pod = machine_a_tron_values.get('pods', {}).get(machine_a_tron_dhcp_pod)
-if not selected_mat_pod or not (selected_mat_pod.get('machines') or selected_mat_pod.get('racks')):
+if not bmc_lab and (not selected_mat_pod or not (selected_mat_pod.get('machines') or selected_mat_pod.get('racks'))):
     fail('MAT readiness requires a configured pod: %s' % machine_a_tron_dhcp_pod)
 enable_mat_gateway = machine_a_tron_values.get('mat-k8s-controller', {}).get('gateway', {}).get('enabled', False)
 
@@ -713,6 +742,8 @@ core_images = [
     ('machine-a-tron', 'machine-a-tron'),
     ('nico-ssh-console', 'ssh-console'),
 ]
+if bmc_lab:
+    core_images.append(('nico-pxe', 'pxe'))
 if enable_mat_gateway:
     core_images.append(('mat-protocol-gateway', 'mat-protocol-gateway'))
 if enable_observability:
@@ -777,11 +808,42 @@ for name, sources in [
 ]:
     rest_image(name, 'Dockerfile.' + name, sources)
 
+if bmc_lab:
+    lab_profile = os.path.join(repo_root, 'dev/deployment/lab/lab_profile.py')
+    watch_file(lab_profile)
+    watch_file(os.path.join(stack_dir, 'bmc-lab.toml'))
+    profile_command = ['python3', lab_profile, '--values', '-',
+                       '--namespace', core_namespace, '--architecture', compiler_arch,
+                       '--boot-artifact-image', boot_artifact_image]
+    for flag, enabled in [('dhcpv6', dhcpv6), ('ipv6-endpoints', ipv6_endpoints), ('ipv6-boot', ipv6_boot)]:
+        if enabled:
+            profile_command.append('--' + flag)
+    all_values = decode_json(str(local(profile_command, quiet=True, stdin=encode_json(all_values))))
+
 core_global = all_values['global']
 nico_api_values = component_values(core_global, all_values['nico-api'])
-nico_api_dependencies = ['nico-core-prereqs', 'nico-postgres', 'vault-admin-ca']
 bmc_proxy_values = component_values(core_global, all_values['nico-bmc-proxy'])
 nico_dhcp_values = all_values['nico-dhcp']
+nico_api_dependencies = ['local-site-mode', 'nico-core-prereqs', 'nico-postgres', 'vault-admin-ca']
+if ipv6_endpoints:
+    helm_chart(
+        name='nico-lab-dns',
+        chart=os.path.join(repo_root, 'helm/nico-lab-dns'),
+        namespace=core_namespace,
+        values={},
+        resource_deps=['nico-api', 'nico-pxe'],
+    )
+if bmc_lab:
+    helm_chart(
+        name='nico-pxe',
+        chart=os.path.join(core_charts, 'nico-pxe'),
+        namespace=core_namespace,
+        values=component_values(core_global, all_values['nico-pxe']),
+        resource_deps=['nico-api'],
+        image_deps=['nico-pxe'],
+        image_keys=[('image.repository', 'image.tag')],
+        manual=True,
+    )
 
 if enable_observability:
     nico_api_values['tracing'] = {'enabled': True}
@@ -848,12 +910,33 @@ helm_chart(
     image_keys=[('image.repository', 'image.tag')],
     manual=True,
 )
+dhcp_dependencies = ['nico-api']
+dhcp_values_files = []
+if ipv6_boot:
+    endpoint_export = os.path.join(repo_root, 'dev/deployment/lab/endpoint-values.py')
+    endpoint_values = os.path.join(tilt_dir, '.local', cluster_context, 'ipv6-endpoints.json')
+    local_resource(
+        'ipv6-boot-endpoints',
+        ['python3', endpoint_export, '--context', cluster_context,
+         '--namespace', core_namespace, '--output', endpoint_values],
+        deps=[endpoint_export],
+        resource_deps=['nico-lab-dns', 'nico-pxe'],
+        labels=['infrastructure'],
+    )
+    # The selected boot profile owns these allocated Service addresses. Remove
+    # explicit flags so Helm's generated values file can supply them.
+    all_values['nico-dhcp']['dhcp'].pop('v6DnsServers', None)
+    all_values['nico-dhcp']['dhcp'].pop('v6ProvisioningServer', None)
+    dhcp_dependencies.append('ipv6-boot-endpoints')
+    dhcp_values_files.append(endpoint_values)
+
 helm_chart(
     name='nico-dhcp',
     chart=os.path.join(core_charts, 'nico-dhcp'),
     namespace=core_namespace,
     values=component_values(core_global, all_values['nico-dhcp']),
-    resource_deps=['nico-api'],
+    resource_deps=dhcp_dependencies,
+    values_files=dhcp_values_files,
     image_deps=['nico-dhcp'],
     image_keys=[('global.image.repository', 'global.image.tag')],
     manual=True,
@@ -1008,6 +1091,7 @@ local_resource(
 )
 
 enabled_resources = [
+    'local-site-mode',
     'stack-ready',
     'vault-admin-ca',
     'repo-jetstack',
@@ -1024,6 +1108,14 @@ enabled_resources = [
     'nico-machine-a-tron',
     'nico-ssh-console-rs',
 ]
+if bmc_lab:
+    enabled_resources = [name for name in enabled_resources if name not in [
+        'stack-ready', 'nico-machine-a-tron', 'nico-ssh-console-rs',
+    ]] + ['nico-pxe']
+if ipv6_endpoints:
+    enabled_resources.append('nico-lab-dns')
+if ipv6_boot:
+    enabled_resources.append('ipv6-boot-endpoints')
 if persistent_vault:
     enabled_resources.append('vault-bootstrap')
 if enable_observability:
