@@ -1,0 +1,17 @@
+**
+!aarch64
+aarch64/**
+!aarch64/ipxe.efi
+!aarch64/scout.efi
+!aarch64/scout.squashfs
+!x86_64
+x86_64/**
+!x86_64/ipxe.efi
+!x86_64/scout.efi
+!x86_64/scout.squashfs
+!aarch64/qcow-imager.efi
+!x86_64/qcow-imager.efi
+!aarch64/scout.network-profile
+!aarch64/qcow-imager.network-profile
+!x86_64/scout.network-profile
+!x86_64/qcow-imager.network-profile

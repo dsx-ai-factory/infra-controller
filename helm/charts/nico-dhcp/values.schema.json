@@ -46,6 +46,35 @@
         },
         "v6RapidCommit": {
           "type": "boolean"
+        },
+        "v6LeaseTimers": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "preferredLifetime": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967294
+            },
+            "validLifetime": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967294
+            },
+            "renewTimer": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967294
+            },
+            "rebindTimer": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967294
+            }
+          }
         }
       },
       "allOf": [

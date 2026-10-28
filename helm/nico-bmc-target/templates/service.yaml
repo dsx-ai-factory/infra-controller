@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "nico-bmc-target.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ipFamilyPolicy: SingleStack
+  ipFamilies: [{{ if contains ":" .Values.service.clusterIP }}IPv6{{ else }}IPv4{{ end }}]
+  clusterIP: {{ required "service.clusterIP is required" .Values.service.clusterIP | quote }}
+  selector:
+    {{- include "nico-bmc-target.labels" . | nindent 4 }}
+  ports:
+    - name: redfish
+      port: 443
+      targetPort: redfish

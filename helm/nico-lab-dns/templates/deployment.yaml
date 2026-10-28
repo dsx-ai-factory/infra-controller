@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "nico-lab-dns.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "nico-lab-dns.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nico-lab-dns.labels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dns
+          image: {{ .Values.image | quote }}
+          imagePullPolicy: IfNotPresent
+          args: [-conf, /etc/coredns/Corefile]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [NET_BIND_SERVICE]
+          ports:
+            - name: health
+              containerPort: 8080
+            - name: ready
+              containerPort: 8181
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: ready
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/coredns
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}
