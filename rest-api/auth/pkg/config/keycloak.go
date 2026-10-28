@@ -19,12 +19,13 @@ type KeycloakConfig struct {
 	Realm                 string
 	Issuer                string
 	ServiceAccountEnabled bool
+	ServiceAccountOrg     string
 	jwksConfig            *JwksConfig
 	mu                    sync.RWMutex
 }
 
 // NewKeycloakConfig creates a new KeycloakConfig instance and attempts to fetch JWKS
-func NewKeycloakConfig(baseURL, externalBaseURL, clientID, clientSecret, realm string, serviceAccountEnabled bool) *KeycloakConfig {
+func NewKeycloakConfig(baseURL, externalBaseURL, clientID, clientSecret, realm string, serviceAccountEnabled bool, serviceAccountOrg string) *KeycloakConfig {
 	// Construct the issuer URL upfront
 	issuer := fmt.Sprintf("%s/realms/%s", externalBaseURL, realm)
 
@@ -36,6 +37,7 @@ func NewKeycloakConfig(baseURL, externalBaseURL, clientID, clientSecret, realm s
 		Realm:                 realm,
 		Issuer:                issuer,
 		ServiceAccountEnabled: serviceAccountEnabled,
+		ServiceAccountOrg:     serviceAccountOrg,
 	}
 
 	// Initialize and populate JWKS config during construction
@@ -53,11 +55,12 @@ func (kc *KeycloakConfig) initializeJWKS() bool {
 	jwksURL := fmt.Sprintf("%s/realms/%s/protocol/openid-connect/certs", kc.BaseURL, kc.Realm)
 
 	jwksConfig := &JwksConfig{
-		Name:           fmt.Sprintf("keycloak-%s", kc.Realm),
-		URL:            jwksURL,
-		Issuer:         kc.Issuer,
-		Origin:         TokenOriginKeycloak, // "keycloak"
-		ServiceAccount: kc.ServiceAccountEnabled,
+		Name:              fmt.Sprintf("keycloak-%s", kc.Realm),
+		URL:               jwksURL,
+		Issuer:            kc.Issuer,
+		Origin:            TokenOriginKeycloak, // "keycloak"
+		ServiceAccount:    kc.ServiceAccountEnabled,
+		ServiceAccountOrg: kc.ServiceAccountOrg,
 	}
 
 	// Retain the configuration even when the initial fetch fails so token

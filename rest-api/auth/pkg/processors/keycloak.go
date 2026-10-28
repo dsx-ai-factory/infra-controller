@@ -60,12 +60,7 @@ func (h *KeycloakProcessor) ProcessToken(c echo.Context, tokenStr string, jwksCo
 	lastName := claims.LastName
 	auxId := claims.GetOidcId()
 	if claims.GetClientId() != "" {
-		// indicates service account, check if service accounts are enabled
-		if !jwksConfig.ServiceAccount {
-			logger.Error().Str("clientID", claims.GetClientId()).Msg("Service account detected but service accounts are not enabled")
-			return nil, util.NewAPIError(http.StatusUnauthorized, "Service accounts are not enabled", nil)
-		}
-		// use sub as auxId
+		// indicates a client credentials token, use sub as auxId
 		auxId = sub
 		firstName = claims.GetClientId()
 	}
@@ -79,13 +74,13 @@ func (h *KeycloakProcessor) ProcessToken(c echo.Context, tokenStr string, jwksCo
 	// Get org name from URL path parameter
 	reqOrgName := c.Param("orgName")
 
-	// A client is a service account only if it holds both Provider Admin and Tenant Admin
-	// for the requested org. A service account org is set up as its own Provider, which a
-	// Tenant's client holding only Tenant Admin must never become.
+	// A client is a service account only for requests to the configured service account org,
+	// and only if it holds both Provider Admin and Tenant Admin there. A service account org is
+	// set up as its own Provider and Tenant.
 	reqOrg, hasReqOrg := tokenOrgData[reqOrgName]
 	isServiceAccount := claims.GetClientId() != "" && jwksConfig.ServiceAccount && hasReqOrg &&
-		authz.ValidateUserRolesInOrg(reqOrg, nil, authz.ProviderAdminRole) &&
-		authz.ValidateUserRolesInOrg(reqOrg, nil, authz.TenantAdminRole)
+		reqOrgName == jwksConfig.ServiceAccountOrg &&
+		authz.ValidateUserHasAllRolesInOrg(reqOrg, config.ServiceAccountRoles...)
 	config.SetIsServiceAccountInContext(c, isServiceAccount)
 
 	ctx := c.Request().Context()

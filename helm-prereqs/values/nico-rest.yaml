@@ -1,5 +1,5 @@
 # =============================================================================
-# nico-rest.yaml — values for: helm upgrade --install nico-rest <chart>
+# nico-rest.yaml: values for helm upgrade --install nico-rest <chart>
 #
 # Image registry and tag are injected at install time via --set flags:
 #   --set global.image.repository=<your-registry>
@@ -44,13 +44,15 @@ nico-rest-api:
     keycloak:
       enabled: true
       # Hostname must match helm-prereqs/values.yaml::keycloak.namespace
-      # (default "nico-rest") — that value is not propagated here
+      # (default "nico-rest"). That value is not propagated here
       # automatically, so update both together if you change it.
       baseURL: "http://keycloak.nico-rest:8082"
       externalBaseURL: "http://keycloak.nico-rest:8082"
       realm: "nico"
       clientID: "nico-rest"
       serviceAccount: true
+      # The org whose ncx-service client holds both PROVIDER_ADMIN and TENANT_ADMIN.
+      serviceAccountOrg: "ncx"
 
 nico-rest-cert-manager:
   replicaCount: 3

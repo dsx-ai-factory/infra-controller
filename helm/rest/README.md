@@ -84,9 +84,11 @@ nico-rest-api:
       realm: my-realm
       clientID: my-client
       serviceAccount: true
+      serviceAccountOrg: my-org
 ```
 
 If `nico-rest-common.enabled=false`, you must pre-create the following resources in the target namespace before install:
+
 - Secrets: `db-creds`, `temporal-encryption-key`, `image-pull-secret`
 - `keycloak-client-secret` (when Keycloak authentication is enabled)
 - The `temporal-client-cloud-cert` Certificate (or its resulting TLS Secret) consumed by the workflow workers

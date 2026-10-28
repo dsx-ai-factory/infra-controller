@@ -1,0 +1,25 @@
+---
+tags: ["unreleased", "rest-api", "security", "deployment"]
+---
+
+## Keycloak service accounts (unreleased)
+
+A Keycloak client is now a service account only for requests to `keycloak.serviceAccountOrg`, and only when it holds both `PROVIDER_ADMIN` and `TENANT_ADMIN` there. Previously, every client credentials token was a service account in every org, so a Tenant's own client became its own Provider when it called `GET /v2/org/{org}/nico/service-account/current`.
+
+### Before upgrading
+
+<Warning title="Service account org is required">
+With `keycloak.serviceAccount: true`, set `keycloak.serviceAccountOrg` and keep `env.disconnected: true`, otherwise `nico-rest-api` fails to start. Set it to the org whose client holds both roles, such as `ncx` for the bundled `ncx-service` client. The `helm-prereqs` values already set it. Refer to [Upgrading NICo](../../docs/manuals/upgrade.md) for the values change.
+</Warning>
+
+### Changed behavior
+
+- A client credentials token from a client that is not the service account is accepted with the roles it holds. This includes `keycloak.serviceAccount: false`, where such a token previously got `401`.
+- A config with more than one `isServiceAccount: true` claim mapping across custom issuers fails to start.
+
+### New and changed configuration
+
+| Setting | Change |
+| --- | --- |
+| `keycloak.serviceAccountOrg` | New. The one org whose client can be a service account. Required when `keycloak.serviceAccount` is `true`. |
+| `keycloak.serviceAccount` | Now requires `env.disconnected: true` and `keycloak.serviceAccountOrg`. |

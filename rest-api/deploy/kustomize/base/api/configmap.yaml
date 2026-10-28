@@ -65,6 +65,7 @@ data:
       clientID: nico-api
       clientSecretPath: /var/secrets/keycloak/client-secret
       serviceAccount: true
+      serviceAccountOrg: test-org
 
     rateLimiter:
       enabled: false
