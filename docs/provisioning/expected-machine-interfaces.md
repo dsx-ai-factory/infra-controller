@@ -1,7 +1,8 @@
 # Configure Expected Machine Interfaces <Badge intent="info">v2.1</Badge>
 
 Expected Machine interface declarations tell NICo how to allocate addresses for
-host, DPU OS, DPU BMC, and host BMC interfaces during ingestion. Use the
+host, DPU OS, DPU BMC, and host BMC interfaces during ingestion, and reserve
+DPU underlay loopbacks. Use the
 `interfaces` array in an Expected Machine manifest to identify each interface
 by MAC address or Cerebro physical name, assign its role, and select an IP
 allocation policy.
@@ -12,14 +13,17 @@ for site network configuration and DHCP relay requirements.
 
 ## Interface Fields
 
-Each `interfaces` entry supports these fields:
+Physical-interface entries support the fields below. For `dpu_loopback`, only
+`mac_address`, `role`, `ip_allocation`, and `fixed_ip` are accepted; the MAC and
+fixed address are required. See [loopback reservations](../manuals/networking/ip_resource_pools.md#deterministic-dpu-loopback-reservations)
+for pool validation, matching, and lifecycle behavior.
 
 | Field | Required | Description |
 |---|---|---|
 | `mac_address` | Unless `physical_ifname` is supplied | MAC address that identifies the interface. |
 | `physical_ifname` | Unless `mac_address` is supplied | Physical interface identifier, such as `C1-1-L1`, as named in the Cerebro database. Must be nonempty. Both identifiers may be supplied. |
 | `logical_ifname` | No | Logical interface name stored for inventory consumers. |
-| `role` | No | Interface role: `host`, `dpu_os`, `dpu_bmc`, or `host_bmc`. The default is `host`. |
+| `role` | No | Interface role: `host`, `dpu_os`, `dpu_bmc`, `host_bmc`, or `dpu_loopback`. The default is `host`. |
 | `ip_allocation` | No | Address policy: `dynamic`, `fixed`, or `retained`. NICo can also infer the policy as described in [IP Allocation Policies](#ip-allocation-policies). |
 | `fixed_ip` | For `fixed` | Address that NICo reserves for this interface. |
 | `network_segment_type` | No | Optional segment-type guard. Admin CLI manifest and RPC JSON values are Tenant `0`, Admin `1`, Underlay `2`, and HostInband `3`. The corresponding model names are `tenant`, `admin`, `underlay`, and `host_inband`. |
@@ -35,7 +39,8 @@ until name-to-MAC resolution is implemented.
 
 ## Interface Roles
 
-All roles support all three IP allocation policies.
+Physical-interface roles support all three IP allocation policies.
+`dpu_loopback` supports Fixed only and does not create a physical interface.
 
 | Role | Interface | Primary behavior | Default policy |
 |---|---|---|---|
@@ -43,12 +48,14 @@ All roles support all three IP allocation policies.
 | `dpu_os` | DPU ARM OS interface | Primary for its DPU. | `dynamic` |
 | `dpu_bmc` | DPU BMC interface | Never primary. | `dynamic` |
 | `host_bmc` | Host BMC interface | Never primary. A supplied MAC must match the top-level `bmc_mac_address`; an omitted MAC is filled from that value. | `retained` |
+| `dpu_loopback` | DPU underlay loopback, identified by its OS/admin MAC | Excluded from primary selection. | `fixed`, inferred from required `fixed_ip` |
 
 An Expected Machine can contain multiple `host`, `dpu_os`, and `dpu_bmc`
 entries, but it can contain only one `host_bmc` entry. If you repeat a MAC
 address to reserve separate IPv4 and IPv6 addresses, every entry for that MAC
-must use the same role. The one-entry limit means `host_bmc` cannot use this
-duplicate-entry form.
+must use the same role, except that `dpu_os` and `dpu_loopback` may share a
+MAC. Each MAC supports one loopback declaration per address family. The
+one-entry limit means `host_bmc` cannot use this duplicate-entry form.
 
 The interface entry whose `mac_address` matches the top-level
 `bmc_mac_address` must use the `host_bmc` role.
@@ -57,6 +64,11 @@ For host boot selection and DPU management policy, see
 [Boot Interfaces and DPU Policies](boot-interfaces-and-dpu-modes.md).
 
 ## IP Allocation Policies
+
+The DHCP, segment, and physical-interface lifetime rules below apply to
+physical roles. Loopbacks use the existing loopback resource pools; an
+undeclared family keeps automatic allocation, and edits do not readdress a
+live DPU. See [loopback updates and lifecycle](../manuals/networking/ip_resource_pools.md#updates-and-lifecycle).
 
 NICo uses the current Expected Machine configuration for each family's first
 successful DHCP or Static allocation. IPv4 and IPv6 initialize independently.
@@ -80,7 +92,7 @@ NICo uses these defaults when `ip_allocation` is omitted:
 |---|---|
 | `fixed_ip` is present | `fixed` |
 | `role` is `host_bmc` and `fixed_ip` is absent | `retained` |
-| Any other role without `fixed_ip` | `dynamic` |
+| Any other physical role without `fixed_ip` | `dynamic` |
 
 The `fixed_ip` inference preserves manifests created before explicit allocation
 policies were available.
@@ -213,7 +225,9 @@ address when no reservation exists. The default segment allocation strategy is
 
 ## Configure All Interface Roles
 
-The following `expected_machines.json` file uses the admin CLI manifest format.
+The following `expected_machines.json` file shows the four physical roles in
+the admin CLI manifest format. For a shared OS/loopback MAC example, see
+[deterministic loopback reservations](../manuals/networking/ip_resource_pools.md#deterministic-dpu-loopback-reservations).
 The fixed DPU OS address assumes `192.0.2.0/24` is a configured Admin prefix.
 This format uses protobuf enum numbers for `network_segment_type`: Tenant `0`,
 Admin `1`, Underlay `2`, and HostInband `3`.
@@ -308,7 +322,8 @@ values.
 
 `em patch --interfaces` replaces the complete interface list for that Expected
 Machine. An empty array clears the list. Omitting the option preserves the
-stored list.
+stored list. This includes loopback reservations: resubmit any loopback
+entries that should remain when replacing the list.
 
 ```bash
 # Replace the complete list.

@@ -2025,7 +2025,7 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::net::{Ipv4Addr, Ipv6Addr};
 
-    use model::expected_machine::DpuLoopbackReservation;
+    use model::expected_machine::{DpuLoopbackReservation, ExpectedMachine};
     use model::hardware_info::HardwareInfo;
     use model::machine::machine_id::from_hardware_info;
 
@@ -2034,7 +2034,7 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
 
     let dpu_a = DpuConfig::with_serial("SER-DPU-A".to_string());
     let dpu_b = DpuConfig::with_serial("SER-DPU-B".to_string());
-    let mock_host = ManagedHostConfig::default().with_dpus(vec![dpu_a.clone(), dpu_b.clone()]);
+    let mock_host = ManagedHostConfig::default().with_dpus(vec![dpu_b.clone(), dpu_a.clone()]);
     let mut fixture = explored_host_fixture(&env, &mock_host).await;
 
     // Reservable (non-auto-assign) addresses, one IPv4 + one IPv6 per DPU.
@@ -2059,7 +2059,7 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
     )
     .await?;
 
-    // Persist the host expected machine with a reservation per DPU serial. Site
+    // Persist the host expected machine with a reservation per DPU OS/admin MAC. Site
     // Explorer resolves them from the database, not the passed-in snapshot.
     db::expected_machine::create(
         &mut txn,
@@ -2067,24 +2067,71 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
             id: None,
             bmc_mac_address: mock_host.bmc_mac_address,
             data: ExpectedMachineData {
-                dpu_loopback_reservations: Some(vec![
+                interfaces: [
                     DpuLoopbackReservation {
-                        dpu_serial_number: "SER-DPU-A".to_string(),
+                        dpu_mac_address: dpu_a.oob_mac_address,
                         loopback_ipv4: Some(a_v4),
                         loopback_ipv6: Some(a_v6),
                     },
                     DpuLoopbackReservation {
-                        dpu_serial_number: "SER-DPU-B".to_string(),
+                        dpu_mac_address: dpu_b.oob_mac_address,
                         loopback_ipv4: Some(b_v4),
                         loopback_ipv6: Some(b_v6),
                     },
-                ]),
+                ]
+                .iter()
+                .flat_map(DpuLoopbackReservation::interfaces)
+                .collect(),
                 ..Default::default()
             },
         },
     )
     .await?;
     txn.commit().await?;
+
+    let saved_dpus = fixture.host.dpus.clone();
+    for (ambiguous, diagnostic) in [(false, "0 matching DPUs"), (true, "2 matching DPUs")] {
+        fixture.host.dpus = saved_dpus.clone();
+        for dpu in &mut fixture.host.dpus {
+            let report = Arc::make_mut(&mut dpu.report);
+            for system in &mut report.systems {
+                if ambiguous {
+                    system
+                        .ethernet_interfaces
+                        .push(model::site_explorer::EthernetInterface {
+                            id: Some("oob_duplicate".to_string()),
+                            mac_address: Some(dpu_a.oob_mac_address),
+                            ..Default::default()
+                        });
+                } else {
+                    system.ethernet_interfaces.clear();
+                }
+            }
+        }
+        let error = creator
+            .create_managed_host(
+                &fixture.host,
+                &mut fixture.host_report,
+                Some(&expected_machine(&mock_host)),
+                &env.pool,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(diagnostic));
+        assert!(
+            db::machine::find_one(
+                &env.pool,
+                &from_hardware_info(&HardwareInfo::from(&dpu_a))?,
+                MachineSearchConfig {
+                    include_dpus: true,
+                    ..Default::default()
+                }
+            )
+            .await?
+            .is_none()
+        );
+    }
+    fixture.host.dpus = saved_dpus;
 
     assert!(
         creator
@@ -2097,7 +2144,7 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
             .await?
     );
 
-    // Each DPU machine, identified by its own serial, holds its reserved pair.
+    // Each DPU machine holds the pair selected by its OS/admin MAC.
     let search = MachineSearchConfig {
         include_dpus: true,
         ..Default::default()

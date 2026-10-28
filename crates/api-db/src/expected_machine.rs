@@ -39,8 +39,7 @@ const SQL_VIOLATION_DUPLICATE_MAC: &str = "expected_machines_bmc_mac_address_key
 /// Select every `expected_machines` column plus a JSON array of the row's DPU
 /// loopback reservations, hydrated from the child table in one round trip. The
 /// `$expected_machines_filter` fragment supplies the trailing `WHERE` /
-/// `ORDER BY` clause. Reads through this macro always yield `Some(..)`
-/// reservations (possibly empty).
+/// `ORDER BY` clause. Reads hydrate loopbacks into the interface list.
 ///
 /// This is a macro rather than a helper function on purpose: the reservations
 /// live in the `expected_dpu_loopback_reservations` child table (one machine,
@@ -54,11 +53,15 @@ const SQL_VIOLATION_DUPLICATE_MAC: &str = "expected_machines_bmc_mac_address_key
 macro_rules! select_expected_machine {
     ($expected_machines_filter:literal) => {
         concat!(
-            "SELECT expected_machines.*, ",
+            "SELECT id, bmc_mac_address, bmc_username, bmc_password, serial_number, ",
+            "fallback_dpu_serial_numbers, metadata_name, metadata_description, metadata_labels, ",
+            "sku_id, host_nics, rack_id, default_pause_ingestion_and_poweron, dpf_enabled, ",
+            "bmc_ip_address, bmc_retain_credentials, dpu_mode, bmc_ip_allocation, ",
+            "host_lifecycle_profile, server_name, ",
             "(SELECT COALESCE(json_agg(json_build_object(",
-            "'dpu_serial_number', r.dpu_serial_number, ",
+            "'dpu_mac_address', r.dpu_mac_address, ",
             "'loopback_ipv4', host(r.loopback_ipv4), ",
-            "'loopback_ipv6', host(r.loopback_ipv6)) ORDER BY r.dpu_serial_number), '[]'::json) ",
+            "'loopback_ipv6', host(r.loopback_ipv6)) ORDER BY r.dpu_mac_address), '[]'::json) ",
             "FROM expected_dpu_loopback_reservations r ",
             "WHERE r.bmc_mac_address = expected_machines.bmc_mac_address) AS dpu_loopback_reservations ",
             "FROM expected_machines ",
@@ -389,7 +392,14 @@ pub async fn create(
         .bind(&machine.data.metadata.description)
         .bind(sqlx::types::Json(&machine.data.metadata.labels))
         .bind(&machine.data.sku_id)
-        .bind(sqlx::types::Json(&machine.data.interfaces))
+        .bind(sqlx::types::Json(
+            machine
+                .data
+                .interfaces
+                .iter()
+                .filter(|interface| !interface.role.is_dpu_loopback())
+                .collect::<Vec<_>>(),
+        ))
         .bind(&machine.data.rack_id)
         .bind(
             machine
@@ -416,14 +426,21 @@ pub async fn create(
     // A new row has no reservations to preserve, so an omitted list resolves to
     // none. `RETURNING *` does not select the reservation subquery column, so
     // set the field explicitly to reflect what was persisted.
-    let reservations = machine.data.dpu_loopback_reservations.unwrap_or_default();
+    let reservations = machine
+        .data
+        .dpu_loopback_reservations()
+        .map_err(|message| DatabaseError::InvalidArgument(message.to_string()))?;
     crate::expected_dpu_loopback_reservation::replace_for_machine(
         &mut *txn,
         machine.bmc_mac_address,
         &reservations,
     )
     .await?;
-    result.data.dpu_loopback_reservations = Some(reservations);
+    result.data.interfaces.extend(
+        reservations
+            .iter()
+            .flat_map(model::expected_machine::DpuLoopbackReservation::interfaces),
+    );
     Ok(result)
 }
 
@@ -509,12 +526,15 @@ pub async fn find_for_update(
     };
 
     if let Some(machine) = machine.as_mut() {
-        machine.data.dpu_loopback_reservations = Some(
-            crate::expected_dpu_loopback_reservation::find_for_machine(
-                &mut *txn,
-                machine.bmc_mac_address,
-            )
-            .await?,
+        let reservations = crate::expected_dpu_loopback_reservation::find_for_machine(
+            &mut *txn,
+            machine.bmc_mac_address,
+        )
+        .await?;
+        machine.data.interfaces.extend(
+            reservations
+                .iter()
+                .flat_map(model::expected_machine::DpuLoopbackReservation::interfaces),
         );
     }
 
@@ -639,7 +659,14 @@ pub async fn update(txn: &mut PgConnection, machine: &ExpectedMachine) -> Databa
         .bind(&machine.data.metadata.description)
         .bind(sqlx::types::Json(&machine.data.metadata.labels))
         .bind(&machine.data.sku_id)
-        .bind(sqlx::types::Json(&machine.data.interfaces))
+        .bind(sqlx::types::Json(
+            machine
+                .data
+                .interfaces
+                .iter()
+                .filter(|interface| !interface.role.is_dpu_loopback())
+                .collect::<Vec<_>>(),
+        ))
         .bind(&machine.data.rack_id)
         .bind(machine.data.default_pause_ingestion_and_poweron)
         .bind(machine.data.dpf_enabled)
@@ -664,18 +691,17 @@ pub async fn update(txn: &mut PgConnection, machine: &ExpectedMachine) -> Databa
         });
     };
 
-    // `Some` replaces the host's reservations (an empty list clears them);
-    // `None` preserves the stored reservations for older clients that omit the
-    // field. Key the replacement on the MAC of the row the UPDATE actually
-    // matched (returned above), not the caller-supplied MAC: when the row is
-    // selected by `id`, a mismatched `machine.bmc_mac_address` would otherwise
-    // rewrite a different host's reservations. The BMC MAC never changes on
-    // update, so the two agree for well-formed callers.
-    if let Some(reservations) = machine.data.dpu_loopback_reservations.as_deref() {
+    // Only explicit loopback intent replaces child rows. Use the matched row's
+    // MAC, since an ID-based update need not supply that MAC as its selector.
+    if machine.data.replaces_dpu_loopbacks() {
+        let reservations = machine
+            .data
+            .dpu_loopback_reservations()
+            .map_err(|message| DatabaseError::InvalidArgument(message.to_string()))?;
         crate::expected_dpu_loopback_reservation::replace_for_machine(
             txn,
             bmc_mac_address,
-            reservations,
+            &reservations,
         )
         .await?;
     }

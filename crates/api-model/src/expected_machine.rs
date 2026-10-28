@@ -236,8 +236,8 @@ pub struct ExpectedMachineRequest {
 /// Identifies which machine endpoint an expected interface belongs to.
 ///
 /// The role determines the resulting [`InterfaceType`] and whether the
-/// interface has a role-defined primary state. It does not choose a network
-/// segment or change the allocation policy available to that interface.
+/// physical interface has a role-defined primary state. DpuLoopback instead
+/// declares Fixed loopback intent, identified by the DPU OS/admin MAC.
 ///
 /// Host BMC identity remains on [`ExpectedMachine::bmc_mac_address`], while a
 /// `HostBmc` entry configures that endpoint's network allocation.
@@ -254,6 +254,8 @@ pub enum ExpectedInterfaceRole {
     DpuBmc,
     /// The host's Redfish/BMC interface.
     HostBmc,
+    /// A DPU underlay loopback selected by its OS/admin MAC, not a physical interface.
+    DpuLoopback,
 }
 
 impl std::fmt::Display for ExpectedInterfaceRole {
@@ -264,6 +266,7 @@ impl std::fmt::Display for ExpectedInterfaceRole {
             Self::DpuOs => "dpu_os",
             Self::DpuBmc => "dpu_bmc",
             Self::HostBmc => "host_bmc",
+            Self::DpuLoopback => "dpu_loopback",
         })
     }
 }
@@ -278,6 +281,11 @@ impl ExpectedInterfaceRole {
         matches!(self, Self::Host)
     }
 
+    /// Whether this declaration reserves a loopback instead of a physical interface.
+    pub fn is_dpu_loopback(self) -> bool {
+        self == Self::DpuLoopback
+    }
+
     /// Return whether this role configures the ExpectedMachine's host BMC.
     pub fn is_host_bmc(&self) -> bool {
         matches!(self, Self::HostBmc)
@@ -290,7 +298,7 @@ impl ExpectedInterfaceRole {
     /// BMC-specific routing and address behavior still applies.
     pub fn interface_type(self) -> InterfaceType {
         match self {
-            Self::Host | Self::DpuOs => InterfaceType::Data,
+            Self::Host | Self::DpuOs | Self::DpuLoopback => InterfaceType::Data,
             Self::DpuBmc | Self::HostBmc => InterfaceType::Bmc,
         }
     }
@@ -305,7 +313,7 @@ impl ExpectedInterfaceRole {
         match self {
             Self::Host => None,
             Self::DpuOs => Some(true),
-            Self::DpuBmc | Self::HostBmc => Some(false),
+            Self::DpuBmc | Self::HostBmc | Self::DpuLoopback => Some(false),
         }
     }
 }
@@ -361,8 +369,9 @@ impl ExpectedInterfaceIpAllocation {
 /// Configures one interface that NICo may encounter while ingesting an
 /// `ExpectedMachine`.
 ///
-/// Every role uses the same allocation and optional segment-guard fields. The
-/// role only supplies endpoint-specific interface type and primary behavior.
+/// Physical roles share allocation and segment-guard fields. DpuLoopback
+/// reserves a Fixed address from the loopback pool using the DPU OS/admin MAC;
+/// it has no physical-interface settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ExpectedInterface {
     /// MAC address used to match DHCP and discovered interface traffic to this
@@ -408,7 +417,7 @@ pub struct ExpectedInterface {
     pub nic_type: Option<String>,
     pub fixed_ip: Option<IpAddr>,
     pub fixed_mask: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_ip_addr_lossy")]
+    #[serde(default)]
     pub fixed_gateway: Option<IpAddr>,
     /// Host-role interfaces may set `primary=true` to declare the host's boot
     /// interface. When one Host interface is declared primary, the other Host
@@ -423,7 +432,6 @@ pub struct ExpectedInterface {
 impl<'de> Deserialize<'de> for ExpectedInterface {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
-        #[serde(remote = "ExpectedInterface")]
         struct UncheckedExpectedInterface {
             mac_address: Option<MacAddress>,
             physical_ifname: Option<String>,
@@ -435,11 +443,28 @@ impl<'de> Deserialize<'de> for ExpectedInterface {
             nic_type: Option<String>,
             fixed_ip: Option<IpAddr>,
             fixed_mask: Option<String>,
-            #[serde(default, deserialize_with = "deserialize_optional_ip_addr_lossy")]
-            fixed_gateway: Option<IpAddr>,
+            fixed_gateway: Option<String>,
             primary: Option<bool>,
         }
-        let interface = UncheckedExpectedInterface::deserialize(deserializer)?;
+        let raw = UncheckedExpectedInterface::deserialize(deserializer)?;
+        if raw.role.is_dpu_loopback() && raw.fixed_gateway.is_some() {
+            return Err(serde::de::Error::custom(
+                "dpu_loopback does not accept fixed_gateway",
+            ));
+        }
+        let interface = ExpectedInterface {
+            mac_address: raw.mac_address,
+            physical_ifname: raw.physical_ifname,
+            logical_ifname: raw.logical_ifname,
+            role: raw.role,
+            ip_allocation: raw.ip_allocation,
+            network_segment_type: raw.network_segment_type,
+            nic_type: raw.nic_type,
+            fixed_ip: raw.fixed_ip,
+            fixed_mask: raw.fixed_mask,
+            fixed_gateway: raw.fixed_gateway.and_then(|address| address.parse().ok()),
+            primary: raw.primary,
+        };
         interface
             .validate_identity()
             .map_err(serde::de::Error::custom)?;
@@ -540,6 +565,26 @@ impl ExpectedInterface {
     /// Validate the effective allocation policy against this interface's
     /// fixed-IP declaration.
     pub fn validate_ip_allocation(&self) -> Result<(), &'static str> {
+        if self.role.is_dpu_loopback() {
+            if self.mac_address.is_none() {
+                return Err("dpu_loopback requires the DPU OS/admin mac_address");
+            }
+            if self.resolved_ip_allocation() != ExpectedInterfaceIpAllocation::Fixed {
+                return Err("dpu_loopback supports only fixed allocation with fixed_ip");
+            }
+            if self.physical_ifname.is_some()
+                || self.logical_ifname.is_some()
+                || self.network_segment_type.is_some()
+                || self.nic_type.is_some()
+                || self.fixed_mask.is_some()
+                || self.fixed_gateway.is_some()
+                || self.primary.is_some()
+            {
+                return Err(
+                    "dpu_loopback accepts only mac_address, role, ip_allocation and fixed_ip",
+                );
+            }
+        }
         self.resolved_ip_allocation()
             .validate(self.fixed_ip.is_some())
     }
@@ -629,14 +674,6 @@ impl ExpectedInterface {
             _ => None,
         }
     }
-}
-
-fn deserialize_optional_ip_addr_lossy<'de, D>(deserializer: D) -> Result<Option<IpAddr>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(Option::<String>::deserialize(deserializer)?
-        .and_then(|address| address.parse::<IpAddr>().ok()))
 }
 
 // Important : new fields for expected machine should be Optional _and_ #[serde(default)],
@@ -742,11 +779,9 @@ impl ExpectedMachine {
             return Some(self.effective_host_bmc());
         }
 
-        let mut interfaces = self
-            .data
-            .interfaces
-            .iter()
-            .filter(|interface| interface.mac_address == Some(mac_address));
+        let mut interfaces = self.data.interfaces.iter().filter(|interface| {
+            !interface.role.is_dpu_loopback() && interface.mac_address == Some(mac_address)
+        });
         interfaces
             .clone()
             .find(|interface| {
@@ -964,47 +999,29 @@ impl ExpectedMachine {
     }
 }
 
-/// Trim surrounding whitespace from a DPU pairing serial during deserialization.
-///
-/// The `expected_machines.json` startup import deserializes straight into this
-/// model, unlike the RPC boundary, which already trims the serial in its
-/// `TryFrom` conversion. Without this, a serial such as `" MT2000X00001 "` would
-/// persist verbatim, pass the non-empty check, yet never match the trimmed DPU
-/// pairing serial that Site Explorer compares against -- silently dropping the
-/// deterministic reservation and letting the DPU fall back to an automatic
-/// address.
-fn deserialize_trimmed_serial<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(String::deserialize(deserializer)?.trim().to_string())
-}
-
-/// A deterministic DPU underlay loopback reservation.
-///
-/// Keyed by the trimmed DPU pairing serial number -- the same identity NICo
-/// pairs DPUs by (`dpu_pairing_serial_number`) and that the operator declares
-/// in `fallback_dpu_serial_numbers` -- not by any MAC, because a DPU's MAC is
-/// not known when the reservation is authored. At least one address is
-/// required; each address, when present, is drawn from the site's `lo-ip` /
-/// `lo-ip-v6` pool and reserved for this specific DPU. Persisted in the
-/// `expected_dpu_loopback_reservations` child table, which owns the site-wide
-/// uniqueness of serials and per-family addresses.
+/// Database representation of one DPU's loopback declarations. The public
+/// configuration uses one Fixed DpuLoopback interface per address family.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DpuLoopbackReservation {
-    #[serde(deserialize_with = "deserialize_trimmed_serial")]
-    pub dpu_serial_number: String,
-    #[serde(default)]
+    pub dpu_mac_address: MacAddress,
     pub loopback_ipv4: Option<Ipv4Addr>,
-    #[serde(default)]
     pub loopback_ipv6: Option<Ipv6Addr>,
 }
 
 impl DpuLoopbackReservation {
-    /// Whether this reservation declares no address at all. The API and the
-    /// database `CHECK` both reject such a reservation.
-    pub fn has_no_address(&self) -> bool {
-        self.loopback_ipv4.is_none() && self.loopback_ipv6.is_none()
+    /// Hydrate child-table intent into the public interface list, IPv4 before IPv6.
+    pub fn interfaces(&self) -> impl Iterator<Item = ExpectedInterface> + '_ {
+        self.loopback_ipv4
+            .map(IpAddr::V4)
+            .into_iter()
+            .chain(self.loopback_ipv6.map(IpAddr::V6))
+            .map(|fixed_ip| ExpectedInterface {
+                mac_address: Some(self.dpu_mac_address),
+                role: ExpectedInterfaceRole::DpuLoopback,
+                ip_allocation: Some(ExpectedInterfaceIpAllocation::Fixed),
+                fixed_ip: Some(fixed_ip),
+                ..Default::default()
+            })
     }
 }
 
@@ -1060,34 +1077,50 @@ pub struct ExpectedMachineData {
     /// switches in LLDP responses and usable for cable validation.
     #[serde(default)]
     pub server_name: Option<String>,
-    /// Deterministic DPU underlay loopback reservations, one per paired DPU,
-    /// keyed by DPU pairing serial number. Persisted in the
-    /// `expected_dpu_loopback_reservations` child table rather than a column on
-    /// this row. The `Option` distinguishes omitted (`None`, preserve stored
-    /// reservations) from an explicit empty list (`Some(vec![])`, clear them);
-    /// a database read always yields `Some(..)` with the actual stored set.
+    /// Replace the loopback subset, including clearing it when no entries remain.
+    /// False preserves existing declarations for older clients. A supplied
+    /// DpuLoopback entry also explicitly requests replacement of that subset.
     #[serde(default)]
-    pub dpu_loopback_reservations: Option<Vec<DpuLoopbackReservation>>,
+    pub replace_dpu_loopbacks: bool,
 }
 // Important : new fields for expected machine (and data) should be optional _and_ serde(default),
 // unless you want to go update all the files in each production deployment that autoload
 // the expected machines on api startup
 
 impl ExpectedMachineData {
-    /// The DPU loopback reservation declared for one paired DPU serial, if any.
-    ///
-    /// Site Explorer resolves a reservation within the matched host expected
-    /// machine by the DPU's pairing serial number. `None` reservations (an
-    /// older client's omission that has not been hydrated) and an absent serial
-    /// both yield `None`, which preserves automatic allocation.
-    pub fn dpu_loopback_reservation(
-        &self,
-        dpu_serial_number: &str,
-    ) -> Option<&DpuLoopbackReservation> {
-        self.dpu_loopback_reservations
-            .as_ref()?
-            .iter()
-            .find(|reservation| reservation.dpu_serial_number == dpu_serial_number)
+    /// Whether this write explicitly supplies the loopback subset.
+    pub fn replaces_dpu_loopbacks(&self) -> bool {
+        self.replace_dpu_loopbacks || self.interfaces.iter().any(|i| i.role.is_dpu_loopback())
+    }
+
+    /// Extract and validate child-table rows without storing loopbacks in interface JSON.
+    /// Repeated MACs are permitted only when they declare distinct address families.
+    pub fn dpu_loopback_reservations(&self) -> Result<Vec<DpuLoopbackReservation>, &'static str> {
+        let mut reservations: Vec<DpuLoopbackReservation> = Vec::new();
+        for interface in self.interfaces.iter().filter(|i| i.role.is_dpu_loopback()) {
+            interface.validate_ip_allocation()?;
+            let mac = interface.require_mac_address()?;
+            let address = interface.fixed_reservation_ip()?;
+            let index = match reservations.iter().position(|r| r.dpu_mac_address == mac) {
+                Some(index) => index,
+                None => {
+                    reservations.push(DpuLoopbackReservation {
+                        dpu_mac_address: mac,
+                        loopback_ipv4: None,
+                        loopback_ipv6: None,
+                    });
+                    reservations.len() - 1
+                }
+            };
+            let duplicate = match address {
+                IpAddr::V4(ip) => reservations[index].loopback_ipv4.replace(ip).is_some(),
+                IpAddr::V6(ip) => reservations[index].loopback_ipv6.replace(ip).is_some(),
+            };
+            if duplicate {
+                return Err("duplicate DPU loopback address family for the same MAC");
+            }
+        }
+        Ok(reservations)
     }
 
     /// The MAC the operator declared as this host's boot interface via
@@ -1136,12 +1169,12 @@ impl<'r> FromRow<'r, PgRow> for ExpectedMachine {
         };
 
         let json: sqlx::types::Json<Vec<ExpectedInterface>> = row.try_get("host_nics")?;
-        let interfaces: Vec<ExpectedInterface> = json.0;
+        let mut interfaces: Vec<ExpectedInterface> = json.0;
 
         // Reservations live in a child table and are hydrated by a JSON
         // subquery column. Reads that do not select that column (for example an
-        // `INSERT ... RETURNING *`) leave the field unhydrated as `None`; the
-        // owning db layer sets it explicitly in those paths.
+        // `INSERT ... RETURNING`) leave loopbacks out; the owning db layer
+        // hydrates them explicitly in those paths.
         let dpu_loopback_reservations = match row
             .try_get::<sqlx::types::Json<Vec<DpuLoopbackReservation>>, _>(
                 "dpu_loopback_reservations",
@@ -1151,6 +1184,13 @@ impl<'r> FromRow<'r, PgRow> for ExpectedMachine {
             Err(error) => return Err(error),
         };
 
+        if let Some(reservations) = dpu_loopback_reservations {
+            interfaces.extend(
+                reservations
+                    .iter()
+                    .flat_map(DpuLoopbackReservation::interfaces),
+            );
+        }
         Ok(ExpectedMachine {
             id: row.try_get("id")?,
             bmc_mac_address: row.try_get("bmc_mac_address")?,
@@ -1174,7 +1214,7 @@ impl<'r> FromRow<'r, PgRow> for ExpectedMachine {
                 host_lifecycle_profile: row
                     .try_get::<sqlx::types::Json<HostLifecycleProfile>, _>("host_lifecycle_profile")
                     .map(|j| j.0)?,
-                dpu_loopback_reservations,
+                replace_dpu_loopbacks: false,
             },
         })
     }
@@ -1242,24 +1282,6 @@ mod tests {
                 r#""no_dpu""# => Yields(HostDpuPolicy::Ignore),
             }
         );
-    }
-
-    /// The startup `expected_machines.json` import deserializes straight into the
-    /// model, so a reservation serial carrying surrounding whitespace must be
-    /// trimmed on the way in; otherwise it would never match Site Explorer's
-    /// trimmed DPU pairing serial and the deterministic reservation is lost.
-    #[test]
-    fn dpu_loopback_reservation_trims_serial_on_deserialize() {
-        let reservation: DpuLoopbackReservation = serde_json::from_str(
-            r#"{"dpu_serial_number":"  MT2000X00001  ","loopback_ipv4":"192.0.2.10"}"#,
-        )
-        .expect("valid reservation JSON");
-        assert_eq!(reservation.dpu_serial_number, "MT2000X00001");
-        assert_eq!(
-            reservation.loopback_ipv4,
-            Some("192.0.2.10".parse().unwrap())
-        );
-        assert_eq!(reservation.loopback_ipv6, None);
     }
 
     #[test]
@@ -2277,43 +2299,6 @@ mod tests {
         );
     }
 
-    /// Site Explorer resolves a DPU's reservation by pairing serial through
-    /// `dpu_loopback_reservation`, so a multi-DPU host must match each serial
-    /// to its own reservation regardless of declaration order, and an unknown
-    /// serial or an unhydrated (`None`) set must fall back to automatic
-    /// allocation.
-    #[test]
-    fn dpu_loopback_reservation_matches_by_serial_order_independently() {
-        let reservation = |serial: &str| DpuLoopbackReservation {
-            dpu_serial_number: serial.to_string(),
-            loopback_ipv4: Some(format!("192.0.2.{}", serial.len()).parse().unwrap()),
-            loopback_ipv6: None,
-        };
-        let data = ExpectedMachineData {
-            dpu_loopback_reservations: Some(vec![reservation("SER-BB"), reservation("SER-A")]),
-            ..Default::default()
-        };
-
-        // Each serial resolves to its own reservation regardless of order.
-        assert_eq!(
-            data.dpu_loopback_reservation("SER-A")
-                .map(|r| &r.dpu_serial_number),
-            Some(&"SER-A".to_string()),
-        );
-        assert_eq!(
-            data.dpu_loopback_reservation("SER-BB")
-                .map(|r| &r.dpu_serial_number),
-            Some(&"SER-BB".to_string()),
-        );
-
-        // An unknown serial and an unhydrated set both fall back to automatic.
-        assert_eq!(data.dpu_loopback_reservation("absent"), None);
-        assert_eq!(
-            ExpectedMachineData::default().dpu_loopback_reservation("SER-A"),
-            None,
-        );
-    }
-
     /// `resolved_network_segment_type` prefers the typed `network_segment_type`
     /// and otherwise maps the legacy `nic_type` string (case-insensitively),
     /// returning `None` when neither declaration names a segment type.
@@ -2601,6 +2586,168 @@ mod tests {
                 "{}",
                 case.name,
             );
+        }
+    }
+    #[test]
+    fn loopback_declarations_validate_and_group_by_mac_and_family() {
+        let declaration = ExpectedInterface {
+            mac_address: Some("02:00:00:00:00:20".parse().unwrap()),
+            role: ExpectedInterfaceRole::DpuLoopback,
+            fixed_ip: Some("198.51.100.20".parse().unwrap()),
+            ..Default::default()
+        };
+        let cases = [
+            ("fixed inferred", declaration.clone(), true),
+            (
+                "no MAC",
+                ExpectedInterface {
+                    mac_address: None,
+                    ..declaration.clone()
+                },
+                false,
+            ),
+            (
+                "no address",
+                ExpectedInterface {
+                    fixed_ip: None,
+                    ..declaration.clone()
+                },
+                false,
+            ),
+            (
+                "dynamic",
+                ExpectedInterface {
+                    ip_allocation: Some(ExpectedInterfaceIpAllocation::Dynamic),
+                    ..declaration.clone()
+                },
+                false,
+            ),
+            (
+                "retained",
+                ExpectedInterface {
+                    ip_allocation: Some(ExpectedInterfaceIpAllocation::Retained),
+                    ..declaration.clone()
+                },
+                false,
+            ),
+            (
+                "segment",
+                ExpectedInterface {
+                    network_segment_type: Some(NetworkSegmentType::Underlay),
+                    ..declaration.clone()
+                },
+                false,
+            ),
+            (
+                "mask",
+                ExpectedInterface {
+                    fixed_mask: Some("32".into()),
+                    ..declaration.clone()
+                },
+                false,
+            ),
+            (
+                "gateway",
+                ExpectedInterface {
+                    fixed_gateway: Some("198.51.100.1".parse().unwrap()),
+                    ..declaration.clone()
+                },
+                false,
+            ),
+            (
+                "primary false",
+                ExpectedInterface {
+                    primary: Some(false),
+                    ..declaration.clone()
+                },
+                false,
+            ),
+            (
+                "physical name",
+                ExpectedInterface {
+                    physical_ifname: Some("oob_net0".into()),
+                    ..declaration.clone()
+                },
+                false,
+            ),
+            (
+                "logical name",
+                ExpectedInterface {
+                    logical_ifname: Some("lo".into()),
+                    ..declaration.clone()
+                },
+                false,
+            ),
+            (
+                "legacy segment hint",
+                ExpectedInterface {
+                    nic_type: Some("oob".into()),
+                    ..declaration.clone()
+                },
+                false,
+            ),
+        ];
+        for (name, interface, valid) in cases {
+            assert_eq!(interface.validate_ip_allocation().is_ok(), valid, "{name}");
+        }
+        let mut data = ExpectedMachineData {
+            interfaces: vec![
+                declaration.clone(),
+                ExpectedInterface {
+                    fixed_ip: Some("2001:db8::20".parse().unwrap()),
+                    ..declaration.clone()
+                },
+            ],
+            ..Default::default()
+        };
+        let reservations = data.dpu_loopback_reservations().unwrap();
+        assert_eq!(reservations.len(), 1);
+        assert_eq!(
+            reservations[0].loopback_ipv4,
+            Some("198.51.100.20".parse().unwrap())
+        );
+        assert_eq!(
+            reservations[0].loopback_ipv6,
+            Some("2001:db8::20".parse().unwrap())
+        );
+        data.interfaces.push(declaration);
+        assert!(data.dpu_loopback_reservations().is_err());
+    }
+
+    #[test]
+    fn loopback_never_selects_a_dhcp_or_primary_interface() {
+        let mac = "02:00:00:00:00:20".parse().unwrap();
+        let loopback = ExpectedInterface {
+            mac_address: Some(mac),
+            role: ExpectedInterfaceRole::DpuLoopback,
+            fixed_ip: Some("198.51.100.20".parse().unwrap()),
+            ..Default::default()
+        };
+        let os = ExpectedInterface {
+            mac_address: Some(mac),
+            role: ExpectedInterfaceRole::DpuOs,
+            fixed_ip: Some("192.0.2.20".parse().unwrap()),
+            ..Default::default()
+        };
+        for interfaces in [
+            vec![loopback.clone(), os.clone()],
+            vec![os.clone(), loopback.clone()],
+            vec![loopback],
+        ] {
+            let has_os = interfaces.len() == 2;
+            let machine = ExpectedMachine {
+                id: None,
+                bmc_mac_address: "02:00:00:00:00:01".parse().unwrap(),
+                data: ExpectedMachineData {
+                    interfaces,
+                    ..Default::default()
+                },
+            };
+            assert_eq!(
+                machine.interface_for_initial_allocation(mac, IpAddressFamily::Ipv4),
+                has_os.then_some(os.clone())
+            );
+            assert_eq!(machine.data.declared_primary_mac(), None);
         }
     }
 }

@@ -19,8 +19,7 @@ nico-admin-cli expected-machine patch
 [--dpf-enabled] [--bmc-ip-address] [--extended]
 [--bmc-retain-credentials] [--dpu-policy]
 [--bmc-ip-allocation] [--interfaces]
-[--disable-lockdown] [--dpu-loopback-reservations]
-[--sort-by] [-h|--help]
+[--disable-lockdown] [--sort-by] [-h|--help]
 ```
 
 ## DESCRIPTION
@@ -202,7 +201,7 @@ record. Unset preserves the existing per-host value.
 Interfaces as a JSON array of ExpectedInterface objects (fields:
 mac_address, role, ip_allocation, network_segment_type, fixed_ip,
 fixed_mask, fixed_gateway, primary; legacy: nic_type). Accepted values:
-role=host|dpu_os|dpu_bmc|host_bmc|unspecified and
+role=host|dpu_os|dpu_bmc|host_bmc|dpu_loopback|unspecified and
 ip_allocation=dynamic|fixed|retained|unspecified.
 network_segment_type uses protobuf enum numbers: tenant=0, admin=1,
 underlay=2, host_inband=3. Replaces the full interface list for the
@@ -224,18 +223,6 @@ setting
 > - true
 >
 > - false
-
-`--dpu-loopback-reservations <DPU_LOOPBACK_RESERVATIONS>`
-
-Deterministic DPU underlay loopback reservations as a JSON array of
-objects (fields: dpu_serial_number, loopback_ipv4, loopback_ipv6), keyed
-by the trimmed DPU pairing serial number. Replaces the full reservation
-list for the machine: omit the flag to preserve the stored reservations,
-or pass an empty array [] to clear them. Each reservation requires at
-least one address, and each address must be a value from the sites
-non-auto-assignable lo-ip / lo-ip-v6 pool that is not already reserved
-for or allocated to another DPU. Example:
-[{"dpu_serial_number":"MT2000X00001","loopback_ipv4":"192.0.2.10"}].
 
 `--sort-by <SORT_BY> [default: primary-id]`
 
@@ -262,6 +249,8 @@ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --bmc-
 nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --dpu-policy ignore
 nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --bmc-ip-allocation retained
 nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --interfaces '[{"mac_address":"02:00:00:00:20:01","fixed_ip":"192.0.2.10"}]'
+nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --interfaces '[{"mac_address":"02:00:00:00:20:01","role":"dpu_loopback","fixed_ip":"198.51.100.20"}]'
+nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --interfaces '[]'
 nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --interfaces '[{"mac_address":"02:00:00:00:20:01","role":"unspecified","ip_allocation":"unspecified","fixed_ip":"192.0.2.10"}]'
 ```
 

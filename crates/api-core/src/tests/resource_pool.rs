@@ -133,7 +133,6 @@ async fn test_grow_ipv6_loopback_pool_backfills_existing_dpus(
             ManagedHostState::Ready,
             None,
             2,
-            None,
         )
         .await?;
     }

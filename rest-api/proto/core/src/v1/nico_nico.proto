@@ -7444,8 +7444,10 @@ message ExpectedHostNic {
   // On update, omission clears this guard.
   optional NetworkSegmentType network_segment_type = 7;
   // Machine endpoint that owns this interface. The role selects interface type
-  // and primary behavior only; every role accepts the same allocation policies
-  // and optional segment guard. On create, missing and Unspecified mean Host.
+  // and primary behavior. DpuLoopback instead reserves fixed_ip from the
+  // loopback resource pool using the DPU OS/admin MAC; only Fixed (or inferred
+  // Fixed) is supported and physical-interface settings are rejected.
+  // On create, missing and Unspecified mean Host.
   // On update, omission preserves the stored role while explicit Unspecified
   // resets it to Host.
   optional ExpectedInterfaceRole role = 8;
@@ -7455,7 +7457,8 @@ message ExpectedHostNic {
   // matching stored policy while `fixed_ip` presence is unchanged; explicit
   // Unspecified resets to inference. New interfaces use create behavior.
   // Explicit Dynamic rejects `fixed_ip`. Explicit Fixed, or a DPU role that
-  // infers Fixed, requires `fixed_ip` inside a configured managed prefix. A
+  // infers Fixed, requires `fixed_ip` inside a configured managed prefix
+  // (DpuLoopback instead requires a non-auto-assign loopback pool address). A
   // legacy Host declaration, or an inferred Host BMC Fixed policy that omits
   // `network_segment_type`, may instead fall back to `static-assignments`; only
   // the legacy Host case leaves `network_segment_type` as a first-DHCP
@@ -7523,31 +7526,6 @@ message HostLifecycleProfile {
   optional bool disable_lockdown = 1;
 }
 
-// A deterministic DPU underlay loopback reservation, keyed by the DPU pairing
-// serial number (the same identity NICo pairs DPUs by and the operator declares
-// in `fallback_dpu_serial_numbers`), not by a MAC. At least one address must be
-// present. Each address, when set, must be a value drawn from the site's
-// `lo-ip` / `lo-ip-v6` pool that is not auto-assignable and not already reserved
-// for or allocated to another DPU.
-message DpuLoopbackReservation {
-  // Trimmed, exact DPU pairing serial number this reservation applies to.
-  string dpu_serial_number = 1;
-  // Reserved IPv4 underlay loopback. Omitted or empty means no IPv4 reservation
-  // for this DPU, which preserves automatic IPv4 allocation.
-  optional string loopback_ipv4 = 2;
-  // Reserved IPv6 underlay loopback. Omitted or empty means no IPv6 reservation
-  // for this DPU, which preserves automatic IPv6 allocation.
-  optional string loopback_ipv6 = 3;
-}
-
-// Wrapper that distinguishes an omitted reservation set from an explicitly empty
-// one. On ExpectedMachine, an absent `dpu_loopback_reservations` preserves the
-// stored reservations (older clients), while a present message with an empty
-// `reservations` list clears them.
-message DpuLoopbackReservationList {
-  repeated DpuLoopbackReservation reservations = 1;
-}
-
 message ExpectedMachine {
   string bmc_mac_address = 1;
   string bmc_username = 2;
@@ -7601,12 +7579,12 @@ message ExpectedMachine {
   // name will be presented to the switches in LLDP responses and is potentially
   // used for cable validation, etc.
   optional string server_name = 20;
-  // Deterministic DPU underlay loopback reservations. The optional wrapper
-  // preserves omitted-versus-empty semantics uniformly across create, update,
-  // batch update, and replace-all: an absent message preserves the stored
-  // reservations (so an older client cannot drop them on a read-modify-write),
-  // while a present message with an empty `reservations` list clears them.
-  optional DpuLoopbackReservationList dpu_loopback_reservations = 29;
+  // Replace the DpuLoopback subset of host_nics, including clearing it when
+  // empty. False/omitted preserves stored loopbacks unless DpuLoopback entries
+  // are supplied, which also explicitly replace the subset. This preserves
+  // reservations across older clients' read-modify-write and replace-all.
+  // 21-28 are used by the REST protobuf snapshot's additional inventory fields.
+  bool replace_dpu_loopbacks = 29;
 
   // WARNING: Following fields are not present in Core, but added directly in REST snapshot
   optional string name = 21;
@@ -11160,6 +11138,9 @@ enum ExpectedInterfaceRole {
   EXPECTED_INTERFACE_ROLE_DPU_BMC = 3;
   // Host Redfish/BMC interface. Never primary.
   EXPECTED_INTERFACE_ROLE_HOST_BMC = 4;
+  // Underlay loopback reservation identified by the DPU OS/admin MAC. Fixed
+  // allocation only, one fixed_ip per family. No physical interface is created.
+  EXPECTED_INTERFACE_ROLE_DPU_LOOPBACK = 5;
 }
 
 // Controls how an expected interface receives and retains its IP address.
@@ -11905,7 +11886,7 @@ message PatchExpectedMachineRequest {
   // fallback_dpu_serial_numbers, sku_id, rack_id, is_dpf_enabled,
   // default_pause_ingestion_and_poweron, bmc_retain_credentials, dpu_mode,
   // bmc_ip_address, bmc_ip_allocation, host_nics,
-  // host_lifecycle_profile.disable_lockdown, dpu_loopback_reservations,
+  // host_lifecycle_profile.disable_lockdown,
   // metadata.name, metadata.description, metadata.labels.
   //
   // Unselected values are ignored. Selected values replace the stored field,
@@ -11929,12 +11910,10 @@ message PatchExpectedMachineRequest {
   // nested Host BMC values. The legacy `replace_host_nics` flag is ignored;
   // only the mask selects interface replacement.
   //
-  // Selecting `dpu_loopback_reservations` replaces the entire reservation list,
-  // including an empty list, which clears every stored reservation. A selected
-  // but absent `DpuLoopbackReservationList` wrapper is treated as an empty list
-  // and clears them as well. Each reservation is validated against the `lo-ip` /
-  // `lo-ip-v6` pools when selected; an unselected path leaves the stored
-  // reservations unchanged.
+  // When host_nics is selected, replace_dpu_loopbacks explicitly replaces its
+  // loopback subset, including clearing it when empty. Without this signal or
+  // any supplied DpuLoopback entries, stored loopbacks are preserved for older
+  // clients. The flag has no effect when host_nics is not selected.
   //
   // A selected `chassis_serial_number` must contain 4-32 ASCII letters,
   // digits, hyphens, or underscores. Selected `fallback_dpu_serial_numbers`

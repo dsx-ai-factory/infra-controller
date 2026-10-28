@@ -1908,11 +1908,10 @@ impl SiteExplorer {
                 self.config.retained_boot_interface_window,
             )
             .await;
-            for nic in
-                expected_machine.data.interfaces.iter().filter(|interface| {
-                    interface.mac_address != Some(expected_machine.bmc_mac_address)
-                })
-            {
+            for nic in expected_machine.data.interfaces.iter().filter(|interface| {
+                !interface.role.is_dpu_loopback()
+                    && interface.mac_address != Some(expected_machine.bmc_mac_address)
+            }) {
                 try_apply_expected_interface(
                     &self.database_connection,
                     expected_machine,
@@ -2038,10 +2037,13 @@ impl SiteExplorer {
             .iter()
             .flat_map(|machine| &machine.data.interfaces)
             .filter(|interface| {
-                // A DpuOs interface terminates on the DPU operating system,
-                // not its management controller. Redfish is exposed through
-                // the separate DpuBmc interface.
-                interface.role == model::expected_machine::ExpectedInterfaceRole::DpuOs
+                // Both declarations identify the OS/admin MAC, including when
+                // only loopback intent is supplied. Redfish uses DpuBmc.
+                matches!(
+                    interface.role,
+                    model::expected_machine::ExpectedInterfaceRole::DpuOs
+                        | model::expected_machine::ExpectedInterfaceRole::DpuLoopback
+                )
             })
             .filter_map(|interface| interface.mac_address)
             .chain(

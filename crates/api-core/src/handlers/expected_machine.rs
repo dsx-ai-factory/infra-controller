@@ -229,150 +229,87 @@ async fn validate_expected_machine(
     validate_reservation_pool_membership(txn, common_pools, machine, existing).await
 }
 
-/// Request-shape validation for DPU loopback reservations that needs no
-/// database: each reservation names a non-empty serial and at least one
-/// address, and neither a serial nor a per-family address repeats within the
-/// request. Pool membership and cross-machine uniqueness are checked separately
-/// (see [`validate_reservation_pool_membership`]) or enforced by the database.
-///
-/// An omitted reservation set (`None`) preserves stored reservations and is not
-/// validated here; those values were validated when they were first set.
+/// Reject duplicate per-family addresses in the request. The child table also
+/// enforces uniqueness across machines and concurrent writers.
 fn validate_dpu_loopback_reservation_shape(machine: &ExpectedMachine) -> Result<(), CarbideError> {
-    let Some(reservations) = machine.data.dpu_loopback_reservations.as_deref() else {
-        return Ok(());
-    };
-
-    let mut seen_serials = HashSet::with_capacity(reservations.len());
-    let mut seen_ipv4 = HashSet::new();
-    let mut seen_ipv6 = HashSet::new();
-    for reservation in reservations {
-        if reservation.dpu_serial_number.trim().is_empty() {
+    let reservations = machine
+        .data
+        .dpu_loopback_reservations()
+        .map_err(|message| CarbideError::InvalidArgument(message.to_string()))?;
+    let mut addresses = HashSet::new();
+    for interface in reservations
+        .iter()
+        .flat_map(DpuLoopbackReservation::interfaces)
+    {
+        if !addresses.insert(interface.fixed_ip) {
             return Err(CarbideError::InvalidArgument(
-                "DPU loopback reservation requires a non-empty DPU serial number".to_string(),
+                "duplicate DPU loopback address in request".to_string(),
             ));
         }
-        if reservation.has_no_address() {
-            return Err(CarbideError::InvalidArgument(format!(
-                "DPU loopback reservation for serial {} requires at least one address",
-                reservation.dpu_serial_number
-            )));
-        }
-        if !seen_serials.insert(reservation.dpu_serial_number.as_str()) {
-            return Err(CarbideError::InvalidArgument(format!(
-                "duplicate DPU loopback reservation for serial {}",
-                reservation.dpu_serial_number
-            )));
-        }
-        if let Some(ipv4) = reservation.loopback_ipv4
-            && !seen_ipv4.insert(ipv4)
-        {
-            return Err(CarbideError::InvalidArgument(format!(
-                "duplicate DPU loopback IPv4 address {ipv4} in request"
-            )));
-        }
-        if let Some(ipv6) = reservation.loopback_ipv6
-            && !seen_ipv6.insert(ipv6)
-        {
-            return Err(CarbideError::InvalidArgument(format!(
-                "duplicate DPU loopback IPv6 address {ipv6} in request"
-            )));
-        }
     }
-
     Ok(())
 }
 
-/// Validate that each new or changed reserved address is usable in its pool.
-///
-/// The reservation table records the operator's *future intent* for a DPU
-/// serial; the resource pool records *live ownership* keyed by DPU machine id.
-/// The two are reconciled at DPU creation, not here. This check only proves a
-/// replacement set is admissible before it is stored.
-///
-/// A reservation whose per-family address matches the stored value for that DPU
-/// serial is unchanged and skipped, so re-submitting an existing reservation is
-/// a no-op rather than a conflict. Every other reserved address must exist in
-/// the matching pool (`lo-ip` / `lo-ip-v6`), sit in the non-auto-assign
-/// partition, and be either free or already allocated to the very DPU this
-/// reservation targets -- so restoring an identical declaration after a clear
-/// succeeds while the DPU still holds the address. A value owned by any other
-/// DPU is rejected. Address-family correctness is guaranteed by the typed model.
-///
-/// Before reading pool state the writer locks this host's existing reservation
-/// rows, serializing with a concurrent DPU creation that read one of them under
-/// [`db::expected_dpu_loopback_reservation::find_by_dpu_serial_for_update`]. That
-/// makes a same-host address transfer observe the creation's committed
-/// allocation instead of validating against a soon-to-be-stale free value.
-///
-/// `None` reservations (an older client's omission) preserve stored values and
-/// need no validation.
+/// Serialize replacement with creation before checking live pool ownership.
 async fn validate_reservation_pool_membership(
     txn: &mut sqlx::PgConnection,
     common_pools: &CommonPools,
     machine: &ExpectedMachine,
-    existing: Option<&ExpectedMachine>,
+    _existing: Option<&ExpectedMachine>,
 ) -> Result<(), CarbideError> {
-    let Some(incoming) = machine.data.dpu_loopback_reservations.as_deref() else {
+    if !machine.data.replaces_dpu_loopbacks() {
         return Ok(());
-    };
-
-    // Lock this host's current reservation rows for the write transaction before
-    // observing pool state, so a concurrent DPU creation that locked one of them
-    // finishes first and its allocation is visible below.
+    }
+    let incoming = machine
+        .data
+        .dpu_loopback_reservations()
+        .map_err(|message| CarbideError::InvalidArgument(message.to_string()))?;
     db::expected_dpu_loopback_reservation::lock_for_machine(txn, machine.bmc_mac_address).await?;
-
-    let existing_by_serial: HashMap<&str, &DpuLoopbackReservation> = existing
-        .and_then(|machine| machine.data.dpu_loopback_reservations.as_deref())
-        .into_iter()
-        .flatten()
-        .map(|reservation| (reservation.dpu_serial_number.as_str(), reservation))
-        .collect();
-
+    let existing =
+        db::expected_dpu_loopback_reservation::find_for_machine(&mut *txn, machine.bmc_mac_address)
+            .await?;
     for reservation in incoming {
-        let stored = existing_by_serial
-            .get(reservation.dpu_serial_number.as_str())
-            .copied();
-
+        let stored = existing
+            .iter()
+            .find(|r| r.dpu_mac_address == reservation.dpu_mac_address);
         if let Some(ipv4) = reservation.loopback_ipv4
-            && stored.and_then(|stored| stored.loopback_ipv4) != Some(ipv4)
+            && stored.and_then(|r| r.loopback_ipv4) != Some(ipv4)
         {
             validate_reserved_pool_address(
                 txn,
                 common_pools.ethernet.pool_loopback_ip.as_ref(),
                 IpAddr::V4(ipv4),
                 model::resource_pool::common::LOOPBACK_IP,
-                &reservation.dpu_serial_number,
+                reservation.dpu_mac_address,
             )
             .await?;
         }
-
         if let Some(ipv6) = reservation.loopback_ipv6
-            && stored.and_then(|stored| stored.loopback_ipv6) != Some(ipv6)
+            && stored.and_then(|r| r.loopback_ipv6) != Some(ipv6)
         {
             validate_reserved_pool_address(
                 txn,
                 common_pools.ethernet.pool_loopback_ip_v6.as_ref(),
                 ipv6,
                 model::resource_pool::common::LOOPBACK_IP_V6,
-                &reservation.dpu_serial_number,
+                reservation.dpu_mac_address,
             )
             .await?;
         }
     }
-
     Ok(())
 }
 
 /// Check one reserved address against its pool: it must exist, be
 /// non-auto-assignable, and be either free or already allocated to the DPU this
-/// reservation targets (identified by `intended_dpu_serial`). A value owned by
+/// reservation targets (identified by `intended_dpu_mac`). A value owned by
 /// any other DPU is rejected.
 async fn validate_reserved_pool_address<T>(
     txn: &mut sqlx::PgConnection,
     pool: &ResourcePool<T>,
     value: T,
     pool_label: &str,
-    intended_dpu_serial: &str,
+    intended_dpu_mac: MacAddress,
 ) -> Result<(), CarbideError>
 where
     T: ToString + FromStr + Send + Sync + 'static,
@@ -393,7 +330,7 @@ where
     match info.state {
         model::resource_pool::ResourcePoolEntryState::Free => Ok(()),
         model::resource_pool::ResourcePoolEntryState::Allocated { owner, .. }
-            if pool_owner_is_dpu_serial(txn, &owner, intended_dpu_serial).await? =>
+            if pool_owner_is_dpu_mac(txn, &owner, intended_dpu_mac).await? =>
         {
             // The address is already this DPU's live allocation: restoring the
             // same declaration must not fail while the DPU still owns it.
@@ -407,51 +344,56 @@ where
     }
 }
 
-/// Whether a pool `owner` string is the DPU machine that pairs to
-/// `intended_dpu_serial`.
-///
-/// The pool records ownership by DPU machine id; the reservation targets a DPU
-/// by its pairing (product) serial. Resolving the owner id back to its serial
-/// through the machine topology ties the allocation to the *specific* DPU, so a
-/// value held by a different DPU -- even one on the same host -- is not mistaken
-/// for the intended owner. A non-machine owner or an owner id that no longer
-/// resolves to a serial is treated as "not this DPU".
-async fn pool_owner_is_dpu_serial(
+/// Accept an address already held by the DPU with this OS/admin MAC.
+async fn pool_owner_is_dpu_mac(
     txn: &mut sqlx::PgConnection,
     owner: &str,
-    intended_dpu_serial: &str,
+    intended_dpu_mac: MacAddress,
 ) -> Result<bool, CarbideError> {
-    let Ok(owner_id) = owner.parse::<carbide_uuid::machine::MachineId>() else {
+    let Ok(owner_id) = owner.parse::<carbide_uuid::machine::DpuMachineId>() else {
         return Ok(false);
     };
-    let owner_serial = db::machine_topology::serial_for_machine(&mut *txn, &owner_id).await?;
-    Ok(owner_serial.as_deref() == Some(intended_dpu_serial))
+    let interfaces =
+        db::machine_interface::find_by_mac_address(&mut *txn, intended_dpu_mac).await?;
+    if interfaces
+        .iter()
+        .any(|interface| interface.machine_id == Some(owner_id.into()))
+    {
+        return Ok(true);
+    }
+    // Site Explorer can create the DPU before its OS interface first DHCPs.
+    // Its predicted interface already records the same MAC-to-DPU identity.
+    Ok(
+        db::predicted_machine_interface::find_by_mac_address(txn, intended_dpu_mac)
+            .await?
+            .is_some_and(|interface| interface.machine_id == owner_id.into()),
+    )
 }
 
-/// Preserve an omitted reservation set on replace-all.
-///
-/// Replace-all recreates every row, so an omitted (`None`) reservation set must
-/// be back-filled from the previous machine or it would be dropped. This
-/// mirrors [`preserve_omitted_rpc_role_and_allocation`]: an absent wrapper keeps
-/// stored reservations, while a present empty list still clears them.
+/// Replace-all recreates parent rows. Preserve loopbacks that an older client
+/// cannot represent before the delete cascades through the child table.
 fn preserve_omitted_dpu_loopback_reservations(
     replacement: &mut rpc::ExpectedMachine,
     existing: Option<&ExpectedMachine>,
 ) {
-    if replacement.dpu_loopback_reservations.is_some() {
+    if replacement.replace_dpu_loopbacks
+        || replacement
+            .interfaces()
+            .iter()
+            .any(|i| i.role == Some(rpc::ExpectedInterfaceRole::DpuLoopback as i32))
+    {
         return;
     }
-    let Some(existing) = existing else {
-        return;
-    };
-    if let Some(reservations) = existing.data.dpu_loopback_reservations.as_ref() {
-        replacement.dpu_loopback_reservations = Some(rpc::DpuLoopbackReservationList {
-            reservations: reservations
+    if let Some(existing) = existing {
+        replacement.interfaces_mut().extend(
+            existing
+                .data
+                .interfaces
                 .iter()
+                .filter(|i| i.role.is_dpu_loopback())
                 .cloned()
-                .map(rpc::DpuLoopbackReservation::from)
-                .collect(),
-        });
+                .map(rpc::ExpectedInterface::from),
+        );
     }
 }
 
@@ -813,6 +755,8 @@ async fn apply_machine_patch(
         let previous = machine.clone();
         if fields.contains(UpdateField::HostNics) {
             preserve_omitted_rpc_role_and_allocation(&mut patch, Some(&previous));
+            preserve_omitted_dpu_loopback_reservations(&mut patch, Some(&previous));
+            machine.data.replace_dpu_loopbacks = patch.replace_dpu_loopbacks;
             // Preserve the explicit reset before converting Unspecified to
             // the model's inferred allocation policy.
             if bmc_overrides.ip_allocation.is_none()
@@ -874,25 +818,6 @@ async fn apply_machine_patch(
             .host_lifecycle_profile
             .and_then(|profile| profile.disable_lockdown);
     }
-    // Applying reservations replaces the stored set (an empty list clears it).
-    // Keep the pre-patch machine so the pool check can treat an unchanged
-    // per-DPU address as a no-op, and validate against live pool state below --
-    // the native patch path performs no other reservation validation.
-    let reservation_baseline = if fields.contains(UpdateField::DpuLoopbackReservations) {
-        let baseline = machine.clone();
-        let reservations = patch
-            .dpu_loopback_reservations
-            .take()
-            .unwrap_or_default()
-            .reservations
-            .into_iter()
-            .map(DpuLoopbackReservation::try_from)
-            .collect::<Result<Vec<_>, _>>()?;
-        machine.data.dpu_loopback_reservations = Some(reservations);
-        Some(baseline)
-    } else {
-        None
-    };
     fields.update_metadata(patch.metadata, &mut machine.data.metadata)?;
     // Match the replacement RPC's validation of the complete metadata.
     machine
@@ -901,9 +826,7 @@ async fn apply_machine_patch(
         .validate(false)
         .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
     validate_expected_machine_for_insert(&machine)?;
-    if let Some(baseline) = reservation_baseline.as_ref() {
-        validate_reservation_pool_membership(txn, common_pools, &machine, Some(baseline)).await?;
-    }
+    validate_reservation_pool_membership(txn, common_pools, &machine, None).await?;
     let preallocations = update_preallocated_interfaces(txn, &machine, retained_window).await?;
     db::expected_machine::update(txn, &machine).await?;
     Ok(preallocations)
@@ -1044,7 +967,8 @@ fn validate_expected_interfaces(interfaces: &[ExpectedInterface]) -> Result<(), 
 fn validate_expected_interface_role_and_allocation(
     interfaces: &[ExpectedInterface],
 ) -> Result<(), CarbideError> {
-    let mut roles_by_mac = HashMap::new();
+    let mut roles_by_mac: HashMap<MacAddress, Vec<model::expected_machine::ExpectedInterfaceRole>> =
+        HashMap::new();
     for interface in interfaces {
         interface
             .validate_identity()
@@ -1065,20 +989,23 @@ fn validate_expected_interface_role_and_allocation(
                 interface.role,
             )));
         }
-        // One MAC may have separate IPv4 and IPv6 fixed reservations, so
-        // duplicate entries remain valid. Their role still has to agree:
-        // DHCP consumes one matching declaration while Site Explorer consumes
-        // every declaration, and role controls row type, primary behavior, and
-        // Redfish scanning in both paths.
-        if let Some(mac_address) = interface.mac_address
-            && let Some(existing_role) = roles_by_mac.insert(mac_address, interface.role)
-            && existing_role != interface.role
-        {
-            return Err(CarbideError::InvalidArgument(format!(
-                "interfaces entries for MAC {} must use the same role; found {existing_role} and {}",
-                interface.identity(),
-                interface.role,
-            )));
+        if let Some(mac) = interface.mac_address {
+            let roles = roles_by_mac.entry(mac).or_default();
+            for &role in roles.iter() {
+                use model::expected_machine::ExpectedInterfaceRole::{DpuLoopback, DpuOs};
+                if role != interface.role
+                    && !matches!(
+                        (role, interface.role),
+                        (DpuOs, DpuLoopback) | (DpuLoopback, DpuOs)
+                    )
+                {
+                    return Err(CarbideError::InvalidArgument(format!(
+                        "interfaces entries for MAC {mac} must use the same role except DpuOs/DpuLoopback; found {role} and {}",
+                        interface.role
+                    )));
+                }
+            }
+            roles.push(interface.role);
         }
     }
 
@@ -1290,7 +1217,32 @@ fn preserve_omitted_rpc_role_and_allocation(
                 Some(mac)
             }
         };
+        // A legacy client may round-trip an address without its newer role.
+        // Recognize a stored loopback by MAC and address before falling
+        // back to the physical declaration sharing that MAC.
+        let loopback = interface.role == Some(rpc::ExpectedInterfaceRole::DpuLoopback as i32)
+            || (interface.role.is_none()
+                && existing.data.interfaces.iter().any(|stored| {
+                    stored.role.is_dpu_loopback()
+                        && stored.mac_address == mac_address
+                        && stored.fixed_ip.is_some()
+                        && stored.fixed_ip
+                            == interface.fixed_ip.as_deref().and_then(|ip| ip.parse().ok())
+                }));
         let matches_identity = |candidate: &&ExpectedInterface| {
+            if candidate.role.is_dpu_loopback() != loopback {
+                return false;
+            }
+            if loopback
+                && candidate.fixed_ip.map(|ip| ip.is_ipv4())
+                    != interface
+                        .fixed_ip
+                        .as_deref()
+                        .and_then(|ip| ip.parse::<IpAddr>().ok())
+                        .map(|ip| ip.is_ipv4())
+            {
+                return false;
+            }
             if let Some(mac) = mac_address {
                 candidate.mac_address == Some(mac)
             } else {
@@ -1368,9 +1320,10 @@ async fn update_preallocated_interfaces(
     }
 
     for interface in machine.data.interfaces.iter().filter(|interface| {
-        interface
-            .mac_address
-            .is_some_and(|mac| mac != machine.bmc_mac_address)
+        !interface.role.is_dpu_loopback()
+            && interface
+                .mac_address
+                .is_some_and(|mac| mac != machine.bmc_mac_address)
     }) {
         if interface.fixed_ip.is_some() {
             preallocations.push(
@@ -2122,6 +2075,55 @@ mod tests {
                 },
             ],
             |interfaces| validate_expected_interface_role_and_allocation(&interfaces).is_ok(),
+        );
+    }
+
+    #[test]
+    fn omitted_role_preserves_loopback_identity_with_shared_mac() {
+        let mac: MacAddress = "02:00:00:00:00:20".parse().unwrap();
+        let existing = ExpectedMachine {
+            id: None,
+            bmc_mac_address: "02:00:00:00:00:01".parse().unwrap(),
+            data: ExpectedMachineData {
+                interfaces: vec![
+                    ExpectedInterface {
+                        mac_address: Some(mac),
+                        role: model::expected_machine::ExpectedInterfaceRole::DpuOs,
+                        fixed_ip: Some("192.0.2.20".parse().unwrap()),
+                        ..Default::default()
+                    },
+                    ExpectedInterface {
+                        mac_address: Some(mac),
+                        role: model::expected_machine::ExpectedInterfaceRole::DpuLoopback,
+                        fixed_ip: Some("198.51.100.20".parse().unwrap()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        };
+        // Legacy clients can reorder entries and omit the role. The loopback
+        // address must not inherit the OS role just because the MAC matches.
+        let mut replacement = rpc::ExpectedMachine {
+            host_nics: ["198.51.100.20", "192.0.2.20"]
+                .map(|address| rpc::ExpectedInterface {
+                    mac_address: Some(mac.to_string()),
+                    fixed_ip: Some(address.to_string()),
+                    primary: Some(false),
+                    ..Default::default()
+                })
+                .to_vec(),
+            ..Default::default()
+        };
+        preserve_omitted_rpc_role_and_allocation(&mut replacement, Some(&existing));
+        assert_eq!(
+            replacement.host_nics[0].role,
+            Some(rpc::ExpectedInterfaceRole::DpuLoopback as i32)
+        );
+        assert_eq!(replacement.host_nics[0].primary, None);
+        assert_eq!(
+            replacement.host_nics[1].role,
+            Some(rpc::ExpectedInterfaceRole::DpuOs as i32)
         );
     }
 

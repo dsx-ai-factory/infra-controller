@@ -687,7 +687,7 @@ async fn define_loopback_ipv6_pool(env: &common::api_fixtures::TestEnv) {
 }
 
 /// Create a host expected machine carrying one DPU loopback reservation. Direct
-/// discovery resolves the reservation globally by DPU serial, so only the child
+/// discovery resolves the reservation globally by DPU OS/admin MAC, so only the child
 /// row and its foreign-key parent need to exist.
 async fn seed_reservation_host(
     env: &common::api_fixtures::TestEnv,
@@ -703,7 +703,18 @@ async fn seed_reservation_host(
             id: None,
             bmc_mac_address: host_bmc_mac,
             data: ExpectedMachineData {
-                dpu_loopback_reservations: Some(vec![reservation]),
+                interfaces: reservation
+                    .interfaces()
+                    .chain([model::expected_machine::ExpectedInterface {
+                        mac_address: Some(reservation.dpu_mac_address),
+                        role: model::expected_machine::ExpectedInterfaceRole::DpuOs,
+                        ip_allocation: Some(
+                            model::expected_machine::ExpectedInterfaceIpAllocation::Fixed,
+                        ),
+                        fixed_ip: Some("192.0.2.200".parse().unwrap()),
+                        ..Default::default()
+                    }])
+                    .collect(),
                 ..Default::default()
             },
         },
@@ -807,7 +818,7 @@ async fn test_direct_discovery_applies_dpu_loopback_reservation(
         &env,
         "aa:bb:cc:dd:ee:10".parse()?,
         model::expected_machine::DpuLoopbackReservation {
-            dpu_serial_number: dpu.serial.clone(),
+            dpu_mac_address: dpu.oob_mac_address,
             loopback_ipv4: Some(reserved_v4),
             loopback_ipv6: Some(reserved_v6),
         },
@@ -820,20 +831,73 @@ async fn test_direct_discovery_applies_dpu_loopback_reservation(
         Some(IpAddr::V4(reserved_v4))
     );
     assert_eq!(dpu_machine.network_config.loopback_ip_v6, Some(reserved_v6));
+    let interfaces =
+        db::machine_interface::find_by_mac_address(&env.pool, dpu.oob_mac_address).await?;
+    assert!(
+        interfaces
+            .iter()
+            .flat_map(|i| &i.addresses)
+            .any(|address| *address == "192.0.2.200".parse::<IpAddr>().unwrap())
+    );
+    assert!(
+        interfaces
+            .iter()
+            .flat_map(|i| &i.addresses)
+            .all(|address| *address != IpAddr::V4(reserved_v4))
+    );
+    // Changing intent does not readdress this live DPU on rediscovery.
+    let mut txn = env.pool.begin().await?;
+    db::expected_dpu_loopback_reservation::replace_for_machine(
+        &mut txn,
+        "aa:bb:cc:dd:ee:10".parse()?,
+        &[],
+    )
+    .await?;
+    txn.commit().await?;
+    let rediscovered = discover_dpu_by_source_ip(&env, dpu, HardwareInfo::from(dpu)).await;
+    assert_eq!(
+        rediscovered.network_config.loopback_ip,
+        dpu_machine.network_config.loopback_ip
+    );
+    assert_eq!(
+        rediscovered.network_config.loopback_ip_v6,
+        dpu_machine.network_config.loopback_ip_v6
+    );
+    // Restoring intent for an already-discovered OS MAC is accepted because
+    // the resource pool's owner is that DPU, without changing its addresses.
+    let mut expected = env
+        .api
+        .get_expected_machine(Request::new(rpc::forge::ExpectedMachineRequest {
+            bmc_mac_address: "aa:bb:cc:dd:ee:10".to_string(),
+            id: None,
+        }))
+        .await?
+        .into_inner();
+    expected.bmc_username = "ADMIN".to_string();
+    expected.bmc_password = "PASS".to_string();
+    expected.chassis_serial_number = "LOOPBACK-HOST".to_string();
+    expected.host_nics.extend(
+        model::expected_machine::DpuLoopbackReservation {
+            dpu_mac_address: dpu.oob_mac_address,
+            loopback_ipv4: Some(reserved_v4),
+            loopback_ipv6: Some(reserved_v6),
+        }
+        .interfaces()
+        .map(rpc::forge::ExpectedInterface::from),
+    );
+    env.api
+        .update_expected_machine(Request::new(expected))
+        .await?;
     Ok(())
 }
 
-/// Scout reports shared `Unspecified...` placeholders for a BlueField's board
-/// and chassis serials. A reservation keyed by that placeholder must not be
-/// applied to an unrelated DPU: only the product serial selects a reservation,
-/// so this DPU auto-assigns from the pool instead.
+/// Direct discovery uses the caller's MAC and leaves another DPU's reserved
+/// address untouched while allocating automatically for an undeclared MAC.
 #[crate::sqlx_test]
-async fn test_direct_discovery_ignores_placeholder_board_and_chassis_serials(
+async fn test_direct_discovery_does_not_use_another_mac_reservation(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::net::Ipv4Addr;
-
-    const PLACEHOLDER_SERIAL: &str = "Unspecified System Serial Number";
 
     let env = create_test_env_with_overrides(
         pool,
@@ -841,7 +905,7 @@ async fn test_direct_discovery_ignores_placeholder_board_and_chassis_serials(
     )
     .await;
 
-    // A reservation another DPU would own, keyed by the shared placeholder.
+    // A reservation for a different DPU OS/admin MAC.
     let reserved_v4 = Ipv4Addr::new(172, 30, 0, 20);
     let mut txn = env.pool.begin().await?;
     db::resource_pool::populate(
@@ -856,25 +920,16 @@ async fn test_direct_discovery_ignores_placeholder_board_and_chassis_serials(
         &env,
         "aa:bb:cc:dd:ee:20".parse()?,
         model::expected_machine::DpuLoopbackReservation {
-            dpu_serial_number: PLACEHOLDER_SERIAL.to_string(),
+            dpu_mac_address: "02:00:00:00:ff:ff".parse()?,
             loopback_ipv4: Some(reserved_v4),
             loopback_ipv6: None,
         },
     )
     .await;
 
-    // This DPU has a distinct product serial but reports the placeholder for its
-    // board and chassis serials, matching what Scout emits for BlueFields.
     let host_config = env.managed_host_config();
     let dpu = host_config.get_and_assert_single_dpu();
-    let mut hardware_info = HardwareInfo::from(dpu);
-    let dmi = hardware_info
-        .dmi_data
-        .as_mut()
-        .expect("DPU fixture must contain DMI data");
-    assert_ne!(dmi.product_serial, PLACEHOLDER_SERIAL);
-    dmi.board_serial = PLACEHOLDER_SERIAL.to_string();
-    dmi.chassis_serial = PLACEHOLDER_SERIAL.to_string();
+    let hardware_info = HardwareInfo::from(dpu);
 
     let dpu_machine = discover_dpu_by_source_ip(&env, dpu, hardware_info).await;
     let loopback = dpu_machine
@@ -884,7 +939,7 @@ async fn test_direct_discovery_ignores_placeholder_board_and_chassis_serials(
     assert_ne!(
         loopback,
         IpAddr::V4(reserved_v4),
-        "a placeholder board/chassis serial must not select another DPU's reservation"
+        "a different OS/admin MAC must not select another DPU's reservation"
     );
     // The automatic address comes from the default auto-assign pool prefix
     // (172.20.0.0/24), not the reservable range the reservation targeted.
