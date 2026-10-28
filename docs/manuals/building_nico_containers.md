@@ -40,7 +40,7 @@ Optional Make variables can be supplied as `NAME=value` arguments:
 
 | Variable | Default | Contract |
 | --- | --- | --- |
-| `DEV_TARGET` | `api` | Exactly one of `api`, `pxe`, `bmc-proxy`, `dhcp`, `machine-a-tron`, `ssh-console`, `mat-protocol-gateway`, or `nico-postgres-exporter`. Other values are rejected. |
+| `DEV_TARGET` | `api` | Exactly one of `api`, `pxe`, `bmc-proxy`, `dhcp`, `machine-a-tron`, `ssh-console`, `mat-protocol-gateway`, `nico-postgres-exporter`, `bmc-target`, `scout-package`, or `scout-builder`. Other values are rejected. |
 | `IMAGE_TAG` | `latest` | Docker tag used in the default image references below. |
 | `DEV_IMAGE` | `nico-dev-$(DEV_TARGET):$(IMAGE_TAG)` | Docker image reference for the selected service output. |
 | `DEV_BUILD_CONTAINER` | `nico-dev-build:$(IMAGE_TAG)` | Docker image reference built for the compiler stage and passed to the service build as `CONTAINER_BUILD`. |
@@ -49,6 +49,18 @@ Optional Make variables can be supplied as `NAME=value` arguments:
 Explicit image references take precedence over their defaults; changing
 `IMAGE_TAG` does not rewrite an explicitly supplied reference. Docker validates
 image-reference syntax. `IMAGE_REGISTRY` does not affect this target.
+
+The optional `bmc-target` image uses a separate digest-pinned Ubuntu 24.04 base
+for its native QEMU/UEFI package pair, shared across AMD64 and ARM64. Its runtime
+is independent of `DEV_RUNTIME_CONTAINER`; its compiler uses
+`DEV_BUILD_CONTAINER`. See the [native BMC target lab](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/nico-bmc-target/README.md).
+
+For native no-DPU guests, `scout-package` exports `/scout.deb` in a data-only
+image, using the existing Scout packaging task and including the firmware
+supervisor. `scout-builder` supplies mkosi prerequisites on the same pinned
+Ubuntu base as `bmc-target`. These targets do not use the common service runtime.
+See [building native Scout artifacts](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/deployment/lab/README.md#scout-boot-artifacts)
+for the privileged build step, inputs and output contract.
 
 The shared recipes are `dev/docker/Dockerfile.dev-services` and
 `dev/docker/Dockerfile.dev-runtime`. DHCP packages both Kea DHCPv4 and DHCPv6
@@ -60,8 +72,9 @@ The DHCP image also includes `iproute2` and `curl` for the chart's IPv6 address
 selection and startup/readiness checks. If the selected build image supplies
 `/opt/kea/kea-common.deb`, the DHCP runtime installs that package after checking
 its package name, pinned Kea version and native architecture. An invalid supplied
-package fails the build; absence retains the distribution library. IPv6 lease-handoff fixes are provided separately by
-[the DHCPv6 prerequisite](https://github.com/dsx-ai-factory/infra-controller/pull/7934).
+package fails the build; absence retains the distribution library. See the
+[DHCPv6 lease-handoff prerequisite](https://github.com/dsx-ai-factory/infra-controller/pull/7934)
+for IPv6 lifecycle validation.
 
 After building the DHCP image, check its packaged tools and hook loading:
 

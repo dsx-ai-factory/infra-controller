@@ -351,6 +351,37 @@ development:
     - helm/observability/dashboards/nico-site-detail.json
     - dev/deployment/stack/dashboards/nico-site-explorer.json
     - helm-prereqs/observability/dashboards/nico-core-health.json
+  bmcLab:
+    dhcpHookParameters:
+      nameservers: "10.96.0.10"
+      ntpServer: "127.0.0.1"
+      provisioningServer: "10.96.0.30"
+    coreIPv6Service:
+      enabled: true
+      type: ClusterIP
+      externalTrafficPolicy: ""
+      ipFamilyPolicy: SingleStack
+      ipFamilies: [IPv6]
+      port: 1079
+    pxe:
+      legacyAlias:
+        enabled: false
+      service:
+        clusterIP: "10.96.0.30"
+        port: 8080
+        bootPort: 80
+      externalService:
+        enabled: false
+        type: ClusterIP
+        externalTrafficPolicy: ""
+        ipFamilyPolicy: SingleStack
+        ipFamilies: [IPv6]
+        port: 80
+        alternatePort: 0
+        sharedIpAnnotation: ""
+      bootArtifactContainers:
+        - name: scout-artifacts
+          imagePullPolicy: IfNotPresent
   machineATronDhcp:
     podName: mat-0
 

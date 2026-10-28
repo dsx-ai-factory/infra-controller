@@ -5,6 +5,8 @@
 
 ARG CONTAINER_BUILD=nico-dev-build
 ARG CONTAINER_RUNTIME=nico-dev-runtime
+# Native QEMU/UEFI pair used by both target architectures.
+ARG BMC_TARGET_BASE=ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
 
 FROM ${CONTAINER_BUILD} AS source
 
@@ -256,3 +258,73 @@ RUN --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-targ
     && rm /tmp/nico-postgres-exporter.sha256sum
 
 USER 65534:65534
+
+FROM source AS bmc-mock-builder
+
+RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
+    cargo build --locked -p bmc-mock --bin bmc-mock \
+    && mkdir -p /out \
+    && sha256sum </cargo-target/debug/bmc-mock >/out/bmc-mock.sha256sum
+
+FROM ${BMC_TARGET_BASE} AS bmc-target
+
+ARG TARGETARCH
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN case "$(dpkg --print-architecture)" in \
+      amd64) packages="qemu-system-x86 ovmf ipxe-qemu" ;; \
+      arm64) packages="qemu-system-arm qemu-efi-aarch64" ;; \
+      *) exit 1 ;; \
+    esac && apt-get update && apt-get install -y --no-install-recommends \
+    libvirt-daemon-system libvirt-clients qemu-utils ${packages} python3 iproute2 iptables isc-dhcp-relay radvd tini ca-certificates libssl3 libudev1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && printf '%s\n' 'user = "root"' 'group = "root"' 'security_driver = "none"' \
+       'cgroup_controllers = []' > /etc/libvirt/qemu.conf \
+    && printf '%s\n' 'auth_unix_rw = "none"' > /etc/libvirt/libvirtd.conf \
+    && rm -rf /etc/libvirt/qemu /var/lib/libvirt /var/log/libvirt \
+    && ln -s /data/domains /etc/libvirt/qemu \
+    && ln -s /data/libvirt /var/lib/libvirt \
+    && ln -s /data/logs /var/log/libvirt
+
+COPY --from=bmc-mock-builder /out/bmc-mock.sha256sum /tmp/bmc-mock.sha256sum
+
+RUN --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
+    cp /cargo-target/debug/bmc-mock /usr/local/bin/bmc-mock \
+    && test "$(sha256sum </usr/local/bin/bmc-mock)" = "$(cat /tmp/bmc-mock.sha256sum)" \
+    && rm /tmp/bmc-mock.sha256sum
+COPY crates/bmc-mock/tls.crt crates/bmc-mock/tls.key /opt/carbide/
+COPY dev/deployment/lab/preflight.py dev/deployment/lab/target.py dev/deployment/lab/network.py dev/deployment/lab/dhcp6_relay.py /opt/nico-lab/
+ENTRYPOINT ["/usr/bin/tini", "--", "python3", "-B", "/opt/nico-lab/target.py"]
+
+
+FROM source AS scout-package-builder
+
+RUN --mount=type=cache,id=nico-dev-cargo-home-${TARGETARCH},target=/cargo-home,sharing=locked \
+    --mount=type=cache,id=nico-dev-cargo-target-${TARGETARCH},target=/cargo-target,sharing=locked \
+    arch="$(uname -m)" && ln -s /cargo-target /workspace/target && \
+    cargo build --locked --target "${arch}-unknown-linux-gnu" \
+      -p carbide-scout --bin forge-scout -p carbide-libmlx --bin mlx-firmware-supervisor && \
+    deb_arch="$(dpkg --print-architecture)" && \
+    rm -rf "/workspace/target/${arch}-unknown-linux-gnu/forge-scout_0.0.0-dev_${deb_arch}" && \
+    VERSION=0.0.0-dev cargo make --makefile Makefile-package.toml \
+      --env CARBIDE_ARCH="${arch}" --env CARBIDE_PROFILE=debug \
+      --env CARBIDE_CRATE=carbide-scout --env CARBIDE_CRATE_DIR=/workspace/crates/scout \
+      --env CARBIDE_PACKAGE=scout package-component && \
+    mkdir -p /out && \
+    cp "/workspace/target/debs/forge-scout_0.0.0-dev_${deb_arch}.deb" /out/scout.deb
+
+FROM scratch AS scout-package
+COPY --from=scout-package-builder /out/scout.deb /scout.deb
+
+FROM ${BMC_TARGET_BASE} AS scout-builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pefile systemd-container systemd-ukify bubblewrap debootstrap \
+    debian-archive-keyring ubuntu-keyring apt-utils dosfstools mtools squashfs-tools \
+    erofs-utils tar cpio zstd xz-utils btrfs-progs e2fsprogs xfsprogs qemu-utils \
+    uidmap build-essential binutils git ca-certificates curl && \
+    rm -rf /var/lib/apt/lists/*

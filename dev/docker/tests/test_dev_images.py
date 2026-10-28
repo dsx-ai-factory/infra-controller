@@ -119,11 +119,12 @@ class DevImagesTest(unittest.TestCase):
                 for call in (builds[0], builds[-1]):
                     self.assertIn(f"KEA_VERSION={version}", call)
 
-    def test_pxe_uses_the_shared_native_build_entrypoint(self):
-        result, calls = self.run_make(arguments=("DEV_TARGET=pxe",))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(calls[-1][calls[-1].index("--target") + 1], "pxe")
-        self.assertEqual(calls[-1][calls[-1].index("--tag") + 1], "nico-dev-pxe:latest")
+    def test_additional_targets_use_the_shared_native_build_entrypoint(self):
+        for target in ('pxe', 'bmc-target', 'scout-package', 'scout-builder'):
+            with self.subTest(target=target):
+                result, calls = self.run_make(arguments=(f'DEV_TARGET={target}',))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(calls[-1][calls[-1].index('--target') + 1], target)
 
     def test_selected_target_and_base_images_are_propagated(self):
         result, calls = self.run_make(arguments=(

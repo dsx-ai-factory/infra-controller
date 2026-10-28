@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import yaml
@@ -24,7 +25,7 @@ def baseline():
 
 
 class TiltResult:
-    def __init__(self, options=None, values=None, architecture='aarch64', context='kind-test'):
+    def __init__(self, options=None, values=None, architecture='aarch64', context='kind-test', cidrs=None):
         self.resources, self.commands, self.objects, self.watches = {}, [], [], []
         self.k8s_resources, self.images, self.repositories = {}, {}, {}
         source = copy.deepcopy(baseline() if values is None else values)
@@ -43,9 +44,14 @@ class TiltResult:
             self.commands.append(command)
             if command == ['docker', 'info', '--format', '{{.OSType}}/{{.Architecture}}']:
                 return 'linux/' + architecture
-            if Path(command[1]).name == 'vault-bootstrap.py' and command[-3:-1] == ['check-mode', '--mode']:
+            if command == ['kubectl', '--context', context, 'get', 'nodes', '-o', 'json']:
+                return json.dumps({'items': [{'spec': {'podCIDRs': ['10.244.0.0/24', 'fd00:10::/64'] if cidrs is None else cidrs}}]})
+            if (Path(command[1]).name == 'site-mode.py' and command[-1] == 'check') or (
+                    Path(command[1]).name == 'vault-bootstrap.py' and command[-3:-1] == ['check-mode', '--mode']):
                 return ''
-            if command[0] == 'helm':
+            if command[0] == 'helm' or Path(command[1]).name == 'lab_profile.py':
+                if command[0] == 'python3':
+                    command = [sys.executable, *command[1:]]
                 return subprocess.check_output(command, input=kwargs.get('stdin'), text=True, cwd=TILT.parent)
             raise AssertionError('unexpected load-time command: ' + repr(command))
 
