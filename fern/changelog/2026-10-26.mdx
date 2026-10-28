@@ -10,5 +10,5 @@ tags: ["unreleased", "machine-controller", "bios"]
 
 | Setting | Change |
 | --- | --- |
-| `machine_state_controller.bios_apply_settle_timeout` | New. Longest wait for the host to boot after the BIOS reboot; defaults to `20m`, at most `60m`. After it, the step completes and logs a warning. |
-| `machine_state_controller.dpu_first_restart_delay` | New. Delay before the first restart of a DPU that has not reported. Unset keeps 5 minutes; at most `30m`. |
+| `machine_state_controller.bios_apply_settle_timeout` | New. Longest wait for the host to boot after the BIOS reboot; defaults to `20m`, must be greater than `0s` and at most `60m`. After it, the step completes and logs a warning. |
+| `machine_state_controller.dpu_first_restart_delay` | New. Delay before the first restart of a DPU that has not reported. Unset keeps 5 minutes; when set, must be greater than `0s` and at most `30m`. |

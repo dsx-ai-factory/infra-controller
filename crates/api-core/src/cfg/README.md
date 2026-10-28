@@ -789,8 +789,8 @@ Extends `StateControllerConfig` with:
 | `full_lockdown_recovery_enabled` | `bool` | `false` | Allows new full-lockdown recovery entries for explored BMC vendor `LenovoAMI` and model `HG635N_V2`. Supported recovery already in progress continues when disabled. Enable only after all machine-state readers support the recovery state; see [full-lockdown recovery rollout](../../../../docs/operations/firmware-updates/host-firmware.md#full-lockdown-recovery-rollout) for rollout and rollback requirements. |
 | `polling_bios_setup_stuck_threshold` | `Duration` | `15m` | Time in PollingBiosSetup with `is_bios_setup == false` before recovery escalation. |
 | `boot_interface_observation_interval` | `Duration` | `10m` | Positive time between successful Redfish observations of an already-verified boot interface. |
-| `bios_apply_settle_timeout` | `Duration` | `20m` | Longest time PollingBiosSetup waits for the host's Redfish `BootProgress` to show the OS booting after the BIOS reboot. After it, the step completes and logs a warning. At most `60m`. |
-| `dpu_first_restart_delay` | `Option<Duration>` | *(unset)* | Delay before the first restart of a DPU that has not reported. Unset keeps 5 minutes. At most `30m`. |
+| `bios_apply_settle_timeout` | `Duration` | `20m` | Longest time PollingBiosSetup waits for the host's Redfish `BootProgress` to show the OS booting after the BIOS reboot. After it, the step completes and logs a warning. Must be greater than `0s` and at most `60m`. |
+| `dpu_first_restart_delay` | `Option<Duration>` | *(unset)* | Delay before the first restart of a DPU that has not reported. Unset keeps 5 minutes. When set, must be greater than `0s` and at most `30m`. |
 | `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |
 
 The Redfish observation is read-only. A successful match refreshes the last
