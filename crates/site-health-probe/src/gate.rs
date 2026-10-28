@@ -145,6 +145,20 @@ impl CallGate {
         let _ = self.calls.set(calls);
     }
 
+    /// Adds one call to `calls` with this result, if a counter is registered.
+    fn count(&self, call: &'static str, result: &'static str) {
+        if let Some(calls) = self.calls.get() {
+            calls.add(
+                1,
+                &[
+                    KeyValue::new("api", self.api),
+                    KeyValue::new("call", call),
+                    KeyValue::new("result", result),
+                ],
+            );
+        }
+    }
+
     /// The API this gate guards ("nico-api", "nico-rest-api", "metrics-store").
     pub(crate) fn api(&self) -> &'static str {
         self.api
@@ -155,6 +169,13 @@ impl CallGate {
     /// on `rec` as operation `call`, never the wait, and only when it
     /// succeeds. Dropping the returned future mid-call releases the permit and
     /// keeps the spacing already reserved for the next call.
+    ///
+    /// Every call that starts is counted once on `calls`: `ok`, `timeout` (the
+    /// gate's call timeout or a server DEADLINE_EXCEEDED), `pushback` or
+    /// `error`. A started call whose future is dropped before it returns, by
+    /// an enclosing timeout, shutdown or an abort, is counted as `cancelled`
+    /// instead. A caller still waiting for the permit, the spacing or the
+    /// back-off has not started and is not counted.
     pub(crate) async fn call<T, F, Fut>(
         &self,
         rec: &ObservationRecorder,
@@ -178,27 +199,20 @@ impl CallGate {
             let mut state = self.lock();
             state.next_start = started + self.spacing + state.backoff;
         }
+        // Outside the call timeout, so the gate's own timeout is counted as
+        // `timeout` and only a drop from further out is `cancelled`.
+        let in_flight = InFlight::new(self, call);
         let result = match tokio::time::timeout(self.call_timeout, f()).await {
             Ok(result) => result,
             Err(_elapsed) => Err(CallError::Timeout),
         };
         let took = started.elapsed();
-        if let Some(calls) = self.calls.get() {
-            let outcome = match &result {
-                Ok(_) => "ok",
-                Err(CallError::Timeout) => "timeout",
-                Err(CallError::Pushback { .. }) => "pushback",
-                Err(_) => "error",
-            };
-            calls.add(
-                1,
-                &[
-                    KeyValue::new("api", self.api),
-                    KeyValue::new("call", call),
-                    KeyValue::new("result", outcome),
-                ],
-            );
-        }
+        in_flight.finish(match &result {
+            Ok(_) => "ok",
+            Err(CallError::Timeout) => "timeout",
+            Err(CallError::Pushback { .. }) => "pushback",
+            Err(_) => "error",
+        });
 
         let mut state = self.lock();
         match &result {
@@ -256,6 +270,50 @@ impl CallGate {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, GateState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// A started call that has not yet returned a result. If it is dropped armed,
+/// the call's future was dropped mid-call, and the call is counted here as
+/// `cancelled`. Dropping counts synchronously and never touches the gate
+/// state, so it is safe wherever a future can be dropped.
+struct InFlight<'a> {
+    gate: &'a CallGate,
+    call: &'static str,
+    armed: bool,
+}
+
+impl<'a> InFlight<'a> {
+    fn new(gate: &'a CallGate, call: &'static str) -> Self {
+        Self {
+            gate,
+            call,
+            armed: true,
+        }
+    }
+
+    /// Counts the call with its result. Disarms first, so the result is never
+    /// counted a second time as the guard drops.
+    fn finish(mut self, result: &'static str) {
+        self.armed = false;
+        self.gate.count(self.call, result);
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // A panic unwinding through the call is a probe bug, not a cancelled
+        // call: count it as the error it is, like the scheduler's panicked
+        // run.
+        let result = if std::thread::panicking() {
+            "error"
+        } else {
+            "cancelled"
+        };
+        self.gate.count(self.call, result);
     }
 }
 
@@ -322,10 +380,88 @@ pub(crate) fn classify_http(status: StatusCode, headers: &HeaderMap) -> Option<C
     Some(CallError::Status(format!("HTTP {}", status.as_u16())))
 }
 
+/// Reading the call counter back, for the tests of the gate and its callers.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    /// Counts the gate's calls on a counter named as in main.rs. Hold the
+    /// returned setup while reading the counts: dropping it stops collection.
+    pub(crate) fn counted(gate: &CallGate) -> metrics_endpoint::MetricsSetup {
+        let setup = metrics_endpoint::new_metrics_setup("site-health-probe", "test", false)
+            .expect("metrics setup");
+        gate.count_calls(
+            setup
+                .meter
+                .u64_counter("carbide_site_health_probe_calls")
+                .build(),
+        );
+        setup
+    }
+
+    /// The summed value of the series `name{labels...}`, from the text
+    /// exposition the scraper sees: 0 for a series nothing was added to.
+    pub(crate) fn series(
+        registry: &prometheus::Registry,
+        name: &str,
+        labels: &[(&str, &str)],
+    ) -> f64 {
+        use prometheus::Encoder;
+        let mut buffer = Vec::new();
+        prometheus::TextEncoder::new()
+            .encode(&registry.gather(), &mut buffer)
+            .expect("encode");
+        String::from_utf8(buffer)
+            .expect("utf-8 exposition")
+            .lines()
+            .filter(|line| line.starts_with(&format!("{name}{{")))
+            .filter(|line| {
+                labels
+                    .iter()
+                    .all(|(k, v)| line.contains(&format!("{k}=\"{v}\"")))
+            })
+            .filter_map(|line| line.rsplit(' ').next()?.parse::<f64>().ok())
+            // `sum` of nothing is -0.0, which prints oddly in a failed assert.
+            .fold(0.0, |total, value| total + value)
+    }
+
+    /// The call counter by result, over every API and call.
+    #[derive(Debug, Default, PartialEq)]
+    pub(crate) struct Tally {
+        pub ok: f64,
+        pub timeout: f64,
+        pub pushback: f64,
+        pub error: f64,
+        pub cancelled: f64,
+    }
+
+    pub(crate) fn tally(registry: &prometheus::Registry) -> Tally {
+        let count = |result| {
+            series(
+                registry,
+                "carbide_site_health_probe_calls_total",
+                &[("result", result)],
+            )
+        };
+        Tally {
+            ok: count("ok"),
+            timeout: count("timeout"),
+            pushback: count("pushback"),
+            error: count("error"),
+            cancelled: count("cancelled"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::pin::{Pin, pin};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Poll;
 
+    use tokio::sync::Notify;
+
+    use super::testing::{Tally, counted, tally};
     use super::*;
 
     fn gate() -> Arc<CallGate> {
@@ -404,6 +540,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn gate_backs_off_on_pushback_and_resets() {
         let gate = gate();
+        let metrics = counted(&gate);
         let server = Server::default();
         let rec = ObservationRecorder::default();
         for _ in 0..3 {
@@ -431,6 +568,14 @@ mod tests {
             rec.take().len(),
             2,
             "only the successful calls are recorded"
+        );
+        assert_eq!(
+            tally(&metrics.registry),
+            Tally {
+                ok: 2.0,
+                pushback: 3.0,
+                ..Tally::default()
+            }
         );
     }
 
@@ -500,6 +645,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn gate_deadline_is_timeout() {
         let gate = gate();
+        let metrics = counted(&gate);
         let server = Arc::new(Server::default());
         let rec = ObservationRecorder::default();
         let started = Instant::now();
@@ -512,6 +658,14 @@ mod tests {
         assert_eq!(err, CallError::Timeout);
         assert_eq!(started.elapsed(), Duration::from_secs(5));
         assert!(rec.take().is_empty(), "a timed-out call is not recorded");
+        // The gate's own deadline is a timeout, not also a cancelled call.
+        assert_eq!(
+            tally(&metrics.registry),
+            Tally {
+                timeout: 1.0,
+                ..Tally::default()
+            }
+        );
 
         // A timeout is retried, at most twice.
         let attempts = AtomicUsize::new(0);
@@ -524,6 +678,14 @@ mod tests {
             .expect_err("deadline every time");
         assert_eq!(err, CallError::Timeout);
         assert_eq!(attempts.load(Ordering::SeqCst), 1 + MAX_RETRIES);
+        assert_eq!(
+            tally(&metrics.registry),
+            Tally {
+                timeout: 4.0,
+                ..Tally::default()
+            },
+            "each attempt is counted once"
+        );
 
         // An error answer is not retried.
         attempts.store(0, Ordering::SeqCst);
@@ -535,5 +697,235 @@ mod tests {
         .expect_err("error answer");
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
         assert!(!CallError::Decode("bad reply".to_string()).is_retryable());
+        assert_eq!(
+            tally(&metrics.registry),
+            Tally {
+                timeout: 4.0,
+                error: 1.0,
+                ..Tally::default()
+            }
+        );
+    }
+
+    /// Polls `fut` once, to know which await it parks at.
+    async fn poll_once<F: Future>(mut fut: Pin<&mut F>) -> Poll<F::Output> {
+        std::future::poll_fn(|cx| Poll::Ready(fut.as_mut().poll(cx))).await
+    }
+
+    /// Runs a call that hangs once the gate has dispatched it, and drops the
+    /// call future there.
+    async fn cancel_in_flight(gate: &CallGate, rec: &ObservationRecorder) {
+        let dispatched = Notify::new();
+        tokio::select! {
+            _ = gate.call(rec, "list", || async {
+                dispatched.notify_one();
+                std::future::pending::<Result<(), CallError>>().await
+            }) => unreachable!("a hung call does not return"),
+            () = dispatched.notified() => {}
+        }
+    }
+
+    fn probe_bug() -> Result<(), CallError> {
+        panic!("probe bug")
+    }
+
+    /// Runs a call whose future panics, in its own task, and returns how the
+    /// task ended.
+    async fn panicking_call(gate: &Arc<CallGate>) -> tokio::task::JoinError {
+        let gate = Arc::clone(gate);
+        tokio::spawn(async move {
+            let rec = ObservationRecorder::default();
+            gate.call(&rec, "list", || async { probe_bug() }).await
+        })
+        .await
+        .expect_err("the call panics")
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn callers_waiting_for_the_gate_are_not_counted() {
+        let gate = gate();
+        let metrics = counted(&gate);
+        let t0 = Instant::now();
+        let rec = ObservationRecorder::default();
+        let ran = AtomicUsize::new(0);
+        let waiter = || {
+            ran.fetch_add(1, Ordering::SeqCst);
+            async { Ok::<(), CallError>(()) }
+        };
+
+        // A call holds the permit in flight, so a second one polled once can
+        // only park at the wait for the permit.
+        let dispatched = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let holder = tokio::spawn({
+            let (gate, dispatched, release) = (
+                Arc::clone(&gate),
+                Arc::clone(&dispatched),
+                Arc::clone(&release),
+            );
+            async move {
+                let rec = ObservationRecorder::default();
+                gate.call(&rec, "list", || async {
+                    dispatched.notify_one();
+                    release.notified().await;
+                    Ok(())
+                })
+                .await
+            }
+        });
+        dispatched.notified().await;
+        {
+            let mut waiting = pin!(gate.call(&rec, "list", &waiter));
+            assert!(poll_once(waiting.as_mut()).await.is_pending());
+        }
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "never started");
+        release.notify_one();
+        holder
+            .await
+            .expect("holder ends")
+            .expect("held call succeeds");
+
+        // With the permit free but the spacing still running, a second caller
+        // takes the permit and parks at the wait for its start time.
+        {
+            let mut waiting = pin!(gate.call(&rec, "list", &waiter));
+            assert!(poll_once(waiting.as_mut()).await.is_pending());
+            assert_eq!(gate.permit.available_permits(), 0, "parked past the permit");
+        }
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "never started");
+        assert_eq!(gate.permit.available_permits(), 1, "permit released");
+
+        // The dropped waiter did not move the next start.
+        gate.call(&rec, "list", &waiter).await.expect("call runs");
+        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        assert!(Instant::now() >= t0 + Duration::from_millis(500));
+        assert_eq!(
+            tally(&metrics.registry),
+            Tally {
+                ok: 2.0,
+                ..Tally::default()
+            },
+            "only the calls that started are counted"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_call_is_counted_and_frees_the_gate() {
+        let gate = gate();
+        let metrics = counted(&gate);
+        let rec = ObservationRecorder::default();
+        let t0 = Instant::now();
+
+        cancel_in_flight(&gate, &rec).await;
+        assert_eq!(
+            tally(&metrics.registry),
+            Tally {
+                cancelled: 1.0,
+                ..Tally::default()
+            }
+        );
+        assert_eq!(gate.permit.available_permits(), 1, "permit released");
+
+        gate.call(&rec, "list", || async { Ok(()) })
+            .await
+            .expect("the gate is free again");
+        assert!(
+            Instant::now() >= t0 + Duration::from_millis(500),
+            "the cancelled call's spacing still holds"
+        );
+        assert_eq!(
+            tally(&metrics.registry),
+            Tally {
+                ok: 1.0,
+                cancelled: 1.0,
+                ..Tally::default()
+            }
+        );
+        assert_eq!(rec.take().len(), 1, "only the finished call is recorded");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancel_during_a_retry_counts_each_attempt_once() {
+        let gate = gate();
+        let metrics = counted(&gate);
+        let rec = ObservationRecorder::default();
+        let attempts = AtomicUsize::new(0);
+        let dispatched = Notify::new();
+
+        // The first attempt fails retryably and is counted. The second hangs
+        // until the retry loop is dropped.
+        tokio::select! {
+            _ = gate.call_with_retries(&rec, "list", || {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                let dispatched = &dispatched;
+                async move {
+                    if attempt == 1 {
+                        return Err(CallError::Transport("reset".to_string()));
+                    }
+                    dispatched.notify_one();
+                    std::future::pending::<Result<(), CallError>>().await
+                }
+            }) => unreachable!("the second attempt hangs"),
+            () = dispatched.notified() => {}
+        }
+
+        // Nothing dispatches a third attempt.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            tally(&metrics.registry),
+            Tally {
+                error: 1.0,
+                cancelled: 1.0,
+                ..Tally::default()
+            }
+        );
+        assert!(rec.take().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gate_works_without_a_counter() {
+        let gate = gate();
+        let rec = ObservationRecorder::default();
+
+        gate.call(&rec, "list", || async { Ok(()) })
+            .await
+            .expect("call");
+        cancel_in_flight(&gate, &rec).await;
+        // Dropping the call while the panic unwinds must not panic again,
+        // which would abort the process.
+        assert!(panicking_call(&gate).await.is_panic());
+        gate.call(&rec, "list", || async { Ok(()) })
+            .await
+            .expect("the permit was released");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn panic_in_a_call_is_counted_once_as_an_error() {
+        let gate = gate();
+        let metrics = counted(&gate);
+        let rec = ObservationRecorder::default();
+
+        assert!(panicking_call(&gate).await.is_panic());
+        assert_eq!(
+            tally(&metrics.registry),
+            Tally {
+                error: 1.0,
+                ..Tally::default()
+            },
+            "a panic is a probe bug, not a cancelled call"
+        );
+
+        gate.call(&rec, "list", || async { Ok(()) })
+            .await
+            .expect("the permit was released");
+        assert_eq!(
+            tally(&metrics.registry),
+            Tally {
+                ok: 1.0,
+                error: 1.0,
+                ..Tally::default()
+            }
+        );
     }
 }

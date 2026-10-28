@@ -165,7 +165,9 @@ mod tests {
 
     use super::*;
     use crate::config::TlsConfig;
-    use crate::framework::{Outcome, ProbeResult, start};
+    use crate::framework::{Outcome, ProbeResult, Sink, start};
+    use crate::gate::testing::{Tally, counted, series, tally};
+    use crate::metrics::Metrics;
 
     /// The CA preflight must name the offending path before any dial is
     /// attempted, instead of surfacing a generic handshake error later.
@@ -290,21 +292,9 @@ mod tests {
         result
     }
 
-    /// The `calls` series counted with result "timeout", from the exposition
-    /// the scraper sees.
-    fn timeout_calls(registry: &prometheus::Registry) -> Option<f64> {
-        use prometheus::Encoder;
-        let mut buffer = Vec::new();
-        prometheus::TextEncoder::new()
-            .encode(&registry.gather(), &mut buffer)
-            .expect("encode");
-        String::from_utf8(buffer)
-            .expect("utf-8 exposition")
-            .lines()
-            .filter(|line| line.starts_with("carbide_site_health_probe_calls_total"))
-            .find(|line| line.contains("result=\"timeout\""))
-            .and_then(|line| line.rsplit(' ').next())
-            .and_then(|value| value.parse().ok())
+    /// The operations a result carries observations of.
+    fn observed(result: &ProbeResult) -> Vec<&'static str> {
+        result.observations.iter().map(|o| o.operation).collect()
     }
 
     /// A call cut by the gate's call timeout (5 s) before the probe's own
@@ -318,20 +308,13 @@ mod tests {
             Reply::DeadlineExceeded,
         ];
         for reply in replies {
-            let setup = metrics_endpoint::new_metrics_setup("site-health-probe", "test", false)
-                .expect("metrics setup");
             let gate = Arc::new(CallGate::new(
                 "nico-api",
                 2.0,
                 Duration::from_secs(5),
                 Duration::from_secs(30),
             ));
-            gate.count_calls(
-                setup
-                    .meter
-                    .u64_counter("carbide_site_health_probe_calls")
-                    .build(),
-            );
+            let metrics = counted(&gate);
 
             let result = first_result(GateCallProbe {
                 gate,
@@ -346,15 +329,74 @@ mod tests {
                 Some("FindMachinesByIds: call timed out")
             );
             assert_eq!(
-                result
-                    .observations
-                    .iter()
-                    .map(|o| o.operation)
-                    .collect::<Vec<_>>(),
-                vec!["find_machine_ids"],
+                observed(&result),
+                ["find_machine_ids"],
                 "the call before the cut one is kept, the cut one is not recorded"
             );
-            assert_eq!(timeout_calls(&setup.registry), Some(1.0));
+            // The cut call is a timeout, not also a cancelled one.
+            assert_eq!(
+                tally(&metrics.registry),
+                Tally {
+                    ok: 1.0,
+                    timeout: 1.0,
+                    ..Tally::default()
+                }
+            );
         }
+    }
+
+    /// A probe timeout (5 s) that lands inside a call still running under the
+    /// gate's call timeout (10 s) drops the call's future. The call is counted
+    /// as cancelled, not as a timeout, and the observation made before it is
+    /// kept.
+    #[tokio::test(start_paused = true)]
+    async fn probe_timeout_cancels_the_call_in_flight() {
+        let gate = Arc::new(CallGate::new(
+            "nico-api",
+            2.0,
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+        ));
+        let setup = counted(&gate);
+
+        let result = first_result(GateCallProbe {
+            gate,
+            timeout: Duration::from_secs(5),
+            reply: Reply::After(Duration::from_secs(20)),
+        })
+        .await;
+
+        assert_eq!(result.outcome, Outcome::Timeout);
+        assert_eq!(result.error.as_deref(), Some("probe timed out"));
+        assert_eq!(observed(&result), ["find_machine_ids"]);
+        let call = |name, outcome| {
+            series(
+                &setup.registry,
+                "carbide_site_health_probe_calls_total",
+                &[("call", name), ("result", outcome)],
+            )
+        };
+        assert_eq!(call("find_machine_ids", "ok"), 1.0);
+        assert_eq!(call("find_machines_by_ids", "cancelled"), 1.0);
+        assert_eq!(
+            tally(&setup.registry),
+            Tally {
+                ok: 1.0,
+                cancelled: 1.0,
+                ..Tally::default()
+            },
+            "the cut call is not also a timeout"
+        );
+
+        // The sink counts the run as a timeout.
+        Metrics::new(&setup.meter).record(&result);
+        assert_eq!(
+            series(
+                &setup.registry,
+                "carbide_site_health_probe_requests_total",
+                &[("api", "nico-api"), ("outcome", "timeout")],
+            ),
+            1.0
+        );
     }
 }

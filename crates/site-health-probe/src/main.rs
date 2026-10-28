@@ -88,7 +88,8 @@ async fn run() -> eyre::Result<()> {
             .u64_counter("carbide_site_health_probe_calls")
             .with_description(
                 "Calls to each API (nico-api, nico-rest-api, metrics-store) by call and result \
-                 (ok, error, timeout, pushback).",
+                 (ok, error, timeout, pushback, cancelled). cancelled is a started call whose \
+                 future was dropped before it returned, e.g. by the probe's own timeout.",
             )
             .build(),
     );
