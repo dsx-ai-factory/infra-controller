@@ -18,6 +18,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::sync::LazyLock;
 
 use carbide_uuid::domain::DomainId;
 use carbide_uuid::machine::{
@@ -61,6 +62,10 @@ use crate::machine_interface_address::InterfaceAssociationType;
 use crate::network_segment::NetworkSegmentType;
 use crate::predicted_machine_interface::PredictedMachineInterface;
 use crate::state_history::StateHistoryRecord;
+
+// Rack-scoped probes excluded from host health aggregation.
+static RACK_ONLY_PROBES: LazyLock<[health_report::HealthProbeId; 1]> =
+    LazyLock::new(|| [health_report::HealthProbeId::missing_rack_component()]);
 
 pub mod slas;
 
@@ -702,7 +707,6 @@ impl ManagedHostStateSnapshot {
         }
 
         if let Some(rack_overrides) = &self.rack_health_overrides {
-            let rack_only_probes = [health_report::HealthProbeId::missing_rack_component()];
             for report in rack_overrides
                 .replace
                 .iter()
@@ -713,7 +717,7 @@ impl ManagedHostStateSnapshot {
                 let mut report = report.clone();
                 report
                     .alerts
-                    .retain(|alert| !rack_only_probes.contains(&alert.id));
+                    .retain(|alert| !RACK_ONLY_PROBES.contains(&alert.id));
                 output.merge(&report);
             }
         }
