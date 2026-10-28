@@ -116,6 +116,7 @@ carbide-version = { path = "../version" }
 bmc-mock = { path = "../bmc-mock" }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
+carbide-utils = { path = "../utils", features = ["test-support"] }
 axum-server = { workspace = true, features = ["tls-rustls"] }
 rcgen = { workspace = true }
 serde_json = { workspace = true }

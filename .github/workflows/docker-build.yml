@@ -265,9 +265,9 @@ jobs:
 
       - name: Parse build arguments
         id: parse-args
+        env:
+          BUILD_ARGS: ${{ inputs.build_args }}
         run: |
-          BUILD_ARGS='${{ inputs.build_args }}'
-
           # Convert JSON to docker build-arg format
           if [ "${BUILD_ARGS}" != "{}" ] && [ -n "${BUILD_ARGS}" ]; then
             echo "build_args<<EOF" >> $GITHUB_OUTPUT
@@ -432,10 +432,14 @@ jobs:
           retention-days: 1
 
       - name: Display build summary
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          PLATFORMS: ${{ inputs.platforms }}
         run: |
           echo "✅ Build completed successfully"
-          echo "  Image: ${{ inputs.image_name }}:${{ inputs.image_tag }}"
+          echo "  Image: ${IMAGE_NAME}:${IMAGE_TAG}"
           echo "  Digest: ${{ steps.build.outputs.digest }}"
-          echo "  Platforms: ${{ inputs.platforms }}"
+          echo "  Platforms: ${PLATFORMS}"
           echo "  Pushed: ${{ inputs.push }}"
           echo "  Loaded locally: ${{ steps.loadgate.outputs.load }}"

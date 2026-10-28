@@ -2,6 +2,15 @@ suite: NVSwitch TLS deployment integration
 templates:
   - deployment.yaml
 tests:
+  - it: mounts the NICo client Secret where nico-api looks by default
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: nvswitch-nico-client
+            mountPath: /var/run/secrets/nvswitch-client
+            readOnly: true
+
   - it: mounts the NICo client Secret read-only
     set:
       nvSwitchTls:

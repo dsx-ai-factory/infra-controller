@@ -456,8 +456,10 @@ message FlashSpec {
   optional string cache_dir = 6;
 }
 
-// FlashOptions contains lifecycle flags for the apply() orchestrator.
-// Controls which post-flash steps are executed.
+// FlashOptions selects post-burn phases and verification timing for apply().
+// Timing applies after a successful reset when reset and either verify_image
+// or verify_version are true; timing values never enable phases. Without
+// reset, each requested verification runs once.
 message FlashOptions {
   // verify_image controls whether the firmware image on the device is
   // verified against the source binary after flashing. Default is false.
@@ -474,6 +476,21 @@ message FlashOptions {
   // is omitted. Omitting FirmwareFlasherProfile.flash_options instead selects
   // the library default level of 3.
   uint32 reset_level = 4;
+  // post_reset_verify_retry_interval_seconds is the delay before retrying a
+  // settled unsuccessful verification read. Omission uses 10 seconds.
+  // Applies only when reset and at least one verification are enabled.
+  // Explicit values must be in 1 through 1800, even when those phases are
+  // disabled. The first read starts immediately. No retry starts if this delay
+  // does not fit within the remaining post_reset_verify_timeout_seconds budget.
+  optional uint32 post_reset_verify_retry_interval_seconds = 5;
+  // post_reset_verify_timeout_seconds is the shared verification budget after
+  // reset completion is recorded. Omission uses 1800 seconds. Applies only when
+  // reset and at least one verification are enabled. Explicit values must be
+  // in 1 through 1800, even when those phases are disabled. Tool discovery,
+  // reads, and retry delays share this budget; bounded command cleanup and
+  // result delivery may outlast it.
+  // Expiration fails verification without repeating a completed burn or reset.
+  optional uint32 post_reset_verify_timeout_seconds = 6;
 }
 
 // FirmwareFlasherProfile bundles a FirmwareSpec, FlashSpec, and
@@ -485,6 +502,16 @@ message FirmwareFlasherProfile {
   // Omission disables reset and verification and selects reset_level 3.
   // A present message preserves its scalar values, including reset_level 0.
   optional FlashOptions flash_options = 3;
+}
+
+// Expected artifact bytes for one immutable firmware update. Each present hash
+// is exactly 64 lowercase hexadecimal SHA-256 characters. Uppercase, empty,
+// malformed, or missing required hashes are rejected before admission.
+message FirmwareArtifactDigests {
+  // Required digest of the image file actually passed to the firmware tool.
+  string image_sha256 = 1;
+  // Required iff the profile includes a configuration source; otherwise absent.
+  optional string configuration_sha256 = 2;
 }
 
 message MlxObservationReport {
@@ -512,8 +539,9 @@ message FirmwareFlashReport {
   // Whether the observed version matches the exact target; absent when
   // unrequested. This does not establish which firmware is running after reset.
   optional bool verified_version = 4;
-  // The version reported by mlxfwmanager, including a mismatched version.
-  // Absent for dry-run, a failed or unrequested query, or unavailable facts.
+  // The last usable version reported by mlxfwmanager during this operation,
+  // including a mismatched version, retained across subsequent failed queries.
+  // Absent when no usable version was observed, including dry-run or no query.
   optional string observed_version = 5;
   // The literal target version from the configuration, when supplied.
   optional string expected_version = 6;
@@ -562,13 +590,14 @@ enum FirmwareOperationPhase {
   FIRMWARE_OPERATION_PHASE_VERIFY_VERSION = 7;
 }
 
-// Receipt for one immutable firmware request. Core accepts it only for the
-// matching ApplyFirmware operation ID; a report from another state entry cannot
-// advance the card. ManualIntervention remains visible while Core waits in
-// ApplyFirmware for operator reconciliation.
+// Receipt for one immutable firmware request, shared by DPA and generic NIC
+// commands. Legacy DPA observations are accepted only for the matching
+// ApplyFirmware operation ID; another state entry cannot advance the card.
+// ManualIntervention keeps that DPA state waiting for operator reconciliation.
+// Generic receipts use MlxDeviceUpdateFirmwareResult and its ingestion contract.
 message FirmwareOperation {
-  // Nonempty opaque ID from
-  // forge.ForgeAgentControlResponse.MlxDeviceApplyFirmwareOperation.operation_id.
+  // Nonempty opaque ID from MlxDeviceApplyFirmwareOperation.operation_id or
+  // MlxDeviceUpdateFirmware.operation_id in forge.ForgeAgentControlResponse.
   string operation_id = 1;
   // Required execution state; UNSPECIFIED and unknown values are invalid.
   FirmwareOperationState state = 2;
@@ -580,6 +609,48 @@ message FirmwareOperation {
   FirmwareFlashReport report = 4;
   // Nonsecret diagnostic text, at most 2048 UTF-8 bytes from the executor.
   optional string diagnostic = 5;
+}
+
+// A request failure is not a durable firmware execution receipt. It cannot
+// authorize replay or establish whether an unavailable submission was admitted.
+enum MlxDeviceUpdateFirmwareErrorCode {
+  // Invalid in a reported error; receivers reject omission and unknown values.
+  MLX_DEVICE_UPDATE_FIRMWARE_ERROR_CODE_UNSPECIFIED = 0;
+  // Required identity, profile, target, source, or digest is invalid.
+  MLX_DEVICE_UPDATE_FIRMWARE_ERROR_CODE_INVALID_TASK = 1;
+  // The operation ID already identifies different immutable inputs.
+  MLX_DEVICE_UPDATE_FIRMWARE_ERROR_CODE_CONFLICT = 2;
+  // The local implementation cannot honor this command's contract.
+  MLX_DEVICE_UPDATE_FIRMWARE_ERROR_CODE_UNSUPPORTED = 3;
+  // No authoritative receipt could be obtained; admission may have happened.
+  MLX_DEVICE_UPDATE_FIRMWARE_ERROR_CODE_UNAVAILABLE = 4;
+}
+
+// Redacted request diagnostic. Artifact URLs, credentials, and tool output must
+// not appear in this message.
+message MlxDeviceUpdateFirmwareError {
+  // Required recognized failure classification, never UNSPECIFIED.
+  MlxDeviceUpdateFirmwareErrorCode code = 1;
+  // Nonempty nonsecret explanation, at most 2048 UTF-8 bytes.
+  string diagnostic = 2;
+}
+
+// Result for exactly one delivered MlxDeviceUpdateFirmware workflow. Core must
+// correlate all three identifiers with its admitted task before using a receipt.
+// These results never advance legacy DPA ApplyFirmware state.
+message MlxDeviceUpdateFirmwareResult {
+  // Operation ID from the delivered task; repeated unchanged for errors too.
+  string operation_id = 1;
+  // Immutable whole-workflow token from the delivered task.
+  string phase_id = 2;
+  // Exact containing MlxDeviceAction.pci_name from the delivered task.
+  string pci_name = 3;
+  // Exactly one member is required; omission is invalid. A receipt comes from
+  // the supervisor, never from a fabricated failure in Scout.
+  oneof result {
+    FirmwareOperation receipt = 4;
+    MlxDeviceUpdateFirmwareError error = 5;
+  }
 }
 
 message MlxObservation {
@@ -598,6 +669,13 @@ message MlxObservation {
   // operation but never makes a legacy, uncorrelated report sufficient to
   // complete ApplyFirmware. Reports for other state entries are ignored.
   optional FirmwareOperation firmware_operation = 6;
+  // Correlated generic NIC workflow result, independent of legacy DPA fields.
+  // device_info may be absent: reading a receipt must not probe a live burn.
+  // Must not be combined with legacy firmware/profile/lock fields.
+  // Core rejects reports containing this field with FAILED_PRECONDITION until
+  // generic-operation persistence is implemented; no observations in that batch
+  // are stored. See https://github.com/dsx-ai-factory/infra-controller/issues/6677.
+  MlxDeviceUpdateFirmwareResult firmware_update_result = 7;
 }
 
 // PublishMlxObservationReportRequest is sent by scout or the agent

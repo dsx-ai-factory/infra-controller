@@ -32,8 +32,9 @@ use carbide_libmlx_model::firmware::result::FirmwareFlashReport;
 use nix::libc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::sync::watch;
 
-use crate::firmware::config::FlashOptions;
+use crate::firmware::config::{FirmwareUpdateContext, FlashOptions};
 
 const SCHEMA_VERSION: u32 = 1;
 // Keep at most 128 receipts per slot so whole-journal reads and writes stay
@@ -44,13 +45,16 @@ const MAX_DIAGNOSTIC_BYTES: usize = 2048;
 const LEDGER_FILENAME: &str = "operations.json";
 const OWNER_LOCK_FILENAME: &str = "owner.lock";
 
-/// Only the target and behavior are retained; source URLs and credentials stay
-/// out of the journal. `None` represents a request with no firmware work.
+/// Retain the target, behavior, and optional checked dispatch/digests without
+/// source URLs or credentials. `None` represents a request with no firmware work.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RequestedFirmware {
     pub(super) target: FirmwareSpec,
     pub(super) options: FlashOptions,
+    /// Legacy receipts omit this field and retain their original request identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) update_context: Option<FirmwareUpdateContext>,
 }
 
 impl RequestedFirmware {
@@ -245,7 +249,7 @@ pub(super) struct OperationJournal {
     directory: File,
     current_boot_id: String,
     ledger: Ledger,
-    reload_required: bool,
+    reload_required: watch::Sender<bool>,
     // Keep ownership for the journal's lifetime. Never unlink the
     // lock file: two helpers could otherwise lock different inodes by one name.
     _owner_lock: OwnerLock,
@@ -335,7 +339,7 @@ impl OperationJournal {
             directory: directory_file,
             current_boot_id: boot_id.to_string(),
             ledger,
-            reload_required: false,
+            reload_required: watch::channel(false).0,
             _owner_lock: owner_lock,
         };
         if created {
@@ -513,8 +517,14 @@ impl OperationJournal {
             .map(|record| record.operation.clone()))
     }
 
+    /// A failed save fences this handle until reopen and wakes execution that
+    /// is waiting without a command in flight. It is not accepted cancellation.
+    pub(super) fn subscribe_reload_required(&self) -> watch::Receiver<bool> {
+        self.reload_required.subscribe()
+    }
+
     fn ensure_readable(&self) -> Result<(), JournalError> {
-        if self.reload_required {
+        if *self.reload_required.borrow() {
             return Err(JournalError::ReloadRequired);
         }
         Ok(())
@@ -545,12 +555,13 @@ impl OperationJournal {
     /// an uncertain I/O failure disables further writes on this handle.
     fn save(&mut self, next: Ledger) -> Result<(), JournalError> {
         let encoded = next.encode_bounded()?;
-        // From this point, any I/O failure leaves the caller without a durable
-        // acceptance answer. Keep the in-memory view unusable until reload.
-        self.reload_required = true;
-        persist_ledger(&self.path, &self.directory, &encoded)?;
+        // An I/O failure leaves no durable acceptance answer. Publish the
+        // sticky fence only after failure, never while a successful save runs.
+        if let Err(error) = persist_ledger(&self.path, &self.directory, &encoded) {
+            self.reload_required.send_replace(true);
+            return Err(error);
+        }
         self.ledger = next;
-        self.reload_required = false;
         Ok(())
     }
 }
@@ -981,6 +992,21 @@ mod tests {
         }
     }
 
+    /// Legacy requested work must omit checked context, not encode it as null.
+    /// Older journal readers reject unknown fields even when their value is null.
+    #[test]
+    fn legacy_requested_firmware_omits_checked_context() {
+        // Keep predecessor bytes independent of today's serializer so removing
+        // `skip_serializing_if` cannot silently change the expected fixture.
+        let predecessor = concat!(
+            r#"{"target":{"part_number":"PN-1","psid":"PSID-1","version":"32.43.1014"},"#,
+            r#""options":{"verify_image":false,"verify_version":false,"reset":false,"reset_level":3}}"#,
+        );
+        let requested: RequestedFirmware = serde_json::from_str(predecessor).unwrap();
+        assert!(requested.update_context.is_none());
+        assert_eq!(serde_json::to_string(&requested).unwrap(), predecessor);
+    }
+
     /// Reload uses the committed receipt, including staged inputs and exact
     /// target options, rather than reconstructing progress from tool versions.
     #[test]
@@ -999,6 +1025,7 @@ mod tests {
                 reset: true,
                 ..FlashOptions::default()
             },
+            update_context: None,
         });
         journal.admit(submitted).expect("admit target");
         // A completed receipt reloads unchanged; interruption recovery has its
@@ -1198,6 +1225,7 @@ mod tests {
                         version: "v".repeat(MAX_LEDGER_BYTES),
                     },
                     options: FlashOptions::default(),
+                    update_context: None,
                 });
             }
             let error = journal
@@ -1469,6 +1497,7 @@ mod tests {
                     version: "target-version".to_string(),
                 },
                 options,
+                update_context: None,
             });
             journal.admit(submitted).expect("admit firmware request");
             let before = fs::read(&journal.path).expect("read admitted receipt");

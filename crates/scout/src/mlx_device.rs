@@ -27,13 +27,16 @@ use carbide_instrument::emit;
 use carbide_uuid::machine::MachineId;
 use libmlx::device::discovery;
 use libmlx::device::report::MlxDeviceReport;
-use libmlx::firmware::config::FirmwareFlasherProfile;
+use libmlx::firmware::config::{
+    FirmwareArtifactDigests, FirmwareFlasherProfile, FirmwareUpdateContext,
+};
 use libmlx::firmware::credentials::Credentials;
 use libmlx::firmware::operation::{
     FirmwareOperation, FirmwareOperationState, FirmwareSupervisorClient,
-    FirmwareSupervisorClientError, ObserverExitBehavior, SupervisorConfig, connect_or_launch,
-    has_unresolved_firmware_claim,
+    FirmwareSupervisorClientError, ObserverExitBehavior, SupervisorConfig, SupervisorLaunchError,
+    connect_or_launch, has_unresolved_firmware_claim,
 };
+use libmlx::firmware::preflight::validate_preflight_request;
 use libmlx::lockdown::error::MlxResult;
 use libmlx::lockdown::lockdown::{LockdownManager, StatusReport};
 use libmlx::profile::error::MlxProfileError;
@@ -53,6 +56,10 @@ use crate::metrics::{
     ScoutMlxProfileApplyFailed, ScoutMlxProfileOperationFailed, ScoutMlxProfileResetFailed,
     ScoutMlxRegistryLookupFailed, ScoutMlxRequestRejected,
 };
+use crate::mlx_access::{DirectMlxAccess, DirectMlxAccessError};
+
+#[cfg(all(test, target_os = "linux"))]
+mod firmware_update_tests;
 
 /// Startup inventory defers to earlier firmware ownership. Its query
 /// is bounded so a stalled MFT probe cannot indefinitely prevent control polling.
@@ -62,9 +69,7 @@ async fn create_device_report_request(
     let config = SupervisorConfig::from_env().map_err(|error| error.to_string())?;
     create_device_report_request_with_query(machine_id, &config, async {
         let mut report = MlxDeviceReport::new();
-        report.devices = discovery::discover_pci_devices_bounded()
-            .await
-            .map_err(|error| error.to_string())?;
+        report.devices = discovery::discover_pci_devices_bounded().await?;
         Ok(report)
     })
     .await
@@ -118,19 +123,45 @@ async fn publish_pending_device_report<PublishFuture>(
     }
 }
 
-/// Check saved ownership before polling the inventory future. This sequences
-/// Scout startup; it does not fence an independent operator's hardware command.
+/// Acquire hardware access before polling inventory, including its bounded
+/// device queries. Process settlement must survive conversion to a report error.
 async fn create_device_report_request_with_query(
     machine_id: MachineId,
     config: &SupervisorConfig,
-    query: impl std::future::Future<Output = Result<MlxDeviceReport, String>>,
+    query: impl std::future::Future<Output = Result<MlxDeviceReport, discovery::DeviceDiscoveryError>>,
 ) -> Result<Option<PublishMlxDeviceReportRequest>, String> {
     if has_unresolved_firmware_claim(config).map_err(|error| error.to_string())? {
         tracing::info!("deferring startup NIC inventory while firmware ownership is unresolved");
         return Ok(None);
     }
+    let mut access = match DirectMlxAccess::acquire(config, "inventory") {
+        Ok(access) => access,
+        Err(DirectMlxAccessError::Acquire(error))
+            if error.kind() == std::io::ErrorKind::AlreadyExists =>
+        {
+            // Another caller acquired after the advisory check. Validate its
+            // marker too, so an unsafe path is not mistaken for ordinary work.
+            has_unresolved_firmware_claim(config).map_err(|error| error.to_string())?;
+            tracing::debug!(
+                "deferring startup NIC inventory after concurrent hardware acquisition"
+            );
+            return Ok(None);
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     tracing::info!("creating PublishMlxDeviceReportRequest");
-    let mut report = query.await?;
+    let result = query.await;
+    if let Err(error) = &result {
+        access.observe_error(error);
+    }
+    if let Err(error) = access.finish() {
+        tracing::warn!(%error, "startup NIC inventory did not confirm hardware access release");
+        return Err(match result {
+            Err(query_error) => format!("{query_error}; {error}"),
+            Ok(_) => error.to_string(),
+        });
+    }
+    let mut report = result.map_err(|error| error.to_string())?;
     report.machine_id = Some(machine_id);
     let report_pb: MlxDeviceReportPb = report.into();
     Ok(Some(PublishMlxDeviceReportRequest {
@@ -349,6 +380,7 @@ fn mask_secret_values<'a>(text: &str, secrets: impl Iterator<Item = &'a str>) ->
 
 pub(super) fn handle_profile_sync(
     request: mlx_device_pb::MlxDeviceProfileSyncRequest,
+    access: &mut DirectMlxAccess,
 ) -> mlx_device_pb::MlxDeviceProfileSyncResponse {
     tracing::info!(
         device_id = %request.device_id,
@@ -424,6 +456,7 @@ pub(super) fn handle_profile_sync(
             }
         }
         Err(e) => {
+            access.observe_error(&e);
             emit(ScoutMlxProfileOperationFailed::Sync {
                 device_id: request.device_id.clone(),
                 profile_name: request.profile_name.clone(),
@@ -445,6 +478,7 @@ pub(super) fn handle_profile_sync(
 
 pub(super) fn handle_profile_compare(
     request: mlx_device_pb::MlxDeviceProfileCompareRequest,
+    access: &mut DirectMlxAccess,
 ) -> mlx_device_pb::MlxDeviceProfileCompareResponse {
     tracing::info!(
         device_id = %request.device_id,
@@ -520,6 +554,7 @@ pub(super) fn handle_profile_compare(
             }
         }
         Err(e) => {
+            access.observe_error(e.as_ref());
             emit(ScoutMlxProfileOperationFailed::Compare {
                 device_id: request.device_id.clone(),
                 profile_name: request.profile_name.clone(),
@@ -542,6 +577,7 @@ pub(super) fn handle_profile_compare(
 // handle_lockdown_lock locks a device.
 pub(super) fn handle_lockdown_lock(
     request: mlx_device_pb::MlxDeviceLockdownLockRequest,
+    access: &mut DirectMlxAccess,
 ) -> mlx_device_pb::MlxDeviceLockdownResponse {
     tracing::info!(
         device_id = %request.device_id,
@@ -551,6 +587,7 @@ pub(super) fn handle_lockdown_lock(
     let manager = match LockdownManager::new() {
         Ok(m) => m,
         Err(e) => {
+            access.observe_error(&e);
             emit(ScoutMlxOperationFailed::LockdownLockInitialize {
                 error: e.to_string(),
             });
@@ -580,6 +617,7 @@ pub(super) fn handle_lockdown_lock(
             }
         }
         Err(e) => {
+            access.observe_error(&e);
             emit(ScoutMlxDeviceOperationFailed::LockdownLockExecute {
                 device_id: request.device_id.clone(),
                 error: e.to_string(),
@@ -599,6 +637,7 @@ pub(super) fn handle_lockdown_lock(
 // handle_lockdown_unlock unlocks a device.
 pub(super) fn handle_lockdown_unlock(
     request: mlx_device_pb::MlxDeviceLockdownUnlockRequest,
+    access: &mut DirectMlxAccess,
 ) -> mlx_device_pb::MlxDeviceLockdownResponse {
     tracing::info!(
         device_id = %request.device_id,
@@ -608,6 +647,7 @@ pub(super) fn handle_lockdown_unlock(
     let manager = match LockdownManager::new() {
         Ok(m) => m,
         Err(e) => {
+            access.observe_error(&e);
             emit(ScoutMlxOperationFailed::LockdownUnlockInitialize {
                 error: e.to_string(),
             });
@@ -637,6 +677,7 @@ pub(super) fn handle_lockdown_unlock(
             }
         }
         Err(e) => {
+            access.observe_error(&e);
             emit(ScoutMlxDeviceOperationFailed::LockdownUnlockExecute {
                 device_id: request.device_id.clone(),
                 error: e.to_string(),
@@ -656,6 +697,7 @@ pub(super) fn handle_lockdown_unlock(
 // handle_lockdown_status gets the lockdown status of a device.
 pub(super) fn handle_lockdown_status(
     request: mlx_device_pb::MlxDeviceLockdownStatusRequest,
+    access: &mut DirectMlxAccess,
 ) -> mlx_device_pb::MlxDeviceLockdownResponse {
     tracing::info!(
         device_id = %request.device_id,
@@ -665,6 +707,7 @@ pub(super) fn handle_lockdown_status(
     let manager = match LockdownManager::new() {
         Ok(m) => m,
         Err(e) => {
+            access.observe_error(&e);
             emit(ScoutMlxOperationFailed::LockdownStatusInitialize {
                 error: e.to_string(),
             });
@@ -694,6 +737,7 @@ pub(super) fn handle_lockdown_status(
             }
         }
         Err(e) => {
+            access.observe_error(&e);
             emit(ScoutMlxDeviceOperationFailed::LockdownStatusExecute {
                 device_id: request.device_id.clone(),
                 error: e.to_string(),
@@ -712,13 +756,14 @@ pub(super) fn handle_lockdown_status(
 
 pub(super) fn handle_info_device(
     request: mlx_device_pb::MlxDeviceInfoDeviceRequest,
+    access: &mut DirectMlxAccess,
 ) -> mlx_device_pb::MlxDeviceInfoDeviceResponse {
     tracing::info!(
         device_id = %request.device_id,
         "[scout_stream::mlx_device] device info request",
     );
 
-    match discovery::discover_device(&request.device_id) {
+    match discovery::discover_device_with_settlement(&request.device_id) {
         Ok(device_info) => {
             tracing::info!(
                 device_id = %request.device_id,
@@ -733,16 +778,17 @@ pub(super) fn handle_info_device(
             }
         }
         Err(e) => {
+            access.observe_error(&e);
             emit(ScoutMlxDeviceOperationFailed::DeviceInfoDiscover {
                 device_id: request.device_id.clone(),
-                error: e.clone(),
+                error: e.to_string(),
             });
             mlx_device_pb::MlxDeviceInfoDeviceResponse {
                 reply: Some(
                     mlx_device_pb::mlx_device_info_device_response::Reply::Error(
                         mlx_device_pb::MlxDeviceStreamError {
                             status: mlx_device_pb::MlxDeviceStreamErrorStatus::Internal.into(),
-                            message: e,
+                            message: e.to_string(),
                         },
                     ),
                 ),
@@ -753,6 +799,7 @@ pub(super) fn handle_info_device(
 
 pub(super) fn handle_info_report(
     request: mlx_device_pb::MlxDeviceInfoReportRequest,
+    access: &mut DirectMlxAccess,
 ) -> mlx_device_pb::MlxDeviceInfoReportResponse {
     tracing::info!("[scout_stream::mlx_device] device report requested");
 
@@ -779,7 +826,7 @@ pub(super) fn handle_info_report(
         MlxDeviceReport::new()
     };
 
-    match report.collect() {
+    match report.collect_with_settlement() {
         Ok(report) => {
             tracing::info!(
                 device_count = report.devices.len(),
@@ -794,13 +841,16 @@ pub(super) fn handle_info_report(
             }
         }
         Err(e) => {
-            emit(ScoutMlxOperationFailed::InfoReportExecute { error: e.clone() });
+            access.observe_error(&e);
+            emit(ScoutMlxOperationFailed::InfoReportExecute {
+                error: e.to_string(),
+            });
             mlx_device_pb::MlxDeviceInfoReportResponse {
                 reply: Some(
                     mlx_device_pb::mlx_device_info_report_response::Reply::Error(
                         mlx_device_pb::MlxDeviceStreamError {
                             status: mlx_device_pb::MlxDeviceStreamErrorStatus::Internal.into(),
-                            message: e,
+                            message: e.to_string(),
                         },
                     ),
                 ),
@@ -871,6 +921,7 @@ pub(super) fn handle_registry_show(
 // a given variable registry.
 pub(super) fn handle_config_query(
     request: mlx_device_pb::MlxDeviceConfigQueryRequest,
+    access: &mut DirectMlxAccess,
 ) -> mlx_device_pb::MlxDeviceConfigQueryResponse {
     tracing::info!(
         device_id = %request.device_id,
@@ -952,6 +1003,7 @@ pub(super) fn handle_config_query(
             }
         }
         Err(e) => {
+            access.observe_error(&e);
             emit(ScoutMlxConfigOperationFailed::QueryExecute {
                 device_id: request.device_id.clone(),
                 registry_name: request.registry_name.clone(),
@@ -977,6 +1029,7 @@ pub(super) fn handle_config_query(
 // handle_config_set sets device variables.
 pub(super) fn handle_config_set(
     request: mlx_device_pb::MlxDeviceConfigSetRequest,
+    access: &mut DirectMlxAccess,
 ) -> mlx_device_pb::MlxDeviceConfigSetResponse {
     tracing::info!(
         device_id = %request.device_id,
@@ -1035,6 +1088,7 @@ pub(super) fn handle_config_set(
             }
         }
         Err(e) => {
+            access.observe_error(&e);
             emit(ScoutMlxConfigOperationFailed::SetExecute {
                 device_id: request.device_id.clone(),
                 registry_name: request.registry_name.clone(),
@@ -1059,6 +1113,7 @@ pub(super) fn handle_config_set(
 // that differ from the observed values.
 pub(super) fn handle_config_sync(
     request: mlx_device_pb::MlxDeviceConfigSyncRequest,
+    access: &mut DirectMlxAccess,
 ) -> mlx_device_pb::MlxDeviceConfigSyncResponse {
     tracing::info!(
         device_id = %request.device_id,
@@ -1141,6 +1196,7 @@ pub(super) fn handle_config_sync(
             }
         }
         Err(e) => {
+            access.observe_error(&e);
             emit(ScoutMlxConfigOperationFailed::SyncExecute {
                 device_id: request.device_id.clone(),
                 registry_name: request.registry_name.clone(),
@@ -1167,6 +1223,7 @@ pub(super) fn handle_config_sync(
 // against the current assignments on the device.
 pub(super) fn handle_config_compare(
     request: mlx_device_pb::MlxDeviceConfigCompareRequest,
+    access: &mut DirectMlxAccess,
 ) -> mlx_device_pb::MlxDeviceConfigCompareResponse {
     tracing::info!(
         device_id = %request.device_id,
@@ -1249,6 +1306,7 @@ pub(super) fn handle_config_compare(
             }
         }
         Err(e) => {
+            access.observe_error(&e);
             emit(ScoutMlxConfigOperationFailed::CompareExecute {
                 device_id: request.device_id.clone(),
                 registry_name: request.registry_name.clone(),
@@ -1269,6 +1327,179 @@ pub(super) fn handle_config_compare(
             }
         }
     }
+}
+
+/// Submit the exact generic task on every delivery, including after completion.
+/// Unlike DPA polling, changed immutable inputs must fail rather than merely
+/// reading the receipt whose operation ID they reused. Host contention and
+/// transient RPC capacity defer publication; other request failures return
+/// redacted, correlated errors.
+pub(super) async fn update_firmware(
+    device: &str,
+    task: &rpc::forge_agent_control_response::MlxDeviceUpdateFirmware,
+    config: &SupervisorConfig,
+) -> Option<mlx_device_pb::MlxDeviceUpdateFirmwareResult> {
+    use mlx_device_pb::MlxDeviceUpdateFirmwareErrorCode as Code;
+    use mlx_device_pb::mlx_device_update_firmware_result::Result as UpdateResult;
+
+    let result = match submit_firmware_update(device, task, config).await {
+        Ok(operation) => UpdateResult::Receipt(operation.into()),
+        Err(SupervisorLaunchError::Client(FirmwareSupervisorClientError::Rpc(status)))
+            if status.code() == tonic::Code::ResourceExhausted =>
+        {
+            tracing::debug!(device, operation_id = %task.operation_id, "deferring NIC firmware update until supervisor capacity is available");
+            return None;
+        }
+        Err(error) => {
+            let (failure_stage, grpc_status_code) = match &error {
+                SupervisorLaunchError::Client(error) => match error {
+                    FirmwareSupervisorClientError::InvalidRequest(_) => ("validation", None),
+                    FirmwareSupervisorClientError::UnsupportedProtocol(_) => ("protocol", None),
+                    FirmwareSupervisorClientError::Rpc(status) => ("rpc", Some(status.code())),
+                    FirmwareSupervisorClientError::Transport(_) => ("connection", None),
+                    FirmwareSupervisorClientError::Deadline => ("deadline", None),
+                    FirmwareSupervisorClientError::InvalidResponse(_) => ("response", None),
+                },
+                SupervisorLaunchError::InvalidConfiguration(_) => ("configuration", None),
+                SupervisorLaunchError::Environment(_) => ("environment", None),
+                SupervisorLaunchError::Device(_) => ("device", None),
+                SupervisorLaunchError::Io { operation, .. } => (*operation, None),
+                SupervisorLaunchError::IdentityMismatch { field, .. } => (*field, None),
+                SupervisorLaunchError::Exited { .. } => ("launcher_exit", None),
+                SupervisorLaunchError::ReadinessTimeout { .. } => ("readiness_timeout", None),
+            };
+            let io_error_kind = match &error {
+                SupervisorLaunchError::Io { source, .. }
+                | SupervisorLaunchError::Device(source) => Some(source.kind()),
+                _ => None,
+            };
+            let (code, diagnostic) = match error {
+                SupervisorLaunchError::Client(FirmwareSupervisorClientError::InvalidRequest(_)) => {
+                    (
+                        Code::InvalidTask,
+                        "invalid NIC firmware update identity, profile, source, or digest",
+                    )
+                }
+                SupervisorLaunchError::Client(
+                    FirmwareSupervisorClientError::UnsupportedProtocol(_),
+                ) => (
+                    Code::Unsupported,
+                    "firmware supervisor does not support checked NIC firmware updates",
+                ),
+                SupervisorLaunchError::Client(FirmwareSupervisorClientError::Rpc(status)) => {
+                    match status.code() {
+                        tonic::Code::InvalidArgument => (
+                            Code::InvalidTask,
+                            "invalid NIC firmware update identity, profile, source, or digest",
+                        ),
+                        tonic::Code::AlreadyExists => (
+                            Code::Conflict,
+                            "firmware operation ID identifies different immutable work",
+                        ),
+                        tonic::Code::Unimplemented => (
+                            Code::Unsupported,
+                            "firmware supervisor does not support checked NIC firmware updates",
+                        ),
+                        _ => (
+                            Code::Unavailable,
+                            "firmware supervisor returned no authoritative receipt; admission may have happened",
+                        ),
+                    }
+                }
+                _ => (
+                    Code::Unavailable,
+                    "firmware supervisor returned no authoritative receipt; admission may have happened",
+                ),
+            };
+            // Local and remote errors may contain paths, URLs, or peer identity
+            // strings. Keep only bounded causes and fixed messages at this boundary.
+            tracing::warn!(pci_name = device, operation_id = %task.operation_id, ?code, failure_stage, ?grpc_status_code, ?io_error_kind, diagnostic, "NIC firmware update request failed");
+            return Some(firmware_update_request_error(
+                device, task, code, diagnostic,
+            ));
+        }
+    };
+    Some(mlx_device_pb::MlxDeviceUpdateFirmwareResult {
+        operation_id: task.operation_id.clone(),
+        phase_id: task.phase_id.clone(),
+        pci_name: device.to_string(),
+        result: Some(result),
+    })
+}
+
+/// Construct a correlated request error without copying local or remote error
+/// text into the wire response. These failures never authorize a new operation ID.
+pub(super) fn firmware_update_request_error(
+    device: &str,
+    task: &rpc::forge_agent_control_response::MlxDeviceUpdateFirmware,
+    code: mlx_device_pb::MlxDeviceUpdateFirmwareErrorCode,
+    diagnostic: &'static str,
+) -> mlx_device_pb::MlxDeviceUpdateFirmwareResult {
+    mlx_device_pb::MlxDeviceUpdateFirmwareResult {
+        operation_id: task.operation_id.clone(),
+        phase_id: task.phase_id.clone(),
+        pci_name: device.to_string(),
+        result: Some(
+            mlx_device_pb::mlx_device_update_firmware_result::Result::Error(
+                mlx_device_pb::MlxDeviceUpdateFirmwareError {
+                    code: code.into(),
+                    diagnostic: diagnostic.to_string(),
+                },
+            ),
+        ),
+    }
+}
+
+/// Validate before helper launch. The supervisor independently validates
+/// admission, then stages and checks the artifact bytes under its own lifetime.
+async fn submit_firmware_update(
+    device: &str,
+    task: &rpc::forge_agent_control_response::MlxDeviceUpdateFirmware,
+    config: &SupervisorConfig,
+) -> Result<FirmwareOperation, SupervisorLaunchError> {
+    let invalid = || {
+        FirmwareSupervisorClientError::InvalidRequest(
+            "invalid NIC firmware update task".to_string(),
+        )
+    };
+    if task.operation_id.is_empty()
+        || task.operation_id.starts_with("dpa-firmware:")
+        || task.operation_id.len() > 256
+        || !task
+            .operation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic())
+        || device.len() != 12
+        || device.bytes().any(|byte| byte.is_ascii_uppercase())
+    {
+        return Err(invalid().into());
+    }
+    let profile: FirmwareFlasherProfile = task
+        .profile
+        .clone()
+        .ok_or_else(invalid)?
+        .try_into()
+        .map_err(|_| invalid())?;
+    let expected_digests =
+        FirmwareArtifactDigests::try_from(task.expected_digests.clone().ok_or_else(invalid)?)
+            .map_err(|_| invalid())?;
+    let context = FirmwareUpdateContext {
+        phase_id: task.phase_id.clone(),
+        expected_digests,
+    };
+    context.validate(&profile).map_err(|_| invalid())?;
+    validate_preflight_request(device, &profile.firmware_spec).map_err(|_| invalid())?;
+
+    let mut client = connect_or_launch(device, config).await?;
+    client
+        .submit_update(
+            &task.operation_id,
+            profile,
+            context,
+            ObserverExitBehavior::Continue,
+        )
+        .await
+        .map_err(SupervisorLaunchError::Client)
 }
 
 /// `apply_firmware` reads or submits one Core state entry's durable operation.
@@ -1396,10 +1627,12 @@ async fn poll_firmware_operation(
 pub(super) fn apply_profile(
     device: &str,
     profile: Option<SerializableProfile>,
+    access: &mut DirectMlxAccess,
 ) -> (Option<String>, Option<bool>) {
     // Always reset to factory defaults first.
     let applier = MlxConfigApplier::new(device);
     if let Err(e) = applier.reset_config() {
+        access.observe_error(&e);
         emit(ScoutMlxProfileResetFailed::execute(
             device.to_string(),
             e.to_string(),
@@ -1426,6 +1659,7 @@ pub(super) fn apply_profile(
             (Some(name), Some(true))
         }
         Err(e) => {
+            access.observe_error(&e);
             emit(ScoutMlxProfileApplyFailed::execute(
                 device.to_string(),
                 name.clone(),
@@ -1674,14 +1908,22 @@ mod tests {
         }
 
         fn invoke(self) -> mlx_device_pb::MlxDeviceStreamError {
-            match self {
+            let directory = firmware_state_directory();
+            let config = SupervisorConfig {
+                state_directory: directory.path().to_path_buf(),
+                ..Default::default()
+            };
+            let mut access = DirectMlxAccess::acquire(&config, DEVICE_ID).unwrap();
+            let error = match self {
                 Self::MissingProfileCompare => {
-                    let response =
-                        handle_profile_compare(mlx_device_pb::MlxDeviceProfileCompareRequest {
+                    let response = handle_profile_compare(
+                        mlx_device_pb::MlxDeviceProfileCompareRequest {
                             device_id: DEVICE_ID.to_string(),
                             profile_name: "default".to_string(),
                             serializable_profile: None,
-                        });
+                        },
+                        &mut access,
+                    );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_profile_compare_response::Reply::Error(
                             error,
@@ -1690,12 +1932,14 @@ mod tests {
                     }
                 }
                 Self::MissingProfileSync => {
-                    let response =
-                        handle_profile_sync(mlx_device_pb::MlxDeviceProfileSyncRequest {
+                    let response = handle_profile_sync(
+                        mlx_device_pb::MlxDeviceProfileSyncRequest {
                             device_id: DEVICE_ID.to_string(),
                             profile_name: "default".to_string(),
                             serializable_profile: None,
-                        });
+                        },
+                        &mut access,
+                    );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_profile_sync_response::Reply::Error(
                             error,
@@ -1716,12 +1960,14 @@ mod tests {
                     }
                 }
                 Self::QueryMissingRegistry => {
-                    let response =
-                        handle_config_query(mlx_device_pb::MlxDeviceConfigQueryRequest {
+                    let response = handle_config_query(
+                        mlx_device_pb::MlxDeviceConfigQueryRequest {
                             device_id: DEVICE_ID.to_string(),
                             registry_name: REGISTRY.to_string(),
                             variables: Vec::new(),
-                        });
+                        },
+                        &mut access,
+                    );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_config_query_response::Reply::Error(
                             error,
@@ -1730,12 +1976,14 @@ mod tests {
                     }
                 }
                 Self::CompareMissingRegistry => {
-                    let response =
-                        handle_config_compare(mlx_device_pb::MlxDeviceConfigCompareRequest {
+                    let response = handle_config_compare(
+                        mlx_device_pb::MlxDeviceConfigCompareRequest {
                             device_id: DEVICE_ID.to_string(),
                             registry_name: REGISTRY.to_string(),
                             assignments: Vec::new(),
-                        });
+                        },
+                        &mut access,
+                    );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_config_compare_response::Reply::Error(
                             error,
@@ -1744,11 +1992,14 @@ mod tests {
                     }
                 }
                 Self::SetMissingRegistry => {
-                    let response = handle_config_set(mlx_device_pb::MlxDeviceConfigSetRequest {
-                        device_id: DEVICE_ID.to_string(),
-                        registry_name: REGISTRY.to_string(),
-                        assignments: Vec::new(),
-                    });
+                    let response = handle_config_set(
+                        mlx_device_pb::MlxDeviceConfigSetRequest {
+                            device_id: DEVICE_ID.to_string(),
+                            registry_name: REGISTRY.to_string(),
+                            assignments: Vec::new(),
+                        },
+                        &mut access,
+                    );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_config_set_response::Reply::Error(
                             error,
@@ -1757,11 +2008,14 @@ mod tests {
                     }
                 }
                 Self::SyncMissingRegistry => {
-                    let response = handle_config_sync(mlx_device_pb::MlxDeviceConfigSyncRequest {
-                        device_id: DEVICE_ID.to_string(),
-                        registry_name: REGISTRY.to_string(),
-                        assignments: Vec::new(),
-                    });
+                    let response = handle_config_sync(
+                        mlx_device_pb::MlxDeviceConfigSyncRequest {
+                            device_id: DEVICE_ID.to_string(),
+                            registry_name: REGISTRY.to_string(),
+                            assignments: Vec::new(),
+                        },
+                        &mut access,
+                    );
                     match response.reply {
                         Some(mlx_device_pb::mlx_device_config_sync_response::Reply::Error(
                             error,
@@ -1769,7 +2023,9 @@ mod tests {
                         _ => panic!("missing sync registry should return an error"),
                     }
                 }
-            }
+            };
+            access.finish().unwrap();
+            error
         }
     }
 
@@ -1956,6 +2212,20 @@ mod tests {
         }
     }
 
+    /// Keep legacy fixtures on the same typed action boundary used by polling.
+    fn legacy_device_actions(
+        commands: Vec<(String, carbide_host_support::dpa_cmds::DpaCommand<'static>)>,
+    ) -> Vec<rpc::forge_agent_control_response::MlxDeviceAction> {
+        commands
+            .into_iter()
+            .map(|(pci_name, command)| {
+                carbide_host_support::dpa_cmds::DpaDeviceCommand { pci_name, command }
+                    .try_into()
+                    .unwrap()
+            })
+            .collect()
+    }
+
     /// Keep fixture state private and allow a trusted short root for Unix sockets.
     fn firmware_state_directory() -> tempfile::TempDir {
         use std::os::unix::fs::PermissionsExt;
@@ -1980,6 +2250,415 @@ mod tests {
             error,
             "firmware operation ID is required; no work was submitted"
         );
+    }
+
+    /// Invalid generic tasks still publish a correlated rejection. Neither a
+    /// missing profile nor a noncanonical target may reach helper launch or the
+    /// legacy DPA no-work path.
+    #[tokio::test]
+    async fn invalid_nic_update_is_reported_without_launching_a_helper() {
+        use mlx_device_pb::mlx_device_update_firmware_result::Result as UpdateResult;
+        use rpc::forge_agent_control_response as fac;
+
+        let task = fac::MlxDeviceUpdateFirmware {
+            operation_id: "generic-update".to_string(),
+            phase_id: "firmware-phase".to_string(),
+            profile: Some(
+                firmware_profile("https://firmware.example/image.bin", None, None, None).into(),
+            ),
+            expected_digests: Some(mlx_device_pb::FirmwareArtifactDigests {
+                image_sha256: "00".repeat(32),
+                configuration_sha256: None,
+            }),
+        };
+        let mut missing_profile = task.clone();
+        missing_profile.profile = None;
+        let mut invalid_operation_id = task.clone();
+        invalid_operation_id.operation_id = "invalid\nidentifier".to_string();
+        let mut reserved_operation_id = task.clone();
+        reserved_operation_id.operation_id = "dpa-firmware:card:state-entry".to_string();
+        let mut invalid_phase = task.clone();
+        invalid_phase.phase_id = "invalid phase".to_string();
+        for (scenario, pci_name, task) in [
+            // The old command's absent-profile completion is not this contract.
+            ("required profile", DEVICE_ID, missing_profile),
+            // The generic task identity must include the domain explicitly.
+            ("full target", "01:00.0", task),
+            // Receipt keys reject invalid bytes before any local service starts.
+            ("operation identity", DEVICE_ID, invalid_operation_id),
+            // DPA receipt-first polling must never read a checked update.
+            ("reserved DPA identity", DEVICE_ID, reserved_operation_id),
+            // Context validation must also run before helper launch.
+            ("phase context", DEVICE_ID, invalid_phase),
+        ] {
+            let directory = firmware_state_directory();
+            let config = SupervisorConfig {
+                state_directory: directory.path().to_path_buf(),
+                supervisor_path: Some(directory.path().join("must-not-launch")),
+                ..Default::default()
+            };
+            let machine_id = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg"
+                .parse()
+                .unwrap();
+            let action = fac::MlxDeviceAction {
+                pci_name: pci_name.to_string(),
+                command: Some(fac::mlx_device_action::Command::UpdateFirmware(
+                    task.clone(),
+                )),
+            };
+            let mut published = None;
+            crate::collect_and_publish_mlx_observations(
+                &machine_id,
+                vec![action],
+                Ok(&config),
+                |_| panic!("invalid generic task must not discover hardware"),
+                |request| {
+                    published = Some(request);
+                    std::future::ready(Ok(PublishMlxObservationReportResponse::default()))
+                },
+            )
+            .await;
+            let report = published
+                .expect("rejection must be published")
+                .report
+                .unwrap();
+            assert_eq!(report.machine_id, Some(machine_id), "{scenario}");
+            assert_eq!(report.observations, vec![mlx_device_pb::MlxObservation {
+                firmware_update_result: Some(mlx_device_pb::MlxDeviceUpdateFirmwareResult {
+                    operation_id: task.operation_id,
+                    phase_id: task.phase_id,
+                    pci_name: pci_name.to_string(),
+                    result: Some(UpdateResult::Error(mlx_device_pb::MlxDeviceUpdateFirmwareError {
+                        code: mlx_device_pb::MlxDeviceUpdateFirmwareErrorCode::InvalidTask.into(),
+                        diagnostic: "invalid NIC firmware update identity, profile, source, or digest".to_string(),
+                    })),
+                }),
+                ..Default::default()
+            }], "{scenario}");
+            assert_eq!(
+                std::fs::read_dir(directory.path()).unwrap().count(),
+                0,
+                "{scenario}: invalid task created supervisor state"
+            );
+        }
+    }
+
+    /// Generic dispatch distinguishes unsupported helpers from occupied ones
+    /// and keeps request failures correlated without local or remote secrets.
+    #[tokio::test]
+    async fn nic_update_dispatch_preserves_support_deferral_and_redaction() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use mlx_device_pb::MlxDeviceUpdateFirmwareErrorCode as Code;
+        use mlx_device_pb::mlx_device_update_firmware_result::Result as UpdateResult;
+        use rpc::forge_agent_control_response as fac;
+        use rpc::protos::firmware_supervisor::firmware_supervisor_server::{
+            FirmwareSupervisor, FirmwareSupervisorServer,
+        };
+        use rpc::protos::firmware_supervisor::{
+            CancelFirmwareOperationRequest, CancelFirmwareOperationResponse,
+            GetFirmwareOperationRequest, GetFirmwareOperationResponse, GetSupervisorStatusRequest,
+            GetSupervisorStatusResponse, SubmitFirmwareOperationRequest,
+            SubmitFirmwareOperationResponse,
+        };
+        use tokio_stream::wrappers::UnixListenerStream;
+        use tokio_util::sync::CancellationToken;
+        use tonic::{Request, Response, Status};
+
+        /// Serve only admission failures; no fixture path executes firmware.
+        struct Supervisor {
+            protocol_version: u32,
+            boot_id: String,
+            admission_error: Status,
+            submissions: Arc<AtomicUsize>,
+            lookups: Arc<AtomicUsize>,
+        }
+
+        #[tonic::async_trait]
+        impl FirmwareSupervisor for Supervisor {
+            async fn submit_firmware_operation(
+                &self,
+                _: Request<SubmitFirmwareOperationRequest>,
+            ) -> Result<Response<SubmitFirmwareOperationResponse>, Status> {
+                self.submissions.fetch_add(1, Ordering::SeqCst);
+                Err(self.admission_error.clone())
+            }
+
+            async fn get_firmware_operation(
+                &self,
+                _: Request<GetFirmwareOperationRequest>,
+            ) -> Result<Response<GetFirmwareOperationResponse>, Status> {
+                self.lookups.fetch_add(1, Ordering::SeqCst);
+                Err(Status::unimplemented(
+                    "checked updates must submit exact inputs",
+                ))
+            }
+
+            async fn cancel_firmware_operation(
+                &self,
+                _: Request<CancelFirmwareOperationRequest>,
+            ) -> Result<Response<CancelFirmwareOperationResponse>, Status> {
+                Err(Status::unimplemented(
+                    "dispatch does not cancel accepted work",
+                ))
+            }
+
+            async fn get_supervisor_status(
+                &self,
+                _: Request<GetSupervisorStatusRequest>,
+            ) -> Result<Response<GetSupervisorStatusResponse>, Status> {
+                Ok(Response::new(GetSupervisorStatusResponse {
+                    protocol_version: self.protocol_version,
+                    device_identity: "0000:01:00".to_string(),
+                    boot_id: self.boot_id.clone(),
+                    execution_device: DEVICE_ID.to_string(),
+                }))
+            }
+        }
+
+        struct Case {
+            name: &'static str,
+            supervisor: Option<(u32, Status)>,
+            expected_code: Option<Code>,
+        }
+
+        const SECRET: &str = "fixture-remote-secret";
+        let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .unwrap()
+            .trim()
+            .to_string();
+        for case in [
+            // A predecessor cannot silently discard checked-update fields.
+            Case {
+                name: "protocol 2 rejects before Submit",
+                supervisor: Some((2, Status::unimplemented("must not receive submit"))),
+                expected_code: Some(Code::Unsupported),
+            },
+            // A matching handshake can still expose an unsupported RPC.
+            Case {
+                name: "unimplemented Submit reports unsupported",
+                supervisor: Some((3, Status::unimplemented("checked admission unavailable"))),
+                expected_code: Some(Code::Unsupported),
+            },
+            Case {
+                name: "invalid Submit reports an invalid task",
+                supervisor: Some((3, Status::invalid_argument("invalid checked context"))),
+                expected_code: Some(Code::InvalidTask),
+            },
+            // Capacity is a deferred poll, not a failed or empty publication.
+            Case {
+                name: "occupied supervisor defers publication",
+                supervisor: Some((3, Status::resource_exhausted("host is occupied"))),
+                expected_code: None,
+            },
+            // An uncertain reply cannot leak URLs or authorize replacement work.
+            Case {
+                name: "failed precondition keeps correlated redacted uncertainty",
+                supervisor: Some((
+                    3,
+                    Status::failed_precondition(format!(
+                        "cannot resolve https://user:{SECRET}@firmware.example/image.bin"
+                    )),
+                )),
+                expected_code: Some(Code::Unavailable),
+            },
+            // No listener exists, so the configured missing executable reaches spawn.
+            Case {
+                name: "local launch failure keeps its cause without exposing the path",
+                supervisor: None,
+                expected_code: Some(Code::Unavailable),
+            },
+        ] {
+            let directory = firmware_state_directory();
+            let config = SupervisorConfig {
+                state_directory: directory.path().to_path_buf(),
+                supervisor_path: Some(
+                    directory
+                        .path()
+                        .join(format!("missing-supervisor-{SECRET}")),
+                ),
+                ..Default::default()
+            };
+            let submissions = Arc::new(AtomicUsize::new(0));
+            let lookups = Arc::new(AtomicUsize::new(0));
+            let protocol_version = case.supervisor.as_ref().map(|(version, _)| *version);
+            let status_code = case.supervisor.as_ref().map(|(_, error)| error.code());
+            let stop = CancellationToken::new();
+            let server = if let Some((protocol_version, admission_error)) = case.supervisor {
+                let card_directory = directory.path().join("0000:01:00");
+                std::fs::create_dir(&card_directory).unwrap();
+                std::fs::set_permissions(&card_directory, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+                let socket = card_directory.join("control.sock");
+                let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+                std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+                let supervisor = Supervisor {
+                    protocol_version,
+                    boot_id: boot_id.clone(),
+                    admission_error,
+                    submissions: submissions.clone(),
+                    lookups: lookups.clone(),
+                };
+                Some(tokio::spawn(
+                    tonic::transport::Server::builder()
+                        .add_service(FirmwareSupervisorServer::new(supervisor))
+                        .serve_with_incoming_shutdown(
+                            UnixListenerStream::new(listener),
+                            stop.clone().cancelled_owned(),
+                        ),
+                ))
+            } else {
+                None
+            };
+            let machine_id = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg"
+                .parse()
+                .unwrap();
+            let task = fac::MlxDeviceUpdateFirmware {
+                operation_id: "checked-update".to_string(),
+                phase_id: "firmware-phase".to_string(),
+                profile: Some(
+                    firmware_profile("https://firmware.example/image.bin", None, None, None).into(),
+                ),
+                expected_digests: Some(mlx_device_pb::FirmwareArtifactDigests {
+                    image_sha256: "00".repeat(32),
+                    configuration_sha256: None,
+                }),
+            };
+            let mut published = None;
+            let ((), logs) = capture_logs_async(crate::collect_and_publish_mlx_observations(
+                &machine_id,
+                vec![fac::MlxDeviceAction {
+                    pci_name: DEVICE_ID.to_string(),
+                    command: Some(fac::mlx_device_action::Command::UpdateFirmware(
+                        task.clone(),
+                    )),
+                }],
+                Ok(&config),
+                |_| panic!("generic dispatch must not discover hardware"),
+                |request| {
+                    published = Some(request);
+                    std::future::ready(Ok(PublishMlxObservationReportResponse::default()))
+                },
+            ))
+            .await;
+
+            assert_eq!(
+                submissions.load(Ordering::SeqCst),
+                usize::from(protocol_version == Some(3)),
+                "{}",
+                case.name,
+            );
+            assert_eq!(lookups.load(Ordering::SeqCst), 0, "{}", case.name);
+            if let Some(code) = case.expected_code {
+                let report = published.expect(case.name).report.unwrap();
+                assert_eq!(report.machine_id, Some(machine_id), "{}", case.name);
+                let diagnostic = match code {
+                    Code::InvalidTask => {
+                        "invalid NIC firmware update identity, profile, source, or digest"
+                    }
+                    Code::Unsupported => {
+                        "firmware supervisor does not support checked NIC firmware updates"
+                    }
+                    _ => {
+                        "firmware supervisor returned no authoritative receipt; admission may have happened"
+                    }
+                };
+                assert_eq!(
+                    report.observations,
+                    vec![mlx_device_pb::MlxObservation {
+                        firmware_update_result: Some(
+                            mlx_device_pb::MlxDeviceUpdateFirmwareResult {
+                                operation_id: task.operation_id,
+                                phase_id: task.phase_id,
+                                pci_name: DEVICE_ID.to_string(),
+                                result: Some(UpdateResult::Error(
+                                    mlx_device_pb::MlxDeviceUpdateFirmwareError {
+                                        code: code.into(),
+                                        diagnostic: diagnostic.to_string(),
+                                    }
+                                )),
+                            }
+                        ),
+                        ..Default::default()
+                    }],
+                    "{}",
+                    case.name
+                );
+                assert!(
+                    !serde_json::to_string(&report).unwrap().contains(SECRET),
+                    "{}",
+                    case.name
+                );
+                let failure = logs
+                    .iter()
+                    .find(|log| log.message == "NIC firmware update request failed")
+                    .expect("request failure has a bounded diagnostic log");
+                assert_eq!(
+                    logs.iter()
+                        .filter(|log| log.level == tracing::Level::WARN)
+                        .count(),
+                    1,
+                    "{}: request failure must be logged once",
+                    case.name
+                );
+                assert_eq!(
+                    failure.field("failure_stage"),
+                    Some(match protocol_version {
+                        Some(2) => "protocol",
+                        Some(_) => "rpc",
+                        None => "launch firmware supervisor",
+                    }),
+                    "{}",
+                    case.name
+                );
+                let expected_status = if protocol_version == Some(3) {
+                    format!("{status_code:?}")
+                } else {
+                    "None".to_string()
+                };
+                assert_eq!(
+                    failure.field("grpc_status_code"),
+                    Some(expected_status.as_str()),
+                    "{}",
+                    case.name
+                );
+                assert_eq!(
+                    failure.field("io_error_kind"),
+                    Some(if protocol_version.is_none() {
+                        "Some(NotFound)"
+                    } else {
+                        "None"
+                    }),
+                    "{}",
+                    case.name
+                );
+            } else {
+                assert!(published.is_none(), "{}", case.name);
+            }
+            assert!(
+                logs.iter().all(|log| {
+                    !log.message.contains(SECRET)
+                        && log.fields.iter().all(|(_, value)| !value.contains(SECRET))
+                }),
+                "{}: local or remote details appeared in logs",
+                case.name
+            );
+            assert!(
+                !directory.path().join("mutation.json").exists(),
+                "{}",
+                case.name
+            );
+            stop.cancel();
+            if let Some(server) = server {
+                tokio::time::timeout(std::time::Duration::from_secs(5), server)
+                    .await
+                    .expect("supervisor fixture must stop after its client disconnects")
+                    .unwrap()
+                    .unwrap();
+            }
+        }
     }
 
     /// Startup and automatic non-firmware commands must not touch hardware when
@@ -2023,7 +2702,7 @@ mod tests {
             }
 
             let commands = || {
-                vec![
+                legacy_device_actions(vec![
                     // Profile apply includes mlxconfig reset even without a profile.
                     (
                         DEVICE_ID.into(),
@@ -2049,13 +2728,13 @@ mod tests {
                             },
                         },
                     ),
-                ]
+                ])
             };
             let metrics = MetricsCapture::start();
             crate::collect_and_publish_mlx_observations(
                 &machine_id,
                 commands(),
-                &config,
+                Ok(&config),
                 |_| panic!("deferred automatic commands must not even discover the card"),
                 |_| async { panic!("deferred automatic commands must not publish a report") },
             )
@@ -2078,7 +2757,9 @@ mod tests {
             let mut queries = 0;
             crate::collect_mlx_observations(&machine_id, commands(), &config, |_| {
                 queries += 1;
-                Err("fixture ends before mutation".into())
+                Err(discovery::DeviceDiscoveryError::InvalidReport(
+                    "fixture ends before mutation".into(),
+                ))
             })
             .await;
             assert_eq!(queries, 3, "{scenario}");
@@ -2090,6 +2771,158 @@ mod tests {
             .unwrap();
             assert_eq!(inventory.report.unwrap().machine_id, Some(machine_id));
         }
+    }
+
+    /// An absent state directory distinguishes no acquisition from acquire/release.
+    /// A later Lock must still reach claimed discovery in the same batch.
+    #[tokio::test]
+    async fn automatic_noop_skips_hardware_access_and_allows_later_commands() {
+        use carbide_host_support::dpa_cmds::{DpaCommand, OpCode};
+
+        let directory = firmware_state_directory();
+        let config = SupervisorConfig {
+            state_directory: directory.path().join("firmware"),
+            ..Default::default()
+        };
+        let machine_id = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg"
+            .parse()
+            .unwrap();
+
+        let report = crate::collect_mlx_observations(
+            &machine_id,
+            legacy_device_actions(vec![(
+                DEVICE_ID.to_string(),
+                DpaCommand { op: OpCode::Noop },
+            )]),
+            &config,
+            |_| panic!("Noop must not discover hardware"),
+        )
+        .await;
+
+        assert!(report.observations.is_empty());
+        assert!(!config.state_directory.exists());
+
+        let next_device = "0000:02:00.0";
+        let commands = legacy_device_actions(vec![
+            (DEVICE_ID.to_string(), DpaCommand { op: OpCode::Noop }),
+            (
+                next_device.to_string(),
+                DpaCommand {
+                    op: OpCode::Lock {
+                        key: "fixture-key".into(),
+                    },
+                },
+            ),
+        ]);
+        let mut queries = 0;
+
+        let report = crate::collect_mlx_observations(&machine_id, commands, &config, |device| {
+            assert_eq!(device, next_device);
+            queries += 1;
+            assert!(config.state_directory.join("mutation.json").is_file());
+            // Stop before the lock command invokes a vendor tool.
+            Err(discovery::DeviceDiscoveryError::InvalidReport(
+                "fixture ends before mutation".into(),
+            ))
+        })
+        .await;
+
+        assert_eq!(queries, 1);
+        assert!(report.observations.is_empty());
+        assert!(!has_unresolved_firmware_claim(&config).unwrap());
+    }
+
+    /// Discovery is part of a direct command's protected work. Losing its
+    /// process result must block the next command before it probes any device.
+    #[tokio::test]
+    async fn automatic_discovery_uncertainty_keeps_host_exclusion() {
+        use carbide_host_support::dpa_cmds::{DpaCommand, OpCode};
+        use libmlx::runner::error::MlxRunnerError;
+
+        let directory = firmware_state_directory();
+        let config = SupervisorConfig {
+            state_directory: directory.path().to_path_buf(),
+            ..Default::default()
+        };
+        let machine_id = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg"
+            .parse()
+            .unwrap();
+        let commands = legacy_device_actions(vec![
+            (
+                DEVICE_ID.to_string(),
+                DpaCommand {
+                    op: OpCode::Lock {
+                        key: "fixture-key".into(),
+                    },
+                },
+            ),
+            (
+                DEVICE_ID.to_string(),
+                DpaCommand {
+                    op: OpCode::Lock {
+                        key: "fixture-key".into(),
+                    },
+                },
+            ),
+        ]);
+        let mut queries = 0;
+        let report = crate::collect_mlx_observations(&machine_id, commands, &config, |_| {
+            queries += 1;
+            Err(discovery::DeviceDiscoveryError::DirectQuery(
+                MlxRunnerError::ProcessUnsettled {
+                    command: "mlxfwmanager".to_string(),
+                    source: std::io::Error::other("fixture lost query completion"),
+                },
+            ))
+        })
+        .await;
+        assert_eq!(
+            queries, 1,
+            "the following command must defer before discovery"
+        );
+        assert!(report.observations.is_empty());
+        assert!(has_unresolved_firmware_claim(&config).unwrap());
+    }
+
+    /// Unknown completion during MST alias resolution must survive the inventory
+    /// wrapper, keeping later queries out until the operator reconciles it.
+    #[tokio::test]
+    async fn startup_inventory_uncertainty_keeps_host_exclusion() {
+        use libmlx::firmware::error::{AttemptError, AttemptFailure};
+
+        let directory = firmware_state_directory();
+        let config = SupervisorConfig {
+            state_directory: directory.path().to_path_buf(),
+            ..Default::default()
+        };
+        let machine_id = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg"
+            .parse()
+            .unwrap();
+        let error = create_device_report_request_with_query(machine_id, &config, async {
+            Err(discovery::DeviceDiscoveryError::MstQueryAttempt(
+                AttemptError::Started {
+                    command: "mst status".into(),
+                    status: None,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    reason: AttemptFailure::Io(std::io::Error::other("lost process status")),
+                    cleanup_errors: Vec::new(),
+                }
+                .into(),
+            ))
+        })
+        .await
+        .expect_err("unknown inventory process must not produce a report");
+        assert!(error.contains("process completion is unknown"));
+        assert!(error.contains("mst status"), "{error}");
+        assert!(error.contains("lost process status"), "{error}");
+        assert!(has_unresolved_firmware_claim(&config).unwrap());
+        let next = create_device_report_request_with_query(machine_id, &config, async {
+            panic!("retained inventory ownership must prevent another query")
+        })
+        .await
+        .unwrap();
+        assert!(next.is_none());
     }
 
     /// Startup inventory remains pending through query and publish failures.
@@ -2134,7 +2967,9 @@ mod tests {
             &mut pending,
             create_device_report_request_with_query(machine_id, &config, async {
                 queries += 1;
-                Err("fixture inventory query failed".to_string())
+                Err(discovery::DeviceDiscoveryError::InvalidReport(
+                    "fixture inventory query failed".to_string(),
+                ))
             }),
             |_| async { panic!("a failed inventory query must not publish a report") },
         )
@@ -2241,6 +3076,7 @@ mod tests {
             lookups: Arc<AtomicUsize>,
             operation_id: String,
             boot_id: String,
+            protocol_version: u32,
         }
 
         #[tonic::async_trait]
@@ -2287,7 +3123,7 @@ mod tests {
                 _: Request<GetSupervisorStatusRequest>,
             ) -> Result<Response<GetSupervisorStatusResponse>, Status> {
                 Ok(Response::new(GetSupervisorStatusResponse {
-                    protocol_version: 1,
+                    protocol_version: self.protocol_version,
                     device_identity: "0000:03:00".to_string(),
                     boot_id: self.boot_id.clone(),
                     execution_device: "0000:03:00.0".to_string(),
@@ -2305,6 +3141,7 @@ mod tests {
 
         struct Case {
             name: &'static str,
+            protocol_version: u32,
             receipt: Result<Option<mlx_device_pb::FirmwareOperation>, Status>,
             profile: Option<FirmwareFlasherProfile>,
             admission_error: Option<Status>,
@@ -2326,9 +3163,11 @@ mod tests {
             .trim()
             .to_string();
         for (case_index, case) in [
-            // Losing a live profile must not erase an unresolved burn receipt.
+            // Upgrading Scout and losing a live profile must not erase an
+            // unresolved burn receipt still owned by a protocol-1 daemon.
             Case {
                 name: "existing work survives a missing profile",
+                protocol_version: 1,
                 receipt: Ok(Some(receipt.clone())),
                 profile: None,
                 admission_error: None,
@@ -2338,6 +3177,7 @@ mod tests {
             // A catalog edit is not permission to replace this state's request.
             Case {
                 name: "existing work ignores a changed live profile",
+                protocol_version: 2,
                 receipt: Ok(Some(receipt.clone())),
                 profile: Some(changed_profile.clone()),
                 admission_error: None,
@@ -2347,6 +3187,7 @@ mod tests {
             // New work is submitted once with the caller's original state ID.
             Case {
                 name: "missing receipt submits the profile",
+                protocol_version: 3,
                 receipt: Err(Status::not_found("unknown operation")),
                 profile: Some(changed_profile.clone()),
                 admission_error: None,
@@ -2356,25 +3197,49 @@ mod tests {
             // A no-work decision still goes through durable admission.
             Case {
                 name: "missing receipt submits the no-profile decision",
+                protocol_version: 3,
                 receipt: Err(Status::not_found("unknown operation")),
                 profile: None,
                 admission_error: None,
                 submits: true,
                 expected: Expected::Receipt,
             },
+            // Reading predecessor receipts does not permit new admission to
+            // that daemon, even for a no-profile decision.
+            Case {
+                name: "protocol-2 daemon refuses new work",
+                protocol_version: 2,
+                receipt: Err(Status::not_found("unknown operation")),
+                profile: None,
+                admission_error: None,
+                submits: false,
+                expected: Expected::RequestFailure,
+            },
             // Another card's operation defers this request without a failed
             // firmware observation or a failed-supervisor metric on each poll.
             Case {
                 name: "host capacity defers submission",
+                protocol_version: 3,
                 receipt: Err(Status::not_found("unknown operation")),
                 profile: None,
                 admission_error: Some(Status::resource_exhausted("host is owned")),
                 submits: true,
                 expected: Expected::Deferred,
             },
+            // Permanent receipt exhaustion is reported, not silently deferred.
+            Case {
+                name: "receipt capacity reports a request failure",
+                protocol_version: 3,
+                receipt: Err(Status::not_found("unknown operation")),
+                profile: None,
+                admission_error: Some(Status::failed_precondition("receipt capacity exhausted")),
+                submits: true,
+                expected: Expected::RequestFailure,
+            },
             // An inconclusive read cannot authorize resubmission or a skip.
             Case {
                 name: "failed lookup does not submit",
+                protocol_version: 3,
                 receipt: Err(Status::unavailable("journal unavailable")),
                 profile: None,
                 admission_error: None,
@@ -2384,6 +3249,7 @@ mod tests {
             // Transport success without a receipt is still inconclusive.
             Case {
                 name: "malformed successful lookup does not submit",
+                protocol_version: 3,
                 receipt: Ok(None),
                 profile: None,
                 admission_error: None,
@@ -2394,6 +3260,7 @@ mod tests {
             // Later polls must recover that receipt and count its failure once.
             Case {
                 name: "lost submit response is recovered without resubmission",
+                protocol_version: 3,
                 receipt: Err(Status::not_found("unknown operation")),
                 profile: Some(firmware_profile("/original-firmware.bin", None, None, None)),
                 admission_error: Some(Status::unavailable("submission response was lost")),
@@ -2453,6 +3320,7 @@ mod tests {
                 lookups: lookups.clone(),
                 operation_id: operation_id.clone(),
                 boot_id: boot_id.clone(),
+                protocol_version: case.protocol_version,
             };
             let stop = CancellationToken::new();
             let server = tokio::spawn(
@@ -2494,7 +3362,7 @@ mod tests {
                 let ((), poll_logs) =
                     capture_logs_async(crate::collect_and_publish_mlx_observations(
                         &machine_id,
-                        vec![
+                        legacy_device_actions(vec![
                             (
                                 devices[0].pci_name.clone(),
                                 carbide_host_support::dpa_cmds::DpaCommand {
@@ -2514,8 +3382,8 @@ mod tests {
                                     },
                                 },
                             ),
-                        ],
-                        &config,
+                        ]),
+                        Ok(&config),
                         |_| panic!("a firmware claim must prevent automatic hardware discovery"),
                         |request| {
                             // Match Core's rejection so publishing a deferred
@@ -2597,6 +3465,16 @@ mod tests {
                 "{}",
                 case.name,
             );
+            if case.protocol_version == 2 && request_failed {
+                assert!(
+                    logs.iter().any(|log| {
+                        log.field("error")
+                            == Some("unsupported firmware supervisor protocol version 2")
+                    }),
+                    "{}",
+                    case.name
+                );
+            }
             assert_eq!(
                 metrics.counter_delta(
                     MLX_FAILURE_METRIC,
@@ -2653,12 +3531,13 @@ mod tests {
                         observer_exit_behavior: 0,
                         expected_identity: Some(
                             rpc::protos::firmware_supervisor::SupervisorIdentity {
-                                protocol_version: 1,
+                                protocol_version: case.protocol_version,
                                 device_identity: "0000:03:00".to_string(),
                                 boot_id: boot_id.clone(),
                                 execution_device: "0000:03:00.0".to_string(),
                             },
                         ),
+                        update_context: None,
                     }],
                     "{}",
                     case.name

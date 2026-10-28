@@ -69,6 +69,7 @@ struct RedfishSimState {
     next_power_state_error: Option<String>,
     /// Fail the next matching power action before changing the host's power.
     next_power_action_error: Option<(SystemPowerControl, String)>,
+    next_chassis_reset_error: Option<RedfishError>,
     job_state_sequence: VecDeque<JobState>,
     /// Offset (in seconds) applied to the BMC `DateTime` returned by
     /// `get_manager`, relative to the controller's `Utc::now()`. Defaults to 0
@@ -439,6 +440,11 @@ impl RedfishSim {
     /// Fail the next matching power action, recording the attempt but applying no change.
     pub fn fail_next_power_action(&self, action: SystemPowerControl, error: &str) {
         self.state.lock().unwrap().next_power_action_error = Some((action, error.to_string()));
+    }
+
+    /// Fail one chassis reset with the supplied error, recording the attempt.
+    pub fn fail_next_chassis_reset(&self, error: RedfishError) {
+        self.state.lock().unwrap().next_chassis_reset_error = Some(error);
     }
 
     /// Set the offset (in seconds) applied to the BMC `DateTime` returned by
@@ -2097,6 +2103,9 @@ impl Redfish for RedfishSimClient {
                 chassis_id: chassis_id.to_string(),
                 reset_type,
             });
+            if let Some(error) = state.next_chassis_reset_error.take() {
+                return Err(error);
+            }
             Ok(())
         })
     }

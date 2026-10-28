@@ -33,6 +33,16 @@ pub enum ComponentManagerError {
     #[error("operation outcome unknown: {0}")]
     OperationOutcomeUnknown(String),
 
+    /// Certificate submission failed, possibly after accepting some nodes.
+    /// The retained job is for reconciliation only; do not resubmit automatically.
+    #[error("switch certificate submission failed: {summary}; {failure}")]
+    SwitchCertificateSubmission {
+        /// Aggregate explanation returned by the backend.
+        summary: String,
+        /// All returned node failures and the job handle, if supplied.
+        failure: Box<model::component_manager::SwitchCertificateFailure>,
+    },
+
     #[error("internal error: {0}")]
     Internal(String),
 

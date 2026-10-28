@@ -1874,6 +1874,10 @@ async fn create_test_env_with_overrides_inner(
             explorations_per_run: 100,
             create_machines: Arc::new(true.into()),
             machines_created_per_run: 1,
+            machine_creation_concurrency: SiteExplorerConfig::default_machine_creation_concurrency(
+            ),
+            switch_and_power_shelf_pass_interval:
+                SiteExplorerConfig::default_switch_and_power_shelf_pass_interval(),
             override_target_ip: None,
             override_target_port: None,
             bmc_proxy: Arc::new(Default::default()),
@@ -1889,6 +1893,7 @@ async fn create_test_env_with_overrides_inner(
             deprecated_force_dpu_nic_mode: None,
             // Tests use MockEndpointExplorer. So this doesn't affect anything.
             explore_mode: SiteExplorerExploreMode::NvRedfish,
+            explore_drive_firmware: false,
         },
         test_meter.meter(),
         api.endpoint_exploration_service.clone(),
@@ -2612,6 +2617,7 @@ pub(in crate::tests) async fn forge_agent_control(
     env.api
         .forge_agent_control(Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(machine_id.into()),
+            ..Default::default()
         }))
         .await
         .unwrap()

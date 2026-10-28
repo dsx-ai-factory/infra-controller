@@ -627,7 +627,7 @@ async fn create_client(
         return Ok((
             new_uri,
             headers,
-            passthrough.client().await,
+            passthrough.client(),
             PassthroughAuth::CoreProxy,
         ));
     }

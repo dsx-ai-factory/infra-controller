@@ -10,7 +10,7 @@ metadata:
 spec:
   replicas: {{ .Values.replicas }}
   strategy:
-    type: RollingUpdate
+    {{- toYaml .Values.strategy | nindent 4 }}
   selector:
     matchLabels:
       {{- include "nico-api.selectorLabels" . | nindent 6 }}

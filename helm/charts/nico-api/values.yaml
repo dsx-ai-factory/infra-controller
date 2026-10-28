@@ -81,6 +81,11 @@ legacyAlias:
       createNamespace: false
 
 replicas: 1
+# Kubernetes Deployment update strategy. Set `type: Recreate` when the API
+# must be stopped before a replacement pod is started, or configure
+# `rollingUpdate` when using the default `RollingUpdate` strategy.
+strategy:
+  type: RollingUpdate
 automountServiceAccountToken: true
 annotations:
   configmap.reloader.stakater.com/reload: '{{ include "nico-api.name" . }}-config-files,{{ include "nico-api.name" . }}-site-config-files'
@@ -226,26 +231,37 @@ certificate:
   # Dev/sim only: IP SANs for direct-IP TLS (e.g. API VIP). Leave empty in production.
   ipAddresses: []
 
+## NVLink partitioning. When nvlink.enabled is set, it is rendered as
+## nvlink_config.enabled in the base configuration; a value in the site
+## configuration takes precedence. When it is unset, nico-api's default (false)
+## applies. Enabling partitioning on a rack with running instances removes the
+## NMX-C default partition on the first monitor pass.
+nvlink: {}
+#  enabled: true
+
 ## Optional NVSwitch control-plane certificates. Both leaves use the
-## same existing issuer, which defaults to the vault-nico-issuer deployed by
-## the standard NICo prerequisites. Both profiles are disabled by default.
+## same issuer. nicoClient is enabled by default; switchServer is disabled by
+## default.
 nvSwitchTls:
-  issuerRef:
-    kind: ClusterIssuer
-    name: vault-nico-issuer
-    group: cert-manager.io
+  ## Issuer for both leaves. Empty uses global.certificate.issuerRef, the issuer
+  ## of nico-api's own certificate (vault-nico-issuer by default). Set kind,
+  ## name, and group together to use a different issuer.
+  issuerRef: {}
 
   ## Dedicated NICo client identity for direct mTLS connections to NMX-C.
   ## When enabled, the generated Secret is mounted read-only at mountPath.
+  ## nico-api uses it for NVLink partitioning when the site configuration sets
+  ## no nvlink_config TLS keys, provided mountPath is left at its default.
   nicoClient:
-    enabled: false
+    enabled: true
     name: nvswitch-nico-client-certificate
     secretName: nvswitch-nico-client-certificate
     mountPath: /var/run/secrets/nvswitch-client
     duration: 720h0m0s
     renewBefore: 360h0m0s
-    ## At least one URI SAN is required when enabled. Any cert-manager approver
-    ## policy must allow the exact identity.
+    ## URI SANs. Empty uses
+    ## spiffe://<global.spiffe.trustDomain>/<release namespace>/sa/nico-nmxc.
+    ## Any cert-manager approver policy must allow the exact identity.
     uris: []
     privateKey:
       algorithm: ECDSA

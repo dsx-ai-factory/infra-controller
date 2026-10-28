@@ -655,8 +655,12 @@ control plane health and performance metrics:
 **Request summary** - API status, request rate, p95 latency, gRPC error rate. Top-level
 indicators for SLO monitoring.
 
-**Requests by method and status** - Heatmap of request latency by gRPC method. Identifies
-which endpoints are slow or failing.
+**Requests by method and status** - Stacked time series of requests per second, grouped
+by gRPC method and status code. Shows traffic volume and error responses by method.
+
+**Request latency** - The summary p95 and the p50/p95/p99 latency time series aggregate
+requests across all methods matching the selected job filter; they do not show
+per-method latency.
 
 **Database** - Queries per second, time per request, connection pool utilization. Database
 contention is a common cause of API slowdowns.

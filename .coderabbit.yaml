@@ -165,7 +165,9 @@ reviews:
         misapplication, and observable consequence.
   auto_review:
     enabled: true
-    ignore_usernames: ["rwthompsonii"] # Preserve existing author opt-outs.
+    ignore_usernames:
+      - "rwthompsonii"
+      - "kensimon"
 knowledge_base:
   learnings:
     scope: local

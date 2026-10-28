@@ -186,6 +186,8 @@ pub struct InitDpfResourcesConfig {
     pub(crate) extra_bfcfg_parameters: Vec<String>,
     /// Delays host initialization until the DPU's `DPUServiceCriticalPodsReady` condition is true.
     pub(crate) enable_delay_host_init: bool,
+    /// Omit partial-multiplane maintenance initialization from Astra provisioning when true.
+    pub(crate) partial_multiplane_disabled: bool,
     /// Deployment type — determines which DPUFlavor spec to build.
     pub(crate) deployment_type: DpuDeploymentType,
 }
@@ -229,6 +231,7 @@ impl Default for InitDpfResourcesConfig {
             proxy: None,
             extra_bfcfg_parameters: Vec::new(),
             enable_delay_host_init: false,
+            partial_multiplane_disabled: false,
             deployment_type: DpuDeploymentType::Bf3,
         }
     }
@@ -1139,11 +1142,12 @@ impl From<DpuStatusPhase> for DpuPhase {
     }
 }
 
-/// Event emitted on any DPU resource change.
+/// Event emitted on named DPU resource changes with status and phase present.
 ///
-/// This event fires for every observed update to a DPU, not only when the
-/// phase transitions. Handlers must be idempotent and tolerate receiving
-/// the same phase multiple times.
+/// This event fires for every observed DPU update with `metadata.name`, `status`,
+/// and `status.phase` present, not only when the phase transitions. Updates
+/// missing any of these are skipped. Handlers must be idempotent and tolerate
+/// receiving the same phase multiple times.
 #[derive(Debug, Clone)]
 pub struct DpuEvent {
     /// Name of the DPU resource.

@@ -1,0 +1,31 @@
+{{- if .Values.switchTls.enabled }}
+{{- $certificate := .Values.switchTls }}
+{{- if eq (len (default (list) $certificate.uris)) 0 }}
+{{- fail "nico-bmc-proxy: switchTls.uris must contain at least one URI SAN" }}
+{{- end }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $certificate.name }}
+  namespace: {{ include "nico-bmc-proxy.namespace" . }}
+  labels:
+    {{- include "nico-bmc-proxy.labels" . | nindent 4 }}
+spec:
+  secretName: {{ $certificate.secretName }}
+  duration: {{ $certificate.duration }}
+  renewBefore: {{ $certificate.renewBefore }}
+  isCA: false
+  usages:
+    - digital signature
+    - client auth
+  uris:
+    {{- toYaml $certificate.uris | nindent 4 }}
+  privateKey:
+    algorithm: {{ $certificate.privateKey.algorithm }}
+    size: {{ $certificate.privateKey.size }}
+    rotationPolicy: {{ $certificate.privateKey.rotationPolicy }}
+  issuerRef:
+    kind: {{ $certificate.issuerRef.kind }}
+    name: {{ $certificate.issuerRef.name }}
+    group: {{ $certificate.issuerRef.group }}
+{{- end }}

@@ -388,6 +388,38 @@ async fn phase_for_deployment_type(mock: OutdatedDpuMock) -> Result<Option<DpuPh
     Ok(phases.and_then(|mut phases| phases.remove("001")))
 }
 
+#[tokio::test]
+async fn phase_observations_wait_for_missing_phase() {
+    let mut dpu = dpu(Some("bf-bundle-abc"), None, None, FLAVOR);
+    dpu.status = Some(serde_json::from_value(serde_json::json!({})).unwrap());
+    let mock = OutdatedDpuMock::with(
+        dpu,
+        deployment_with_selector_for_fixture(
+            deployment(Some("bf-bundle-abc"), None, true),
+            DpuDeploymentType::Bf3Gb200,
+        ),
+    );
+    let sdk = DpfSdkBuilder::new(mock, TEST_NS, String::new())
+        .with_labeler(DeploymentTypeLabeler)
+        .build_without_resources()
+        .await
+        .unwrap();
+    assert!(matches!(
+        sdk.get_dpu_phase_observation("001", "node-host-001").await,
+        Err(DpfError::InvalidState(message)) if message.contains("no status phase")
+    ));
+    assert!(
+        sdk.get_dpu_phase_observations_for_deployment_type(
+            &["001".to_string()],
+            "node-host-001",
+            DpuDeploymentType::Bf3Gb200,
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+}
+
 /// Both readers retain diagnostics from the observed `Error` CR, even if it
 /// disappears immediately. Other phases must not acquire failure details.
 #[tokio::test]
@@ -599,7 +631,7 @@ async fn a_dpu_phase_must_belong_to_the_requested_deployment_type() {
             ),
             case.owner,
         );
-        dpu.status.as_mut().expect("DPU status").phase = case.phase;
+        dpu.status.as_mut().expect("DPU status").phase = Some(case.phase);
         let deployment = deployment_with_selector(
             Some("bf-bundle-abc"),
             case.deployment_ready,

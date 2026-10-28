@@ -43,6 +43,7 @@ use carbide_machine_controller::dpf::DpfOperations;
 use crate::cfg::file::{
     DpfBootstrapCaObjectKind, DpfDpuAgentBootstrapCa, DpfExtraService,
     DpfResolvedMandatoryServicesConfig, DpfServiceConfig, EwEthersConfig, NodeAuthConfig,
+    PartialMultiplane,
 };
 
 /// Default DOCA helm registry (DPUServiceTemplate source.repoURL).
@@ -1184,11 +1185,27 @@ pub(crate) fn mandatory_services(
     // Slot listeners attach directly to their own bridge, so each needs its own NAD.
     let mut dhcp = dhcp_server_service(&resolved.base.dhcp_server, interfaces);
     service_vpc_slots.append_dhcp_interfaces(&mut dhcp);
+
+    // If Xplane service is enabled, then set the xplaneMaintenance from the
+    // site config's partial-multiplane setting. Apply this
+    // after extra_helm_values so the mounts stay consistent with that setting.
+    // Mounted directories contain the Xplane core socket and provisioned
+    // netdev-to-logical-name mapping.
+    let mut agent = dpu_agent_service(&resolved.base.dpu_agent, bootstrap_ca);
+    if resolved.extra.contains_key(&DpfExtraService::DocaXplane) {
+        let enabled = ewethers_config
+            .is_none_or(|config| config.partial_multiplane == PartialMultiplane::Enabled);
+        agent
+            .helm_values
+            .as_mut()
+            .expect("DPU agent has generated Helm values")["xplaneMaintenance"] =
+            serde_json::json!({ "enabled": enabled });
+    }
     let mut service_vec = vec![
         dts_service(&resolved.base.dts),
         doca_hbn_service(&resolved.base.doca_hbn, interfaces, service_vpc_slots),
         dhcp,
-        dpu_agent_service(&resolved.base.dpu_agent, bootstrap_ca),
+        agent,
         // Not `node_auth.enabled` directly: an operator staging a disable
         // moves fmds off tokens first, while the API still accepts them.
         fmds_service(
@@ -2225,16 +2242,12 @@ mod tests {
                 expected_nads
             );
             for (name, nad) in &rendered_nads {
-                let expected_bridge = if name == "service-vpc-dhcp-slot0" {
-                    "br-svc-0"
-                } else {
-                    "br-sfc"
-                };
-                // Slot listeners use the service-VPC contract while ordinary DHCP and FMDS stay unchanged.
-                let expected_mtu = if name == "service-vpc-dhcp-slot0" {
-                    SERVICE_VPC_MTU
-                } else {
-                    1500
+                // Verify each NAD retains the bridge and MTU assigned by its service contract.
+                let (expected_bridge, expected_mtu) = match name.as_str() {
+                    "service-vpc-dhcp-slot0" => ("br-svc-0", carbide_dpf::SERVICE_VPC_MTU),
+                    DHCP_SERVER_SERVICE_NAD_NAME => ("br-sfc", 1500),
+                    FMDS_SERVICE_NAD_NAME => ("br-sfc", 1500),
+                    _ => unreachable!("rendered NAD names were checked above"),
                 };
                 assert_eq!(nad.metadata.name.as_deref(), Some(name.as_str()));
                 assert_eq!(nad.spec.bridge.as_deref(), Some(expected_bridge));

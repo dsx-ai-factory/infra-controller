@@ -35,10 +35,9 @@
 //! - Job ids in every response are replaced by gateway ids from [`JobMap`], and the job status
 //!   RPCs resolve their id through the same map. A batch split across instances gets one
 //!   aggregate parent whose status is the worst, least advanced of the per-instance parents,
-//!   with no rack or node of its own. An id the map does not know is answered as the RMS mock
-//!   answers an id it never issued:
-//!   complete by `GetJobStatus` and `GetConfigureSwitchCertificateJobStatus`,
-//!   `RETURN_CODE_FAILURE` with `job <id> not found` by `GetFirmwareJobStatus` and
+//!   with no rack or node of its own. An id the map does not know is answered locally:
+//!   `NOT_FOUND` by `GetJobStatus`, `RETURN_CODE_FAILURE` with `job <id> not found`
+//!   by `GetConfigureSwitchCertificateJobStatus`, `GetFirmwareJobStatus` and
 //!   `GetSwitchSystemImageJobStatus`.
 //! - `GetVersion` is answered locally. Every RPC the RMS mock does not implement is
 //!   `UNIMPLEMENTED` here as well.
@@ -1314,7 +1313,7 @@ rack_manager_impl! {
 
         /// Resolves the gateway job id. A single-instance job is forwarded and its ids rewritten;
         /// an aggregate polls every per-instance parent and reports the worst, least advanced of
-        /// them, listing the parents as its children; an unknown id is reported complete.
+        /// them, listing the parents as its children; an unknown id returns NotFound.
         async fn get_job_status(
             &self,
             request: Request<rms::GetJobStatusRequest>,
@@ -1322,14 +1321,7 @@ rack_manager_impl! {
             let request = request.into_inner();
             let include_children = request.include_child_job_states;
             match self.resolve_job(&request.job_id)? {
-                None => Ok(Response::new(rms::GetJobStatusResponse {
-                    job_states: vec![rms::JobStatus {
-                        job_id: request.job_id,
-                        execution_state: JobPhase::Completed.execution_state(),
-                        state_description: JobPhase::Completed.wire_str().to_owned(),
-                        ..rms::JobStatus::default()
-                    }],
-                })),
+                None => Err(Status::not_found(format!("job {} not found", request.job_id))),
                 Some(JobRecord::Single(job)) => {
                     let mut backend = self.backend(&job.source)?;
                     let response = self
@@ -1443,10 +1435,10 @@ rack_manager_impl! {
             };
             match self.resolve_job(&gateway_job_id)? {
                 None => Ok(Response::new(rms::GetConfigureSwitchCertificateJobStatusResponse {
-                    status: return_code(true),
+                    status: return_code(false),
+                    error_message: format!("job {gateway_job_id} not found"),
                     job_id: gateway_job_id,
-                    state: JobPhase::Completed.wire_str().to_owned(),
-                    ..rms::GetConfigureSwitchCertificateJobStatusResponse::default()
+                    ..Default::default()
                 })),
                 Some(JobRecord::Single(job)) => {
                     let backend = self.backend(&job.source)?;

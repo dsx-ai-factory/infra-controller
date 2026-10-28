@@ -16,7 +16,6 @@
  */
 
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::sync::Arc;
 
 use carbide_site_explorer::SwitchCreator;
@@ -27,73 +26,11 @@ use mac_address::MacAddress;
 use model::metadata::Metadata;
 use model::site_explorer::{
     Chassis, ComputerSystem, EndpointExplorationReport, EndpointType, EthernetInterface,
-    ExploredManagedSwitch,
 };
 use model::switch::SwitchSearchFilter;
 use rpc::forge::DhcpDiscovery;
 
-use crate::env::Env;
-
-fn expected_switch_fixture(
-    bmc_mac: MacAddress,
-    nvos_mac: MacAddress,
-    serial: &str,
-) -> model::expected_switch::ExpectedSwitch {
-    model::expected_switch::ExpectedSwitch {
-        expected_switch_id: None,
-        bmc_mac_address: bmc_mac,
-        nvos_interfaces: vec![model::expected_switch::ExpectedNvosInterface {
-            mac_address: nvos_mac,
-            is_primary: true,
-        }],
-        serial_number: serial.to_string(),
-        bmc_username: "ADMIN".to_string(),
-        bmc_password: "Pwd2023".to_string(),
-        nvos_username: None,
-        nvos_password: None,
-        bmc_ip_address: None,
-        nvos_ip_address: None,
-        metadata: Metadata {
-            name: format!("Test Switch {serial}"),
-            description: String::new(),
-            labels: HashMap::new(),
-        },
-        rack_id: None,
-        bmc_retain_credentials: None,
-    }
-}
-
-fn explored_managed_switch_fixture(
-    bmc_ip: IpAddr,
-    nvos_mac: MacAddress,
-    chassis_serial: Option<&str>,
-) -> ExploredManagedSwitch {
-    let chassis = Chassis {
-        id: "mgx_nvswitch_0".to_string(),
-        manufacturer: Some("NVIDIA".to_string()),
-        model: Some("Switch".to_string()),
-        serial_number: chassis_serial.map(String::from),
-        part_number: chassis_serial.map(String::from),
-        ..Default::default()
-    };
-    ExploredManagedSwitch {
-        bmc_ip,
-        report: EndpointExplorationReport {
-            endpoint_type: EndpointType::Bmc,
-            vendor: Some(bmc_vendor::BMCVendor::Nvidia),
-            chassis: vec![chassis],
-            systems: vec![ComputerSystem {
-                ethernet_interfaces: vec![EthernetInterface {
-                    mac_address: Some(nvos_mac),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-            model: Some("Switch".to_string()),
-            ..Default::default()
-        },
-    }
-}
+use crate::env::{Env, expected_switch_fixture, explored_managed_switch_fixture};
 
 #[sqlx_test]
 async fn test_site_explorer_switch_discovery(

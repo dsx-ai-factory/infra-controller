@@ -301,6 +301,20 @@ case "${0##*/}" in
         printf '<Devices><Device pciName="%s" type="BlueField3" partNumber="test-part" psid="test-psid"><Versions><FW current="1.0"/></Versions></Device></Devices>' "$DEVICE"
         ;;
     flint)
+        if [ "$#" -eq 5 ] && [ "$1" = -d ] && [ "$2" = "$DEVICE" ] &&
+            [ "$3" = -i ] && [ "$5" = verify ]; then
+            [ -s "$4" ] || exit 43
+            printf 'attempt\n' >> "$FIXTURE/verification-attempts"
+            if [ ! -f "$FIXTURE/verification-ready" ]; then
+                if [ ! -f "$FIXTURE/failed-verification-worker-pid" ]; then
+                    printf '%s' "$PPID" > "$FIXTURE/failed-verification-worker-pid"
+                fi
+                printf 'firmware is still starting\n' >&2
+                exit 46
+            fi
+            printf verified
+            exit 0
+        fi
         [ "$#" -eq 6 ] && [ "$1" = -d ] && [ "$2" = "$DEVICE" ] &&
             [ "$3" = -y ] && [ "$4" = -i ] && [ "$6" = burn ] || exit 42
         [ -s "$5" ] || exit 43
@@ -397,6 +411,26 @@ async fn wait_for_file(path: &Path) -> String {
     .expect("fake tool published its handshake")
 }
 
+/// Wait for the failed read's worker to be reaped before inspecting its receipt.
+/// The daemon deliberately filters out the flasher's unsanitized diagnostics.
+async fn wait_for_settled_verification_failure(fixture: &Path) {
+    timeout(WATCHDOG, async {
+        let worker_pid = wait_for_file(&fixture.join("failed-verification-worker-pid")).await;
+        loop {
+            if !Path::new("/proc")
+                .join(&worker_pid)
+                .try_exists()
+                .expect("inspect failed verification worker")
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the supervisor reaped its failed verification worker within watchdog");
+}
+
 /// Release the burn before shutdown so failed assertions do not orphan a worker.
 struct GatedDaemon {
     process: TestProcess,
@@ -418,6 +452,328 @@ impl Drop for GatedDaemon {
             Ok(Some(_)) => {}
             result => eprintln!("fixture did not finish admitted work during cleanup: {result:?}"),
         }
+    }
+}
+
+/// The submitted timing policy must reach the daemon's executor without replaying mutations.
+#[tokio::test]
+async fn post_reset_verification_retries_with_the_submitted_policy() {
+    timeout(TEST_TIMEOUT, async {
+        let directory = private_fixture();
+        let fixture = directory.path();
+        fake_tools(fixture);
+        fs::write(fixture.join("release"), "release").unwrap();
+        let mut daemon = GatedDaemon {
+            process: daemon(fixture),
+            fixture: fixture.to_path_buf(),
+        };
+        let mut client = connect(&mut daemon.process, fixture).await;
+        let mut profile = firmware_profile(fixture);
+        profile.flash_options = FlashOptions {
+            reset: true,
+            verify_image: true,
+            post_reset_verify_retry_interval_seconds: Some(1),
+            post_reset_verify_timeout_seconds: Some(30),
+            ..FlashOptions::default()
+        };
+        client
+            .submit(
+                "retrying",
+                Some(profile.clone()),
+                ObserverExitBehavior::Continue,
+            )
+            .await
+            .expect("admit reset and image verification with a one-second interval");
+        wait_for_settled_verification_failure(fixture).await;
+        let running = client.get("retrying").await.unwrap();
+        assert_eq!(running.state, FirmwareOperationState::Running);
+        assert_eq!(running.phase, Some(FirmwareOperationPhase::VerifyImage));
+        assert!(running.report.flashed);
+        assert_eq!(running.report.reset, Some(true));
+        assert_eq!(running.report.verified_image, Some(false));
+        let ledger_path = fixture.join("state").join(SLOT).join("operations.json");
+        let ledger: serde_json::Value =
+            serde_json::from_slice(&fs::read(&ledger_path).unwrap()).unwrap();
+        let options = &ledger["records"][0]["requested"]["options"];
+        assert_eq!(options["post_reset_verify_retry_interval_seconds"], 1);
+        assert_eq!(options["post_reset_verify_timeout_seconds"], 30);
+
+        // The retry policy is part of admission, not a mutable daemon setting.
+        let mut changed = profile.clone();
+        changed
+            .flash_options
+            .post_reset_verify_retry_interval_seconds = Some(2);
+        let conflict = client
+            .submit("retrying", Some(changed), ObserverExitBehavior::Continue)
+            .await
+            .expect_err("an existing operation cannot change its retry interval");
+        assert!(
+            matches!(conflict, FirmwareSupervisorClientError::Rpc(status)
+            if status.code() == tonic::Code::AlreadyExists)
+        );
+
+        fs::write(fixture.join("verification-ready"), "ready").unwrap();
+        // Six seconds permits the requested one-second retry, but not the
+        // default ten-second interval if either wire conversion drops it.
+        let complete = timeout(Duration::from_secs(6), async {
+            loop {
+                let operation = client.get("retrying").await.unwrap();
+                if operation.state == FirmwareOperationState::Complete {
+                    return operation;
+                }
+                assert_eq!(operation.state, FirmwareOperationState::Running);
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("verification uses the submitted interval instead of its default");
+        assert!(complete.is_complete());
+        assert_eq!(complete.report.reset, Some(true));
+        assert_eq!(complete.report.verified_image, Some(true));
+        assert_eq!(complete.report.verified_version, None);
+        timeout(WATCHDOG, async {
+            while fixture.join("state/mutation.json").exists() {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("completion releases exclusion after cleanup");
+        assert_eq!(fs::read_to_string(fixture.join("burns")).unwrap(), "launch");
+        let invocations = fs::read_to_string(fixture.join("invocations")).unwrap();
+        assert_eq!(
+            invocations
+                .lines()
+                .filter(|line| line.ends_with(" reset -y"))
+                .count(),
+            1
+        );
+        assert!(
+            fs::read_to_string(fixture.join("verification-attempts"))
+                .unwrap()
+                .lines()
+                .count()
+                >= 2
+        );
+        let duplicate = client
+            .submit("retrying", Some(profile), ObserverExitBehavior::Continue)
+            .await
+            .expect("repeated submission returns the completed retry operation");
+        assert_eq!(
+            serde_json::to_value(duplicate).unwrap(),
+            serde_json::to_value(complete).unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(fixture.join("invocations")).unwrap(),
+            invocations
+        );
+        drop(client);
+        daemon.process.stop();
+    })
+    .await
+    .expect("post-reset retry test exceeded its independent watchdog");
+}
+
+/// Ending a verification wait preserves completed mutations and never authorizes replay.
+#[tokio::test]
+async fn interrupted_verification_waits_retain_evidence_after_restart() {
+    #[derive(Debug)]
+    enum Interruption {
+        Cancel,
+        CancelPersistenceFailure,
+        DaemonExit,
+    }
+
+    for interruption in [
+        Interruption::Cancel,
+        Interruption::CancelPersistenceFailure,
+        Interruption::DaemonExit,
+    ] {
+        timeout(TEST_TIMEOUT, async {
+            let directory = private_fixture();
+            let fixture = directory.path();
+            fake_tools(fixture);
+            fs::write(fixture.join("release"), "release").unwrap();
+            let mut daemon = GatedDaemon {
+                process: daemon(fixture),
+                fixture: fixture.to_path_buf(),
+            };
+            let mut client = connect(&mut daemon.process, fixture).await;
+            let mut profile = firmware_profile(fixture);
+            profile.flash_options = FlashOptions {
+                reset: true,
+                verify_image: true,
+                post_reset_verify_retry_interval_seconds: Some(60),
+                post_reset_verify_timeout_seconds: Some(120),
+                ..FlashOptions::default()
+            };
+            client
+                .submit(
+                    "waiting",
+                    Some(profile.clone()),
+                    ObserverExitBehavior::Continue,
+                )
+                .await
+                .expect("admit firmware with a long verification wait");
+            wait_for_settled_verification_failure(fixture).await;
+            let running = client.get("waiting").await.unwrap();
+            assert_eq!(running.state, FirmwareOperationState::Running);
+            assert_eq!(running.phase, Some(FirmwareOperationPhase::VerifyImage));
+            assert!(running.report.flashed);
+            assert_eq!(running.report.reset, Some(true));
+            assert_eq!(running.report.verified_image, Some(false));
+            let ledger_path = fixture.join("state").join(SLOT).join("operations.json");
+            let before_bytes = fs::read(&ledger_path).unwrap();
+            let before: serde_json::Value = serde_json::from_slice(&before_bytes).unwrap();
+            assert_eq!(
+                before["records"][0]["operation"],
+                serde_json::to_value(&running).unwrap()
+            );
+            assert_eq!(before["records"][0]["mutation_started"], true);
+            let prepared_image = wait_for_file(&fixture.join("prepared-image")).await;
+            let claim = fs::read(fixture.join("state/mutation.json")).unwrap();
+            let invocations = fs::read_to_string(fixture.join("invocations")).unwrap();
+            assert_eq!(fs::read_to_string(fixture.join("burns")).unwrap(), "launch");
+            assert_eq!(
+                invocations
+                    .lines()
+                    .filter(|line| line.ends_with(" reset -y"))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                fs::read_to_string(fixture.join("verification-attempts")).unwrap(),
+                "attempt\n"
+            );
+
+            let (expected_state, canceled_receipt) = match interruption {
+                Interruption::Cancel => {
+                    // Cancellation must wake the sixty-second wait, rather than
+                    // waiting for its next attempt or losing the reset result.
+                    client.cancel("waiting").await.unwrap();
+                    let canceled = timeout(WATCHDOG, async {
+                        loop {
+                            let operation = client.get("waiting").await.unwrap();
+                            if operation.state == FirmwareOperationState::Canceled {
+                                break operation;
+                            }
+                            assert_eq!(operation.state, FirmwareOperationState::CancelRequested);
+                            sleep(Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .expect("cancellation interrupts the verification wait");
+                    kill(Pid::from_raw(daemon.process.0.id() as i32), Signal::SIGTERM).unwrap();
+                    timeout(WATCHDOG, async {
+                        loop {
+                            if let Some(status) = daemon.process.0.try_wait().unwrap() {
+                                assert!(status.success());
+                                break;
+                            }
+                            sleep(Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .expect("cancellation finishes its claim-release check before restart");
+                    (
+                        FirmwareOperationState::Canceled,
+                        Some(serde_json::to_value(canceled).unwrap()),
+                    )
+                }
+                Interruption::CancelPersistenceFailure => {
+                    // A failed cancel save must wake idle execution without
+                    // claiming durable cancellation or probing another tool.
+                    let saved_ledger = fixture.join("saved-operations.json");
+                    fs::rename(&ledger_path, &saved_ledger).unwrap();
+                    fs::create_dir(&ledger_path).unwrap();
+                    assert!(client.cancel("waiting").await.is_err());
+                    timeout(WATCHDOG, async {
+                        loop {
+                            if let Some(status) = daemon.process.0.try_wait().unwrap() {
+                                assert!(!status.success());
+                                break;
+                            }
+                            sleep(Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .expect("a fenced journal stops the wait before the sixty-second retry");
+                    assert_eq!(fs::read(&saved_ledger).unwrap(), before_bytes);
+                    assert_eq!(
+                        fs::read_to_string(fixture.join("invocations")).unwrap(),
+                        invocations
+                    );
+                    assert_eq!(
+                        fs::read(&prepared_image).unwrap(),
+                        b"fixture firmware image\n"
+                    );
+                    // Restore only the preserved receipt after the daemon has
+                    // exited; reopening must diagnose loss without replay.
+                    fs::remove_dir(&ledger_path).unwrap();
+                    fs::rename(&saved_ledger, &ledger_path).unwrap();
+                    (FirmwareOperationState::ManualIntervention, None)
+                }
+                Interruption::DaemonExit => {
+                    // The read worker is already gone. Only the daemon's retry
+                    // wait is lost; reopening must not resume verification.
+                    daemon.process.stop();
+                    (FirmwareOperationState::ManualIntervention, None)
+                }
+            };
+            drop(client);
+            assert_eq!(
+                fs::read(fixture.join("state/mutation.json")).unwrap(),
+                claim
+            );
+
+            let mut restarted = daemon_with_executable(fixture, Path::new(SUPERVISOR), DEVICE);
+            let mut client = connect(&mut restarted, fixture).await;
+            let recovered = client.get("waiting").await.unwrap();
+            assert_eq!(recovered.state, expected_state);
+            assert_eq!(recovered.phase, Some(FirmwareOperationPhase::VerifyImage));
+            assert_eq!(
+                serde_json::to_value(&recovered.report).unwrap(),
+                serde_json::to_value(running.report).unwrap()
+            );
+            assert!(recovered.diagnostic.is_some());
+            let saved = serde_json::to_value(recovered).unwrap();
+            if let Some(canceled) = canceled_receipt {
+                assert_eq!(saved, canceled);
+            }
+            let after: serde_json::Value =
+                serde_json::from_slice(&fs::read(&ledger_path).unwrap()).unwrap();
+            assert_eq!(after["records"][0]["operation"], saved);
+            assert_eq!(after["records"][0]["mutation_started"], true);
+            assert_eq!(
+                after["records"][0]["prepared_inputs"],
+                before["records"][0]["prepared_inputs"]
+            );
+            let duplicate = client
+                .submit("waiting", Some(profile), ObserverExitBehavior::Continue)
+                .await
+                .expect("the original ID returns its interrupted receipt");
+            assert_eq!(serde_json::to_value(duplicate).unwrap(), saved);
+            let new_work = client
+                .submit("new-work", None, ObserverExitBehavior::Continue)
+                .await;
+            let Err(FirmwareSupervisorClientError::Rpc(status)) = new_work else {
+                panic!("retained mutation claim must reject new work");
+            };
+            assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(
+                fs::read_to_string(fixture.join("invocations")).unwrap(),
+                invocations
+            );
+            assert_eq!(
+                fs::read(&prepared_image).unwrap(),
+                b"fixture firmware image\n"
+            );
+            assert_eq!(
+                fs::read(fixture.join("state/mutation.json")).unwrap(),
+                claim
+            );
+        })
+        .await
+        .unwrap_or_else(|_| panic!("verification wait {interruption:?} exceeded its watchdog"));
     }
 }
 
@@ -734,7 +1090,8 @@ async fn renamed_daemon_runs_firmware_and_rejects_changed_profile_reuse() {
     .expect("renamed-daemon test exceeded its independent watchdog");
 }
 
-/// Cancellation retains preparation evidence and releases host exclusion across distinct slots.
+/// Cancellation retains preparation evidence and releases host exclusion. Each
+/// slot keeps its own receipt even when callers reuse an operation ID.
 #[tokio::test]
 async fn stalled_http_prepare_cancels_and_preserves_requested_report_after_restart() {
     timeout(TEST_TIMEOUT, async {
@@ -818,14 +1175,19 @@ async fn stalled_http_prepare_cancels_and_preserves_requested_report_after_resta
             daemon_with_executable(fixture, Path::new(SUPERVISOR), "ffff:fd:1f.0");
         let mut other_client = connect_slot(&mut other_process, fixture, other_slot).await;
         assert_eq!(other_client.status().await.unwrap().device_identity, other_slot);
+        // The host claim serializes these slots, but receipt lookup stays local
+        // to each slot. Reusing the ID must not return the first slot's work.
         let exclusion = other_client
-            .submit("other-slot", None, ObserverExitBehavior::Continue)
+            .submit("stalled-prepare", None, ObserverExitBehavior::Continue)
             .await
             .expect_err("another slot cannot admit work while preparation owns the host");
         assert!(matches!(exclusion, FirmwareSupervisorClientError::Rpc(status)
             if status.code() == tonic::Code::ResourceExhausted
                 && status.message() == "another firmware operation owns the host or requires reconciliation"));
-        let missing = other_client.get("other-slot").await.expect_err("rejected work has no receipt");
+        let missing = other_client
+            .get("stalled-prepare")
+            .await
+            .expect_err("rejected work has no receipt");
         assert!(matches!(missing, FirmwareSupervisorClientError::Rpc(status)
             if status.code() == tonic::Code::NotFound));
         assert_eq!(
@@ -871,16 +1233,17 @@ async fn stalled_http_prepare_cancels_and_preserves_requested_report_after_resta
         assert!(!fixture.join("burns").exists());
         assert_eq!(fs::read(&staged_image).unwrap(), b"fixture firmware image\n");
         let saved = serde_json::to_value(canceled).unwrap();
+        let saved_ledger = fs::read(&ledger_path).unwrap();
 
         let other_accepted = other_client
-            .submit("other-slot", None, ObserverExitBehavior::Continue)
+            .submit("stalled-prepare", None, ObserverExitBehavior::Continue)
             .await
             .expect("the same second-slot request can be admitted after safe cancellation");
         assert_eq!(other_accepted.state, FirmwareOperationState::Accepted);
-        assert_eq!(other_accepted.operation_id, "other-slot");
+        assert_eq!(other_accepted.operation_id, "stalled-prepare");
         let complete = timeout(WATCHDOG, async {
             loop {
-                let operation = other_client.get("other-slot").await.unwrap();
+                let operation = other_client.get("stalled-prepare").await.unwrap();
                 if operation.state == FirmwareOperationState::Complete {
                     return operation;
                 }
@@ -902,6 +1265,18 @@ async fn stalled_http_prepare_cancels_and_preserves_requested_report_after_resta
         assert_eq!(
             serde_json::to_value(client.get("stalled-prepare").await.unwrap()).unwrap(),
             saved
+        );
+        // Completion in the second slot must persist independently, without
+        // replacing the canceled request saved in the first slot.
+        assert_eq!(fs::read(&ledger_path).unwrap(), saved_ledger);
+        let other_ledger: serde_json::Value = serde_json::from_slice(
+            &fs::read(fixture.join("state").join(other_slot).join("operations.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(other_ledger["execution_device"], "ffff:fd:1f.0");
+        assert_eq!(
+            other_ledger["records"][0]["operation"],
+            serde_json::to_value(&complete).unwrap()
         );
         assert_eq!(fs::read_to_string(fixture.join("invocations")).unwrap(), invocations);
         drop(other_client);

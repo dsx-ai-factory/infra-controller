@@ -208,15 +208,19 @@ jobs:
 
       - name: Pull carbide-extras container
         if: inputs.inject_extras == true && inputs.extras_container != ''
+        env:
+          EXTRAS_CONTAINER: ${{ inputs.extras_container }}
         run: |
-          echo "Pulling carbide-extras container ${{ inputs.extras_container }}"
-          docker pull ${{ inputs.extras_container }}
+          echo "Pulling carbide-extras container ${EXTRAS_CONTAINER}"
+          docker pull "${EXTRAS_CONTAINER}"
 
       - name: Pull build container
         if: inputs.use_container == true && inputs.build_container != ''
+        env:
+          BUILD_CONTAINER: ${{ inputs.build_container }}
         run: |
-          echo "Pulling build container: ${{ inputs.build_container }}"
-          docker pull ${{ inputs.build_container }}
+          echo "Pulling build container: ${BUILD_CONTAINER}"
+          docker pull "${BUILD_CONTAINER}"
 
       - name: Log out of source registry
         env:
@@ -231,6 +235,8 @@ jobs:
           if [ -n "${EXTRAS}" ]; then docker logout "${EXTRAS%%/*}" 2>/dev/null || true; fi
 
       - name: Set up environment variables
+        env:
+          VERSION: ${{ inputs.version }}
         run: |
           echo "CARGO_HOME=${{ github.workspace }}/cargo" >> $GITHUB_ENV
           echo "CARGO_INCREMENTAL=0" >> $GITHUB_ENV
@@ -240,7 +246,7 @@ jobs:
           echo "KEA_BIN_PATH=/usr/bin" >> $GITHUB_ENV
           echo "KEA_INCLUDE_PATH=/usr/include/kea" >> $GITHUB_ENV
           echo "REPO_ROOT=${{ github.workspace }}" >> $GITHUB_ENV
-          echo "VERSION=${{ inputs.version }}" >> $GITHUB_ENV
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
           echo "FORGE_CA=prod" >> $GITHUB_ENV
 
           # Add cargo and sbin to PATH (needed for mkosi)
@@ -249,24 +255,33 @@ jobs:
           echo "/usr/sbin" >> $GITHUB_PATH
 
       - name: Create cache directories
+        env:
+          ARCH: ${{ inputs.arch }}
         run: |
           mkdir -p ${{ github.workspace }}/cargo
           mkdir -p ${{ github.workspace }}/cache
           mkdir -p ${{ github.workspace }}/apt
-          mkdir -p pxe/static/blobs/internal/${{ inputs.arch }}
+          mkdir -p "pxe/static/blobs/internal/${ARCH}"
 
       - name: Display build information
+        env:
+          BUILD_TYPE: ${{ inputs.build_type }}
+          ARCH: ${{ inputs.arch }}
+          CARGO_MAKE_TASK: ${{ inputs.cargo_make_task }}
+          VERSION: ${{ inputs.version }}
+          RUNNER: ${{ inputs.runner }}
+          BUILD_CONTAINER: ${{ inputs.build_container }}
         run: |
           echo "============================================"
-          echo "Building: ${{ inputs.build_type }} artifacts"
+          echo "Building: ${BUILD_TYPE} artifacts"
           echo "============================================"
-          echo "Architecture: ${{ inputs.arch }}"
-          echo "Task: ${{ inputs.cargo_make_task }}"
-          echo "Version: ${{ inputs.version }}"
-          echo "Runner: ${{ inputs.runner }}"
+          echo "Architecture: ${ARCH}"
+          echo "Task: ${CARGO_MAKE_TASK}"
+          echo "Version: ${VERSION}"
+          echo "Runner: ${RUNNER}"
           echo "Use container: ${{ inputs.use_container }}"
-          if [ -n "${{ inputs.build_container }}" ]; then
-            echo "Container: ${{ inputs.build_container }}"
+          if [ -n "${BUILD_CONTAINER}" ]; then
+            echo "Container: ${BUILD_CONTAINER}"
           fi
           echo "Working directory: $(pwd)"
           echo "============================================"
@@ -274,10 +289,12 @@ jobs:
       # TODO(ajf): This is NVIDIA specific stuff and really needs to be genericized
       - name: Inject carbide_extras content into build
         if: inputs.inject_extras == true && inputs.extras_container != ''
+        env:
+          CARBIDE_EXTRAS_CONTAINER: ${{ inputs.extras_container }}
+          ARCH: ${{ inputs.arch }}
         run: |
           set -euo pipefail
-          CARBIDE_EXTRAS_CONTAINER="${{ inputs.extras_container }}"
-          PROFILE_DIR="pxe/mkosi.profiles/scout-oss-${{ inputs.arch }}"
+          PROFILE_DIR="pxe/mkosi.profiles/scout-oss-${ARCH}"
 
           container_id=$(docker create "${CARBIDE_EXTRAS_CONTAINER}" /bin/true)
 
@@ -339,9 +356,11 @@ jobs:
 
       - name: Verify required extras binaries are present
         if: inputs.inject_extras == true && inputs.extras_container != ''
+        env:
+          ARCH: ${{ inputs.arch }}
         run: |
           set -euo pipefail
-          PROFILE_DIR="pxe/mkosi.profiles/scout-oss-${{ inputs.arch }}"
+          PROFILE_DIR="pxe/mkosi.profiles/scout-oss-${ARCH}"
 
           REQUIRED_BINARIES=(
             "${PROFILE_DIR}/mkosi.extra/opt/forge/bin/mnv_cli"
@@ -386,6 +405,9 @@ jobs:
         env:
           # Only main publishes; every other ref reads what main left behind.
           SCCACHE_GHA_RW_MODE: ${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
+          VERSION: ${{ inputs.version }}
+          BUILD_CONTAINER: ${{ inputs.build_container }}
+          CARGO_MAKE_TASK: ${{ inputs.cargo_make_task }}
         run: |
           # dev/docker/sccache-cache.sh reads its credentials from /run/secrets
           # because that is where BuildKit puts them. Staging the same three
@@ -401,27 +423,30 @@ jobs:
           chmod 600 "${SCCACHE_SECRETS}"/*
 
           # Set up environment variables for container (matches GitLab CI global variables)
-          ENV_ARGS="-e CARGO_HOME=/workspace/cargo"
-          ENV_ARGS="$ENV_ARGS -e CARGO_INCREMENTAL=0"
-          ENV_ARGS="$ENV_ARGS -e RUSTC_WRAPPER=sccache"
-          ENV_ARGS="$ENV_ARGS -e SCCACHE_DIR=/workspace/cache/sccache"
-          ENV_ARGS="$ENV_ARGS -e CACHE_DIRECTORY=/workspace/cache"
-          ENV_ARGS="$ENV_ARGS -e APT_CACHE_DIR=/workspace/apt"
-          ENV_ARGS="$ENV_ARGS -e LOGNAME=root"
-          ENV_ARGS="$ENV_ARGS -e KEA_BIN_PATH=/usr/bin"
-          ENV_ARGS="$ENV_ARGS -e KEA_INCLUDE_PATH=/usr/include/kea"
-          ENV_ARGS="$ENV_ARGS -e REPO_ROOT=/workspace"
-          ENV_ARGS="$ENV_ARGS -e VERSION=${{ inputs.version }}"
-          ENV_ARGS="$ENV_ARGS -e FORGE_CA=prod"
+          ENV_ARGS=(
+            -e CARGO_HOME=/workspace/cargo
+            -e CARGO_INCREMENTAL=0
+            -e RUSTC_WRAPPER=sccache
+            -e SCCACHE_DIR=/workspace/cache/sccache
+            -e CACHE_DIRECTORY=/workspace/cache
+            -e APT_CACHE_DIR=/workspace/apt
+            -e LOGNAME=root
+            -e KEA_BIN_PATH=/usr/bin
+            -e KEA_INCLUDE_PATH=/usr/include/kea
+            -e REPO_ROOT=/workspace
+            -e VERSION
+            -e CARGO_MAKE_TASK
+            -e FORGE_CA=prod
+          )
 
           echo "============================================"
-          echo "Running in container: ${{ inputs.build_container }}"
-          echo "VERSION=${{ inputs.version }}"
+          echo "Running in container: ${BUILD_CONTAINER}"
+          echo "VERSION=${VERSION}"
           echo "FORGE_CA=prod"
           echo "============================================"
 
           EXTRA_DOCKER_ARGS="-v ${SCCACHE_SECRETS}:/run/secrets:ro"
-          if [[ "${{ inputs.cargo_make_task }}" == "build-boot-artifacts-bfb-ci" ]]; then
+          if [[ "${CARGO_MAKE_TASK}" == "build-boot-artifacts-bfb-ci" ]]; then
             # bfb build runs `docker pull/save` (see pxe/Makefile.toml tasks.bfb-hbn-pull/export).
             # Allow docker CLI inside the build container to talk to the host Docker daemon.
             EXTRA_DOCKER_ARGS="${EXTRA_DOCKER_ARGS} -v /var/run/docker.sock:/var/run/docker.sock"
@@ -450,13 +475,16 @@ jobs:
             -v "${{ github.workspace }}:/workspace" \
             ${EXTRA_DOCKER_ARGS} \
             -w /workspace \
-            ${ENV_ARGS} \
-            ${{ inputs.build_container }} \
-            bash -c ". /workspace/dev/docker/sccache-cache.sh && sccache_setup && git config --global --add safe.directory /workspace && git config --global --add safe.directory /workspace/pxe/ipxe/upstream && echo 'VERSION in container: '\${VERSION} && cargo make --cwd pxe ${SA_ENABLEMENT_ARG} ${{ inputs.cargo_make_task }} && sccache_report"
+            "${ENV_ARGS[@]}" \
+            "${BUILD_CONTAINER}" \
+            bash -c ". /workspace/dev/docker/sccache-cache.sh && sccache_setup && git config --global --add safe.directory /workspace && git config --global --add safe.directory /workspace/pxe/ipxe/upstream && echo 'VERSION in container: '\${VERSION} && cargo make --cwd pxe ${SA_ENABLEMENT_ARG} \"\${CARGO_MAKE_TASK}\" && sccache_report"
 
       # Run build directly on runner (for ephemeral images with mkosi)
       - name: Run cargo make task (shell mode)
         if: inputs.use_container == false
+        env:
+          VERSION: ${{ inputs.version }}
+          CARGO_MAKE_TASK: ${{ inputs.cargo_make_task }}
         run: |
           set -euo pipefail
 
@@ -474,12 +502,12 @@ jobs:
 
           echo "============================================"
           echo "Running on shell runner (mkosi mode)"
-          echo "VERSION=${{ inputs.version }}"
+          echo "VERSION=${VERSION}"
           echo "SA_ENABLEMENT=${{ inputs.sa_enablement }}"
           echo "============================================"
 
           # Run the cargo make task with full output
-          cargo make --cwd pxe ${SA_ENABLEMENT_ARG} ${{ inputs.cargo_make_task }} 2>&1 | tee build.log
+          cargo make --cwd pxe ${SA_ENABLEMENT_ARG} "${CARGO_MAKE_TASK}" 2>&1 | tee build.log
 
           echo "Build completed!"
 
@@ -549,10 +577,12 @@ jobs:
 
       - name: Verify mnv_cli exists in built scout image
         if: inputs.build_type == 'ephemeral' && inputs.inject_extras == true
+        env:
+          ARCH: ${{ inputs.arch }}
         run: |
           set -euo pipefail
 
-          SCOUT_IMAGE="pxe/static/blobs/internal/${{ inputs.arch }}/scout.squashfs"
+          SCOUT_IMAGE="pxe/static/blobs/internal/${ARCH}/scout.squashfs"
           if [ ! -f "${SCOUT_IMAGE}" ]; then
             echo "ERROR: Missing scout image artifact: ${SCOUT_IMAGE}"
             exit 1
@@ -635,15 +665,20 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
       - name: Display build summary
+        env:
+          BUILD_TYPE: ${{ inputs.build_type }}
+          ARCH: ${{ inputs.arch }}
+          CARGO_MAKE_TASK: ${{ inputs.cargo_make_task }}
+          VERSION: ${{ inputs.version }}
         run: |
           echo "============================================"
-          echo "✅ ${{ inputs.build_type }} Build Completed"
+          echo "✅ ${BUILD_TYPE} Build Completed"
           echo "============================================"
-          echo "Architecture: ${{ inputs.arch }}"
-          echo "Task: ${{ inputs.cargo_make_task }}"
-          echo "Version: ${{ inputs.version }}"
+          echo "Architecture: ${ARCH}"
+          echo "Task: ${CARGO_MAKE_TASK}"
+          echo "Version: ${VERSION}"
           echo "Container mode: ${{ inputs.use_container }}"
           echo ""
           echo "Generated Artifacts:"
-          find pxe/static/blobs/internal/${{ inputs.arch }} -type f 2>/dev/null || echo "No blobs found"
+          find "pxe/static/blobs/internal/${ARCH}" -type f 2>/dev/null || echo "No blobs found"
           echo "============================================"

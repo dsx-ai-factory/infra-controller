@@ -262,7 +262,7 @@ Useful metrics for fleet-level monitoring include:
 | `carbide_reboot_attempts_in_booting_with_discovery_image` | Detect hosts that require repeated discovery-image reboots. |
 | `carbide_measured_boot_machines_per_machine_state_total` | Review measured boot machine state coverage. |
 | `carbide_pending_host_firmware_update_count` | Count hosts that need host firmware updates. |
-| `carbide_pending_dpu_nic_firmware_update_count` | Count DPUs that need NIC firmware updates. |
+| `carbide_pending_dpu_nic_firmware_update_count` | Count classic and DPF drift candidates under the filters in [DPU Firmware Updates](firmware-updates/dpu-firmware.md#monitor-an-update). |
 | `carbide_active_host_firmware_update_count` | Count hosts actively updating firmware. |
 | `carbide_running_dpu_updates_count` | Count DPUs actively updating firmware. |
 

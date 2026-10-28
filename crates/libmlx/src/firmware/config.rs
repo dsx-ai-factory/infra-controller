@@ -25,9 +25,11 @@
 // of specs + options to drive further operations/management.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub use carbide_libmlx_model::firmware::FirmwareSpec;
 use rpc::protos::mlx_device::{
+    FirmwareArtifactDigests as FirmwareArtifactDigestsPb,
     FirmwareFlasherProfile as FirmwareFlasherProfilePb, FlashOptions as FlashOptionsPb,
     FlashSpec as FlashSpecPb,
 };
@@ -37,6 +39,134 @@ use crate::firmware::credentials::Credentials;
 use crate::firmware::error::{FirmwareError, FirmwareResult};
 use crate::firmware::reset::DEFAULT_RESET_LEVEL;
 use crate::firmware::source::FirmwareSource;
+
+/// `FirmwareArtifactDigests` identifies the exact bytes approved for an update.
+/// Wire digests must be 64 lowercase hexadecimal characters; configuration is
+/// required exactly when the profile supplies a configuration source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirmwareArtifactDigests {
+    /// SHA-256 of the firmware image before any hardware mutation.
+    pub image_sha256: [u8; 32],
+    /// SHA-256 of optional configuration applied before the image burn.
+    pub configuration_sha256: Option<[u8; 32]>,
+}
+
+impl TryFrom<FirmwareArtifactDigestsPb> for FirmwareArtifactDigests {
+    type Error = FirmwareError;
+
+    fn try_from(value: FirmwareArtifactDigestsPb) -> Result<Self, Self::Error> {
+        fn parse(value: &str) -> FirmwareResult<[u8; 32]> {
+            if value.len() != 64
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                return Err(FirmwareError::ConfigError(
+                    "firmware SHA-256 must contain 64 lowercase hexadecimal characters".into(),
+                ));
+            }
+            let mut digest = [0; 32];
+            hex::decode_to_slice(value, &mut digest)
+                .map_err(|_| FirmwareError::ConfigError("invalid firmware SHA-256".into()))?;
+            Ok(digest)
+        }
+        Ok(Self {
+            image_sha256: parse(&value.image_sha256)?,
+            configuration_sha256: value
+                .configuration_sha256
+                .as_deref()
+                .map(parse)
+                .transpose()?,
+        })
+    }
+}
+
+impl From<FirmwareArtifactDigests> for FirmwareArtifactDigestsPb {
+    fn from(value: FirmwareArtifactDigests) -> Self {
+        Self {
+            image_sha256: hex::encode(value.image_sha256),
+            configuration_sha256: value.configuration_sha256.map(hex::encode),
+        }
+    }
+}
+
+/// `FirmwareUpdateContext` pins a checked workflow to its whole-workflow phase ID
+/// and approved artifact bytes. It is immutable once the operation is admitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FirmwareUpdateContext {
+    /// Whole-workflow phase ID containing 1-256 printable nonspace ASCII bytes.
+    pub phase_id: String,
+    /// Expected image and optional configuration bytes, checked before mutation.
+    pub expected_digests: FirmwareArtifactDigests,
+}
+
+impl FirmwareUpdateContext {
+    /// `validate` rejects malformed phase IDs, missing/extra configuration
+    /// digests, and sources outside unauthenticated HTTP(S). URLs may not contain
+    /// user information, query strings, or fragments. Downloads reject redirects.
+    /// Legacy submissions retain their separate, broader source contract.
+    pub fn validate(&self, profile: &FirmwareFlasherProfile) -> FirmwareResult<()> {
+        if self.phase_id.is_empty()
+            || self.phase_id.len() > 256
+            || !self.phase_id.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            return Err(FirmwareError::ConfigError(
+                "firmware phase ID must contain 1-256 printable nonspace ASCII bytes".into(),
+            ));
+        }
+        let source = &profile.flash_spec;
+        if source.device_conf_url.is_some() != self.expected_digests.configuration_sha256.is_some()
+        {
+            return Err(FirmwareError::ConfigError(
+                "configuration source and SHA-256 must either both be present or both be absent"
+                    .into(),
+            ));
+        }
+        if source.firmware_credentials.is_some() || source.device_conf_credentials.is_some() {
+            return Err(FirmwareError::ConfigError(
+                "firmware updates require unauthenticated artifact sources".into(),
+            ));
+        }
+        for source in
+            std::iter::once(source.firmware_url.as_str()).chain(source.device_conf_url.as_deref())
+        {
+            validate_update_source(source)?;
+        }
+        Ok(())
+    }
+}
+
+/// Validate without echoing a URL that may contain an unsupported credential.
+pub(super) fn validate_update_source(source: &str) -> FirmwareResult<()> {
+    // The WHATWG parser strips whitespace and normalizes empty userinfo. Check
+    // the literal source first so normalization cannot admit those forms.
+    let authority_has_no_userinfo = source.split_once("://").is_some_and(|(_, rest)| {
+        rest.split(['/', '?', '#'])
+            .next()
+            .is_some_and(|authority| !authority.contains('@'))
+    });
+    let valid = (source.starts_with("http://") || source.starts_with("https://"))
+        && source.trim() == source
+        && !source.chars().any(char::is_control)
+        && authority_has_no_userinfo
+        && url::Url::parse(source).is_ok_and(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.has_host()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none()
+        });
+    if !valid {
+        return Err(FirmwareError::ConfigError(
+            "firmware update sources require HTTP(S) URLs without credentials, query, or fragment"
+                .into(),
+        ));
+    }
+    Ok(())
+}
 
 /// `FlashSpec` identifies the image and optional configuration sources used by
 /// preparation and standalone image verification.
@@ -260,26 +390,49 @@ fn default_reset_level() -> u8 {
     DEFAULT_RESET_LEVEL
 }
 
-// FlashOptions contains lifecycle flags for the apply() workflow
-// orchestrator, which takes a FirmwareFlasherProfile. This controls
-// which post-flash steps are executed, and their parameters.
+const DEFAULT_POST_RESET_VERIFY_RETRY_INTERVAL_SECONDS: u32 = 10;
+const DEFAULT_POST_RESET_VERIFY_TIMEOUT_SECONDS: u32 = 30 * 60;
+const MAX_POST_RESET_VERIFICATION_SECONDS: u32 = 30 * 60;
+
+/// `FlashOptions` selects post-burn phases and verification timing for `apply`.
+/// Timing applies after a successful reset when `reset` and either
+/// `verify_image` or `verify_version` are true; timing values never enable
+/// phases. Without reset, each requested verification runs once. Omitted
+/// timing fields remain absent in saved requests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlashOptions {
-    // verify_image controls whether the firmware image is verified
-    // against the source binary after flashing.
+    /// `verify_image` controls whether the firmware image is verified
+    /// against the source binary after flashing. Defaults to `false`.
     #[serde(default)]
     pub verify_image: bool,
-    // verify_version controls whether the firmware version on the
-    // device is checked after flashing.
+    /// `verify_version` controls whether the firmware version on the
+    /// device is checked after flashing. Defaults to `false`.
     #[serde(default)]
     pub verify_version: bool,
-    // reset controls whether the device is reset via mlxfwreset
-    // after flashing.
+    /// `reset` controls whether the device is reset via `mlxfwreset`
+    /// after flashing. Defaults to `false`.
     #[serde(default)]
     pub reset: bool,
-    // reset_level is the mlxfwreset level to use. Defaults to 3.
+    /// `reset_level` is the `mlxfwreset` level used when `reset` is true.
+    /// Accepts 0 through 255 and defaults to 3. Device support for the selected
+    /// level is not checked here.
     #[serde(default = "default_reset_level")]
     pub reset_level: u8,
+    /// `post_reset_verify_retry_interval_seconds` delays the next verification
+    /// read after a settled unsuccessful attempt. Omission uses 10 seconds.
+    /// It applies only when `reset` and at least one verification are enabled.
+    /// Explicit values must be in 1..=1800, even when those phases are disabled.
+    /// No retry starts if this delay does not fit within the remaining budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_reset_verify_retry_interval_seconds: Option<u32>,
+    /// `post_reset_verify_timeout_seconds` bounds all requested verification
+    /// after reset completion is recorded. Omission uses 1800 seconds.
+    /// It applies only when `reset` and at least one verification are enabled.
+    /// Explicit values must be in 1..=1800, even when those phases are disabled.
+    /// Tool discovery, read attempts, and retry delays share this budget;
+    /// bounded command cleanup and result delivery may finish after it expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_reset_verify_timeout_seconds: Option<u32>,
 }
 
 impl Default for FlashOptions {
@@ -289,7 +442,56 @@ impl Default for FlashOptions {
             verify_version: false,
             reset: false,
             reset_level: DEFAULT_RESET_LEVEL,
+            post_reset_verify_retry_interval_seconds: None,
+            post_reset_verify_timeout_seconds: None,
         }
+    }
+}
+
+/// `PostResetVerificationPolicy` contains validated timing for one apply call.
+pub(super) struct PostResetVerificationPolicy {
+    pub(super) retry_interval: Duration,
+    pub(super) timeout: Duration,
+}
+
+impl FlashOptions {
+    /// Resolve timing without changing the request used for operation identity.
+    /// Invalid explicit values are rejected even when no reset or verification
+    /// is requested; an inactive policy returns `None` after validation.
+    pub(super) fn post_reset_verification_policy(
+        &self,
+    ) -> FirmwareResult<Option<PostResetVerificationPolicy>> {
+        for (field, seconds) in [
+            (
+                "post_reset_verify_retry_interval_seconds",
+                self.post_reset_verify_retry_interval_seconds,
+            ),
+            (
+                "post_reset_verify_timeout_seconds",
+                self.post_reset_verify_timeout_seconds,
+            ),
+        ] {
+            if let Some(seconds) = seconds
+                && !(1..=MAX_POST_RESET_VERIFICATION_SECONDS).contains(&seconds)
+            {
+                return Err(FirmwareError::ConfigError(format!(
+                    "{field} must be in 1..={MAX_POST_RESET_VERIFICATION_SECONDS} seconds"
+                )));
+            }
+        }
+        if !self.reset || !(self.verify_image || self.verify_version) {
+            return Ok(None);
+        }
+        Ok(Some(PostResetVerificationPolicy {
+            retry_interval: Duration::from_secs(u64::from(
+                self.post_reset_verify_retry_interval_seconds
+                    .unwrap_or(DEFAULT_POST_RESET_VERIFY_RETRY_INTERVAL_SECONDS),
+            )),
+            timeout: Duration::from_secs(u64::from(
+                self.post_reset_verify_timeout_seconds
+                    .unwrap_or(DEFAULT_POST_RESET_VERIFY_TIMEOUT_SECONDS),
+            )),
+        }))
     }
 }
 
@@ -343,10 +545,14 @@ impl<'de> Deserialize<'de> for FirmwareFlasherProfile {
             reset: bool,
             #[serde(default = "default_reset_level")]
             reset_level: u8,
+            #[serde(default)]
+            post_reset_verify_retry_interval_seconds: Option<u32>,
+            #[serde(default)]
+            post_reset_verify_timeout_seconds: Option<u32>,
         }
 
         let profile = FlatFirmwareFlasherProfile::deserialize(deserializer)?;
-        Ok(Self {
+        let profile = Self {
             firmware_spec: FirmwareSpec {
                 part_number: profile.part_number,
                 psid: profile.psid,
@@ -365,8 +571,16 @@ impl<'de> Deserialize<'de> for FirmwareFlasherProfile {
                 verify_version: profile.verify_version,
                 reset: profile.reset,
                 reset_level: profile.reset_level,
+                post_reset_verify_retry_interval_seconds: profile
+                    .post_reset_verify_retry_interval_seconds,
+                post_reset_verify_timeout_seconds: profile.post_reset_verify_timeout_seconds,
             },
-        })
+        };
+        profile
+            .flash_options
+            .post_reset_verification_policy()
+            .map_err(serde::de::Error::custom)?;
+        Ok(profile)
     }
 }
 
@@ -430,6 +644,8 @@ impl From<FlashOptions> for FlashOptionsPb {
             verify_version: opts.verify_version,
             reset: opts.reset,
             reset_level: opts.reset_level as u32,
+            post_reset_verify_retry_interval_seconds: opts.post_reset_verify_retry_interval_seconds,
+            post_reset_verify_timeout_seconds: opts.post_reset_verify_timeout_seconds,
         }
     }
 }
@@ -438,13 +654,20 @@ impl TryFrom<FlashOptionsPb> for FlashOptions {
     type Error = String;
 
     fn try_from(proto: FlashOptionsPb) -> Result<Self, Self::Error> {
-        Ok(FlashOptions {
+        let options = FlashOptions {
             verify_image: proto.verify_image,
             verify_version: proto.verify_version,
             reset: proto.reset,
             reset_level: u8::try_from(proto.reset_level)
                 .map_err(|_| "reset_level must be in 0..=255".to_string())?,
-        })
+            post_reset_verify_retry_interval_seconds: proto
+                .post_reset_verify_retry_interval_seconds,
+            post_reset_verify_timeout_seconds: proto.post_reset_verify_timeout_seconds,
+        };
+        options
+            .post_reset_verification_policy()
+            .map_err(|error| error.to_string())?;
+        Ok(options)
     }
 }
 
@@ -483,6 +706,138 @@ impl TryFrom<FirmwareFlasherProfilePb> for FirmwareFlasherProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Wire digests must use exactly 64 lowercase hexadecimal characters.
+    /// Conversion must reject other spellings and preserve valid digests.
+    #[test]
+    fn update_digest_wire_format_is_lowercase_sha256() {
+        use carbide_test_support::value_scenarios;
+
+        value_scenarios!(run = |value: &str| FirmwareArtifactDigests::try_from(
+            FirmwareArtifactDigestsPb { image_sha256: value.into(), configuration_sha256: None }
+        ).map(|value| FirmwareArtifactDigestsPb::from(value).image_sha256).ok();
+            "canonical bytes round trip" {
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" =>
+                    Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into()),
+            }
+            "alternate or malformed representations fail" {
+                "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF" => None,
+                "00" => None,
+                "g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" => None,
+            }
+        );
+    }
+
+    /// Checked source validation rejects credential-bearing forms before any
+    /// caller, daemon, or error text can forward them to the legacy resolver.
+    #[test]
+    fn update_sources_are_unauthenticated_http_without_query_or_fragment() {
+        use carbide_test_support::Outcome::{Fails, Yields};
+        use carbide_test_support::scenarios;
+
+        scenarios!(run = |source: &str| validate_update_source(source).map_err(drop);
+            "plain HTTP and HTTPS sources" {
+                "https://artifacts.example/image.bin" => Yields(()),
+                "http://[::1]:8080/image.bin" => Yields(()),
+            }
+            "source forms outside the checked transport contract" {
+                "file:///image.bin" => Fails,
+                "ssh://host:image.bin" => Fails,
+                "https://user:password@host/image.bin" => Fails,
+                "https://@host/image.bin" => Fails,
+                "https://host/image.bin?token=secret" => Fails,
+                "https://host/image.bin#fragment" => Fails,
+                "https://host/image.bin " => Fails,
+                "https://host/im\tage.bin" => Fails,
+            }
+        );
+    }
+
+    /// Configuration bytes must be covered by a digest whenever configuration
+    /// will run; an orphan digest must not silently describe skipped work.
+    #[test]
+    fn update_context_requires_configuration_and_digest_together() {
+        let profile = FirmwareFlasherProfile::from_toml(
+            r#"
+            part_number = "part"
+            psid = "psid"
+            version = "version"
+            firmware_url = "https://host/image.bin"
+        "#,
+        )
+        .unwrap();
+        for (scenario, source, digest, valid) in [
+            ("no configuration requested", None, None, true),
+            (
+                "configuration is covered",
+                Some("https://host/config.bin"),
+                Some([1; 32]),
+                true,
+            ),
+            (
+                "configuration lacks its digest",
+                Some("https://host/config.bin"),
+                None,
+                false,
+            ),
+            (
+                "digest describes no requested configuration",
+                None,
+                Some([1; 32]),
+                false,
+            ),
+        ] {
+            let mut profile = profile.clone();
+            profile.flash_spec.device_conf_url = source.map(str::to_owned);
+            let context = FirmwareUpdateContext {
+                phase_id: "dispatch-1".into(),
+                expected_digests: FirmwareArtifactDigests {
+                    image_sha256: [0; 32],
+                    configuration_sha256: digest,
+                },
+            };
+            assert_eq!(context.validate(&profile).is_ok(), valid, "{scenario}");
+        }
+    }
+
+    /// Plain URLs do not make explicit authentication safe. Both credential
+    /// fields must be absent before a checked update can be admitted.
+    #[test]
+    fn update_context_rejects_explicit_artifact_credentials() {
+        use carbide_test_support::Outcome::Fails;
+        use carbide_test_support::scenarios;
+
+        let profile = FirmwareFlasherProfile::from_toml(
+            r#"
+            part_number = "part"
+            psid = "psid"
+            version = "version"
+            firmware_url = "https://host/image.bin"
+            device_conf_url = "https://host/config.bin"
+        "#,
+        )
+        .unwrap();
+        let context = FirmwareUpdateContext {
+            phase_id: "dispatch-1".into(),
+            expected_digests: FirmwareArtifactDigests {
+                image_sha256: [0; 32],
+                configuration_sha256: Some([1; 32]),
+            },
+        };
+        scenarios!(run = |(image, configuration): (Option<Credentials>, Option<Credentials>)| {
+            let mut profile = profile.clone();
+            profile.flash_spec.firmware_credentials = image;
+            profile.flash_spec.device_conf_credentials = configuration;
+            context.validate(&profile).map_err(drop)
+        };
+            "image authentication" {
+                (Some(Credentials::bearer_token("image-secret")), None) => Fails,
+            }
+            "configuration authentication" {
+                (None, Some(Credentials::basic_auth("user", "config-secret"))) => Fails,
+            }
+        );
+    }
 
     /// Resolve caller-local references without reading files, so retries still
     /// identify accepted work after the original inputs have been removed.
@@ -684,6 +1039,83 @@ mod tests {
         assert!(!opts.verify_version);
         assert!(!opts.reset);
         assert_eq!(opts.reset_level, 3);
+        assert_eq!(opts.post_reset_verify_retry_interval_seconds, None);
+        assert_eq!(opts.post_reset_verify_timeout_seconds, None);
+    }
+
+    /// Disabled phases must stay disabled, but cannot hide invalid timing that
+    /// would become active if a caller later selects reset and verification.
+    #[test]
+    fn post_reset_verification_policy_validates_timing_before_selecting_phases() {
+        use carbide_test_support::Outcome::{Fails, Yields};
+        use carbide_test_support::scenarios;
+
+        let resolve = |options: FlashOptions| {
+            options
+                .post_reset_verification_policy()
+                .map(|policy| {
+                    policy.map(|policy| (policy.retry_interval.as_secs(), policy.timeout.as_secs()))
+                })
+                .map_err(drop)
+        };
+        scenarios!(resolve:
+            "image verification after reset uses the timing defaults" {
+                FlashOptions {
+                    reset: true,
+                    verify_image: true,
+                    ..Default::default()
+                } => Yields(Some((10, 1800))),
+            }
+            "version verification alone also enables the policy" {
+                FlashOptions {
+                    reset: true,
+                    verify_version: true,
+                    ..Default::default()
+                } => Yields(Some((10, 1800))),
+            }
+            "verification without reset keeps its single attempt" {
+                FlashOptions {
+                    verify_image: true,
+                    ..Default::default()
+                } => Yields(None),
+            }
+            "reset without verification has no verification budget" {
+                FlashOptions {
+                    reset: true,
+                    ..Default::default()
+                } => Yields(None),
+            }
+            "valid explicit timing never enables disabled phases" {
+                FlashOptions {
+                    post_reset_verify_retry_interval_seconds: Some(10),
+                    post_reset_verify_timeout_seconds: Some(1800),
+                    ..Default::default()
+                } => Yields(None),
+            }
+            "accepted limits permit an interval longer than the budget" {
+                FlashOptions {
+                    reset: true,
+                    verify_image: true,
+                    post_reset_verify_retry_interval_seconds: Some(1800),
+                    post_reset_verify_timeout_seconds: Some(1),
+                    ..Default::default()
+                } => Yields(Some((1800, 1))),
+            }
+            "zero interval is invalid even when no verification is requested" {
+                FlashOptions {
+                    post_reset_verify_retry_interval_seconds: Some(0),
+                    ..Default::default()
+                } => Fails,
+            }
+            "verification cannot exceed the hard timeout limit" {
+                FlashOptions {
+                    reset: true,
+                    verify_image: true,
+                    post_reset_verify_timeout_seconds: Some(1801),
+                    ..Default::default()
+                } => Fails,
+            }
+        );
     }
 
     #[test]
@@ -693,6 +1125,8 @@ mod tests {
             verify_version: true,
             reset: true,
             reset_level: 5,
+            post_reset_verify_retry_interval_seconds: Some(2),
+            post_reset_verify_timeout_seconds: Some(30),
         };
         let proto: FlashOptionsPb = original.clone().into();
         let converted: FlashOptions = proto.try_into().unwrap();
@@ -700,21 +1134,26 @@ mod tests {
         assert_eq!(original.verify_version, converted.verify_version);
         assert_eq!(original.reset, converted.reset);
         assert_eq!(original.reset_level, converted.reset_level);
+        assert_eq!(
+            original.post_reset_verify_retry_interval_seconds,
+            converted.post_reset_verify_retry_interval_seconds
+        );
+        assert_eq!(
+            original.post_reset_verify_timeout_seconds,
+            converted.post_reset_verify_timeout_seconds
+        );
     }
 
     #[test]
-    fn profile_options_preserve_omission_and_reject_reset_level_overflow() {
+    fn profile_options_preserve_omission_and_reject_invalid_values() {
         use carbide_test_support::Outcome::{Fails, Yields};
         use carbide_test_support::scenarios;
 
-        let convert = |level: Option<u32>| {
+        let convert = |flash_options: Option<FlashOptionsPb>| {
             FirmwareFlasherProfile::try_from(FirmwareFlasherProfilePb {
                 firmware_spec: Some(Default::default()),
                 flash_spec: Some(FlashSpecPb::default()),
-                flash_options: level.map(|reset_level| FlashOptionsPb {
-                    reset_level,
-                    ..Default::default()
-                }),
+                flash_options,
             })
             .map(|profile| profile.flash_options.reset_level)
         };
@@ -723,11 +1162,23 @@ mod tests {
                 None => Yields(3),
             }
             "a present options message preserves the wire value" {
-                Some(0) => Yields(0),
-                Some(255) => Yields(255),
+                Some(FlashOptionsPb::default()) => Yields(0),
+                Some(FlashOptionsPb {
+                    reset_level: 255,
+                    ..Default::default()
+                }) => Yields(255),
             }
             "out-of-range levels cannot alias accepted work" {
-                Some(256) => Fails,
+                Some(FlashOptionsPb {
+                    reset_level: 256,
+                    ..Default::default()
+                }) => Fails,
+            }
+            "wire decoding validates timing before admission" {
+                Some(FlashOptionsPb {
+                    post_reset_verify_retry_interval_seconds: Some(0),
+                    ..Default::default()
+                }) => Fails,
             }
         );
     }
@@ -753,6 +1204,7 @@ mod tests {
                 verify_version: true,
                 reset: true,
                 reset_level: 3,
+                ..Default::default()
             },
         };
         let proto: FirmwareFlasherProfilePb = original.clone().into();
@@ -849,17 +1301,31 @@ verify_version = true
     }
 
     #[test]
-    fn profile_toml_rejects_unknown_fields() {
-        let toml_str = r#"
+    fn profile_toml_rejects_unknown_or_invalid_fields() {
+        use carbide_test_support::value_scenarios;
+
+        let rejects = |(field, value): (&str, &str)| {
+            let toml_str = format!(
+                r#"
 part_number = "900-9D3B4-00CV-TA0"
 psid = "MT_0000000884"
 version = "32.43.1014"
 firmware_url = "https://artifacts.nvidia.com/fw.bin"
-firmware_urll = "https://typo.example.com/fw.bin"
-"#;
+{field} = {value}
+"#
+            );
 
-        let error = FirmwareFlasherProfile::from_toml(toml_str).unwrap_err();
-        assert!(error.to_string().contains("firmware_urll"));
+            let error = FirmwareFlasherProfile::from_toml(&toml_str).unwrap_err();
+            error.to_string().contains(field)
+        };
+        value_scenarios!(rejects:
+            "unknown keys identify the misspelled field" {
+                ("firmware_urll", "\"https://typo.example.com/fw.bin\"") => true,
+            }
+            "timing is validated even when optional phases are disabled" {
+                ("post_reset_verify_timeout_seconds", "1801") => true,
+            }
+        );
     }
 
     #[test]
@@ -883,6 +1349,8 @@ firmware_urll = "https://typo.example.com/fw.bin"
                 verify_version: true,
                 reset: true,
                 reset_level: 5,
+                post_reset_verify_retry_interval_seconds: Some(5),
+                post_reset_verify_timeout_seconds: Some(90),
             },
         };
 
@@ -924,6 +1392,18 @@ firmware_urll = "https://typo.example.com/fw.bin"
         assert_eq!(
             decoded.flash_options.reset_level,
             original.flash_options.reset_level
+        );
+        assert_eq!(
+            decoded
+                .flash_options
+                .post_reset_verify_retry_interval_seconds,
+            original
+                .flash_options
+                .post_reset_verify_retry_interval_seconds
+        );
+        assert_eq!(
+            decoded.flash_options.post_reset_verify_timeout_seconds,
+            original.flash_options.post_reset_verify_timeout_seconds
         );
     }
 }

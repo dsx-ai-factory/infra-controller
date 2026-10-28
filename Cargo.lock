@@ -2333,7 +2333,6 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "axum",
- "base64",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-client-cache",
@@ -3326,11 +3325,13 @@ dependencies = [
  "eyre",
  "ipnetwork",
  "itertools 0.14.0",
+ "mac_address",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tonic",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -3523,6 +3524,17 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "carbide-site-health-probe-api"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
 ]
 
 [[package]]
@@ -3813,6 +3825,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -10431,6 +10444,7 @@ version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2b42f36aa1cd011945615b92222f6bf73c599a102a300334cd7f8dbeec726cc"
 dependencies = [
+ "chrono",
  "dyn-clone",
  "ref-cast",
  "schemars_derive",

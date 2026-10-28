@@ -295,6 +295,7 @@ impl TestApiBuilder {
             real_bmc_client.clone(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             SiteExplorerExploreMode::NvRedfish,
+            false,
             self.db_pool.clone(),
         );
         // A mock supplies both narrow interfaces so tests asserting on BMC calls

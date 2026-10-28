@@ -796,7 +796,7 @@ pub(crate) async fn discover_dhcp(
             })
             .or_else(|| network_segments.first())
             .ok_or_else(|| {
-                CarbideError::internal(format!(
+                CarbideError::FailedPrecondition(format!(
                     "no network segment defined for DHCPv6 relay address {parsed_relay}"
                 ))
             })?;

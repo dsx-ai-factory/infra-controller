@@ -134,6 +134,14 @@ jobs:
           else
             RELEASE_TAG=""
           fi
+          if [[ ! "${SEMANTIC_VERSION}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+            echo "::error::semantic version is not safe: ${SEMANTIC_VERSION}"
+            exit 1
+          fi
+          if [[ -n "${RELEASE_TAG}" && ! "${RELEASE_TAG}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+            echo "::error::release tag is not safe: ${RELEASE_TAG}"
+            exit 1
+          fi
 
           # Keep this precedence aligned with the manual-only resolver in
           # rest-build-binaries.yml.

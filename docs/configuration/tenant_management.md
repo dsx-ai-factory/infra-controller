@@ -510,7 +510,7 @@ Prefixes or Subnets and instances.
 | `--site-id` | yes | The site this VPC belongs to |
 | `--routing-profile` | no | One of `external`, `internal`, `privileged-internal` (REST API mapping); see core docs for semantics |
 | `--network-virtualization-type` | no | `FNN` for VPC Prefixes, `ETHERNET_VIRTUALIZER` for IPv4 Subnets, or `FLAT` for zero-DPU and NIC-mode hosts |
-| `--nv-link-logical-partition-id` | no | Attach to a specific NVLink partition (GB200) |
+| `--nv-link-logical-partition-id` | no | Attach to a specific NVLink partition (GB200/GB300/VR) |
 | `--vni` | no | Pin a specific VXLAN Network Identifier |
 | `--description` | no | |
 
@@ -679,6 +679,10 @@ nicocli tui
    `ETHERNET_VIRTUALIZER` (loops, can add more). `FLAT` VPCs attach the network
    automatically and skip this prompt.
 6. **SSH key groups** -- optional, attaches SSH keys for serial-console access
+
+For key registration, Site synchronization, and the connection procedure, see
+[SSH Console Setup and Access](ssh-console.md). The guide also covers updating
+an existing Instance's key-group attachments.
 
 For an image-based operating system, review [Image-Based Operating Systems](image-based-operating-systems.md) before making the definition available to tenants. Its disk selector applies to every eligible target and the selected whole disk is overwritten during installation.
 

@@ -1161,13 +1161,13 @@ async fn gnmi_sample_task(
 }
 
 /// Adapts the SAMPLE processor to the same runtime used by additional streams.
-/// The injectable opener also preserves the existing timeout/retry unit boundary.
+/// Clears retained counter metadata before each attempt, including retries.
 async fn run_gnmi_sample_task<S, F, Fut>(
     cancel_token: &CancellationToken,
     config: &GnmiStreamConfig,
     stream_metrics: &GnmiStreamMetrics,
     sample_processor: &GnmiSampleProcessor,
-    subscribe: F,
+    mut subscribe: F,
 ) where
     S: Stream<Item = Result<proto::SubscribeResponse, tonic::Status>> + Send + Unpin,
     F: FnMut() -> Fut + Send,
@@ -1201,7 +1201,12 @@ async fn run_gnmi_sample_task<S, F, Fut>(
                     .diagnostic_stream
                     .unwrap_or(NVUE_GNMI_SAMPLE_STREAM_ID),
             }),
-        subscribe,
+        || {
+            // Earlier epochs and delete history may no longer describe the source.
+            // Learn them from the new stream, including updates before `SyncResponse`.
+            sample_processor.clear_counter_epochs();
+            subscribe()
+        },
         |response| {
             sample_processor.process_subscribe_response(response, stream_metrics);
             Ok(false)
@@ -1247,7 +1252,7 @@ async fn gnmi_on_change_task(
 
 /// Runs opening, initial synchronization, telemetry delivery and reconnects.
 ///
-/// Processors keep their metric and delete semantics across reconnects.
+/// The opener applies each processor's per-attempt reset before telemetry resumes.
 /// Synchronized streams release the RPC and readiness guards before credential refresh.
 /// Credential refresh observes cancellation so shutdown does not wait for its timeout.
 async fn run_subscription<S, F, Fut, P>(
@@ -2049,7 +2054,26 @@ mod tests {
             ..Default::default()
         };
 
-        let stalled: TestStream = Box::pin(tokio_stream::pending());
+        // Metadata can arrive before initial synchronization stalls. The retry
+        // must discard it before opening the next subscription.
+        let metadata = proto::SubscribeResponse {
+            response: Some(proto::subscribe_response::Response::Update(
+                proto::Notification {
+                    timestamp: 200,
+                    update: vec![super::super::sample_processor::test_interface_update(
+                        "nvl0",
+                        &["state", "counters", "last-clear"],
+                        proto::TypedValue {
+                            value: Some(proto::typed_value::Value::UintVal(100)),
+                        },
+                    )],
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        };
+        let stalled: TestStream =
+            Box::pin(tokio_stream::once(Ok(metadata)).chain(tokio_stream::pending()));
 
         let synchronized: TestStream =
             Box::pin(tokio_stream::once(Ok(synchronized)).chain(tokio_stream::pending()));
@@ -2058,6 +2082,7 @@ mod tests {
         let (attempt_tx, mut attempt_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let run = run_gnmi_sample_task(&cancel_token, &config, &metrics, &processor, || {
+            assert_eq!(processor.counter_epoch_start("nvl0", 200), None);
             attempt_tx.send(()).expect("attempt receiver remains open");
             std::future::ready(Ok((
                 streams.pop_front().expect("test stream is available"),
@@ -2072,6 +2097,11 @@ mod tests {
             assert_eq!(metrics.connection_state.get(), READY);
             assert_eq!(metrics.connected.get(), 1);
             assert_eq!(metrics.synchronized.get(), 0);
+
+            assert_eq!(
+                processor.counter_epoch_start("nvl0", 200),
+                Some(std::time::UNIX_EPOCH + Duration::from_nanos(100)),
+            );
 
             attempt_rx.recv().await.expect("retry subscription attempt");
 

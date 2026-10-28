@@ -113,6 +113,7 @@ mod set;
 mod site_explorer;
 mod site_prefix;
 mod sku;
+mod spx_maintenance;
 mod spx_partition;
 mod ssh;
 mod switch;
@@ -307,6 +308,7 @@ async fn main() -> color_eyre::Result<()> {
         CliCommand::NvlDomain(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::NvlPartition(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::SpxPartition(cmd) => cmd.dispatch(ctx).await?,
+        CliCommand::SpxMaintenance(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::IpxeTemplate(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::OsImage(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::OperatingSystem(cmd) => cmd.dispatch(ctx).await?,

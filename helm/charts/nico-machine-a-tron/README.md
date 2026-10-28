@@ -221,8 +221,11 @@ against `nvlink_config.nmx_c_tls_authority`. Every pod's certificate carries
 purpose. That setting does not cover the NVUE mock on port 443: hardware
 health's NVUE REST collector accepts any server certificate unless its
 `[tls.switch]` profile is configured, in which case it verifies the mock
-against that profile's CA bundle and `tls_server_name`, and the BMC proxy
-accepts any upstream certificate. The simulation profile
+against that profile's CA bundle and `tls_server_name`. The BMC proxy likewise
+accepts any upstream certificate unless its own
+[`[tls.switch]`](../../../crates/bmc-proxy/README.md#tlsswitch) is set, in
+which case it verifies the mock against that table's CA bundle and
+`tls_server_name`, or else the address it connects to. The simulation profile
 `helm-prereqs/values/nico-core-simulation.yaml` ships the matching
 `[nvlink_config]` block; refer to
 [Machine-a-tron NMX-C Mock](../../../docs/development/machine-a-tron-nmxc-mock.md)

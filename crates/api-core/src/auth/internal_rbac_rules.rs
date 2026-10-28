@@ -738,6 +738,7 @@ impl InternalRBACRules {
         x.perm("UpdateSkuMetadata", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("UpdateMachineHardwareInfo", vec![ForgeAdminCLI]);
         x.perm("ReplaceSku", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("ReplaceSkuComponents", vec![ForgeAdminCLI, SiteAgent]);
         x.perm(
             "GetManagedHostQuarantineState",
             vec![ForgeAdminCLI, SiteAgent],
@@ -1044,6 +1045,11 @@ impl InternalRBACRules {
         x.perm("DeleteSpxPartition", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("FindSpxPartitionIds", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("FindSpxPartitionsByIds", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("GetMachineSpxMultiplane", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm(
+            "UpdateMachineSpxMultiplaneMaintenance",
+            vec![ForgeAdminCLI, SiteAgent],
+        );
         x.perm("FindNVLinkPartitionIds", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("FindNVLinkPartitionsByIds", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("NVLinkPartitionsForTenant", vec![ForgeAdminCLI, SiteAgent]);
@@ -1525,6 +1531,14 @@ mod rbac_rule_tests {
                 "{method} should reject unrelated services"
             );
         }
+    }
+
+    #[test]
+    fn sku_replacement_methods_have_the_same_permissions() {
+        assert_eq!(
+            INTERNAL_RBAC_RULES.perms["ReplaceSkuComponents"].principals,
+            INTERNAL_RBAC_RULES.perms["ReplaceSku"].principals,
+        );
     }
 
     #[test]

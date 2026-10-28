@@ -48,8 +48,8 @@ use model::metadata::Metadata;
 use model::site_explorer::{
     BlueFieldOperatingMode, Chassis, ComponentIntegrityEntry, ComputerSystem,
     EndpointExplorationError, EndpointExplorationReport, EndpointType, ExploredDpu,
-    ExploredManagedHost, InitialBmcResetPhase, Inventory, NetworkAdapter, PreingestionState,
-    Service, UefiDevicePath,
+    ExploredManagedHost, InitialBmcResetPhase, Inventory, NetworkAdapter, PowerState,
+    PreingestionState, Service, UefiDevicePath,
 };
 use model::test_support::{DpuConfig, ManagedHostConfig};
 use rpc::forge::GetSiteExplorationRequest;
@@ -1254,6 +1254,135 @@ async fn test_rejected_exploration_error_skips_only_its_remediation(
         .collect();
     assert_eq!(counts["{kind=\"endpoint_error_update_attempts\"}"], "2");
     assert_eq!(counts["{kind=\"redfish_remediation_candidates\"}"], "1");
+    Ok(())
+}
+
+/// A probe report the database rejected as stale does not count as refreshed:
+/// the identify phase reads the host's power state live instead of trusting
+/// the stored report, which another writer replaced during the probe.
+#[sqlx_test]
+async fn test_rejected_report_is_not_treated_as_refreshed_for_ingestion(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let mut machines = vec![env.new_machine("02:00:00:00:15:01", "Vendor1")];
+    machines.discover_dhcp(env.api()).await?;
+    let machine = &machines[0];
+    let address: IpAddr = machine.ip.parse()?;
+    let serial = format!("host-{}", machine.mac);
+    let mut txn = env.pool.begin().await?;
+    db::expected_machine::create(
+        &mut txn,
+        ExpectedMachine {
+            id: None,
+            bmc_mac_address: machine.mac,
+            data: ExpectedMachineData {
+                serial_number: serial.clone(),
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    // The stored report says the host is on, and the live host is off.
+    let report = EndpointExplorationReport {
+        endpoint_type: EndpointType::Bmc,
+        last_exploration_error: Some(EndpointExplorationError::AvoidLockout),
+        systems: vec![ComputerSystem {
+            id: "System_0".to_string(),
+            serial_number: Some(serial),
+            power_state: PowerState::On,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    db::explored_endpoints::insert(address, &report, false, &mut txn).await?;
+    db::explored_endpoints::set_preingestion_complete(address, &mut txn).await?;
+    db::explored_endpoints::request_exploration_for_addresses(&[address], txn.as_mut()).await?;
+    txn.commit().await?;
+    let seeded = db::explored_endpoints::find_by_ips(&env.pool, vec![address])
+        .await?
+        .pop()
+        .expect("the endpoint is registered");
+
+    let explorer = env.test_site_explorer(SiteExplorerConfig {
+        enabled: Arc::new(true.into()),
+        retained_boot_interface_window: None,
+        explorations_per_run: 1,
+        concurrent_explorations: 1,
+        create_machines: Arc::new(false.into()),
+        ..Default::default()
+    });
+    let mut probe_report = report.clone();
+    probe_report.last_exploration_error = None;
+    probe_report.systems[0].power_state = PowerState::Off;
+    explorer.insert_endpoint_result(address, Ok(probe_report));
+    explorer
+        .endpoint_explorer()
+        .power_states
+        .lock()
+        .unwrap()
+        .insert(address, libredfish::PowerState::Off);
+
+    // The operator's clear commits while the probe is in flight, so the
+    // probe's report is rejected as stale.
+    let blocker = explorer.endpoint_explorer().block_next_exploration();
+    let clear_during_probe = async {
+        blocker.wait_until_started().await;
+        env.api()
+            .clear_site_exploration_error(Request::new(
+                rpc::forge::ClearSiteExplorationErrorRequest {
+                    ip_address: address.to_string(),
+                },
+            ))
+            .await?;
+        blocker.release();
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    let iteration = async {
+        explorer.run_single_iteration().await?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    };
+    tokio::try_join!(iteration, clear_during_probe)?;
+
+    let persisted = db::explored_endpoints::find_by_ips(&env.pool, vec![address])
+        .await?
+        .pop()
+        .expect("the endpoint is still registered");
+    assert_eq!(
+        persisted.report_version.version_nr(),
+        seeded.report_version.version_nr() + 1,
+        "only the clear's write was accepted"
+    );
+    assert!(persisted.waiting_for_explorer_refresh);
+    assert_eq!(persisted.report.last_exploration_error, None);
+    assert_eq!(
+        persisted.report.systems[0].power_state,
+        PowerState::On,
+        "the stored power state is the stale cached one"
+    );
+    assert_eq!(
+        explorer
+            .endpoint_explorer()
+            .redfish_get_power_state_calls
+            .lock()
+            .unwrap()
+            .as_slice(),
+        &[std::net::SocketAddr::new(address, 443)],
+        "the host's power state is read live"
+    );
+    assert_eq!(
+        explorer
+            .endpoint_explorer()
+            .redfish_power_control_calls
+            .lock()
+            .unwrap()
+            .as_slice(),
+        &[(
+            std::net::SocketAddr::new(address, 443),
+            libredfish::SystemPowerControl::On,
+        )],
+        "the live reading drives a power-on, not an ingestion"
+    );
     Ok(())
 }
 
@@ -2708,6 +2837,9 @@ async fn test_site_explorer_audit_exploration_results(
         run_interval: std::time::Duration::from_secs(1),
         create_machines: Arc::new(true.into()),
         machines_created_per_run: 1,
+        machine_creation_concurrency: SiteExplorerConfig::default_machine_creation_concurrency(),
+        switch_and_power_shelf_pass_interval:
+            SiteExplorerConfig::default_switch_and_power_shelf_pass_interval(),
         override_target_ip: None,
         override_target_port: None,
         allow_changing_bmc_proxy: None,
@@ -2723,6 +2855,7 @@ async fn test_site_explorer_audit_exploration_results(
         deprecated_force_dpu_nic_mode: None,
         // Tests use MockEndpointExplorer. So this doesn't affect anything.
         explore_mode: SiteExplorerExploreMode::NvRedfish,
+        explore_drive_firmware: false,
     };
     let explorer = env.test_site_explorer(explorer_config);
     explorer.insert_endpoints(vec![
@@ -4783,8 +4916,8 @@ async fn test_site_explorer_pairs_dpu_from_chassis_serial(
 }
 
 /// A host can report one BlueField as both a network adapter and a separate
-/// chassis. Refresh must replace a persisted duplicate list and ingest each
-/// distinct DPU once.
+/// chassis, including copies without part numbers. Refresh must replace a
+/// persisted duplicate list and ingest each distinct DPU once.
 #[sqlx_test]
 async fn test_site_explorer_deduplicates_chassis_serials_and_repairs_persisted_host(
     pool: PgPool,
@@ -4821,7 +4954,7 @@ async fn test_site_explorer_deduplicates_chassis_serials_and_repairs_persisted_h
                 .enumerate()
                 .map(|(index, dpu)| NetworkAdapter {
                     id: (index + 1).to_string(),
-                    part_number: Some("900-9D3B6-00CV-AA0".to_string()),
+                    part_number: (index != 0).then(|| "900-9D3B6-00CV-AA0".to_string()),
                     serial_number: Some(dpu.serial.clone()),
                     ..Default::default()
                 })
@@ -4832,6 +4965,15 @@ async fn test_site_explorer_deduplicates_chassis_serials_and_repairs_persisted_h
             id: "SmartNIC_1".to_string(),
             part_number: Some("900-9D3B6-00CV-AA0".to_string()),
             serial_number: Some(dpus[0].serial.clone()),
+            ..Default::default()
+        },
+        Chassis {
+            id: "2".to_string(),
+            network_adapters: vec![NetworkAdapter {
+                id: "1".to_string(),
+                serial_number: Some(dpus[1].serial.clone()),
+                ..Default::default()
+            }],
             ..Default::default()
         },
     ];

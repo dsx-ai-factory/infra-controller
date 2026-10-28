@@ -40,8 +40,9 @@ use rpc::protos::mlx_device::{
     FirmwareFlashReport, FirmwareOperation, FirmwareOperationState,
     MlxAdminDeviceIdentitiesRequest, MlxAdminDeviceReportRequest, MlxDeviceIdentity,
     MlxDeviceIdentityReport, MlxDeviceInfo, MlxDeviceInfoReportResponse, MlxDeviceReport,
-    MlxObservation, MlxObservationReport, PublishMlxDeviceReportRequest,
-    PublishMlxObservationReportRequest, mlx_device_info_report_response,
+    MlxDeviceUpdateFirmwareResult, MlxObservation, MlxObservationReport,
+    PublishMlxDeviceReportRequest, PublishMlxObservationReportRequest,
+    mlx_device_info_report_response, mlx_device_update_firmware_result,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -131,6 +132,133 @@ async fn firmware_test_card(
     card.controller_state.value = DpaInterfaceControllerState::ApplyFirmware;
     card.controller_state.version = version;
     card
+}
+
+/// Generic receipt publication must fail visibly even when the DPA route is
+/// disabled; success would incorrectly acknowledge durable Core ingestion.
+#[crate::sqlx_test]
+async fn firmware_update_result_is_not_acknowledged_without_dpa(pool: sqlx::PgPool) {
+    let mut config = get_config();
+    config.ewethers_config = None;
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            config: Some(config),
+            ..Default::default()
+        },
+    )
+    .await;
+    let host = create_managed_host(&env).await;
+    let host_id: HostMachineId = host.id.into();
+    let machine_id: MachineId = host_id.into();
+    assert!(!env.api.runtime_config.is_svpc_enabled());
+
+    let error = env
+        .api
+        .publish_mlx_observation_report(machine_request(
+            PublishMlxObservationReportRequest {
+                report: Some(MlxObservationReport {
+                    machine_id: Some(machine_id),
+                    observations: vec![firmware_update_observation("nic-firmware:attempt")],
+                    ..Default::default()
+                }),
+            },
+            machine_id,
+        ))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("result ingestion is not enabled"));
+    assert!(
+        db::dpa_interface::find_by_machine_id(&env.pool, host_id, DpaSearchConfig::default())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// A generic result must be classified before DPA merging, even when it uses
+/// a real DPA attempt ID and follows an otherwise acceptable legacy update.
+#[crate::sqlx_test]
+async fn firmware_update_result_rejects_batch_before_dpa_writes(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let host = create_managed_host(&env).await;
+    let host_id: HostMachineId = host.id.into();
+    let machine_id: MachineId = host_id.into();
+    let before = firmware_test_card(&env.pool, host_id, "00:11:22:33:44:55", "0000:cc:00.0").await;
+    let operation_id = before.firmware_operation_id();
+
+    let error = env
+        .api
+        .publish_mlx_observation_report(machine_request(
+            PublishMlxObservationReportRequest {
+                report: Some(MlxObservationReport {
+                    machine_id: Some(machine_id),
+                    observations: vec![
+                        // An acceptable DPA update earlier in the batch must
+                        // not be committed when generic ingestion is rejected.
+                        MlxObservation {
+                            device_info: Some(MlxDeviceInfo {
+                                base_mac: before.mac_address.to_string(),
+                                pci_name: before.pci_name.clone(),
+                                ..Default::default()
+                            }),
+                            profile_name: Some("must-not-be-saved".into()),
+                            ..Default::default()
+                        },
+                        firmware_update_observation(&operation_id),
+                    ],
+                    ..Default::default()
+                }),
+            },
+            machine_id,
+        ))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    let stored =
+        db::dpa_interface::find_by_machine_id(&env.pool, host_id, DpaSearchConfig::default())
+            .await
+            .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0].controller_state.value,
+        before.controller_state.value
+    );
+    assert_eq!(
+        stored[0].controller_state.version,
+        before.controller_state.version
+    );
+    assert_eq!(
+        serde_json::to_value(&stored[0].card_state).unwrap(),
+        serde_json::to_value(&before.card_state).unwrap()
+    );
+}
+
+/// Supply successful generic execution evidence without legacy completion fields.
+/// Its identity can deliberately collide with a DPA attempt to test routing.
+fn firmware_update_observation(operation_id: &str) -> MlxObservation {
+    MlxObservation {
+        firmware_update_result: Some(MlxDeviceUpdateFirmwareResult {
+            operation_id: operation_id.into(),
+            phase_id: "update:1".into(),
+            pci_name: "0000:cc:00.0".into(),
+            result: Some(mlx_device_update_firmware_result::Result::Receipt(
+                FirmwareOperation {
+                    operation_id: operation_id.into(),
+                    state: FirmwareOperationState::Complete.into(),
+                    report: Some(FirmwareFlashReport {
+                        flashed: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )),
+        }),
+        ..Default::default()
+    }
 }
 
 /// Canonical inventory upgrades a saved MST locator without creating a new card

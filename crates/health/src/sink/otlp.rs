@@ -1844,31 +1844,56 @@ mod tests {
         use std::sync::atomic::Ordering::SeqCst;
 
         let collector = Arc::new(GatedCollector::new(0));
-        let sink = sink_exporting_to(
-            serve_gated_collector(&collector).await,
-            1,
-            2,
-            std::time::Duration::from_secs(3600),
-            "otlp_concurrency_test",
-        );
+        let endpoint = serve_gated_collector(&collector).await;
+        let mut sink = bounded_test_sink(3);
+        sink.target = ConfiguredOtlpTarget(endpoint.clone());
+        let drain = OtlpMetricsDrainTask::new(
+            sink.metrics_queue.clone(),
+            OtlpTargetConfig {
+                endpoint,
+                batch_size: 1,
+                queue_capacity: 3,
+                max_request_bytes: OtlpTargetConfig::DEFAULT_MAX_REQUEST_BYTES,
+                max_concurrent_exports: 2,
+                flush_interval: Duration::from_secs(3600),
+                include_diagnostics: false,
+                include_alert_details: false,
+                tls: None,
+            },
+            "otlp_concurrency_test".to_string(),
+        )
+        .run();
+        tokio::pin!(drain);
 
         push_metrics(&sink, 3);
 
-        wait_until(
-            || collector.in_flight.load(SeqCst) >= 2,
-            "two exports are in flight",
-        )
-        .await;
-        // Give a third export time to arrive if the drain did not wait for a slot.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::select! {
+            () = &mut drain => panic!("drain must keep running"),
+            () = wait_until(
+                || collector.in_flight.load(SeqCst) >= 2,
+                "two exports are in flight",
+            ) => {}
+        }
+
+        // Both responses remain blocked while the drain is polled again. The
+        // third full batch must remain queued until an export completes.
+        let drain_poll =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(drain.as_mut().poll(cx))).await;
+        assert!(drain_poll.is_pending());
+        assert_eq!(sink.metrics_queue.len(), 1);
+        assert_eq!(collector.in_flight.load(SeqCst), 2);
         assert_eq!(collector.max_in_flight.load(SeqCst), 2);
 
         collector.gate.add_permits(3);
-        wait_until(
-            || collector.exported_points.lock().unwrap().len() == 3,
-            "all three batches are exported",
-        )
-        .await;
+        tokio::select! {
+            () = &mut drain => panic!("drain must keep running"),
+            () = wait_until(
+                || collector.exported_points.lock().unwrap().len() == 3,
+                "all three batches are exported",
+            ) => {}
+        }
+        assert_eq!(sink.metrics_queue.len(), 0);
+        assert_eq!(*collector.exported_points.lock().unwrap(), vec![1, 1, 1]);
         assert_eq!(collector.max_in_flight.load(SeqCst), 2);
     }
 }

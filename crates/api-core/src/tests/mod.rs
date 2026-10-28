@@ -91,6 +91,7 @@ mod site_explorer;
 mod site_prefix;
 mod sku;
 mod spdm;
+mod spx_multiplane;
 mod spx_partition;
 mod switch;
 mod tenant_identity_config;

@@ -240,6 +240,16 @@ global:
       kind: ClusterIssuer
 ```
 
+This issuer also signs the `nico-api` NVSwitch certificates: the NMX-C client
+certificate (`nico-api.nvSwitchTls.nicoClient`, enabled by default) and the
+optional switch server certificate. To use a different issuer for them, set
+`nico-api.nvSwitchTls.issuerRef` with `kind`, `name`, and `group`. The issuer,
+and any cert-manager approver policy, must allow the `client auth` usage and
+the client certificate's URI SAN, which defaults to
+`spiffe://<global.spiffe.trustDomain>/<namespace>/sa/nico-nmxc`. The
+`nico-api` pod does not start until the client certificate is issued. To skip
+it, set `nico-api.nvSwitchTls.nicoClient.enabled: false`.
+
 ---
 
 ## 6. Site Configuration

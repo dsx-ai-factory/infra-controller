@@ -65,7 +65,10 @@ pub use device_simulator::{
 };
 pub use dhcp_wrapper::{DhcpClient, UdpDhcpService};
 pub use dpu_machine::DpuMachineHandle;
-pub use expected_inventory::ExpectedInventorySummary;
+pub use expected_inventory::{
+    DeviceRecord, DpuKey, ExpectedInventorySummary, ExpectedRecordsResponse, MemberIntent,
+    NicIntent, RackGroupIntent, RackIntent, ServedRecords,
+};
 pub use machine_a_tron::MachineATron;
 pub use mock_ssh_server::{
     Credentials as MockSshCredentials, MockSshServerHandle, PromptBehavior,

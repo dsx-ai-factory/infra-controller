@@ -476,7 +476,7 @@ func (gesh GetExpectedSwitchHandler) Handle(c echo.Context) error {
 	site := expectedSwitch.Site
 	if site == nil {
 		siteDAO := cdbm.NewSiteDAO(gesh.dbSession)
-		site, err = siteDAO.GetByID(ctx, nil, expectedSwitch.SiteID, nil, false)
+		site, err = siteDAO.GetByID(ctx, nil, expectedSwitch.SiteID, nil, false, false)
 		if err != nil {
 			logger.Error().Err(err).Msg("error retrieving Site from DB")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site details for Expected Switch due to DB error", nil)

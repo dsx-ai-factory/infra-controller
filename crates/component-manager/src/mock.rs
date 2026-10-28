@@ -357,6 +357,7 @@ impl NvSwitchManager for MockNvSwitchManager {
             .certificate_job_status
             .clone()
             .unwrap_or(ConfigureSwitchCertificateJobStatus {
+                failure: None,
                 state: ConfigureSwitchCertificateState::Completed,
                 error: None,
             }))

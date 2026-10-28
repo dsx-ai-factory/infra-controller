@@ -56,7 +56,7 @@ spec:
                 description: |-
                   ClusterSelector determines in which clusters the DPUServiceIPAM controller should apply the configuration.
 
-                  Deprecated: This field is deprecated and will be removed with v27.1.0. Use DPUClusterSelector instead.
+                  Deprecated: This field is deprecated and will be removed with v31.0.0. Use DPUClusterSelector instead.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
@@ -149,8 +149,10 @@ spec:
                 type: object
                 x-kubernetes-map-type: atomic
               ipv4Network:
-                description: IPV4Network is the configuration related to splitting
-                  a network into subnets per node, each with their own gateway.
+                description: |-
+                  IPV4Network is the configuration related to splitting a network into subnets per node, each with their own gateway.
+
+                  Deprecated: Use Network instead.
                 properties:
                   allocations:
                     additionalProperties:
@@ -183,14 +185,14 @@ spec:
                     description: |-
                       Exclusions is a list of IPs that should be excluded when splitting the CIDR into subnets per node.
 
-                      Deprecated: This field is deprecated and will be removed with v26.10.0. Use ExcludeRanges instead.
+                      Deprecated: This field is deprecated and will be removed with v31.0.0. Use ExcludeRanges instead.
                     items:
                       type: string
                     type: array
                   gatewayIndex:
                     description: |-
                       GatewayIndex determines which IP in the subnet extracted from the CIDR should be the gateway IP. For point to
-                      point networks (/31), one needs to leave this empty to make use of both the IPs.
+                      point networks (/31 or /127), one needs to leave this empty to make use of both IPs.
                     format: int32
                     type: integer
                   network:
@@ -231,6 +233,8 @@ spec:
                 description: |-
                   IPV4Subnet is the configuration related to splitting a subnet into blocks per node. In this setup, there is a
                   single gateway.
+
+                  Deprecated: Use Subnet instead.
                 properties:
                   blocksPerDPUCluster:
                     description: |-
@@ -305,6 +309,86 @@ spec:
                       type: string
                     description: Labels is a map of string keys and values.
                     type: object
+                type: object
+              network:
+                description: |-
+                  Network is the configuration for splitting an IPv4 or IPv6 network into subnets per node, each with their own
+                  gateway.
+                properties:
+                  allocations:
+                    additionalProperties:
+                      type: string
+                    description: Allocations describes the subnets that should be
+                      assigned in each DPU node.
+                    type: object
+                  defaultGateway:
+                    description: DefaultGateway adds gateway as default gateway in
+                      the routes list if true.
+                    type: boolean
+                  excludeRanges:
+                    description: |-
+                      ExcludeRanges is a list of IP ranges that should be excluded from the allocation.
+                      startIP and endIP are part of the Excluded range.
+                    items:
+                      properties:
+                        endIP:
+                          description: EndIP is the end of the range.
+                          type: string
+                        startIP:
+                          description: StartIP is the start of the range.
+                          type: string
+                      required:
+                      - endIP
+                      - startIP
+                      type: object
+                    type: array
+                  exclusions:
+                    description: |-
+                      Exclusions is a list of IPs that should be excluded when splitting the CIDR into subnets per node.
+
+                      Deprecated: This field is deprecated and will be removed with v31.0.0. Use ExcludeRanges instead.
+                    items:
+                      type: string
+                    type: array
+                  gatewayIndex:
+                    description: |-
+                      GatewayIndex determines which IP in the subnet extracted from the CIDR should be the gateway IP. For point to
+                      point networks (/31 or /127), one needs to leave this empty to make use of both IPs.
+                    format: int32
+                    type: integer
+                  network:
+                    description: Network is the CIDR from which subnets should be
+                      allocated per node.
+                    type: string
+                  prefixSize:
+                    description: PrefixSize is the size of the subnet that should
+                      be allocated per node.
+                    format: int32
+                    type: integer
+                  routes:
+                    description: Routes is the static routes list using the gateway
+                      specified in the spec.
+                    items:
+                      description: Route contains static route parameters
+                      properties:
+                        dst:
+                          description: The destination of the route, in CIDR notation
+                          type: string
+                      required:
+                      - dst
+                      type: object
+                    type: array
+                  subnetsPerDPUCluster:
+                    description: |-
+                      SubnetsPerDPUCluster is the number of PrefixSize-sized subnets each DPUCluster should receive.
+                      When specified, the controller will take care of assigning non-overlapping subnets part of the Network in each
+                      DPUCluster that the DPUServiceIPAM is targeting. Leave empty in case you want the whole Network to be consumed
+                      by a single DPUCluster.
+                    format: int32
+                    type: integer
+                required:
+                - network
+                - prefixSize
                 type: object
               nodeSelector:
                 description: NodeSelector determines in which DPU nodes the DPUServiceIPAM
@@ -395,7 +479,77 @@ spec:
                 - nodeSelectorTerms
                 type: object
                 x-kubernetes-map-type: atomic
+              subnet:
+                description: |-
+                  Subnet is the configuration for splitting an IPv4 or IPv6 subnet into blocks per node. In this setup, there is a
+                  single gateway.
+                properties:
+                  blocksPerDPUCluster:
+                    description: |-
+                      BlocksPerDPUCluster is the number of PerNodeIPCount-sized blocks each DPUCluster should receive.
+                      When specified, the controller will take care of assigning non-overlapping IP blocks part of the Subnet in each
+                      DPUCluster that the DPUServiceIPAM is targeting. Leave empty in case you want the whole Subnet to be consumed by
+                      a single DPUCluster.
+                    format: int32
+                    type: integer
+                  defaultGateway:
+                    description: |-
+                      if true, add gateway as default gateway in the routes list
+                      DefaultGateway adds gateway as default gateway in the routes list if true.
+                    type: boolean
+                  excludeRanges:
+                    description: |-
+                      ExcludeRanges is a list of IP ranges that should be excluded from the allocation.
+                      startIP and endIP are part of the Excluded range.
+                    items:
+                      properties:
+                        endIP:
+                          description: EndIP is the end of the range.
+                          type: string
+                        startIP:
+                          description: StartIP is the start of the range.
+                          type: string
+                      required:
+                      - endIP
+                      - startIP
+                      type: object
+                    type: array
+                  gateway:
+                    description: Gateway is the IP in the subnet that should be the
+                      gateway of the subnet.
+                    type: string
+                  perNodeIPCount:
+                    description: PerNodeIPCount is the number of IPs that should be
+                      allocated per node.
+                    type: integer
+                  routes:
+                    description: Routes is the static routes list using the gateway
+                      specified in the spec.
+                    items:
+                      description: Route contains static route parameters
+                      properties:
+                        dst:
+                          description: The destination of the route, in CIDR notation
+                          type: string
+                      required:
+                      - dst
+                      type: object
+                    type: array
+                  subnet:
+                    description: Subnet is the CIDR from which blocks should be allocated
+                      per node
+                    type: string
+                required:
+                - gateway
+                - perNodeIPCount
+                - subnet
+                type: object
             type: object
+            x-kubernetes-validations:
+            - message: exactly one of ipv4Network, ipv4Subnet, network, or subnet
+                must be specified
+              rule: '(has(self.ipv4Network) ? 1 : 0) + (has(self.ipv4Subnet) ? 1 :
+                0) + (has(self.network) ? 1 : 0) + (has(self.subnet) ? 1 : 0) == 1'
           status:
             description: DPUServiceIPAMStatus defines the observed state of DPUServiceIPAM
             properties:
@@ -457,8 +611,9 @@ spec:
                   type: object
                 type: array
               dpuClusterAllocations:
-                description: DPUClusterAllocations contains the IPV4Network/IPV4Subnet
-                  allocations per DPUCluster as calculated by the controller.
+                description: |-
+                  DPUClusterAllocations contains the configured network or subnet allocations per DPUCluster as calculated by the
+                  controller. A DPUServiceIPAM contains exactly one address-family configuration, so every entry has that family.
                 items:
                   description: DPUClusterAllocation contains the IP range allocations
                     for a specific DPUCluster.

@@ -2938,7 +2938,7 @@ async fn assert_switch_cert_monitor_nmxc_simulator_probe(
         nvlink_config.nmx_c_tls_client_cert_path = Some(NMXC_SIMULATOR_TLS_CERT.to_string());
         nvlink_config.nmx_c_tls_client_key_path = Some(NMXC_SIMULATOR_TLS_CLIENT_KEY.to_string());
         nvlink_config.nmx_c_tls_authority = Some(NMXC_SIMULATOR_TLS_AUTHORITY.to_string());
-        nvlink_config.nmx_c_certificate_rotation.enabled = true;
+        nvlink_config.nmx_c_certificate_rotation.enabled = Some(true);
         nvlink_config
             .nmx_c_certificate_rotation
             .rotate_before_expiry = rotate_before_expiry;

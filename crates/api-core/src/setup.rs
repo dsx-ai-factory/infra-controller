@@ -588,6 +588,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             .rotate_switch_nvos_credentials
             .clone(),
         carbide_config.site_explorer.explore_mode,
+        carbide_config.site_explorer.explore_drive_firmware,
         db_pool.clone(),
     );
     let endpoint_exploration_service = Arc::new(EndpointExplorationService::new(
@@ -1019,6 +1020,7 @@ fn build_dpf_init_config(
         .interfaces(interfaces)
         .extra_bfcfg_parameters(carbide_config.dpf.resolved_bfcfg_parameters_for(deployment))
         .enable_delay_host_init(deployment.enable_delay_host_init)
+        .partial_multiplane_disabled(!carbide_config.is_partial_multiplane_enabled())
         .deployment_type(deployment_type);
     if let Some(bluefield_software) = bluefield_software {
         builder = builder.bluefield_software(bluefield_software);

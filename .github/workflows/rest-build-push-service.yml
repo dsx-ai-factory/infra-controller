@@ -137,24 +137,31 @@ jobs:
 
       - name: Determine Docker tags
         id: docker-tags
+        env:
+          SEMANTIC_VERSION: ${{ inputs.semantic_version }}
+          IS_MAIN_BRANCH: ${{ inputs.is_main_branch }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          BRANCH_SHA_TAG: ${{ inputs.branch_sha_tag }}
+          TARGET_REGISTRY: ${{ inputs.target_registry }}
+          SERVICE_NAME: ${{ inputs.service_name }}
         run: |
           # semantic_version comes from `git describe --long` and already ends in `-g<short_sha>`,
           # so appending short_sha again would produce a duplicated SHA suffix.
-          ARTIFACT_VERSION="${{ inputs.semantic_version }}"
-          if [ "${{ inputs.is_main_branch }}" == "true" ]; then
-            PRIMARY_TAG="${{ inputs.semantic_version }}"
-          elif [ "${{ inputs.release_tag }}" != "" ]; then
-            PRIMARY_TAG="${{ inputs.release_tag }}"
-            ARTIFACT_VERSION="${{ inputs.release_tag }}"
+          ARTIFACT_VERSION="${SEMANTIC_VERSION}"
+          if [ "${IS_MAIN_BRANCH}" == "true" ]; then
+            PRIMARY_TAG="${SEMANTIC_VERSION}"
+          elif [ -n "${RELEASE_TAG}" ]; then
+            PRIMARY_TAG="${RELEASE_TAG}"
+            ARTIFACT_VERSION="${RELEASE_TAG}"
           else
-            PRIMARY_TAG="${{ inputs.branch_sha_tag }}"
+            PRIMARY_TAG="${BRANCH_SHA_TAG}"
           fi
           # Per-arch tag; the bare manifest tag is assembled by the merge job.
-          ARCH_TAG="${{ inputs.target_registry }}/${{ inputs.service_name }}:${PRIMARY_TAG}-${{ matrix.arch }}"
+          ARCH_TAG="${TARGET_REGISTRY}/${SERVICE_NAME}:${PRIMARY_TAG}-${{ matrix.arch }}"
           # Moving major.minor tag (e.g. v2.2-latest), mirroring core ci.yaml's
           # major_minor_version. semantic_version is `git describe`, so this collapses
           # dev builds and releases in the same X.Y line onto one tag.
-          MAJOR_MINOR=$(echo "${{ inputs.semantic_version }}" | cut -d. -f1,2)
+          MAJOR_MINOR=$(echo "${SEMANTIC_VERSION}" | cut -d. -f1,2)
           echo "primary_tag=$PRIMARY_TAG" >> $GITHUB_OUTPUT
           echo "arch_tag=$ARCH_TAG" >> $GITHUB_OUTPUT
           echo "artifact_version=$ARTIFACT_VERSION" >> $GITHUB_OUTPUT
@@ -211,22 +218,26 @@ jobs:
       - name: Extract ${{ matrix.arch }} binary and verify architecture
         # No push_enabled gate: the build step loads the image, so this guard also runs on PRs
         # and catches an arch mismatch before merge — not only on main.
+        env:
+          ARCH_TAG: ${{ steps.docker-tags.outputs.arch_tag }}
+          BINARY_PATH: ${{ inputs.binary_path }}
+          BINARY_NAME: ${{ inputs.binary_name }}
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          cid=$(docker create "${{ steps.docker-tags.outputs.arch_tag }}")
-          docker cp "${cid}:${{ inputs.binary_path }}" "artifacts/${{ inputs.binary_name }}-${{ matrix.arch }}"
+          cid=$(docker create "${ARCH_TAG}")
+          docker cp "${cid}:${BINARY_PATH}" "artifacts/${BINARY_NAME}-${{ matrix.arch }}"
           docker rm "${cid}"
-          chmod +x "artifacts/${{ inputs.binary_name }}-${{ matrix.arch }}"
+          chmod +x "artifacts/${BINARY_NAME}-${{ matrix.arch }}"
           # Guard: the binary must match this leg's target arch (amd64=x86-64, arm64=aarch64).
           case "${{ matrix.arch }}" in
             amd64) want='x86-64' ;;
             arm64) want='aarch64' ;;
             *) echo "::error::unknown arch ${{ matrix.arch }}"; exit 1 ;;
           esac
-          got="$(file -b "artifacts/${{ inputs.binary_name }}-${{ matrix.arch }}")"
+          got="$(file -b "artifacts/${BINARY_NAME}-${{ matrix.arch }}")"
           echo "${got}" | grep -q "${want}" \
-            || { echo "::error::${{ matrix.arch }} ${{ inputs.binary_name }} is not ${want}: ${got}"; exit 1; }
+            || { echo "::error::${{ matrix.arch }} ${BINARY_NAME} is not ${want}: ${got}"; exit 1; }
 
       - name: Login to target registry
         if: ${{ inputs.push_enabled == true }}
@@ -238,7 +249,9 @@ jobs:
 
       - name: Push ${{ matrix.arch }} image
         if: inputs.push_enabled == true
-        run: docker push "${{ steps.docker-tags.outputs.arch_tag }}"
+        env:
+          ARCH_TAG: ${{ steps.docker-tags.outputs.arch_tag }}
+        run: docker push "${ARCH_TAG}"
 
       - name: Upload binary artifact with semantic version
         if: inputs.push_enabled == true && inputs.ngc_path != ''
@@ -303,33 +316,44 @@ jobs:
 
       - name: Determine Docker tags
         id: docker-tags
+        env:
+          SEMANTIC_VERSION: ${{ inputs.semantic_version }}
+          IS_MAIN_BRANCH: ${{ inputs.is_main_branch }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          BRANCH_SHA_TAG: ${{ inputs.branch_sha_tag }}
         run: |
-          ARTIFACT_VERSION="${{ inputs.semantic_version }}"
-          if [ "${{ inputs.is_main_branch }}" == "true" ]; then
-            PRIMARY_TAG="${{ inputs.semantic_version }}"
-          elif [ "${{ inputs.release_tag }}" != "" ]; then
-            PRIMARY_TAG="${{ inputs.release_tag }}"
-            ARTIFACT_VERSION="${{ inputs.release_tag }}"
+          ARTIFACT_VERSION="${SEMANTIC_VERSION}"
+          if [ "${IS_MAIN_BRANCH}" == "true" ]; then
+            PRIMARY_TAG="${SEMANTIC_VERSION}"
+          elif [ -n "${RELEASE_TAG}" ]; then
+            PRIMARY_TAG="${RELEASE_TAG}"
+            ARTIFACT_VERSION="${RELEASE_TAG}"
           else
-            PRIMARY_TAG="${{ inputs.branch_sha_tag }}"
+            PRIMARY_TAG="${BRANCH_SHA_TAG}"
           fi
-          MAJOR_MINOR=$(echo "${{ inputs.semantic_version }}" | cut -d. -f1,2)
+          MAJOR_MINOR=$(echo "${SEMANTIC_VERSION}" | cut -d. -f1,2)
           echo "primary_tag=$PRIMARY_TAG" >> $GITHUB_OUTPUT
           echo "artifact_version=$ARTIFACT_VERSION" >> $GITHUB_OUTPUT
           echo "major_minor_tag=$MAJOR_MINOR" >> $GITHUB_OUTPUT
 
       - name: Create and push multi-arch manifest
         uses: nick-fields/retry@ce71cc2ab81d554ebbe88c79ab5975992d79ba08
+        env:
+          TARGET_REGISTRY: ${{ inputs.target_registry }}
+          SERVICE_NAME: ${{ inputs.service_name }}
+          PRIMARY_TAG: ${{ steps.docker-tags.outputs.primary_tag }}
+          MAJOR_MINOR_TAG: ${{ steps.docker-tags.outputs.major_minor_tag }}
+          IS_MAIN_BRANCH: ${{ inputs.is_main_branch }}
         with:
           max_attempts: 3
           timeout_minutes: 10
           retry_wait_seconds: 20
           command: |
-            REG="${{ inputs.target_registry }}/${{ inputs.service_name }}"
-            TAG="${{ steps.docker-tags.outputs.primary_tag }}"
-            MAJOR_MINOR="${{ steps.docker-tags.outputs.major_minor_tag }}"
+            REG="${TARGET_REGISTRY}/${SERVICE_NAME}"
+            TAG="${PRIMARY_TAG}"
+            MAJOR_MINOR="${MAJOR_MINOR_TAG}"
             docker buildx imagetools create -t "${REG}:${TAG}" "${REG}:${TAG}-amd64" "${REG}:${TAG}-arm64"
-            if [ "${{ inputs.is_main_branch }}" == "true" ]; then
+            if [ "${IS_MAIN_BRANCH}" == "true" ]; then
               docker buildx imagetools create -t "${REG}:latest" "${REG}:${TAG}-amd64" "${REG}:${TAG}-arm64"
             fi
             if [ -n "${MAJOR_MINOR}" ]; then
@@ -337,12 +361,17 @@ jobs:
             fi
 
       - name: Export Docker image
+        env:
+          TARGET_REGISTRY: ${{ inputs.target_registry }}
+          SERVICE_NAME: ${{ inputs.service_name }}
+          PRIMARY_TAG: ${{ steps.docker-tags.outputs.primary_tag }}
+          ARTIFACT_VERSION: ${{ steps.docker-tags.outputs.artifact_version }}
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          docker pull "${{ inputs.target_registry }}/${{ inputs.service_name }}:${{ steps.docker-tags.outputs.primary_tag }}"
-          docker save "${{ inputs.target_registry }}/${{ inputs.service_name }}:${{ steps.docker-tags.outputs.primary_tag }}" \
-            | gzip > "artifacts/${{ inputs.service_name }}-${{ steps.docker-tags.outputs.artifact_version }}.tar.gz"
+          docker pull "${TARGET_REGISTRY}/${SERVICE_NAME}:${PRIMARY_TAG}"
+          docker save "${TARGET_REGISTRY}/${SERVICE_NAME}:${PRIMARY_TAG}" \
+            | gzip > "artifacts/${SERVICE_NAME}-${ARTIFACT_VERSION}.tar.gz"
 
       - name: Upload Docker image artifact with semantic version
         if: inputs.ngc_path != ''

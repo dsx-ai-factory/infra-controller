@@ -12,6 +12,12 @@ exposedPorts:
 ### Cert directory on the host (also used as the container mountPath).
 certsDir: /opt/forge
 
+### Internal container access for Spectrum-X maintenance, derived from [ewethers_config] partial-multiplane NICO site configuration.
+### Mounts the host Xplane socket directory and provisioned netdev mapping
+### directory read-only, without changing pod networking.
+xplaneMaintenance:
+  enabled: false
+
 ### Bootstrap CA source. The default preserves the legacy PXE download and
 ### renders the historical bare `init-container` invocation.
 bootstrapCa:

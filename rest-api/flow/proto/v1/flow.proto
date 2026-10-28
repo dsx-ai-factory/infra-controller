@@ -1979,7 +1979,7 @@ message GetTrayPowerDetailsResponse {
     TrayPowerDetails details = 1;
 }
 
-// Flow inventory identity remains usable before a managed Core ID exists.
+// Power details remain readable by MAC before a managed Core ID exists.
 // Every section is populated with either its value or a categorized error.
 // Inventory and both child reads share at most 30 seconds from RPC entry, capped
 // at one second before a caller deadline. Completed sections survive another
@@ -1987,19 +1987,27 @@ message GetTrayPowerDetailsResponse {
 // instants from Flow tasks; Running tasks do not imply active Core actions.
 // The encoded proxy response is limited to 1,991,680 bytes (1945 KiB).
 // If the response is oversized, populated waiting-context lists are replaced
-// with context-level LimitExceeded first. If it still exceeds the limit, the
-// entire task section is replaced with LimitExceeded. If the rest still exceeds
-// the limit, the RPC returns ResourceExhausted. No task targets are truncated.
+// with context-level LimitExceeded first, then successful external target results
+// are replaced with LimitExceeded. If it still exceeds the limit, the entire
+// task section is replaced with LimitExceeded. If the rest still exceeds the
+// limit, the RPC returns ResourceExhausted. No task targets are truncated.
 message TrayPowerDetails {
-    UUID flow_component_id = 1;
+    reserved 1;
+    reserved "flow_component_id", "internal_component_id";
+
+    // External inventory ID, matching Component.component_id.
     // Absent until the inventory member has a managed Core identity.
-    optional string core_component_id = 2;
+    optional string component_id = 2;
     ComponentType component_type = 3;
     // Absent when this member has no Flow rack assignment.
     UUID rack_id = 4;
     PowerActualDetails actual = 5;
     PowerDesiredDetails desired = 6;
     PowerOperations operations = 7;
+    // The inventory rack identifier used by REST rack and tray resources.
+    // Includes retained soft-deleted racks. Absent when no rack identity can be
+    // read; older services or proxies also omit it. Never uses the Flow UUID.
+    optional string rack_external_id = 8;
 }
 
 // Flow lookup failures are distinct from errors returned inside Core values.
@@ -2008,7 +2016,8 @@ enum PowerDetailsReadError {
     // Not emitted as an error by this RPC.
     POWER_DETAILS_READ_ERROR_UNSPECIFIED = 0;
     // The section lacks its required identity: a managed Core ID for Core
-    // sections, or a Flow rack assignment for tasks.
+    // sections, a Flow rack assignment for tasks, or a retained external
+    // component/rack identifier for an external target result.
     POWER_DETAILS_READ_ERROR_NOT_LINKED = 1;
     // Flow has no NICo provider client.
     POWER_DETAILS_READ_ERROR_NOT_CONFIGURED = 2;
@@ -2019,7 +2028,8 @@ enum PowerDetailsReadError {
     // The dependency returned an error other than unsupported/deadline.
     POWER_DETAILS_READ_ERROR_READ_FAILED = 5;
     // A dependency returned the wrong identity/cardinality, an absent required
-    // value, or task data that cannot be converted to the declared operation.
+    // value, an inventory type that differs from the selected type, or task data
+    // that cannot be converted to the declared operation or UUID.
     POWER_DETAILS_READ_ERROR_INVALID_RESPONSE = 6;
     // The rack power-task count, waiting-context task count, or encoded response
     // exceeded its documented bound.
@@ -2099,6 +2109,33 @@ message PowerTaskDetails {
     // Populated for Waiting tasks; absent for Pending/Running (not applicable).
     // On a Waiting task, absence means the service did not provide context.
     PowerTaskWaitingContext waiting_context = 10;
+    // Inventory identifiers for REST consumers. Absent on older services/proxies;
+    // a present result has every member of targets or a categorized error.
+    // Failure here does not remove the task or change its recorded UUID targets.
+    PowerTaskExternalTargets external_targets = 11;
+}
+
+// External identities read from retained inventory, including soft-deleted rows.
+// These are the identities available at read time, not a historical copy saved
+// with the task. A component may have moved racks since the task was recorded.
+// Error is absent on success, including an empty recorded selection. On failure,
+// rack_id and targets are empty; no partial selection or Flow UUID fallback is
+// returned. Lookup shares the power-details request's existing read deadline.
+message PowerTaskExternalTargets {
+    // External identifier of the task's recorded rack; nonempty on success.
+    string rack_id = 1;
+    // Membership and order match the existing PowerTaskDetails.targets field,
+    // which is ordered by type and UUID, not by external ID. Each type is
+    // explicit and matches the selected type.
+    repeated ExternalRef targets = 2;
+    // NotLinked means a rack or component identity is missing, empty, or purged.
+    // InvalidResponse means a selected type is unknown or disagrees with the
+    // inventory type, a target UUID is malformed, or the retained rack reply has
+    // wrong identity or cardinality. DeadlineExceeded/ReadFailed mean lookup
+    // failed; Unsupported means the dependency does not implement the read.
+    // LimitExceeded means external identity lookup was skipped because the UUID
+    // text alone cannot fit, or the result was removed to fit the response limit.
+    optional PowerDetailsReadError error = 3;
 }
 
 // Nearby work observed for a Waiting power task, not a saved reason for waiting.

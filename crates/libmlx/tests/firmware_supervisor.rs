@@ -30,7 +30,6 @@ use libmlx::runner::FirmwareToolExecutor;
 use libmlx::runner::command_builder::CommandSpec;
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::unistd::{Pid, getpgid, getsid};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::time::{sleep, timeout};
 use wait_timeout::ChildExt;
@@ -374,7 +373,7 @@ if [ "$role" = leader ]; then
     wait
     exit 0
 fi
-# Natural fixture expiry must outlast the cancellation and continuation watchdogs.
+# Natural fixture expiry must outlast the cancellation watchdog.
 i=0
 while [ ! -f "$fixture/release" ]; do
     [ -d "$fixture" ] && [ "$i" -lt 6000 ] || exit 77
@@ -592,7 +591,7 @@ async fn inherited_ignored_sigchld_does_not_discard_tool_status() {
 /// This separate process embeds the library so its abrupt death closes the
 /// control pipe without depending on Tokio task cancellation or Rust destructors.
 #[test]
-#[ignore = "subprocess fixture invoked only by parent death tests"]
+#[ignore = "subprocess fixture invoked only by the parent death test"]
 fn supervisor_parent_fixture() {
     let fixture =
         PathBuf::from(std::env::var_os("MLX_SUPERVISOR_PARENT_FIXTURE").expect("fixture path"));
@@ -601,50 +600,6 @@ fn supervisor_parent_fixture() {
         .build()
         .expect("build fixture runtime");
     runtime.block_on(async {
-        if let Some(timeout_ms) = std::env::var_os("MLX_SUPERVISOR_CONTINUE_TIMEOUT_MS") {
-            let timeout = Duration::from_millis(
-                timeout_ms
-                    .to_str()
-                    .expect("UTF-8 timeout")
-                    .parse()
-                    .expect("fixture timeout in milliseconds"),
-            );
-            let command = gated_command(&fixture);
-            let mut helper = Command::new(SUPERVISOR)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
-                .process_group(0)
-                .spawn()
-                .expect("start actual firmware supervisor");
-            fs::write(
-                fixture.join("helper"),
-                helper.id().expect("running helper PID").to_string(),
-            )
-            .expect("record helper PID");
-            let mut control = helper.stdin.take().expect("helper control pipe");
-            let mut result = helper.stdout.take().expect("helper result pipe");
-            let mut hello = [0; b"MLX-SUPERVISOR-1\n".len()];
-            result.read_exact(&mut hello).await.expect("read handshake");
-            assert_eq!(&hello, b"MLX-SUPERVISOR-1\n");
-            let request = serde_json::to_vec(&serde_json::json!({
-                "program": command.program,
-                "args": command.args,
-                "timeout": timeout,
-                "owner_exit_behavior": "Continue",
-            }))
-            .expect("encode continuing request");
-            control
-                .write_all(&u32::try_from(request.len()).unwrap().to_be_bytes())
-                .await
-                .expect("write request length");
-            control.write_all(&request).await.expect("dispatch tool");
-            helper.wait().await.expect("wait for bounded helper");
-            // Both descriptors must remain open until the embedding process
-            // is killed, so its death also breaks the helper's result pipe.
-            drop((control, result));
-            panic!("fixture parent should be killed while waiting");
-        }
         FirmwareToolExecutor::with_supervisor_path(SUPERVISOR)
             .execute(&gated_command(&fixture), CANCELLATION_ATTEMPT_TIMEOUT)
             .await
@@ -688,114 +643,56 @@ async fn parent_death_stops_owned_descendants() {
     assert!(!directory.path().join("completed").exists());
 }
 
-/// Accepted work survives an owner crash, but retains its original deadline.
-#[tokio::test]
-async fn continuing_after_parent_death_finishes_or_expires() {
-    struct Case {
-        scenario: &'static str,
-        timeout: Duration,
-        release: bool,
+/// Under `Continue`, closing the control pipe must not cancel work or remove its deadline.
+#[test]
+fn continuing_after_control_eof_keeps_the_attempt_deadline() {
+    let mut helper = SupervisorProcess::spawn();
+    let mut control = helper.0.stdin.take().expect("helper control pipe");
+    // Outlast the attempt deadline, but finish before WATCHDOG if it stops working.
+    let attempt_timeout = Duration::from_secs(2);
+    let request = serde_json::to_vec(&serde_json::json!({
+        "program": "/bin/sleep",
+        "args": ["5"],
+        "timeout": attempt_timeout,
+        "owner_exit_behavior": "Continue",
+    }))
+    .expect("encode continuing request");
+    let started = Instant::now();
+    control
+        .write_all(&u32::try_from(request.len()).unwrap().to_be_bytes())
+        .expect("write request length");
+    control.write_all(&request).expect("dispatch tool");
+    // Close only the control pipe; keep the result pipe open for the helper's report.
+    drop(control);
+    let status = helper
+        .0
+        .wait_timeout(WATCHDOG)
+        .expect("wait for continuing helper")
+        .expect("continuing helper exits within watchdog");
+    assert!(status.success(), "continuing helper exited with {status}");
+    assert!(
+        started.elapsed() >= attempt_timeout,
+        "closing the control pipe must not stop work before its deadline"
+    );
+    let mut output = Vec::new();
+    // The helper has exited, so its complete frame is already available. Another
+    // concurrently spawning child may briefly retain a pipe writer before exec.
+    if let Err(error) = helper.0.stdout.as_mut().unwrap().read_to_end(&mut output) {
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock, "{error}");
     }
-    let cases = [
-        // Releasing the gate proves work can finish after its owner exits.
-        Case {
-            scenario: "complete after owner exit",
-            timeout: WATCHDOG,
-            release: true,
-        },
-        // The closed gate outlives the outer watchdog, so only the attempt
-        // deadline can reap the tool soon enough for this case to pass.
-        Case {
-            scenario: "deadline after owner exit",
-            timeout: Duration::from_secs(2),
-            release: false,
-        },
-    ];
-    for case in cases {
-        timeout(Duration::from_secs(20), async {
-            let directory = tempfile::tempdir().expect("create continuing parent fixture");
-            let fixture = directory.path();
-            let mut parent = Command::new(std::env::current_exe().expect("test binary path"))
-                .args([
-                    "--ignored",
-                    "--exact",
-                    "supervisor_parent_fixture",
-                    "--nocapture",
-                ])
-                .env("MLX_SUPERVISOR_PARENT_FIXTURE", fixture)
-                .env(
-                    "MLX_SUPERVISOR_CONTINUE_TIMEOUT_MS",
-                    case.timeout.as_millis().to_string(),
-                )
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
-                .kill_on_drop(true)
-                .spawn()
-                .expect("start embedding process");
-            let leader = wait_for_file(&fixture.join("leader")).await;
-            let descendant = wait_for_file(&fixture.join("descendant")).await;
-            let helper = wait_for_file(&fixture.join("helper")).await;
-            parent
-                .start_kill()
-                .expect("kill embedding process without destructors");
-            assert!(
-                !parent
-                    .wait()
-                    .await
-                    .expect("reap embedding process")
-                    .success(),
-                "{}",
-                case.scenario
-            );
-            // Keep the gate shut while the helper observes EOF. If owner exit
-            // still cancels, the child disappears before we release its work.
-            assert!(
-                timeout(Duration::from_millis(100), wait_until_reaped(&descendant))
-                    .await
-                    .is_err(),
-                "{}: owner exit stopped the accepted tool",
-                case.scenario
-            );
-            if case.release {
-                fs::write(fixture.join("release"), "release").expect("release accepted work");
-                assert_eq!(wait_for_file(&fixture.join("completed")).await, "finished");
-            }
-            wait_until_reaped(&leader).await;
-            wait_until_reaped(&descendant).await;
-            assert_eq!(
-                fixture.join("completed").exists(),
-                case.release,
-                "{}",
-                case.scenario
-            );
-
-            // The killed owner cannot reap its helper; init adopts that final
-            // process. Require it to exit, even when the test's init delays reaping.
-            timeout(WATCHDOG, async {
-                let stat_path = Path::new("/proc").join(helper.trim()).join("stat");
-                loop {
-                    match fs::read_to_string(&stat_path) {
-                        Ok(stat)
-                            if matches!(
-                                stat.rsplit_once(") ").unwrap().1.as_bytes()[0],
-                                b'Z' | b'X'
-                            ) =>
-                        {
-                            break;
-                        }
-                        Ok(_) => sleep(Duration::from_millis(10)).await,
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
-                        Err(error) => panic!("read helper process state: {error}"),
-                    }
-                }
-            })
-            .await
-            .expect("continuing helper exits within its bounds");
-        })
-        .await
-        .unwrap_or_else(|_| panic!("{}: test exceeded its independent watchdog", case.scenario));
-    }
+    let frame = output
+        .strip_prefix(b"MLX-SUPERVISOR-1\n")
+        .expect("helper handshake");
+    let length = u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize;
+    assert_eq!(frame.len() - 4, length);
+    let response: serde_json::Value = serde_json::from_slice(&frame[4..]).expect("helper result");
+    assert_eq!(response["Failed"]["reason"], "Deadline", "{response}");
+    assert!(response["Failed"]["status"].is_i64(), "{response}");
+    assert_eq!(
+        response["Failed"]["cleanup_errors"],
+        serde_json::json!([]),
+        "{response}"
+    );
 }
 
 /// Continuing on EOF does not ignore an explicit cancellation byte.

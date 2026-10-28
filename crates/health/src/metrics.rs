@@ -22,8 +22,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
-use http::Response;
-use http::header::CONTENT_TYPE;
+use http::header::{ALLOW, CONTENT_TYPE};
+use http::{Method, Response};
 use hyper::Request;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
@@ -721,14 +721,24 @@ fn serve_request<B>(
     req: Request<B>,
     metrics_manager: Arc<MetricsManager>,
 ) -> Result<Response<String>, hyper::Error> {
-    match req.uri().path() {
-        "/livez" => Ok(Response::builder()
+    match (req.method(), req.uri().path()) {
+        (&Method::GET, "/livez") => Ok(Response::builder()
             .status(http::StatusCode::OK)
             .header(CONTENT_TYPE, "text/plain; charset=utf-8")
             .body("ok".to_string())
             .expect("BUG: Response::builder error")),
-        "/metrics" => serve_prometheus(metrics_manager.export_metrics(), "service metrics"),
-        "/telemetry" => serve_prometheus(metrics_manager.export_telemetry(), "telemetry metrics"),
+        (&Method::GET, "/metrics") => {
+            serve_prometheus(metrics_manager.export_metrics(), "service metrics")
+        }
+        (&Method::GET, "/telemetry") => {
+            serve_prometheus(metrics_manager.export_telemetry(), "telemetry metrics")
+        }
+        (_, "/livez" | "/metrics" | "/telemetry") => Ok(Response::builder()
+            .status(http::StatusCode::METHOD_NOT_ALLOWED)
+            .header(ALLOW, "GET")
+            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body("method not allowed; use GET".to_string())
+            .expect("BUG: Response::builder error")),
         _ => Ok(Response::builder()
             .status(http::StatusCode::NOT_FOUND)
             .header(CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -785,6 +795,7 @@ pub fn sanitize_unit(unit: &str) -> String {
 #[cfg(test)]
 mod tests {
     use carbide_test_support::{Check, check_values};
+    use http::HeaderValue;
 
     use super::*;
 
@@ -812,6 +823,73 @@ mod tests {
         assert_eq!(
             response.body(),
             "not found; use /metrics, /telemetry, or /livez",
+        );
+    }
+
+    #[test]
+    fn metrics_routes_serve_only_get() {
+        let metrics_manager = Arc::new(
+            MetricsManager::new("test").expect("metrics manager should initialize for test"),
+        );
+
+        check_values(
+            [
+                Check {
+                    scenario: "liveness probe serves GET",
+                    input: (Method::GET, "/livez"),
+                    expect: (http::StatusCode::OK, None),
+                },
+                Check {
+                    scenario: "service metrics serve GET",
+                    input: (Method::GET, "/metrics"),
+                    expect: (http::StatusCode::OK, None),
+                },
+                Check {
+                    scenario: "telemetry metrics serve GET",
+                    input: (Method::GET, "/telemetry"),
+                    expect: (http::StatusCode::OK, None),
+                },
+                Check {
+                    scenario: "liveness probe rejects POST",
+                    input: (Method::POST, "/livez"),
+                    expect: (
+                        http::StatusCode::METHOD_NOT_ALLOWED,
+                        Some(HeaderValue::from_static("GET")),
+                    ),
+                },
+                Check {
+                    scenario: "service metrics reject POST",
+                    input: (Method::POST, "/metrics"),
+                    expect: (
+                        http::StatusCode::METHOD_NOT_ALLOWED,
+                        Some(HeaderValue::from_static("GET")),
+                    ),
+                },
+                Check {
+                    scenario: "telemetry metrics reject POST",
+                    input: (Method::POST, "/telemetry"),
+                    expect: (
+                        http::StatusCode::METHOD_NOT_ALLOWED,
+                        Some(HeaderValue::from_static("GET")),
+                    ),
+                },
+                Check {
+                    scenario: "unknown route stays not found for POST",
+                    input: (Method::POST, "/definitely-not-a-route"),
+                    expect: (http::StatusCode::NOT_FOUND, None),
+                },
+            ],
+            |(method, path)| {
+                let request = Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(())
+                    .expect("test request should be valid");
+
+                let response = serve_request(request, metrics_manager.clone())
+                    .expect("request should produce a response");
+                (response.status(), response.headers().get(ALLOW).cloned())
+            },
         );
     }
 
