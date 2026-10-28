@@ -33,7 +33,9 @@ use itertools::Itertools;
 use model::expected_machine::ExpectedMachineData;
 use model::firmware::{FirmwareComponent, FirmwareComponentType};
 use model::hardware_info::HardwareInfo;
-use model::machine::{LoadSnapshotOptions, ManagedHostState, ManagedHostStateSnapshot};
+use model::machine::{
+    LoadSnapshotOptions, ManagedHostState, ManagedHostStateSnapshot, NotAllocatableReason,
+};
 use model::machine_boot_interface::{BootInterfaceSelectionSource, MachineBootInterfaceTarget};
 use model::site_explorer::{
     EndpointExplorationError, EndpointExplorationReport, ExploredEndpoint, Inventory,
@@ -45,7 +47,6 @@ use tonic::Request;
 
 use crate::cfg::file::CarbideConfig;
 use crate::handlers::host_state::SnapshotReadHook;
-use crate::instance::not_allocatable_error;
 use crate::test_support::fixture_config::{FixtureDefault as _, ManagedHostConfigExt as _};
 use crate::tests::common::api_fixtures::instance::{
     default_os_config, default_tenant_config, single_interface_network_config,
@@ -605,10 +606,53 @@ async fn allocation_attempt_agrees_per_reason(pool: sqlx::PgPool) {
             (Ok(()), Ok(_)) => assert_eq!(expect, None),
             (Err(reason), Err(error)) => {
                 assert_eq!(Some(reason.code()), expect);
-                let expected = tonic::Status::from(not_allocatable_error(host.id, reason));
+                // Written out here, not taken from production, so a changed mapping fails.
+                let (code, wording, names_machine) = match &reason {
+                    NotAllocatableReason::InvalidState(_) => {
+                        (tonic::Code::InvalidArgument, "given machine state", true)
+                    }
+                    NotAllocatableReason::PendingInstanceCreation => (
+                        tonic::Code::InvalidArgument,
+                        "already used by another instance creation request",
+                        true,
+                    ),
+                    NotAllocatableReason::PendingDecommission => (
+                        tonic::Code::FailedPrecondition,
+                        "pending decommission request",
+                        true,
+                    ),
+                    NotAllocatableReason::PendingBootConfiguration => (
+                        tonic::Code::FailedPrecondition,
+                        "pending boot configuration",
+                        true,
+                    ),
+                    NotAllocatableReason::DpuReprovisioningStarted => (
+                        tonic::Code::FailedPrecondition,
+                        "started DPU reprovisioning",
+                        true,
+                    ),
+                    NotAllocatableReason::NoDpuSnapshots => {
+                        (tonic::Code::Internal, "has no DPU", true)
+                    }
+                    // These two messages do not name the machine.
+                    NotAllocatableReason::MaintenanceMode => {
+                        (tonic::Code::FailedPrecondition, "MaintenanceMode", false)
+                    }
+                    NotAllocatableReason::HealthAlert(_) => {
+                        (tonic::Code::FailedPrecondition, "health probe alert", false)
+                    }
+                };
+                assert_eq!(error.code(), code, "{expect:?}: {}", error.message());
+                assert!(
+                    error.message().contains(wording),
+                    "{expect:?}: {:?} lacks {wording:?}",
+                    error.message()
+                );
                 assert_eq!(
-                    (error.code(), error.message()),
-                    (expected.code(), expected.message())
+                    error.message().contains(&host.id.to_string()),
+                    names_machine,
+                    "{expect:?}: {:?}",
+                    error.message()
                 );
             }
             (reason, attempt) => panic!("{expect:?}: {reason:?} but allocation gave {attempt:?}"),

@@ -1954,7 +1954,7 @@ pub(crate) fn validate_instance_extension_services(
     Ok(())
 }
 
-pub(crate) fn not_allocatable_error(
+fn not_allocatable_error(
     machine_id: impl MachineIdSubtypeTrait,
     reason: NotAllocatableReason,
 ) -> CarbideError {
