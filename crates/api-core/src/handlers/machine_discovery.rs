@@ -170,19 +170,19 @@ pub(crate) async fn discover_machine(
     // caller interface's current machine id tells a host's first discovery (a
     // rename) from a repeat one; a DPU's host link row tells an allocation
     // from a reattach.
-    let caller_machine_id = match &direct_interface {
-        Some(interface) => interface.machine_id,
+    let (caller_machine_id, caller_mac) = match &direct_interface {
+        Some(interface) => (interface.machine_id, Some(interface.mac_address)),
         None => match machine_discovery_info.machine_interface_id {
             Some(interface_id) => {
                 match db::machine_interface::find_one(api.pg_pool(), interface_id).await {
-                    Ok(interface) => interface.machine_id,
+                    Ok(interface) => (interface.machine_id, Some(interface.mac_address)),
                     // The transaction below loads this interface again and
                     // reports a missing one itself.
-                    Err(db::DatabaseError::FindOneReturnedNoResultsError(_)) => None,
+                    Err(db::DatabaseError::FindOneReturnedNoResultsError(_)) => (None, None),
                     Err(error) => return Err(error.into()),
                 }
             }
-            None => None,
+            None => (None, None),
         },
     };
     let admin_segment_locks = admin_segment_locks_for_discovery(
@@ -203,6 +203,18 @@ pub(crate) async fn discover_machine(
     };
 
     let mut txn = api.txn_begin().await?;
+
+    // Reservation intent precedes admin/interface locks in both creation paths
+    // and expected-machine writes. The caller interface is revalidated below.
+    let loopback_reservation = if hardware_info.is_dpu() && machine_discovery_info.create_machine {
+        if let Some(mac) = caller_mac {
+            db::expected_dpu_loopback_reservation::find_by_dpu_mac_for_update(&mut txn, mac).await?
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // Segment advisory locks come before any interface row lock, so the ones
     // this transaction needs are taken before the caller interface is locked.
@@ -389,14 +401,21 @@ pub(crate) async fn discover_machine(
             })?;
         }
 
-        // Resolve the operator's deterministic loopback reservation for this
-        // DPU by its globally unique serial. Direct discovery does not read an
-        // ExpectedMachine, so the reservation is looked up by serial alone.
-        // Only the create path applies a reservation; an already-created DPU is
-        // never readdressed. An absent reservation leaves both families on
-        // automatic allocation.
-        let reservation = if machine_discovery_info.create_machine {
-            resolve_dpu_loopback_reservation(&mut txn, &hardware_info).await?
+        // The authenticated caller's OS/admin interface identifies the DPU even
+        // before that interface has a persisted machine association.
+        let reservation = if machine_discovery_info.create_machine
+            && db::machine::find_one(
+                &mut txn,
+                &stable_machine_id,
+                MachineSearchConfig {
+                    include_dpus: true,
+                    ..Default::default()
+                },
+            )
+            .await?
+            .is_none()
+        {
+            loopback_reservation
         } else {
             None
         };
@@ -441,7 +460,10 @@ pub(crate) async fn discover_machine(
             })?
         };
 
-        (db_machine.id, Some((db_machine.network_config, requested_loopback_v4)))
+        (
+            db_machine.id,
+            Some((db_machine.network_config, requested_loopback_v4)),
+        )
     } else {
         // Now we know stable machine id for host. Let's update it in db.
         let stable_host_machine_id = StableHostMachineId::try_from(stable_machine_id)
@@ -504,17 +526,25 @@ pub(crate) async fn discover_machine(
             let mut network_config_changed = false;
 
             if network_config.loopback_ip.is_none() {
-                let loopback_ip =
-                    db::machine::allocate_loopback_ip(&api.common_pools, &mut txn, &owner_id, requested_loopback_v4)
-                        .await?;
+                let loopback_ip = db::machine::allocate_loopback_ip(
+                    &api.common_pools,
+                    &mut txn,
+                    &owner_id,
+                    requested_loopback_v4,
+                )
+                .await?;
                 network_config.loopback_ip = Some(loopback_ip);
                 network_config_changed = true;
             }
 
             if network_config.loopback_ip_v6.is_none()
-                && let Some(loopback_ip_v6) =
-                    db::machine::allocate_loopback_ip_v6(&api.common_pools, &mut txn, &owner_id, None)
-                        .await?
+                && let Some(loopback_ip_v6) = db::machine::allocate_loopback_ip_v6(
+                    &api.common_pools,
+                    &mut txn,
+                    &owner_id,
+                    None,
+                )
+                .await?
             {
                 network_config.loopback_ip_v6 = Some(loopback_ip_v6);
                 network_config_changed = true;
@@ -886,50 +916,6 @@ pub(crate) async fn discovery_completed(
         discovery_result, "discovery_completed",
     );
     Ok(Response::new(rpc::MachineDiscoveryCompletedResponse {}))
-}
-
-/// Resolve a DPU's deterministic loopback reservation during direct discovery.
-///
-/// Scout never reports the owning host expected machine, so the reservation is
-/// resolved by the DPU's serial alone. The reservation is keyed by the DPU
-/// pairing serial the operator declares, which is the product serial -- the same
-/// identity the supported discovery paths pair on. The board and chassis serials
-/// are deliberately not consulted: Scout reports shared placeholders (for
-/// example `Unspecified System Serial Number`) for them on BlueFields, so a
-/// reservation mistakenly declared with one of those strings would otherwise
-/// validate and match unrelated DPUs. An absent reservation (no DMI data, an
-/// empty product serial, or no matching row) leaves both address families on
-/// automatic allocation.
-///
-/// The lookup locks the matching reservation row for the creating transaction so
-/// the intent used for allocation cannot be moved to another DPU or cleared
-/// before the DPU is created; see [`db::expected_dpu_loopback_reservation::find_by_dpu_serial_for_update`].
-/// Resolve the operator's deterministic loopback reservation for a DPU during
-/// direct discovery, keyed by its trimmed product serial.
-///
-/// Only the product serial is used. It is the DPU pairing identity for the
-/// supported discovery paths, and it is globally unique. The board and chassis
-/// serials are deliberately *not* consulted as fallbacks: Scout reports shared
-/// `Unspecified...` placeholders for them on BlueFields, so a placeholder could
-/// otherwise match and hand one DPU another DPU's reservation. A missing or
-/// empty product serial resolves to no reservation, which leaves both families
-/// on automatic allocation. The lookup takes a row lock so a concurrent
-/// reservation edit cannot make this read stale before the address is claimed.
-async fn resolve_dpu_loopback_reservation(
-    txn: &mut sqlx::PgConnection,
-    hardware_info: &HardwareInfo,
-) -> Result<Option<model::expected_machine::DpuLoopbackReservation>, CarbideError> {
-    let Some(dmi) = hardware_info.dmi_data.as_ref() else {
-        return Ok(None);
-    };
-    let serial = dmi.product_serial.trim();
-    if serial.is_empty() {
-        return Ok(None);
-    }
-    Ok(
-        db::expected_dpu_loopback_reservation::find_by_dpu_serial_for_update(&mut *txn, serial)
-            .await?,
-    )
 }
 
 /// Builds NVLink discovery info from scout `GpuPlatformInfo` for every GPU that reported it.

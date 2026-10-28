@@ -65,7 +65,6 @@ use crate::expected_machines::common::HostDpuPolicy;
 "default_pause_ingestion_and_poweron",
 "interfaces",
 "disable_lockdown",
-"dpu_loopback_reservations",
 ])))]
 #[command(after_long_help = "\
 EXAMPLES:
@@ -103,6 +102,13 @@ Replace the interface list for a matching stored interface that already has a
 fixed IP. The omitted role and allocation policy keep their stored values:
     $ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 \
     --interfaces '[{\"mac_address\":\"02:00:00:00:20:01\",\"fixed_ip\":\"192.0.2.10\"}]'
+
+Replace the interface list with a loopback reservation (no DpuOs entry is required):
+    $ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 \
+    --interfaces '[{\"mac_address\":\"02:00:00:00:20:01\",\"role\":\"dpu_loopback\",\"fixed_ip\":\"198.51.100.20\"}]'
+
+Clear the interface list, including loopback reservations:
+    $ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --interfaces '[]'
 
 Reset that role to Host and infer Fixed allocation from fixed_ip:
     $ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 \
@@ -239,7 +245,7 @@ pub(crate) struct Args {
         visible_alias = "host_nics",
         value_name = "INTERFACES",
         group = "group",
-        help = "Interfaces as a JSON array of ExpectedInterface objects (fields: mac_address, role, ip_allocation, network_segment_type, fixed_ip, fixed_mask, fixed_gateway, primary; legacy: nic_type). Accepted values: role=host|dpu_os|dpu_bmc|host_bmc|unspecified and ip_allocation=dynamic|fixed|retained|unspecified. network_segment_type uses protobuf enum numbers: tenant=0, admin=1, underlay=2, host_inband=3. Replaces the full interface list for the machine. For a matching stored MAC, omitting role preserves the stored role; role=unspecified resets it to host. Omitting ip_allocation preserves the stored policy when the presence of fixed_ip is unchanged; ip_allocation=unspecified resets it to fixed_ip inference. Omitting any other optional interface field, including network_segment_type, clears its stored value."
+        help = "Interfaces as a JSON array of ExpectedInterface objects (fields: mac_address, role, ip_allocation, network_segment_type, fixed_ip, fixed_mask, fixed_gateway, primary; legacy: nic_type). Accepted values: role=host|dpu_os|dpu_bmc|host_bmc|dpu_loopback|unspecified and ip_allocation=dynamic|fixed|retained|unspecified. network_segment_type uses protobuf enum numbers: tenant=0, admin=1, underlay=2, host_inband=3. Replaces the full interface list for the machine. For a matching stored MAC, omitting role preserves the stored role; role=unspecified resets it to host. Omitting ip_allocation preserves the stored policy when the presence of fixed_ip is unchanged; ip_allocation=unspecified resets it to fixed_ip inference. Omitting any other optional interface field, including network_segment_type, clears its stored value."
     )]
     pub(super) interfaces: Option<String>,
 
@@ -249,14 +255,6 @@ pub(crate) struct Args {
         help = "Set true to skip server lockdown during lifecycle management, or false to lock down after BIOS configuration. Omission preserves the stored setting"
     )]
     pub(super) disable_lockdown: Option<bool>,
-
-    #[clap(
-        long = "dpu-loopback-reservations",
-        value_name = "DPU_LOOPBACK_RESERVATIONS",
-        group = "group",
-        help = "Deterministic DPU underlay loopback reservations as a JSON array of objects (fields: dpu_serial_number, loopback_ipv4, loopback_ipv6), keyed by the trimmed DPU pairing serial number. Replaces the full reservation list for the machine: omit the flag to preserve the stored reservations, or pass an empty array '[]' to clear them. Each reservation requires at least one address, and each address must be a value from the site's non-auto-assignable lo-ip / lo-ip-v6 pool that is not already reserved for or allocated to another DPU. Example: '[{\"dpu_serial_number\":\"MT2000X00001\",\"loopback_ipv4\":\"192.0.2.10\"}]'."
-    )]
-    pub(super) dpu_loopback_reservations: Option<String>,
 }
 
 impl Args {

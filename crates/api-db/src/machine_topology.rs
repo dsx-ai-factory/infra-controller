@@ -530,16 +530,8 @@ mod tests {
                 );
                 // Use the production helper: `machines` has NOT NULL columns
                 // without defaults, so a hand-rolled INSERT drifts from the schema.
-                crate::machine::create(
-                    txn.as_mut(),
-                    None,
-                    &id,
-                    ManagedHostState::Ready,
-                    None,
-                    1,
-                    None,
-                )
-                .await?;
+                crate::machine::create(txn.as_mut(), None, &id, ManagedHostState::Ready, None, 1)
+                    .await?;
                 Some(id)
             } else {
                 None

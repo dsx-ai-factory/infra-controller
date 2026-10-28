@@ -209,7 +209,7 @@ pub async fn get_or_create(
         // Host and DPU machines are created in same `discover_machine` call. Update same
         // state in both machines.
         let state = ManagedHostState::Created;
-        let machine = create(
+        let machine = create_with_requested_loopback(
             txn,
             common_pools,
             stable_machine_id,
@@ -2202,6 +2202,28 @@ pub async fn create(
     state: ManagedHostState,
     expected_machine_data: Option<&ExpectedMachineData>,
     state_model_version: i16,
+) -> DatabaseResult<AnyMachine> {
+    create_with_requested_loopback(
+        txn,
+        common_pools,
+        stable_machine_id,
+        state,
+        expected_machine_data,
+        state_model_version,
+        None,
+    )
+    .await
+}
+
+/// Create a machine with explicit IPv6 loopback intent. The caller's transaction
+/// holds the reservation lock and claims IPv4 before committing creation.
+pub async fn create_with_requested_loopback(
+    txn: &mut PgConnection,
+    common_pools: Option<&CommonPools>,
+    stable_machine_id: &MachineId,
+    state: ManagedHostState,
+    expected_machine_data: Option<&ExpectedMachineData>,
+    state_model_version: i16,
     requested_loopback_v6: Option<Ipv6Addr>,
 ) -> DatabaseResult<AnyMachine> {
     let stable_machine_id_string = stable_machine_id.to_string();
@@ -3495,6 +3517,11 @@ pub async fn allocate_loopback_ip_v6(
 ) -> Result<Option<Ipv6Addr>, DatabaseError> {
     let pool = &common_pools.ethernet.pool_loopback_ip_v6;
     if !crate::resource_pool::pool_has_rows(txn, pool.name()).await? {
+        if requested_value.is_some() {
+            return Err(DatabaseError::FailedPrecondition(
+                "requested IPv6 loopback requires a configured lo-ip-v6 pool".to_string(),
+            ));
+        }
         return Ok(None);
     }
 
@@ -6408,7 +6435,6 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
-            None,
         )
         .await?;
 
@@ -6813,7 +6839,6 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
-            None,
         )
         .await?;
         txn.commit().await?;
@@ -6912,7 +6937,6 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
-            None,
         )
         .await?;
         txn.commit().await?;
@@ -7033,7 +7057,6 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
-            None,
         )
         .await?;
 
@@ -7433,7 +7456,6 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
-            None,
         )
         .await?;
         setup_txn.commit().await?;
@@ -7547,7 +7569,6 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
-            None,
         )
         .await?;
         setup_txn.commit().await?;
@@ -7678,7 +7699,6 @@ mod test {
                 ManagedHostState::Ready,
                 None,
                 2,
-                None,
             ))
             .await;
             let machine = machine?;
@@ -7743,7 +7763,6 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
-            None,
         )
         .await?;
         txn.commit().await?;
@@ -7890,7 +7909,6 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
-            None,
         )
         .await?;
 
@@ -7978,7 +7996,7 @@ mod test {
         let mut txn: sqlx::Transaction<'_, sqlx::Postgres> = pool.begin().await.unwrap();
         let id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
-        super::create(&mut txn, None, &id, ManagedHostState::Ready, None, 2, None).await?;
+        super::create(&mut txn, None, &id, ManagedHostState::Ready, None, 2).await?;
         super::set_firmware_autoupdate(&mut txn, &id, Some(true)).await?;
         txn.commit().await?;
         let mut txn: sqlx::Transaction<'_, sqlx::Postgres> = pool.begin().await.unwrap();
@@ -8020,6 +8038,17 @@ mod test {
             None
         );
 
+        assert!(
+            super::allocate_loopback_ip_v6(
+                &common_pools,
+                txn.as_mut(),
+                &dpu_machine_id.to_string(),
+                Some("2001:db8::20".parse()?)
+            )
+            .await
+            .is_err()
+        );
+
         let dpu = super::create(
             txn.as_mut(),
             Some(&common_pools),
@@ -8027,7 +8056,6 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
-            None,
         )
         .await?;
         assert_eq!(dpu.network_config.loopback_ip_v6, None);
@@ -8054,7 +8082,6 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
-            None,
         )
         .await?;
         assert_eq!(
@@ -8085,7 +8112,6 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
-            None,
         )
         .await
         .expect_err("a configured but exhausted IPv6 loopback pool must fail DPU creation");
@@ -8224,7 +8250,6 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
-            None,
         )
         .await?;
         let allocated = dpu
@@ -8311,7 +8336,6 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
-            None,
         )
         .await?;
         for dpu_machine_id in &dpu_machine_ids {
@@ -8322,7 +8346,6 @@ mod test {
                 ManagedHostState::Ready,
                 None,
                 2,
-                None,
             )
             .await?;
         }
@@ -8417,7 +8440,6 @@ mod test {
             ManagedHostState::ForceDeletion,
             None,
             2,
-            None,
         )
         .await?;
         txn.commit().await?;
@@ -8447,7 +8469,6 @@ mod test {
             ManagedHostState::Ready,
             None,
             2,
-            None,
         )
         .await?;
         let reserved = super::allocate_loopback_ip_v6(
@@ -8533,7 +8554,6 @@ mod test {
                 ManagedHostState::Ready,
                 None,
                 2,
-                None,
             )
             .await?;
         }

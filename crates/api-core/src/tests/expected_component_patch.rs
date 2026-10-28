@@ -327,7 +327,7 @@ async fn patch_expected_machine_preserves_unselected_fields(pool: PgPool) {
 
 /// Read back a machine's persisted DPU loopback reservations through the RPC,
 /// exercising the same hydration path operators observe.
-async fn reservations_of(env: &TestEnv, id: Uuid) -> Vec<forge::DpuLoopbackReservation> {
+async fn reservations_of(env: &TestEnv, id: Uuid) -> Vec<forge::ExpectedInterface> {
     env.api
         .get_expected_machine(Request::new(forge::ExpectedMachineRequest {
             bmc_mac_address: String::new(),
@@ -336,12 +336,13 @@ async fn reservations_of(env: &TestEnv, id: Uuid) -> Vec<forge::DpuLoopbackReser
         .await
         .unwrap()
         .into_inner()
-        .dpu_loopback_reservations
-        .unwrap_or_default()
-        .reservations
+        .host_nics
+        .into_iter()
+        .filter(|i| i.role == Some(forge::ExpectedInterfaceRole::DpuLoopback as i32))
+        .collect()
 }
 
-/// A native patch that selects `dpu_loopback_reservations` validates each
+/// A native patch that selects `host_nics` with loopback entries validates each
 /// reserved address against its pool before persisting, replaces the stored set
 /// (an empty list clears it), and leaves the set untouched when the field is not
 /// selected. This is the only reservation validation the native patch path runs,
@@ -373,26 +374,32 @@ async fn patch_expected_machine_dpu_loopback_reservations(pool: PgPool) {
         .await
         .unwrap();
 
-    let reservation = |serial: &str, v4: &str| forge::DpuLoopbackReservation {
-        dpu_serial_number: serial.to_string(),
-        loopback_ipv4: Some(v4.to_string()),
-        loopback_ipv6: None,
+    let reservation = |mac: &str, v4: &str| forge::ExpectedInterface {
+        mac_address: Some(mac.to_string()),
+        role: Some(forge::ExpectedInterfaceRole::DpuLoopback as i32),
+        ip_allocation: Some(forge::ExpectedInterfaceIpAllocation::Fixed as i32),
+        fixed_ip: Some(v4.to_string()),
+        ..Default::default()
     };
-    let patch = |reservations: Vec<forge::DpuLoopbackReservation>| {
+    let patch = |reservations: Vec<forge::ExpectedInterface>| {
         Request::new(forge::PatchExpectedMachineRequest {
             expected_machine: Some(forge::ExpectedMachine {
                 id: rpc_id(id),
-                dpu_loopback_reservations: Some(forge::DpuLoopbackReservationList { reservations }),
+                host_nics: reservations,
+                replace_dpu_loopbacks: true,
                 ..Default::default()
             }),
-            update_mask: mask(&["dpu_loopback_reservations"]),
+            update_mask: mask(&["host_nics"]),
         })
     };
 
     // A reserved address outside the pool is rejected on the native path.
     let error = env
         .api
-        .patch_expected_machine(patch(vec![reservation("D1", "198.51.100.1")]))
+        .patch_expected_machine(patch(vec![reservation(
+            "02:00:00:00:00:01",
+            "198.51.100.1",
+        )]))
         .await
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
@@ -400,19 +407,19 @@ async fn patch_expected_machine_dpu_loopback_reservations(pool: PgPool) {
     // An auto-assignable value cannot be explicitly reserved.
     let error = env
         .api
-        .patch_expected_machine(patch(vec![reservation("D1", "192.0.2.20")]))
+        .patch_expected_machine(patch(vec![reservation("02:00:00:00:00:01", "192.0.2.20")]))
         .await
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
 
     // A free, requestable value is accepted and stored.
     env.api
-        .patch_expected_machine(patch(vec![reservation("D1", "192.0.2.10")]))
+        .patch_expected_machine(patch(vec![reservation("02:00:00:00:00:01", "192.0.2.10")]))
         .await
         .unwrap();
     assert_eq!(
         reservations_of(&env, id).await,
-        vec![reservation("D1", "192.0.2.10")]
+        vec![reservation("02:00:00:00:00:01", "192.0.2.10")]
     );
 
     // A patch that does not select the field leaves the reservation untouched.
@@ -432,7 +439,7 @@ async fn patch_expected_machine_dpu_loopback_reservations(pool: PgPool) {
         .unwrap();
     assert_eq!(
         reservations_of(&env, id).await,
-        vec![reservation("D1", "192.0.2.10")]
+        vec![reservation("02:00:00:00:00:01", "192.0.2.10")]
     );
 
     // Selecting the field with an empty list clears the reservation.
@@ -472,39 +479,53 @@ async fn patch_expected_machine_dpu_loopback_reservation_restore_owned(pool: PgP
         .await
         .unwrap();
 
-    let reservation = |serial: &str, v4: &str| forge::DpuLoopbackReservation {
-        dpu_serial_number: serial.to_string(),
-        loopback_ipv4: Some(v4.to_string()),
-        loopback_ipv6: None,
+    let reservation = |mac: &str, v4: &str| forge::ExpectedInterface {
+        mac_address: Some(mac.to_string()),
+        role: Some(forge::ExpectedInterfaceRole::DpuLoopback as i32),
+        ip_allocation: Some(forge::ExpectedInterfaceIpAllocation::Fixed as i32),
+        fixed_ip: Some(v4.to_string()),
+        ..Default::default()
     };
-    let patch = |reservations: Vec<forge::DpuLoopbackReservation>| {
+    let patch = |reservations: Vec<forge::ExpectedInterface>| {
         Request::new(forge::PatchExpectedMachineRequest {
             expected_machine: Some(forge::ExpectedMachine {
                 id: rpc_id(id),
-                dpu_loopback_reservations: Some(forge::DpuLoopbackReservationList { reservations }),
+                host_nics: reservations,
+                replace_dpu_loopbacks: true,
                 ..Default::default()
             }),
-            update_mask: mask(&["dpu_loopback_reservations"]),
+            update_mask: mask(&["host_nics"]),
         })
     };
 
     // The reservation is admissible while the address is free.
     env.api
-        .patch_expected_machine(patch(vec![reservation("D1", "192.0.2.30")]))
+        .patch_expected_machine(patch(vec![reservation("02:00:00:00:00:01", "192.0.2.30")]))
         .await
         .unwrap();
 
-    // Simulate DPU "D1" being created: record its topology so the pool owner
-    // resolves back to serial "D1", and allocate the reserved address to it.
+    // Simulate creation with the reservation row locked until the DPU, its
+    // OS/admin MAC association, and the live pool allocation are committed.
     let dpu_hw = HardwareInfo {
         dmi_data: Some(DmiData {
-            product_serial: "D1".to_string(),
+            product_serial: "02:00:00:00:00:01".to_string(),
             ..Default::default()
         }),
         ..Default::default()
     };
     let dpu_id = from_hardware_info_with_type(&dpu_hw, MachineType::Dpu).unwrap();
     let mut txn = pool.begin().await.unwrap();
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *txn)
+        .await
+        .unwrap();
+    db::expected_dpu_loopback_reservation::find_by_dpu_mac_for_update(
+        &mut txn,
+        "02:00:00:00:00:01".parse().unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     db::machine::create(
         &mut txn,
         None,
@@ -512,13 +533,21 @@ async fn patch_expected_machine_dpu_loopback_reservation_restore_owned(pool: PgP
         ManagedHostState::Ready,
         None,
         CURRENT_STATE_MODEL_VERSION,
-        None,
     )
     .await
     .unwrap();
-    db::machine_topology::create_or_update(&mut txn, &dpu_id, &dpu_hw)
-        .await
-        .unwrap();
+    db::predicted_machine_interface::create(
+        model::predicted_machine_interface::NewPredictedMachineInterface {
+            machine_id: &dpu_id,
+            mac_address: "02:00:00:00:00:01".parse().unwrap(),
+            expected_network_segment_type: model::network_segment::NetworkSegmentType::Underlay,
+            primary_interface: true,
+            boot_interface_id: None,
+        },
+        &mut txn,
+    )
+    .await
+    .unwrap();
     db::resource_pool::allocate_exact(
         loopback_pool,
         &mut txn,
@@ -528,7 +557,25 @@ async fn patch_expected_machine_dpu_loopback_reservation_restore_owned(pool: PgP
     )
     .await
     .unwrap();
+    // An edit racing creation must wait, then reject transferring the newly
+    // owned address to another MAC. It must not validate against stale Free state.
+    let transfer = env
+        .api
+        .patch_expected_machine(patch(vec![reservation("02:00:00:00:00:02", "192.0.2.30")]));
+    tokio::pin!(transfer);
+    tokio::select! {
+        result = &mut transfer => panic!("reservation transfer did not wait: {result:?}"),
+        _ = wait_for_blocked_query(&pool, blocker_pid, "expected_dpu_loopback_reservations") => {}
+    }
     txn.commit().await.unwrap();
+    assert_eq!(
+        transfer.await.unwrap_err().code(),
+        tonic::Code::FailedPrecondition
+    );
+    assert_eq!(
+        reservations_of(&env, id).await,
+        vec![reservation("02:00:00:00:00:01", "192.0.2.30")]
+    );
 
     // Clearing the declaration does not release D1's live pool allocation.
     env.api.patch_expected_machine(patch(vec![])).await.unwrap();
@@ -537,24 +584,12 @@ async fn patch_expected_machine_dpu_loopback_reservation_restore_owned(pool: PgP
     // Restoring the identical declaration succeeds because the address is still
     // D1's own allocation, not another DPU's.
     env.api
-        .patch_expected_machine(patch(vec![reservation("D1", "192.0.2.30")]))
+        .patch_expected_machine(patch(vec![reservation("02:00:00:00:00:01", "192.0.2.30")]))
         .await
         .unwrap();
     assert_eq!(
         reservations_of(&env, id).await,
-        vec![reservation("D1", "192.0.2.30")]
-    );
-
-    // Reserving that same live allocation for a different DPU is rejected.
-    let error = env
-        .api
-        .patch_expected_machine(patch(vec![reservation("D2", "192.0.2.30")]))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
-    assert_eq!(
-        reservations_of(&env, id).await,
-        vec![reservation("D1", "192.0.2.30")]
+        vec![reservation("02:00:00:00:00:01", "192.0.2.30")]
     );
 }
 

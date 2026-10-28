@@ -14,14 +14,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
 
 use mac_address::MacAddress;
 use model::expected_machine::{
-    BmcIpAllocationType, DpuLoopbackReservation, ExpectedInterface, ExpectedInterfaceIpAllocation,
-    ExpectedInterfaceRole, ExpectedMachine, ExpectedMachineData, ExpectedMachineRequest,
-    HostDpuPolicy, HostLifecycleProfile, LegacyHostBmcOverrides, LinkedExpectedMachine,
-    UnexpectedMachine,
+    BmcIpAllocationType, ExpectedInterface, ExpectedInterfaceIpAllocation, ExpectedInterfaceRole,
+    ExpectedMachine, ExpectedMachineData, ExpectedMachineRequest, HostDpuPolicy,
+    HostLifecycleProfile, LegacyHostBmcOverrides, LinkedExpectedMachine, UnexpectedMachine,
 };
 use model::metadata::Metadata;
 use model::network_segment::NetworkSegmentType;
@@ -77,6 +76,7 @@ impl From<ExpectedInterfaceRole> for rpc::forge::ExpectedInterfaceRole {
         match role {
             ExpectedInterfaceRole::Host => Self::Host,
             ExpectedInterfaceRole::DpuOs => Self::DpuOs,
+            ExpectedInterfaceRole::DpuLoopback => Self::DpuLoopback,
             ExpectedInterfaceRole::DpuBmc => Self::DpuBmc,
             ExpectedInterfaceRole::HostBmc => Self::HostBmc,
         }
@@ -92,6 +92,7 @@ impl From<rpc::forge::ExpectedInterfaceRole> for ExpectedInterfaceRole {
             rpc::forge::ExpectedInterfaceRole::Unspecified
             | rpc::forge::ExpectedInterfaceRole::Host => Self::Host,
             rpc::forge::ExpectedInterfaceRole::DpuOs => Self::DpuOs,
+            rpc::forge::ExpectedInterfaceRole::DpuLoopback => Self::DpuLoopback,
             rpc::forge::ExpectedInterfaceRole::DpuBmc => Self::DpuBmc,
             rpc::forge::ExpectedInterfaceRole::HostBmc => Self::HostBmc,
         }
@@ -271,6 +272,13 @@ impl TryFrom<rpc::forge::ExpectedInterface> for ExpectedInterface {
     type Error = RpcDataConversionError;
 
     fn try_from(expected_interface: rpc::forge::ExpectedInterface) -> Result<Self, Self::Error> {
+        if expected_interface.role == Some(rpc::forge::ExpectedInterfaceRole::DpuLoopback as i32)
+            && expected_interface.fixed_gateway.is_some()
+        {
+            return Err(RpcDataConversionError::InvalidArgument(
+                "dpu_loopback does not accept fixed_gateway".to_string(),
+            ));
+        }
         let mac_address = match expected_interface.mac_address.as_deref() {
             None | Some("") => None,
             Some(mac) => Some(
@@ -312,76 +320,6 @@ impl TryFrom<rpc::forge::ExpectedInterface> for ExpectedInterface {
             .map_err(|message| RpcDataConversionError::InvalidArgument(message.to_string()))?;
         Ok(interface)
     }
-}
-
-impl From<DpuLoopbackReservation> for rpc::forge::DpuLoopbackReservation {
-    fn from(reservation: DpuLoopbackReservation) -> Self {
-        rpc::forge::DpuLoopbackReservation {
-            dpu_serial_number: reservation.dpu_serial_number,
-            loopback_ipv4: reservation.loopback_ipv4.map(|ip| ip.to_string()),
-            loopback_ipv6: reservation.loopback_ipv6.map(|ip| ip.to_string()),
-        }
-    }
-}
-
-/// Parse a wire reservation into the model, trimming the serial and enforcing
-/// that each address parses in the family of the field it was sent in. A value
-/// in the wrong family (for example an IPv6 literal in `loopback_ipv4`) fails to
-/// parse and is rejected here, before handler validation.
-impl TryFrom<rpc::forge::DpuLoopbackReservation> for DpuLoopbackReservation {
-    type Error = RpcDataConversionError;
-
-    fn try_from(reservation: rpc::forge::DpuLoopbackReservation) -> Result<Self, Self::Error> {
-        let loopback_ipv4 = match reservation.loopback_ipv4.as_deref() {
-            None | Some("") => None,
-            Some(value) => Some(value.parse::<Ipv4Addr>().map_err(|_| {
-                RpcDataConversionError::InvalidArgument(format!(
-                    "Invalid IPv4 loopback address: {value}"
-                ))
-            })?),
-        };
-        let loopback_ipv6 = match reservation.loopback_ipv6.as_deref() {
-            None | Some("") => None,
-            Some(value) => Some(value.parse::<Ipv6Addr>().map_err(|_| {
-                RpcDataConversionError::InvalidArgument(format!(
-                    "Invalid IPv6 loopback address: {value}"
-                ))
-            })?),
-        };
-        Ok(DpuLoopbackReservation {
-            dpu_serial_number: reservation.dpu_serial_number.trim().to_string(),
-            loopback_ipv4,
-            loopback_ipv6,
-        })
-    }
-}
-
-/// Encode reservations while preserving omitted-versus-empty semantics: `None`
-/// leaves the wrapper absent so an older read-modify-write client cannot drop
-/// stored reservations, while `Some` (including an empty list) sends a present
-/// wrapper. A database read always yields `Some`, so responses always carry the
-/// wrapper.
-fn dpu_loopback_reservations_to_rpc(
-    reservations: Option<Vec<DpuLoopbackReservation>>,
-) -> Option<rpc::forge::DpuLoopbackReservationList> {
-    reservations.map(|reservations| rpc::forge::DpuLoopbackReservationList {
-        reservations: reservations.into_iter().map(Into::into).collect(),
-    })
-}
-
-/// Decode reservations, preserving omitted (`None`) versus explicit empty
-/// (`Some(vec![])`) so the handler and db layer can preserve or clear.
-fn dpu_loopback_reservations_from_rpc(
-    reservations: Option<rpc::forge::DpuLoopbackReservationList>,
-) -> Result<Option<Vec<DpuLoopbackReservation>>, RpcDataConversionError> {
-    reservations
-        .map(|list| {
-            list.reservations
-                .into_iter()
-                .map(DpuLoopbackReservation::try_from)
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .transpose()
 }
 
 impl From<ExpectedMachine> for rpc::forge::ExpectedMachine {
@@ -448,9 +386,7 @@ impl From<ExpectedMachine> for rpc::forge::ExpectedMachine {
                         .disable_lockdown,
                 }),
             server_name: expected_machine.data.server_name,
-            dpu_loopback_reservations: dpu_loopback_reservations_to_rpc(
-                expected_machine.data.dpu_loopback_reservations,
-            ),
+            replace_dpu_loopbacks: false,
         }
     }
 }
@@ -586,9 +522,7 @@ impl TryFrom<rpc::forge::ExpectedMachine> for ExpectedMachineData {
                 })
                 .unwrap_or_default(),
             server_name: em.server_name,
-            dpu_loopback_reservations: dpu_loopback_reservations_from_rpc(
-                em.dpu_loopback_reservations,
-            )?,
+            replace_dpu_loopbacks: em.replace_dpu_loopbacks,
         })
     }
 }
@@ -653,54 +587,6 @@ mod tests {
     #[test]
     fn host_dpu_policy_default_is_manage() {
         assert_eq!(HostDpuPolicy::default(), HostDpuPolicy::Manage);
-    }
-
-    /// A wire reservation trims its serial, treats an omitted or empty address
-    /// as absent, and parses each address in the family of the field it arrived
-    /// in.
-    #[test]
-    fn dpu_loopback_reservation_parses_and_trims() {
-        let reservation = DpuLoopbackReservation::try_from(rpc::forge::DpuLoopbackReservation {
-            dpu_serial_number: "  SER1  ".to_string(),
-            loopback_ipv4: Some("192.0.2.10".to_string()),
-            loopback_ipv6: Some(String::new()),
-        })
-        .expect("valid reservation");
-        assert_eq!(reservation.dpu_serial_number, "SER1");
-        assert_eq!(
-            reservation.loopback_ipv4,
-            Some("192.0.2.10".parse().unwrap())
-        );
-        assert_eq!(reservation.loopback_ipv6, None);
-    }
-
-    /// An address in the wrong family fails to parse and is rejected at the wire
-    /// boundary, before handler validation.
-    #[test]
-    fn dpu_loopback_reservation_rejects_wrong_family() {
-        let err = DpuLoopbackReservation::try_from(rpc::forge::DpuLoopbackReservation {
-            dpu_serial_number: "SER1".to_string(),
-            loopback_ipv4: Some("2001:db8::1".to_string()),
-            loopback_ipv6: None,
-        })
-        .expect_err("an IPv6 literal in the IPv4 field must be rejected");
-        assert!(matches!(err, RpcDataConversionError::InvalidArgument(_)));
-    }
-
-    /// The reservation wrapper preserves omitted (`None`) versus explicit empty
-    /// (`Some(vec![])`) across a decode/encode round trip, so an older
-    /// read-modify-write client cannot silently drop stored reservations.
-    #[test]
-    fn dpu_loopback_reservations_preserve_omitted_versus_empty() {
-        assert_eq!(dpu_loopback_reservations_from_rpc(None).unwrap(), None);
-        assert_eq!(dpu_loopback_reservations_to_rpc(None), None);
-
-        let empty = dpu_loopback_reservations_from_rpc(Some(
-            rpc::forge::DpuLoopbackReservationList::default(),
-        ))
-        .unwrap();
-        assert_eq!(empty, Some(vec![]));
-        assert!(dpu_loopback_reservations_to_rpc(empty).is_some());
     }
 
     /// The policy refactor must not change the protobuf bytes consumed by
@@ -1484,6 +1370,7 @@ mod tests {
                 ..Default::default()
             }],
             replace_host_nics: true,
+            replace_dpu_loopbacks: true,
             ..Default::default()
         };
 
@@ -1491,6 +1378,7 @@ mod tests {
         assert_eq!(json["interfaces"][0]["mac_address"], "AA:BB:CC:DD:EE:FF");
         assert_eq!(json.get("host_nics"), None);
         assert_eq!(json.get("replace_host_nics"), None);
+        assert_eq!(json.get("replace_dpu_loopbacks"), None);
     }
 
     #[test]
