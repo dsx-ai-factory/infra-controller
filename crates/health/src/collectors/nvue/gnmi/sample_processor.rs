@@ -17,7 +17,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use carbide_utils::none_if_empty::NoneIfEmpty;
@@ -37,6 +37,7 @@ pub(crate) struct GnmiSampleProcessor {
     pub(crate) switch_id: String,
     pub(crate) diagnostic_stream: Option<&'static str>,
     pub(super) reconciliation: Option<Arc<MetricReconciler>>,
+    counter_epochs: Mutex<InterfaceCounterEpochs>,
 }
 
 impl GnmiSampleProcessor {
@@ -59,6 +60,69 @@ impl GnmiSampleProcessor {
             event_context,
             switch_id,
             diagnostic_stream,
+            counter_epochs: Mutex::default(),
+        }
+    }
+
+    /// Discards metadata and replay history before opening a new subscription.
+    pub(super) fn clear_counter_epochs(&self) {
+        let mut epochs = self
+            .counter_epochs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Replacing the entire tracker restores its invariants after a panic.
+        *epochs = InterfaceCounterEpochs::default();
+        self.counter_epochs.clear_poison();
+    }
+
+    #[cfg(test)]
+    pub(super) fn counter_epoch_start(
+        &self,
+        interface: &str,
+        observed_at: i64,
+    ) -> Option<SystemTime> {
+        self.counter_epochs
+            .lock()
+            .expect("counter epochs")
+            .start_time(interface, observed_at)
+    }
+
+    fn update_counter_epochs(&self, notification: &proto::Notification, prefix: &[PathElem]) {
+        let mut epochs = self
+            .counter_epochs
+            .lock()
+            .expect("counter epoch mutex poisoned; source metadata may be inconsistent");
+
+        // Deletes invalidate old epochs before replacements in the same notification.
+        for path in &notification.delete {
+            let combined = prefix.iter().chain(&path.elem).collect::<Vec<_>>();
+            epochs.delete(&combined, notification.timestamp);
+        }
+
+        // Learn metadata before projecting counters.
+        for update in &notification.update {
+            let path = update
+                .path
+                .as_ref()
+                .map(|path| path.elem.as_slice())
+                .unwrap_or_default();
+            let combined = prefix.iter().chain(path).collect::<Vec<_>>();
+
+            let Some(interface) = openconfig_interface(&combined) else {
+                continue;
+            };
+            let tail = &combined[2..];
+            if tail.iter().map(|element| element.name.as_str()).eq([
+                "state",
+                "counters",
+                "last-clear",
+            ]) {
+                epochs.record(
+                    interface,
+                    notification.timestamp,
+                    update.val.as_ref().and_then(last_clear_time),
+                );
+            }
         }
     }
 
@@ -104,6 +168,8 @@ impl GnmiSampleProcessor {
             .unwrap_or_default();
 
         let mut entities: HashSet<(&str, &str)> = HashSet::new();
+
+        self.update_counter_epochs(notification, prefix_elems);
 
         // Apply live Deletes to tracked source keys and existing metric selectors
         // before processing replacement updates.
@@ -724,6 +790,16 @@ impl GnmiSampleProcessor {
     }
 }
 
+fn openconfig_interface<'a>(elems: &[&'a PathElem]) -> Option<&'a str> {
+    let [root, interface, ..] = elems else {
+        return None;
+    };
+    if root.name != "interfaces" || interface.name != "interface" {
+        return None;
+    }
+    interface.key.get("name").map(String::as_str)
+}
+
 /// `InterfaceCounterEpochs` keeps each interface's supplied `last-clear` for
 /// `MetricSemantics::CumulativeCounter`. `observed_at` is `Notification.timestamp`
 /// in Unix nanoseconds. Starts after their metadata observation are discarded;
@@ -737,10 +813,8 @@ impl GnmiSampleProcessor {
 /// and require newer metadata. An untimed covering delete uses the maximum retained
 /// interface and deletion history as a conservative floor for every interface.
 /// Without retained history, it cannot establish a replay boundary.
-#[allow(
-    dead_code,
-    reason = "Activated with the complete notification and reconnect lifecycle in https://github.com/dsx-ai-factory/infra-controller/issues/8014"
-)]
+///
+/// Each new subscription discards all retained epochs and replay history.
 #[derive(Default)]
 struct InterfaceCounterEpochs {
     interfaces: HashMap<String, CounterEpoch>,
@@ -748,20 +822,12 @@ struct InterfaceCounterEpochs {
     invalidated_through: Option<i64>,
 }
 
-#[allow(
-    dead_code,
-    reason = "Activated with the complete notification and reconnect lifecycle in https://github.com/dsx-ai-factory/infra-controller/issues/8014"
-)]
 struct CounterEpoch {
     observed_at: i64,
     start_time: Option<SystemTime>,
     requires_newer_observation: bool,
 }
 
-#[allow(
-    dead_code,
-    reason = "Activated with the complete notification and reconnect lifecycle in https://github.com/dsx-ai-factory/infra-controller/issues/8014"
-)]
 impl InterfaceCounterEpochs {
     fn record(&mut self, interface: &str, observed_at: i64, start_time: Option<SystemTime>) {
         if observed_at <= 0 {
@@ -840,6 +906,10 @@ impl InterfaceCounterEpochs {
         });
     }
 
+    #[allow(
+        dead_code,
+        reason = "Exported counter starts are activated in https://github.com/dsx-ai-factory/infra-controller/issues/8014"
+    )]
     fn start_time(&self, interface: &str, observed_at: i64) -> Option<SystemTime> {
         let epoch = self.interfaces.get(interface)?;
         (epoch.observed_at <= observed_at)
@@ -849,10 +919,6 @@ impl InterfaceCounterEpochs {
 }
 
 /// `last_clear_time` decodes OpenConfig `last-clear` Unix nanoseconds exactly.
-#[allow(
-    dead_code,
-    reason = "Activated with the complete notification and reconnect lifecycle in https://github.com/dsx-ai-factory/infra-controller/issues/8014"
-)]
 fn last_clear_time(value: &proto::TypedValue) -> Option<SystemTime> {
     use proto::typed_value::Value;
 
@@ -1764,6 +1830,31 @@ pub(crate) fn now_unix_secs() -> f64 {
 }
 
 #[cfg(test)]
+pub(super) fn test_interface_update(
+    interface: &str,
+    tail: &[&str],
+    value: proto::TypedValue,
+) -> proto::Update {
+    let mut elem = ["interfaces", "interface"]
+        .into_iter()
+        .chain(tail.iter().copied())
+        .map(|name| PathElem {
+            name: name.into(),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    elem[1].key.insert("name".into(), interface.into());
+    proto::Update {
+        path: Some(proto::Path {
+            elem,
+            ..Default::default()
+        }),
+        val: Some(value),
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -2477,6 +2568,99 @@ mod tests {
                 state,
             );
         }
+    }
+
+    #[test]
+    fn notification_metadata_replaces_deleted_epochs_without_changing_samples() {
+        let sink = Arc::new(CapturingSink::default());
+        let mut processor = test_processor();
+        processor.data_sink = Some(sink.clone());
+        let mut metadata = test_interface_update(
+            "nvl0",
+            &["state", "counters", "last-clear"],
+            make_typed_value_uint(100),
+        );
+        let mut prefix = metadata.path.take().expect("metadata path");
+        metadata.path = Some(proto::Path {
+            elem: prefix.elem.split_off(4),
+            ..Default::default()
+        });
+        let notification = proto::Notification {
+            timestamp: 200,
+            prefix: Some(prefix),
+            delete: vec![proto::Path::default()],
+            update: vec![metadata],
+            ..Default::default()
+        };
+
+        processor.process_notification(&proto::Notification {
+            timestamp: 150,
+            update: vec![test_interface_update(
+                "nvl1",
+                &["state", "counters", "last-clear"],
+                make_typed_value_uint(100),
+            )],
+            ..Default::default()
+        });
+
+        // The prefix makes this an entire counter subtree delete. Its replacement
+        // metadata must survive at the same timestamp, without emitting a metric.
+        processor.process_notification(&notification);
+        let start = Some(SystemTime::UNIX_EPOCH + Duration::from_nanos(100));
+        assert_eq!(processor.counter_epoch_start("nvl0", 200), start);
+        assert_eq!(processor.counter_epoch_start("nvl1", 200), start);
+
+        let mut unrelated = notification.clone();
+        unrelated.delete.clear();
+        unrelated.prefix.as_mut().expect("prefix").elem[0].name = "components".into();
+        unrelated.update[0].val = Some(make_typed_value_uint(150));
+        processor.process_notification(&unrelated);
+        assert_eq!(processor.counter_epoch_start("nvl0", 200), start);
+
+        let mut unusable = notification.clone();
+        unusable.delete.clear();
+        for value in [None, Some(make_typed_value_string("invalid"))] {
+            unusable.update[0].val = value;
+            processor.process_notification(&unusable);
+            assert_eq!(processor.counter_epoch_start("nvl0", 200), None);
+            processor.process_notification(&notification);
+        }
+        assert!(sink.events.lock().expect("events").is_empty());
+
+        processor.process_notification(&proto::Notification {
+            timestamp: 200,
+            update: vec![test_interface_update(
+                "nvl0",
+                &["state", "counters", "in-errors"],
+                make_typed_value_uint(7),
+            )],
+            ..Default::default()
+        });
+        let events = sink.events.lock().expect("events");
+        let [(_, CollectorEvent::Metric(sample))] = events.as_slice() else {
+            panic!("expected one counter reading");
+        };
+        assert_eq!(sample.value, 7.0);
+        assert!(matches!(
+            sample.semantics,
+            MetricSemantics::CumulativeCounter {
+                start_time: None,
+                ..
+            }
+        ));
+        drop(events);
+
+        // A new subscription must accept metadata older than the prior stream's
+        // deletion history, since that history no longer describes the new source.
+        processor.process_notification(&proto::Notification {
+            timestamp: 300,
+            delete: vec![proto::Path::default()],
+            ..Default::default()
+        });
+        assert_eq!(processor.counter_epoch_start("nvl0", 300), None);
+        processor.clear_counter_epochs();
+        processor.process_notification(&notification);
+        assert_eq!(processor.counter_epoch_start("nvl0", 200), start);
     }
 
     #[test]
