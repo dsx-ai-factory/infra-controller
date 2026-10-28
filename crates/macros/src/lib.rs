@@ -32,9 +32,18 @@ type AttributeArgs = syn::punctuated::Punctuated<syn::Meta, syn::Token![,]>;
 /// declaration order without inspecting field types or unrelated attributes.
 /// `db_table_columns()` returns `carbide_uuid::DbColumns` for direct SQL
 /// formatting, with the original names available through `as_slice()`.
-/// Both table and field names must match `[a-z_][a-z0-9_]*`. Names are returned
-/// unquoted, so callers must avoid reserved SQL keywords. Raw Rust identifiers, qualified
-/// table names, and `#[sqlx(...)]` attributes on the struct or its fields are
+/// Add `alias = "r"` in the same attribute to have `db_aliased_table()`
+/// return `table_name AS r` and `db_aliased_columns()` return `r.column`
+/// references. `db_table_name()` and `db_table_columns()` stay unaliased.
+/// Without `alias`, the aliased helpers return those same values.
+/// Each model has one fixed alias. Use `db_aliased_table()` in the `FROM`
+/// or `JOIN` clause so that alias is in scope for `db_aliased_columns()`.
+/// PostgreSQL labels `r.column` results as `column`, so `sqlx::FromRow`
+/// still decodes them by field name.
+///
+/// Table, alias, and field names must match `[a-z_][a-z0-9_]*`. Names are
+/// returned unquoted, so callers must avoid reserved SQL keywords. Raw Rust
+/// identifiers, qualified table names, and `#[sqlx(...)]` attributes are
 /// unsupported; implement `DbTable` manually when the decoder needs mappings.
 /// The consuming crate must depend on `carbide-uuid` as `carbide_uuid`.
 #[proc_macro_derive(DbTable, attributes(db_table))]
