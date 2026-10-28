@@ -1190,8 +1190,8 @@ async fn run_gnmi_sample_task<S, F, Fut>(
         sample_processor
             .reconciliation
             .as_deref()
-            .map(|reconciliation| Reconciliation {
-                processor: ReconciliationProcessor::Metrics(reconciliation),
+            .map(|_| Reconciliation {
+                processor: ReconciliationProcessor::Samples(sample_processor),
                 interval: config.reconcile_interval,
                 request: build_snapshot_request(build_sample_subscribe_request(
                     &config.paths,

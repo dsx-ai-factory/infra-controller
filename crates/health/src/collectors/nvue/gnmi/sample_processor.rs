@@ -25,7 +25,7 @@ use carbide_uuid::rack::RackId;
 
 use super::client::{typed_value_to_f64, typed_value_to_string};
 use super::proto::{self, PathElem};
-use super::reconciliation::MetricReconciler;
+use super::reconciliation::{MetricReconciler, MetricSnapshot, SourcePath};
 use super::subscriber::GnmiStreamMetrics;
 use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample, MetricSemantics};
 
@@ -87,6 +87,61 @@ impl GnmiSampleProcessor {
             .start_time(interface, observed_at)
     }
 
+    /// Tracks epochs backed by metric sources when this snapshot begins.
+    pub(super) fn begin_reconciliation(
+        &self,
+        request: &proto::SubscribeRequest,
+    ) -> Option<MetricSnapshot> {
+        let reconciliation = self.reconciliation.as_ref()?;
+        let snapshot = reconciliation.begin(request)?;
+        let mut epochs = self
+            .counter_epochs
+            .lock()
+            .expect("counter epoch mutex poisoned; source metadata may be inconsistent");
+        let mut candidates = HashSet::new();
+
+        reconciliation.for_each_source(|source| {
+            if let Some(interface) = source_interface(source)
+                && epochs.interfaces.contains_key(interface)
+            {
+                candidates.insert(interface.to_string());
+            }
+        });
+        epochs.reconciliation_candidates = candidates;
+        Some(snapshot)
+    }
+
+    /// Completes cleanup; `None` discards a failed or cancelled snapshot.
+    /// Returns the removed metric count, excluding epoch invalidations.
+    pub(super) fn finish_reconciliation(&self, snapshot: Option<MetricSnapshot>) -> usize {
+        let Some(reconciliation) = &self.reconciliation else {
+            return 0;
+        };
+        let completed = snapshot.is_some();
+        let removed = reconciliation.finish(snapshot);
+        let mut epochs = self
+            .counter_epochs
+            .lock()
+            .expect("counter epoch mutex poisoned; source metadata may be inconsistent");
+        let mut candidates = std::mem::take(&mut epochs.reconciliation_candidates);
+
+        if completed {
+            // Retained metric sources keep their interface epochs. Live metadata
+            // also protects its epoch, even when no metric source remains.
+            reconciliation.for_each_source(|source| {
+                if let Some(interface) = source_interface(source) {
+                    candidates.remove(interface);
+                }
+            });
+            for interface in candidates {
+                // No source timestamp exists for inferred absence. Preserve the
+                // replay boundary while requiring newer metadata to restore a start.
+                epochs.record(&interface, 0, None);
+            }
+        }
+        removed
+    }
+
     fn update_counter_epochs(&self, notification: &proto::Notification, prefix: &[PathElem]) {
         let mut epochs = self
             .counter_epochs
@@ -99,7 +154,8 @@ impl GnmiSampleProcessor {
             epochs.delete(&combined, notification.timestamp);
         }
 
-        // Learn metadata before projecting counters.
+        // Learn metadata before projecting counters. Even an unusable counter
+        // reading proves the interface is live and protects its retained epoch.
         for update in &notification.update {
             let path = update
                 .path
@@ -117,11 +173,16 @@ impl GnmiSampleProcessor {
                 "counters",
                 "last-clear",
             ]) {
+                epochs.reconciliation_candidates.remove(interface);
                 epochs.record(
                     interface,
                     notification.timestamp,
                     update.val.as_ref().and_then(last_clear_time),
                 );
+            } else if numeric_interface_leaf(tail).is_some_and(|metric| {
+                matches!(metric.semantics, MetricSemantics::CumulativeCounter { .. })
+            }) {
+                epochs.reconciliation_candidates.remove(interface);
             }
         }
     }
@@ -790,6 +851,15 @@ impl GnmiSampleProcessor {
     }
 }
 
+fn source_interface(source: &SourcePath) -> Option<&str> {
+    let [(root, _), (element, keys), ..] = source.as_slice() else {
+        return None;
+    };
+    (root == "interfaces" && element == "interface")
+        .then(|| keys.get("name").map(String::as_str))
+        .flatten()
+}
+
 fn openconfig_interface<'a>(elems: &[&'a PathElem]) -> Option<&'a str> {
     let [root, interface, ..] = elems else {
         return None;
@@ -814,12 +884,15 @@ fn openconfig_interface<'a>(elems: &[&'a PathElem]) -> Option<&'a str> {
 /// interface and deletion history as a conservative floor for every interface.
 /// Without retained history, it cannot establish a replay boundary.
 ///
-/// Each new subscription discards all retained epochs and replay history.
+/// Successful snapshots invalidate candidates that lose every metric source.
+/// Live counter or metadata updates protect their interface, and each new
+/// subscription discards all retained epochs and replay history.
 #[derive(Default)]
 struct InterfaceCounterEpochs {
     interfaces: HashMap<String, CounterEpoch>,
     deleted_at: Option<i64>,
     invalidated_through: Option<i64>,
+    reconciliation_candidates: HashSet<String>,
 }
 
 struct CounterEpoch {
@@ -2661,6 +2734,127 @@ mod tests {
         processor.clear_counter_epochs();
         processor.process_notification(&notification);
         assert_eq!(processor.counter_epoch_start("nvl0", 200), start);
+    }
+
+    #[test]
+    fn successful_snapshots_preserve_live_and_present_interface_epochs() {
+        use super::super::client::{build_sample_subscribe_request, build_snapshot_request};
+
+        // A live counter or metadata update may preserve an epoch without
+        // retaining a metric; snapshot presence preserves the last source.
+        let start = |nanos| Some(SystemTime::UNIX_EPOCH + Duration::from_nanos(nanos));
+        let run = |live_tail: Option<[&str; 3]>| {
+            let sink = Arc::new(CapturingSink::default());
+            let processor = GnmiSampleProcessor::new(
+                Some(sink.clone()),
+                test_processor().event_context,
+                "serial-abc".into(),
+                None,
+                true,
+            );
+            let notification = |interface, leaf, value, observed_at| proto::Notification {
+                timestamp: observed_at,
+                update: vec![test_interface_update(
+                    interface,
+                    &["state", "counters", leaf],
+                    make_typed_value_uint(value),
+                )],
+                ..Default::default()
+            };
+            for interface in ["removed", "survivor", "metadata-only"] {
+                processor.process_notification(&notification(interface, "last-clear", 100, 200));
+            }
+            for (interface, leaf) in [
+                ("removed", "in-errors"),
+                ("survivor", "in-errors"),
+                ("survivor", "out-pkts"),
+            ] {
+                processor.process_notification(&notification(interface, leaf, 7, 200));
+            }
+            let request = build_snapshot_request(build_sample_subscribe_request(
+                &[proto::Path::default()],
+                1,
+            ));
+            let mut snapshot = processor
+                .begin_reconciliation(&request)
+                .expect("retained sources");
+            if let Some(tail) = live_tail {
+                let mut update =
+                    test_interface_update("survivor", &tail, make_typed_value_uint(250));
+                if tail.last() != Some(&"last-clear") {
+                    update.val = None;
+                }
+                processor.process_notification(&proto::Notification {
+                    timestamp: 300,
+                    update: vec![update],
+                    ..Default::default()
+                });
+            } else {
+                snapshot
+                    .process_response(&proto::SubscribeResponse {
+                        response: Some(proto::subscribe_response::Response::Update(notification(
+                            "survivor",
+                            "in-errors",
+                            7,
+                            300,
+                        ))),
+                        ..Default::default()
+                    })
+                    .expect("present source");
+            }
+            assert_eq!(
+                sink.events.lock().expect("events").len(),
+                3,
+                "metadata and unusable values emit no samples"
+            );
+            let removed = processor.finish_reconciliation(Some(snapshot));
+            let result = (
+                removed,
+                processor.counter_epoch_start("removed", 400),
+                processor.counter_epoch_start("survivor", 400),
+            );
+            assert_eq!(
+                processor.counter_epoch_start("metadata-only", 400),
+                start(100)
+            );
+            assert!(
+                processor
+                    .counter_epochs
+                    .lock()
+                    .expect("counter epochs")
+                    .reconciliation_candidates
+                    .is_empty()
+            );
+
+            if live_tail.is_none() {
+                // Inferred absence must preserve the replay boundary, then
+                // permit fresh metadata to establish a new start.
+                for (observed_at, expected) in [(200, None), (201, start(100))] {
+                    processor.process_notification(&notification(
+                        "removed",
+                        "last-clear",
+                        100,
+                        observed_at,
+                    ));
+                    assert_eq!(processor.counter_epoch_start("removed", 400), expected);
+                }
+            }
+            result
+        };
+        value_scenarios! {
+            run = run;
+            "live counter or metadata protects the interface" {
+                Some(["state", "counters", "out-errors"]) => (3, None, start(100)),
+                Some(["state", "counters", "last-clear"]) => (3, None, start(250)),
+            }
+            "unmapped leaves and gauges do not protect counter epochs" {
+                Some(["state", "counters", "unmapped"]) => (3, None, None),
+                Some(["phy-diag", "state", "raw-ber"]) => (3, None, None),
+            }
+            "snapshot presence preserves an interface with one of its two sources" {
+                None => (2, None, start(100)),
+            }
+        }
     }
 
     #[test]
