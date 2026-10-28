@@ -60,6 +60,25 @@ class DevImagesTest(unittest.TestCase):
             calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
             return result, calls
 
+    def test_failed_smoke_package_copy_removes_the_created_container(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            removed = directory / 'removed'
+            docker = directory / 'docker'
+            docker.write_text('#!/bin/sh\ncase "$1" in\n'
+                              'create) echo test-container;;\n'
+                              'cp) exit 7;;\n'
+                              'rm) test "$3" = test-container && : > "$DOCKER_TEST_REMOVED";;\nesac\n')
+            docker.chmod(0o755)
+            package = directory / 'kea-common.deb'
+            package.touch()
+            result = subprocess.run(['/bin/bash', str(ROOT / 'dev/docker/tests/smoke_dhcp_image.sh'),
+                                     'test-image', str(package)], capture_output=True, text=True,
+                                    env=dict(os.environ, PATH=str(directory) + os.pathsep + os.environ['PATH'],
+                                             DOCKER_TEST_REMOVED=str(removed)))
+            self.assertEqual(result.returncode, 7, result.stderr)
+            self.assertTrue(removed.exists())
+
     @patch.dict(os.environ, {
         "IMAGE_TAG": "exported-tag",
         "KEA_VERSION": "exported-version",
@@ -99,6 +118,12 @@ class DevImagesTest(unittest.TestCase):
                 version = (ROOT / "dev/docker/kea.version").read_text().strip()
                 for call in (builds[0], builds[-1]):
                     self.assertIn(f"KEA_VERSION={version}", call)
+
+    def test_pxe_uses_the_shared_native_build_entrypoint(self):
+        result, calls = self.run_make(arguments=("DEV_TARGET=pxe",))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls[-1][calls[-1].index("--target") + 1], "pxe")
+        self.assertEqual(calls[-1][calls[-1].index("--tag") + 1], "nico-dev-pxe:latest")
 
     def test_selected_target_and_base_images_are_propagated(self):
         result, calls = self.run_make(arguments=(

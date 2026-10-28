@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Development Keycloak workload ownership
+templates:
+  - templates/service.yaml
+  - templates/secret.yaml
+tests:
+  - it: preserves the ClusterIP service when host NodePort access is disabled
+    template: templates/service.yaml
+    set:
+      service.nodePort.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: spec.ports[0].port
+          value: 8082
+      - equal:
+          path: spec.ports[0].targetPort
+          value: 8080
+  - it: renders supplied database credentials without interpreting templates
+    template: templates/secret.yaml
+    set:
+      database.password: '{{ unchanged }}'
+    asserts:
+      - equal:
+          path: stringData.password
+          value: '{{ unchanged }}'
