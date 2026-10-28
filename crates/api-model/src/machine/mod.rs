@@ -594,6 +594,9 @@ impl ManagedHostStateSnapshot {
     /// Derives the aggregate health of the Managed Host based on individual
     /// health reports
     ///
+    /// Rack component inventory shortages remain rack-scoped; other rack alerts
+    /// are included unless a host replacement report takes precedence.
+    ///
     /// Also runs on the compact snapshot, see [`Self::is_usable_as_instance`].
     pub fn derive_aggregate_health(&mut self, host_health_config: HostHealthConfig) {
         let source = "aggregate-host-health".to_string();
@@ -699,11 +702,17 @@ impl ManagedHostStateSnapshot {
         }
 
         if let Some(rack_overrides) = &self.rack_health_overrides {
-            if let Some(rack_replace) = &rack_overrides.replace {
-                output.merge(rack_replace);
-            }
-            for rack_merge in rack_overrides.merges.values() {
-                output.merge(rack_merge);
+            let missing_component = health_report::HealthProbeId::missing_rack_component();
+            for report in rack_overrides
+                .replace
+                .iter()
+                .chain(rack_overrides.merges.values())
+            {
+                // Inventory shortages are actionable at the rack, not on each host.
+                // Filter before merging so host-owned alerts remain untouched.
+                let mut report = report.clone();
+                report.alerts.retain(|alert| alert.id != missing_component);
+                output.merge(&report);
             }
         }
 
@@ -5331,6 +5340,60 @@ mod tests {
                 )),
             }
         );
+    }
+
+    #[test]
+    fn rack_component_shortages_are_not_host_health() {
+        use health_report::{
+            HealthAlertClassification, HealthProbeId, HealthProbeSuccess, HealthReportApplyMode,
+        };
+
+        for mode in [HealthReportApplyMode::Merge, HealthReportApplyMode::Replace] {
+            let mut host = managed_host_state_snapshot();
+            host.host_snapshot.health_reports = HealthReportSources::default();
+            let missing = health_report::HealthProbeAlert {
+                id: HealthProbeId::missing_rack_component(),
+                target: Some("switch".to_string()),
+                ..alert_with_classifications(vec![HealthAlertClassification::hardware()])
+            };
+            let other = health_report::HealthProbeAlert {
+                id: "RackLeak".parse().unwrap(),
+                ..alert_with_classifications(vec![HealthAlertClassification::prevent_allocations()])
+            };
+            let mut report = health_report_with_alerts(vec![missing.clone(), other.clone()]);
+            report.successes.push(HealthProbeSuccess {
+                id: "RackProbe".parse().unwrap(),
+                target: None,
+            });
+            let mut sources = HealthReportSources::default();
+            match mode {
+                HealthReportApplyMode::Merge => {
+                    sources.merges.insert(report.source.clone(), report.clone());
+                }
+                HealthReportApplyMode::Replace => sources.replace = Some(report.clone()),
+            }
+            host.rack_health_overrides = Some(sources.clone());
+            // A snapshot produced by the previous implementation already has this alert.
+            host.aggregate_health = report.clone();
+            host.derive_aggregate_health(HostHealthConfig::default());
+            assert!(!host.aggregate_health.alerts.contains(&missing), "{mode:?}");
+            assert!(host.aggregate_health.alerts.contains(&other), "{mode:?}");
+            assert!(
+                host.aggregate_health
+                    .successes
+                    .contains(&report.successes[0])
+            );
+            assert_eq!(host.rack_health_overrides, Some(sources));
+
+            // Filtering rack data must not remove an identically named host-owned alert.
+            let host_report = health_report_with_alerts(vec![missing.clone()]);
+            host.host_snapshot
+                .health_reports
+                .merges
+                .insert(host_report.source.clone(), host_report);
+            host.derive_aggregate_health(HostHealthConfig::default());
+            assert!(host.aggregate_health.alerts.contains(&missing), "{mode:?}");
+        }
     }
 
     fn alert_with_classifications(
