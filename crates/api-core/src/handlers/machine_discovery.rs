@@ -208,7 +208,8 @@ pub(crate) async fn discover_machine(
     // and expected-machine writes. The caller interface is revalidated below.
     let loopback_reservation = if hardware_info.is_dpu() && machine_discovery_info.create_machine {
         if let Some(mac) = caller_mac {
-            db::expected_dpu_loopback_reservation::find_by_dpu_mac_for_update(&mut txn, mac).await?
+            db::expected_dpu_loopback_reservation::find_by_dpu_oob_mac_for_update(&mut txn, mac)
+                .await?
         } else {
             None
         }

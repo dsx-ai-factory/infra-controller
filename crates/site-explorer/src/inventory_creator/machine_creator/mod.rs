@@ -457,12 +457,13 @@ impl MachineCreator {
 
         // Zero-dpu case: If the explored host had no DPUs, we can create the machine now
         if managed_host.explored_host.dpus.is_empty() {
-            if !db::expected_dpu_loopback_reservation::find_for_machine(
-                &mut txn,
-                expected_machine.bmc_mac_address,
-            )
-            .await?
-            .is_empty()
+            if expected_machine.data.dpu_policy.expects_managed_dpus()
+                && !db::expected_dpu_loopback_reservation::find_for_machine(
+                    &mut txn,
+                    expected_machine.bmc_mac_address,
+                )
+                .await?
+                .is_empty()
             {
                 return Err(SiteExplorerError::internal("DPU loopback declarations exist but discovery reported no DPUs; defer creation".to_string()));
             }
@@ -525,16 +526,21 @@ impl MachineCreator {
             });
         }
 
-        db::expected_dpu_loopback_reservation::lock_for_machine(
-            &mut txn,
-            expected_machine.bmc_mac_address,
-        )
-        .await?;
-        let reservations = db::expected_dpu_loopback_reservation::find_for_machine(
-            &mut txn,
-            expected_machine.bmc_mac_address,
-        )
-        .await?;
+        let reservations = if dpu_ids.is_empty() {
+            // Nic and Ignore retain declarations without allocating DPU loopbacks.
+            Vec::new()
+        } else {
+            db::expected_dpu_loopback_reservation::lock_for_machine(
+                &mut txn,
+                expected_machine.bmc_mac_address,
+            )
+            .await?;
+            db::expected_dpu_loopback_reservation::find_for_machine(
+                &mut txn,
+                expected_machine.bmc_mac_address,
+            )
+            .await?
+        };
         let mut loopbacks_by_dpu = HashMap::new();
         for reservation in reservations {
             let matching = explored_host
@@ -542,13 +548,13 @@ impl MachineCreator {
                 .iter()
                 .filter(|dpu| {
                     dpu.os_mac_addresses()
-                        .any(|mac| mac == reservation.dpu_mac_address)
+                        .any(|mac| mac == reservation.dpu_oob_mac_address)
                 })
                 .collect::<Vec<_>>();
             let [dpu] = matching.as_slice() else {
                 return Err(SiteExplorerError::internal(format!(
                     "cannot resolve DPU loopback MAC {} unambiguously from discovery ({} matching DPUs); defer creation",
-                    reservation.dpu_mac_address,
+                    reservation.dpu_oob_mac_address,
                     matching.len()
                 )));
             };

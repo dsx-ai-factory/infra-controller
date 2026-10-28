@@ -87,7 +87,7 @@ pub(crate) async fn add(
     let machine = parse_expected_machine_for_insert(request.into_inner(), None)?;
 
     let mut txn = api.txn_begin().await?;
-    validate_expected_machine(&mut txn, &api.common_pools, &machine, None).await?;
+    validate_expected_machine(&mut txn, &api.common_pools, &machine).await?;
     // Convert through CarbideError so a duplicate BMC MAC becomes AlreadyExists; the direct
     // DatabaseError to Status conversion reports it as FailedPrecondition.
     db::expected_machine::create(&mut txn, machine)
@@ -223,10 +223,9 @@ async fn validate_expected_machine(
     txn: &mut sqlx::PgConnection,
     common_pools: &CommonPools,
     machine: &ExpectedMachine,
-    existing: Option<&ExpectedMachine>,
 ) -> Result<(), CarbideError> {
     validate_expected_machine_for_insert(machine)?;
-    validate_reservation_pool_membership(txn, common_pools, machine, existing).await
+    validate_reservation_pool_membership(txn, common_pools, machine).await
 }
 
 /// Reject duplicate per-family addresses in the request. The child table also
@@ -255,7 +254,6 @@ async fn validate_reservation_pool_membership(
     txn: &mut sqlx::PgConnection,
     common_pools: &CommonPools,
     machine: &ExpectedMachine,
-    _existing: Option<&ExpectedMachine>,
 ) -> Result<(), CarbideError> {
     if !machine.data.replaces_dpu_loopbacks() {
         return Ok(());
@@ -271,7 +269,7 @@ async fn validate_reservation_pool_membership(
     for reservation in incoming {
         let stored = existing
             .iter()
-            .find(|r| r.dpu_mac_address == reservation.dpu_mac_address);
+            .find(|r| r.dpu_oob_mac_address == reservation.dpu_oob_mac_address);
         if let Some(ipv4) = reservation.loopback_ipv4
             && stored.and_then(|r| r.loopback_ipv4) != Some(ipv4)
         {
@@ -280,7 +278,7 @@ async fn validate_reservation_pool_membership(
                 common_pools.ethernet.pool_loopback_ip.as_ref(),
                 IpAddr::V4(ipv4),
                 model::resource_pool::common::LOOPBACK_IP,
-                reservation.dpu_mac_address,
+                reservation.dpu_oob_mac_address,
             )
             .await?;
         }
@@ -292,7 +290,7 @@ async fn validate_reservation_pool_membership(
                 common_pools.ethernet.pool_loopback_ip_v6.as_ref(),
                 ipv6,
                 model::resource_pool::common::LOOPBACK_IP_V6,
-                reservation.dpu_mac_address,
+                reservation.dpu_oob_mac_address,
             )
             .await?;
         }
@@ -302,14 +300,14 @@ async fn validate_reservation_pool_membership(
 
 /// Check one reserved address against its pool: it must exist, be
 /// non-auto-assignable, and be either free or already allocated to the DPU this
-/// reservation targets (identified by `intended_dpu_mac`). A value owned by
+/// reservation targets (identified by `intended_dpu_oob_mac`). A value owned by
 /// any other DPU is rejected.
 async fn validate_reserved_pool_address<T>(
     txn: &mut sqlx::PgConnection,
     pool: &ResourcePool<T>,
     value: T,
     pool_label: &str,
-    intended_dpu_mac: MacAddress,
+    intended_dpu_oob_mac: MacAddress,
 ) -> Result<(), CarbideError>
 where
     T: ToString + FromStr + Send + Sync + 'static,
@@ -330,7 +328,7 @@ where
     match info.state {
         model::resource_pool::ResourcePoolEntryState::Free => Ok(()),
         model::resource_pool::ResourcePoolEntryState::Allocated { owner, .. }
-            if pool_owner_is_dpu_mac(txn, &owner, intended_dpu_mac).await? =>
+            if pool_owner_is_dpu_oob_mac(txn, &owner, intended_dpu_oob_mac).await? =>
         {
             // The address is already this DPU's live allocation: restoring the
             // same declaration must not fail while the DPU still owns it.
@@ -345,29 +343,24 @@ where
 }
 
 /// Accept an address already held by the DPU with this OS/admin MAC.
-async fn pool_owner_is_dpu_mac(
+async fn pool_owner_is_dpu_oob_mac(
     txn: &mut sqlx::PgConnection,
     owner: &str,
-    intended_dpu_mac: MacAddress,
+    intended_dpu_oob_mac: MacAddress,
 ) -> Result<bool, CarbideError> {
     let Ok(owner_id) = owner.parse::<carbide_uuid::machine::DpuMachineId>() else {
+        tracing::warn!(
+            pool_owner = owner,
+            dpu_oob_mac_address = %intended_dpu_oob_mac,
+            "Loopback pool owner is not a valid DPU machine ID"
+        );
         return Ok(false);
     };
     let interfaces =
-        db::machine_interface::find_by_mac_address(&mut *txn, intended_dpu_mac).await?;
-    if interfaces
+        db::machine_interface::find_by_mac_address(&mut *txn, intended_dpu_oob_mac).await?;
+    Ok(interfaces
         .iter()
-        .any(|interface| interface.machine_id == Some(owner_id.into()))
-    {
-        return Ok(true);
-    }
-    // Site Explorer can create the DPU before its OS interface first DHCPs.
-    // Its predicted interface already records the same MAC-to-DPU identity.
-    Ok(
-        db::predicted_machine_interface::find_by_mac_address(txn, intended_dpu_mac)
-            .await?
-            .is_some_and(|interface| interface.machine_id == owner_id.into()),
-    )
+        .any(|interface| interface.machine_id == Some(owner_id.into())))
 }
 
 /// Replace-all recreates parent rows. Preserve loopbacks that an older client
@@ -442,9 +435,7 @@ pub(crate) async fn create_missing_from(
             LegacyHostBmcOverrides::default()
         };
         normalize_host_bmc_configuration(&mut expected_machine, None, overrides)?;
-        // These are fresh inserts (existing == None), so every reserved address
-        // is treated as new and checked against its pool.
-        validate_expected_machine(&mut *txn, common_pools, &expected_machine, None).await?;
+        validate_expected_machine(&mut *txn, common_pools, &expected_machine).await?;
         db::expected_machine::create(&mut *txn, expected_machine).await?;
     }
 
@@ -523,7 +514,7 @@ pub(crate) async fn update(
         data,
     };
     normalize_host_bmc_configuration(&mut machine, existing.as_ref(), overrides)?;
-    validate_expected_machine(&mut txn, &api.common_pools, &machine, existing.as_ref()).await?;
+    validate_expected_machine(&mut txn, &api.common_pools, &machine).await?;
 
     let preallocations = update_preallocated_interfaces(
         &mut txn,
@@ -826,7 +817,7 @@ async fn apply_machine_patch(
         .validate(false)
         .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
     validate_expected_machine_for_insert(&machine)?;
-    validate_reservation_pool_membership(txn, common_pools, &machine, None).await?;
+    validate_reservation_pool_membership(txn, common_pools, &machine).await?;
     let preallocations = update_preallocated_interfaces(txn, &machine, retained_window).await?;
     db::expected_machine::update(txn, &machine).await?;
     Ok(preallocations)
@@ -859,7 +850,7 @@ pub(crate) async fn replace_all(
     for replacement in replacements {
         let existing = find_previous_expected_machine(&previous, &replacement);
         let parsed = parse_expected_machine_for_insert(replacement, existing)?;
-        validate_expected_machine(&mut txn, &api.common_pools, &parsed, existing).await?;
+        validate_expected_machine(&mut txn, &api.common_pools, &parsed).await?;
         if !seen_bmc_macs.insert(parsed.bmc_mac_address) {
             return Err(CarbideError::InvalidArgument(format!(
                 "duplicate expected machine BMC MAC address {} in replacement list",
@@ -1417,7 +1408,7 @@ async fn create_expected_machine(
     };
 
     normalize_host_bmc_configuration(&mut expected_machine, None, overrides)?;
-    validate_expected_machine(&mut *txn, common_pools, &expected_machine, None).await?;
+    validate_expected_machine(&mut *txn, common_pools, &expected_machine).await?;
     db::expected_machine::create(txn, expected_machine).await?;
 
     Ok((result_machine, Vec::new()))
@@ -1455,13 +1446,7 @@ async fn update_expected_machine(
         data,
     };
     normalize_host_bmc_configuration(&mut expected_machine, existing.as_ref(), overrides)?;
-    validate_expected_machine(
-        &mut *txn,
-        common_pools,
-        &expected_machine,
-        existing.as_ref(),
-    )
-    .await?;
+    validate_expected_machine(&mut *txn, common_pools, &expected_machine).await?;
     let preallocations =
         update_preallocated_interfaces(txn, &expected_machine, retained_window).await?;
 

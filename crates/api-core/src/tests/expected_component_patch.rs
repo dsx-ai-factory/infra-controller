@@ -504,6 +504,22 @@ async fn patch_expected_machine_dpu_loopback_reservation_restore_owned(pool: PgP
         .await
         .unwrap();
 
+    // The DPU's OS/admin interface DHCPs before the DPU is created.
+    let interface_id = env
+        .api
+        .discover_dhcp(
+            crate::tests::common::rpc_builder::DhcpDiscovery::builder(
+                "02:00:00:00:00:01",
+                crate::tests::common::api_fixtures::FIXTURE_DHCP_RELAY_ADDRESS,
+            )
+            .tonic_request(),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .machine_interface_id
+        .unwrap();
+
     // Simulate creation with the reservation row locked until the DPU, its
     // OS/admin MAC association, and the live pool allocation are committed.
     let dpu_hw = HardwareInfo {
@@ -519,7 +535,7 @@ async fn patch_expected_machine_dpu_loopback_reservation_restore_owned(pool: PgP
         .fetch_one(&mut *txn)
         .await
         .unwrap();
-    db::expected_dpu_loopback_reservation::find_by_dpu_mac_for_update(
+    db::expected_dpu_loopback_reservation::find_by_dpu_oob_mac_for_update(
         &mut txn,
         "02:00:00:00:00:01".parse().unwrap(),
     )
@@ -536,14 +552,9 @@ async fn patch_expected_machine_dpu_loopback_reservation_restore_owned(pool: PgP
     )
     .await
     .unwrap();
-    db::predicted_machine_interface::create(
-        model::predicted_machine_interface::NewPredictedMachineInterface {
-            machine_id: &dpu_id,
-            mac_address: "02:00:00:00:00:01".parse().unwrap(),
-            expected_network_segment_type: model::network_segment::NetworkSegmentType::Underlay,
-            primary_interface: true,
-            boot_interface_id: None,
-        },
+    db::machine_interface::associate_interface_with_machine(
+        &interface_id,
+        model::machine_interface_address::MachineInterfaceAssociation::Machine(dpu_id),
         &mut txn,
     )
     .await
