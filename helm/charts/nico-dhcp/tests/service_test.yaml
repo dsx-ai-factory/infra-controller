@@ -1,0 +1,35 @@
+suite: IPv4 DHCP service address
+templates:
+  - service.yaml
+tests:
+  - it: preserves dynamically allocated services by default
+    asserts:
+      - notExists:
+          path: spec.clusterIP
+      - equal:
+          path: spec.ipFamilies
+          value: [IPv4]
+  - it: pins the local relay endpoint without changing selectors or ports
+    set:
+      service.clusterIP: 10.96.0.20
+    asserts:
+      - equal:
+          path: spec.clusterIP
+          value: 10.96.0.20
+      - equal:
+          path: spec.selector
+          value:
+            app.kubernetes.io/name: nico-dhcp
+            app.kubernetes.io/component: dhcp
+      - equal:
+          path: spec.ports[0]
+          value:
+            port: 67
+            name: udp
+            protocol: UDP
+  - it: rejects an IPv6 address for the IPv4 Service
+    set:
+      service.clusterIP: fd00::20
+    asserts:
+      - failedTemplate:
+          errorPattern: 'service.clusterIP'

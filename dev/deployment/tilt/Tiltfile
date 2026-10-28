@@ -11,12 +11,13 @@ if not cluster_context.startswith('kind-'):
 
 repo_root = os.path.realpath(os.path.join(os.path.dirname(__file__), '../../..'))
 tilt_dir = os.path.join(repo_root, 'dev/deployment/tilt')
+stack_dir = os.path.join(repo_root, 'dev/deployment/stack')
 core_charts = os.path.join(repo_root, 'helm/charts')
 rest_charts = os.path.join(repo_root, 'helm/rest')
 rest_api_dir = os.path.join(repo_root, 'rest-api')
 dpf_crd_dir = os.path.join(repo_root, 'crates/dpf/crds')
 rest_api_docker_local = os.path.join(rest_api_dir, 'docker/local')
-values_file = os.path.join(tilt_dir, 'values.yaml')
+values_file = os.path.join(stack_dir, 'values.yaml')
 kea_version = str(read_file(os.path.join(repo_root, 'dev/docker/kea.version'))).strip()
 docker_platform = str(local(['docker', 'info', '--format', '{{.OSType}}/{{.Architecture}}'], quiet=True)).strip()
 native_platforms = {
@@ -30,55 +31,49 @@ if docker_platform not in native_platforms:
 build_platform, compiler_arch = native_platforms[docker_platform]
 
 all_values = read_yaml(values_file)
-tilt_values = all_values['tilt']
-profiles = tilt_values['profiles']
+development = all_values['development']
+charts = development['charts']
+profiles = development['profiles']
 config.define_bool('rest')
 config.define_bool('mcp')
 config.define_bool('dsx-exchange')
 config.define_bool('observability')
 config.define_bool('dpf')
+config.define_bool('persistent-vault')
 options = config.parse()
+persistent_vault = options.get('persistent-vault', False)
 enable_mcp = options.get('mcp', profiles['mcp'])
 enable_rest = options.get('rest', profiles['rest']) or enable_mcp
 enable_dsx_exchange = options.get('dsx-exchange', profiles['dsxExchange'])
 enable_observability = options.get('observability', profiles['observability'])
 enable_dpf = options.get('dpf', profiles['dpf'])
-local_config = tilt_values['localConfig']
-core_namespace = local_config['coreNamespace']
+if enable_dpf and persistent_vault:
+    fail('The DPF profile requires ephemeral Vault; omit --persistent-vault')
+local_config = development['localConfig']
+rest_values = development['rest']
+rest_global = rest_values['global']
+if enable_rest and (rest_global['certificate']['issuerRef'].get('kind') != 'ClusterIssuer' or
+                    rest_global['certificate']['issuerRef'].get('group', 'cert-manager.io') != 'cert-manager.io'):
+    fail('Local REST trust requires issuerRef.kind=ClusterIssuer and issuerRef.group=cert-manager.io')
+prereqs_values_file = os.path.join(repo_root, 'helm-prereqs/values/local-development.yaml')
+prereqs_values = read_yaml(prereqs_values_file)
+core_namespace = prereqs_values['namespace']
+vault_bootstrap = os.path.join(stack_dir, 'vault-bootstrap.py')
+vault_command = ['python3', vault_bootstrap, '--context', cluster_context, '--namespace', core_namespace]
+local(vault_command + ['check-mode', '--mode', 'persistent' if persistent_vault else 'ephemeral'], quiet=True)
+vault_values = read_yaml(os.path.join(stack_dir, 'vault-persistent.yaml')) if persistent_vault else development['vault']
+vault_ready = 'vault-bootstrap' if persistent_vault else 'vault'
 rest_namespace = local_config['restNamespace']
 temporal_namespace = local_config['temporalNamespace']
 dpf_namespace = local_config['dpfNamespace']
 observability_namespace = local_config['observabilityNamespace']
 
-machine_a_tron_dhcp = tilt_values['machineATronDhcp']
-machine_a_tron_dhcp_server_ip = machine_a_tron_dhcp['serverIP']
-machine_a_tron_dhcp_server_port = machine_a_tron_dhcp['serverPort']
-machine_a_tron_dhcp_pod = machine_a_tron_dhcp['podName']
-machine_a_tron_dhcp_service_ip = machine_a_tron_dhcp['serviceIP']
-machine_a_tron_dhcp_listen_port = machine_a_tron_dhcp['listenPort']
-
-nico_dhcp_values = all_values['nico-dhcp']
-nico_dhcp_values['config']['kea']['serverIdentifier'] = machine_a_tron_dhcp_server_ip
-
+machine_a_tron_dhcp_pod = development['machineATronDhcp']['podName']
 machine_a_tron_values = all_values['nico-machine-a-tron']
+selected_mat_pod = machine_a_tron_values.get('pods', {}).get(machine_a_tron_dhcp_pod)
+if not selected_mat_pod or not (selected_mat_pod.get('machines') or selected_mat_pod.get('racks')):
+    fail('MAT readiness requires a configured pod: %s' % machine_a_tron_dhcp_pod)
 enable_mat_gateway = machine_a_tron_values.get('mat-k8s-controller', {}).get('gateway', {}).get('enabled', False)
-machine_a_tron_configs = machine_a_tron_values['configFiles']['matConfigs']
-if machine_a_tron_dhcp_pod not in machine_a_tron_configs:
-    fail('Tilt DHCP relay mode requires a MAT config for pod %s' % machine_a_tron_dhcp_pod)
-machine_a_tron_config = machine_a_tron_configs[machine_a_tron_dhcp_pod]
-machine_a_tron_config = machine_a_tron_config.replace(
-    '__NICO_DHCP_SERVER_ADDRESS__',
-    '%s:%s' % (machine_a_tron_dhcp_server_ip, machine_a_tron_dhcp_server_port),
-)
-machine_a_tron_config = machine_a_tron_config.replace(
-    '__MAT_DHCP_LISTEN_PORT__',
-    str(machine_a_tron_dhcp_listen_port),
-)
-machine_a_tron_config = machine_a_tron_config.replace(
-    '__MAT_DHCP_SERVICE_IP__',
-    machine_a_tron_dhcp_service_ip,
-)
-machine_a_tron_configs[machine_a_tron_dhcp_pod] = machine_a_tron_config
 
 def merged(first, second):
     result = {}
@@ -130,12 +125,6 @@ def helm_json_flags(values, prefix=''):
             flags.extend(['--set-json', '%s=%s' % (path, encode_json(value))])
     return flags
 
-def object_metadata(name, namespace=None):
-    result = {'name': name}
-    if namespace:
-        result['namespace'] = namespace
-    return result
-
 def object_selector(obj):
     name = obj['metadata']['name']
     kind = obj['kind'].lower()
@@ -144,22 +133,21 @@ def object_selector(obj):
         return '%s:%s:%s' % (name, kind, namespace)
     return '%s:%s' % (name, kind)
 
-def secret(name, namespace, string_data, secret_type='Opaque', labels={}):
-    return {
-        'apiVersion': 'v1',
-        'kind': 'Secret',
-        'metadata': merged(object_metadata(name, namespace), {'labels': labels}),
-        'type': secret_type,
-        'stringData': string_data,
-    }
+def local_prerequisites(name, template, dependencies=[], labels=['infrastructure']):
+    # Keep the existing apply ownership; only manifest construction moves to Helm.
+    # Splitting the render preserves namespace/operator/database readiness ordering.
+    chart = os.path.join(repo_root, 'helm/nico-dev-prereqs')
+    watch_file(chart)
+    rendered = local(['helm', 'template', 'nico-dev-prereqs', chart,
+                      '--values', '-', '--show-only', 'templates/' + template + '.yaml'],
+                     stdin=encode_json(local_prereq_values), quiet=True)
+    objects = [obj for obj in decode_yaml_stream(rendered) if obj]
+    k8s_yaml(rendered)
+    k8s_resource(new_name=name,
+                 objects=[object_selector(obj) for obj in objects],
+                 resource_deps=dependencies, labels=labels, pod_readiness='ignore')
+    return objects
 
-def config_map(name, namespace, data):
-    return {
-        'apiVersion': 'v1',
-        'kind': 'ConfigMap',
-        'metadata': object_metadata(name, namespace),
-        'data': data,
-    }
 
 def helm_chart(
         name,
@@ -173,8 +161,11 @@ def helm_chart(
         links=[],
         manual=False,
         wait=True,
-        timeout='5m'):
+        timeout='5m',
+        values_files=[]):
     flags = ['--create-namespace'] + helm_json_flags(values)
+    for path in values_files:
+        flags.extend(['--values', path])
     if wait:
         flags.extend(['--wait', '--wait-for-jobs', '--timeout=%s' % timeout])
     helm_resource(
@@ -182,7 +173,7 @@ def helm_chart(
         chart=chart,
         release_name=name,
         namespace=namespace,
-        deps=[chart, values_file],
+        deps=[chart, values_file] + values_files,
         resource_deps=resource_deps,
         image_deps=image_deps,
         image_keys=image_keys,
@@ -240,53 +231,23 @@ def rest_image(name, dockerfile, only):
         ],
     )
 
-helm_repo(
-    'jetstack',
-    'https://charts.jetstack.io',
-    resource_name='repo-jetstack',
-    labels=['infrastructure'],
-)
-helm_repo(
-    'cnpg',
-    'https://cloudnative-pg.github.io/charts',
-    resource_name='repo-cnpg',
-    labels=['infrastructure'],
-)
-helm_repo(
-    'hashicorp',
-    'https://helm.releases.hashicorp.com',
-    resource_name='repo-hashicorp',
-    labels=['infrastructure'],
-)
-helm_repo(
-    'grafana-community',
-    'https://grafana-community.github.io/helm-charts',
-    resource_name='repo-grafana-community',
-    labels=['observability'],
-)
-helm_repo(
-    'grafana',
-    'https://grafana.github.io/helm-charts',
-    resource_name='repo-grafana',
-    labels=['observability'],
-)
-helm_repo(
-    'prometheus-community',
-    'https://prometheus-community.github.io/helm-charts',
-    resource_name='repo-prometheus-community',
-    labels=['observability'],
-)
+for name, label in [
+    ('jetstack', 'infrastructure'), ('cnpg', 'infrastructure'), ('hashicorp', 'infrastructure'),
+    ('grafana-community', 'observability'), ('grafana', 'observability'),
+    ('prometheus-community', 'observability'),
+]:
+    helm_repo(name, development['repositories'][name], resource_name='repo-' + name, labels=[label])
 
 prerequisite(
     name='cert-manager',
-    chart='jetstack/cert-manager',
+    chart=charts['cert-manager']['chart'],
     release_name='cert-manager',
     namespace='cert-manager',
-    version='v1.21.1',
-    values=tilt_values['certManager'],
+    version=charts['cert-manager']['version'],
+    values=development['certManager'],
     repo='repo-jetstack',
 )
-cnpg_operator_values = tilt_values['cnpgOperator']
+cnpg_operator_values = development['cnpgOperator']
 cnpg_operator_values['monitoring']['podMonitorEnabled'] = enable_observability
 cnpg_dashboard_values = cnpg_operator_values['monitoring']['grafanaDashboard']
 cnpg_dashboard_values['create'] = enable_observability
@@ -294,10 +255,10 @@ cnpg_dashboard_values['namespace'] = observability_namespace
 cnpg_operator_dependencies = ['prometheus'] if enable_observability else []
 prerequisite(
     name='cnpg-operator',
-    chart='cnpg/cloudnative-pg',
+    chart=charts['cnpg-operator']['chart'],
     release_name='cnpg',
     namespace='cnpg-system',
-    version='0.29.0',
+    version=charts['cnpg-operator']['version'],
     values=cnpg_operator_values,
     repo='repo-cnpg',
     resource_deps=cnpg_operator_dependencies,
@@ -305,52 +266,52 @@ prerequisite(
 if enable_dpf:
     # The dpf profile mounts nico-api's ServiceAccount token, which switches
     # its Vault client to Kubernetes login; see vaultDpfPostStart in
-    # values.yaml.
-    vault_post_start = tilt_values['vault']['server']['postStart']
-    vault_post_start[-1] += tilt_values['vaultDpfPostStart']
+    # stack/values.yaml.
+    vault_post_start = vault_values['server']['postStart']
+    vault_post_start[-1] += development['vaultDpfPostStart']
 prerequisite(
     name='vault',
-    chart='hashicorp/vault',
+    chart=charts['vault']['chart'],
     release_name='nico-vault',
     namespace=core_namespace,
-    version='0.34.0',
-    values=tilt_values['vault'],
+    version=charts['vault']['version'],
+    values=vault_values,
     repo='repo-hashicorp',
+)
+
+if persistent_vault:
+    local_resource(
+        'vault-bootstrap',
+        vault_command + ['bootstrap'],
+        deps=[vault_bootstrap],
+        resource_deps=['vault'],
+        labels=['infrastructure'],
+    )
+
+# The local Vault has its own PKI. Supply its public CA through Helm before
+# Core starts so the shared admin CLI can keep mutual TLS verification enabled.
+vault_admin_values = os.path.join(tilt_dir, '.local', cluster_context, 'vault-admin-ca.json')
+vault_ca_exporter = os.path.join(stack_dir, 'vault-admin-ca.py')
+local_resource(
+    'vault-admin-ca',
+    ['python3', vault_ca_exporter, '--context', cluster_context,
+     '--namespace', core_namespace, '--pki-mount', prereqs_values['vault']['pkiMount'],
+     '--output', vault_admin_values],
+    deps=[vault_ca_exporter],
+    resource_deps=[vault_ready],
+    labels=['infrastructure'],
 )
 
 local_ca_certificate = str(read_file(
     os.path.join(repo_root, 'dev/certs/localhost/ca.crt'),
 ))
-local_ca_key = str(read_file(
-    os.path.join(repo_root, 'dev/certs/localhost/ca.key'),
-))
-ssh_console_host_key = str(read_file(os.path.join(
-    repo_root,
-    'crates/ssh-console/tests/fixtures/ssh_host_ed25519_key',
-)))
-ssh_console_host_key_public = str(read_file(os.path.join(
-    repo_root,
-    'crates/ssh-console/tests/fixtures/ssh_host_ed25519_key.pub',
-)))
 database_config = local_config['database']
 rest_database = database_config['rest']
 keycloak_database = database_config['keycloak']
 temporal_database = database_config['temporal']
-rest_labels = {'app.kubernetes.io/part-of': 'nico-rest'}
-cnpg_labels = {'cnpg.io/reload': 'true'}
-
-namespace_objects = [
-    {
-        'apiVersion': 'v1',
-        'kind': 'Namespace',
-        'metadata': object_metadata(rest_namespace),
-    },
-    {
-        'apiVersion': 'v1',
-        'kind': 'Namespace',
-        'metadata': object_metadata(temporal_namespace),
-    },
-]
+local_prereq_values = {'coreNamespace': core_namespace, 'localConfig': local_config}
+local_prerequisites('nico-local-namespaces', 'rest-namespaces')
+local_prerequisites('nico-observability-namespace', 'observability-namespace', labels=['observability'])
 
 if enable_dpf:
     # nico-api compiles this namespace in (carbide_dpf::NAMESPACE); the
@@ -361,7 +322,7 @@ if enable_dpf:
     dpf_namespace_object = {
         'apiVersion': 'v1',
         'kind': 'Namespace',
-        'metadata': object_metadata(dpf_namespace),
+        'metadata': {'name': dpf_namespace},
     }
     k8s_yaml(encode_yaml(dpf_namespace_object))
     k8s_resource(
@@ -403,74 +364,20 @@ if enable_dpf:
         labels=['dpf'],
     )
 
-observability_namespace_object = {
-    'apiVersion': 'v1',
-    'kind': 'Namespace',
-    'metadata': object_metadata(observability_namespace),
+observability_values = development['observability']
+local_prereq_values['dashboards'] = {
+    os.path.basename(path): str(read_file(os.path.join(repo_root, path)))
+    for path in development['dashboardFiles']
 }
-k8s_yaml(encode_yaml(observability_namespace_object))
-k8s_resource(
-    new_name='nico-observability-namespace',
-    objects=[object_selector(observability_namespace_object)],
-    labels=['observability'],
-    pod_readiness='ignore',
-)
+local_prerequisites('grafana-dashboards', 'dashboards',
+                    ['nico-observability-namespace'], labels=['observability'])
 
-for obj in namespace_objects:
-    k8s_yaml(encode_yaml(obj))
-
-k8s_resource(
-    new_name='nico-local-namespaces',
-    objects=[object_selector(obj) for obj in namespace_objects],
-    labels=['infrastructure'],
-    pod_readiness='ignore',
-)
-
-observability_values = tilt_values['observability']
-
-# Mirrors the chart's observability/dashboards/*.json glob, plus the two
-# dashboards that only exist outside the chart.
-grafana_dashboard_paths = [
-    'helm/observability/dashboards/nico-api-performance.json',
-    'helm/observability/dashboards/nico-bmc-performance.json',
-    'helm/observability/dashboards/nico-fleet.json',
-    'helm/observability/dashboards/nico-lifecycle.json',
-    'helm/observability/dashboards/nico-overview.json',
-    'helm/observability/dashboards/nico-site-detail.json',
-    'dev/deployment/tilt/dashboards/nico-site-explorer.json',
-    'helm-prereqs/observability/dashboards/nico-core-health.json',
-]
-grafana_dashboard_data = {}
-for dashboard_path in grafana_dashboard_paths:
-    grafana_dashboard_data[os.path.basename(dashboard_path)] = str(
-        read_file(os.path.join(repo_root, dashboard_path)),
-    )
-grafana_dashboard_object = {
-    'apiVersion': 'v1',
-    'kind': 'ConfigMap',
-    'metadata': merged(
-        object_metadata('grafana-dashboards-nico', observability_namespace),
-        {
-            'labels': {'grafana_dashboard': '1'},
-            'annotations': {'grafana_folder': 'NICo'},
-        },
-    ),
-    'data': grafana_dashboard_data,
-}
-k8s_yaml(encode_yaml(grafana_dashboard_object))
-k8s_resource(
-    new_name='grafana-dashboards',
-    objects=[object_selector(grafana_dashboard_object)],
-    resource_deps=['nico-observability-namespace'],
-    labels=['observability'],
-    pod_readiness='ignore',
-)
 prerequisite(
     name='prometheus',
-    chart='prometheus-community/kube-prometheus-stack',
+    chart=charts['prometheus']['chart'],
     release_name='prometheus',
     namespace=observability_namespace,
-    version='59.1.0',
+    version=charts['prometheus']['version'],
     values=observability_values['prometheus'],
     repo='repo-prometheus-community',
     resource_deps=['nico-observability-namespace'],
@@ -480,10 +387,10 @@ prerequisite(
 )
 prerequisite(
     name='loki',
-    chart='grafana-community/loki',
+    chart=charts['loki']['chart'],
     release_name='loki',
     namespace=observability_namespace,
-    version='18.8.1',
+    version=charts['loki']['version'],
     values=observability_values['loki'],
     repo='repo-grafana-community',
     resource_deps=['nico-observability-namespace'],
@@ -491,10 +398,10 @@ prerequisite(
 )
 prerequisite(
     name='tempo',
-    chart='grafana-community/tempo',
+    chart=charts['tempo']['chart'],
     release_name='tempo',
     namespace=observability_namespace,
-    version='3.2.1',
+    version=charts['tempo']['version'],
     values=observability_values['tempo'],
     repo='repo-grafana-community',
     resource_deps=['nico-observability-namespace'],
@@ -502,10 +409,10 @@ prerequisite(
 )
 prerequisite(
     name='alloy',
-    chart='grafana/alloy',
+    chart=charts['alloy']['chart'],
     release_name='alloy',
     namespace=observability_namespace,
-    version='1.11.1',
+    version=charts['alloy']['version'],
     values=observability_values['alloy'],
     repo='repo-grafana',
     resource_deps=['nico-observability-namespace', 'loki'],
@@ -513,7 +420,7 @@ prerequisite(
 )
 helm_resource(
     name='grafana',
-    chart='grafana-community/grafana',
+    chart=charts['grafana']['chart'],
     release_name='grafana',
     namespace=observability_namespace,
     deps=[values_file],
@@ -530,7 +437,7 @@ helm_resource(
     port_forwards=[port_forward(13000, 3000)],
     links=[link('http://localhost:13000', 'Grafana')],
     flags=[
-        '--version=12.10.4',
+        '--version=%s' % charts['grafana']['version'],
         '--create-namespace',
     ] + helm_json_flags(observability_values['grafana']) + [
         '--wait',
@@ -538,161 +445,39 @@ helm_resource(
     ],
 )
 
-local_objects = [
-    secret(
-        'nico-local-ca',
-        core_namespace,
-        {'tls.crt': local_ca_certificate, 'tls.key': local_ca_key},
-        secret_type='kubernetes.io/tls',
-    ),
-    secret('nico-roots', core_namespace, {'ca.crt': local_ca_certificate}),
-    secret(
-        'ssh-host-key',
-        core_namespace,
-        {
-            'ssh_host_ed25519_key': ssh_console_host_key,
-            'ssh_host_ed25519_key_pub': ssh_console_host_key_public,
-        },
-    ),
-    {
-        'apiVersion': 'cert-manager.io/v1',
-        'kind': 'Issuer',
-        'metadata': object_metadata('local-ca-issuer', core_namespace),
-        'spec': {'ca': {'secretName': 'nico-local-ca'}},
-    },
-    secret(
-        'nico-vault-token',
-        core_namespace,
-        {'token': local_config['vault']['token']},
-    ),
-    secret(
-        'nico-vault-approle-tokens',
-        core_namespace,
-        {'VAULT_ROLE_ID': '', 'VAULT_SECRET_ID': ''},
-    ),
-    config_map(
-        'vault-cluster-info',
-        core_namespace,
-        {
-            'VAULT_SERVICE': local_config['vault']['service'],
-            'NICO_VAULT_MOUNT': local_config['vault']['mount'],
-            'NICO_VAULT_PKI_MOUNT': local_config['vault']['pkiMount'],
-        },
-    ),
-    config_map(
-        'nico-system-nico-database-config',
-        core_namespace,
-        {
-            'DB_HOST': database_config['host'],
-            'DB_PORT': str(database_config['port']),
-            'DB_NAME': database_config['name'],
-        },
-    ),
-]
-
-if enable_rest:
-    local_objects.extend([
-        secret(
-            'ca-signing-secret',
-            'cert-manager',
-            {'tls.crt': local_ca_certificate, 'tls.key': local_ca_key},
-            secret_type='kubernetes.io/tls',
-        ),
-        secret(
-            'ca-signing-secret',
-            rest_namespace,
-            {'tls.crt': local_ca_certificate, 'tls.key': local_ca_key},
-            secret_type='kubernetes.io/tls',
-        ),
-        {
-            'apiVersion': 'cert-manager.io/v1',
-            'kind': 'ClusterIssuer',
-            'metadata': object_metadata('nico-rest-ca-issuer'),
-            'spec': {'ca': {'secretName': 'ca-signing-secret'}},
-        },
-        secret(
-            'nico-rest-db-user',
-            core_namespace,
-            {'username': rest_database['user'], 'password': rest_database['password']},
-            secret_type='kubernetes.io/basic-auth',
-            labels=cnpg_labels,
-        ),
-        secret(
-            'keycloak-db-user',
-            core_namespace,
-            {'username': keycloak_database['user'], 'password': keycloak_database['password']},
-            secret_type='kubernetes.io/basic-auth',
-            labels=cnpg_labels,
-        ),
-        secret(
-            'temporal-db-user',
-            core_namespace,
-            {'username': temporal_database['user'], 'password': temporal_database['password']},
-            secret_type='kubernetes.io/basic-auth',
-            labels=cnpg_labels,
-        ),
-        secret(
-            'db-creds',
-            rest_namespace,
-            {'password': rest_database['password']},
-            labels=rest_labels,
-        ),
-        secret(
-            'keycloak-client-secret',
-            rest_namespace,
-            {'keycloak-client-secret': local_config['keycloak']['clientSecret']},
-            labels=rest_labels,
-        ),
-        secret(
-            'temporal-encryption-key',
-            rest_namespace,
-            {'temporal-encryption-key': local_config['temporal']['encryptionKey']},
-            labels=rest_labels,
-        ),
-        {
-            'apiVersion': 'v1',
-            'kind': 'Secret',
-            'metadata': merged(
-                object_metadata('image-pull-secret', rest_namespace),
-                {'labels': rest_labels},
-            ),
-            'type': 'kubernetes.io/dockerconfigjson',
-            'data': {'.dockerconfigjson': 'eyJhdXRocyI6e319'},
-        },
-        secret(
-            'site-registration',
-            rest_namespace,
-            {
-                'site-uuid': local_config['site']['id'],
-                'otp': 'local-dev-otp-token',
-                'creds-url': 'https://nico-rest-site-manager:8100/v1/sitecreds',
-                'cacert': local_ca_certificate,
-            },
-        ),
-        secret(
-            'db-creds',
-            temporal_namespace,
-            {'password': temporal_database['password']},
-            labels={'app.kubernetes.io/part-of': 'temporal'},
-        ),
-    ])
-
-for obj in local_objects:
-    k8s_yaml(encode_yaml(obj))
-
-local_config_dependencies = ['cert-manager', 'cnpg-operator', 'vault']
-if enable_rest:
-    local_config_dependencies.append('nico-local-namespaces')
-
-k8s_resource(
-    new_name='nico-local-config',
-    objects=[object_selector(obj) for obj in local_objects],
-    resource_deps=local_config_dependencies,
-    labels=['infrastructure'],
+# The shared prerequisite chart owns trust, connection settings and Core keys.
+helm_resource(
+    name='nico-core-prereqs',
     pod_readiness='ignore',
+    chart=os.path.join(repo_root, 'helm-prereqs'),
+    release_name='nico-core-prereqs',
+    namespace=core_namespace,
+    deps=[os.path.join(repo_root, 'helm-prereqs'), values_file,
+          os.path.join(repo_root, 'dev/certs/localhost/ca.crt'),
+          os.path.join(repo_root, 'dev/certs/localhost/ca.key'),
+          os.path.join(repo_root, 'crates/ssh-console/tests/fixtures/ssh_host_ed25519_key'),
+          os.path.join(repo_root, 'crates/ssh-console/tests/fixtures/ssh_host_ed25519_key.pub')],
+    resource_deps=['cert-manager', vault_ready] + (['nico-local-namespaces'] if enable_rest else []),
+    labels=['infrastructure'],
+    flags=[
+        '--create-namespace', '--wait', '--timeout=5m',
+        '--values', prereqs_values_file,
+        '--set-file', 'certManager.localCA.certificate=%s' % os.path.join(repo_root, 'dev/certs/localhost/ca.crt'),
+        '--set-file', 'certManager.localCA.privateKey=%s' % os.path.join(repo_root, 'dev/certs/localhost/ca.key'),
+        '--set-file', 'sshHostKey.privateKey=%s' % os.path.join(repo_root, 'crates/ssh-console/tests/fixtures/ssh_host_ed25519_key'),
+        '--set-file', 'sshHostKey.publicKey=%s' % os.path.join(repo_root, 'crates/ssh-console/tests/fixtures/ssh_host_ed25519_key.pub'),
+    ] + helm_json_flags({'vault': {'tokenSecret': {'create': not persistent_vault}}}) + helm_json_flags({'certManager': {'localCA': {'rest': {
+        'enabled': enable_rest,
+        'namespace': rest_namespace,
+        'temporalNamespace': temporal_namespace,
+        'issuerName': rest_global['certificate']['issuerRef']['name'],
+    }}}}),
 )
 
-postgres_values = tilt_values['postgres']
+local_prerequisites('nico-local-config', 'credentials',
+                    ['nico-core-prereqs', 'cnpg-operator', 'nico-local-namespaces'])
+
+postgres_values = development['postgres']
 postgres_values['cluster']['monitoring']['enabled'] = enable_observability
 if not enable_rest:
     postgres_values['cluster']['roles'] = []
@@ -713,13 +498,13 @@ if enable_observability:
 
 prerequisite(
     name='nico-postgres',
-    chart='cnpg/cluster',
+    chart=charts['postgres']['chart'],
     release_name='nico-postgres',
     namespace=core_namespace,
-    version='0.8.1',
+    version=charts['postgres']['version'],
     values=postgres_values,
     repo='repo-cnpg',
-    resource_deps=['cnpg-operator', 'nico-local-config'],
+    resource_deps=['cnpg-operator', 'nico-core-prereqs'] + (['nico-local-config'] if enable_rest else []),
 )
 
 k8s_kind(
@@ -736,9 +521,9 @@ k8s_resource(
 if enable_observability:
     exporter_values = observability_values['postgresExporter']
     exporter_values['enabled'] = True
-    exporter_values['database']['host'] = database_config['host']
-    exporter_values['database']['port'] = database_config['port']
-    exporter_values['database']['name'] = database_config['name']
+    exporter_values['database']['host'] = prereqs_values['postgresql']['host']
+    exporter_values['database']['port'] = prereqs_values['postgresql']['port']
+    exporter_values['database']['name'] = prereqs_values['postgresql']['database']
     exporter_values['grafanaDashboards']['namespace'] = observability_namespace
     helm_resource(
         name='nico-postgres-exporter',
@@ -746,7 +531,7 @@ if enable_observability:
         release_name='nico-postgres-exporter',
         namespace=core_namespace,
         deps=[os.path.join(core_charts, 'nico-postgres-exporter'), values_file],
-        resource_deps=['prometheus', 'nico-postgres', 'nico-local-config'],
+        resource_deps=['prometheus', 'nico-postgres', 'nico-core-prereqs'],
         image_deps=['nico-postgres-exporter'],
         image_keys=[('image.repository', 'image.tag')],
         labels=['observability'],
@@ -754,46 +539,7 @@ if enable_observability:
         flags=helm_json_flags(exporter_values) + ['--wait', '--timeout=5m'],
     )
 
-database_objects = []
-for database in [rest_database, keycloak_database, temporal_database]:
-    database_objects.append({
-        'apiVersion': 'postgresql.cnpg.io/v1',
-        'kind': 'Database',
-        'metadata': object_metadata(database['resourceName'], core_namespace),
-        'spec': {
-            'name': database['name'],
-            'owner': database['user'],
-            'cluster': {'name': 'nico-pg-cluster'},
-        },
-    })
-
-database_objects.append({
-    'apiVersion': 'postgresql.cnpg.io/v1',
-    'kind': 'Database',
-    'metadata': object_metadata(
-        temporal_database['visibilityResourceName'],
-        core_namespace,
-    ),
-    'spec': {
-        'name': temporal_database['visibilityName'],
-        'owner': temporal_database['user'],
-        'cluster': {'name': 'nico-pg-cluster'},
-    },
-})
-database_objects[0]['spec']['extensions'] = [
-    {'name': 'pg_trgm', 'ensure': 'present'},
-]
-
-for obj in database_objects:
-    k8s_yaml(encode_yaml(obj))
-
-k8s_resource(
-    new_name='rest-databases',
-    objects=[object_selector(obj) for obj in database_objects],
-    resource_deps=['nico-postgres', 'nico-local-config'],
-    labels=['infrastructure'],
-    pod_readiness='ignore',
-)
+database_objects = local_prerequisites('rest-databases', 'databases', ['nico-postgres', 'nico-local-config'])
 local_resource(
     'rest-databases-ready',
     [
@@ -810,21 +556,6 @@ local_resource(
     labels=['infrastructure'],
 )
 
-k8s_yaml(os.path.join(
-    rest_api_dir,
-    'deploy/kustomize/base/temporal-helm/certificates.yaml',
-))
-k8s_resource(
-    new_name='temporal-certificates',
-    objects=[
-        'server-interservice-cert:certificate:%s' % temporal_namespace,
-        'server-cloud-cert:certificate:%s' % temporal_namespace,
-        'server-site-cert:certificate:%s' % temporal_namespace,
-    ],
-    resource_deps=['nico-local-config'],
-    labels=['infrastructure'],
-    pod_readiness='ignore',
-)
 local_resource(
     'temporal-certificates-ready',
     [
@@ -837,11 +568,11 @@ local_resource(
         'certificate/server-cloud-cert',
         'certificate/server-site-cert',
     ],
-    resource_deps=['temporal-certificates'],
+    resource_deps=['nico-core-prereqs'],
     labels=['infrastructure'],
 )
 
-temporal_values = tilt_values['temporal']
+temporal_values = development['temporal']
 
 helm_resource(
     name='temporal',
@@ -889,10 +620,6 @@ temporal_namespaces_command = '\n'.join([
     'set -e',
     '"%s" temporal-namespace cloud' % setup_local,
     '"%s" temporal-namespace site' % setup_local,
-    '"%s" temporal-namespace "%s"' % (
-        setup_local,
-        local_config['site']['id'],
-    ),
 ])
 local_resource(
     'temporal-namespaces',
@@ -901,43 +628,50 @@ local_resource(
     labels=['infrastructure'],
 )
 
-keycloak_values = tilt_values['keycloak']
-keycloak_objects = decode_yaml_stream(kustomize(os.path.join(
-    rest_api_dir,
-    'deploy/kustomize/base/keycloak',
-)))
-for obj in keycloak_objects:
-    if obj['kind'] == 'Deployment' and obj['metadata']['name'] == 'keycloak':
-        container = obj['spec']['template']['spec']['containers'][0]
-        container['image'] = keycloak_values['image']
-        for variable in container['env']:
-            if variable['name'] == 'KC_DB_URL':
-                variable['value'] = keycloak_values['databaseUrl']
-            if variable['name'] == 'KC_DB_USERNAME':
-                variable['value'] = keycloak_database['user']
-            if variable['name'] == 'KC_DB_PASSWORD':
-                variable['value'] = keycloak_database['password']
-
-k8s_yaml(encode_yaml_stream(keycloak_objects))
-k8s_resource(
-    'keycloak',
-    objects=['keycloak-realm:configmap:%s' % rest_namespace],
+keycloak_values = development['keycloak']
+keycloak_realm_file = os.path.join(rest_api_dir, 'deploy/kustomize/base/keycloak/nico-dev-realm.json')
+keycloak_chart_values = {
+    'database': {
+        'url': keycloak_values['databaseUrl'],
+        'username': keycloak_database['user'],
+        'password': keycloak_database['password'],
+    },
+    'realmFiles': {'nico-dev-realm.json': str(read_file(keycloak_realm_file))},
+}
+if 'image' in keycloak_values:
+    keycloak_chart_values['image'] = keycloak_values['image']
+helm_resource(
+    name='keycloak',
+    chart=os.path.join(repo_root, 'helm/nico-dev-keycloak'),
+    release_name='keycloak',
+    namespace=rest_namespace,
+    deps=[os.path.join(repo_root, 'helm/nico-dev-keycloak'), values_file, keycloak_realm_file],
     resource_deps=['rest-databases-ready', 'nico-local-config'],
     labels=['application'],
-    port_forwards=[port_forward(18082, 8080)],
     pod_readiness='wait',
+    port_forwards=[port_forward(18082, 8080)],
+    flags=helm_json_flags(keycloak_chart_values) + ['--wait', '--timeout=5m'],
 )
 
-k8s_yaml(os.path.join(
-    rest_api_dir,
-    'deploy/kustomize/base/common/temporal-client-cloud-cert.yaml',
-))
-k8s_resource(
-    new_name='rest-certificate',
-    objects=['temporal-client-cloud-cert:certificate:%s' % rest_namespace],
+# Install common resources before migrations; ordinary Secrets retain their UIDs.
+rest_common_values = component_values(rest_global, {
+    'secrets': {
+        'migrationHooks': False,
+        'dbCreds': {'username': rest_database['user'], 'password': rest_database['password']},
+        'keycloakClientSecret': {'value': local_config['keycloak']['clientSecret']},
+        'temporalEncryptionKey': {'value': local_config['temporal']['encryptionKey']},
+    },
+})
+helm_resource(
+    name='nico-rest-common',
+    chart=os.path.join(rest_charts, 'nico-rest/charts/nico-rest-common'),
+    release_name='nico-rest-common',
+    namespace=rest_namespace,
+    deps=[os.path.join(rest_charts, 'nico-rest/charts/nico-rest-common'), values_file],
     resource_deps=['nico-local-config'],
     labels=['infrastructure'],
     pod_readiness='ignore',
+    flags=helm_json_flags(rest_common_values) + ['--wait', '--timeout=5m'],
 )
 local_resource(
     'rest-certificate-ready',
@@ -949,7 +683,7 @@ local_resource(
         '--timeout=5m',
         'certificate/temporal-client-cloud-cert',
     ],
-    resource_deps=['rest-certificate'],
+    resource_deps=['nico-rest-common'],
     labels=['infrastructure'],
 )
 
@@ -967,7 +701,6 @@ docker_build(
         repo_root,
         'dev/docker/Dockerfile.build-container-%s' % compiler_arch,
     ),
-    only=['dev/docker'],
     build_args={'KEA_VERSION': kea_version},
     platform=build_platform,
 )
@@ -1032,75 +765,22 @@ if enable_dpf:
         labels=['dpf'],
     )
 
-rest_image(
-    'nico-rest-api',
-    'Dockerfile.nico-rest-api',
-    [
-        'api',
-        'common',
-        'auth',
-        'db',
-        'proto',
-        'workflow',
-        'site-workflow',
-        'ipam',
-        'site-manager',
-        'cert-manager',
-        'openapi',
-        'cli',
-    ],
-)
-rest_image(
-    'nico-rest-workflow',
-    'Dockerfile.nico-rest-workflow',
-    [
-        'workflow',
-        'common',
-        'db',
-        'ipam',
-        'site-workflow',
-        'proto',
-        'site-manager',
-        'cert-manager',
-    ],
-)
-rest_image(
-    'nico-rest-site-manager',
-    'Dockerfile.nico-rest-site-manager',
-    ['site-manager', 'cert-manager', 'common'],
-)
-rest_image(
-    'nico-rest-site-agent',
-    'Dockerfile.nico-rest-site-agent',
-    [
-        'site-agent',
-        'common',
-        'site-manager',
-        'proto',
-        'site-workflow',
-        'cert-manager',
-    ],
-)
-rest_image(
-    'nico-rest-db',
-    'Dockerfile.nico-rest-db',
-    ['common', 'db', 'proto', 'ipam'],
-)
-rest_image(
-    'nico-rest-cert-manager',
-    'Dockerfile.nico-rest-cert-manager',
-    ['common', 'cert-manager'],
-)
-rest_image(
-    'nico-mcp',
-    'Dockerfile.nico-mcp',
-    ['mcp', 'cli', 'openapi'],
-)
+for name, sources in [
+    ('nico-rest-api', ['api', 'common', 'auth', 'db', 'proto', 'workflow', 'site-workflow', 'ipam', 'site-manager', 'cert-manager', 'openapi', 'cli']),
+    ('nico-rest-workflow', ['workflow', 'common', 'db', 'ipam', 'site-workflow', 'proto', 'site-manager', 'cert-manager']),
+    ('nico-rest-site-manager', ['site-manager', 'cert-manager', 'common']),
+    ('nico-rest-site-agent', ['site-agent', 'common', 'site-manager', 'proto', 'site-workflow', 'cert-manager']),
+    ('nico-rest-db', ['common', 'db', 'proto', 'ipam']),
+    ('nico-rest-cert-manager', ['common', 'cert-manager']),
+    ('nico-mcp', ['mcp', 'cli', 'openapi']),
+]:
+    rest_image(name, 'Dockerfile.' + name, sources)
 
 core_global = all_values['global']
 nico_api_values = component_values(core_global, all_values['nico-api'])
-nico_api_dependencies = ['nico-local-config', 'nico-postgres', 'vault']
+nico_api_dependencies = ['nico-core-prereqs', 'nico-postgres', 'vault-admin-ca']
 bmc_proxy_values = component_values(core_global, all_values['nico-bmc-proxy'])
+nico_dhcp_values = all_values['nico-dhcp']
 
 if enable_observability:
     nico_api_values['tracing'] = {'enabled': True}
@@ -1120,20 +800,20 @@ if enable_observability:
 if enable_dsx_exchange:
     helm_repo(
         'nats',
-        'https://nats-io.github.io/k8s/helm/charts/',
+        development['repositories']['nats'],
         resource_name='repo-nats',
         labels=['infrastructure'],
     )
     prerequisite(
         name='dsx-exchange',
-        chart='nats/nats',
+        chart=charts['dsx-exchange']['chart'],
         release_name='dsx-exchange',
         namespace=core_namespace,
-        version='2.12.6',
-        values=tilt_values['dsxExchange']['chart'],
+        version=charts['dsx-exchange']['version'],
+        values=development['dsxExchange']['chart'],
         repo='repo-nats',
     )
-    nico_api_values['dsxExchangeEventBusConfig'] = tilt_values['dsxExchange']['nicoApiConfig']
+    nico_api_values['dsxExchangeEventBusConfig'] = development['dsxExchange']['nicoApiConfig']
     nico_api_dependencies.append('dsx-exchange')
 
 if enable_dpf:
@@ -1149,6 +829,7 @@ helm_chart(
     chart=os.path.join(core_charts, 'nico-api'),
     namespace=core_namespace,
     values=nico_api_values,
+    values_files=[vault_admin_values],
     resource_deps=nico_api_dependencies,
     image_deps=['nico-api'],
     image_keys=[('global.image.repository', 'global.image.tag')],
@@ -1170,94 +851,11 @@ helm_chart(
     name='nico-dhcp',
     chart=os.path.join(core_charts, 'nico-dhcp'),
     namespace=core_namespace,
-    values=component_values(core_global, nico_dhcp_values),
+    values=component_values(core_global, all_values['nico-dhcp']),
     resource_deps=['nico-api'],
     image_deps=['nico-dhcp'],
     image_keys=[('global.image.repository', 'global.image.tag')],
     manual=True,
-)
-
-nico_dhcp_machine_a_tron_service = {
-    'apiVersion': 'v1',
-    'kind': 'Service',
-    'metadata': object_metadata('nico-dhcp-machine-a-tron', core_namespace),
-    'spec': {
-        'type': 'ClusterIP',
-        'clusterIP': machine_a_tron_dhcp_server_ip,
-        'selector': {
-            'app.kubernetes.io/name': 'nico-dhcp',
-            'app.kubernetes.io/component': 'dhcp',
-        },
-        'ports': [{
-            'name': 'dhcp',
-            'port': machine_a_tron_dhcp_server_port,
-            'targetPort': machine_a_tron_dhcp_server_port,
-            'protocol': 'UDP',
-        }],
-    },
-}
-k8s_yaml(encode_yaml(nico_dhcp_machine_a_tron_service))
-k8s_resource(
-    new_name='nico-dhcp-machine-a-tron',
-    objects=[object_selector(nico_dhcp_machine_a_tron_service)],
-    resource_deps=['nico-dhcp'],
-    labels=['application'],
-    pod_readiness='ignore',
-)
-
-machine_a_tron_dhcp_service_name = 'nico-machine-a-tron-%s-dhcp-relay' % machine_a_tron_dhcp_pod
-machine_a_tron_dhcp_service = {
-    'apiVersion': 'v1',
-    'kind': 'Service',
-    'metadata': object_metadata(machine_a_tron_dhcp_service_name, core_namespace),
-    'spec': {
-        'type': 'ClusterIP',
-        'clusterIP': machine_a_tron_dhcp_service_ip,
-        'selector': {
-            'app.kubernetes.io/name': 'nico-machine-a-tron',
-            'app.kubernetes.io/component': 'machine-a-tron',
-            'nvidia-infra-controller/pod-name': machine_a_tron_dhcp_pod,
-        },
-        'ports': [{
-            'name': 'dhcp-relay',
-            'port': machine_a_tron_dhcp_listen_port,
-            'targetPort': machine_a_tron_dhcp_listen_port,
-            'protocol': 'UDP',
-        }],
-    },
-}
-k8s_yaml(encode_yaml(machine_a_tron_dhcp_service))
-k8s_resource(
-    new_name='nico-machine-a-tron-dhcp-relay',
-    objects=[object_selector(machine_a_tron_dhcp_service)],
-    resource_deps=['nico-dhcp'],
-    labels=['application'],
-    pod_readiness='ignore',
-)
-
-machine_a_tron_ssh_service_name = 'nico-machine-a-tron-%s-ssh' % machine_a_tron_dhcp_pod
-# This headless Service only supplies stable pod DNS. ssh-console keeps the
-# per-machine port discovered through Redfish and connects directly to the pod.
-machine_a_tron_ssh_service = {
-    'apiVersion': 'v1',
-    'kind': 'Service',
-    'metadata': object_metadata(machine_a_tron_ssh_service_name, core_namespace),
-    'spec': {
-        'clusterIP': 'None',
-        'selector': {
-            'app.kubernetes.io/name': 'nico-machine-a-tron',
-            'app.kubernetes.io/component': 'machine-a-tron',
-            'nvidia-infra-controller/pod-name': machine_a_tron_dhcp_pod,
-        },
-    },
-}
-k8s_yaml(encode_yaml(machine_a_tron_ssh_service))
-k8s_resource(
-    new_name='nico-machine-a-tron-ssh',
-    objects=[object_selector(machine_a_tron_ssh_service)],
-    resource_deps=['nico-machine-a-tron'],
-    labels=['application'],
-    pod_readiness='ignore',
 )
 
 machine_a_tron_images = ['machine-a-tron', 'mat-k8s-controller']
@@ -1279,8 +877,7 @@ helm_chart(
     values=component_values(core_global, machine_a_tron_values),
     resource_deps=[
         'nico-api',
-        'nico-dhcp-machine-a-tron',
-        'nico-machine-a-tron-dhcp-relay',
+        'nico-dhcp',
     ],
     image_deps=machine_a_tron_images,
     image_keys=machine_a_tron_image_keys,
@@ -1298,7 +895,7 @@ helm_chart(
     values=ssh_console_values,
     resource_deps=[
         'nico-api',
-        'nico-machine-a-tron-ssh',
+        'nico-machine-a-tron',
     ],
     image_deps=['nico-ssh-console'],
     image_keys=[('global.image.repository', 'global.image.tag')],
@@ -1310,10 +907,8 @@ helm_chart(
     manual=True,
 )
 
-rest_values = tilt_values['rest']
 if enable_observability:
     configure_rest_tracing(rest_values, observability_namespace)
-rest_global = rest_values['global']
 rest_image_keys = [(
     'global.image.repository',
     'image.name',
@@ -1340,125 +935,96 @@ k8s_yaml(rest_db_yaml)
 k8s_resource(
     'nico-rest-db-migration-dev',
     new_name='nico-rest-db',
-    resource_deps=['rest-databases-ready'],
+    resource_deps=['rest-databases-ready', 'nico-rest-common'],
     trigger_mode=TRIGGER_MODE_MANUAL,
     labels=['application'],
     pod_readiness='wait',
 )
-helm_chart(
-    name='nico-rest-cert-manager',
-    chart=os.path.join(rest_charts, 'nico-rest/charts/nico-rest-cert-manager'),
-    namespace=rest_namespace,
-    values=component_values(rest_global, rest_values['certManager']),
-    resource_deps=['nico-local-config'],
-    image_deps=['localhost/nico-rest-cert-manager'],
-    image_keys=rest_image_keys,
-    manual=True,
-)
-helm_chart(
-    name='nico-rest-site-manager',
-    chart=os.path.join(rest_charts, 'nico-rest/charts/nico-rest-site-manager'),
-    namespace=rest_namespace,
-    values=component_values(rest_global, rest_values['siteManager']),
-    resource_deps=['nico-rest-cert-manager'],
-    image_deps=['localhost/nico-rest-site-manager'],
-    image_keys=rest_image_keys,
-    manual=True,
-)
-helm_chart(
-    name='nico-rest-api',
-    chart=os.path.join(rest_charts, 'nico-rest/charts/nico-rest-api'),
-    namespace=rest_namespace,
-    values=component_values(rest_global, rest_values['api']),
-    resource_deps=[
-        'keycloak',
-        'nico-rest-db',
-        'nico-rest-site-manager',
-        'rest-certificate-ready',
-        'temporal-namespaces',
-    ],
-    image_deps=['localhost/nico-rest-api'],
-    image_keys=rest_image_keys,
-    port_forwards=[port_forward(18388, 8388)],
-    manual=True,
-)
-helm_chart(
-    name='nico-rest-workflow',
-    chart=os.path.join(rest_charts, 'nico-rest/charts/nico-rest-workflow'),
-    namespace=rest_namespace,
-    values=component_values(rest_global, rest_values['workflow']),
-    resource_deps=[
-        'nico-rest-db',
-        'rest-certificate-ready',
-        'temporal-namespaces',
-    ],
-    image_deps=['localhost/nico-rest-workflow'],
-    image_keys=rest_image_keys,
-    manual=True,
-)
-helm_chart(
-    name='nico-rest-site-agent',
-    chart=os.path.join(rest_charts, 'nico-rest-site-agent'),
-    namespace=rest_namespace,
-    values=component_values(rest_global, rest_values['siteAgent']),
-    resource_deps=[
-        'nico-api',
-        'nico-rest-api',
-        'nico-rest-site-manager',
-        'nico-rest-workflow',
-    ],
-    image_deps=['localhost/nico-rest-site-agent'],
-    image_keys=rest_image_keys,
-    manual=True,
-    wait=False,
-)
-helm_chart(
-    name='nico-mcp',
-    chart=os.path.join(rest_charts, 'nico-mcp'),
-    namespace=rest_namespace,
-    values=component_values(rest_global, rest_values['mcp']),
-    resource_deps=['nico-rest-api'],
-    image_deps=['localhost/nico-mcp'],
-    image_keys=rest_image_keys,
-    port_forwards=[port_forward(18080, 8080)],
-    manual=True,
-)
-
-rest_integration_dependencies = ['nico-rest-site-agent']
-if enable_mcp:
-    rest_integration_dependencies.append('nico-mcp')
-
+for name, chart, settings, dependencies, ports in [
+    ('nico-rest-cert-manager', 'nico-rest/charts/nico-rest-cert-manager', 'certManager',
+     ['nico-local-config'], []),
+    ('nico-rest-site-manager', 'nico-rest/charts/nico-rest-site-manager', 'siteManager',
+     ['nico-rest-cert-manager'], []),
+    ('nico-rest-api', 'nico-rest/charts/nico-rest-api', 'api',
+     ['keycloak', 'nico-rest-db', 'nico-rest-site-manager', 'rest-certificate-ready', 'temporal-namespaces'], [port_forward(18388, 8388)]),
+    ('nico-rest-workflow', 'nico-rest/charts/nico-rest-workflow', 'workflow',
+     ['nico-rest-db', 'rest-certificate-ready', 'temporal-namespaces'], []),
+]:
+    helm_chart(
+        name=name, chart=os.path.join(rest_charts, chart), namespace=rest_namespace,
+        values=component_values(rest_global, rest_values[settings]),
+        resource_deps=dependencies, image_deps=['localhost/' + name],
+        image_keys=rest_image_keys, port_forwards=ports, manual=True,
+    )
+# Registration owns the mutable Secret; Helm consumes it without a second writer.
 local_resource(
     'rest-integration',
-    [setup_local, 'site-agent'],
+    [setup_local, 'register-site'],
     env={
+        'LOCAL_DEV_KUBE_CONTEXT': cluster_context,
         'NAMESPACE': rest_namespace,
         'API_URL': 'http://localhost:18388',
         'KEYCLOAK_URL': 'http://localhost:18082',
         'RESTART_API': '0',
     },
-    resource_deps=rest_integration_dependencies,
+    deps=[setup_local],
+    resource_deps=['nico-rest-api', 'nico-rest-site-manager', 'nico-rest-workflow'],
+    labels=['application'],
+)
+
+for name, chart, settings, dependencies, ports in [
+    ('nico-rest-site-agent', 'nico-rest-site-agent', 'siteAgent',
+     ['nico-api', 'nico-rest-api', 'nico-rest-site-manager', 'nico-rest-workflow', 'rest-integration'], []),
+    ('nico-mcp', 'nico-mcp', 'mcp',
+     ['nico-rest-api'], [port_forward(18080, 8080)]),
+]:
+    helm_chart(
+        name=name, chart=os.path.join(rest_charts, chart), namespace=rest_namespace,
+        values=component_values(rest_global, rest_values[settings]),
+        resource_deps=dependencies, image_deps=['localhost/' + name],
+        image_keys=rest_image_keys, port_forwards=ports, manual=True,
+    )
+
+# Pod readiness does not prove that simulated hosts are usable. Verify the same
+# inventory contract through the shared command after the selected stack starts.
+stack_verifier = os.path.join(repo_root, 'dev/deployment/verify-stack.py')
+stack_readiness_command = [
+    'python3', stack_verifier, '--context', cluster_context, '--core-namespace', core_namespace,
+    '--mat-service', 'nico-machine-a-tron-%s-bmc-mock' % machine_a_tron_dhcp_pod,
+]
+stack_readiness_dependencies = ['nico-machine-a-tron', 'nico-api']
+if enable_rest:
+    stack_readiness_command.extend(['--rest', '--rest-namespace', rest_namespace])
+    stack_readiness_dependencies.append('nico-rest-site-agent')
+    if enable_mcp:
+        stack_readiness_dependencies.append('nico-mcp')
+local_resource(
+    'stack-ready',
+    stack_readiness_command,
+    deps=[stack_verifier, os.path.join(repo_root, 'dev/deployment/core-admin.sh')],
+    resource_deps=stack_readiness_dependencies,
     labels=['application'],
 )
 
 enabled_resources = [
+    'stack-ready',
+    'vault-admin-ca',
     'repo-jetstack',
     'repo-cnpg',
     'repo-hashicorp',
     'cert-manager',
     'cnpg-operator',
     'vault',
-    'nico-local-config',
+    'nico-core-prereqs',
     'nico-postgres',
     'nico-api',
     'nico-bmc-proxy',
     'nico-dhcp',
-    'nico-dhcp-machine-a-tron',
-    'nico-machine-a-tron-dhcp-relay',
     'nico-machine-a-tron',
-    'nico-machine-a-tron-ssh',
     'nico-ssh-console-rs',
 ]
+if persistent_vault:
+    enabled_resources.append('vault-bootstrap')
 if enable_observability:
     enabled_resources.extend([
         'repo-grafana-community',
@@ -1476,15 +1042,15 @@ if enable_observability:
 if enable_rest:
     enabled_resources.extend([
         'nico-local-namespaces',
+        'nico-local-config',
         'rest-databases',
         'rest-databases-ready',
-        'temporal-certificates',
         'temporal-certificates-ready',
         'temporal',
         'temporal-ui',
         'temporal-namespaces',
         'keycloak',
-        'rest-certificate',
+        'nico-rest-common',
         'rest-certificate-ready',
         'nico-rest-db',
         'nico-rest-cert-manager',

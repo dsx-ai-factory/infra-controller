@@ -54,21 +54,52 @@ run_as_user() {
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "devspace.yaml").touch()
-            for present in (False, True):
-                with self.subTest(present=present):
-                    if present:
-                        helper = root / "dev/deployment/setup-kind.sh"
-                        helper.parent.mkdir(parents=True)
-                        helper.touch()
+            for missing in ('setup-kind.sh', 'install-tools.py', 'docker-host.sh', None):
+                with self.subTest(missing=missing):
+                    helper = root / 'dev/deployment'
+                    helper.mkdir(parents=True, exist_ok=True)
+                    for name in ('setup-kind.sh', 'install-tools.py', 'docker-host.sh'):
+                        path = helper / name
+                        if name == missing:
+                            path.unlink(missing_ok=True)
+                        else:
+                            path.touch()
                     result = subprocess.run(
                         ["bash", "-c", "set -euo pipefail\ndie() { echo \"$*\" >&2; exit 1; }\n"
                          + prepare + "\nprepare_checkout\n"],
                         env={**os.environ, "REPO_DIR": directory, "REPO_REF": ""},
                         capture_output=True, text=True, timeout=10,
                     )
-                    self.assertEqual(result.returncode == 0, present, result.stderr)
-                    if not present:
-                        self.assertIn("selected checkout lacks dev/deployment/setup-kind.sh", result.stderr)
+                    self.assertEqual(result.returncode == 0, missing is None, result.stderr)
+                    if missing:
+                        self.assertIn('selected checkout lacks dev/deployment/' + missing, result.stderr)
+
+    def test_standalone_script_clones_before_using_selected_checkout_tools(self):
+        source = SCRIPT.read_text()
+        main = source[source.index('main() {'):source.index('\nmain "$@"')]
+        installer = source[source.index('install_cli_tools() {'):source.index('\nconfigure_user_shell() {')]
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory) / 'selected checkout'
+            result = subprocess.run(['bash', '-c', 'set -euo pipefail\n' + installer + main + """
+log() { :; }
+install_host_packages() { :; }
+configure_docker() { :; }
+prepare_user_tool_directories() { :; }
+prepare_checkout() {
+  mkdir -p "$REPO_DIR/dev/deployment"
+  printf 'install_docker() { :; }\\n' > "$REPO_DIR/dev/deployment/docker-host.sh"
+  printf 'import sys; print("SELECTED_CHECKOUT", sys.argv[1:])\\n' > "$REPO_DIR/dev/deployment/install-tools.py"
+}
+run_as_user() { if [[ "$1" == python3 ]]; then "$@"; fi; }
+configure_user_shell() { :; }
+prepare_cluster() { :; }
+preload_postgres_image() { :; }
+show_summary() { :; }
+main
+"""], env={**os.environ, 'REPO_DIR': str(checkout), 'USER_HOME': directory, 'SKIP_DEPLOY': '1'}, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('SELECTED_CHECKOUT', result.stdout)
+            self.assertIn("'devspace', 'kind', 'kubectl', 'helm'", result.stdout)
 
     def test_invalid_cluster_name_fails_before_host_setup(self):
         for name in ("bad.name", "a" * 50):

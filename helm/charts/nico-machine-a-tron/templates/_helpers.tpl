@@ -143,16 +143,11 @@ true
 {{- end }}
 
 {{/*
-Get DHCP server address.
-Uses dhcpRelay.serverAddress if set, otherwise defaults to nico-dhcp.nico-system.
-Returns: "<host>:<port>"
+Get the explicit IPv4:port DHCP server address. MAT parses SocketAddrV4;
+a DNS fallback would render successfully but fail when the simulator starts.
 */}}
 {{- define "nico-machine-a-tron.dhcpServerAddress" -}}
-{{- if and .Values.dhcpRelay .Values.dhcpRelay.serverAddress -}}
-{{- .Values.dhcpRelay.serverAddress -}}
-{{- else -}}
-{{- print "nico-dhcp.nico-system.svc.cluster.local:67" -}}
-{{- end -}}
+{{- required "MAT DHCP relay requires dhcpRelay.serverAddress (IPv4:port)" .Values.dhcpRelay.serverAddress -}}
 {{- end }}
 
 {{/*

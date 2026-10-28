@@ -111,7 +111,7 @@ configure_kind_node_tls
             self.assertEqual(calls.read_text().count("systemctl restart containerd"), 1)
 
     def test_docker_configuration_only_restarts_changed_running_services(self):
-        script = (SCRIPT_DIR / "setup-devspace-on-host.sh").read_text()
+        script = (SCRIPT_DIR.parent / "docker-host.sh").read_text()
         function = script.split("configure_docker() {", 1)[1].split("\n}\n", 1)[0]
         config = '[Service]\nEnvironment="GODEBUG=tlsmlkem=0"\n'
         for active, existing, restarted in (

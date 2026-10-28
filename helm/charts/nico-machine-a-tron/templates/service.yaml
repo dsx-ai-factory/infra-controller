@@ -57,6 +57,21 @@ spec:
       targetPort: ssh
       protocol: TCP
     {{- end }}
+{{- if and $root.Values.service.ssh.headless $root.Values.machineATron.mockBmcSshServer }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-ssh
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "nico-machine-a-tron.labels" $root | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "nico-machine-a-tron.selectorLabels" $root | nindent 4 }}
+    nvidia-infra-controller/pod-name: {{ $podName | quote }}
+{{- end }}
 {{- if $dhcpRelayEnabled }}
 {{- $dhcpRelay := $root.Values.dhcpRelay }}
 {{- $relayIP := include "nico-machine-a-tron.dhcpRelayIP" (dict "baseIP" $dhcpRelay.baseIP "podIndex" $podIndex) }}
