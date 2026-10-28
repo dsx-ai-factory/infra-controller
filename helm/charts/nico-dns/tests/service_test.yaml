@@ -14,11 +14,13 @@ tests:
           path: spec.ports
           content:
             port: 53
+            targetPort: 53
             name: tcp
             protocol: TCP
       - contains:
           path: spec.ports
           content:
             port: 53
+            targetPort: 53
             name: udp
             protocol: UDP
