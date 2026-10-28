@@ -106,6 +106,9 @@ pub enum HealthError {
     #[error("BMC error: {0}")]
     BmcError(#[from] Box<dyn std::error::Error + Send + Sync>),
 
+    #[error("BMC {0} is unreachable; request skipped while the connection circuit breaker is open")]
+    BmcCircuitOpen(std::net::IpAddr),
+
     #[error("HTTP(S) error: {0}")]
     HttpError(String),
 

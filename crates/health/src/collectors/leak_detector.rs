@@ -24,7 +24,7 @@ use nv_redfish::resource::State;
 use nv_redfish::schema::leak_detector::{DetectorState, LeakDetector};
 
 use crate::HealthError;
-use crate::bmc::CollectorSweep;
+use crate::bmc::is_connection_bmc_source_error;
 use crate::collectors::{IterationResult, PeriodicCollector};
 use crate::endpoint::BmcEndpoint;
 use crate::sink::{
@@ -39,7 +39,6 @@ pub struct LeakDetectorCollectorConfig {
 
 pub struct LeakDetectorCollector<B: Bmc> {
     bmc: Arc<B>,
-    endpoint: Arc<BmcEndpoint>,
     event_context: EventContext,
     state: Option<LeakDetectorCollectorState>,
     data_sink: Option<Arc<dyn DataSink>>,
@@ -67,7 +66,6 @@ where
             EventContext::from_endpoint(endpoint.as_ref(), "leak_detector_collector");
         Ok(Self {
             bmc,
-            endpoint,
             event_context,
             state: None,
             data_sink: config.data_sink,
@@ -199,7 +197,7 @@ where
 
     /// Fetches every discovered detector, returning the ones that could be read,
     /// the ids and errors of the ones that could not, and how many of those
-    /// failed with the BMC connection circuit open.
+    /// failed because the BMC was unreachable.
     ///
     /// A detector the BMC serves in a shape this client cannot decode costs its
     /// own leak reporting instead of every other detector on the endpoint. It is
@@ -220,8 +218,7 @@ where
             match self.bmc.get::<LeakDetector>(detector_id).await {
                 Ok(detector) => detectors.push(detector),
                 Err(error) => {
-                    // A read the BMC answered, like a decode failure, leaves it closed.
-                    if self.endpoint.bmc.collector_sweep() != CollectorSweep::Full {
+                    if is_connection_bmc_source_error(&error) {
                         connection_failures += 1;
                     }
                     tracing::warn!(?error, detector = %detector_id, "Failed to fetch leak detector");
@@ -304,10 +301,10 @@ fn build_health_report(
     }
 }
 
-/// Whether to publish a pass's report. A pass whose only failures happened with
-/// the BMC connection circuit open keeps the previous report unless it read a
-/// leak. Any other failure publishes it, unreachable detectors included, so the
-/// report cannot clear a leak on them.
+/// Whether to publish a pass's report. A pass whose only failures were the BMC
+/// being unreachable keeps the previous report unless it read a leak. Any other
+/// failure publishes it, unreachable detectors included, so the report cannot
+/// clear a leak on them.
 fn should_publish(
     report: &HealthReport,
     fetch_failures: usize,

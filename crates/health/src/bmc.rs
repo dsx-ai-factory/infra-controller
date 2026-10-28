@@ -876,10 +876,7 @@ impl BmcClient {
     }
 
     fn circuit_open_error(&self) -> HealthError {
-        HealthError::GenericError(format!(
-            "BMC {} is unreachable; request skipped while the connection circuit breaker is open",
-            self.addr.ip
-        ))
+        HealthError::BmcCircuitOpen(self.addr.ip)
     }
 
     /// Seed the circuit state and its fast-path hint coherently. Tests use this
@@ -1779,17 +1776,19 @@ fn is_auth_bmc_error(error: &BmcError) -> bool {
 }
 
 /// Whether an error represents the BMC being unreachable at the transport layer
-/// (TCP connect refused/timed out, or a request that timed out) — as opposed to
-/// the BMC answering with an error. Only these trip the connection circuit
-/// breaker; an HTTP 404 or a decode error means the BMC is alive and talking.
+/// (TCP connect refused/timed out, a request that timed out, or one skipped
+/// while the circuit is open) — as opposed to the BMC answering with an error.
+/// Only these trip the connection circuit breaker; an HTTP 404 or a decode
+/// error means the BMC is alive and talking.
 pub(crate) fn is_connection_error(error: &HealthError) -> bool {
     match error {
         HealthError::BmcError(inner) => is_connection_bmc_source_error(inner.as_ref()),
+        HealthError::BmcCircuitOpen(_) => true,
         _ => false,
     }
 }
 
-fn is_connection_bmc_source_error(error: &(dyn std::error::Error + 'static)) -> bool {
+pub(crate) fn is_connection_bmc_source_error(error: &(dyn std::error::Error + 'static)) -> bool {
     error
         .downcast_ref::<BmcError>()
         .is_some_and(is_connection_bmc_error)
@@ -2249,8 +2248,10 @@ mod tests {
         client.trip_circuit(&dummy_error());
         assert_eq!(client.collector_sweep(), CollectorSweep::Skip);
         assert!(
-            client.check_circuit().is_err(),
-            "open circuit must fast-fail"
+            client
+                .check_circuit()
+                .is_err_and(|error| is_connection_error(&error)),
+            "open circuit must fast-fail with a connection error"
         );
 
         // A success closes it again.
