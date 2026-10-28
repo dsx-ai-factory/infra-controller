@@ -202,7 +202,7 @@ struct BmcIdentity {
     model: Option<String>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct BmcLatencyEndpointLabels {
     pub(crate) machine_id: Option<String>,
     pub(crate) rack_id: Option<String>,

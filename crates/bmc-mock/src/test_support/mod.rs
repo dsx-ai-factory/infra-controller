@@ -449,6 +449,21 @@ pub async fn generic_supermicro_bmc_with_callbacks<C: Callbacks>(
     .await
 }
 
+/// Builds a LiteOn power shelf router that enforces Redfish authentication,
+/// as `bmc-mock --redfish-auth` does. Power shelves accept their factory-default
+/// password, [`crate::DUMMY_FACTORY_PASSWORD`] for [`crate::DUMMY_FACTORY_USERNAME`];
+/// rotate it with `state.account_service_state.change_factory_default_password`.
+/// Serve the router with [`serve_https`].
+pub fn liteon_powershelf_router_with_auth() -> (Router, BmcState<TestCallbacks>) {
+    create_test_bmc(
+        &host_info(HardwareType::LiteOnPowerShelf),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        true,
+        MachineRouterOptions::default(),
+    )
+}
+
 pub async fn liteon_powershelf_bmc() -> TestBmcHandle {
     test_bmc(create_test_bmc(
         &host_info(HardwareType::LiteOnPowerShelf),
