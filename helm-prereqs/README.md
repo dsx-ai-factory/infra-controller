@@ -26,6 +26,108 @@ export NICO_DPF_DPU_CLUSTER_VIP=<free-routable-ip>    # DPU cluster control-plan
 > required `NICO_DPF_*` vars above must be set unless you pass `--skip-dpf`. See
 > [DPF](#dpf) and [DPF images and registries](#dpf-images-and-registries).
 
+## Local Core prerequisites
+
+The [local development values](values/local-development.yaml) reuse this chart
+for Core's CA, Issuer, SSH host key, Vault Secrets and connection ConfigMaps.
+They do not install operators, configure Vault, create databases, or register a
+REST site. Cert-manager and a namespace must exist before installation; Helm's
+`--create-namespace` can create the release namespace. Vault and PostgreSQL must
+be configured separately at the endpoints in that values file.
+
+From the repository root, with the development cluster's kubeconfig selected:
+
+```bash
+helm upgrade --install nico-core-prereqs helm-prereqs \
+  --namespace nico-system --create-namespace --wait --timeout 5m \
+  --values helm-prereqs/values/local-development.yaml \
+  --set-file certManager.localCA.certificate=dev/certs/localhost/ca.crt \
+  --set-file certManager.localCA.privateKey=dev/certs/localhost/ca.key \
+  --set-file sshHostKey.privateKey=crates/ssh-console/tests/fixtures/ssh_host_ed25519_key \
+  --set-file sshHostKey.publicKey=crates/ssh-console/tests/fixtures/ssh_host_ed25519_key.pub
+```
+
+These repository fixtures and the profile's Vault root token are public local
+development credentials. Supply your own files and token outside an isolated
+development cluster. Helm stores supplied values in its release Secret.
+
+`certManager.localCA.enabled` defaults to `false`. When enabled, both
+`certificate` and `privateKey` must be supplied as PEM strings; neither is
+generated. The chart creates `nico-local-ca`, `nico-roots` and the namespaced
+`local-ca-issuer`. It rejects `externalSecrets.enabled=true` or
+`certManager.siteRoot.create=true`, which would introduce competing CA/trust
+owners. The profile also disables Vault PKI/bootstrap jobs and the Vault Issuer.
+It preserves the supplied CA on repeated installs; changing the supplied files
+changes the rendered Secret data and requires coordinating certificate renewal.
+
+`sshHostKey.create` defaults to `true`. Optional `privateKey` and `publicKey`
+strings default to empty. An explicit private key overrides the existing Secret;
+without it the chart reuses the existing private key, or generates one if absent.
+The console requires OpenSSH format, so this profile's command supplies the
+existing OpenSSH fixture. `publicKey` is written as provided, including empty;
+the console derives its public key from the private key. Keep the same inputs on
+upgrades to preserve host identity. Key-format and CA/key-pair validation remain
+the consuming services' responsibility.
+
+`createNamespace` defaults to `true`; the managed namespace has a Helm `keep`
+policy. The local profile sets it to `false` because the namespace is created
+separately. The chart then neither owns nor deletes it. Do not toggle ownership
+on an existing deployment without a planned migration.
+
+`postgresql.host`, `port` and `database` populate Core's connection ConfigMap.
+The latter two default to `5432` and `nico_system_nico`. Different ports or
+database names require `postgresql.enabled=false`; this configures the connection
+but does not provision an external database or its credentials. The local
+profile uses the separately deployed CloudNativePG database.
+
+Use a fresh development cluster when switching from Tilt-created prerequisite
+objects: Helm rejects existing objects owned outside this release. No automatic
+adoption is performed. Uninstalling this release removes its Secrets, Issuer and
+ConfigMaps and interrupts dependent services; it does not remove the external
+namespace, Vault, PostgreSQL or their data.
+
+## Local REST trust
+
+`certManager.localCA.rest.enabled` defaults to `false`. Set it to `true` only
+with `certManager.localCA.enabled=true` and its explicit PEM `certificate` and
+`privateKey` inputs. The existing local-CA exclusions still apply:
+`externalSecrets.enabled=false` and `certManager.siteRoot.create=false`.
+This option adds two `ca-signing-secret` TLS Secrets, one ClusterIssuer and
+three Temporal server Certificates to the same prerequisite release. It creates
+no namespaces, workloads, databases or site registration.
+
+The optional namespace and issuer settings are nonempty strings:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `certManagerNamespace` | `cert-manager` | The controller's cluster-resource namespace, where the ClusterIssuer reads its CA Secret. Match the controller's configuration. |
+| `certManager.localCA.rest.namespace` | `nico-rest` | REST signing service's copy of the CA Secret. |
+| `certManager.localCA.rest.temporalNamespace` | `temporal` | Namespace for the three Temporal Certificates and their DNS SANs. |
+| `certManager.localCA.rest.issuerName` | `nico-rest-ca-issuer` | ClusterIssuer name; REST client certificate issuer references must match. |
+
+All selected namespaces and cert-manager must exist first. If the REST and
+controller namespaces are equal, the chart creates only one copy of the CA
+Secret. Fixed Certificate names `server-interservice-cert`, `server-cloud-cert`
+and `server-site-cert` produce Secrets named `server-interservice-certs`,
+`server-cloud-certs` and `server-site-certs`, respectively. They preserve the
+local Temporal TLS identities and service names, use RSA-2048 keys, last 2160
+hours and renew 360 hours before expiry. Service DNS SANs follow the configured
+Temporal namespace with the `cluster.local` DNS suffix; the logical names
+`interservice.server.temporal.local`, `cloud.server.temporal.local` and
+`site.server.temporal.local` remain fixed. Temporal must mount those Secrets and
+wait for Certificate readiness before starting. Helm's resource installation
+completion alone does not establish certificate issuance.
+
+The chart is the sole owner of these objects. Existing objects from the local
+setup script or Kustomize are not adopted; use a fresh development cluster for
+this ownership change. Upgrades preserve the supplied CA inputs; no CA is
+generated. Changing the CA requires coordinating certificate renewal and trust
+with all consumers. Disabling this option or uninstalling the release removes
+its REST trust resources and interrupts dependent consumers. Preserve the CA
+inputs before removal and reuse them when restoring retained data. Cert-manager
+owns generated certificate Secrets; their deletion follows its controller's
+certificate owner-reference configuration.
+
 ## Documentation
 
 For complete step-by-step deployment instructions, see the **[Quick Start Guide](https://docs.nvidia.com/infra-controller/documentation/getting-started/quick-start-guide)** in the NICo documentation site. The Quick Start Guide covers:

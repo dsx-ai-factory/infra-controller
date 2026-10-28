@@ -23,6 +23,31 @@ Helm charts for deploying the NICo REST API platform services.
 > `nico-rest-common` creates the secrets (`db-creds`, `temporal-encryption-key`, `image-pull-secret`,
 > `keycloak-client-secret`) and the `temporal-client-cloud-cert` Certificate as part of the Helm install.
 
+### Installing common resources separately
+
+`nico-rest-common.secrets.migrationHooks` defaults to `true` in the umbrella
+chart (`secrets.migrationHooks` when installing the common chart directly).
+It makes `db-creds` and `image-pull-secret` pre-install/pre-upgrade hooks at
+weight `-10`, before the database migration hook at `-5`. Hooks use
+`before-hook-creation`, so upgrades recreate these two Secrets. Choose the hook
+mode at initial installation; changing it on an existing release is unsupported
+because Helm does not safely transfer objects between hook and ordinary ownership.
+
+Set this boolean to `false` only when the common chart is installed as a
+separate prerequisite release **before** installing or upgrading migrations and
+services. All four Secrets then have ordinary Helm ownership: upgrades update
+them in place and uninstall removes them. Disable `nico-rest-common.enabled`
+in any subsequent umbrella installation to avoid competing releases. With
+`secrets.create=false`, neither hook mode creates Secrets; pre-create the required
+Secrets yourself. The Certificate is still rendered.
+
+The separate release requires `global.certificate.issuerRef` and an existing
+issuer. Supply credentials matching the database and authentication services.
+An explicit `secrets.temporalEncryptionKey.value` overrides an existing key;
+omitting it reuses an existing key, generates one on a fresh install, or fails
+an upgrade without an existing key. Preserve that key with the database when
+removing or restoring a deployment: a new key cannot decrypt existing payloads.
+
 ## Prerequisites
 
 The following must be running before installing charts:
@@ -113,7 +138,8 @@ helm upgrade --install nico-rest nico-rest/ \
 
 ### Site Agent (deployed separately per-site)
 
-Site agent requires a registered site (UUID + OTP). The chart must be installed first, then bootstrapped:
+The Site Agent requires a registered site (UUID + OTP). With the default
+ConfigMap identity path, install the chart first, then bootstrap it:
 
 ```bash
 # 1. Install chart
@@ -160,5 +186,12 @@ global:
 ### Site Agent Chart (`nico-rest-site-agent`)
 
 Standalone chart with its own `global` section (same structure as above).
+
+Alternatively, set `siteIdentityFromRegistrationSecret: true` to read `CLUSTER_ID`
+and `TEMPORAL_SUBSCRIBE_NAMESPACE` from the `site-uuid` key of
+`secrets.siteRegistration`. Register the site before installing the workload;
+this mode requires `bootstrap.enabled: false`. See the
+[shared local registration workflow](../../dev/deployment/tilt/README.md#site-registration)
+for the command, precedence, prerequisites and recovery contract.
 
 See each chart's `values.yaml` for full configuration options.

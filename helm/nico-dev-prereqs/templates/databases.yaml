@@ -1,0 +1,34 @@
+{{- if .Values.localConfig.database }}
+{{- range $component := list "rest" "keycloak" "temporal" }}
+{{- $database := required (printf "localConfig.database.%s is required" $component) (index $.Values.localConfig.database $component) }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: {{ $database.resourceName | quote }}
+  namespace: {{ $.Values.coreNamespace | quote }}
+spec:
+  name: {{ $database.name | quote }}
+  owner: {{ $database.user | quote }}
+  cluster:
+    name: {{ $.Values.clusterName | quote }}
+  {{- if eq $component "rest" }}
+  extensions:
+    - name: pg_trgm
+      ensure: present
+  {{- end }}
+{{- if eq $component "temporal" }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: {{ $database.visibilityResourceName | quote }}
+  namespace: {{ $.Values.coreNamespace | quote }}
+spec:
+  name: {{ $database.visibilityName | quote }}
+  owner: {{ $database.user | quote }}
+  cluster:
+    name: {{ $.Values.clusterName | quote }}
+{{- end }}
+{{- end }}
+{{- end }}

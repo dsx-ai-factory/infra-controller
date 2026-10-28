@@ -10,3 +10,6 @@ rest/
 # nico-flow is likewise a standalone release (setup.sh phase 7h), not an
 # umbrella subchart - keep it out of the packaged nico chart.
 nico-flow/
+# Local development Keycloak is a separate release, not an umbrella subchart.
+nico-dev-keycloak/
+nico-dev-prereqs/

@@ -9,11 +9,6 @@
 
 set -euo pipefail
 
-DEVSPACE_VERSION="v6.3.21"
-KIND_VERSION="v0.32.0"
-KUBECTL_VERSION="v1.36.3"
-HELM_VERSION="v3.21.3"
-
 DEV_USER=""
 REPO_DIR=""
 REPO_URL="https://github.com/NVIDIA/infra-controller.git"
@@ -66,7 +61,9 @@ Options:
                        ~/infra-controller.
   --repo-url URL       Repository to clone if --repo-dir does not exist.
   --repo-ref REF       Branch, tag, or commit to check out after cloning.
-                       Must include dev/deployment/setup-kind.sh.
+                       Must include dev/deployment/setup-kind.sh and
+                       dev/deployment/install-tools.py and docker-host.sh.
+                       The Docker helper runs as root; select a trusted ref.
   --cluster-name NAME  Lowercase DNS label, 1-49 characters. Default: nico-dev.
   --profile PROFILE    Single DevSpace profile to deploy. Default: full.
                        Must exist in the checkout; no fallback if unavailable.
@@ -178,12 +175,7 @@ USER_GROUP="$(id -gn "${DEV_USER}")"
 [[ -n "${USER_HOME}" ]] || die "could not determine home for ${DEV_USER}"
 
 case "$(uname -m)" in
-  x86_64)
-    DOWNLOAD_ARCH="amd64"
-    ;;
-  aarch64|arm64)
-    DOWNLOAD_ARCH="arm64"
-    ;;
+  x86_64|aarch64|arm64) ;;
   *)
     die "unsupported CPU architecture: $(uname -m)"
     ;;
@@ -237,6 +229,7 @@ prepare_user_tool_directories() {
     "${USER_HOME}/.cache" \
     "${USER_HOME}/.cache/helm" \
     "${USER_HOME}/.local" \
+    "${USER_HOME}/.local/bin" \
     "${USER_HOME}/.local/share" \
     "${USER_HOME}/.local/share/helm"; do
     ensure_user_directory "${directory}"
@@ -252,141 +245,19 @@ install_host_packages() {
     git \
     jq \
     openssh-client \
+    python3 \
     rsync
 
-  if command -v docker >/dev/null 2>&1 && \
-    command -v containerd >/dev/null 2>&1 && \
-    docker buildx version >/dev/null 2>&1; then
-    return
-  fi
-
-  log "Installing Docker CE"
-  install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-    -o /etc/apt/keyrings/docker.asc
-  chmod a+r /etc/apt/keyrings/docker.asc
-
-  cat >/etc/apt/sources.list.d/docker.sources <<EOF
-Types: deb
-URIs: https://download.docker.com/linux/ubuntu
-Suites: ${VERSION_CODENAME}
-Components: stable
-Architectures: $(dpkg --print-architecture)
-Signed-By: /etc/apt/keyrings/docker.asc
-EOF
-
-  apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    containerd.io \
-    docker-buildx-plugin \
-    docker-ce \
-    docker-ce-cli \
-    docker-compose-plugin
 }
 
-configure_docker() {
-  log "Configuring Docker access and registry TLS compatibility"
-
-  local service config
-  local config_changed=0
-  local restart_services=()
-  for service in containerd docker; do
-    config="/etc/systemd/system/${service}.service.d/10-tls-compat.conf"
-    if ! cmp -s "${config}" <(printf '[Service]\nEnvironment="GODEBUG=tlsmlkem=0"\n'); then
-      install -m 0755 -d "$(dirname "${config}")"
-      cat >"${config}" <<'EOF'
-[Service]
-Environment="GODEBUG=tlsmlkem=0"
-EOF
-      config_changed=1
-      if systemctl is-active --quiet "${service}.service"; then
-        restart_services+=("${service}.service")
-      fi
-    fi
-  done
-
-  usermod -aG docker "${DEV_USER}"
-  if [[ "${config_changed}" == 1 ]]; then
-    systemctl daemon-reload
-  fi
-  systemctl enable --now containerd.service docker.service
-  # Repeated deploys must not restart kind or discard the development Vault.
-  if ((${#restart_services[@]})); then
-    systemctl restart "${restart_services[@]}"
-  fi
-
-  local _attempt
-  for _attempt in {1..30}; do
-    if docker info >/dev/null 2>&1; then
-      break
-    fi
-    sleep 1
-  done
-  docker info >/dev/null 2>&1 || die "Docker did not become ready"
-  run_as_user docker info >/dev/null 2>&1 || \
-    die "${DEV_USER} cannot access Docker after being added to the docker group"
-}
-
-verify_checksum_file() {
-  local artifact="$1"
-  local checksum_file="$2"
-  local expected actual
-  expected="$(awk '{print $1; exit}' "${checksum_file}")"
-  actual="$(sha256sum "${artifact}" | awk '{print $1}')"
-  [[ "${actual}" == "${expected}" ]] || die "checksum failed for ${artifact}"
-}
-
-install_cli_tools() (
-  log "Installing pinned DevSpace, kind, kubectl, and Helm binaries"
-  local install_dir="${USER_HOME}/.local/bin"
-  local work_dir
-  local devspace_binary="devspace-linux-${DOWNLOAD_ARCH}"
-  local kind_binary="kind-linux-${DOWNLOAD_ARCH}"
-  work_dir="$(mktemp -d)"
-  trap 'rm -rf -- "${work_dir}"' EXIT
-  install -o "${DEV_USER}" -g "${USER_GROUP}" -m 0755 -d "${install_dir}"
-
-  pushd "${work_dir}" >/dev/null
-
-  curl -fsSLO \
-    "https://github.com/loft-sh/devspace/releases/download/${DEVSPACE_VERSION}/${devspace_binary}"
-  curl -fsSLO \
-    "https://github.com/loft-sh/devspace/releases/download/${DEVSPACE_VERSION}/${devspace_binary}.sha256"
-  verify_checksum_file "${devspace_binary}" "${devspace_binary}.sha256"
-  install -o "${DEV_USER}" -g "${USER_GROUP}" -m 0755 \
-    "${devspace_binary}" "${install_dir}/devspace"
-
-  curl -fsSLO \
-    "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/${kind_binary}"
-  curl -fsSLO \
-    "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/${kind_binary}.sha256sum"
-  verify_checksum_file "${kind_binary}" "${kind_binary}.sha256sum"
-  install -o "${DEV_USER}" -g "${USER_GROUP}" -m 0755 \
-    "${kind_binary}" "${install_dir}/kind"
-
-  curl -fsSLO \
-    "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${DOWNLOAD_ARCH}/kubectl"
-  curl -fsSLO \
-    "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${DOWNLOAD_ARCH}/kubectl.sha256"
-  printf '%s  %s\n' "$(cat kubectl.sha256)" kubectl | sha256sum --check
-  install -o "${DEV_USER}" -g "${USER_GROUP}" -m 0755 \
-    kubectl "${install_dir}/kubectl"
-
-  local helm_archive="helm-${HELM_VERSION}-linux-${DOWNLOAD_ARCH}.tar.gz"
-  curl -fsSLO "https://get.helm.sh/${helm_archive}"
-  curl -fsSLO "https://get.helm.sh/${helm_archive}.sha256sum"
-  verify_checksum_file "${helm_archive}" "${helm_archive}.sha256sum"
-  tar -xzf "${helm_archive}"
-  install -o "${DEV_USER}" -g "${USER_GROUP}" -m 0755 \
-    "linux-${DOWNLOAD_ARCH}/helm" "${install_dir}/helm"
-
-  popd >/dev/null
-
+install_cli_tools() {
+  log "Installing pinned native deployment tools"
+  run_as_user python3 "${REPO_DIR}/dev/deployment/install-tools.py" --bin-dir "${USER_HOME}/.local/bin" devspace kind kubectl helm
   run_as_user devspace version
   run_as_user kind version
   run_as_user kubectl version --client
   run_as_user helm version --short
-)
+}
 
 configure_user_shell() {
   local login_shell marker end_marker rc_file candidate
@@ -444,6 +315,10 @@ prepare_checkout() {
   fi
   [[ -f "${REPO_DIR}/dev/deployment/setup-kind.sh" ]] ||
     die "selected checkout lacks dev/deployment/setup-kind.sh; choose a revision containing the shared cluster bootstrap"
+  [[ -f "${REPO_DIR}/dev/deployment/install-tools.py" ]] ||
+    die "selected checkout lacks dev/deployment/install-tools.py; choose a revision containing the shared tool installer"
+  [[ -f "${REPO_DIR}/dev/deployment/docker-host.sh" ]] ||
+    die "selected checkout lacks dev/deployment/docker-host.sh; choose a revision containing the shared Docker bootstrap"
 }
 
 configure_kind_node_tls() {
@@ -640,11 +515,14 @@ EOF
 
 main() {
   install_host_packages
-  configure_docker
   prepare_user_tool_directories
+  prepare_checkout
+  # shellcheck source=../docker-host.sh
+  source "${REPO_DIR}/dev/deployment/docker-host.sh"
+  install_docker
+  configure_docker
   install_cli_tools
   configure_user_shell
-  prepare_checkout
   prepare_cluster
   preload_postgres_image
 

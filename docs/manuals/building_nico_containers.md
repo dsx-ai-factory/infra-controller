@@ -40,7 +40,7 @@ Optional Make variables can be supplied as `NAME=value` arguments:
 
 | Variable | Default | Contract |
 | --- | --- | --- |
-| `DEV_TARGET` | `api` | Exactly one of `api`, `bmc-proxy`, `dhcp`, `machine-a-tron`, `ssh-console`, `mat-protocol-gateway`, or `nico-postgres-exporter`. Other values are rejected. |
+| `DEV_TARGET` | `api` | Exactly one of `api`, `pxe`, `bmc-proxy`, `dhcp`, `machine-a-tron`, `ssh-console`, `mat-protocol-gateway`, or `nico-postgres-exporter`. Other values are rejected. |
 | `IMAGE_TAG` | `latest` | Docker tag used in the default image references below. |
 | `DEV_IMAGE` | `nico-dev-$(DEV_TARGET):$(IMAGE_TAG)` | Docker image reference for the selected service output. |
 | `DEV_BUILD_CONTAINER` | `nico-dev-build:$(IMAGE_TAG)` | Docker image reference built for the compiler stage and passed to the service build as `CONTAINER_BUILD`. |
@@ -57,7 +57,11 @@ defaults to `dev/docker/kea.version`. Both architectures install the hook at
 `/usr/lib/kea/hooks/libdhcp.so`; configure that path when deploying the image
 outside Tilt. Building the DHCPv6 binary does not enable IPv6 in a deployment.
 The DHCP image also includes `iproute2` and `curl` for the chart's IPv6 address
-selection and startup/readiness checks.
+selection and startup/readiness checks. If the selected build image supplies
+`/opt/kea/kea-common.deb`, the DHCP runtime installs that package after checking
+its package name, pinned Kea version and native architecture. An invalid supplied
+package fails the build; absence retains the distribution library. IPv6 lease-handoff fixes are provided separately by
+[the DHCPv6 prerequisite](https://github.com/dsx-ai-factory/infra-controller/pull/7934).
 
 After building the DHCP image, check its packaged tools and hook loading:
 
@@ -65,8 +69,13 @@ After building the DHCP image, check its packaged tools and hook loading:
 dev/docker/tests/smoke_dhcp_image.sh nico-dev-dhcp:latest
 ```
 
-The script requires exactly one image reference, available in the selected Docker
-daemon; use the value of `DEV_IMAGE` if overridden. Missing or extra arguments
+The script requires an image reference available in the selected Docker daemon;
+use the value of `DEV_IMAGE` if overridden. An optional second argument names a
+local `kea-common.deb` file. It is copied from the client into the temporary container, including with a remote
+Docker context, and must match the installed
+package name, version and native architecture; every packaged `libkea*.so*`
+regular file must match the runtime bytes. A missing file or mismatch fails.
+Omitting the package skips those comparisons. Zero or more than two arguments
 print usage and exit with status 2. It runs a temporary container with
 `--network none`, enables IPv6 loopback inside that container's network namespace,
 checks `ip`, `ss` and `curl`, and starts each real Kea server with the NICo hook.

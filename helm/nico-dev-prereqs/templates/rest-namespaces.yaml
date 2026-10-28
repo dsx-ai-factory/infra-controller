@@ -1,0 +1,7 @@
+{{- range list .Values.localConfig.restNamespace .Values.localConfig.temporalNamespace }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ . | quote }}
+{{- end }}
