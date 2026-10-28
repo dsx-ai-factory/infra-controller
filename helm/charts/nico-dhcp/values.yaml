@@ -38,10 +38,13 @@ replicas: 1
 ##   containerSecurityContext:
 ##     capabilities:
 ##       add: [NET_BIND_SERVICE]
-## Set the value to null only on clusters (e.g. vanilla Kubernetes with
-## NET_BIND_SERVICE in the default capability set) where privileged ports
-## are already bindable without it; the baseline is still applied:
-##   containerSecurityContext: null
+## Kea cannot move off UDP port 67, so on OpenShift it is the documented
+## exception: it needs NET_BIND_SERVICE and a compatible SCC. See
+## helm-prereqs/values/nico-core-openshift.yaml (nico-dhcp section) for the
+## tested override; every other Core service drops its capability with
+##   containerSecurityContext:
+##     capabilities:
+##       add: []
 containerSecurityContext:
   capabilities:
     add:

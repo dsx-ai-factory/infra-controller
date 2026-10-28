@@ -37,9 +37,13 @@ podSecurityContext: {}
 ## Container-level security context, rendered after the always-applied
 ## `allowPrivilegeEscalation: false` baseline (chart-managed; an
 ## allowPrivilegeEscalation key set here is ignored). The chart default adds IPC_LOCK.
-## OpenShift's restricted Security Context Constraints (SCC) do not permit it, so
-## set the value to null there; the baseline is still applied:
-##   containerSecurityContext: null
+## OpenShift's restricted Security Context Constraints (SCC) do not permit it.
+## Drop it with a non-null empty list — list replacement is stable under
+## Helm's value coalescing, unlike a top-level null:
+##   containerSecurityContext:
+##     capabilities:
+##       add: []
+## See helm-prereqs/values/nico-core-openshift.yaml for a full working example.
 containerSecurityContext:
   capabilities:
     add:

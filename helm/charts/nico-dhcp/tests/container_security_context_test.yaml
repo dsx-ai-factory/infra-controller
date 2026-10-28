@@ -19,3 +19,26 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].securityContext.runAsNonRoot
           value: true
+
+  - it: drops the capability when the value is nulled (OpenShift opt-out)
+    set:
+      containerSecurityContext: null
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].securityContext.capabilities
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+
+  - it: drops the capability with a non-null empty add list
+    set:
+      containerSecurityContext:
+        capabilities:
+          add: []
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add
+          value: []
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
