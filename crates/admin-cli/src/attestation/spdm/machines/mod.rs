@@ -9,6 +9,6 @@ use crate::cfg::dispatch::Dispatch;
 
 #[derive(Dispatch, Parser, Debug)]
 pub(crate) enum Cmd {
-    #[clap(about = "List predicted machine attestation statuses")]
+    #[clap(about = "List machine attestation statuses")]
     List(list::Args),
 }

@@ -27,8 +27,11 @@ pub(in crate::tests) mod tests {
     use model::attestation::spdm::{SpdmAttestationState, SpdmObjectId};
     use model::controller_outcome::PersistentStateHandlerOutcome;
     use rpc::forge::forge_server::Forge;
+    use rpc::forge::list_machine_attestation_statuses_request::Target;
     use rpc::forge::{
-        SpdmAttestationJobStatus, SpdmListAttestationRequest, SpdmListAttestationRequestSelector,
+        ListMachineAttestationStatusesRequest, SpdmAttestationJobStatus, SpdmAttestationStatus,
+        SpdmAttesterSelectionStatus, SpdmListAttestationRequest,
+        SpdmListAttestationRequestSelector, SpdmMachineAttestationMachineRequest,
         SpdmMachineAttestationTriggerRequest, SpdmSchedulingOutcome,
     };
     use sqlx::PgConnection;
@@ -41,6 +44,15 @@ pub(in crate::tests) mod tests {
         TestEnv, TestEnvOverrides, create_managed_host, create_test_env,
         create_test_env_with_overrides, get_config,
     };
+
+    fn machine_assessment_request(machine_id: MachineId) -> ListMachineAttestationStatusesRequest {
+        ListMachineAttestationStatusesRequest {
+            target: Some(Target::Machine(SpdmMachineAttestationMachineRequest {
+                machine_id: Some(machine_id),
+                redfish_timeout_secs: None,
+            })),
+        }
+    }
 
     /// The default test config leaves SPDM disabled, matching a fresh
     /// deployment. `trigger_machine_attestation` refuses to schedule at a site
@@ -209,6 +221,22 @@ pub(in crate::tests) mod tests {
         // Refusing has to leave no work behind: a caller that retries after
         // enabling SPDM should start from nothing.
         assert_eq!(0, list_machines_under_attestation(&env).await?.len());
+
+        env.redfish_sim
+            .set_create_client_error("disabled assessment must not contact BMCs");
+        let assessment = env
+            .api
+            .list_machine_attestation_statuses(Request::new(machine_assessment_request(
+                machine_id.into(),
+            )))
+            .await?
+            .into_inner();
+        assert_eq!(assessment.statuses.len(), 1);
+        assert!(assessment.statuses[0].attestation_status.is_none());
+        assert_eq!(
+            assessment.statuses[0].attester_selection_status(),
+            SpdmAttesterSelectionStatus::Disabled
+        );
 
         Ok(())
     }
@@ -423,6 +451,7 @@ pub(in crate::tests) mod tests {
             scenario: &'static str,
             profiles: fn() -> Vec<(String, AttesterSelection)>,
             expect_outcome: SpdmSchedulingOutcome,
+            expect_selection: SpdmAttesterSelectionStatus,
         }
 
         let cases = [
@@ -438,11 +467,13 @@ pub(in crate::tests) mod tests {
                     )]
                 },
                 expect_outcome: SpdmSchedulingOutcome::AttestationDisabled,
+                expect_selection: SpdmAttesterSelectionStatus::Disabled,
             },
             Case {
                 scenario: "a class nobody profiled has nothing to ask the BMC for",
                 profiles: Vec::new,
                 expect_outcome: SpdmSchedulingOutcome::NoProfile,
+                expect_selection: SpdmAttesterSelectionStatus::NoProfile,
             },
         ];
 
@@ -486,6 +517,22 @@ pub(in crate::tests) mod tests {
                 .into_inner();
 
             assert_eq!(case.expect_outcome, response.outcome(), "{}", case.scenario);
+            let assessment = env
+                .api
+                .list_machine_attestation_statuses(Request::new(machine_assessment_request(
+                    machine_id.into(),
+                )))
+                .await?
+                .into_inner();
+            assert_eq!(assessment.statuses.len(), 1, "{}", case.scenario);
+            let row = &assessment.statuses[0];
+            assert!(row.attestation_status.is_none(), "{}", case.scenario);
+            assert_eq!(
+                row.attester_selection_status(),
+                case.expect_selection,
+                "{}",
+                case.scenario
+            );
         }
 
         Ok(())
@@ -534,14 +581,22 @@ pub(in crate::tests) mod tests {
             .await
             .expect_err("a profile naming attesters cannot be satisfied without the BMC");
 
-        assert_eq!(
-            Some("NICO-REDFISH-500"),
-            status
-                .metadata()
-                .get("nico-error-code")
-                .map(|code| code.to_str().expect("the error code is ASCII"))
-        );
-
+        let assessment_error = env
+            .api
+            .list_machine_attestation_statuses(Request::new(machine_assessment_request(
+                machine_id.into(),
+            )))
+            .await
+            .expect_err("a definitive assessment must report BMC failures");
+        for status in [status, assessment_error] {
+            assert_eq!(
+                Some("NICO-REDFISH-500"),
+                status
+                    .metadata()
+                    .get("nico-error-code")
+                    .map(|code| code.to_str().expect("the error code is ASCII"))
+            );
+        }
         Ok(())
     }
 
@@ -1042,8 +1097,11 @@ pub(in crate::tests) mod tests {
         use base64::Engine;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use carbide_uuid::machine::{MachineIdSource, MachineType};
-        use rpc::forge::{ListSpdmMachineAttestationsRequest, SpdmAttestationStatus};
+        use rpc::forge::SpdmMachineAttestationFleetRequest;
 
+        let fleet_request = |request| ListMachineAttestationStatusesRequest {
+            target: Some(Target::Fleet(request)),
+        };
         let mut config = get_config();
         config.max_find_by_ids = 2;
         let env = create_test_env_with_overrides(
@@ -1089,11 +1147,13 @@ pub(in crate::tests) mod tests {
         for (page_size, expected_len) in [(0, 2), (u32::MAX, 2), (1, 1)] {
             let response = env
                 .api
-                .list_spdm_machine_attestations(Request::new(ListSpdmMachineAttestationsRequest {
-                    attestation_status: None,
-                    page_size,
-                    page_token,
-                }))
+                .list_machine_attestation_statuses(Request::new(fleet_request(
+                    SpdmMachineAttestationFleetRequest {
+                        attestation_status: None,
+                        page_size,
+                        page_token,
+                    },
+                )))
                 .await?
                 .into_inner();
             assert_eq!(response.statuses.len(), expected_len);
@@ -1112,31 +1172,36 @@ pub(in crate::tests) mod tests {
             statuses[0].attestation_status,
             Some(SpdmAttestationStatus::SpdmAttPassed.into())
         );
-        assert_eq!(
-            uuid::Uuid::try_from(statuses[0].job_id.as_ref().unwrap())?,
-            job_id
+        assert!(statuses[1].attestation_status.is_none());
+        assert!(
+            statuses
+                .iter()
+                .all(|row| row.attester_selection_status.is_none())
         );
-        assert!(statuses[1].attestation_status.is_none() && statuses[1].job_id.is_none());
 
         let passed = Some(SpdmAttestationStatus::SpdmAttPassed.into());
         let first = env
             .api
-            .list_spdm_machine_attestations(Request::new(ListSpdmMachineAttestationsRequest {
-                attestation_status: passed,
-                page_size: 1,
-                page_token: String::new(),
-            }))
+            .list_machine_attestation_statuses(Request::new(fleet_request(
+                SpdmMachineAttestationFleetRequest {
+                    attestation_status: passed,
+                    page_size: 1,
+                    page_token: String::new(),
+                },
+            )))
             .await?
             .into_inner();
         assert_eq!(first.statuses[0].machine_id, Some(machines[0]));
         assert!(!first.next_page_token.is_empty());
         let last = env
             .api
-            .list_spdm_machine_attestations(Request::new(ListSpdmMachineAttestationsRequest {
-                attestation_status: passed,
-                page_size: 2,
-                page_token: first.next_page_token.clone(),
-            }))
+            .list_machine_attestation_statuses(Request::new(fleet_request(
+                SpdmMachineAttestationFleetRequest {
+                    attestation_status: passed,
+                    page_size: 2,
+                    page_token: first.next_page_token.clone(),
+                },
+            )))
             .await?
             .into_inner();
         assert_eq!(
@@ -1152,13 +1217,24 @@ pub(in crate::tests) mod tests {
         );
         let empty = env
             .api
-            .list_spdm_machine_attestations(Request::new(ListSpdmMachineAttestationsRequest {
-                attestation_status: Some(SpdmAttestationStatus::SpdmAttFailed.into()),
-                ..Default::default()
-            }))
+            .list_machine_attestation_statuses(Request::new(fleet_request(
+                SpdmMachineAttestationFleetRequest {
+                    attestation_status: Some(SpdmAttestationStatus::SpdmAttFailed.into()),
+                    ..Default::default()
+                },
+            )))
             .await?
             .into_inner();
         assert!(empty.statuses.is_empty() && empty.next_page_token.is_empty());
+
+        let error = env
+            .api
+            .list_machine_attestation_statuses(Request::new(
+                ListMachineAttestationStatusesRequest::default(),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
 
         // Reject malformed encodings and changed search semantics at the RPC boundary.
         let invalid_tokens = [
@@ -1184,15 +1260,232 @@ pub(in crate::tests) mod tests {
         for (scenario, attestation_status, page_token) in invalid_tokens {
             let error = env
                 .api
-                .list_spdm_machine_attestations(Request::new(ListSpdmMachineAttestationsRequest {
-                    attestation_status,
-                    page_token,
-                    ..Default::default()
-                }))
+                .list_machine_attestation_statuses(Request::new(fleet_request(
+                    SpdmMachineAttestationFleetRequest {
+                        attestation_status,
+                        page_token,
+                        ..Default::default()
+                    },
+                )))
                 .await
                 .unwrap_err();
             assert_eq!(error.code(), tonic::Code::InvalidArgument, "{scenario}");
         }
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn definitive_machine_assessment_uses_current_selection_without_writes(
+        pool: sqlx::PgPool,
+    ) -> eyre::Result<()> {
+        use carbide_uuid::machine::{MachineIdSource, MachineType};
+        use rpc::forge::SpdmMachineAttestationFleetRequest;
+
+        async fn snapshot(
+            pool: &sqlx::PgPool,
+            id: MachineId,
+        ) -> Result<serde_json::Value, sqlx::Error> {
+            sqlx::query_scalar("SELECT COALESCE(jsonb_agg(to_jsonb(a) ORDER BY device_id, job_id), '[]'::jsonb) FROM spdm_machine_devices_attestation a WHERE machine_id = $1")
+                .bind(id).fetch_one(pool).await
+        }
+
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(spdm_enabled_config()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let (host_id, _) = create_managed_host(&env).await.into();
+        let machine_id: MachineId = host_id.into();
+        let mut txn = env.pool.begin().await?;
+        sqlx::query("DELETE FROM spdm_machine_devices_attestation WHERE machine_id = $1")
+            .bind(machine_id)
+            .execute(&mut *txn)
+            .await?;
+        sqlx::query("DELETE FROM attestation_profiles")
+            .execute(&mut *txn)
+            .await?;
+        db::attestation_profile::create(
+            &mut txn,
+            MOCK_HOST_HARDWARE_CLASS,
+            &AttestationPolicyDocument::new(gpu_allowlist()),
+            "test",
+        )
+        .await?;
+        let controller_job = uuid::Uuid::new_v4();
+        let external_job = uuid::Uuid::new_v4();
+        let time = Utc::now();
+        // GPU_2 is selected by the live inventory but has no stored result. GPU_0's
+        // external pass supersedes its controller failure; the obsolete device is excluded.
+        for (device, state, job, seconds, controller) in [
+            (
+                "HGX_IRoT_GPU_0",
+                SpdmAttestationState::Failed("superseded failure".to_string()),
+                controller_job,
+                -2,
+                true,
+            ),
+            (
+                "HGX_IRoT_GPU_1",
+                SpdmAttestationState::Passed,
+                controller_job,
+                -2,
+                true,
+            ),
+            (
+                "obsolete-device",
+                SpdmAttestationState::Failed("obsolete failure".to_string()),
+                controller_job,
+                -2,
+                true,
+            ),
+            (
+                "HGX_IRoT_GPU_0",
+                SpdmAttestationState::Passed,
+                external_job,
+                -1,
+                false,
+            ),
+        ] {
+            sqlx::query("INSERT INTO spdm_machine_devices_attestation (machine_id, device_id, nonce, state, job_id, started_at, triggered_by_mh_controller) VALUES ($1, $2, gen_random_uuid(), $3, $4, $5, $6)")
+                .bind(machine_id).bind(device).bind(sqlx::types::Json(state)).bind(job).bind(time + chrono::Duration::seconds(seconds)).bind(controller).execute(&mut *txn).await?;
+        }
+        txn.commit().await?;
+        let fleet = env
+            .api
+            .list_machine_attestation_statuses(Request::new(
+                ListMachineAttestationStatusesRequest {
+                    target: Some(Target::Fleet(SpdmMachineAttestationFleetRequest {
+                        attestation_status: Some(SpdmAttestationStatus::SpdmAttFailed.into()),
+                        ..Default::default()
+                    })),
+                },
+            ))
+            .await?
+            .into_inner();
+        assert!(
+            fleet
+                .statuses
+                .iter()
+                .any(|row| row.machine_id == Some(machine_id))
+        );
+
+        for expected in [
+            SpdmAttestationStatus::SpdmAttInProgress,
+            SpdmAttestationStatus::SpdmAttPassed,
+        ] {
+            let before = snapshot(&env.pool, machine_id).await?;
+            let response = env
+                .api
+                .list_machine_attestation_statuses(Request::new(machine_assessment_request(
+                    machine_id,
+                )))
+                .await?
+                .into_inner();
+            assert_eq!(response.statuses.len(), 1);
+            assert!(response.next_page_token.is_empty());
+            let row = &response.statuses[0];
+            assert_eq!(row.machine_id, Some(machine_id));
+            assert_eq!(row.attestation_status, Some(expected.into()));
+            assert_eq!(
+                row.attester_selection_status(),
+                SpdmAttesterSelectionStatus::Selected
+            );
+            assert_eq!(
+                snapshot(&env.pool, machine_id).await?,
+                before,
+                "assessment must not change any attestation row"
+            );
+            if expected == SpdmAttestationStatus::SpdmAttInProgress {
+                sqlx::query("INSERT INTO spdm_machine_devices_attestation (machine_id, device_id, nonce, state, job_id, started_at, triggered_by_mh_controller) VALUES ($1, 'HGX_IRoT_GPU_2', gen_random_uuid(), $2, $3, now(), false)")
+                    .bind(machine_id).bind(sqlx::types::Json(SpdmAttestationState::Passed)).bind(uuid::Uuid::new_v4()).execute(&env.pool).await?;
+            }
+        }
+        // Partial policy coverage stays explicit even when all selected devices passed.
+        let mut txn = env.pool.begin().await?;
+        sqlx::query("DELETE FROM attestation_profiles")
+            .execute(&mut *txn)
+            .await?;
+        let mut selection = gpu_allowlist();
+        selection
+            .component_ids
+            .push(ComponentIdMatch::Exact("NOT_PRESENT".to_string()));
+        db::attestation_profile::create(
+            &mut txn,
+            MOCK_HOST_HARDWARE_CLASS,
+            &AttestationPolicyDocument::new(selection),
+            "test",
+        )
+        .await?;
+        txn.commit().await?;
+        let partial = env
+            .api
+            .list_machine_attestation_statuses(Request::new(machine_assessment_request(machine_id)))
+            .await?
+            .into_inner();
+        assert_eq!(
+            partial.statuses[0].attestation_status,
+            Some(SpdmAttestationStatus::SpdmAttPassed.into())
+        );
+        assert_eq!(
+            partial.statuses[0].attester_selection_status(),
+            SpdmAttesterSelectionStatus::PartiallySatisfied
+        );
+
+        let missing = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [0xf1; 32],
+            MachineType::Host,
+        );
+        for (scenario, machine_id, timeout, expected) in [
+            ("missing ID", None, None, tonic::Code::InvalidArgument),
+            (
+                "zero timeout",
+                Some(machine_id),
+                Some(0),
+                tonic::Code::InvalidArgument,
+            ),
+            (
+                "unknown machine",
+                Some(missing),
+                None,
+                tonic::Code::NotFound,
+            ),
+        ] {
+            let error = env
+                .api
+                .list_machine_attestation_statuses(Request::new(
+                    ListMachineAttestationStatusesRequest {
+                        target: Some(Target::Machine(SpdmMachineAttestationMachineRequest {
+                            machine_id,
+                            redfish_timeout_secs: timeout,
+                        })),
+                    },
+                ))
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), expected, "{scenario}");
+        }
+        // The deadline covers database waits too; inject one rather than relying on BMC timing.
+        let mut blocker = env.pool.begin().await?;
+        sqlx::query("LOCK TABLE machines IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await?;
+        let result = env
+            .api
+            .list_machine_attestation_statuses(Request::new(
+                ListMachineAttestationStatusesRequest {
+                    target: Some(Target::Machine(SpdmMachineAttestationMachineRequest {
+                        machine_id: Some(machine_id),
+                        redfish_timeout_secs: Some(1),
+                    })),
+                },
+            ))
+            .await;
+        blocker.rollback().await?;
+        assert_eq!(result.unwrap_err().code(), tonic::Code::DeadlineExceeded);
         Ok(())
     }
 

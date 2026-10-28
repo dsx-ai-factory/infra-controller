@@ -74,7 +74,7 @@ pub(crate) enum Cmd {
     #[dispatch]
     #[clap(
         subcommand,
-        about = "Inspect predicted SPDM attestation status per machine",
+        about = "Inspect predicted fleet statuses or assess one machine using current attesters",
         defer = |command| {
             // Machine predictions always use machine-ID order.
             command.mut_arg("sort_by", |arg| arg.hide(true))

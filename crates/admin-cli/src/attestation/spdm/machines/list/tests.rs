@@ -48,6 +48,18 @@ fn machine_list_selectors() {
         "in-progress selector" {
             &["att", "spdm", "machines", "list", "--in-progress"][..] => Yields((false, false, false, true)),
         }
+        "single machine has no fleet selector" {
+            &["att", "spdm", "machines", "list", "--machine-id", "fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg"][..] => Yields((false, false, false, false)),
+        }
+        "timeout needs a machine" {
+            &["att", "spdm", "machines", "list", "--redfish-timeout-secs", "60"][..] => FailsWith(ErrorKind::MissingRequiredArgument),
+        }
+        "zero timeout is invalid" {
+            &["att", "spdm", "machines", "list", "--machine-id", "fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg", "--redfish-timeout-secs", "0"][..] => FailsWith(ErrorKind::ValueValidation),
+        }
+        "machine mode excludes fleet filters" {
+            &["att", "spdm", "machines", "list", "--machine-id", "fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg", "--passed"][..] => FailsWith(ErrorKind::ArgumentConflict),
+        }
         "contradictory status selectors" {
             &["att", "spdm", "machines", "list", "--passed", "--failed"][..] => FailsWith(ErrorKind::ArgumentConflict),
             &["att", "spdm", "machines", "list", "--passed", "--cancelled"][..] => FailsWith(ErrorKind::ArgumentConflict),
@@ -59,27 +71,40 @@ fn machine_list_selectors() {
 struct FakeClient {
     statuses: Vec<SpdmMachineAttestationStatus>,
     selector: Option<i32>,
-    requests: RefCell<Vec<ListSpdmMachineAttestationsRequest>>,
+    requests: RefCell<Vec<ListMachineAttestationStatusesRequest>>,
 }
 
 impl MachineAttestationClient for FakeClient {
     async fn list(
         &self,
-        request: ListSpdmMachineAttestationsRequest,
-    ) -> Result<ListSpdmMachineAttestationsResponse, Status> {
-        assert_eq!(request.attestation_status, self.selector);
-        assert_eq!(request.page_size, 2);
-        // Use a deliberately opaque fixture token; the CLI must return it unchanged.
-        let start = if self.requests.borrow().is_empty() {
-            assert!(request.page_token.is_empty());
-            0
-        } else {
-            assert_eq!(request.page_token, "opaque-next-page");
-            2
+        request: ListMachineAttestationStatusesRequest,
+    ) -> Result<ListMachineAttestationStatusesResponse, Status> {
+        let start = match request.target.as_ref().unwrap() {
+            Target::Fleet(fleet) => {
+                assert_eq!(fleet.attestation_status, self.selector);
+                assert_eq!(fleet.page_size, 2);
+                // Use an opaque fixture token; the CLI must return it unchanged.
+                if self.requests.borrow().is_empty() {
+                    assert!(fleet.page_token.is_empty());
+                    0
+                } else {
+                    assert_eq!(fleet.page_token, "opaque-next-page");
+                    2
+                }
+            }
+            Target::Machine(machine) => {
+                assert!(
+                    self.requests.borrow().is_empty(),
+                    "single-machine assessments must not paginate"
+                );
+                assert_eq!(machine.machine_id, self.statuses[0].machine_id);
+                assert_eq!(machine.redfish_timeout_secs, Some(60));
+                0
+            }
         };
         self.requests.borrow_mut().push(request);
         let statuses = self.statuses.iter().skip(start).take(2).cloned().collect();
-        Ok(ListSpdmMachineAttestationsResponse {
+        Ok(ListMachineAttestationStatusesResponse {
             statuses,
             next_page_token: if self.statuses.len() > start + 2 {
                 "opaque-next-page".to_string()
@@ -120,21 +145,14 @@ async fn execute(client: &FakeClient, format: OutputFormat, flags: &[&str]) -> (
 async fn machine_table_follows_pages_and_prints_populated_and_empty_cells() {
     let mut ids = vec![machine(1), machine(2), machine(3)];
     ids.sort();
-    let job_id = Uuid::new_v4();
     let statuses = ids
         .iter()
         .enumerate()
         .map(|(index, id)| SpdmMachineAttestationStatus {
             machine_id: Some(*id),
+            attester_selection_status: None,
             attestation_status: if index == 0 {
                 Some(SpdmAttestationStatus::SpdmAttPassed.into())
-            } else {
-                None
-            },
-            job_id: if index == 0 {
-                Some(rpc::common::Uuid {
-                    value: job_id.to_string(),
-                })
             } else {
                 None
             },
@@ -159,18 +177,10 @@ async fn machine_table_follows_pages_and_prints_populated_and_empty_cells() {
     assert_eq!(
         rows,
         vec![
-            vec![
-                "MACHINE ID".to_string(),
-                "ATTESTATION STATUS".to_string(),
-                "JOB ID".to_string()
-            ],
-            vec![
-                ids[0].to_string(),
-                "SPDM_ATT_PASSED".to_string(),
-                job_id.to_string()
-            ],
-            vec![ids[1].to_string(), "unknown".to_string(), String::new()],
-            vec![ids[2].to_string(), "unknown".to_string(), String::new()],
+            vec!["MACHINE ID".to_string(), "ATTESTATION STATUS".to_string()],
+            vec![ids[0].to_string(), "SPDM_ATT_PASSED".to_string()],
+            vec![ids[1].to_string(), "unknown".to_string()],
+            vec![ids[2].to_string(), "unknown".to_string()],
         ]
     );
     assert_eq!(client.requests.borrow().len(), 2);
@@ -178,6 +188,77 @@ async fn machine_table_follows_pages_and_prints_populated_and_empty_cells() {
         warning,
         "Predicted attestation status, for definitive attestation status use \"attestation spdm machines list --machine-id <your machine id>\"\n"
     );
+    let id = ids[0].to_string();
+    for (scenario, attester_selection_status, status, expected_status, expected_warning) in [
+        (
+            "complete selection",
+            SpdmAttesterSelectionStatus::Selected,
+            Some(SpdmAttestationStatus::SpdmAttPassed),
+            "SPDM_ATT_PASSED",
+            "",
+        ),
+        (
+            "empty selection",
+            SpdmAttesterSelectionStatus::NoProfile,
+            None,
+            "not assessed",
+            "",
+        ),
+        (
+            "partial selection",
+            SpdmAttesterSelectionStatus::PartiallySatisfied,
+            Some(SpdmAttestationStatus::SpdmAttPassed),
+            "SPDM_ATT_PASSED",
+            "Warning: attestation status covers only the selected devices; the profile is partially satisfied\n",
+        ),
+    ] {
+        let client = FakeClient {
+            statuses: vec![SpdmMachineAttestationStatus {
+                machine_id: Some(ids[0]),
+                attestation_status: status.map(Into::into),
+                attester_selection_status: Some(attester_selection_status.into()),
+            }],
+            selector: None,
+            requests: RefCell::default(),
+        };
+        let (output, warning) = execute(
+            &client,
+            OutputFormat::AsciiTable,
+            &["--machine-id", &id, "--redfish-timeout-secs", "60"],
+        )
+        .await;
+        let rows = output
+            .lines()
+            .filter(|line| line.starts_with('|'))
+            .map(|line| {
+                line.trim_matches('|')
+                    .split('|')
+                    .map(|cell| cell.trim().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    "MACHINE ID",
+                    "ATTESTATION STATUS",
+                    "ATTESTER SELECTION STATUS"
+                ]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+                vec![
+                    id.clone(),
+                    expected_status.to_string(),
+                    attester_selection_status.as_str_name().to_string()
+                ],
+            ],
+            "{scenario}"
+        );
+        assert_eq!(warning, expected_warning, "{scenario}");
+        assert_eq!(client.requests.borrow().len(), 1, "{scenario}");
+    }
 }
 
 #[tokio::test]
@@ -186,8 +267,8 @@ async fn machine_json_keeps_unknown_fields_and_warning_separate() {
     let client = FakeClient {
         statuses: vec![SpdmMachineAttestationStatus {
             machine_id: Some(id),
+            attester_selection_status: None,
             attestation_status: None,
-            job_id: None,
         }],
         selector: None,
         requests: RefCell::default(),
@@ -196,10 +277,34 @@ async fn machine_json_keeps_unknown_fields_and_warning_separate() {
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&output).unwrap(),
         serde_json::json!([
-            { "machine_id": id, "attestation_status": null, "job_id": null }
+            { "machine_id": id, "attestation_status": null }
         ])
     );
     assert_eq!(warning, format!("{PREDICTION_WARNING}\n"));
+    let client = FakeClient {
+        statuses: vec![SpdmMachineAttestationStatus {
+            machine_id: Some(id),
+            attestation_status: None,
+            attester_selection_status: Some(SpdmAttesterSelectionStatus::NoProfile.into()),
+        }],
+        selector: None,
+        requests: RefCell::default(),
+    };
+    let id_arg = id.to_string();
+    let (output, warning) = execute(
+        &client,
+        OutputFormat::Json,
+        &["--machine-id", &id_arg, "--redfish-timeout-secs", "60"],
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output).unwrap(),
+        serde_json::json!([
+            {"machine_id": id, "attestation_status": null,
+             "attester_selection_status": "SPDM_ATTESTER_SELECTION_STATUS_NO_PROFILE"}
+        ])
+    );
+    assert!(warning.is_empty());
 }
 
 #[tokio::test]

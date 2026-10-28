@@ -17,11 +17,16 @@
 use ::rpc::forge::{self as rpc};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use carbide_machine_controller::handler::attestation::{SchedulingOutcome, trigger_attestation};
+use carbide_machine_controller::handler::attestation::{
+    SchedulingOutcome, select_machine_attesters, trigger_attestation,
+};
 use carbide_uuid::machine::MachineId;
 use db::ObjectFilter;
+use itertools::Itertools;
 use model::attestation::spdm as model_spdm;
+use model::bmc_info::BmcInfo;
 use model::machine::machine_search_config::MachineSearchConfig;
+use sqlx::PgPool;
 use state_controller::state_handler::StateHandlerError;
 use tokio::time as tt;
 use tonic::{Request, Response, Status};
@@ -247,12 +252,219 @@ struct MachineAttestationPageToken {
     attestation_status: Option<i32>,
 }
 
-pub(crate) async fn list_machine_attestations(
+pub(crate) async fn list_machine_attestation_statuses(
     api: &Api,
-    request: Request<rpc::ListSpdmMachineAttestationsRequest>,
-) -> Result<Response<rpc::ListSpdmMachineAttestationsResponse>, Status> {
+    request: Request<rpc::ListMachineAttestationStatusesRequest>,
+) -> Result<Response<rpc::ListMachineAttestationStatusesResponse>, Status> {
     log_request_data(&request);
     let request = request.into_inner();
+    match request
+        .target
+        .ok_or_else(|| Status::invalid_argument("provide a fleet or machine target"))?
+    {
+        rpc::list_machine_attestation_statuses_request::Target::Fleet(request) => {
+            list_machine_predictions(api, request).await
+        }
+        rpc::list_machine_attestation_statuses_request::Target::Machine(request) => {
+            assess_single_machine(api, request).await
+        }
+    }
+}
+
+/// The result of selecting current attesters, without scheduling attestation work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AttesterSelectionStatus {
+    /// All selection requirements were satisfied and at least one attester was selected.
+    Selected,
+    /// Some allowlist requirements matched nothing; status covers the selected subset.
+    PartiallySatisfied,
+    /// Site-wide SPDM or the resolved profile disables attestation.
+    Disabled,
+    /// The BMC offered no eligible attesters under the resolved policy.
+    NoAttestersFound,
+    /// The policy's requirements matched no eligible attesters.
+    PolicyMatchedNothing,
+    /// No hardware class was recorded and no `any` profile applied.
+    ClassNotRecorded,
+    /// Neither the recorded hardware class nor `any` supplied a profile.
+    NoProfile,
+}
+
+/// A read-only assessment of the current selection and its latest stored results.
+struct MachineAttestationAssessment {
+    /// Aggregate for selected devices; absent when selection is empty or disabled.
+    attestation_status: Option<model_spdm::SpdmAttestationStatus>,
+    /// Whether selection was complete, partial, disabled, or unable to select attesters.
+    attester_selection_status: AttesterSelectionStatus,
+}
+
+/// Selects current attesters and reads their latest results across all job origins.
+/// Uses the same policy and inventory selection as scheduling and recovery, without
+/// writing work rows or emitting scheduling events. Site-wide disablement returns
+/// an empty selection without contacting the BMC. Selection finishes before opening
+/// the status transaction; selected devices without results make it `InProgress`.
+async fn assess_machine_attestation(
+    db_pool: &PgPool,
+    connect: impl AsyncFnOnce() -> Result<Box<dyn libredfish::Redfish>, StateHandlerError>,
+    bmc_info: &BmcInfo,
+    machine_id: &MachineId,
+    redfish_timeout_duration: std::time::Duration,
+    spdm_enabled: bool,
+) -> Result<MachineAttestationAssessment, StateHandlerError> {
+    // Disabled sites have no current attestation requirement to assess.
+    if !spdm_enabled {
+        return Ok(MachineAttestationAssessment {
+            attestation_status: None,
+            attester_selection_status: AttesterSelectionStatus::Disabled,
+        });
+    }
+    let selection = select_machine_attesters(
+        db_pool,
+        connect,
+        bmc_info,
+        machine_id,
+        redfish_timeout_duration,
+    )
+    .await?;
+    let mut device_ids = selection
+        .attesters
+        .into_iter()
+        .map(|attester| attester.id)
+        .collect_vec();
+    device_ids.sort();
+    device_ids.dedup();
+    // An empty selection has a reason, but cannot supply a passed verdict.
+    let attestation_status = if device_ids.is_empty() {
+        None
+    } else {
+        let mut txn = db_pool.begin().await?;
+        let status = db::attestation::spdm::list_single_machine_attestation_status(
+            &mut txn,
+            machine_id,
+            Some(&device_ids),
+        )
+        .await?;
+        txn.commit().await?;
+        Some(status)
+    };
+    // Selection success reports what was selected, without implying a job was scheduled.
+    let attester_selection_status = match selection.outcome {
+        SchedulingOutcome::Scheduled => AttesterSelectionStatus::Selected,
+        SchedulingOutcome::PartiallySatisfied => AttesterSelectionStatus::PartiallySatisfied,
+        SchedulingOutcome::AttestationDisabled => AttesterSelectionStatus::Disabled,
+        SchedulingOutcome::NoAttestersFound => AttesterSelectionStatus::NoAttestersFound,
+        SchedulingOutcome::PolicyMatchedNothing => AttesterSelectionStatus::PolicyMatchedNothing,
+        SchedulingOutcome::ClassNotRecorded => AttesterSelectionStatus::ClassNotRecorded,
+        SchedulingOutcome::NoProfile => AttesterSelectionStatus::NoProfile,
+    };
+    Ok(MachineAttestationAssessment {
+        attestation_status,
+        attester_selection_status,
+    })
+}
+
+async fn assess_single_machine(
+    api: &Api,
+    request: rpc::SpdmMachineAttestationMachineRequest,
+) -> Result<Response<rpc::ListMachineAttestationStatusesResponse>, Status> {
+    let machine_id = request
+        .machine_id
+        .ok_or_else(|| Status::invalid_argument("machine ID is required"))?;
+    let timeout_secs = request.redfish_timeout_secs.unwrap_or(30);
+    if timeout_secs == 0 {
+        return Err(Status::invalid_argument("redfish timeout must be positive"));
+    }
+    let duration = std::time::Duration::from_secs(u64::from(timeout_secs));
+    // Bound the complete assessment, including client creation and database reads.
+    let assessment = tt::timeout(duration, async {
+        let mut reader = api.db_reader();
+        let machines = db::machine::find(
+            &mut reader,
+            ObjectFilter::List(&[machine_id]),
+            MachineSearchConfig::default(),
+        )
+        .await?;
+        let machine = machines
+            .into_iter()
+            .next()
+            .ok_or_else(|| CarbideError::NotFoundError {
+                kind: "machine",
+                id: machine_id.to_string(),
+            })?;
+        drop(reader);
+        let bmc_info = &machine.status.bmc_info;
+        // Resolve credentials and authenticate only when selection requires the BMC.
+        let connect = async || {
+            let address = bmc_info
+                .ip_addr()
+                .map_err(StateHandlerError::GenericError)?;
+            let mut reader = api.db_reader();
+            let access =
+                db::machine_interface::lookup_bmc_access_info(&mut reader, address, bmc_info.port)
+                    .await?;
+            drop(reader);
+            api.redfish_pool
+                .client_by_info(&access)
+                .await
+                .map_err(StateHandlerError::from)
+        };
+        assess_machine_attestation(
+            api.pg_pool(),
+            connect,
+            bmc_info,
+            &machine_id,
+            duration,
+            api.runtime_config.spdm.enabled,
+        )
+        .await
+        .map_err(|error| match error {
+            StateHandlerError::ExternalServiceError(redfish) => {
+                CarbideError::RedfishError(libredfish::RedfishError::GenericError {
+                    error: redfish.to_string(),
+                })
+            }
+            StateHandlerError::DBError(error) => CarbideError::from(*error),
+            StateHandlerError::TransactionError(error) => CarbideError::DBError(
+                db::AnnotatedSqlxError::new("assess machine attestation", *error),
+            ),
+            other => CarbideError::AttestationError(format!("assessment error: {other}")),
+        })
+    })
+    .await
+    .map_err(|_| Status::deadline_exceeded("machine attestation assessment timed out"))??;
+    let attester_selection_status = match assessment.attester_selection_status {
+        AttesterSelectionStatus::Selected => rpc::SpdmAttesterSelectionStatus::Selected,
+        AttesterSelectionStatus::PartiallySatisfied => {
+            rpc::SpdmAttesterSelectionStatus::PartiallySatisfied
+        }
+        AttesterSelectionStatus::Disabled => rpc::SpdmAttesterSelectionStatus::Disabled,
+        AttesterSelectionStatus::NoAttestersFound => {
+            rpc::SpdmAttesterSelectionStatus::NoAttestersFound
+        }
+        AttesterSelectionStatus::PolicyMatchedNothing => {
+            rpc::SpdmAttesterSelectionStatus::PolicyMatchedNothing
+        }
+        AttesterSelectionStatus::ClassNotRecorded => {
+            rpc::SpdmAttesterSelectionStatus::ClassNotRecorded
+        }
+        AttesterSelectionStatus::NoProfile => rpc::SpdmAttesterSelectionStatus::NoProfile,
+    };
+    Ok(Response::new(rpc::ListMachineAttestationStatusesResponse {
+        statuses: vec![rpc::SpdmMachineAttestationStatus {
+            machine_id: Some(machine_id),
+            attestation_status: assessment
+                .attestation_status
+                .map(|status| convert_model_status_to_rpc_status(status).into()),
+            attester_selection_status: Some(attester_selection_status.into()),
+        }],
+        next_page_token: String::new(),
+    }))
+}
+
+async fn list_machine_predictions(
+    api: &Api,
+    request: rpc::SpdmMachineAttestationFleetRequest,
+) -> Result<Response<rpc::ListMachineAttestationStatusesResponse>, Status> {
     // Presence matters: enum zero means in-progress, not an omitted filter.
     let status = request
         .attestation_status
@@ -328,14 +540,12 @@ pub(crate) async fn list_machine_attestations(
     } else {
         String::new()
     };
-    Ok(Response::new(rpc::ListSpdmMachineAttestationsResponse {
+    Ok(Response::new(rpc::ListMachineAttestationStatusesResponse {
         statuses: summaries
             .into_iter()
             .map(|summary| rpc::SpdmMachineAttestationStatus {
                 machine_id: Some(summary.machine_id),
-                job_id: summary.job_id.map(|id| ::rpc::common::Uuid {
-                    value: id.to_string(),
-                }),
+                attester_selection_status: None,
                 attestation_status: summary
                     .attestation_status
                     .map(|status| convert_model_status_to_rpc_status(status).into()),

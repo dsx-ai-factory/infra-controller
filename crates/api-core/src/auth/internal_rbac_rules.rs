@@ -814,7 +814,7 @@ impl InternalRBACRules {
         x.perm("ListAttestation", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GetAttestation", vec![ForgeAdminCLI, SiteAgent]);
         x.perm(
-            "ListSpdmMachineAttestations",
+            "ListMachineAttestationStatuses",
             vec![ForgeAdminCLI, SiteAgent],
         );
         x.perm("CreateAttestationProfile", vec![ForgeAdminCLI]);

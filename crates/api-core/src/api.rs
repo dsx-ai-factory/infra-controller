@@ -3575,11 +3575,11 @@ impl Forge for Api {
         crate::handlers::attestation::list_attestation(self, request).await
     }
 
-    async fn list_spdm_machine_attestations(
+    async fn list_machine_attestation_statuses(
         &self,
-        request: tonic::Request<rpc::ListSpdmMachineAttestationsRequest>,
-    ) -> Result<Response<rpc::ListSpdmMachineAttestationsResponse>, Status> {
-        crate::handlers::attestation::list_machine_attestations(self, request).await
+        request: tonic::Request<rpc::ListMachineAttestationStatusesRequest>,
+    ) -> Result<Response<rpc::ListMachineAttestationStatusesResponse>, Status> {
+        crate::handlers::attestation::list_machine_attestation_statuses(self, request).await
     }
 
     async fn get_attestation(

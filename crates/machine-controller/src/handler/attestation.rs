@@ -41,13 +41,13 @@ use state_controller::state_handler::{
 use crate::context::MachineStateHandlerContextObjects;
 use crate::handler::{MachineStateHandlerServices, waiting_for_cleanup_state};
 
-/// What scheduling decided for one machine.
+/// The attester selection decision used by scheduling and read-only assessment.
 ///
 /// A BMC that cannot be reached is not one of these: it stays an error so the
 /// controller retries it, where every value here is a settled answer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, carbide_instrument::LabelValue)]
 pub enum SchedulingOutcome {
-    /// One work row was written per selected attester.
+    /// Eligible attesters were selected; scheduling writes one work row per attester.
     Scheduled,
     /// Work rows were written, but an allowlist pattern matched no eligible
     /// attester. Attesting is under way for less than the profile asked for.
@@ -121,12 +121,14 @@ pub struct SchedulingResult {
 }
 
 /// Selected BMC components and the policy decision, before any work is scheduled.
-struct MachineAttesterSelection {
-    outcome: SchedulingOutcome,
+pub struct MachineAttesterSelection {
+    /// The policy decision, before any attestation work is scheduled.
+    pub outcome: SchedulingOutcome,
     hardware_class: String,
     used_any_fallback: bool,
     profile_version: Option<String>,
-    attesters: Vec<ComponentIntegrity>,
+    /// Eligible components selected by the resolved profile.
+    pub attesters: Vec<ComponentIntegrity>,
 }
 
 impl MachineAttesterSelection {
@@ -596,7 +598,9 @@ pub(crate) async fn handle_spdm_poll_state(
 }
 
 /// Resolves the machine's profile and selects eligible BMC components without scheduling work.
-async fn select_machine_attesters(
+/// Calls `connect` only when the profile requires BMC inventory, bounds each Redfish
+/// read by `redfish_timeout_duration`, and propagates database or BMC errors.
+pub async fn select_machine_attesters(
     db_pool: &PgPool,
     connect: impl AsyncFnOnce() -> Result<Box<dyn libredfish::Redfish>, StateHandlerError>,
     bmc_info: &BmcInfo,

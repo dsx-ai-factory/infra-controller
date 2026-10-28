@@ -1047,8 +1047,8 @@ service Forge {
 
   rpc ListAttestation(SpdmListAttestationRequest) returns (SpdmListAttestationResponse);
   rpc GetAttestation(common.UUID) returns (SpdmGetAttestationResponse);
-  // Lists predicted machine statuses in pages, without contacting BMCs.
-  rpc ListSpdmMachineAttestations(ListSpdmMachineAttestationsRequest) returns (ListSpdmMachineAttestationsResponse);
+  // Lists fleet predictions in pages or assesses one machine using current attesters.
+  rpc ListMachineAttestationStatuses(ListMachineAttestationStatusesRequest) returns (ListMachineAttestationStatusesResponse);
   // Attestation profiles APIs
   rpc CreateAttestationProfile(CreateAttestationProfileRequest) returns (AttestationProfile);
   rpc UpdateAttestationProfile(UpdateAttestationProfileRequest) returns (AttestationProfile);
@@ -12547,10 +12547,22 @@ message GetDesiredNicFirmwareResponse {
   repeated string warnings = 3;
 }
 
-// Lists predictions from each machine's latest retained controller-triggered job.
+// Lists either fleet predictions or a definitive assessment of one machine.
+// The target must be supplied; an omitted target returns INVALID_ARGUMENT.
+message ListMachineAttestationStatusesRequest {
+  reserved 1, 2, 3;
+  reserved "attestation_status", "page_size", "page_token";
+  oneof target {
+    // Database-only predictions, with filtering and pagination.
+    SpdmMachineAttestationFleetRequest fleet = 4;
+    // Read-only assessment using the current profile and BMC component inventory.
+    SpdmMachineAttestationMachineRequest machine = 5;
+  }
+}
+
 // Each page is ordered by ascending machine ID. Inventory and externally triggered jobs
 // are not consulted. Pages are separate reads: concurrent changes can affect membership.
-message ListSpdmMachineAttestationsRequest {
+message SpdmMachineAttestationFleetRequest {
   // Omission includes all machines, including those without a retained controller job.
   // A supplied status excludes machines without such a job. Unknown enum values are rejected.
   optional SpdmAttestationStatus attestation_status = 1;
@@ -12563,26 +12575,55 @@ message ListSpdmMachineAttestationsRequest {
   string page_token = 3;
 }
 
-// A prediction, not a live inventory-based attestation assessment.
-message SpdmMachineAttestationStatus {
-  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
-  // Always present: the machine whose prediction is reported.
+message SpdmMachineAttestationMachineRequest {
+  // Required. Unknown machines return NOT_FOUND; omission returns INVALID_ARGUMENT.
   common.MachineId machine_id = 1;
-  // Aggregate over all this machine's devices in its latest retained controller job:
-  // unfinished takes precedence over failed, cancelled, then all-passed.
-  // Absent when no controller-triggered job is retained; this means unknown, not passed.
-  optional SpdmAttestationStatus attestation_status = 2;
-  // The source job, chosen by started_at DESC, then job_id DESC to break ties.
-  // Absent when no controller-triggered job is retained.
-  common.UUID job_id = 3;
+  // Omission uses 30 seconds. Explicit zero returns INVALID_ARGUMENT.
+  // Bounds the entire assessment, including profile lookup, Redfish discovery and status reads.
+  // Expiry returns DEADLINE_EXCEEDED. BMC errors are reported without a prediction fallback.
+  optional uint32 redfish_timeout_secs = 2;
 }
 
-message ListSpdmMachineAttestationsResponse {
-  // Matching machines ordered by ascending machine ID, at most the effective page size.
-  // Machines without a retained controller job have absent status and job_id fields.
-  // No matches produces an empty list and an empty next_page_token.
+// Why current policy and inventory selected this set of attesters. This is a read-only
+// decision: no outcome creates, cancels, or modifies attestation jobs.
+enum SpdmAttesterSelectionStatus {
+  SPDM_ATTESTER_SELECTION_STATUS_UNSPECIFIED = 0;
+  // All selection requirements were satisfied and at least one attester was selected.
+  SPDM_ATTESTER_SELECTION_STATUS_SELECTED = 1;
+  // Some allowlist patterns matched nothing. Status covers only the selected subset.
+  SPDM_ATTESTER_SELECTION_STATUS_PARTIALLY_SATISFIED = 2;
+  // Site-wide SPDM or the resolved profile disables attestation; the BMC is not contacted.
+  SPDM_ATTESTER_SELECTION_STATUS_DISABLED = 3;
+  SPDM_ATTESTER_SELECTION_STATUS_NO_ATTESTERS_FOUND = 4;
+  SPDM_ATTESTER_SELECTION_STATUS_POLICY_MATCHED_NOTHING = 5;
+  SPDM_ATTESTER_SELECTION_STATUS_CLASS_NOT_RECORDED = 6;
+  SPDM_ATTESTER_SELECTION_STATUS_NO_PROFILE = 7;
+}
+
+message SpdmMachineAttestationStatus {
+  reserved 3, 4;
+  reserved "job_id", "selection";
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Always present: the machine whose status is reported.
+  common.MachineId machine_id = 1;
+  // Unfinished takes precedence over failed, cancelled, then all-passed.
+  // Fleet: aggregate this machine's devices in its latest retained controller job;
+  // absent when no controller job is retained (unknown).
+  // Machine: aggregate each currently selected device's latest result, including external
+  // jobs, by started_at DESC then job_id DESC. Missing device results mean in-progress.
+  // Absent when selection is empty; inspect attester_selection_status for the reason.
+  optional SpdmAttestationStatus attestation_status = 2;
+  // Present and non-UNSPECIFIED only for a definitive single-machine assessment.
+  // Partial coverage is explicit even when the selected subset's aggregate is passed.
+  optional SpdmAttesterSelectionStatus attester_selection_status = 5;
+}
+
+message ListMachineAttestationStatusesResponse {
+  // Fleet: matching machines ordered by ID, at most the effective page size.
+  // No matches produces an empty list and empty next_page_token.
+  // Machine: exactly one definitive assessment, with attester_selection_status.
   repeated SpdmMachineAttestationStatus statuses = 1;
-  // Continue strictly after the last returned machine ID. Empty means no further matches.
-  // This does not preserve a snapshot across requests.
+  // Fleet continuation, strictly after the last returned ID. Empty means no further matches.
+  // Always empty in machine mode. This does not preserve a snapshot across requests.
   string next_page_token = 2;
 }

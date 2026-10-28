@@ -440,8 +440,6 @@ pub async fn list_all_attestation_statuses(
 pub struct MachineAttestationSummary {
     /// The machine whose prediction is reported.
     pub machine_id: MachineId,
-    /// The source job, absent when no controller-triggered job is retained.
-    pub job_id: Option<uuid::Uuid>,
     /// The job's aggregate for this machine, absent when no controller job is retained.
     pub attestation_status: Option<SpdmAttestationStatus>,
 }
@@ -470,7 +468,7 @@ pub async fn find_machine_attestation_statuses(
     // from earlier jobs cannot keep a machine failed. Aggregate within each machine
     // lookup so an ordered scan can stop once the page and lookahead are filled.
     let query = r#"
-        SELECT m.id AS machine_id, latest.job_id, prediction.attestation_status
+        SELECT m.id AS machine_id, prediction.attestation_status
         FROM machines m
         LEFT JOIN LATERAL (
             SELECT job_id
@@ -495,7 +493,7 @@ pub async fn find_machine_attestation_statuses(
         ORDER BY m.id
         LIMIT $3
     "#;
-    let rows: Vec<(MachineId, Option<uuid::Uuid>, Option<String>)> = sqlx::query_as(query)
+    let rows: Vec<(MachineId, Option<String>)> = sqlx::query_as(query)
         .bind(after_machine_id)
         .bind(status)
         .bind(i64::from(page_size) + 1)
@@ -503,10 +501,9 @@ pub async fn find_machine_attestation_statuses(
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     rows.into_iter()
-        .map(|(machine_id, job_id, status)| {
+        .map(|(machine_id, status)| {
             Ok(MachineAttestationSummary {
                 machine_id,
-                job_id,
                 attestation_status: status
                     .as_deref()
                     .map(convert_status_str_to_model_status)
@@ -1129,7 +1126,7 @@ mod tests {
                         status == selector
                     }).collect::<Vec<_>>();
                     predicted_machine_selectors_match[index] = predicted.iter().all(|row| {
-                        row.job_id == Some(job_id) && row.attestation_status == Some(selector)
+                        row.attestation_status == Some(selector)
                     }) && predicted.into_iter().map(|row| row.machine_id).collect::<Vec<_>>() == expected;
                 }
 
@@ -1228,25 +1225,17 @@ mod tests {
                 .execute(&mut *txn).await?;
         }
         let mut expected = vec![
-            (
-                machines[0],
-                Some(current_job),
-                Some(SpdmAttestationStatus::Passed),
-            ),
-            (
-                machines[1],
-                Some(current_job),
-                Some(SpdmAttestationStatus::InProgress),
-            ),
-            (machines[2], None, None),
-            (machines[3], None, None),
+            (machines[0], Some(SpdmAttestationStatus::Passed)),
+            (machines[1], Some(SpdmAttestationStatus::InProgress)),
+            (machines[2], None),
+            (machines[3], None),
         ];
         expected.sort_by_key(|row| row.0);
         let predictions = find_machine_attestation_statuses(&mut txn, None, None, 100).await?;
         assert_eq!(
             predictions
                 .into_iter()
-                .map(|row| (row.machine_id, row.job_id, row.attestation_status))
+                .map(|row| (row.machine_id, row.attestation_status))
                 .collect::<Vec<_>>(),
             expected
         );

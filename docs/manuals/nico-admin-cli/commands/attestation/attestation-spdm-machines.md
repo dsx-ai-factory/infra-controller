@@ -4,8 +4,8 @@
 
 ## NAME
 
-nico-admin-cli-attestation-spdm-machines - Inspect predicted SPDM
-attestation status per machine
+nico-admin-cli-attestation-spdm-machines - Inspect predicted fleet
+statuses or assess one machine using current attesters
 
 ## SYNOPSIS
 
@@ -16,7 +16,8 @@ nico-admin-cli attestation spdm machines [-h|--help]
 
 ## DESCRIPTION
 
-Inspect predicted SPDM attestation status per machine
+Inspect predicted fleet statuses or assess one machine using current
+attesters
 
 ## OPTIONS
 
@@ -28,7 +29,7 @@ Print help
 
 | Subcommand | Description |
 |---|---|
-| [`list`](./attestation-spdm-machines-list.md) | List predicted machine attestation statuses |
+| [`list`](./attestation-spdm-machines-list.md) | List machine attestation statuses |
 
 ---
 
