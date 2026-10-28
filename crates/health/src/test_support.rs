@@ -239,7 +239,7 @@ fn assert_prometheus_family(
     assert_eq!(value, expected_value, "{name}");
 }
 
-const EXPECTED_SOURCE_NAMES: [&str; 54] = [
+const EXPECTED_SOURCE_NAMES: [&str; 56] = [
     "hw_metric_pcie_correctable_errors_count",
     "hw_metric_pcie_non_fatal_errors_count",
     "hw_metric_pcie_fatal_errors_count",
@@ -266,8 +266,10 @@ const EXPECTED_SOURCE_NAMES: [&str; 54] = [
     "hw_metric_correctable_io_write_errors_count",
     "hw_metric_uncorrectable_io_read_errors_count",
     "hw_metric_uncorrectable_io_write_errors_count",
+    "hw_metric_power_on_hours_hours",
     "hw_metric_read_io_kibibytes",
     "hw_metric_write_io_kibibytes",
+    "hw_metric_energy_kilowatt_hours",
     "hw_metric_nvidia_pcie_tx_bytes",
     "hw_metric_nvidia_pcie_rx_bytes",
     "hw_metric_nvidia_hardware_violation_throttle_seconds",

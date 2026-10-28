@@ -150,6 +150,8 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_hardware_health_hw_metric_current_indeterminate_uncorrectable_errors_count_total</td><td>counter</td><td>Number of indeterminate uncorrectable memory errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id; the same error may appear for multiple memory resources</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_current_uncorrectable_ecc_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_current_uncorrectable_ecc_errors_count_total</td><td>counter</td><td>Number of uncorrectable memory ECC errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_energy_kilowatt_hours</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_energy_kilowatt_hours_total</td><td>counter</td><td>Number of kilowatt-hours consumed by the power supply since the last sensor reset, by powersupply_id, chassis_id, and optional model</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_lifetime_correctable_ecc_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_lifetime_correctable_ecc_errors_count_total</td><td>counter</td><td>Number of correctable ECC errors over the lifetime of the memory, by memory_id and system_id</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_lifetime_indeterminate_correctable_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
@@ -202,6 +204,8 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_hardware_health_hw_metric_pcie_unsupported_request_count_total</td><td>counter</td><td>Number of unsupported PCIe requests received by the device</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_power_limit_throttle_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_power_limit_throttle_seconds_total</td><td>counter</td><td>Number of seconds the processor has throttled due to a power limit since reset</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_power_on_hours_hours</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_power_on_hours_hours_total</td><td>counter</td><td>Number of power-on hours over the lifetime of the drive, by drive_id, storage_id, system_id, and optional model</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_read_io_kibibytes</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_read_io_kibibytes_total</td><td>counter</td><td>Number of kibibytes read from the drive since the last reset or wrap, by drive_id, storage_id, and system_id</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_thermal_limit_throttle_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
