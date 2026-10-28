@@ -288,25 +288,17 @@ func NewAPITenantAccount(dbta *cdbm.TenantAccount, dbsds []cdbm.StatusDetail, al
 		apiTenantAccount.Deprecations = append(apiTenantAccount.Deprecations, NewAPIDeprecation(deprecation))
 	}
 
-	type capabilityVector struct {
-		targetedInstanceCreation     bool
-		crossTenantInterfaceCreation bool
-	}
-
-	accountDefault := capabilityVector{
-		targetedInstanceCreation:     dbta.Config.TargetedInstanceCreation,
-		crossTenantInterfaceCreation: dbta.Config.CrossTenantInterfaceCreation,
-	}
+	accountDefault := dbta.Config
 	caps := []APITenantAccountSiteCapability{
 		{
 			SiteIDs:                      []string{},
-			TargetedInstanceCreation:     accountDefault.targetedInstanceCreation,
-			CrossTenantInterfaceCreation: accountDefault.crossTenantInterfaceCreation,
+			TargetedInstanceCreation:     accountDefault.TargetedInstanceCreation,
+			CrossTenantInterfaceCreation: accountDefault.CrossTenantInterfaceCreation,
 		},
 	}
 
 	if dbta.TenantID != nil {
-		groupedSiteIDs := map[capabilityVector][]string{}
+		groupedSiteIDs := map[cdbm.TenantAccountConfig][]string{}
 
 		for _, ts := range tenantSites {
 			// Fail closed: a TenantSite with a missing Site relation cannot be
@@ -316,10 +308,10 @@ func NewAPITenantAccount(dbta *cdbm.TenantAccount, dbsds []cdbm.StatusDetail, al
 			}
 			effective := accountDefault
 			if ts.Config.TargetedInstanceCreation != nil {
-				effective.targetedInstanceCreation = *ts.Config.TargetedInstanceCreation
+				effective.TargetedInstanceCreation = *ts.Config.TargetedInstanceCreation
 			}
 			if ts.Config.CrossTenantInterfaceCreation != nil {
-				effective.crossTenantInterfaceCreation = *ts.Config.CrossTenantInterfaceCreation
+				effective.CrossTenantInterfaceCreation = *ts.Config.CrossTenantInterfaceCreation
 			}
 			if effective == accountDefault {
 				continue
@@ -328,19 +320,19 @@ func NewAPITenantAccount(dbta *cdbm.TenantAccount, dbsds []cdbm.StatusDetail, al
 			groupedSiteIDs[effective] = append(groupedSiteIDs[effective], ts.SiteID.String())
 		}
 
-		vectors := make([]capabilityVector, 0, len(groupedSiteIDs))
+		vectors := make([]cdbm.TenantAccountConfig, 0, len(groupedSiteIDs))
 		for vector := range groupedSiteIDs {
 			vectors = append(vectors, vector)
 		}
-		slices.SortFunc(vectors, func(a, b capabilityVector) int {
-			if a.targetedInstanceCreation != b.targetedInstanceCreation {
-				if !a.targetedInstanceCreation {
+		slices.SortFunc(vectors, func(a, b cdbm.TenantAccountConfig) int {
+			if a.TargetedInstanceCreation != b.TargetedInstanceCreation {
+				if !a.TargetedInstanceCreation {
 					return -1
 				}
 				return 1
 			}
-			if a.crossTenantInterfaceCreation != b.crossTenantInterfaceCreation {
-				if !a.crossTenantInterfaceCreation {
+			if a.CrossTenantInterfaceCreation != b.CrossTenantInterfaceCreation {
+				if !a.CrossTenantInterfaceCreation {
 					return -1
 				}
 				return 1
@@ -353,8 +345,8 @@ func NewAPITenantAccount(dbta *cdbm.TenantAccount, dbsds []cdbm.StatusDetail, al
 			slices.Sort(siteIDs)
 			caps = append(caps, APITenantAccountSiteCapability{
 				SiteIDs:                      siteIDs,
-				TargetedInstanceCreation:     vector.targetedInstanceCreation,
-				CrossTenantInterfaceCreation: vector.crossTenantInterfaceCreation,
+				TargetedInstanceCreation:     vector.TargetedInstanceCreation,
+				CrossTenantInterfaceCreation: vector.CrossTenantInterfaceCreation,
 			})
 		}
 	}

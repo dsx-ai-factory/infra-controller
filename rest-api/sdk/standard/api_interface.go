@@ -32,6 +32,7 @@ type ApiGetAllInterfacesRequest struct {
 	vpcId            *string
 	crossTenant      *bool
 	instanceTenantId *string
+	vpcTenantId      *string
 	status           *InterfaceStatus
 	includeRelation  *string
 	pageNumber       *int32
@@ -45,7 +46,7 @@ func (r ApiGetAllInterfacesRequest) VpcId(vpcId string) ApiGetAllInterfacesReque
 	return r
 }
 
-// Filter by whether the consuming Instance belongs to a Tenant other than the caller&#39;s Tenant
+// Filter by whether the Instance and selected VPC or VPC Prefix have different owning Tenants
 func (r ApiGetAllInterfacesRequest) CrossTenant(crossTenant bool) ApiGetAllInterfacesRequest {
 	r.crossTenant = &crossTenant
 	return r
@@ -57,13 +58,19 @@ func (r ApiGetAllInterfacesRequest) InstanceTenantId(instanceTenantId string) Ap
 	return r
 }
 
+// Filter by the Tenant that owns the selected VPC or VPC Prefix, within the caller&#39;s visibility boundary
+func (r ApiGetAllInterfacesRequest) VpcTenantId(vpcTenantId string) ApiGetAllInterfacesRequest {
+	r.vpcTenantId = &vpcTenantId
+	return r
+}
+
 // Filter Interfaces by status
 func (r ApiGetAllInterfacesRequest) Status(status InterfaceStatus) ApiGetAllInterfacesRequest {
 	r.status = &status
 	return r
 }
 
-// Related entity to expand; repeat the parameter to request multiple relations. Another Tenant&#39;s Instance or VPC Prefix is expanded only when &#x60;crossTenant&#x60; is &#x60;true&#x60;; otherwise that relation is omitted.
+// Related entity to expand; repeat the parameter to request multiple relations.
 func (r ApiGetAllInterfacesRequest) IncludeRelation(includeRelation string) ApiGetAllInterfacesRequest {
 	r.includeRelation = &includeRelation
 	return r
@@ -96,7 +103,7 @@ GetAllInterfaces Retrieve Tenant-visible Interfaces
 
 Retrieve current, non-deleted REST Interfaces visible to the caller's Tenant. Results include all Interfaces on the caller's Instances, plus Interfaces on other Tenants' Instances when they explicitly select a VPC owned by the caller or a VPC Prefix under one.
 
-`vpcId` filters by the directly selected VPC or the parent of an explicitly selected VPC Prefix. `crossTenant: true` returns only Interfaces whose Instance and selected VPC or VPC Prefix have different owning Tenants; `false` returns only matching ownership. `instanceTenantId` filters by the Tenant that owns the consuming Instance. Filters compose and may produce an empty result. A valid but inaccessible `vpcId` or `instanceTenantId` returns an empty list rather than disclosing resource existence.
+`vpcId` filters by the directly selected VPC or the parent of an explicitly selected VPC Prefix. `crossTenant: true` returns only Interfaces whose Instance and selected VPC or VPC Prefix have different owning Tenants; `false` returns only matching ownership. `instanceTenantId` filters by the Tenant that owns the consuming Instance, and `vpcTenantId` filters by the Tenant that owns the selected VPC or VPC Prefix. Filters compose and may produce an empty result. A valid but inaccessible `vpcId`, `instanceTenantId`, or `vpcTenantId` returns an empty list rather than disclosing resource existence.
 
 The caller must have an organization membership and an authorization role with `TENANT_ADMIN` suffix. No cross-Tenant creation capability is required to list visible Interfaces. A cross-Tenant result includes non-null `instanceTenantId` and `vpcTenantId`; both are null when the owners match. The response uses the complete Interface representation, including addresses and routing data. Visibility does not grant authority over another Tenant's Instance, VPC, VPC Prefix, or security policy.
 
@@ -145,6 +152,9 @@ func (a *InterfaceAPIService) GetAllInterfacesExecute(r ApiGetAllInterfacesReque
 	}
 	if r.instanceTenantId != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "instanceTenantId", r.instanceTenantId, "form", "")
+	}
+	if r.vpcTenantId != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "vpcTenantId", r.vpcTenantId, "form", "")
 	}
 	if r.status != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")

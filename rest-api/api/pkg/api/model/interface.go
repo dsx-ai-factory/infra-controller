@@ -11,6 +11,7 @@ import (
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
+	"github.com/google/uuid"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -271,6 +272,7 @@ type APIInterfaceGetAllRequest struct {
 	VpcID            *string  `query:"vpcId"`
 	CrossTenant      *bool    `query:"crossTenant"`
 	InstanceTenantID *string  `query:"instanceTenantId"`
+	VpcTenantID      *string  `query:"vpcTenantId"`
 	Status           *string  `query:"status"`
 	IncludeRelation  []string `query:"includeRelation"`
 }
@@ -280,6 +282,7 @@ func (r APIInterfaceGetAllRequest) Validate() error {
 	return validation.ValidateStruct(&r,
 		validation.Field(&r.VpcID, validation.When(r.VpcID != nil, validationis.UUID)),
 		validation.Field(&r.InstanceTenantID, validation.When(r.InstanceTenantID != nil, validationis.UUID)),
+		validation.Field(&r.VpcTenantID, validation.When(r.VpcTenantID != nil, validationis.UUID)),
 	)
 }
 
@@ -356,6 +359,18 @@ func NewAPIInterface(dbis *cdbm.Interface) *APIInterface {
 
 	if dbis.Instance != nil {
 		apiInterface.Instance = NewAPIInstanceSummary(dbis.Instance)
+
+		var vpcTenantID *uuid.UUID
+		switch {
+		case dbis.VpcID != nil && dbis.Vpc != nil:
+			vpcTenantID = &dbis.Vpc.TenantID
+		case dbis.VpcPrefixID != nil && dbis.VpcPrefix != nil:
+			vpcTenantID = &dbis.VpcPrefix.TenantID
+		}
+		if vpcTenantID != nil && dbis.Instance.TenantID != *vpcTenantID {
+			apiInterface.InstanceTenantID = cutil.GetPtr(dbis.Instance.TenantID.String())
+			apiInterface.VpcTenantID = cutil.GetPtr(vpcTenantID.String())
+		}
 	}
 
 	if dbis.SubnetID != nil {

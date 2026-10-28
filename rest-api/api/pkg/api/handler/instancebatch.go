@@ -550,7 +550,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 	// at the Site. Check it before validating the selectors, so the errors can't reveal another
 	// Tenant's VPC state.
 	if model.HasCrossTenantInterface(apiRequest.Interfaces, tenant.ID, interfaceVpcIDMap, vpcPrefixIDMap) {
-		hasCrossTenantInterfaceCreation, capErr := common.TenantHasCrossTenantInterfaceCreation(ctx, nil, bcih.dbSession, tenant, site.ID)
+		hasCrossTenantInterfaceCreation, capErr := cdbm.TenantHasCrossTenantInterfaceCreation(ctx, nil, bcih.dbSession, tenant, site.ID)
 		if capErr != nil {
 			logger.Error().Err(capErr).Msg("failed to resolve crossTenantInterfaceCreation capability")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve crossTenantInterfaceCreation capability, DB error", nil)

@@ -812,19 +812,19 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 
 	disableCrossTenantInterfaceCreation := func(t *testing.T) {
 		accountDAO := cdbm.NewTenantAccountDAO(dbSession)
+		disabledConfig := tenantAccount.Config
+		disabledConfig.CrossTenantInterfaceCreation = false
 		_, err := accountDAO.Update(ctx, nil, cdbm.TenantAccountUpdateInput{
 			TenantAccountID: tenantAccount.ID,
-			Config: &cdbm.TenantAccountConfigUpdate{
-				CrossTenantInterfaceCreation: cutil.GetPtr(false),
-			},
+			Config:          &disabledConfig,
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() {
+			enabledConfig := tenantAccount.Config
+			enabledConfig.CrossTenantInterfaceCreation = true
 			_, cleanupErr := accountDAO.Update(ctx, nil, cdbm.TenantAccountUpdateInput{
 				TenantAccountID: tenantAccount.ID,
-				Config: &cdbm.TenantAccountConfigUpdate{
-					CrossTenantInterfaceCreation: cutil.GetPtr(true),
-				},
+				Config:          &enabledConfig,
 			})
 			assert.NoError(t, cleanupErr)
 		})
@@ -840,9 +840,11 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 		})
 		require.NoError(t, err)
 		t.Cleanup(func() {
-			_, cleanupErr := siteDAO.Update(ctx, nil, cdbm.TenantSiteUpdateInput{
-				TenantSiteID:    ts1.ID,
-				ClearConfigKeys: []string{cdbm.TenantSiteConfigKeyCrossTenantInterfaceCreation},
+			_, cleanupErr := siteDAO.Clear(ctx, nil, cdbm.TenantSiteClearInput{
+				TenantSiteID: ts1.ID,
+				Config: cdbm.TenantAccountConfig{
+					CrossTenantInterfaceCreation: true,
+				},
 			})
 			assert.NoError(t, cleanupErr)
 		})
@@ -1526,6 +1528,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 		wantErr                  bool
 		verifyChildSpanner       bool
 		check                    func(t *testing.T)
+		checkResponse            func(t *testing.T, response *model.APIInstance)
 	}
 	tests := []testCase{
 		{
@@ -1975,6 +1978,20 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 				reqOrg:   tnOrg,
 				reqUser:  tnu1,
 				respCode: http.StatusCreated,
+			},
+			checkResponse: func(t *testing.T, response *model.APIInstance) {
+				require.Len(t, response.Interfaces, 3)
+				for _, apiInterface := range response.Interfaces {
+					isCrossTenant := (apiInterface.VpcID != nil && *apiInterface.VpcID == crossTenantVpcSt1.ID.String()) ||
+						(apiInterface.VpcPrefixID != nil && *apiInterface.VpcPrefixID == crossTenantVpcPrefixSt1.ID.String())
+					if isCrossTenant {
+						assert.Equal(t, cutil.GetPtr(tn1.ID.String()), apiInterface.InstanceTenantID)
+						assert.Equal(t, cutil.GetPtr(tn2.ID.String()), apiInterface.VpcTenantID)
+					} else {
+						assert.Nil(t, apiInterface.InstanceTenantID)
+						assert.Nil(t, apiInterface.VpcTenantID)
+					}
+				}
 			},
 			expectedControllerVpcIDs: map[string]uuid.UUID{
 				vpc9.ID.String():              *vpc9.ControllerVpcID,
@@ -4590,6 +4607,9 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			serr := json.Unmarshal(rec.Body.Bytes(), rst)
 			if serr != nil {
 				t.Fatal(serr)
+			}
+			if tt.checkResponse != nil {
+				tt.checkResponse(t, rst)
 			}
 
 			require.NotNil(t, rst.MachineID)

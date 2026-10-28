@@ -1321,6 +1321,14 @@ func TestInterfaceSQLDAO_GetAll(t *testing.T) {
 				wantIDs: []uuid.UUID{otherOnCallerVpc.ID},
 			},
 			{
+				name: "VPC Tenant filters direct and explicit-prefix Interfaces",
+				filter: InterfaceFilterInput{
+					VisibleToTenantID: &callerTenant.ID,
+					VpcTenantID:       &callerTenant.ID,
+				},
+				wantIDs: []uuid.UUID{callerOnCallerVpc.ID, otherOnCallerVpc.ID},
+			},
+			{
 				name: "caller-owned VPC includes own and cross-Tenant Interfaces",
 				filter: InterfaceFilterInput{
 					VisibleToTenantID: &callerTenant.ID,

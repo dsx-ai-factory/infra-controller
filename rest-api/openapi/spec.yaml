@@ -3404,7 +3404,7 @@ paths:
       description: |-
         Retrieve current, non-deleted REST Interfaces visible to the caller's Tenant. Results include all Interfaces on the caller's Instances, plus Interfaces on other Tenants' Instances when they explicitly select a VPC owned by the caller or a VPC Prefix under one.
 
-        `vpcId` filters by the directly selected VPC or the parent of an explicitly selected VPC Prefix. `crossTenant: true` returns only Interfaces whose Instance and selected VPC or VPC Prefix have different owning Tenants; `false` returns only matching ownership. `instanceTenantId` filters by the Tenant that owns the consuming Instance. Filters compose and may produce an empty result. A valid but inaccessible `vpcId` or `instanceTenantId` returns an empty list rather than disclosing resource existence.
+        `vpcId` filters by the directly selected VPC or the parent of an explicitly selected VPC Prefix. `crossTenant: true` returns only Interfaces whose Instance and selected VPC or VPC Prefix have different owning Tenants; `false` returns only matching ownership. `instanceTenantId` filters by the Tenant that owns the consuming Instance, and `vpcTenantId` filters by the Tenant that owns the selected VPC or VPC Prefix. Filters compose and may produce an empty result. A valid but inaccessible `vpcId`, `instanceTenantId`, or `vpcTenantId` returns an empty list rather than disclosing resource existence.
 
         The caller must have an organization membership and an authorization role with `TENANT_ADMIN` suffix. No cross-Tenant creation capability is required to list visible Interfaces. A cross-Tenant result includes non-null `instanceTenantId` and `vpcTenantId`; both are null when the owners match. The response uses the complete Interface representation, including addresses and routing data. Visibility does not grant authority over another Tenant's Instance, VPC, VPC Prefix, or security policy.
 
@@ -3475,13 +3475,19 @@ paths:
             type: boolean
           in: query
           name: crossTenant
-          description: Filter by whether the consuming Instance belongs to a Tenant other than the caller's Tenant
+          description: Filter by whether the Instance and selected VPC or VPC Prefix have different owning Tenants
         - schema:
             type: string
             format: uuid
           in: query
           name: instanceTenantId
           description: Filter by the Tenant that owns the consuming Instance, within the caller's visibility boundary
+        - schema:
+            type: string
+            format: uuid
+          in: query
+          name: vpcTenantId
+          description: Filter by the Tenant that owns the selected VPC or VPC Prefix, within the caller's visibility boundary
         - schema:
             $ref: '#/components/schemas/InterfaceStatus'
           in: query
@@ -3495,7 +3501,7 @@ paths:
               - VpcPrefix
           in: query
           name: includeRelation
-          description: Related entity to expand; repeat the parameter to request multiple relations. Another Tenant's Instance or VPC Prefix is expanded only when `crossTenant` is `true`; otherwise that relation is omitted.
+          description: Related entity to expand; repeat the parameter to request multiple relations.
         - schema:
             $ref: '#/components/schemas/PageNumber'
             default: 1
@@ -20911,6 +20917,7 @@ components:
           siteCapabilities:
             - siteIds: []
               targetedInstanceCreation: true
+              crossTenantInterfaceCreation: false
           created: '2019-08-24T14:15:22Z'
           updated: '2019-08-24T14:15:22Z'
       properties:
@@ -20971,7 +20978,7 @@ components:
         siteCapabilities:
           type: array
           description: |-
-            Provider-scoped TargetedInstanceCreation settings for this Tenant Account. Replaces the deprecated tenant-level `capabilities.targetedInstanceCreation` attribute.
+            Provider-scoped `targetedInstanceCreation` and `crossTenantInterfaceCreation` settings for this Tenant Account. `targetedInstanceCreation` replaces the deprecated tenant-level `capabilities.targetedInstanceCreation` attribute.
 
             The response always begins with one account-default entry whose `siteIds` is empty. Each following entry contains sorted Site IDs whose effective value differs from the account default. A non-null Tenant Site override takes precedence over the account default; a missing override inherits that default.
           minItems: 1
@@ -25489,7 +25496,7 @@ components:
         secondaryVpcIds:
           type: array
           uniqueItems: true
-          description: IDs of additional VPCs the Instance should attach to through non-primary Interfaces. With effective `targetedInstanceCreation`, these may include same-Site FNN VPC IDs owned by another Tenant, obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
+          description: IDs of additional VPCs the Instance should attach to through non-primary Interfaces. With effective `crossTenantInterfaceCreation`, these may include same-Site FNN VPC IDs owned by another Tenant, obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
           items:
             type: string
             format: uuid
@@ -25667,7 +25674,7 @@ components:
         secondaryVpcIds:
           type: array
           uniqueItems: true
-          description: IDs of additional VPCs every Instance should attach to through non-primary Interfaces. With effective `targetedInstanceCreation`, these may include same-Site FNN VPC IDs owned by another Tenant, obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
+          description: IDs of additional VPCs every Instance should attach to through non-primary Interfaces. With effective `crossTenantInterfaceCreation`, these may include same-Site FNN VPC IDs owned by another Tenant, obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
           items:
             type: string
             format: uuid
@@ -25908,7 +25915,7 @@ components:
         secondaryVpcIds:
           type: array
           uniqueItems: true
-          description: Complete IDs of additional VPCs the Instance should attach to through non-primary Interfaces. With effective `targetedInstanceCreation`, these may include same-Site FNN VPC IDs owned by another Tenant, obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
+          description: Complete IDs of additional VPCs the Instance should attach to through non-primary Interfaces. With effective `crossTenantInterfaceCreation`, these may include same-Site FNN VPC IDs owned by another Tenant, obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
           items:
             type: string
             format: uuid
@@ -26008,6 +26015,8 @@ components:
       examples:
         - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
           instanceId: 64d2028c-ae87-4069-a624-66089d957ef9
+          instanceTenantId: null
+          vpcTenantId: null
           subnetId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
           isPhysical: true
           virtualFunctionId: null
@@ -26019,6 +26028,8 @@ components:
           updated: '2019-08-24T14:15:22Z'
         - id: 94c4c8c0-c3c4-4a52-9518-3e165b1de036
           instanceId: 371ddf80-a7ff-4ff6-9a37-0557cec8b9be
+          instanceTenantId: f97df110-f4de-492e-8849-4a6af68026b0
+          vpcTenantId: 34f5c98e-f430-457b-a812-92637d0c6fd0
           vpcPrefixId: 1f232bf0-7b90-456e-b9b0-38d9fea4171a
           requestedIpAddress: 10.0.0.191
           isPhysical: true
@@ -26033,6 +26044,8 @@ components:
           updated: '2019-08-24T14:15:22Z'
         - id: 4c53d2f4-2a51-4ac5-90c9-87ad215c5091
           instanceId: 371ddf80-a7ff-4ff6-9a37-0557cec8b9be
+          instanceTenantId: null
+          vpcTenantId: null
           vpcId: bdd3d1af-b4a8-4675-a59c-56548716ef45
           ipFamilies:
             - IPv4
@@ -26049,6 +26062,8 @@ components:
           updated: '2019-08-24T14:15:22Z'
         - id: 45d89d4f-2dde-4fc5-a20d-9f96faa4e9fa
           instanceId: 371ddf80-a7ff-4ff6-9a37-0557cec8b9be
+          instanceTenantId: null
+          vpcTenantId: null
           vpcPrefixId: d89d8cc6-d66e-4bf2-bf62-40238837cc90
           requestedIpAddress: 10.0.0.193
           isPhysical: false
@@ -26063,6 +26078,8 @@ components:
           updated: '2019-08-24T14:15:22Z'
         - id: 236ee9d1-5f61-4aaa-abf3-0f72693e1189
           instanceId: 371ddf80-a7ff-4ff6-9a37-0557cec8b9be
+          instanceTenantId: null
+          vpcTenantId: null
           vpcPrefixId: d5dd56e2-1b0b-4913-927e-b5896d7aca7b
           requestedIpAddress: 10.0.0.195
           isPhysical: true

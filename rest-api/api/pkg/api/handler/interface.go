@@ -106,6 +106,7 @@ func NewGetAllInterfaceHandler(dbSession *cdb.Session, tc temporalClient.Client,
 // @Param vpcId query string false "Filter by attached VPC ID"
 // @Param crossTenant query boolean false "Filter by whether the Instance and selected VPC or VPC Prefix have different owning Tenants"
 // @Param instanceTenantId query string false "Filter by Instance owning Tenant ID"
+// @Param vpcTenantId query string false "Filter by selected VPC or VPC Prefix owning Tenant ID"
 // @Param status query string false "Filter by status"
 // @Param includeRelation query string false "Related entities to include in response"
 // @Param pageNumber query integer false "Page number of results returned"
@@ -142,7 +143,15 @@ func (gaish GetAllInterfaceHandler) Handle(c echo.Context) error {
 
 	request := model.APIInterfaceGetAllRequest{}
 	pageRequest := pagination.PageRequest{}
-	err = common.ValidateKnownQueryParams(c.QueryParams(), request, pageRequest)
+	instanceIDFromPath := gaish.queryOverride != nil && gaish.queryOverride.ValueFromPath
+	knownQueryRequest := any(request)
+	if instanceIDFromPath {
+		knownQueryRequest = struct {
+			Status          *string  `query:"status"`
+			IncludeRelation []string `query:"includeRelation"`
+		}{}
+	}
+	err = common.ValidateKnownQueryParams(c.QueryParams(), knownQueryRequest, pageRequest)
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
 	}
@@ -203,7 +212,6 @@ func (gaish GetAllInterfaceHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Tenant", nil)
 	}
 
-	instanceIDFromPath := gaish.queryOverride != nil && gaish.queryOverride.ValueFromPath
 	instanceIDStrs := []string{}
 	if instanceIDFromPath {
 		instanceIDStrs = gaish.queryOverride.InstanceIDs
@@ -251,6 +259,10 @@ func (gaish GetAllInterfaceHandler) Handle(c echo.Context) error {
 			instanceTenantID := uuid.MustParse(*request.InstanceTenantID)
 			filterInput.InstanceTenantID = &instanceTenantID
 		}
+		if request.VpcTenantID != nil {
+			vpcTenantID := uuid.MustParse(*request.VpcTenantID)
+			filterInput.VpcTenantID = &vpcTenantID
+		}
 	}
 
 	if status != nil {
@@ -280,10 +292,6 @@ func (gaish GetAllInterfaceHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Interfaces", nil)
 	}
 
-	// Another Tenant's Instance or VPC Prefix is expanded only when the caller asks for
-	// cross-Tenant Interfaces. The Instance path never sets this filter, so it doesn't expand them.
-	expandCrossTenantRelations := filterInput.CrossTenant != nil && *filterInput.CrossTenant
-
 	// Create response
 	apiInterfaces := make([]model.APIInterface, 0, len(dbInterfaces))
 	for i := range dbInterfaces {
@@ -293,33 +301,24 @@ func (gaish GetAllInterfaceHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to build Interface response", nil)
 		}
 
-		var vpcTenantID *uuid.UUID
 		switch {
 		case dbInterface.VpcID != nil:
 			if dbInterface.Vpc == nil {
 				logger.Error().Str("interfaceID", dbInterface.ID.String()).Msg("Interface is missing its VPC relation")
 				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to build Interface response", nil)
 			}
-			vpcTenantID = &dbInterface.Vpc.TenantID
 		case dbInterface.VpcPrefixID != nil:
 			if dbInterface.VpcPrefix == nil {
 				logger.Error().Str("interfaceID", dbInterface.ID.String()).Msg("Interface is missing its VPC Prefix relation")
 				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to build Interface response", nil)
 			}
-			vpcTenantID = &dbInterface.VpcPrefix.TenantID
 		}
 
 		apiInterface := model.NewAPIInterface(dbInterface)
-		if vpcTenantID != nil && dbInterface.Instance.TenantID != *vpcTenantID {
-			apiInterface.InstanceTenantID = cutil.GetPtr(dbInterface.Instance.TenantID.String())
-			apiInterface.VpcTenantID = cutil.GetPtr(vpcTenantID.String())
-		}
-		if !requestedRelations[cdbm.InstanceRelationName] ||
-			(!expandCrossTenantRelations && dbInterface.Instance.TenantID != tenant.ID) {
+		if !requestedRelations[cdbm.InstanceRelationName] {
 			apiInterface.Instance = nil
 		}
-		if !requestedRelations[cdbm.VpcPrefixRelationName] ||
-			(!expandCrossTenantRelations && dbInterface.VpcPrefix != nil && dbInterface.VpcPrefix.TenantID != tenant.ID) {
+		if !requestedRelations[cdbm.VpcPrefixRelationName] {
 			apiInterface.VpcPrefix = nil
 		}
 		apiInterfaces = append(apiInterfaces, *apiInterface)

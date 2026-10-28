@@ -2091,8 +2091,8 @@ func InstanceListQueryParamDeprecations() []APIDeprecation {
 }
 
 // NewAPIInstance accepts a DB layer Instance object returns an API layer object.
-// SecondaryVpcIDs are derived from Interface.VpcID or the explicit prefix relation, so
-// callers must preload Interface.VpcPrefix when explicit-prefix IDs should be populated.
+// SecondaryVpcIDs and cross-Tenant ownership are derived from Interface VPC relations,
+// so callers must preload Interface.Vpc and Interface.VpcPrefix.
 func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Interface, dbibis []cdbm.InfiniBandInterface, dbsxas []cdbm.SpectrumXAttachment, dbdesds []cdbm.DpuExtensionServiceDeployment, dbnvlis []cdbm.NVLinkInterface, dbskgs []cdbm.SSHKeyGroup, dbsds []cdbm.StatusDetail) *APIInstance {
 	var instanceTypeID *string
 	if dbinst.InstanceTypeID != nil {
@@ -2186,7 +2186,10 @@ func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Inter
 	apiInstance.Interfaces = []APIInterface{}
 	for _, dbis := range dbiss {
 		curis := dbis
-		apiInstance.Interfaces = append(apiInstance.Interfaces, *NewAPIInterface(&curis))
+		curis.Instance = dbinst
+		apiInterface := NewAPIInterface(&curis)
+		apiInterface.Instance = nil
+		apiInstance.Interfaces = append(apiInstance.Interfaces, *apiInterface)
 		if dbis.VpcID != nil && *dbis.VpcID != dbinst.VpcID {
 			secondaryVpcIDs.Add(dbis.VpcID.String())
 		} else if dbis.VpcID == nil && dbis.VpcPrefix != nil && dbis.VpcPrefix.VpcID != dbinst.VpcID {

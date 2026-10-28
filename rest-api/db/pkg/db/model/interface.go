@@ -232,6 +232,7 @@ type InterfaceUpdateInput struct {
 type InterfaceFilterInput struct {
 	InstanceIDs       []uuid.UUID
 	InstanceTenantID  *uuid.UUID
+	VpcTenantID       *uuid.UUID
 	VisibleToTenantID *uuid.UUID
 	CrossTenant       *bool
 	SubnetID          *uuid.UUID
@@ -353,100 +354,41 @@ func (ifcd InterfaceSQLDAO) setQueryWithFilter(filter InterfaceFilterInput, quer
 		}
 	}
 
+	if filter.VisibleToTenantID != nil ||
+		filter.InstanceTenantID != nil ||
+		filter.VpcTenantID != nil ||
+		filter.CrossTenant != nil ||
+		filter.VpcID != nil {
+		query = query.
+			Join("JOIN instance AS fi ON fi.id = ifc.instance_id AND fi.deleted IS NULL").
+			Join("LEFT JOIN vpc AS fv ON fv.id = ifc.vpc_id AND fv.deleted IS NULL").
+			Join("LEFT JOIN vpc_prefix AS fvp ON fvp.id = ifc.vpc_prefix_id AND fvp.deleted IS NULL")
+	}
+
 	if filter.VisibleToTenantID != nil {
-		tenantID := *filter.VisibleToTenantID
-		query = query.Where(`EXISTS (
-			SELECT 1
-			FROM instance AS visible_instance
-			WHERE visible_instance.id = ifc.instance_id
-				AND visible_instance.deleted IS NULL
-				AND (
-					visible_instance.tenant_id = ?
-					OR (
-						visible_instance.tenant_id <> ?
-						AND (
-							EXISTS (
-								SELECT 1
-								FROM vpc AS visible_vpc
-								WHERE visible_vpc.id = ifc.vpc_id
-									AND visible_vpc.tenant_id = ?
-									AND visible_vpc.deleted IS NULL
-							)
-							OR EXISTS (
-								SELECT 1
-								FROM vpc_prefix AS visible_prefix
-								JOIN vpc AS visible_vpc
-									ON visible_vpc.id = visible_prefix.vpc_id
-									AND visible_vpc.deleted IS NULL
-								WHERE visible_prefix.id = ifc.vpc_prefix_id
-									AND visible_prefix.deleted IS NULL
-									AND visible_vpc.tenant_id = ?
-							)
-						)
-					)
-				)
-		)`, tenantID, tenantID, tenantID, tenantID)
-		cotel.SetAttribute(interfaceDAOSpan, attribute.String("visible_to_tenant_id", tenantID.String()))
+		query = query.Where(
+			"(fi.tenant_id = ? OR COALESCE(fv.tenant_id, fvp.tenant_id) = ?)",
+			*filter.VisibleToTenantID,
+			*filter.VisibleToTenantID,
+		)
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("visible_to_tenant_id", filter.VisibleToTenantID.String()))
 	}
 
 	if filter.InstanceTenantID != nil {
-		query = query.Where(`EXISTS (
-			SELECT 1
-			FROM instance AS tenant_instance
-			WHERE tenant_instance.id = ifc.instance_id
-				AND tenant_instance.tenant_id = ?
-				AND tenant_instance.deleted IS NULL
-		)`, *filter.InstanceTenantID)
+		query = query.Where("fi.tenant_id = ?", *filter.InstanceTenantID)
 		cotel.SetAttribute(interfaceDAOSpan, attribute.String("instance_tenant_id", filter.InstanceTenantID.String()))
+	}
+
+	if filter.VpcTenantID != nil {
+		query = query.Where("COALESCE(fv.tenant_id, fvp.tenant_id) = ?", *filter.VpcTenantID)
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("vpc_tenant_id", filter.VpcTenantID.String()))
 	}
 
 	if filter.CrossTenant != nil {
 		if *filter.CrossTenant {
-			query = query.Where(`EXISTS (
-				SELECT 1
-				FROM instance AS cross_tenant_instance
-				WHERE cross_tenant_instance.id = ifc.instance_id
-					AND cross_tenant_instance.deleted IS NULL
-					AND (
-						EXISTS (
-							SELECT 1
-							FROM vpc AS cross_tenant_vpc
-							WHERE cross_tenant_vpc.id = ifc.vpc_id
-								AND cross_tenant_vpc.tenant_id <> cross_tenant_instance.tenant_id
-								AND cross_tenant_vpc.deleted IS NULL
-						)
-						OR EXISTS (
-							SELECT 1
-							FROM vpc_prefix AS cross_tenant_prefix
-							WHERE cross_tenant_prefix.id = ifc.vpc_prefix_id
-								AND cross_tenant_prefix.tenant_id <> cross_tenant_instance.tenant_id
-								AND cross_tenant_prefix.deleted IS NULL
-						)
-					)
-			)`)
+			query = query.Where("COALESCE(fv.tenant_id, fvp.tenant_id) <> fi.tenant_id")
 		} else {
-			query = query.Where(`EXISTS (
-				SELECT 1
-				FROM instance AS cross_tenant_instance
-				WHERE cross_tenant_instance.id = ifc.instance_id
-					AND cross_tenant_instance.deleted IS NULL
-					AND NOT (
-						EXISTS (
-							SELECT 1
-							FROM vpc AS cross_tenant_vpc
-							WHERE cross_tenant_vpc.id = ifc.vpc_id
-								AND cross_tenant_vpc.tenant_id <> cross_tenant_instance.tenant_id
-								AND cross_tenant_vpc.deleted IS NULL
-						)
-						OR EXISTS (
-							SELECT 1
-							FROM vpc_prefix AS cross_tenant_prefix
-							WHERE cross_tenant_prefix.id = ifc.vpc_prefix_id
-								AND cross_tenant_prefix.tenant_id <> cross_tenant_instance.tenant_id
-								AND cross_tenant_prefix.deleted IS NULL
-						)
-					)
-			)`)
+			query = query.Where("(ifc.subnet_id IS NOT NULL OR COALESCE(fv.tenant_id, fvp.tenant_id) = fi.tenant_id)")
 		}
 		cotel.SetAttribute(interfaceDAOSpan, attribute.Bool("cross_tenant", *filter.CrossTenant))
 	}
@@ -457,26 +399,7 @@ func (ifcd InterfaceSQLDAO) setQueryWithFilter(filter InterfaceFilterInput, quer
 	}
 
 	if filter.VpcID != nil {
-		query = query.WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
-			return q.
-				Where("ifc.vpc_id = ?", *filter.VpcID).
-				WhereOr(`EXISTS (
-					SELECT 1
-					FROM vpc_prefix AS vp
-					WHERE vp.id = ifc.vpc_prefix_id
-						AND vp.vpc_id = ?
-						AND vp.deleted IS NULL
-				)`, *filter.VpcID)
-		})
-		// Site deletion soft-deletes Instances before it deletes their Interfaces,
-		// so exclude Interfaces whose Instance is already gone. This stays outside
-		// the group so it applies to both the direct-VPC and VPC Prefix matches.
-		query = query.Where(`EXISTS (
-			SELECT 1
-			FROM instance AS i
-			WHERE i.id = ifc.instance_id
-				AND i.deleted IS NULL
-		)`)
+		query = query.Where("COALESCE(ifc.vpc_id, fvp.vpc_id) = ?", *filter.VpcID)
 		cotel.SetAttribute(interfaceDAOSpan, attribute.String("vpc_id", filter.VpcID.String()))
 	}
 

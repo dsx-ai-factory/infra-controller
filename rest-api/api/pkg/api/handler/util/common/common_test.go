@@ -3685,7 +3685,7 @@ func TestTenantHasCrossTenantInterfaceCreation(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := TenantHasCrossTenantInterfaceCreation(ctx, nil, dbSession, tc.tenant, tc.siteID)
+			got, err := cdbm.TenantHasCrossTenantInterfaceCreation(ctx, nil, dbSession, tc.tenant, tc.siteID)
 			if tc.wantErr {
 				assert.Error(t, err)
 			} else {

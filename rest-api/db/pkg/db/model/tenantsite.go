@@ -75,7 +75,13 @@ type TenantSiteUpdateInput struct {
 	TenantSiteID        uuid.UUID
 	EnableSerialConsole *bool
 	Config              *TenantSiteConfig
-	ClearConfigKeys     []string
+}
+
+// TenantSiteClearInput identifies Tenant Site capability overrides to remove.
+// True fields in Config select the corresponding JSON keys.
+type TenantSiteClearInput struct {
+	TenantSiteID uuid.UUID
+	Config       TenantAccountConfig
 }
 
 type TenantSiteFilterInput struct {
@@ -121,6 +127,8 @@ type TenantSiteDAO interface {
 	Create(ctx context.Context, tx *db.Tx, input TenantSiteCreateInput) (*TenantSite, error)
 	//
 	Update(ctx context.Context, tx *db.Tx, input TenantSiteUpdateInput) (*TenantSite, error)
+	//
+	Clear(ctx context.Context, tx *db.Tx, input TenantSiteClearInput) (*TenantSite, error)
 	//
 	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
 }
@@ -306,7 +314,30 @@ func (tssd TenantSiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input Tenant
 		}
 	}
 
-	for _, key := range input.ClearConfigKeys {
+	uts, err := tssd.GetByID(ctx, tx, input.TenantSiteID, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return uts, nil
+}
+
+// Clear removes selected capability overrides from TenantSite config.
+func (tssd TenantSiteSQLDAO) Clear(ctx context.Context, tx *db.Tx, input TenantSiteClearInput) (_ *TenantSite, retErr error) {
+	ctx, tnsDAOSpan := cotel.StartSpan(ctx, "TenantSiteDAO.Clear")
+	defer func() { cotel.EndSpan(tnsDAOSpan, retErr) }()
+	cotel.SetAttribute(tnsDAOSpan, attribute.String("id", input.TenantSiteID.String()))
+
+	configKeys := []string{}
+	if input.Config.TargetedInstanceCreation {
+		configKeys = append(configKeys, TenantSiteConfigKeyTargetedInstanceCreation)
+	}
+	if input.Config.CrossTenantInterfaceCreation {
+		configKeys = append(configKeys, TenantSiteConfigKeyCrossTenantInterfaceCreation)
+	}
+
+	ts := &TenantSite{ID: input.TenantSiteID}
+	for _, key := range configKeys {
 		_, err := db.GetIDB(tx, tssd.dbSession).NewUpdate().
 			Model(ts).
 			Set("config = config - ?, updated = current_timestamp", key).
@@ -321,7 +352,6 @@ func (tssd TenantSiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input Tenant
 	if err != nil {
 		return nil, err
 	}
-
 	return uts, nil
 }
 

@@ -38,7 +38,7 @@ type InstanceCreateRequest struct {
 	MachineLabelSelector map[string]string `json:"machineLabelSelector,omitempty"`
 	// ID of the primary VPC the Instance belongs to. It must be owned by the Instance Tenant.
 	VpcId string `json:"vpcId"`
-	// IDs of additional VPCs the Instance should attach to through non-primary Interfaces. With effective `targetedInstanceCreation`, these may include same-Site FNN VPC IDs owned by another Tenant, obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
+	// IDs of additional VPCs the Instance should attach to through non-primary Interfaces. With effective `crossTenantInterfaceCreation`, these may include same-Site FNN VPC IDs owned by another Tenant, obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
 	SecondaryVpcIds []string `json:"secondaryVpcIds,omitempty"`
 	// Can only be specified if allowOverride is set to true in Operating System. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
 	UserData NullableString `json:"userData,omitempty"`

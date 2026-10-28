@@ -928,17 +928,17 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 
 		targetedInstanceCreationReplaced := accountCapability.TargetedInstanceCreation != nil
 		crossTenantInterfaceCreationReplaced := accountCapability.CrossTenantInterfaceCreation != nil
-		currentTargetedInstanceCreationDefault := ta.Config.TargetedInstanceCreation
+		accountConfig := ta.Config
 		if targetedInstanceCreationReplaced {
-			currentTargetedInstanceCreationDefault = *accountCapability.TargetedInstanceCreation
+			accountConfig.TargetedInstanceCreation = *accountCapability.TargetedInstanceCreation
+		}
+		if crossTenantInterfaceCreationReplaced {
+			accountConfig.CrossTenantInterfaceCreation = *accountCapability.CrossTenantInterfaceCreation
 		}
 
 		_, derr = taDAO.Update(ctx, tx, cdbm.TenantAccountUpdateInput{
 			TenantAccountID: taID,
-			Config: &cdbm.TenantAccountConfigUpdate{
-				TargetedInstanceCreation:     accountCapability.TargetedInstanceCreation,
-				CrossTenantInterfaceCreation: accountCapability.CrossTenantInterfaceCreation,
-			},
+			Config:          &accountConfig,
 		})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error updating TenantAccount config in DB")
@@ -969,19 +969,19 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 			}
 
 			config := &cdbm.TenantSiteConfig{}
-			clearConfigKeys := []string{}
+			clearConfig := cdbm.TenantAccountConfig{}
 			if targetedInstanceCreationReplaced {
 				if capability.TargetedInstanceCreation != nil {
 					config.TargetedInstanceCreation = capability.TargetedInstanceCreation
 				} else {
-					clearConfigKeys = append(clearConfigKeys, cdbm.TenantSiteConfigKeyTargetedInstanceCreation)
+					clearConfig.TargetedInstanceCreation = true
 				}
 			}
 			if crossTenantInterfaceCreationReplaced {
 				if capability.CrossTenantInterfaceCreation != nil {
 					config.CrossTenantInterfaceCreation = capability.CrossTenantInterfaceCreation
 				} else {
-					clearConfigKeys = append(clearConfigKeys, cdbm.TenantSiteConfigKeyCrossTenantInterfaceCreation)
+					clearConfig.CrossTenantInterfaceCreation = true
 				}
 			}
 
@@ -1023,14 +1023,25 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 			if ts.Config.TargetedInstanceCreation != nil {
 				previousTargetedInstanceCreation = *ts.Config.TargetedInstanceCreation
 			}
-			_, derr = tsDAO.Update(ctx, tx, cdbm.TenantSiteUpdateInput{
-				TenantSiteID:    ts.ID,
-				Config:          config,
-				ClearConfigKeys: clearConfigKeys,
-			})
-			if derr != nil {
-				logger.Error().Err(derr).Msg("error updating TenantSite config for siteCapabilities")
-				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Tenant Account capabilities", nil)
+			if config.TargetedInstanceCreation != nil || config.CrossTenantInterfaceCreation != nil {
+				_, derr = tsDAO.Update(ctx, tx, cdbm.TenantSiteUpdateInput{
+					TenantSiteID: ts.ID,
+					Config:       config,
+				})
+				if derr != nil {
+					logger.Error().Err(derr).Msg("error updating TenantSite config for siteCapabilities")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Tenant Account capabilities", nil)
+				}
+			}
+			if clearConfig.TargetedInstanceCreation || clearConfig.CrossTenantInterfaceCreation {
+				_, derr = tsDAO.Clear(ctx, tx, cdbm.TenantSiteClearInput{
+					TenantSiteID: ts.ID,
+					Config:       clearConfig,
+				})
+				if derr != nil {
+					logger.Error().Err(derr).Msg("error clearing TenantSite config for siteCapabilities")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Tenant Account capabilities", nil)
+				}
 			}
 			if config.TargetedInstanceCreation != nil &&
 				*config.TargetedInstanceCreation &&
@@ -1058,27 +1069,27 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 			}
 
 			capability, listed := siteUpdates[ts.SiteID]
-			clearConfigKeys := []string{}
+			clearConfig := cdbm.TenantAccountConfig{}
 			targetedInstanceCreationOverride := ts.Config.TargetedInstanceCreation
 			crossTenantInterfaceCreationOverride := ts.Config.CrossTenantInterfaceCreation
 			if targetedInstanceCreationReplaced {
 				hasOverride := listed && capability.TargetedInstanceCreation != nil
 				if !hasOverride && targetedInstanceCreationOverride != nil {
-					clearConfigKeys = append(clearConfigKeys, cdbm.TenantSiteConfigKeyTargetedInstanceCreation)
+					clearConfig.TargetedInstanceCreation = true
 					targetedInstanceCreationOverride = nil
 				}
 			}
 			if crossTenantInterfaceCreationReplaced {
 				hasOverride := listed && capability.CrossTenantInterfaceCreation != nil
 				if !hasOverride && crossTenantInterfaceCreationOverride != nil {
-					clearConfigKeys = append(clearConfigKeys, cdbm.TenantSiteConfigKeyCrossTenantInterfaceCreation)
+					clearConfig.CrossTenantInterfaceCreation = true
 					crossTenantInterfaceCreationOverride = nil
 				}
 			}
-			if len(clearConfigKeys) > 0 {
-				_, derr = tsDAO.Update(ctx, tx, cdbm.TenantSiteUpdateInput{
-					TenantSiteID:    ts.ID,
-					ClearConfigKeys: clearConfigKeys,
+			if clearConfig.TargetedInstanceCreation || clearConfig.CrossTenantInterfaceCreation {
+				_, derr = tsDAO.Clear(ctx, tx, cdbm.TenantSiteClearInput{
+					TenantSiteID: ts.ID,
+					Config:       clearConfig,
 				})
 				if derr != nil {
 					logger.Error().Err(derr).Msg("error clearing stale TenantSite capability override")
@@ -1091,7 +1102,7 @@ func (utah UpdateTenantAccountHandler) handleProviderSiteCapabilitiesUpdate(c ec
 			if targetedInstanceCreationOverride != nil || crossTenantInterfaceCreationOverride != nil {
 				continue
 			}
-			if currentTargetedInstanceCreationDefault {
+			if accountConfig.TargetedInstanceCreation {
 				continue
 			}
 			count, derr := cdbm.NewAllocationDAO(utah.dbSession).GetCount(ctx, tx, cdbm.AllocationFilterInput{

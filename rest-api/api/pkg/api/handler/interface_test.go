@@ -141,6 +141,7 @@ func TestGetAllInstanceInterfaceHandler_Handle(t *testing.T) {
 		expectedCount             int
 		expectedTotal             int
 		verifyChildSpanner        bool
+		query                     url.Values
 	}{
 		{
 			name: "test Interface getall subnet API endpoint success",
@@ -360,6 +361,23 @@ func TestGetAllInstanceInterfaceHandler_Handle(t *testing.T) {
 			expectedTotal: 0,
 			wantErr:       false,
 		},
+		{
+			name: "test Instance Interface endpoint rejects top-level Interface filters",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqInstance:   inst1,
+				reqInstanceID: inst1.ID.String(),
+				reqOrg:        tnOrg1,
+				reqUser:       tnu1,
+				respCode:      http.StatusBadRequest,
+			},
+			query:   url.Values{"crossTenant": {"true"}},
+			wantErr: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -375,6 +393,11 @@ func TestGetAllInstanceInterfaceHandler_Handle(t *testing.T) {
 			rec := httptest.NewRecorder()
 
 			q := req.URL.Query()
+			for key, values := range tt.query {
+				for _, value := range values {
+					q.Add(key, value)
+				}
+			}
 			if tt.queryIncludeRelations1 != nil {
 				q.Add("includeRelation", *tt.queryIncludeRelations1)
 			}
@@ -739,6 +762,23 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 			),
 		},
 		{
+			name:       "VPC Tenant filter includes direct and explicit-prefix Interfaces",
+			org:        ownerOrg,
+			user:       ownerUser,
+			query:      url.Values{"vpcTenantId": {ownerTenant.ID.String()}},
+			statusCode: http.StatusOK,
+			check: checkInterfaces(
+				[]string{ownerDirect.ID.String(), crossTenantDirect.ID.String(), crossTenantPrefix.ID.String()},
+				map[string]tenantOwnershipExpectation{
+					ownerDirect.ID.String():       {},
+					crossTenantDirect.ID.String(): {instanceTenantID: &consumerTenantID, vpcTenantID: &ownerTenantID},
+					crossTenantPrefix.ID.String(): {instanceTenantID: &consumerTenantID, vpcTenantID: &ownerTenantID},
+				},
+				cdbp.DefaultLimit,
+				false,
+			),
+		},
+		{
 			name:       "caller sees all own Instance Interfaces across VPC ownership",
 			org:        consumerOrg,
 			user:       consumerUser,
@@ -799,43 +839,21 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 			),
 		},
 		{
-			name:       "default list does not expand another Tenant's Instance",
+			name:       "includeRelation expands another Tenant's Instance",
 			org:        ownerOrg,
 			user:       ownerUser,
 			query:      url.Values{"includeRelation": relations},
 			statusCode: http.StatusOK,
 			check: checkRelations(
-				map[string]bool{ownerDirect.ID.String(): true, crossTenantDirect.ID.String(): false},
+				map[string]bool{ownerDirect.ID.String(): true, crossTenantDirect.ID.String(): true},
 				map[string]bool{crossTenantPrefix.ID.String(): true},
 			),
 		},
 		{
-			name:       "default list does not expand another Tenant's VPC Prefix",
+			name:       "includeRelation expands another Tenant's VPC Prefix",
 			org:        consumerOrg,
 			user:       consumerUser,
 			query:      url.Values{"includeRelation": relations},
-			statusCode: http.StatusOK,
-			check: checkRelations(
-				map[string]bool{crossTenantPrefix.ID.String(): true},
-				map[string]bool{crossTenantPrefix.ID.String(): false},
-			),
-		},
-		{
-			name:       "cross-Tenant filter expands another Tenant's Instance",
-			org:        ownerOrg,
-			user:       ownerUser,
-			query:      url.Values{"crossTenant": {"true"}, "includeRelation": relations},
-			statusCode: http.StatusOK,
-			check: checkRelations(
-				map[string]bool{crossTenantDirect.ID.String(): true},
-				map[string]bool{crossTenantPrefix.ID.String(): true},
-			),
-		},
-		{
-			name:       "cross-Tenant filter expands another Tenant's VPC Prefix",
-			org:        consumerOrg,
-			user:       consumerUser,
-			query:      url.Values{"crossTenant": {"true"}, "includeRelation": relations},
 			statusCode: http.StatusOK,
 			check: checkRelations(
 				map[string]bool{crossTenantPrefix.ID.String(): true},
@@ -854,6 +872,13 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 			org:        ownerOrg,
 			user:       ownerUser,
 			query:      url.Values{"instanceTenantId": {"not-a-uuid"}},
+			statusCode: http.StatusBadRequest,
+		},
+		{
+			name:       "invalid VPC Tenant ID is rejected",
+			org:        ownerOrg,
+			user:       ownerUser,
+			query:      url.Values{"vpcTenantId": {"not-a-uuid"}},
 			statusCode: http.StatusBadRequest,
 		},
 		{

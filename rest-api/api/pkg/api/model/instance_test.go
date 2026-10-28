@@ -470,6 +470,18 @@ func TestNewAPIInstance(t *testing.T) {
 		})
 	}
 
+	t.Run("cross-Tenant Interface ownership", func(t *testing.T) {
+		vpcTenantID := uuid.New()
+		crossTenantInterface := dbis1Secondary1
+		crossTenantInterface.Vpc = &cdbm.Vpc{TenantID: vpcTenantID}
+
+		got := NewAPIInstance(dbi1, dbs, []cdbm.Interface{crossTenantInterface}, nil, nil, nil, nil, nil, nil)
+		require.Len(t, got.Interfaces, 1)
+		assert.Equal(t, cutil.GetPtr(dbi1.TenantID.String()), got.Interfaces[0].InstanceTenantID)
+		assert.Equal(t, cutil.GetPtr(vpcTenantID.String()), got.Interfaces[0].VpcTenantID)
+		assert.Nil(t, got.Interfaces[0].Instance)
+	})
+
 	controllerInstanceID := uuid.New()
 	urlPrefix := "ssh://" + controllerInstanceID.String() + "@"
 	serialConsoleTests := []struct {

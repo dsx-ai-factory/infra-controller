@@ -290,7 +290,7 @@ another tenant's VPC or VPC prefix at the same site. The interface selects the V
 `vpcId` or the VPC prefix with `vpcPrefixId` on instance create, batch create, or update. The
 caller must be a Tenant Admin, and the VPC must be a `Ready` FNN VPC. The VPC or VPC prefix ID
 comes from the owning tenant out of band, because the capability does not grant discovery of
-or CRUD access to another tenant's VPCs or VPC prefixes.
+or CRUD access to VPCs or VPC prefixes owned by other Tenants.
 
 These rules still apply with the capability:
 

@@ -1631,12 +1631,6 @@ func TenantHasTargetedInstanceCreation(ctx context.Context, tx *cdb.Tx, dbSessio
 	return cdbm.TenantHasTargetedInstanceCreation(ctx, tx, dbSession, tenant, scope)
 }
 
-// TenantHasCrossTenantInterfaceCreation reports whether the Tenant may create
-// cross-Tenant Interfaces at the specified Site.
-func TenantHasCrossTenantInterfaceCreation(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, siteID uuid.UUID) (bool, error) {
-	return cdbm.TenantHasCrossTenantInterfaceCreation(ctx, tx, dbSession, tenant, siteID)
-}
-
 // TenantHasSiteAccess reports whether the Tenant has an Allocation or effective TargetedInstanceCreation on the Site.
 func TenantHasSiteAccess(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant, siteID uuid.UUID) (bool, error) {
 	return cdbm.TenantHasSiteAccess(ctx, tx, dbSession, tenant, siteID)

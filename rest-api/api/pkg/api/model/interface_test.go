@@ -133,6 +133,50 @@ func TestNewAPIInterface(t *testing.T) {
 			assert.JSONEq(t, tt.wantPrefixesJSON, string(response["ipPrefixes"]))
 		})
 	}
+
+	instanceTenantID := uuid.New()
+	vpcTenantID := uuid.New()
+	for _, tc := range []struct {
+		name                 string
+		dbInterface          *cdbm.Interface
+		wantInstanceTenantID *string
+		wantVpcTenantID      *string
+	}{
+		{
+			name: "cross-Tenant direct VPC",
+			dbInterface: &cdbm.Interface{
+				Instance: &cdbm.Instance{TenantID: instanceTenantID},
+				VpcID:    &vpcID,
+				Vpc:      &cdbm.Vpc{TenantID: vpcTenantID},
+			},
+			wantInstanceTenantID: cutil.GetPtr(instanceTenantID.String()),
+			wantVpcTenantID:      cutil.GetPtr(vpcTenantID.String()),
+		},
+		{
+			name: "cross-Tenant explicit VPC Prefix",
+			dbInterface: &cdbm.Interface{
+				Instance:    &cdbm.Instance{TenantID: instanceTenantID},
+				VpcPrefixID: cutil.GetPtr(uuid.New()),
+				VpcPrefix:   &cdbm.VpcPrefix{TenantID: vpcTenantID},
+			},
+			wantInstanceTenantID: cutil.GetPtr(instanceTenantID.String()),
+			wantVpcTenantID:      cutil.GetPtr(vpcTenantID.String()),
+		},
+		{
+			name: "same-Tenant VPC",
+			dbInterface: &cdbm.Interface{
+				Instance: &cdbm.Instance{TenantID: instanceTenantID},
+				VpcID:    &vpcID,
+				Vpc:      &cdbm.Vpc{TenantID: instanceTenantID},
+			},
+		},
+	} {
+		t.Run("tenant ownership/"+tc.name, func(t *testing.T) {
+			got := NewAPIInterface(tc.dbInterface)
+			assert.Equal(t, tc.wantInstanceTenantID, got.InstanceTenantID)
+			assert.Equal(t, tc.wantVpcTenantID, got.VpcTenantID)
+		})
+	}
 }
 
 func TestAPIInterfaceGetAllRequest_Validate(t *testing.T) {
@@ -144,9 +188,10 @@ func TestAPIInterfaceGetAllRequest_Validate(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "no filters"},
-		{name: "valid IDs", request: APIInterfaceGetAllRequest{VpcID: &validID, InstanceTenantID: &validID}},
+		{name: "valid IDs", request: APIInterfaceGetAllRequest{VpcID: &validID, InstanceTenantID: &validID, VpcTenantID: &validID}},
 		{name: "invalid VPC ID", request: APIInterfaceGetAllRequest{VpcID: &invalidID}, wantErr: true},
 		{name: "invalid Instance Tenant ID", request: APIInterfaceGetAllRequest{InstanceTenantID: &invalidID}, wantErr: true},
+		{name: "invalid VPC Tenant ID", request: APIInterfaceGetAllRequest{VpcTenantID: &invalidID}, wantErr: true},
 	}
 
 	for _, tc := range tests {

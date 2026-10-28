@@ -629,7 +629,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 	// at the Site. Check it before validating the selectors, so the errors can't reveal another
 	// Tenant's VPC state.
 	if model.HasCrossTenantInterface(apiRequest.Interfaces, tenant.ID, interfaceVpcIDMap, vpcPrefixIDMap) {
-		hasCrossTenantInterfaceCreation, capErr := common.TenantHasCrossTenantInterfaceCreation(ctx, nil, cih.dbSession, tenant, site.ID)
+		hasCrossTenantInterfaceCreation, capErr := cdbm.TenantHasCrossTenantInterfaceCreation(ctx, nil, cih.dbSession, tenant, site.ID)
 		if capErr != nil {
 			logger.Error().Err(capErr).Msg("failed to resolve crossTenantInterfaceCreation capability")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve crossTenantInterfaceCreation capability, DB error", nil)
@@ -2304,7 +2304,7 @@ func (uih UpdateInstanceHandler) handleReboot(c echo.Context, logger *zerolog.Lo
 
 		// Get the instance subnets record from the db
 		ifcDAO := cdbm.NewInterfaceDAO(uih.dbSession)
-		retifc, _, derr = ifcDAO.GetAll(ctx, tx, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{}, []string{cdbm.SubnetRelationName, cdbm.VpcPrefixRelationName})
+		retifc, _, derr = ifcDAO.GetAll(ctx, tx, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{}, []string{cdbm.SubnetRelationName, cdbm.VpcRelationName, cdbm.VpcPrefixRelationName})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error retrieving Instance Subnets Details from DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Instance Subnets for Instance", nil)
@@ -2999,7 +2999,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to authorize cross-Tenant VPC attachments", nil)
 	}
 	if hasNewCrossTenantInterface {
-		hasCrossTenantInterfaceCreation, err = common.TenantHasCrossTenantInterfaceCreation(ctx, nil, uih.dbSession, tenant, site.ID)
+		hasCrossTenantInterfaceCreation, err = cdbm.TenantHasCrossTenantInterfaceCreation(ctx, nil, uih.dbSession, tenant, site.ID)
 		if err != nil {
 			logger.Error().Err(err).Msg("failed to resolve crossTenantInterfaceCreation capability")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve crossTenantInterfaceCreation capability, DB error", nil)
@@ -4957,7 +4957,7 @@ func (gih GetInstanceHandler) Handle(c echo.Context) error {
 			InstanceIDs: []uuid.UUID{instance.ID},
 		},
 		cdbp.PageInput{OrderBy: &cdbp.OrderBy{Field: cdbm.InterfaceOrderByCreated, Order: cdbp.OrderAscending}, Limit: cutil.GetPtr(cdbp.TotalLimit)},
-		[]string{cdbm.SubnetRelationName, cdbm.VpcPrefixRelationName},
+		[]string{cdbm.SubnetRelationName, cdbm.VpcRelationName, cdbm.VpcPrefixRelationName},
 	)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving instance Interfaces Details from DB")
@@ -5481,7 +5481,7 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 	// Create a map for instanceID -> set of VPCs
 	vpcsByInstance := map[uuid.UUID]goset.Set[uuid.UUID]{}
 
-	ifcs, _, serr := ifcDAO.GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: insIDs}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, []string{cdbm.SubnetRelationName, cdbm.VpcPrefixRelationName})
+	ifcs, _, serr := ifcDAO.GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: insIDs}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, []string{cdbm.SubnetRelationName, cdbm.VpcRelationName, cdbm.VpcPrefixRelationName})
 	if serr != nil {
 		// Log error and continue
 		logger.Error().Err(serr).Msg("error retrieving Instance Subnets for Instance from DB")
