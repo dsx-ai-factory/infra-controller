@@ -133,9 +133,9 @@ impl Firmware {
 
     /// Every installed inventory entry matching each configured component, as
     /// the updater matches them. A configured component without a match gets
-    /// an empty group. Groups are sorted by component name and entries by
-    /// service, inventory and version. `None` when a configured component is
-    /// unknown.
+    /// an empty group. Groups are sorted by component slug, then by drive
+    /// model, and entries by service, inventory and version. `None` when a
+    /// configured component is unknown.
     pub fn installed_inventory(&self, services: &[Service]) -> Option<Vec<ComponentInventory>> {
         let mut groups = self
             .components
@@ -162,7 +162,7 @@ impl Firmware {
                     .then_some(ComponentInventory { component, entries })
             })
             .collect::<Option<Vec<_>>>()?;
-        groups.sort_by_key(|group| group.component.slug());
+        groups.sort_by_key(|group| (group.component.slug(), group.component));
         Some(groups)
     }
 

@@ -31,7 +31,7 @@ use db::ConditionalWrite;
 use health_report::{HealthAlertClassification, HealthProbeAlert, HealthReport};
 use itertools::Itertools;
 use model::expected_machine::ExpectedMachineData;
-use model::firmware::{FirmwareComponent, FirmwareComponentType};
+use model::firmware::{DriveModel, FirmwareComponent, FirmwareComponentType};
 use model::hardware_info::HardwareInfo;
 use model::machine::{
     LoadSnapshotOptions, ManagedHostState, ManagedHostStateSnapshot, NotAllocatableReason,
@@ -848,9 +848,11 @@ async fn compact_read_error_returns_no_partial_batch(pool: sqlx::PgPool) {
 
 #[crate::sqlx_test]
 async fn compact_inventory_through_handler(pool: sqlx::PgPool) {
-    // The R750 catalog entry also covers CX7 cards, which report one entry per card.
+    // The R750 catalog entry also covers CX7 cards, which report one entry per card,
+    // and two drive models, which share a slug.
     let mut config = get_config();
     let cx7 = Regex::new("^CX7_").unwrap();
+    let drive_models = ["KCD8DPUG15T3", "Dell Ent NVMe CM6 RI 1.92TB"];
     for firmware in config.host_models.values_mut() {
         if firmware.model == "PowerEdge R750" {
             let component = FirmwareComponent {
@@ -860,6 +862,18 @@ async fn compact_inventory_through_handler(pool: sqlx::PgPool) {
             firmware
                 .components
                 .insert(FirmwareComponentType::Cx7, component);
+            for model in drive_models {
+                let component = FirmwareComponent {
+                    current_version_reported_as: Some(
+                        Regex::new(&format!("^Drive_{}_", regex::escape(model))).unwrap(),
+                    ),
+                    ..Default::default()
+                };
+                let model = DriveModel::new(model).unwrap();
+                firmware
+                    .components
+                    .insert(FirmwareComponentType::Drive { model }, component);
+            }
         }
     }
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
@@ -868,14 +882,22 @@ async fn compact_inventory_through_handler(pool: sqlx::PgPool) {
     let address: IpAddr = read().await.address.parse().unwrap();
     let entry = |id: &str, version: &str| (id.to_string(), Some(version.to_string()));
 
-    for cards in [
-        [("CX7_0", "28.2"), ("CX7_1", "28.1")],
-        [("CX7_1", "28.1"), ("CX7_0", "28.2")],
-    ] {
+    let reported = [
+        ("CX7_0", "28.2"),
+        ("CX7_1", "28.1"),
+        ("Drive_KCD8DPUG15T3_drive_bay_0", "1XET7106"),
+        ("Drive_Dell Ent NVMe CM6 RI 1.92TB_Disk.Bay.1", "2.2.1"),
+        ("Drive_KCD8DPUG15T3_drive_bay_1", "1XET7107"),
+    ];
+    let mut reversed = reported;
+    reversed.reverse();
+    for report in [reported, reversed] {
         let mut endpoint = stored_endpoint(&env, address).await;
         let inventories = &mut endpoint.report.service[0].inventories;
-        inventories.retain(|inventory| !inventory.id.starts_with("CX7_"));
-        inventories.extend(cards.map(|(id, version)| Inventory {
+        inventories.retain(|inventory| {
+            !inventory.id.starts_with("CX7_") && !inventory.id.starts_with("Drive_")
+        });
+        inventories.extend(report.map(|(id, version)| Inventory {
             id: id.to_string(),
             version: Some(version.to_string()),
             ..Default::default()
@@ -909,11 +931,25 @@ async fn compact_inventory_through_handler(pool: sqlx::PgPool) {
             ("bmc", vec![entry("Installed-__iDRACz", "5.10.20")]),
             ("cx7", vec![entry("CX7_0", "28.2"), entry("CX7_1", "28.1")]),
             (
+                "drive-Dell Ent NVMe CM6 RI 1.92TB",
+                vec![entry(
+                    "Drive_Dell Ent NVMe CM6 RI 1.92TB_Disk.Bay.1",
+                    "2.2.1",
+                )],
+            ),
+            (
+                "drive-KCD8DPUG15T3",
+                vec![
+                    entry("Drive_KCD8DPUG15T3_drive_bay_0", "1XET7106"),
+                    entry("Drive_KCD8DPUG15T3_drive_bay_1", "1XET7107"),
+                ],
+            ),
+            (
                 "uefi",
                 vec![entry("Current-159-1.13.2__BIOS.Setup.1-1", "1.12.0")],
             ),
         ]
         .map(|(component, entries)| (component.to_string(), entries));
-        assert_eq!(inventory, expected, "{cards:?}");
+        assert_eq!(inventory, expected, "{report:?}");
     }
 }

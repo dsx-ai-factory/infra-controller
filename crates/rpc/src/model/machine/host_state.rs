@@ -17,7 +17,7 @@
 
 //! Projection of the compact host read, `FindHostStatesByIds`.
 
-use model::firmware::ComponentInventory;
+use model::firmware::{ComponentInventory, FirmwareComponentType};
 use model::host_machine_update::{HostUpdateGateRow, UpdateBlockingReason};
 use model::machine::ManagedHostStateSnapshot;
 use model::site_explorer::EndpointExplorationError;
@@ -46,7 +46,12 @@ pub fn explored_firmware(
             components: groups
                 .into_iter()
                 .map(|group| rpc::forge::HostFirmwareComponentInventory {
-                    component: group.component.slug().to_string(),
+                    component: match group.component {
+                        // Every drive model shares the slug, so a drive keeps its
+                        // stored `drive-<model>` name.
+                        component @ FirmwareComponentType::Drive { .. } => component.to_string(),
+                        component => component.slug().to_string(),
+                    },
                     entries: group
                         .entries
                         .into_iter()
