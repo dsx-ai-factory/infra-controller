@@ -63,7 +63,7 @@ func (r ApiGetAllInterfacesRequest) Status(status InterfaceStatus) ApiGetAllInte
 	return r
 }
 
-// Related entity to expand; repeat the parameter to request multiple relations
+// Related entity to expand; repeat the parameter to request multiple relations. Another Tenant&#39;s Instance or VPC Prefix is expanded only when &#x60;crossTenant&#x60; is &#x60;true&#x60;; otherwise that relation is omitted.
 func (r ApiGetAllInterfacesRequest) IncludeRelation(includeRelation string) ApiGetAllInterfacesRequest {
 	r.includeRelation = &includeRelation
 	return r

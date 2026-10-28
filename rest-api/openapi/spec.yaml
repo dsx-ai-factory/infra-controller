@@ -3495,7 +3495,7 @@ paths:
               - VpcPrefix
           in: query
           name: includeRelation
-          description: Related entity to expand; repeat the parameter to request multiple relations
+          description: Related entity to expand; repeat the parameter to request multiple relations. Another Tenant's Instance or VPC Prefix is expanded only when `crossTenant` is `true`; otherwise that relation is omitted.
         - schema:
             $ref: '#/components/schemas/PageNumber'
             default: 1

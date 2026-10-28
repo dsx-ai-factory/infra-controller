@@ -625,6 +625,27 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 		}
 	}
 
+	// checkRelations asserts which Interfaces expand their Instance and VPC Prefix relations.
+	checkRelations := func(wantInstance map[string]bool, wantVpcPrefix map[string]bool) func(*httptest.ResponseRecorder) {
+		return func(rec *httptest.ResponseRecorder) {
+			var interfaces []model.APIInterface
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &interfaces))
+			interfacesByID := make(map[string]model.APIInterface, len(interfaces))
+			for _, apiInterface := range interfaces {
+				interfacesByID[apiInterface.ID] = apiInterface
+			}
+			for interfaceID, want := range wantInstance {
+				require.Contains(t, interfacesByID, interfaceID)
+				assert.Equal(t, want, interfacesByID[interfaceID].Instance != nil, "Instance relation on %s", interfaceID)
+			}
+			for interfaceID, want := range wantVpcPrefix {
+				require.Contains(t, interfacesByID, interfaceID)
+				assert.Equal(t, want, interfacesByID[interfaceID].VpcPrefix != nil, "VPC Prefix relation on %s", interfaceID)
+			}
+		}
+	}
+	relations := []string{cdbm.InstanceRelationName, cdbm.VpcPrefixRelationName}
+
 	tests := []struct {
 		name       string
 		org        string
@@ -775,6 +796,50 @@ func TestGetAllInterfaceHandler_Handle(t *testing.T) {
 				},
 				cdbp.DefaultLimit,
 				false,
+			),
+		},
+		{
+			name:       "default list does not expand another Tenant's Instance",
+			org:        ownerOrg,
+			user:       ownerUser,
+			query:      url.Values{"includeRelation": relations},
+			statusCode: http.StatusOK,
+			check: checkRelations(
+				map[string]bool{ownerDirect.ID.String(): true, crossTenantDirect.ID.String(): false},
+				map[string]bool{crossTenantPrefix.ID.String(): true},
+			),
+		},
+		{
+			name:       "default list does not expand another Tenant's VPC Prefix",
+			org:        consumerOrg,
+			user:       consumerUser,
+			query:      url.Values{"includeRelation": relations},
+			statusCode: http.StatusOK,
+			check: checkRelations(
+				map[string]bool{crossTenantPrefix.ID.String(): true},
+				map[string]bool{crossTenantPrefix.ID.String(): false},
+			),
+		},
+		{
+			name:       "cross-Tenant filter expands another Tenant's Instance",
+			org:        ownerOrg,
+			user:       ownerUser,
+			query:      url.Values{"crossTenant": {"true"}, "includeRelation": relations},
+			statusCode: http.StatusOK,
+			check: checkRelations(
+				map[string]bool{crossTenantDirect.ID.String(): true},
+				map[string]bool{crossTenantPrefix.ID.String(): true},
+			),
+		},
+		{
+			name:       "cross-Tenant filter expands another Tenant's VPC Prefix",
+			org:        consumerOrg,
+			user:       consumerUser,
+			query:      url.Values{"crossTenant": {"true"}, "includeRelation": relations},
+			statusCode: http.StatusOK,
+			check: checkRelations(
+				map[string]bool{crossTenantPrefix.ID.String(): true},
+				map[string]bool{crossTenantPrefix.ID.String(): true},
 			),
 		},
 		{

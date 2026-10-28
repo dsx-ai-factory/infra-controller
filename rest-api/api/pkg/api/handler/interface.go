@@ -280,6 +280,10 @@ func (gaish GetAllInterfaceHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Interfaces", nil)
 	}
 
+	// Another Tenant's Instance or VPC Prefix is expanded only when the caller asks for
+	// cross-Tenant Interfaces. The Instance path never sets this filter, so it doesn't expand them.
+	expandCrossTenantRelations := filterInput.CrossTenant != nil && *filterInput.CrossTenant
+
 	// Create response
 	apiInterfaces := make([]model.APIInterface, 0, len(dbInterfaces))
 	for i := range dbInterfaces {
@@ -310,10 +314,12 @@ func (gaish GetAllInterfaceHandler) Handle(c echo.Context) error {
 			apiInterface.InstanceTenantID = cutil.GetPtr(dbInterface.Instance.TenantID.String())
 			apiInterface.VpcTenantID = cutil.GetPtr(vpcTenantID.String())
 		}
-		if !requestedRelations[cdbm.InstanceRelationName] {
+		if !requestedRelations[cdbm.InstanceRelationName] ||
+			(!expandCrossTenantRelations && dbInterface.Instance.TenantID != tenant.ID) {
 			apiInterface.Instance = nil
 		}
-		if !requestedRelations[cdbm.VpcPrefixRelationName] {
+		if !requestedRelations[cdbm.VpcPrefixRelationName] ||
+			(!expandCrossTenantRelations && dbInterface.VpcPrefix != nil && dbInterface.VpcPrefix.TenantID != tenant.ID) {
 			apiInterface.VpcPrefix = nil
 		}
 		apiInterfaces = append(apiInterfaces, *apiInterface)
