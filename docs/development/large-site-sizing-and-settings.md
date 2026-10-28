@@ -36,11 +36,11 @@ first 2 to 3 hours after that point.
 
 ## Site Controller Sizing
 
-The three nodes reported 96 logical CPUs, as Kubernetes counts them, and 251 GiB
-of allocatable memory each. A two-socket 24-core node with simultaneous
-multithreading reports 96 logical CPUs, so they are read as baseline nodes.
-Their physical core count was not recorded, and the core figures on this page
-are in that unit. They carried NICo, its Postgres, and the simulator. The
+The three nodes are baseline nodes: two Intel Xeon Gold 6442Y sockets of 24
+cores each with Hyper-Threading on, 96 logical CPUs as Kubernetes counts them,
+and eight 32 GiB DIMMs, 251 GiB of allocatable memory each. The core figures
+on this page are logical CPUs. They carried NICo, its Postgres, and the
+simulator. The
 figures below are from the runs at controller concurrency 80 to 140, the
 measured range around the recommended 80 to 120.
 
@@ -70,8 +70,8 @@ measured at controller concurrency 140.
 Memory fits the 256 GiB minimum node with room to spare. The highest reading
 was 62 GiB on one node, during the two-sample Postgres spike late in the
 20-hour run at the default concurrency. That run is outside the table's range.
-Read as baseline nodes, these runs show the CPU headroom of a node with two
-24-core CPUs and simultaneous multithreading. At controller concurrency 80 to
+These runs show the CPU headroom of a baseline node with two 24-core
+sockets and Hyper-Threading. At controller concurrency 80 to
 140 the highest per-node 95th percentile was 31 to 50 logical CPUs and the
 highest per-node peak was 38 to 54 of the 96. At the busiest samples
 kube-apiserver was anywhere from a small share to three quarters of that, and

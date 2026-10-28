@@ -189,11 +189,10 @@ a fleet grows.
 The [hardware prerequisites](prerequisites/hardware.md#site-controller) are
 the baseline: 3 nodes with two 24-core sockets and 256 GiB of memory each, 512
 GiB recommended. CPU figures below are logical CPUs as Kubernetes reports
-them. A two-socket 24-core node with simultaneous multithreading reports 96
-logical CPUs, so the three nodes the simulated runs used, 96 logical CPUs and
-251 GiB of allocatable memory each, are read as baseline nodes. Their physical
-core count was not recorded. Memory figures are the node working set against
-allocatable memory. The simulation nodes also carried the simulator pods and
+them. The three nodes the simulated runs used are baseline nodes: two Intel
+Xeon Gold 6442Y sockets of 24 cores each with Hyper-Threading on, 96 logical
+CPUs, and eight 32 GiB DIMMs, 251 GiB of allocatable memory. Memory figures
+are the node working set against allocatable memory. The simulation nodes also carried the simulator pods and
 their Services, so their sampled CPU peaks include a kube-apiserver share that
 a real site does not have: 19 to 47 logical CPUs in the earlier runs and 6.5
 in the later 556-rack run.
