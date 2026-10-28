@@ -31,15 +31,23 @@ replicas: 2
 ## `allowPrivilegeEscalation: false` baseline (chart-managed; an
 ## allowPrivilegeEscalation key set here is ignored). The chart default adds SYS_PTRACE.
 ## OpenShift's restricted Security Context Constraints (SCC) do not permit it.
-## nico-dns binds port 53, which restricted-v2 only allows with an explicit
-## NET_BIND_SERVICE capability (it permits that one). Helm merges maps but
-## replaces lists, so an override setting other fields still keeps the default
-## capabilities.add — replace the list explicitly (or null it to drop it):
+## nico-dns binds port 53, which is privileged. Two options:
+## - Clusters whose runtime propagates CAP_NET_BIND_SERVICE to non-root
+##   processes can add it (restricted-v2 permits that one):
 ##   containerSecurityContext:
 ##     capabilities:
-##       add: [NET_BIND_SERVICE]   # or `add: null` plus a lower service port
-## Set the whole value to null only when combined with an unprivileged
-## service.targetPort (see below); the baseline is still applied.
+##       add: [NET_BIND_SERVICE]
+##   CAVEAT: some runtimes (including the reference OpenShift cluster — see
+##   helm-prereqs/values/nico-core-openshift.yaml) grant it only in CapBnd,
+##   never CapEff, for non-root processes, so the bind of [::]:53 still
+##   fails with the capability present.
+## - Moving the listener off the privileged port is the reliable path and the
+##   OpenShift default: listenAddress "[::]:5353" + service.targetPort 5353,
+##   dropping the capability with  containerSecurityContext: {capabilities:
+##   {add: []}}  — see the nico-dns section of the OpenShift overlay for the
+##   tested pair.
+## Helm merges maps but replaces lists: always replace capabilities.add
+## explicitly rather than relying on the merge.
 containerSecurityContext:
   capabilities:
     add:
