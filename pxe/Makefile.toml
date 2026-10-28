@@ -393,7 +393,8 @@ script = '''
   mkdir -p "${REPO_ROOT}/pxe/static/blobs/internal/apt/pool/base/f/forge-dpu"
   mkdir -p "${REPO_ROOT}/pxe/static/blobs/internal/apt/pool/base/f/forge-scout"
   mkdir -p "${REPO_ROOT}/pxe/static/blobs/internal/x86_64"
-  mkdir -p "${REPO_ROOT}/pxe/static/blobs/internal/apt/dists/focal/main/binary-amd64"
+  mkdir -p "${REPO_ROOT}/pxe/static/blobs/internal/x86_64/apt/dists/focal/main/binary-amd64"
+  mkdir -p "${REPO_ROOT}/pxe/static/blobs/internal/x86_64/apt/pool/base/f/forge-scout"
 '''
 
 [tasks.copy-forge-prod-root-ca-x86_64]
@@ -1250,11 +1251,11 @@ dependencies = ["mkdir-static"]
 description = "Setup apt repo for amd64 forge-scout package"
 script = '''
   cp "${REPO_ROOT}/target/debs/forge-scout_${PKG_VERSION}_amd64.deb" \
-  "${REPO_ROOT}/pxe/static/blobs/internal/apt/pool/base/f/forge-scout/"
+  "${REPO_ROOT}/pxe/static/blobs/internal/x86_64/apt/pool/base/f/forge-scout/"
 
-  cd "${REPO_ROOT}/pxe/static/blobs/internal/apt"
+  cd "${REPO_ROOT}/pxe/static/blobs/internal/x86_64/apt"
   dpkg-scanpackages --arch amd64 -m pool > dists/focal/main/binary-amd64/Packages
-  cd "${REPO_ROOT}/pxe/static/blobs/internal/apt/dists/focal"
+  cd "${REPO_ROOT}/pxe/static/blobs/internal/x86_64/apt/dists/focal"
   echo "Origin: Ubuntu
 Label: Ubuntu
 Suite: focal
@@ -1266,7 +1267,7 @@ Description: Forge apt repo" > Release
   echo "Date: `LANG=C date -Ru`" >> Release
   echo 'SHA256:' >> Release
   find main -type f | xargs -i sh -c 'printf " "$(sha256sum {} | cut -d " " -f 1)" "$(wc --bytes {} | cut -d " " -f 1)" "{}"\n"' >> Release
-  cd "${REPO_ROOT}/pxe/static/blobs/internal/apt/dists/focal/main/binary-amd64"
+  cd "${REPO_ROOT}/pxe/static/blobs/internal/x86_64/apt/dists/focal/main/binary-amd64"
   echo "Archive: focal
 Version: 20.04
 Component: main
