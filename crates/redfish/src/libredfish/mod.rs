@@ -421,6 +421,35 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
         ))
     }
 
+    /// Restore account 1 IPMI access after a recovered Lenovo password change.
+    /// Uses the current credentials without repeating the password change;
+    /// other vendors require no repair. Errors redact the supplied password.
+    async fn restore_bmc_root_ipmi_access(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        vendor: RedfishVendor,
+        credentials: Credentials,
+    ) -> Result<(), RedfishClientCreationError> {
+        if vendor != RedfishVendor::Lenovo {
+            return Ok(());
+        }
+        let Credentials::UsernamePassword { username, password } = credentials;
+        let client = self
+            .create_client(
+                host,
+                port,
+                RedfishAuth::Direct(username, password.clone()),
+                Some(vendor),
+            )
+            .await?;
+        client
+            .enable_ipmi_account_access("1", &password)
+            .await
+            .map_err(|err| redact_password(err, &password))
+            .map_err(RedfishClientCreationError::RedfishError)
+    }
+
     /// Rotate a BMC's root password in place, then apply the vendor-specific
     /// password policy.
     ///
@@ -1075,6 +1104,31 @@ mod tests {
                 case.name,
             );
         }
+    }
+
+    #[tokio::test]
+    async fn recovered_ipmi_access_is_lenovo_only_and_redacts_failures() {
+        let sim = test_support::RedfishSim::default();
+        let credentials = Credentials::new("1", "test-recovery-password");
+        sim.restore_bmc_root_ipmi_access(
+            "127.0.0.1",
+            None,
+            RedfishVendor::Dell,
+            credentials.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(sim.create_client_calls().is_empty());
+
+        sim.seed_user("1", "test-recovery-password");
+        sim.fail_next_ipmi_access("rejected test-recovery-password");
+        let error = sim
+            .restore_bmc_root_ipmi_access("127.0.0.1", None, RedfishVendor::Lenovo, credentials)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("test-recovery-password"));
+        assert!(!sim.ipmi_account_access_enabled("1"));
     }
 
     #[tokio::test]

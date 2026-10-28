@@ -8819,9 +8819,31 @@ impl StateHandler for HostMachineStateHandler {
                                 // `Nic`/`Ignore` hosts. Disable still needs the
                                 // shared status poll to reach platform
                                 // configuration. Preserve the established
-                                // Enable path, which does not require a
-                                // separately readable lockdown status.
+                                // Enable path for controls that apply immediately.
+                                // Boot-latched controls need a host boot after the
+                                // policy's restart request, not configured readback.
                                 if lockdown_info.mode == LockdownMode::Enable {
+                                    let host = &mh_snapshot.host_snapshot;
+                                    let redfish_client = ctx
+                                        .services
+                                        .create_redfish_client_from_machine(host)
+                                        .await?;
+                                    if redfish_client
+                                        .lockdown_has_boot_latched_controls()
+                                        .await
+                                        .map_err(|e| {
+                                            redfish_error("lockdown_has_boot_latched_controls", e)
+                                        })?
+                                        && !host.status.last_reboot_requested.as_ref().is_some_and(
+                                            |request| {
+                                                host.status
+                                                    .last_reboot_time
+                                                    .is_some_and(|boot| boot > request.time)
+                                            },
+                                        )
+                                    {
+                                        return Ok(StateHandlerOutcome::do_nothing());
+                                    }
                                     return complete_host_init_lockdown(
                                         ctx,
                                         mh_snapshot,

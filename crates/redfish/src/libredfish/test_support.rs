@@ -68,12 +68,13 @@ struct RedfishSimState {
     lockdown_bmc_applies: Option<bool>,
     next_lockdown_status_error: Option<RedfishError>,
     /// Fail one power-state read without changing the host's actual power.
-    next_power_state_error: Option<String>,
+    next_power_state_error: Option<(usize, String)>,
     /// Fail the next matching power action before changing the host's power.
     next_power_action_error: Option<(SystemPowerControl, RedfishError)>,
     /// Value of `ac_powercycle_supported_by_power`. Defaults to `false`.
     ac_powercycle_supported: bool,
     next_chassis_reset_error: Option<RedfishError>,
+    next_ipmi_access_error: Option<String>,
     job_state_sequence: VecDeque<JobState>,
     /// Offset (in seconds) applied to the BMC `DateTime` returned by
     /// `get_manager`, relative to the controller's `Utc::now()`. Defaults to 0
@@ -446,7 +447,18 @@ impl RedfishSim {
 
     /// Inject a transient error into the next power-state read only.
     pub fn fail_next_power_state_read(&self, error: &str) {
-        self.state.lock().unwrap().next_power_state_error = Some(error.to_string());
+        self.fail_power_state_read_after(0, error);
+    }
+
+    /// Fail one power-state read after the specified number of successful reads.
+    pub fn fail_power_state_read_after(&self, successful_reads: usize, error: &str) {
+        self.state.lock().unwrap().next_power_state_error =
+            Some((successful_reads, error.to_string()));
+    }
+
+    /// Fail one IPMI access repair before enabling access.
+    pub fn fail_next_ipmi_access(&self, error: &str) {
+        self.state.lock().unwrap().next_ipmi_access_error = Some(error.to_string());
     }
 
     /// Fail the next matching power action, recording the attempt but applying no change.
@@ -507,8 +519,8 @@ impl RedfishSim {
         self.state.lock().unwrap().users.get(account_id).cloned()
     }
 
-    #[cfg(test)]
-    pub(super) fn ipmi_account_access_enabled(&self, account_id: &str) -> bool {
+    /// Return whether a simulated account has IPMI access.
+    pub fn ipmi_account_access_enabled(&self, account_id: &str) -> bool {
         self.state
             .lock()
             .unwrap()
@@ -882,8 +894,13 @@ impl Redfish for RedfishSimClient {
         Box::pin(async move {
             let mut state = self.state.lock().unwrap();
             self.authorize(&mut state, "Systems/System.Embedded.1")?;
-            if let Some(error) = state.next_power_state_error.take() {
-                return Err(RedfishError::GenericError { error });
+            if let Some((remaining, error)) = state.next_power_state_error.as_mut() {
+                if *remaining == 0 {
+                    let error = error.clone();
+                    state.next_power_state_error = None;
+                    return Err(RedfishError::GenericError { error });
+                }
+                *remaining -= 1;
             }
             Ok(state.hosts[&self._host].power)
         })
@@ -1274,6 +1291,9 @@ impl Redfish for RedfishSimClient {
                     "AccountService/Accounts",
                     "sim: IPMI access requires the account's current password",
                 ));
+            }
+            if let Some(error) = state.next_ipmi_access_error.take() {
+                return Err(RedfishError::GenericError { error });
             }
             state.ipmi_accounts.insert(account_id.to_string());
             Ok(())

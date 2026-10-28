@@ -32,6 +32,14 @@ fn deconfiguring(step: DeconfiguringHostState) -> ManagedHostState {
 }
 
 async fn setup(pool: PgPool, boot_wait: chrono::Duration) -> (Env, TestManagedHost) {
+    setup_with_config(pool, boot_wait, ManagedHostConfig::default()).await
+}
+
+async fn setup_with_config(
+    pool: PgPool,
+    boot_wait: chrono::Duration,
+    config: ManagedHostConfig,
+) -> (Env, TestManagedHost) {
     let env = Env::builder(pool)
         .configure_runtime(|config| config.machine_state_controller.uefi_boot_wait = boot_wait)
         .build()
@@ -44,7 +52,7 @@ async fn setup(pool: PgPool, boot_wait: chrono::Duration) -> (Env, TestManagedHo
     let mh = env
         .test_harness
         .managed_host_builder(&explorer, underlay)
-        .with_config(ManagedHostConfig::default())
+        .with_config(config)
         .build()
         .await
         .0;
@@ -141,4 +149,58 @@ async fn decommission_without_runtime_control_preserves_existing_no_reboot_path(
             .all_hosts()
             .is_empty()
     );
+}
+
+#[sqlx_test]
+async fn no_dpu_lockdown_waits_for_boot_only_when_runtime_controls_exist(pool: PgPool) {
+    let mut config = ManagedHostConfig::default();
+    config.dpus.clear();
+    config.expected_machine_data = Some(model::expected_machine::ExpectedMachineData {
+        serial_number: config.serial.clone(),
+        dpu_policy: model::expected_machine::HostDpuPolicy::Ignore,
+        ..Default::default()
+    });
+    let (mut env, mh) = setup_with_config(pool, chrono::Duration::hours(1), config).await;
+    assert!(mh.dpus.is_empty());
+    let waiting = ManagedHostState::HostInit {
+        machine_state: model::machine::MachineState::WaitingForLockdown {
+            lockdown_info: model::machine::LockdownInfo {
+                state: model::machine::LockdownState::TimeWaitForDPUDown,
+                mode: model::machine::LockdownMode::Enable,
+            },
+        },
+    };
+    mh.advance_state(waiting.clone()).await;
+    // A boot reported before this policy's restart request is insufficient.
+    mh.host.reboot_completed().await;
+    let mut txn = env.test_harness.db_txn().await;
+    db::machine::update_reboot_requested_explicit_time(
+        &mh.host.id.into(),
+        &mut txn,
+        model::machine::MachineLastRebootRequestedMode::Reboot,
+        chrono::Utc::now(),
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    // Older firmware retains the established completion path without a new boot.
+    env.redfish_sim
+        .set_lockdown_has_boot_latched_controls(false);
+    env.run_single_iteration().await;
+    assert!(matches!(
+        mh.host.machine().await.current_state(),
+        ManagedHostState::BomValidating { .. }
+    ));
+
+    mh.advance_state(waiting.clone()).await;
+    env.redfish_sim.set_lockdown_has_boot_latched_controls(true);
+    env.run_single_iteration().await;
+    assert_eq!(mh.host.machine().await.current_state(), &waiting);
+    mh.host.reboot_completed().await;
+    env.run_single_iteration().await;
+    assert!(matches!(
+        mh.host.machine().await.current_state(),
+        ManagedHostState::BomValidating { .. }
+    ));
 }

@@ -107,27 +107,25 @@ pub async fn host_power_control_with_location(
     if (action == SystemPowerControl::GracefulRestart)
         || (action == SystemPowerControl::ForceRestart)
     {
-        let power_result: Result<PowerState, RedfishError> = redfish_client.get_power_state().await;
-        if let Ok(power_state) = power_result {
+        let power_state = redfish_client.get_power_state().await?;
+        tracing::info!(
+            machine_id = machine.id.to_string(),
+            action = power_state.to_string(),
+            "Host Power State"
+        );
+        if power_state == PowerState::Off {
             tracing::info!(
                 machine_id = machine.id.to_string(),
-                action = power_state.to_string(),
-                "Host Power State"
+                action = "Manual intervention required to initiate power-on".to_string(),
+                "Host Power Action"
             );
-            if power_state == PowerState::Off {
-                tracing::info!(
-                    machine_id = machine.id.to_string(),
-                    action = "Manual intervention required to initiate power-on".to_string(),
-                    "Host Power Action"
-                );
-                /* // reserve for future proactive power on action
-                redfish_client
-                .power(SystemPowerControl::On)
-                .await?
-                */
-            } else {
-                redfish_client.power(action).await?
-            }
+            /* // reserve for future proactive power on action
+            redfish_client
+            .power(SystemPowerControl::On)
+            .await?
+            */
+        } else {
+            redfish_client.power(action).await?
         }
     } else if action == SystemPowerControl::ACPowercycle {
         let power_state = redfish_client.get_power_state().await?;

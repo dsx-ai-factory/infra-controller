@@ -560,6 +560,18 @@ async fn cold_firmware_download_preserves_request_until_check_completes(pool: Pg
     );
 
     let timepoint = env.redfish_sim.timepoint();
+    // The wrapper's first read succeeds; the shared restart helper's read fails.
+    env.redfish_sim
+        .fail_power_state_read_after(1, "transient power-state read failure");
+    env.run_single_iteration().await;
+    assert_eq!(mh.host.machine().await.current_state(), &expected);
+    assert!(
+        env.redfish_sim
+            .actions_since(&timepoint)
+            .all_hosts()
+            .is_empty()
+    );
+
     env.redfish_sim.fail_next_power_action(
         libredfish::SystemPowerControl::ForceRestart,
         "transient restart failure",
