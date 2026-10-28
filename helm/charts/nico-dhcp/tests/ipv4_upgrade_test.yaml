@@ -37,6 +37,7 @@ tests:
                     - {name: RUST_LIB_BACKTRACE, value: "0"}
                   imagePullPolicy: IfNotPresent
                   securityContext:
+                    allowPrivilegeEscalation: false
                     capabilities:
                       add: [SYS_PTRACE]
                   ports:
@@ -45,6 +46,8 @@ tests:
                   volumeMounts:
                     - {name: spiffe, mountPath: /var/run/secrets/spiffe.io, readOnly: true}
                     - {name: config, mountPath: /tmp}
+                    - {name: kea-run, mountPath: /var/run/kea}
+                    - {name: kea-lib, mountPath: /var/lib/kea}
               volumes:
                 - name: spiffe
                   secret:
@@ -53,6 +56,8 @@ tests:
                   configMap:
                     defaultMode: 420
                     name: nico-dhcp-config
+                - {name: kea-run, emptyDir: {}}
+                - {name: kea-lib, emptyDir: {}}
 
   # Older values may quote the port while Kubernetes still requires a number.
   - it: retains the IPv4 pod with a quoted metrics port

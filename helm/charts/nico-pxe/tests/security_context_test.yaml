@@ -15,3 +15,26 @@ tests:
           value: 10001
       - notExists:
           path: spec.template.spec.containers[0].securityContext.capabilities.add
+
+  - it: renders the pod fsGroup from podSecurityContext and drops it when nulled
+    set:
+      podSecurityContext: null
+    asserts:
+      - notExists:
+          path: spec.template.spec.securityContext
+
+  - it: follows a custom podSecurityContext fsGroup in the artifact permissions init
+    set:
+      bootArtifactContainers:
+        - name: artifacts
+          repository: example.invalid/artifacts
+          tag: "1"
+      podSecurityContext:
+        fsGroup: 2000
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.fsGroup
+          value: 2000
+      - matchRegex:
+          path: spec.template.spec.initContainers[-1].command[2]
+          pattern: 'chgrp -R 2000 /forge-boot-artifacts/blobs/internal'

@@ -37,11 +37,10 @@ spec:
         kubectl.kubernetes.io/default-container: {{ include "nico-pxe.name" . }}
     spec:
       serviceAccountName: {{ include "nico-pxe.name" . }}
+      {{- with .Values.podSecurityContext }}
       securityContext:
-        # The artifact init containers need root to copy from their images.
-        # Only the serving container runs as UID/GID 10001. The final artifact
-        # init container makes restrictive source modes readable by that group.
-        fsGroup: 10001
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -78,7 +77,7 @@ spec:
             - /bin/sh
             - -ec
             - |
-              chgrp -R 10001 /forge-boot-artifacts/blobs/internal
+              chgrp -R {{ .Values.podSecurityContext.fsGroup | default 10001 }} /forge-boot-artifacts/blobs/internal
               chmod -R g+rX /forge-boot-artifacts/blobs/internal
           securityContext:
             runAsUser: 0
