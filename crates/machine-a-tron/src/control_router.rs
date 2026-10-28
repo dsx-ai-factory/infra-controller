@@ -334,6 +334,10 @@ impl RmsInventory for ControlState {
         self.device_by_bmc_mac(bmc_mac)?
             .set_nvos_password(username, password)
     }
+
+    fn reset_switch(&self, bmc_mac: MacAddress) -> eyre::Result<()> {
+        self.device_by_bmc_mac(bmc_mac)?.reset_nvos()
+    }
 }
 
 /// The Redfish reset an RMS power operation stands for; RMS documents `RESET`
@@ -1042,6 +1046,35 @@ mod tests {
 
         let unknown = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x99]);
         assert!(state.power_state(unknown).is_err());
+    }
+
+    #[test]
+    fn rms_switch_reset_reaches_nvos_and_rejects_other_devices() {
+        let switch = DeviceHandle::for_control_test_switch(
+            rack_member_info(HardwareType::NvidiaSwitchNd5200Ld, 19, 0x19),
+            "switch-19",
+            None,
+        );
+        let host = DeviceHandle::for_control_test(Vec::new(), None);
+        let switch_mac = switch.host_info().bmc_mac_address;
+        let host_mac = host.host_info().bmc_mac_address;
+        let state = control_state(vec![switch.clone(), host]);
+        let factory_admin = switch.persisted().nvos_admin.unwrap();
+        state
+            .set_switch_password(switch_mac, &factory_admin.username, "rotated")
+            .unwrap();
+        let power_before = state.power_state(switch_mac).unwrap();
+
+        state.reset_switch(switch_mac).unwrap();
+
+        assert_eq!(switch.persisted().nvos_admin, Some(factory_admin));
+        assert_eq!(state.power_state(switch_mac).unwrap(), power_before);
+        assert!(state.reset_switch(host_mac).is_err());
+        assert!(
+            state
+                .reset_switch(MacAddress::new([2, 0, 0, 0, 0, 0x99]))
+                .is_err()
+        );
     }
 
     #[tokio::test]

@@ -209,10 +209,12 @@ func TestInvokeProxyJSONConn(t *testing.T) {
 		})
 	}
 
-	t.Run("core preserves advertised capabilities", func(t *testing.T) {
+	t.Run("core preserves known capability names and unknown values", func(t *testing.T) {
 		binaryReply, err := proto.Marshal(&corev1.BuildInfo{
 			Capabilities: []corev1.BuildCapability{
 				corev1.BuildCapability_BUILD_CAPABILITY_VPC_SLAAC,
+				corev1.BuildCapability_BUILD_CAPABILITY_REPLACE_SKU_COMPONENTS,
+				corev1.BuildCapability(32767),
 			},
 		})
 		require.NoError(t, err)
@@ -221,7 +223,7 @@ func TestInvokeProxyJSONConn(t *testing.T) {
 		respJSON, err := invokeProxyJSONConn(context.Background(), conn, grpcproxy.Core, "Version", nil)
 		require.NoError(t, err)
 		assert.Equal(t, "/forge.Forge/Version", conn.lastMethod)
-		assert.JSONEq(t, `{"capabilities":["BUILD_CAPABILITY_VPC_SLAAC"]}`, string(respJSON))
+		assert.JSONEq(t, `{"capabilities":["BUILD_CAPABILITY_VPC_SLAAC","BUILD_CAPABILITY_REPLACE_SKU_COMPONENTS",32767]}`, string(respJSON))
 	})
 }
 

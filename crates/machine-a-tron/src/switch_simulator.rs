@@ -678,6 +678,17 @@ impl SwitchHandle {
         Ok(())
     }
 
+    /// Restores NVOS factory credentials while leaving BMC and power state alone.
+    pub(crate) fn reset_nvos(&self) -> eyre::Result<()> {
+        let nvos = self
+            .0
+            .nvos_state
+            .as_ref()
+            .ok_or_else(|| eyre::eyre!("the switch's hardware profile serves no NVOS"))?;
+        nvos.reset_to_defaults();
+        Ok(())
+    }
+
     /// Overrides the switch's NVOS lease for control-router tests.
     #[cfg(test)]
     pub(crate) fn set_control_test_nvos_ip(&self, ip: Option<Ipv4Addr>) {
@@ -887,6 +898,53 @@ mod tests {
         assert_eq!(
             nvos.state.admin_credentials(),
             ("admin".to_string(), "rotated".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn nvos_factory_reset_persists_without_resetting_bmc_or_power() {
+        let handle = switch_tray_handle();
+        let nvos = handle.0.nvos_state.as_ref().unwrap();
+        let factory_credentials = nvos.admin_credentials();
+        let (_, bmc) = bmc_mock::machine_router(
+            &MachineInfo::Host(handle.0.host_info.clone()),
+            Arc::new(SwitchCallbacks {
+                state: handle.0.live_state.clone(),
+                mailbox: handle.0.mailbox.clone(),
+            }),
+            handle.0.mat_id.to_string(),
+            true,
+            bmc_mock::MachineRouterOptions {
+                bmc_reset_duration: Some(Duration::from_secs(60)),
+                ..Default::default()
+            },
+        );
+        bmc.account_service_state
+            .change_factory_default_password("rotated-bmc-password");
+        handle
+            .0
+            .live_state
+            .write()
+            .unwrap()
+            .bmc_persistence
+            .attach(&bmc);
+        let bmc_before = bmc.persisted();
+        let power_before = handle.power_state();
+        handle
+            .set_nvos_password(&factory_credentials.0, "rotated")
+            .unwrap();
+
+        handle.reset_nvos().unwrap();
+
+        let persisted = handle.persisted();
+        assert_eq!(persisted.bmc_state, Some(bmc_before.clone()));
+        assert_eq!(bmc.persisted(), bmc_before);
+        assert!(!bmc.availability.as_ref().unwrap().is_offline());
+        assert_eq!(handle.power_state(), power_before);
+        let actor = resumed(persisted);
+        assert_eq!(
+            actor.nvos.as_ref().unwrap().state.admin_credentials(),
+            factory_credentials
         );
     }
 

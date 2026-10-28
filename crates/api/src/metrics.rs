@@ -378,6 +378,76 @@ mod tests {
     }
 
     #[test]
+    fn machine_reboot_duration_histogram_resolves_long_reboots() {
+        let registry = prometheus::Registry::new();
+        let exporter = opentelemetry_prometheus::exporter()
+            .with_registry(registry.clone())
+            .without_scope_info()
+            .without_target_info()
+            .build()
+            .unwrap();
+        let provider = opentelemetry_sdk::metrics::MeterProviderBuilder::default()
+            .with_reader(exporter)
+            .with_view(ApiMetricsEmitter::machine_reboot_duration_view().unwrap())
+            .build();
+        let emitter = ApiMetricsEmitter::new(&provider.meter("test"));
+        for duration in [180, 7200, 172800] {
+            emitter.record_machine_reboot_duration(
+                duration,
+                "test-product".to_string(),
+                "test-vendor".to_string(),
+                "Reboot".to_string(),
+            );
+        }
+
+        let families = registry.gather();
+        let family = families
+            .iter()
+            .find(|family| family.name() == "carbide_machine_reboot_duration_seconds")
+            .unwrap();
+        assert_eq!(family.get_metric().len(), 1);
+        let metric = &family.get_metric()[0];
+        let labels: Vec<_> = metric
+            .get_label()
+            .iter()
+            .map(|label| (label.name(), label.value()))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                ("product_name", "test-product"),
+                ("reboot_mode", "Reboot"),
+                ("vendor", "test-vendor"),
+            ]
+        );
+        let histogram = metric.get_histogram();
+        assert_eq!(histogram.get_sample_count(), 3);
+        assert_eq!(histogram.get_sample_sum(), 180180.0);
+        let buckets: Vec<_> = histogram
+            .get_bucket()
+            .iter()
+            .map(|bucket| (bucket.upper_bound(), bucket.cumulative_count()))
+            .collect();
+        assert_eq!(
+            buckets,
+            [
+                (180.0, 1),
+                (300.0, 1),
+                (600.0, 1),
+                (900.0, 1),
+                (1800.0, 1),
+                (3600.0, 1),
+                (7200.0, 2),
+                (14400.0, 2),
+                (28800.0, 2),
+                (43200.0, 2),
+                (86400.0, 2),
+                (172800.0, 3),
+            ]
+        );
+    }
+
+    #[test]
     fn time_in_state_histograms_resolve_multi_day_dwells() {
         let registry = prometheus::Registry::new();
         let exporter = opentelemetry_prometheus::exporter()

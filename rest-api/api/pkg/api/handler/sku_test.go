@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,13 +32,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/extra/bundebug"
+	temporalEnums "go.temporal.io/api/enums/v1"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -1199,17 +1203,15 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "replaces version five components and clears device type",
+			name: "replaces components and clears device type",
 			run: func(t *testing.T) {
 				existing := existingSkuProto()
-				existing.SchemaVersion = model.CoreSkuSchemaVersion
 				deviceType := ""
 				replacementResponse := existingSkuProto()
 				replacementResponse.SchemaVersion = model.CoreSkuSchemaVersion
 				replacementResponse.DeviceType = &deviceType
 				replacementResponse.Components = validSkuCreateRequest("").ToProto().Skus[0].Components
 				fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
-					findResponse:    &corev1.SkuList{Skus: []*corev1.Sku{existing}},
 					replaceResponse: replacementResponse,
 				})
 				skuDAO := cdbm.NewSkuDAO(fixture.updateHandler.dbSession)
@@ -1226,12 +1228,12 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 				}, fixture.updateHandler.Handle)
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 				require.Len(t, fixture.requests, 2)
-				assert.Equal(t, corev1.Forge_FindSkusByIds_FullMethodName, fixture.requests[0].FullMethod)
-				assert.Equal(t, corev1.Forge_ReplaceSku_FullMethodName, fixture.requests[1].FullMethod)
+				assert.Equal(t, corev1.Forge_Version_FullMethodName, fixture.requests[0].FullMethod)
+				assert.Equal(t, corev1.Forge_ReplaceSkuComponents_FullMethodName, fixture.requests[1].FullMethod)
 
-				var coreReq corev1.Sku
+				var coreReq corev1.ReplaceSkuComponentsRequest
 				require.NoError(t, protojson.Unmarshal(fixture.requests[1].RequestJSON, &coreReq))
-				assert.Equal(t, "sku-1", coreReq.Id)
+				assert.Equal(t, "sku-1", coreReq.SkuId)
 				require.NotNil(t, coreReq.DeviceType)
 				assert.Equal(t, deviceType, coreReq.GetDeviceType())
 				assert.Equal(t, model.CoreSkuSchemaVersion, coreReq.SchemaVersion)
@@ -1262,7 +1264,6 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 				components := validSkuCreateRequest("").Components
 				replacementResponse.Components = components.ToProto()
 				fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
-					findResponse:    &corev1.SkuList{Skus: []*corev1.Sku{existing}},
 					replaceResponse: replacementResponse,
 				})
 				skuDAO := cdbm.NewSkuDAO(fixture.updateHandler.dbSession)
@@ -1286,9 +1287,9 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 				require.Len(t, fixture.requests, 2)
-				assert.Equal(t, corev1.Forge_FindSkusByIds_FullMethodName, fixture.requests[0].FullMethod)
-				assert.Equal(t, corev1.Forge_ReplaceSku_FullMethodName, fixture.requests[1].FullMethod)
-				var coreReq corev1.Sku
+				assert.Equal(t, corev1.Forge_Version_FullMethodName, fixture.requests[0].FullMethod)
+				assert.Equal(t, corev1.Forge_ReplaceSkuComponents_FullMethodName, fixture.requests[1].FullMethod)
+				var coreReq corev1.ReplaceSkuComponentsRequest
 				require.NoError(t, protojson.Unmarshal(fixture.requests[1].RequestJSON, &coreReq))
 				assert.Nil(t, coreReq.DeviceType)
 				assert.True(t, proto.Equal(replacementResponse.Components, coreReq.Components))
@@ -1321,9 +1322,9 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 				rec = fixture.request(t, http.MethodPatch, "sku-1", updateRequest, fixture.updateHandler.Handle)
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 				require.Len(t, fixture.requests, 4)
-				assert.Equal(t, corev1.Forge_FindSkusByIds_FullMethodName, fixture.requests[2].FullMethod)
-				assert.Equal(t, corev1.Forge_ReplaceSku_FullMethodName, fixture.requests[3].FullMethod)
-				var repeatCoreReq corev1.Sku
+				assert.Equal(t, corev1.Forge_Version_FullMethodName, fixture.requests[2].FullMethod)
+				assert.Equal(t, corev1.Forge_ReplaceSkuComponents_FullMethodName, fixture.requests[3].FullMethod)
+				var repeatCoreReq corev1.ReplaceSkuComponentsRequest
 				require.NoError(t, protojson.Unmarshal(fixture.requests[3].RequestJSON, &repeatCoreReq))
 				assert.True(t, proto.Equal(&coreReq, &repeatCoreReq), "repeat PATCH must send the same replacement to Core")
 
@@ -1343,34 +1344,460 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 			},
 		},
 		{
-			name: "preserves projection when Core replace fails",
+			name: "does not fall back from component replacement without a confirmed dispatch rejection",
 			run: func(t *testing.T) {
-				existing := existingSkuProto()
-				existing.SchemaVersion = model.CoreSkuSchemaVersion
-				fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
-					findResponse: &corev1.SkuList{Skus: []*corev1.Sku{existing}},
-					replaceError: errors.New("Core unavailable"),
-				})
-				deviceType := "cpu-server"
+				cases := []struct {
+					name    string
+					err     error
+					status  int
+					message string
+				}{
+					{
+						name:    "permission denied",
+						err:     tp.NewNonRetryableApplicationError("Core permission denied", swe.ErrTypeNICoDenied, nil),
+						status:  http.StatusForbidden,
+						message: "Core permission denied",
+					},
+					{
+						name:    "Core unavailable",
+						err:     errors.New("Core unavailable"),
+						status:  http.StatusInternalServerError,
+						message: "Core unavailable",
+					},
+					{
+						name:    "proxy execution timeout",
+						err:     tp.NewTimeoutError(temporalEnums.TIMEOUT_TYPE_START_TO_CLOSE, nil),
+						status:  http.StatusGatewayTimeout,
+						message: "Core proxy request timed out",
+					},
+					{
+						name:    "unimplemented mutation",
+						err:     tp.NewNonRetryableApplicationError("unsupported method", swe.ErrTypeNICoUnimplemented, nil),
+						status:  http.StatusNotImplemented,
+						message: "unsupported method",
+					},
+					{
+						name:    "SKU no longer exists in Core",
+						err:     tp.NewNonRetryableApplicationError("SKU sku-1 not found", swe.ErrTypeNICoObjectNotFound, nil),
+						status:  http.StatusNotFound,
+						message: "Could not find SKU with the specified ID",
+					},
+				}
+				for _, tc := range cases {
+					t.Run(tc.name, func(t *testing.T) {
+						fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
+							replaceComponentsError: skuProxyActivityError("InvokeCoreGRPCOnSite", tc.err),
+						})
+						skuDAO := cdbm.NewSkuDAO(fixture.updateHandler.dbSession)
+						before, err := skuDAO.Get(context.Background(), nil, "sku-1")
+						require.NoError(t, err)
 
-				rec := fixture.request(t, http.MethodPatch, "sku-1", model.APISkuUpdateRequest{
-					DeviceType: &deviceType,
-					Components: validSkuCreateRequest(fixture.siteID).Components,
-				}, fixture.updateHandler.Handle)
+						rec := fixture.request(t, http.MethodPatch, "sku-1", model.APISkuUpdateRequest{
+							DeviceType: cutil.GetPtr("cpu-server"),
+							Components: validSkuCreateRequest(fixture.siteID).Components,
+						}, fixture.updateHandler.Handle)
 
-				require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
-				require.Len(t, fixture.requests, 2)
-				assert.Equal(t, corev1.Forge_FindSkusByIds_FullMethodName, fixture.requests[0].FullMethod)
-				assert.Equal(t, corev1.Forge_ReplaceSku_FullMethodName, fixture.requests[1].FullMethod)
+						require.Equal(t, tc.status, rec.Code, rec.Body.String())
+						var response cutil.APIError
+						require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+						assert.Contains(t, response.Message, tc.message)
+						assert.Nil(t, response.Data)
+						if tc.status == http.StatusNotFound {
+							assert.Equal(t, tc.message, response.Message)
+						}
+						require.Len(t, fixture.requests, 2)
+						assert.Equal(t, corev1.Forge_Version_FullMethodName, fixture.requests[0].FullMethod)
+						assert.Equal(t, corev1.Forge_ReplaceSkuComponents_FullMethodName, fixture.requests[1].FullMethod)
+						after, err := skuDAO.Get(context.Background(), nil, "sku-1")
+						require.NoError(t, err)
+						assert.Equal(t, before, after, "failed replacement must not change the REST projection")
+					})
+				}
+			},
+		},
+		{
+			name: "uses legacy replacement when capability discovery cannot confirm support",
+			run: func(t *testing.T) {
+				cases := []struct {
+					name                string
+					versionResponseJSON string
+					versionError        error
+					findError           error
+					replaceError        error
+					status              int
+					requests            int
+					errorMessage        string
+				}{
+					{
+						name:                "capability absent on older Core",
+						versionResponseJSON: `{"capabilities":["BUILD_CAPABILITY_VPC_SLAAC"]}`,
+						status:              http.StatusOK,
+						requests:            3,
+					},
+					{
+						name:                "numeric capability from older Site Agent",
+						versionResponseJSON: `{"capabilities":["BUILD_CAPABILITY_VPC_SLAAC",2]}`,
+						status:              http.StatusOK,
+						requests:            3,
+					},
+					{
+						name:         "read-only capability probe fails",
+						versionError: errors.New("Core version unavailable"),
+						status:       http.StatusOK,
+						requests:     3,
+					},
+					{
+						name:                "legacy read fails",
+						versionResponseJSON: `{}`,
+						findError:           errors.New("Core read failed"),
+						errorMessage:        "Core read failed",
+						status:              http.StatusInternalServerError,
+						requests:            2,
+					},
+					{
+						name:                "legacy replacement fails",
+						versionResponseJSON: `{}`,
+						replaceError:        errors.New("Core replace failed"),
+						errorMessage:        "Core replace failed",
+						status:              http.StatusInternalServerError,
+						requests:            3,
+					},
+				}
+				for _, tc := range cases {
+					t.Run(tc.name, func(t *testing.T) {
+						existing := existingSkuProto()
+						require.Equal(t, uint32(4), existing.SchemaVersion)
+						components := validSkuCreateRequest("").Components
+						replacementResponse := proto.Clone(existing).(*corev1.Sku)
+						replacementResponse.Description = cutil.GetPtr("")
+						replacementResponse.SchemaVersion = model.CoreSkuSchemaVersion
+						replacementResponse.Components = components.ToProto()
+						replacementResponse.AssociatedMachineIds = []*corev1.MachineId{{Id: "machine-1"}}
+						fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
+							versionResponseJSON: []byte(tc.versionResponseJSON),
+							versionError:        tc.versionError,
+							findResponse:        &corev1.SkuList{Skus: []*corev1.Sku{existing}},
+							findError:           tc.findError,
+							replaceResponse:     replacementResponse,
+							replaceError:        tc.replaceError,
+						})
+						skuDAO := cdbm.NewSkuDAO(fixture.updateHandler.dbSession)
+						before, err := skuDAO.Get(context.Background(), nil, "sku-1")
+						require.NoError(t, err)
 
-				var coreReq corev1.Sku
-				require.NoError(t, protojson.Unmarshal(fixture.requests[1].RequestJSON, &coreReq))
-				assert.Equal(t, deviceType, coreReq.GetDeviceType())
+						rec := fixture.request(t, http.MethodPatch, "sku-1", model.APISkuUpdateRequest{
+							Description: cutil.GetPtr(""),
+							Components:  components,
+						}, fixture.updateHandler.Handle)
 
-				saved, err := cdbm.NewSkuDAO(fixture.updateHandler.dbSession).Get(context.Background(), nil, "sku-1")
-				require.NoError(t, err)
-				assert.Nil(t, saved.DeviceType)
-				assert.Nil(t, saved.Components)
+						require.Equal(t, tc.status, rec.Code, rec.Body.String())
+						require.Len(t, fixture.requests, tc.requests)
+						assert.Equal(t, corev1.Forge_Version_FullMethodName, fixture.requests[0].FullMethod)
+						var versionReq corev1.VersionRequest
+						require.NoError(t, protojson.Unmarshal(fixture.requests[0].RequestJSON, &versionReq))
+						assert.True(t, proto.Equal(&corev1.VersionRequest{}, &versionReq))
+						assert.Equal(t, corev1.Forge_FindSkusByIds_FullMethodName, fixture.requests[1].FullMethod)
+						var findReq corev1.SkusByIdsRequest
+						require.NoError(t, protojson.Unmarshal(fixture.requests[1].RequestJSON, &findReq))
+						assert.Equal(t, []string{"sku-1"}, findReq.Ids)
+						if tc.requests == 3 {
+							assert.Equal(t, corev1.Forge_ReplaceSku_FullMethodName, fixture.requests[2].FullMethod)
+							var coreReq corev1.Sku
+							require.NoError(t, protojson.Unmarshal(fixture.requests[2].RequestJSON, &coreReq))
+							assert.Equal(t, "sku-1", coreReq.Id)
+							assert.Equal(t, cutil.GetPtr(""), coreReq.Description)
+							assert.Equal(t, existing.DeviceType, coreReq.DeviceType)
+							assert.Equal(t, model.CoreSkuSchemaVersion, coreReq.SchemaVersion)
+							assert.True(t, proto.Equal(components.ToProto(), coreReq.Components))
+						}
+
+						after, err := skuDAO.Get(context.Background(), nil, "sku-1")
+						require.NoError(t, err)
+						if tc.status != http.StatusOK {
+							assert.Contains(t, rec.Body.String(), tc.errorMessage)
+							assert.Equal(t, before, after, "failed legacy update must not change the REST projection")
+							return
+						}
+
+						var response model.APISku
+						require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+						assert.Equal(t, "", response.Description)
+						assert.Equal(t, existing.DeviceType, response.DeviceType)
+						assert.Equal(t, []string{"machine-1"}, response.AssociatedMachineIds)
+						assert.Equal(t, "", after.Description)
+						assert.Equal(t, existing.DeviceType, after.DeviceType)
+						assert.Equal(t, []string{"machine-1"}, after.AssociatedMachineIds)
+						require.NotNil(t, after.Components)
+						assert.True(t, proto.Equal(components.ToProto(), after.Components.SkuComponents))
+					})
+				}
+			},
+		},
+		{
+			name: "uses legacy replacement when another Site Agent rejects dispatch after a successful capability probe",
+			run: func(t *testing.T) {
+				cases := []struct {
+					name         string
+					replaceError error
+					status       int
+				}{
+					{name: "legacy replacement succeeds", status: http.StatusOK},
+					{
+						name: "legacy replacement is independently denied",
+						replaceError: skuProxyActivityError("InvokeCoreGRPCOnSite",
+							swe.WrapErr(status.Error(codes.PermissionDenied, "legacy replacement denied"))),
+						status: http.StatusForbidden,
+					},
+				}
+				for _, tc := range cases {
+					t.Run(tc.name, func(t *testing.T) {
+						existing := existingSkuProto()
+						components := validSkuCreateRequest("").Components
+						deviceType := "cpu-server"
+						replacementResponse := proto.Clone(existing).(*corev1.Sku)
+						replacementResponse.DeviceType = &deviceType
+						replacementResponse.Components = components.ToProto()
+						replacementResponse.SchemaVersion = model.CoreSkuSchemaVersion
+						// Version ran on an upgraded Agent, but the mutation reached an
+						// older Agent whose descriptor cannot dispatch the new method.
+						dispatchError := skuProxyActivityError("InvokeCoreGRPCOnSite", fmt.Errorf("%w: %q on %q",
+							errors.New("unknown proxied gRPC method"), "ReplaceSkuComponents", "forge.Forge"))
+						fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
+							findResponse:           &corev1.SkuList{Skus: []*corev1.Sku{existing}},
+							replaceComponentsError: dispatchError,
+							replaceResponse:        replacementResponse,
+							replaceError:           tc.replaceError,
+						})
+						skuDAO := cdbm.NewSkuDAO(fixture.updateHandler.dbSession)
+						before, err := skuDAO.Get(context.Background(), nil, "sku-1")
+						require.NoError(t, err)
+
+						rec := fixture.request(t, http.MethodPatch, "sku-1", model.APISkuUpdateRequest{
+							DeviceType: &deviceType,
+							Components: components,
+						}, fixture.updateHandler.Handle)
+
+						require.Equal(t, tc.status, rec.Code, rec.Body.String())
+						methods := []string{
+							corev1.Forge_Version_FullMethodName,
+							corev1.Forge_ReplaceSkuComponents_FullMethodName,
+							corev1.Forge_FindSkusByIds_FullMethodName,
+							corev1.Forge_ReplaceSku_FullMethodName,
+						}
+						require.Len(t, fixture.requests, len(methods))
+						for i, method := range methods {
+							assert.Equal(t, method, fixture.requests[i].FullMethod)
+						}
+						var replacement corev1.Sku
+						require.NoError(t, protojson.Unmarshal(fixture.requests[3].RequestJSON, &replacement))
+						assert.Equal(t, existing.Description, replacement.Description)
+						assert.Equal(t, &deviceType, replacement.DeviceType)
+						assert.True(t, proto.Equal(components.ToProto(), replacement.Components))
+
+						after, err := skuDAO.Get(context.Background(), nil, "sku-1")
+						require.NoError(t, err)
+						if tc.status != http.StatusOK {
+							assert.Contains(t, rec.Body.String(), "legacy replacement denied")
+							assert.Equal(t, before, after, "denied legacy replacement must not change the REST projection")
+							return
+						}
+
+						var response model.APISku
+						require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+						assert.Equal(t, existing.GetDescription(), response.Description)
+						assert.Equal(t, &deviceType, response.DeviceType)
+						require.NotNil(t, response.Components)
+						assert.True(t, proto.Equal(replacementResponse.Components, response.Components.ToProto()))
+						assert.Equal(t, existing.GetDescription(), after.Description)
+						assert.Equal(t, &deviceType, after.DeviceType)
+						require.NotNil(t, after.Components)
+						assert.True(t, proto.Equal(replacementResponse.Components, after.Components.SkuComponents))
+					})
+				}
+			},
+		},
+		{
+			name: "shares one RPC deadline and preserves the caller context for DB writes",
+			run: func(t *testing.T) {
+				cases := []struct {
+					name                string
+					versionResponseJSON []byte
+					request             model.APISkuUpdateRequest
+					methods             []string
+					callerTimeout       time.Duration
+				}{
+					{
+						name:    "component replacement",
+						request: model.APISkuUpdateRequest{Components: validSkuCreateRequest("").Components},
+						methods: []string{corev1.Forge_Version_FullMethodName, corev1.Forge_ReplaceSkuComponents_FullMethodName},
+					},
+					{
+						name:                "legacy replacement",
+						versionResponseJSON: []byte(`{}`),
+						request:             model.APISkuUpdateRequest{Components: validSkuCreateRequest("").Components},
+						methods:             []string{corev1.Forge_Version_FullMethodName, corev1.Forge_FindSkusByIds_FullMethodName, corev1.Forge_ReplaceSku_FullMethodName},
+					},
+					{
+						name:    "metadata update",
+						request: model.APISkuUpdateRequest{Description: cutil.GetPtr("updated description")},
+						methods: []string{corev1.Forge_FindSkusByIds_FullMethodName, corev1.Forge_UpdateSkuMetadata_FullMethodName},
+					},
+					{
+						name:                "shorter caller deadline",
+						versionResponseJSON: []byte(`{}`),
+						request:             model.APISkuUpdateRequest{Components: validSkuCreateRequest("").Components},
+						methods:             []string{corev1.Forge_Version_FullMethodName, corev1.Forge_FindSkusByIds_FullMethodName, corev1.Forge_ReplaceSku_FullMethodName},
+						callerTimeout:       30 * time.Second,
+					},
+				}
+				for _, tc := range cases {
+					t.Run(tc.name, func(t *testing.T) {
+						mutationComplete := false
+						fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
+							versionResponseJSON: tc.versionResponseJSON,
+							afterWorkflowGet: func(method string) {
+								if method == tc.methods[len(tc.methods)-1] {
+									mutationComplete = true
+								}
+							},
+						})
+						ctx := context.Background()
+						var callerDeadline time.Time
+						if tc.callerTimeout != 0 {
+							var cancel context.CancelFunc
+							ctx, cancel = context.WithTimeout(ctx, tc.callerTimeout)
+							defer cancel()
+							callerDeadline, _ = ctx.Deadline()
+						}
+
+						// Observe actual SKU reads and writes after Core returns. Transaction
+						// setup uses a separate context and is not part of the projection.
+						var projectionContexts []context.Context
+						projectionWrites := 0
+						fixture.updateHandler.dbSession.DB.AddQueryHook(skuQueryContextHook(func(ctx context.Context, event *bun.QueryEvent) {
+							if !mutationComplete || event.IQuery == nil || event.IQuery.GetTableName() != "sku" {
+								return
+							}
+							switch event.Operation() {
+							case "SELECT":
+								projectionContexts = append(projectionContexts, ctx)
+							case "UPDATE":
+								projectionContexts = append(projectionContexts, ctx)
+								projectionWrites++
+							}
+						}))
+
+						rec := fixture.request(t, http.MethodPatch, "sku-1", tc.request, func(c echo.Context) error {
+							c.SetRequest(c.Request().WithContext(ctx))
+							return fixture.updateHandler.Handle(c)
+						})
+
+						require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+						require.Len(t, fixture.requests, len(tc.methods))
+						require.Len(t, fixture.startContexts, len(tc.methods))
+						require.Len(t, fixture.getContexts, len(tc.methods))
+						deadline, ok := fixture.startContexts[0].Deadline()
+						require.True(t, ok)
+						remaining := time.Until(deadline)
+						assert.Positive(t, remaining)
+						assert.LessOrEqual(t, remaining, cutil.WorkflowContextTimeout)
+						if !callerDeadline.IsZero() {
+							assert.True(t, callerDeadline.Equal(deadline), "RPCs must respect the shorter caller deadline")
+						}
+						for i, method := range tc.methods {
+							assert.Equal(t, method, fixture.requests[i].FullMethod)
+							startDeadline, hasStartDeadline := fixture.startContexts[i].Deadline()
+							getDeadline, hasGetDeadline := fixture.getContexts[i].Deadline()
+							require.True(t, hasStartDeadline)
+							require.True(t, hasGetDeadline)
+							assert.True(t, deadline.Equal(startDeadline), "workflow %d must share the first RPC deadline", i)
+							assert.True(t, deadline.Equal(getDeadline), "workflow wait %d must share the first RPC deadline", i)
+						}
+						require.NotEmpty(t, projectionContexts)
+						require.Positive(t, projectionWrites)
+						for _, projectionCtx := range projectionContexts {
+							projectionDeadline, hasDeadline := projectionCtx.Deadline()
+							assert.Equal(t, !callerDeadline.IsZero(), hasDeadline, "projection must use the caller's deadline")
+							assert.True(t, callerDeadline.Equal(projectionDeadline), "projection must not inherit the RPC deadline")
+							assert.NoError(t, projectionCtx.Err(), "ending the RPC wait must not cancel projection queries")
+						}
+					})
+				}
+			},
+		},
+		{
+			name: "does not dispatch another RPC after caller cancellation",
+			run: func(t *testing.T) {
+				cases := []struct {
+					name                   string
+					versionResponseJSON    []byte
+					replaceComponentsError error
+					cancelAfter            string
+					methods                []string
+					message                string
+				}{
+					{
+						name:        "while waiting for capability discovery",
+						cancelAfter: corev1.Forge_Version_FullMethodName,
+						methods:     []string{corev1.Forge_Version_FullMethodName},
+						message:     "SKU update timed out before Core could apply it",
+					},
+					{
+						name: "while waiting for component replacement",
+						replaceComponentsError: skuProxyActivityError("InvokeCoreGRPCOnSite", fmt.Errorf("%w: %q on %q",
+							errors.New("unknown proxied gRPC method"), "ReplaceSkuComponents", "forge.Forge")),
+						cancelAfter: corev1.Forge_ReplaceSkuComponents_FullMethodName,
+						methods:     []string{corev1.Forge_Version_FullMethodName, corev1.Forge_ReplaceSkuComponents_FullMethodName},
+						message:     "Core proxy request timed out",
+					},
+					{
+						name:                "while waiting for the legacy read",
+						versionResponseJSON: []byte(`{}`),
+						cancelAfter:         corev1.Forge_FindSkusByIds_FullMethodName,
+						methods:             []string{corev1.Forge_Version_FullMethodName, corev1.Forge_FindSkusByIds_FullMethodName},
+						message:             "SKU update timed out before Core could apply it",
+					},
+				}
+				for _, tc := range cases {
+					t.Run(tc.name, func(t *testing.T) {
+						ctx, cancel := context.WithCancel(context.Background())
+						defer cancel()
+						fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
+							versionResponseJSON:    tc.versionResponseJSON,
+							replaceComponentsError: tc.replaceComponentsError,
+							afterWorkflowGet: func(method string) {
+								if method == tc.cancelAfter {
+									cancel()
+								}
+							},
+						})
+						skuDAO := cdbm.NewSkuDAO(fixture.updateHandler.dbSession)
+						before, err := skuDAO.Get(context.Background(), nil, "sku-1")
+						require.NoError(t, err)
+
+						rec := fixture.request(t, http.MethodPatch, "sku-1", model.APISkuUpdateRequest{
+							Description: cutil.GetPtr("updated description"),
+							Components:  validSkuCreateRequest(fixture.siteID).Components,
+						}, func(c echo.Context) error {
+							c.SetRequest(c.Request().WithContext(ctx))
+							return fixture.updateHandler.Handle(c)
+						})
+
+						require.Equal(t, http.StatusGatewayTimeout, rec.Code, rec.Body.String())
+						var response cutil.APIError
+						require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+						assert.Equal(t, tc.message, response.Message)
+						assert.Nil(t, response.Data)
+						require.ErrorIs(t, ctx.Err(), context.Canceled)
+						require.Len(t, fixture.requests, len(tc.methods))
+						for i, method := range tc.methods {
+							assert.Equal(t, method, fixture.requests[i].FullMethod)
+						}
+						after, err := skuDAO.Get(context.Background(), nil, "sku-1")
+						require.NoError(t, err)
+						assert.Equal(t, before, after, "cancelled update must not change the REST projection")
+					})
+				}
 			},
 		},
 		{
@@ -1379,10 +1806,13 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 				existing := existingSkuProto()
 				existing.SchemaVersion = model.CoreSkuSchemaVersion
 				replacementResponse := proto.Clone(existing).(*corev1.Sku)
+				replacementResponse.Description = cutil.GetPtr("new Core description")
+				replacementResponse.DeviceType = cutil.GetPtr("new Core device type")
 				replacementResponse.AssociatedMachineIds = []*corev1.MachineId{{Id: "machine-1"}}
-				replacementResponse.Components = validSkuCreateRequest("").ToProto().Skus[0].Components
+				components := validSkuCreateRequest("").Components
+				replacementResponse.Components = components.ToProto()
+				replacementResponse.Components.Chassis.Model = "Core chassis model"
 				fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
-					findResponse:    &corev1.SkuList{Skus: []*corev1.Sku{existing}},
 					replaceResponse: replacementResponse,
 				})
 				skuDAO := cdbm.NewSkuDAO(fixture.updateHandler.dbSession)
@@ -1394,31 +1824,36 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 				require.NoError(t, err)
 
 				rec := fixture.request(t, http.MethodPatch, "sku-1", model.APISkuUpdateRequest{
-					Components: validSkuCreateRequest(fixture.siteID).Components,
+					Components: components,
 				}, fixture.updateHandler.Handle)
 
 				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 				require.Len(t, fixture.requests, 2)
-				assert.Equal(t, corev1.Forge_FindSkusByIds_FullMethodName, fixture.requests[0].FullMethod)
-				assert.Equal(t, corev1.Forge_ReplaceSku_FullMethodName, fixture.requests[1].FullMethod)
+				assert.Equal(t, corev1.Forge_Version_FullMethodName, fixture.requests[0].FullMethod)
+				assert.Equal(t, corev1.Forge_ReplaceSkuComponents_FullMethodName, fixture.requests[1].FullMethod)
 
-				var coreReq corev1.Sku
+				var coreReq corev1.ReplaceSkuComponentsRequest
 				require.NoError(t, protojson.Unmarshal(fixture.requests[1].RequestJSON, &coreReq))
-				assert.Empty(t, coreReq.AssociatedMachineIds)
-				assert.Equal(t, existing.Description, coreReq.Description)
-				assert.Equal(t, existing.DeviceType, coreReq.DeviceType)
+				assert.Nil(t, coreReq.Description)
+				assert.Nil(t, coreReq.DeviceType)
+				assert.True(t, proto.Equal(components.ToProto(), coreReq.Components))
+				assert.False(t, proto.Equal(coreReq.Components, replacementResponse.Components))
 
 				var response model.APISku
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
 				assert.Equal(t, []string{"machine-1"}, response.AssociatedMachineIds)
 				assert.Equal(t, replacementResponse.GetDescription(), response.Description)
 				assert.Equal(t, replacementResponse.DeviceType, response.DeviceType)
+				require.NotNil(t, response.Components)
+				assert.True(t, proto.Equal(replacementResponse.Components, response.Components.ToProto()))
 
 				saved, err := skuDAO.Get(context.Background(), nil, "sku-1")
 				require.NoError(t, err)
 				assert.Equal(t, []string{"machine-1"}, saved.AssociatedMachineIds)
 				assert.Equal(t, replacementResponse.GetDescription(), saved.Description)
 				assert.Equal(t, replacementResponse.DeviceType, saved.DeviceType)
+				require.NotNil(t, saved.Components)
+				assert.True(t, proto.Equal(replacementResponse.Components, saved.Components.SkuComponents))
 
 				getHandler := NewGetSkuHandler(fixture.updateHandler.dbSession, nil, &config.Config{})
 				getRec := fixture.request(t, http.MethodGet, "sku-1", nil, getHandler.Handle)
@@ -1426,37 +1861,6 @@ func TestUpdateSkuHandler_Handle(t *testing.T) {
 				var getResponse model.APISku
 				require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &getResponse))
 				assert.Equal(t, []string{"machine-1"}, getResponse.AssociatedMachineIds)
-			},
-		},
-		{
-			name: "sends version five when replacing legacy SKU components",
-			run: func(t *testing.T) {
-				existing := existingSkuProto()
-				require.Equal(t, uint32(4), existing.SchemaVersion)
-				replacementResponse := proto.Clone(existing).(*corev1.Sku)
-				replacementResponse.SchemaVersion = model.CoreSkuSchemaVersion
-				replacementResponse.Components = validSkuCreateRequest("").ToProto().Skus[0].Components
-				fixture := newSkuManagementFixtureWithOptions(t, []string{authz.ProviderAdminRole}, skuManagementFixtureOptions{
-					findResponse:    &corev1.SkuList{Skus: []*corev1.Sku{existing}},
-					replaceResponse: replacementResponse,
-				})
-				components := validSkuCreateRequest(fixture.siteID).Components
-
-				rec := fixture.request(t, http.MethodPatch, "sku-1", model.APISkuUpdateRequest{
-					Components: components,
-				}, fixture.updateHandler.Handle)
-				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-				require.Len(t, fixture.requests, 2)
-				assert.Equal(t, corev1.Forge_FindSkusByIds_FullMethodName, fixture.requests[0].FullMethod)
-				assert.Equal(t, corev1.Forge_ReplaceSku_FullMethodName, fixture.requests[1].FullMethod)
-
-				var coreReq corev1.Sku
-				require.NoError(t, protojson.Unmarshal(fixture.requests[1].RequestJSON, &coreReq))
-				assert.Equal(t, model.CoreSkuSchemaVersion, coreReq.SchemaVersion)
-				assert.Equal(t, "sku-1", coreReq.Id)
-				require.NotNil(t, coreReq.Components)
-				require.Len(t, coreReq.Components.Storage, 1)
-				assert.True(t, proto.Equal(components.ToProto(), coreReq.Components))
 			},
 		},
 		{
@@ -1619,26 +2023,43 @@ func TestDeleteSkuHandler(t *testing.T) {
 	})
 }
 
+// skuQueryContextHook observes the context used for SKU projection queries.
+type skuQueryContextHook func(context.Context, *bun.QueryEvent)
+
+func (h skuQueryContextHook) BeforeQuery(ctx context.Context, event *bun.QueryEvent) context.Context {
+	h(ctx, event)
+	return ctx
+}
+
+func (skuQueryContextHook) AfterQuery(context.Context, *bun.QueryEvent) {}
+
 type skuManagementFixture struct {
-	org           string
-	siteID        string
-	user          *cdbm.User
-	createHandler CreateSkuHandler
-	updateHandler UpdateSkuHandler
-	deleteHandler DeleteSkuHandler
-	requests      []grpcproxy.Request
+	org              string
+	siteID           string
+	user             *cdbm.User
+	createHandler    CreateSkuHandler
+	updateHandler    UpdateSkuHandler
+	deleteHandler    DeleteSkuHandler
+	requests         []grpcproxy.Request
+	startContexts    []context.Context
+	getContexts      []context.Context
+	afterWorkflowGet func(string)
 }
 
 type skuManagementFixtureOptions struct {
-	findResponse        *corev1.SkuList
-	findError           error
-	createError         error
-	replaceResponse     *corev1.Sku
-	replaceError        error
-	updateMetadataError error
-	deleteError         error
-	skipPersistedSKU    bool
-	afterUpdateMetadata func(*cdb.Session)
+	versionResponseJSON    []byte
+	versionError           error
+	findResponse           *corev1.SkuList
+	findError              error
+	createError            error
+	replaceResponse        *corev1.Sku
+	replaceError           error
+	replaceComponentsError error
+	updateMetadataError    error
+	deleteError            error
+	skipPersistedSKU       bool
+	afterUpdateMetadata    func(*cdb.Session)
+	afterWorkflowGet       func(string)
 }
 
 func newSkuManagementFixture(t *testing.T, roles []string) *skuManagementFixture {
@@ -1672,9 +2093,20 @@ func newSkuManagementFixtureWithOptions(t *testing.T, roles []string, options sk
 		require.NoError(t, err)
 	}
 
-	fixture := &skuManagementFixture{org: org, siteID: site.ID.String(), user: user}
+	fixture := &skuManagementFixture{org: org, siteID: site.ID.String(), user: user, afterWorkflowGet: options.afterWorkflowGet}
 	client := &tmocks.Client{}
 	existing := existingSkuProto()
+	if options.versionError != nil {
+		fixture.addWorkflowError(client, corev1.Forge_Version_FullMethodName, options.versionError)
+	} else if options.versionResponseJSON != nil {
+		var response structpb.Struct
+		require.NoError(t, protojson.Unmarshal(options.versionResponseJSON, &response))
+		fixture.addWorkflow(t, client, corev1.Forge_Version_FullMethodName, &response)
+	} else {
+		fixture.addWorkflow(t, client, corev1.Forge_Version_FullMethodName, &corev1.BuildInfo{
+			Capabilities: []corev1.BuildCapability{corev1.BuildCapability_BUILD_CAPABILITY_REPLACE_SKU_COMPONENTS},
+		})
+	}
 	if options.createError != nil {
 		fixture.addWorkflowError(client, corev1.Forge_CreateSku_FullMethodName, options.createError)
 	} else {
@@ -1697,6 +2129,11 @@ func newSkuManagementFixtureWithOptions(t *testing.T, roles []string, options sk
 		fixture.addWorkflowError(client, corev1.Forge_ReplaceSku_FullMethodName, options.replaceError)
 	} else {
 		fixture.addWorkflow(t, client, corev1.Forge_ReplaceSku_FullMethodName, replaceResponse)
+	}
+	if options.replaceComponentsError != nil {
+		fixture.addWorkflowError(client, corev1.Forge_ReplaceSkuComponents_FullMethodName, options.replaceComponentsError)
+	} else {
+		fixture.addWorkflow(t, client, corev1.Forge_ReplaceSkuComponents_FullMethodName, replaceResponse)
 	}
 	if options.updateMetadataError != nil {
 		fixture.addWorkflowError(client, corev1.Forge_UpdateSkuMetadata_FullMethodName, options.updateMetadataError)
@@ -1723,7 +2160,12 @@ func newSkuManagementFixtureWithOptions(t *testing.T, roles []string, options sk
 
 func (f *skuManagementFixture) addWorkflowError(client *tmocks.Client, method string, getErr error) {
 	run := &tmocks.WorkflowRun{}
-	run.On("Get", mock.Anything, mock.Anything).Return(getErr)
+	run.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		f.getContexts = append(f.getContexts, args.Get(0).(context.Context))
+		if f.afterWorkflowGet != nil {
+			f.afterWorkflowGet(method)
+		}
+	}).Return(getErr)
 	client.On(
 		"ExecuteWorkflow",
 		mock.Anything,
@@ -1732,6 +2174,7 @@ func (f *skuManagementFixture) addWorkflowError(client *tmocks.Client, method st
 		mock.MatchedBy(func(req grpcproxy.Request) bool { return req.FullMethod == method }),
 	).Run(func(args mock.Arguments) {
 		f.requests = append(f.requests, args.Get(3).(grpcproxy.Request))
+		f.startContexts = append(f.startContexts, args.Get(0).(context.Context))
 	}).Return(run, nil).Maybe()
 }
 
@@ -1745,11 +2188,15 @@ func (f *skuManagementFixture) addWorkflow(t *testing.T, client *tmocks.Client, 
 		require.NoError(t, err)
 	}
 	run.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		f.getContexts = append(f.getContexts, args.Get(0).(context.Context))
 		out, ok := args.Get(1).(*grpcproxy.Response)
 		require.True(t, ok)
 		out.ResponseJSON = responseJSON
 		for _, callback := range afterGet {
 			callback()
+		}
+		if f.afterWorkflowGet != nil {
+			f.afterWorkflowGet(method)
 		}
 	}).Return(nil)
 	client.On(
@@ -1760,6 +2207,7 @@ func (f *skuManagementFixture) addWorkflow(t *testing.T, client *tmocks.Client, 
 		mock.MatchedBy(func(req grpcproxy.Request) bool { return req.FullMethod == method }),
 	).Run(func(args mock.Arguments) {
 		f.requests = append(f.requests, args.Get(3).(grpcproxy.Request))
+		f.startContexts = append(f.startContexts, args.Get(0).(context.Context))
 	}).Return(run, nil).Maybe()
 }
 

@@ -17,7 +17,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	temporalCommon "go.temporal.io/api/common/v1"
 	temporalEnums "go.temporal.io/api/enums/v1"
+	temporalFailure "go.temporal.io/api/failure/v1"
 	"go.temporal.io/api/serviceerror"
 	tclient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
@@ -26,6 +28,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
 
 // newProxyEchoContext returns a context and recorder for helpers whose HTTP
@@ -186,8 +189,6 @@ func TestProxyFlowGRPCReturnsAPIError(t *testing.T) {
 			name: "flow succeeds",
 		},
 		{
-			// Flow's own rejection arrives with no separate cause, so the
-			// message is the only diagnosis there is.
 			name:         "flow rejects the request",
 			getErr:       errors.New("rack not found"),
 			expectedCode: http.StatusInternalServerError,
@@ -228,36 +229,73 @@ func TestProxyFlowGRPCReturnsAPIError(t *testing.T) {
 }
 
 func TestExecuteCoreGRPC(t *testing.T) {
-	temporalClient, started := newTimingOutProxyClient()
-
-	err := ExecuteCoreGRPC(
-		context.Background(),
-		temporalClient,
-		"/forge.Forge/Test",
-		&emptypb.Empty{},
-		nil,
-		"",
-	)
-
-	t.Run("starts the Core proxy workflow", func(t *testing.T) {
-		assert.Equal(t, grpcproxy.Core.WorkflowName, started.workflowName)
+	cause := tp.NewApplicationError("method unavailable", "methodError")
+	applicationErr := tp.NewNonRetryableApplicationError("Core rejected the method", swe.ErrTypeNICoUnimplemented, cause)
+	converter := tp.GetDefaultFailureConverter()
+	activityErr := converter.FailureToError(&temporalFailure.Failure{
+		Message: "activity failed",
+		Cause:   converter.ErrorToFailure(applicationErr),
+		FailureInfo: &temporalFailure.Failure_ActivityFailureInfo{
+			ActivityFailureInfo: &temporalFailure.ActivityFailureInfo{
+				ActivityType: &temporalCommon.ActivityType{Name: "InvokeCoreGRPCOnSite"},
+			},
+		},
 	})
 
-	t.Run("generates a fresh workflow ID so identical calls never coalesce", func(t *testing.T) {
-		assert.True(t, strings.HasPrefix(started.options.ID, "core-grpc-Test-"), "got %q", started.options.ID)
-		assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, started.options.WorkflowIDConflictPolicy)
-	})
+	cases := []struct {
+		name            string
+		getErr          error
+		expectedCode    int
+		expectedMessage string
+		checkCause      bool
+	}{
+		{
+			name:            "execution timeout",
+			getErr:          tp.NewTimeoutError(temporalEnums.TIMEOUT_TYPE_START_TO_CLOSE, nil),
+			expectedCode:    http.StatusGatewayTimeout,
+			expectedMessage: "Core proxy request timed out",
+		},
+		{
+			name:            "retains Temporal errors without exporting response data",
+			getErr:          activityErr,
+			expectedCode:    http.StatusNotImplemented,
+			expectedMessage: cause.Error(),
+			checkCause:      true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			temporalClient, started := newProxyClient(tc.getErr, nil)
+			apiErr := ExecuteCoreGRPC(context.Background(), temporalClient, "/forge.Forge/Test", &emptypb.Empty{}, nil, "")
 
-	t.Run("expires before the caller gives up", func(t *testing.T) {
-		assert.Equal(t, grpcproxy.WorkflowExecutionTimeout, started.options.WorkflowExecutionTimeout)
-		assert.Less(t, started.options.WorkflowExecutionTimeout, cutil.WorkflowContextTimeout)
-	})
+			assert.Equal(t, grpcproxy.Core.WorkflowName, started.workflowName)
+			assert.True(t, strings.HasPrefix(started.options.ID, "core-grpc-Test-"), "got %q", started.options.ID)
+			assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, started.options.WorkflowIDConflictPolicy)
+			assert.Equal(t, grpcproxy.WorkflowExecutionTimeout, started.options.WorkflowExecutionTimeout)
+			assert.Less(t, started.options.WorkflowExecutionTimeout, cutil.WorkflowContextTimeout)
+			require.NotNil(t, apiErr)
+			assert.Equal(t, tc.expectedCode, apiErr.Code)
+			assert.Equal(t, tc.expectedMessage, apiErr.Message)
+			if !tc.checkCause {
+				return
+			}
 
-	t.Run("reports a timeout as 504", func(t *testing.T) {
-		require.NotNil(t, err)
-		assert.Equal(t, http.StatusGatewayTimeout, err.Code)
-		assert.Equal(t, "Core proxy request timed out", err.Message)
-	})
+			assert.Same(t, tc.getErr, apiErr.Unwrap())
+			var originalActivity *tp.ActivityError
+			require.ErrorAs(t, apiErr, &originalActivity)
+			assert.Equal(t, "InvokeCoreGRPCOnSite", originalActivity.ActivityType().Name)
+			var originalApplication *tp.ApplicationError
+			require.ErrorAs(t, apiErr, &originalApplication)
+			assert.Equal(t, swe.ErrTypeNICoUnimplemented, originalApplication.Type())
+			assert.EqualError(t, originalApplication.Unwrap(), cause.Error())
+			assert.Nil(t, apiErr.Data)
+
+			ctx, recorder := newProxyEchoContext()
+			require.NoError(t, apiErr.Send(ctx))
+			assert.Equal(t, tc.expectedCode, recorder.Code)
+			assert.JSONEq(t, `{"source":"","message":"method unavailable (type: methodError, retryable: true)","data":null}`, recorder.Body.String())
+		})
+	}
 }
 
 // TestExecuteGRPCProxyRejectsSecretFieldsWithoutKey covers the combination that

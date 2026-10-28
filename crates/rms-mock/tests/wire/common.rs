@@ -66,6 +66,10 @@ pub(crate) async fn serve_inventory(
     config: RmsMockConfig,
 ) -> String {
     let mock = Arc::new(RmsMock::new(inventory, config));
+    serve_mock(mock).await
+}
+
+pub(crate) async fn serve_mock(mock: Arc<RmsMock>) -> String {
     let router = rms_mock::router(mock);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
