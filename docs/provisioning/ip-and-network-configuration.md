@@ -620,21 +620,21 @@ Two TLD conventions exist:
 
 Choose the convention that matches your binaries. The stock names change both the first label and the TLD. For example, the NTP name is exactly `carbide-ntp.forge`, not `nico-ntp.forge`. Verify the name by checking what the agent actually resolves at startup with `kubectl exec -n nico-system <agent-pod> -- getent hosts carbide-ntp.forge`.
 
-The required DNS records are shown with both NTP names where they differ:
+The required DNS records are shown with both PXE and NTP names where they differ:
 
 | Hostname | Port | Resolves to | Purpose | Configurable at runtime? |
 |---|---|---|---|---|
-| `nico-api.nico` | 443 | `nico-api` external LoadBalancer VIP | NICo gRPC API | Yes — `NICO_API_URL` env var on most clients |
-| `nico-pxe.nico` | 80 | `nico-pxe` LoadBalancer VIP | iPXE scripts, cloud-init, internal APT, and the legacy bootstrap-CA endpoint | The DNS record remains fixed for general consumers. DPF can separately configure bootstrap CA acquisition through a complete URL override or mounted Secret or ConfigMap. Non-DPF boot instructions include `pxe_uri`. Other consumers retain the compatibility hostname. |
+| `carbide-api.forge` (default) or `nico-api.nico` (rebranded image) | 443 | `nico-api` external LoadBalancer VIP | NICo gRPC API | Partly - there is no `NICO_API_URL` setting. Stock DPU agents use `carbide-api.forge` unless the interface is on the static-assignments segment and `external_api_url` is set; see [DNS Service Endpoints](../configuration/dns-service-endpoints.md) |
+| `carbide-pxe.forge` (stock) or `nico-pxe.nico` (rebranded image) | 80 | `nico-pxe` LoadBalancer VIP | iPXE scripts, cloud-init, internal APT, and the legacy bootstrap-CA endpoint | The DNS record remains fixed for general consumers. Stock DPU agents resolve `carbide-pxe.forge` at startup and stop if it does not resolve. DPF can separately configure bootstrap CA acquisition through a complete URL override or mounted Secret or ConfigMap. Non-DPF boot instructions include `pxe_uri`. Other consumers retain the compatibility hostname. |
 | `carbide-static-pxe.forge` (stock fallback) | 80 | Static PXE asset server VIP | Full Scout filesystem and update assets | **Yes, at boot.** Scout accepts `newrootfs=` for its full-image download and `pxe_uri=` for update checks. Embedded fallback URLs remain; see the [canonical endpoint reference](../configuration/dns-service-endpoints.md#nico-static-pxenico---static-boot-asset-server). |
 | `carbide-ntp.forge` (stock) or `nico-ntp.nico` (rebranded image) | 123 | Operator-supplied NTP server IPs — A and AAAA records point at your existing NTP infrastructure, not a NICo-deployed service | Per-family NTP fallback for DPU-agent DHCP when that family has no valid site-configured address | **Fallback only.** Prefer `siteConfig.ntp_servers` for IPv4. Configure the exact hostname queried by the agent with at least one AAAA record for DHCPv6 option 56. |
 | `unbound.nico` | 53 | `unbound` LoadBalancer VIP | Recursive DNS resolver | Yes — the resolver address itself is distributed via DHCP option 6 |
-| `otel-receiver.nico` | 443 | OTel receiver VIP on the site controller | OTLP ingestion endpoint for DPU otel-collector sidecars | Yes — set in the otel-collector configuration YAML and re-deployed |
+| `otel-receiver.forge` (default) | 443 | OTel receiver VIP on the site controller | OTLP ingestion endpoint for DPU otel-collector sidecars | Yes — set in the otel-collector configuration YAML and re-deployed |
 
 The static-asset row describes Scout's stock fallback. Boot URL overrides
 select their own host, scheme, port, and destination.
 
-One additional `.nico` hostname, `socks.nico`, is hardcoded into the DPU agent as the SOCKS5 outbound proxy for DPU extension-service pods. Add a corresponding A record only if your environment runs a SOCKS5 proxy for that purpose; it is not part of every NICo deployment. For per-endpoint detail (consumers, in-cluster addresses, hardcode locations, and the `unbound`-vs-other-resolver guidance), see [DNS Service Endpoints](../configuration/dns-service-endpoints.md). That file is the canonical endpoint reference; the table above is the operator-facing summary.
+One additional hostname, `socks.forge` (stock) or `socks.nico` (rebranded image), is hardcoded into the DPU agent as the SOCKS5 proxy that containerd uses to pull extension service images. Add a corresponding A record only if your environment runs a SOCKS5 proxy for that purpose; it is not part of every NICo deployment. For per-endpoint detail (consumers, in-cluster addresses, hardcode locations, and the `unbound`-vs-other-resolver guidance), see [DNS Service Endpoints](../configuration/dns-service-endpoints.md). That file is the canonical endpoint reference; the table above is the operator-facing summary.
 
 > **Note:** The `.nico` service zone is private and is not a publicly
 > registered TLD. It can be served on the conventional isolated OOB network or
@@ -722,7 +722,9 @@ dig +short @<nico-dns-vip> <initial_domain_name>
 managed host's BMC web UI shell, or another client on its network), confirm the
 service zone resolves.
 
-The loop below assumes your deployment publishes the listed `.nico` records.
+The loop below assumes stock agents and that your deployment publishes the
+listed records. For an image rebuilt with the rebranded PXE name, replace the
+complete `carbide-pxe.forge` hostname with `nico-pxe.nico`.
 Before running it, replace `nico-static-pxe.nico` with the hostname from
 Scout's effective full-image URL, and add the hostname from its effective
 update URL if different. The `newrootfs=` and `pxe_uri=` arguments select
@@ -733,8 +735,8 @@ Refer to the [Static Boot Asset Server reference](../configuration/dns-service-e
 for URL selection.
 
 ```bash
-for name in nico-api.nico nico-pxe.nico nico-static-pxe.nico \
-            unbound.nico otel-receiver.nico; do
+for name in carbide-api.forge carbide-pxe.forge nico-static-pxe.nico \
+            unbound.nico otel-receiver.forge; do
     printf "%-30s -> %s\n" "$name" "$(dig +short "$name" @<UNBOUND_VIP> || echo 'FAILED')"
 done
 
@@ -754,16 +756,16 @@ A `FAILED` or empty result for a required record type needs investigation:
 check resolver reachability and the hostname's authoritative records or
 forwarding configuration. Custom Scout hostnames do not necessarily use
 `local_data.conf`. If your environment also runs a SOCKS5 proxy, extend the
-loop with `socks.nico`.
+loop with `socks.forge` for stock agents or `socks.nico` for rebranded images.
 
 **Confirm reachability on the expected ports:**
 
 ```bash
 # nico-api gRPC (TLS handshake)
-openssl s_client -connect nico-api.nico:443 </dev/null 2>/dev/null | grep -E '^(subject|Verify)'
+openssl s_client -connect carbide-api.forge:443 </dev/null 2>/dev/null | grep -E '^(subject|Verify)'
 
 # nico-pxe
-curl -sf --max-time 5 http://nico-pxe.nico/ -o /dev/null && echo OK || echo FAILED
+curl -sf --max-time 5 http://carbide-pxe.forge/ -o /dev/null && echo OK || echo FAILED
 
 # unbound recursing externally
 dig +short +timeout=3 example.com @unbound.nico
