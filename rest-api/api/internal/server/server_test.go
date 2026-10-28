@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -410,18 +411,52 @@ func Test_Audit(t *testing.T) {
 
 	srv := InitAPIServer(cfg, dbSession, tc, tnc, scp, nil)
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/%s/org/wdksahew1rqv/%s/site", cfg.GetAPIRouteVersion(), cfg.GetAPIName()), nil)
-	srv.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	// check if the audit log entry was created
-	aeDAO := cdbm.NewAuditEntryDAO(dbSession)
-	entries, count, err := aeDAO.GetAll(context.Background(), nil, cdbm.AuditEntryFilterInput{OrgName: cutil.GetPtr("wdksahew1rqv")}, paginator.PageInput{})
-	assert.NoError(t, err)
-	assert.Len(t, entries, 1)
-	assert.Equal(t, count, 1)
-	assert.Equal(t, entries[0].OrgName, "wdksahew1rqv")
-	assert.Equal(t, entries[0].StatusCode, 401)
+	// Larger than the 5 MiB Echo captures by default, within the API body limit.
+	largeName := strings.Repeat("a", 6<<20)
+
+	tests := []struct {
+		name    string
+		orgName string
+		body    []byte
+		check   func(t *testing.T, body map[string]interface{})
+	}{
+		{
+			name:    "records an unauthorized request without a body",
+			orgName: "wdksahew1rqv",
+			check: func(t *testing.T, body map[string]interface{}) {
+				assert.Empty(t, body)
+			},
+		},
+		{
+			name:    "records a valid body larger than the Echo default capture in full",
+			orgName: "auditlargebody",
+			body:    []byte(`{"name":"` + largeName + `"}`),
+			check: func(t *testing.T, body map[string]interface{}) {
+				assert.NotContains(t, body, "jsonParseFailed")
+				name, ok := body["name"].(string)
+				require.True(t, ok)
+				assert.Equal(t, len(largeName), len(name))
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/%s/org/%s/%s/site", cfg.GetAPIRouteVersion(), tt.orgName, cfg.GetAPIName()), bytes.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			srv.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusUnauthorized, rec.Code)
+
+			aeDAO := cdbm.NewAuditEntryDAO(dbSession)
+			entries, count, err := aeDAO.GetAll(context.Background(), nil, cdbm.AuditEntryFilterInput{OrgName: cutil.GetPtr(tt.orgName)}, paginator.PageInput{})
+			require.NoError(t, err)
+			require.Len(t, entries, 1)
+			assert.Equal(t, 1, count)
+			assert.Equal(t, tt.orgName, entries[0].OrgName)
+			assert.Equal(t, http.StatusUnauthorized, entries[0].StatusCode)
+			tt.check(t, entries[0].Body)
+		})
+	}
 }
 
 func Test_BodyLimit(t *testing.T) {
