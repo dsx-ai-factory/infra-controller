@@ -268,6 +268,13 @@ func TestConfig_ValidateIssuersConfig(t *testing.T) {
 			wantErr:      "only one claimMapping with isServiceAccount is allowed across all issuers",
 		},
 		{
+			name: "service account mappings in two issuers in connected mode",
+			issuers: []IssuerConfig{
+				serviceAccountIssuer("custom-one", "automation"),
+				serviceAccountIssuer("custom-two", "automation-two"),
+			},
+		},
+		{
 			name: "direct and legacy KAS",
 			issuers: []IssuerConfig{
 				kasIssuer,
@@ -421,19 +428,14 @@ func TestConfig_ValidateKeycloakConfig(t *testing.T) {
 			serviceAccountOrg: "ncx",
 		},
 		{
-			name:           "service account without an org",
+			name:           "service account in disconnected mode without an org",
 			disconnected:   true,
 			serviceAccount: true,
 			wantErr:        "keycloak service account org must be specified",
 		},
 		{
-			name:              "service account in connected mode",
-			serviceAccount:    true,
-			serviceAccountOrg: "ncx",
-			wantErr:           "keycloak service account is only supported in disconnected mode",
-		},
-		{
-			name: "no service account in connected mode",
+			name:           "service account in connected mode without an org",
+			serviceAccount: true,
 		},
 	}
 	for _, tt := range tests {

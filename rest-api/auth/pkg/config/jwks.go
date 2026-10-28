@@ -159,12 +159,12 @@ type JwksConfig struct {
 
 	ClaimMappings []ClaimMapping // org/role mapping configuration
 
-	// ServiceAccount treats client credentials tokens holding every ServiceAccountRoles role in
-	// ServiceAccountOrg as service accounts for requests to that org (Keycloak only). For custom
-	// issuers, use ClaimMapping.IsServiceAccount instead.
+	// ServiceAccount treats client credentials tokens holding every ServiceAccountRoles role in the
+	// requested org as service accounts for that org (Keycloak only). For custom issuers, use
+	// ClaimMapping.IsServiceAccount instead.
 	ServiceAccount bool
 
-	// ServiceAccountOrg is the one org whose clients can be service accounts (Keycloak only).
+	// ServiceAccountOrg, when set, limits service accounts to that org (Keycloak only).
 	ServiceAccountOrg string
 
 	// ReservedOrgNames prevents dynamic org mappings from claiming statically-configured org names.

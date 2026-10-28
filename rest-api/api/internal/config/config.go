@@ -135,7 +135,7 @@ const (
 	ConfigKeycloakClientSecret = "keycloak.clientSecret"
 	// ConfigKeycloakServiceAccountEnabled is a feature flag for service account support
 	ConfigKeycloakServiceAccountEnabled = "keycloak.serviceAccount"
-	// ConfigKeycloakServiceAccountOrg is the one org whose clients can be service accounts
+	// ConfigKeycloakServiceAccountOrg limits Keycloak service accounts to one org, required in disconnected mode
 	ConfigKeycloakServiceAccountOrg = "keycloak.serviceAccountOrg"
 
 	// ConfigRateLimiterEnabled is a feature flag for rate limiter
@@ -732,11 +732,9 @@ func (c *Config) ValidateIssuersConfig(issuers []IssuerConfig) error {
 				if mapping.OrgAttribute != "" {
 					return fmt.Errorf("issuer %s: claimMapping %d: orgAttribute cannot be specified when isServiceAccount is true", issuer.Name, j)
 				}
-				if !c.GetEnvDisconnected() {
-					return fmt.Errorf("issuer %s: claimMapping %d: isServiceAccount is only supported in disconnected mode", issuer.Name, j)
-				}
-				if seenServiceAccountMapping {
-					return fmt.Errorf("issuer %s: claimMapping %d: only one claimMapping with isServiceAccount is allowed across all issuers", issuer.Name, j)
+				// A disconnected deployment has a single Site, which only one org can claim.
+				if c.GetEnvDisconnected() && seenServiceAccountMapping {
+					return fmt.Errorf("issuer %s: claimMapping %d: only one claimMapping with isServiceAccount is allowed across all issuers in disconnected mode", issuer.Name, j)
 				}
 				seenServiceAccountMapping = true
 			}
@@ -768,13 +766,6 @@ func (c *Config) ValidateIssuersConfig(issuers []IssuerConfig) error {
 				if !cauth.IsValidRole(role) {
 					return fmt.Errorf("issuer %s: claimMapping %d: invalid role: %s", issuer.Name, j, role)
 				}
-			}
-		}
-
-		// Service account validation
-		if issuer.ServiceAccount {
-			if !c.GetEnvDisconnected() {
-				return fmt.Errorf("issuer %s: service account is only supported in disconnected mode", issuer.Name)
 			}
 		}
 	}
@@ -1235,13 +1226,9 @@ func (c *Config) ValidateKeycloakConfig() error {
 		return fmt.Errorf("keycloak client secret or client secret path must be specified when Keycloak is enabled")
 	}
 
-	if c.GetKeycloakServiceAccountEnabled() {
-		if !c.GetEnvDisconnected() {
-			return fmt.Errorf("keycloak service account is only supported in disconnected mode")
-		}
-		if c.GetKeycloakServiceAccountOrg() == "" {
-			return fmt.Errorf("keycloak service account org must be specified when service account is enabled")
-		}
+	// A disconnected deployment has a single Site, which only one org can claim.
+	if c.GetKeycloakServiceAccountEnabled() && c.GetEnvDisconnected() && c.GetKeycloakServiceAccountOrg() == "" {
+		return fmt.Errorf("keycloak service account org must be specified when service account is enabled in disconnected mode")
 	}
 
 	return nil

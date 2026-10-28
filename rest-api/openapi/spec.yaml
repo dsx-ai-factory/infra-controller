@@ -34359,13 +34359,13 @@ components:
             at deployment time (the issuer config in the `nico-rest-api-config`
             ConfigMap); it cannot be toggled via the API. Rules by issuer origin:
               - `keycloak`: true for a client-credentials (service-to-service) token
-                that holds both `PROVIDER_ADMIN` and `TENANT_ADMIN` in the org set as
-                `keycloak.serviceAccountOrg`, on requests to that org, when the issuer
-                is deployed with `keycloak.serviceAccount: true`. Only permitted when
-                the API runs in disconnected mode.
+                that holds both `PROVIDER_ADMIN` and `TENANT_ADMIN` in the requested
+                org, when the issuer is deployed with `keycloak.serviceAccount: true`.
+                When `keycloak.serviceAccountOrg` is set, which disconnected mode
+                requires, only requests to that org qualify.
               - `custom`: true when the `claimMapping` matched for this org sets
-                `isServiceAccount: true`. Only permitted when the API runs in
-                disconnected mode.
+                `isServiceAccount: true`. Disconnected mode allows only one such
+                mapping.
               - `kas-ssa` / `kas-legacy`: always false; service accounts are not
                 supported for these origins.
 
