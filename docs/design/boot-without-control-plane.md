@@ -2,6 +2,8 @@
 
 - **Issue:** [#7568](https://github.com/dsx-ai-factory/infra-controller/issues/7568)
 - **Status:** Scoping
+- **Code links:** pinned to [`7889b69`](https://github.com/dsx-ai-factory/infra-controller/commit/7889b69707d74296d991f7063b8e4f3d13e534ea), the `main` commit this branch
+  started from. Line numbers are correct at that commit, not on `main`.
 
 This document scopes the work. It proposes no code changes.
 
@@ -42,15 +44,15 @@ outage.
 ### 2.1 Address allocation is a database record, not a device configuration
 
 NICo already has a per-interface IP allocation policy. See
-[`ExpectedInterfaceIpAllocation`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-model/src/expected_machine.rs#L322)
+[`ExpectedInterfaceIpAllocation`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/api-model/src/expected_machine.rs#L322)
 with the values `Dynamic`, `Fixed` and `Retained`, and the host-BMC compatibility
-enum [`BmcIpAllocationType`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-model/src/expected_machine.rs#L144).
+enum [`BmcIpAllocationType`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/api-model/src/expected_machine.rs#L144).
 
 `Fixed` and `Retained` only pin the address **in the NICo database**. The device
 still learns the address through DHCP. The allocation decision runs in
-[`ensure_dhcp_address_for_family`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/dhcp/discover.rs#L258)
+[`ensure_dhcp_address_for_family`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/api-core/src/dhcp/discover.rs#L258)
 and in
-[`discover_dhcp`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/dhcp/discover.rs#L539).
+[`discover_dhcp`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/api-core/src/dhcp/discover.rs#L539).
 
 Therefore a `Fixed` BMC with a stable address still cannot boot when `nico-dhcp`
 or `nico-api` is down. This is the central gap. The new work must push the
@@ -60,27 +62,27 @@ address **into the device**.
 
 `nico-dhcp` is a Kea hooks library. Every DISCOVER and REQUEST goes to `nico-api`
 over gRPC. The hook cache in
-[`crates/dhcp/src/cache.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/dhcp/src/cache.rs#L40)
+[`crates/dhcp/src/cache.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/dhcp/src/cache.rs#L40)
 holds negative answers only. The operator documentation states this explicitly in
-[`docs/provisioning/ip-and-network-configuration.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/provisioning/ip-and-network-configuration.md):
+[`docs/provisioning/ip-and-network-configuration.md`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/docs/provisioning/ip-and-network-configuration.md):
 the cache is "a degraded-mode safety net, not a fallback pool".
 
 The DPU-local DHCP server is different. It runs in DPU mode and answers from a
 file on the DPU. See
-[`crates/dhcp-server/src/modes/dpu.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/dhcp-server/src/modes/dpu.rs#L98)
+[`crates/dhcp-server/src/modes/dpu.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/dhcp-server/src/modes/dpu.rs#L98)
 and the `host.yaml` path in
-[`crates/agent/src/dhcp.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/agent/src/dhcp.rs#L32).
+[`crates/agent/src/dhcp.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/agent/src/dhcp.rs#L32).
 This local path already works without `nico-api`, as long as the file stays on
 disk. Work item W4 protects that file.
 
 ### 2.3 The DPU OOB address is hard-coded to DHCP
 
 The iPXE command line for a DPU sets `ip=dhcp` and `bfnet=oob_net0:dhcp`. See
-[`crates/api-core/src/ipxe.rs#L221`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/ipxe.rs#L221).
+[`crates/api-core/src/ipxe.rs#L221`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/api-core/src/ipxe.rs#L221).
 The value is a literal in a `format!` call. It has no per-machine variant.
 
 The DPU cloud-init payload is rendered in
-[`render_user_data`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/pxe/src/routes/cloud_init/dpu.rs#L94).
+[`render_user_data`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/pxe/src/routes/cloud_init/dpu.rs#L94).
 It carries the API URL, the PXE URL and the HBN bridge settings, but no OOB
 address configuration.
 
@@ -90,15 +92,15 @@ This is the behaviour that the issue calls out: "NICo specifically prevents this
 behavior so stale nodes do not come back from the dead".
 
 The agent fetches the network configuration in
-[`PeriodicConfigFetcher`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/agent/src/periodic_config_fetcher.rs#L41).
+[`PeriodicConfigFetcher`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/agent/src/periodic_config_fetcher.rs#L41).
 The field `netconf` is an in-memory `ArcSwapOption`. Nothing is written to disk.
 A `NotFound` answer clears it at
-[line 258](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/agent/src/periodic_config_fetcher.rs#L258).
+[line 258](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/agent/src/periodic_config_fetcher.rs#L258).
 
 The main loop reads that value. The `None` arm at
-[`crates/agent/src/main_loop.rs#L1539`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/agent/src/main_loop.rs#L1539)
+[`crates/agent/src/main_loop.rs#L1539`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/agent/src/main_loop.rs#L1539)
 waits one iteration and then calls
-[`ethernet_virtualization::reset`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/agent/src/ethernet_virtualization.rs#L1503).
+[`ethernet_virtualization::reset`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/agent/src/ethernet_virtualization.rs#L1503).
 That function writes blank DHCP files and deletes `var/support/nvue_startup.yaml`.
 
 Two different conditions produce the same `None`:
@@ -114,36 +116,36 @@ configuration while the control plane is down.
 
 `nico-dns` is authoritative only. It answers each query with a `lookup_record`
 gRPC call to `nico-api`. See
-[`crates/dns/src/lib.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/dns/src/lib.rs#L21)
+[`crates/dns/src/lib.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/dns/src/lib.rs#L21)
 and the handler
-[`lookup_record`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/handlers/dns.rs#L334).
+[`lookup_record`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/api-core/src/handlers/dns.rs#L334).
 It keeps a negative cache only, in
-[`crates/dns/src/negative_cache.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/dns/src/negative_cache.rs).
+[`crates/dns/src/negative_cache.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/dns/src/negative_cache.rs).
 It serves A, AAAA and PTR records. It does not recurse and it does not support
 zone transfer.
 
 Recursive DNS is a separate `unbound` deployment in the same cluster. See
-[`helm/charts/unbound`](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/charts/unbound/values.yaml).
+[`helm/charts/unbound`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/helm/charts/unbound/values.yaml).
 
 Both services therefore fail together with the cluster. This matches the issue
 comment that both recursive and authoritative DNS are in scope.
 
 DNS is also a hard start dependency for the DPU agent.
-[`ServiceAddresses::build`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/agent/src/util.rs#L172)
+[`ServiceAddresses::build`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/agent/src/util.rs#L172)
 resolves `carbide-pxe.forge` and propagates the error. The agent does not start
 if that name does not resolve.
 
 ### 2.6 NICo can already write BMC settings through Redfish
 
 The Redfish client trait already contains a write method for BMC time settings:
-[`set_ntp_servers`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/redfish/src/libredfish/instrumented.rs#L396).
+[`set_ntp_servers`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/redfish/src/libredfish/instrumented.rs#L396).
 The pre-ingestion state machine calls it from
-[`crates/preingestion-manager/src/lib.rs#L1793`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/preingestion-manager/src/lib.rs#L1793).
+[`crates/preingestion-manager/src/lib.rs#L1793`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/preingestion-manager/src/lib.rs#L1793).
 
 NICo also reads the BMC `EthernetInterfaces` collection during exploration. See
-[`crates/bmc-explorer/src/manager.rs#L72`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/bmc-explorer/src/manager.rs#L72)
+[`crates/bmc-explorer/src/manager.rs#L72`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/bmc-explorer/src/manager.rs#L72)
 and
-[`get_manager_ethernet_interface`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/redfish/src/libredfish/instrumented.rs#L351).
+[`get_manager_ethernet_interface`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/redfish/src/libredfish/instrumented.rs#L351).
 
 No code writes `IPv4StaticAddresses`, `DHCPv4.DHCPEnabled` or `StaticNameServers`.
 The read path and the state machine hook both exist, so the new write path can
@@ -164,22 +166,22 @@ already holds the IP allocation policy and the BMC credentials.
 Scope:
 
 - A new field on
-  [`ExpectedMachineData`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-model/src/expected_machine.rs#L968)
+  [`ExpectedMachineData`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/api-model/src/expected_machine.rs#L968)
   and on the protobuf message in
-  [`crates/rpc/proto/forge.proto`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/rpc/proto/forge.proto).
+  [`crates/rpc/proto/forge.proto`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/rpc/proto/forge.proto).
 - A nullable column, added by one forward migration in
-  [`crates/api-db/migrations/`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-db/migrations).
+  [`crates/api-db/migrations/`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/api-db/migrations).
 - Validation in
-  [`crates/api-core/src/handlers/expected_machine.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/handlers/expected_machine.rs#L180).
+  [`crates/api-core/src/handlers/expected_machine.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/api-core/src/handlers/expected_machine.rs#L180).
   Reject the designation when an interface policy is `Dynamic`. A boot-independent
   machine needs a `Fixed` or `Retained` address for every management interface.
 - New flags on `nico-admin-cli em add` and `em patch`, in
-  [`crates/admin-cli/src/expected_machines/add/args.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/admin-cli/src/expected_machines/add/args.rs#L195)
+  [`crates/admin-cli/src/expected_machines/add/args.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/admin-cli/src/expected_machines/add/args.rs#L195)
   and
-  [`patch/args.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/admin-cli/src/expected_machines/patch/args.rs#L234).
+  [`patch/args.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/admin-cli/src/expected_machines/patch/args.rs#L234).
   Regenerate the CLI documentation.
 - The REST contract in
-  [`rest-api/openapi/spec.yaml`](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/openapi/spec.yaml).
+  [`rest-api/openapi/spec.yaml`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/rest-api/openapi/spec.yaml).
 
 Open question Q1 applies here: machine-level flag, or a fourth value in
 `ExpectedInterfaceIpAllocation`.
@@ -192,26 +194,26 @@ not need DHCP after a reset.
 Scope:
 
 - New Redfish write methods beside
-  [`set_ntp_servers`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/redfish/src/libredfish/instrumented.rs#L396):
+  [`set_ntp_servers`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/redfish/src/libredfish/instrumented.rs#L396):
   set `DHCPv4.DHCPEnabled = false`, set `IPv4StaticAddresses`, set
   `StaticNameServers`, and the matching IPv6 properties. Add a read-back method
   for verification, and a method that restores DHCP.
 - A vendor compatibility layer in
-  [`crates/bmc-vendor`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/bmc-vendor).
+  [`crates/bmc-vendor`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/bmc-vendor).
   Redfish `EthernetInterface` support is not uniform across BMC vendors.
 - A new state in the pre-ingestion state machine in
-  [`crates/preingestion-manager/src/lib.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/preingestion-manager/src/lib.rs#L420),
+  [`crates/preingestion-manager/src/lib.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/preingestion-manager/src/lib.rs#L420),
   beside `SetNtpServers`. Use the same bounded retry shape.
 - Reconciliation. The static value must follow a later address change. The
   address write path in
-  [`crates/api-core/src/handlers/machine_interface_address.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/handlers/machine_interface_address.rs#L305)
+  [`crates/api-core/src/handlers/machine_interface_address.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/api-core/src/handlers/machine_interface_address.rs#L305)
   is the trigger point.
 - Rollback. Decommissioning and factory reset must restore DHCP on the BMC,
   otherwise a repaired machine keeps a stale static address and causes the IP
   conflict that the issue warns about. See
-  [`crates/machine-controller/src/handler/decommissioning.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/machine-controller/src/handler/decommissioning.rs)
+  [`crates/machine-controller/src/handler/decommissioning.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/machine-controller/src/handler/decommissioning.rs)
   and
-  [`factory_reset.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/machine-controller/src/handler/factory_reset.rs).
+  [`factory_reset.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/machine-controller/src/handler/factory_reset.rs).
 
 Risk: a wrong static write makes the BMC unreachable over the network. Recovery
 then needs physical access. Verify the read-back before the change is committed,
@@ -222,13 +224,13 @@ and keep the operation behind the W1 designation.
 Scope:
 
 - Make the `bfnet=oob_net0:dhcp` literal at
-  [`crates/api-core/src/ipxe.rs#L221`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/ipxe.rs#L221)
+  [`crates/api-core/src/ipxe.rs#L221`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/api-core/src/ipxe.rs#L221)
   conditional. For a designated DPU, render the static BlueField kickstart form
   with the address, the mask and the gateway that NICo reserved.
 - Add the same address to the DPU cloud-init context in
-  [`render_user_data`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/pxe/src/routes/cloud_init/dpu.rs#L94),
+  [`render_user_data`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/pxe/src/routes/cloud_init/dpu.rs#L94),
   and write a persistent interface configuration in the template
-  [`pxe/templates/user-data`](https://github.com/dsx-ai-factory/infra-controller/blob/main/pxe/templates/user-data).
+  [`pxe/templates/user-data`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/pxe/templates/user-data).
   The kickstart value only covers the installer. The installed DPU OS needs its
   own persistent configuration.
 - Carry the address in the `DiscoveryInstructions` message, so the PXE service
@@ -241,20 +243,20 @@ This item removes the behaviour described in section 2.4.
 Scope:
 
 - Persist the last successful `ManagedHostNetworkConfigResponse` to disk in
-  [`crates/agent/src/periodic_config_fetcher.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/agent/src/periodic_config_fetcher.rs#L236),
+  [`crates/agent/src/periodic_config_fetcher.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/agent/src/periodic_config_fetcher.rs#L236),
   and load it at agent start when the first fetch fails. Today the value exists
   only in memory.
 - Separate the two `None` conditions. Keep `NotFound` as a true "this DPU is
   gone" signal. Treat a transport error as "unknown", and do not clear the cache.
   The `None` arm at
-  [`crates/agent/src/main_loop.rs#L1539`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/agent/src/main_loop.rs#L1539)
+  [`crates/agent/src/main_loop.rs#L1539`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/agent/src/main_loop.rs#L1539)
   must only call
-  [`reset`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/agent/src/ethernet_virtualization.rs#L1503)
+  [`reset`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/agent/src/ethernet_virtualization.rs#L1503)
   for the first condition.
 - For a designated DPU, never reset on an unreachable API, even after a long
   outage. Deliver the designation to the DPU in the cloud-init agent
   configuration written by
-  [`generate_forge_agent_config`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/pxe/src/routes/cloud_init/dpu.rs#L77),
+  [`generate_forge_agent_config`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/pxe/src/routes/cloud_init/dpu.rs#L77),
   so the agent can apply the rule before it reaches the API.
 - Confirm that the HBN configuration file `var/support/nvue_startup.yaml` and the
   DHCP file `var/support/forge-dhcp/conf/host.yaml` are on persistent DPU storage.
@@ -274,7 +276,7 @@ This item needs a design decision first. Three candidate approaches:
    OS (part of W3). Point them at an off-cluster resolver. This is the smallest
    change, but it moves the dependency to site infrastructure.
 2. **A positive cache in `nico-dns`.** Extend
-   [`crates/dns/src/negative_cache.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/dns/src/negative_cache.rs)
+   [`crates/dns/src/negative_cache.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/dns/src/negative_cache.rs)
    to a persistent snapshot of the zone, and serve it when `nico-api` is
    unreachable. This keeps the answers inside NICo, but `nico-dns` still runs in
    the cluster that is down.
@@ -286,7 +288,7 @@ dependency described in section 2.5 and needs no new DNS data path. Approaches 2
 and 3 should be tracked separately.
 
 Independently of the choice, make the DPU agent start without DNS. Today
-[`ServiceAddresses::build`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/agent/src/util.rs#L172)
+[`ServiceAddresses::build`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/agent/src/util.rs#L172)
 fails when `carbide-pxe.forge` does not resolve. The PXE address is not needed
 to keep HBN running. Degrade instead of failing, as the NTP branch in the same
 function already does.
@@ -296,7 +298,7 @@ function already does.
 If a designated machine still uses DHCP for one interface, the Kea hook cannot
 answer while `nico-api` is down. A persistent reservation file for designated
 machines only, read by
-[`crates/dhcp/src/lib.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/dhcp/src/lib.rs),
+[`crates/dhcp/src/lib.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/dhcp/src/lib.rs),
 would close that gap.
 
 This item has lower priority. W2 and W3 remove the need for DHCP on the
@@ -307,13 +309,13 @@ configuration.
 
 - Metrics: a gauge for the number of designated machines, and a counter for
   failed static pushes. Follow the `Event` rules in
-  [`AGENTS.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/AGENTS.md).
+  [`AGENTS.md`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/AGENTS.md).
 - Health: report the designation and the age of the applied DPU configuration in
   the DPU health report.
 - Documentation: a new section in
-  [`docs/provisioning/ip-and-network-configuration.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/provisioning/ip-and-network-configuration.md),
+  [`docs/provisioning/ip-and-network-configuration.md`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/docs/provisioning/ip-and-network-configuration.md),
   an update to
-  [`docs/provisioning/expected-machine-interfaces.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/provisioning/expected-machine-interfaces.md),
+  [`docs/provisioning/expected-machine-interfaces.md`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/docs/provisioning/expected-machine-interfaces.md),
   and a cold-start procedure. Record the IP-conflict risk and the manual steps
   that a network move needs.
 
@@ -323,27 +325,27 @@ configuration.
 
 | Area | File | Change |
 |---|---|---|
-| Model | [`crates/api-model/src/expected_machine.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-model/src/expected_machine.rs#L322) | Designation field; validation against the allocation policy |
-| Protobuf | [`crates/rpc/proto/forge.proto`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/rpc/proto/forge.proto) | Designation field; OOB address in `DiscoveryInstructions` |
-| Database | [`crates/api-db/migrations/`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-db/migrations) | One nullable column |
-| API handler | [`crates/api-core/src/handlers/expected_machine.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/handlers/expected_machine.rs#L180) | Accept and validate the designation |
-| iPXE | [`crates/api-core/src/ipxe.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/ipxe.rs#L221) | Static `bfnet` form for a designated DPU |
-| PXE cloud-init | [`crates/pxe/src/routes/cloud_init/dpu.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/pxe/src/routes/cloud_init/dpu.rs#L94) | OOB address and designation in the template context |
-| PXE template | [`pxe/templates/user-data`](https://github.com/dsx-ai-factory/infra-controller/blob/main/pxe/templates/user-data) | Persistent OOB interface configuration |
-| Redfish | [`crates/redfish/src/libredfish/instrumented.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/redfish/src/libredfish/instrumented.rs#L396) | Static address, resolver and DHCP-disable write methods |
-| Redfish | [`crates/redfish/src/libredfish/mod.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/redfish/src/libredfish/mod.rs#L140) | Trait additions |
-| BMC vendors | [`crates/bmc-vendor`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/bmc-vendor) | Per-vendor property differences |
-| Pre-ingestion | [`crates/preingestion-manager/src/lib.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/preingestion-manager/src/lib.rs#L420) | New state that writes the static BMC configuration |
-| Address lifecycle | [`crates/api-core/src/handlers/machine_interface_address.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/handlers/machine_interface_address.rs#L305) | Re-push on an address change |
-| Teardown | [`crates/machine-controller/src/handler/decommissioning.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/machine-controller/src/handler/decommissioning.rs) | Restore DHCP on the BMC |
-| DPU agent | [`crates/agent/src/periodic_config_fetcher.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/agent/src/periodic_config_fetcher.rs#L41) | Persist and reload the last good configuration |
-| DPU agent | [`crates/agent/src/main_loop.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/agent/src/main_loop.rs#L1539) | Do not reset on an unreachable API |
-| DPU agent | [`crates/agent/src/ethernet_virtualization.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/agent/src/ethernet_virtualization.rs#L1503) | Guard the reset behind the new condition |
-| DPU agent | [`crates/agent/src/util.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/agent/src/util.rs#L172) | Start without DNS |
-| DNS | [`crates/dns/src/negative_cache.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/dns/src/negative_cache.rs) | Optional positive cache, after the W5 decision |
-| CLI | [`crates/admin-cli/src/expected_machines/`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/admin-cli/src/expected_machines) | New flags; regenerated documentation |
-| REST | [`rest-api/openapi/spec.yaml`](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/openapi/spec.yaml) | New attribute; regenerated SDK |
-| Documentation | [`docs/provisioning/ip-and-network-configuration.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/provisioning/ip-and-network-configuration.md) | Designation, limits and cold-start procedure |
+| Model | [`crates/api-model/src/expected_machine.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/api-model/src/expected_machine.rs#L322) | Designation field; validation against the allocation policy |
+| Protobuf | [`crates/rpc/proto/forge.proto`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/rpc/proto/forge.proto) | Designation field; OOB address in `DiscoveryInstructions` |
+| Database | [`crates/api-db/migrations/`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/api-db/migrations) | One nullable column |
+| API handler | [`crates/api-core/src/handlers/expected_machine.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/api-core/src/handlers/expected_machine.rs#L180) | Accept and validate the designation |
+| iPXE | [`crates/api-core/src/ipxe.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/api-core/src/ipxe.rs#L221) | Static `bfnet` form for a designated DPU |
+| PXE cloud-init | [`crates/pxe/src/routes/cloud_init/dpu.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/pxe/src/routes/cloud_init/dpu.rs#L94) | OOB address and designation in the template context |
+| PXE template | [`pxe/templates/user-data`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/pxe/templates/user-data) | Persistent OOB interface configuration |
+| Redfish | [`crates/redfish/src/libredfish/instrumented.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/redfish/src/libredfish/instrumented.rs#L396) | Static address, resolver and DHCP-disable write methods |
+| Redfish | [`crates/redfish/src/libredfish/mod.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/redfish/src/libredfish/mod.rs#L140) | Trait additions |
+| BMC vendors | [`crates/bmc-vendor`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/bmc-vendor) | Per-vendor property differences |
+| Pre-ingestion | [`crates/preingestion-manager/src/lib.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/preingestion-manager/src/lib.rs#L420) | New state that writes the static BMC configuration |
+| Address lifecycle | [`crates/api-core/src/handlers/machine_interface_address.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/api-core/src/handlers/machine_interface_address.rs#L305) | Re-push on an address change |
+| Teardown | [`crates/machine-controller/src/handler/decommissioning.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/machine-controller/src/handler/decommissioning.rs) | Restore DHCP on the BMC |
+| DPU agent | [`crates/agent/src/periodic_config_fetcher.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/agent/src/periodic_config_fetcher.rs#L41) | Persist and reload the last good configuration |
+| DPU agent | [`crates/agent/src/main_loop.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/agent/src/main_loop.rs#L1539) | Do not reset on an unreachable API |
+| DPU agent | [`crates/agent/src/ethernet_virtualization.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/agent/src/ethernet_virtualization.rs#L1503) | Guard the reset behind the new condition |
+| DPU agent | [`crates/agent/src/util.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/agent/src/util.rs#L172) | Start without DNS |
+| DNS | [`crates/dns/src/negative_cache.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/dns/src/negative_cache.rs) | Optional positive cache, after the W5 decision |
+| CLI | [`crates/admin-cli/src/expected_machines/`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/crates/admin-cli/src/expected_machines) | New flags; regenerated documentation |
+| REST | [`rest-api/openapi/spec.yaml`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/rest-api/openapi/spec.yaml) | New attribute; regenerated SDK |
+| Documentation | [`docs/provisioning/ip-and-network-configuration.md`](https://github.com/dsx-ai-factory/infra-controller/blob/7889b69707d74296d991f7063b8e4f3d13e534ea/docs/provisioning/ip-and-network-configuration.md) | Designation, limits and cold-start procedure |
 
 ---
 
