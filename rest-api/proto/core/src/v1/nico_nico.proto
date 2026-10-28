@@ -12640,13 +12640,18 @@ message ReplaceSkuComponentsRequest {
   optional string device_type = 5;
 }
 
-// `MachineUpdatePolicy` is the machine update manager's effective policy.
+// Machine update manager settings, including the effective interval and configured caps.
 message MachineUpdatePolicy {
   // Seconds between manager passes. 300 when not configured, an explicit 0 stays 0.
   uint64 effective_run_interval_seconds = 1;
   // firmware_global.requires_manual_upgrade.
   bool requires_manual_upgrade = 2;
-  // Site-wide caps on concurrent updates. Unset means not configured, which differs from 0.
+  // Site-wide configured caps on concurrent updates. Unset differs from 0.
+  // With both caps unset, the manager starts no new updates.
+  // Without a percentage cap, the absolute cap is used without a health adjustment.
+  // With a percentage cap, no hosts or a percentage of 0 or less gives 0.
+  // Otherwise, round that share of hosts up and subtract unhealthy hosts, flooring at 0.
+  // Also apply the absolute cap when it is nonnegative. An absolute cap of 0 gives 0.
   optional int32 max_concurrent_updates_absolute = 3;
   optional int32 max_concurrent_updates_percent = 4;
 }

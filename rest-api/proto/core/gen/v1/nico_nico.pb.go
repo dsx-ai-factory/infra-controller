@@ -73578,14 +73578,19 @@ func (x *ReplaceSkuComponentsRequest) GetDeviceType() string {
 	return ""
 }
 
-// `MachineUpdatePolicy` is the machine update manager's effective policy.
+// Machine update manager settings, including the effective interval and configured caps.
 type MachineUpdatePolicy struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Seconds between manager passes. 300 when not configured, an explicit 0 stays 0.
 	EffectiveRunIntervalSeconds uint64 `protobuf:"varint,1,opt,name=effective_run_interval_seconds,json=effectiveRunIntervalSeconds,proto3" json:"effective_run_interval_seconds,omitempty"`
 	// firmware_global.requires_manual_upgrade.
 	RequiresManualUpgrade bool `protobuf:"varint,2,opt,name=requires_manual_upgrade,json=requiresManualUpgrade,proto3" json:"requires_manual_upgrade,omitempty"`
-	// Site-wide caps on concurrent updates. Unset means not configured, which differs from 0.
+	// Site-wide configured caps on concurrent updates. Unset differs from 0.
+	// With both caps unset, the manager starts no new updates.
+	// Without a percentage cap, the absolute cap is used without a health adjustment.
+	// With a percentage cap, no hosts or a percentage of 0 or less gives 0.
+	// Otherwise, round that share of hosts up and subtract unhealthy hosts, flooring at 0.
+	// Also apply the absolute cap when it is nonnegative. An absolute cap of 0 gives 0.
 	MaxConcurrentUpdatesAbsolute *int32 `protobuf:"varint,3,opt,name=max_concurrent_updates_absolute,json=maxConcurrentUpdatesAbsolute,proto3,oneof" json:"max_concurrent_updates_absolute,omitempty"`
 	MaxConcurrentUpdatesPercent  *int32 `protobuf:"varint,4,opt,name=max_concurrent_updates_percent,json=maxConcurrentUpdatesPercent,proto3,oneof" json:"max_concurrent_updates_percent,omitempty"`
 	unknownFields                protoimpl.UnknownFields
