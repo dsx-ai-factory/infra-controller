@@ -401,6 +401,15 @@ impl MachineCreator {
 
         // Zero-dpu case: If the explored host had no DPUs, we can create the machine now
         if managed_host.explored_host.dpus.is_empty() {
+            if !db::expected_dpu_loopback_reservation::find_for_machine(
+                &mut txn,
+                expected_machine.bmc_mac_address,
+            )
+            .await?
+            .is_empty()
+            {
+                return Err(SiteExplorerError::internal("DPU loopback declarations exist but discovery reported no DPUs; defer creation".to_string()));
+            }
             if let Some(machine_id) = self
                 .create_zero_dpu_host(
                     &mut txn,
@@ -436,6 +445,41 @@ impl MachineCreator {
             // or conflicting inventory, then leave existing state unchanged.
             txn.rollback().await?;
             return Ok(ManagedHostCreation::SkippedExisting);
+        }
+
+        db::expected_dpu_loopback_reservation::lock_for_machine(
+            &mut txn,
+            expected_machine.bmc_mac_address,
+        )
+        .await?;
+        let reservations = db::expected_dpu_loopback_reservation::find_for_machine(
+            &mut txn,
+            expected_machine.bmc_mac_address,
+        )
+        .await?;
+        let mut loopbacks_by_dpu = HashMap::new();
+        for reservation in reservations {
+            let matching = explored_host
+                .dpus
+                .iter()
+                .filter(|dpu| {
+                    dpu.os_mac_addresses()
+                        .any(|mac| mac == reservation.dpu_mac_address)
+                })
+                .collect::<Vec<_>>();
+            let [dpu] = matching.as_slice() else {
+                return Err(SiteExplorerError::internal(format!(
+                    "cannot resolve DPU loopback MAC {} unambiguously from discovery ({} matching DPUs); defer creation",
+                    reservation.dpu_mac_address,
+                    matching.len()
+                )));
+            };
+            let id = dpu.machine_id_if_valid_report()?;
+            if loopbacks_by_dpu.insert(id, reservation).is_some() {
+                return Err(SiteExplorerError::internal(format!(
+                    "multiple loopback MAC declarations resolve to DPU {id}; defer creation"
+                )));
+            }
         }
 
         // Advisory-lock the admin segments, in the allocators' mode, before the
@@ -814,8 +858,6 @@ impl MachineCreator {
             ManagedHostState::Created,
             machine_data,
             CURRENT_STATE_MODEL_VERSION,
-            // Hosts never receive a DPU loopback reservation.
-            None,
         )
         .await?;
         let hardware_info = HardwareInfo::default();
@@ -872,7 +914,7 @@ impl MachineCreator {
         {
             // Do nothing if machine exists. It'll be reprovisioned via redfish
             Some(_existing_machine) => Ok(None),
-            None => match db::machine::create(
+            None => match db::machine::create_with_requested_loopback(
                 txn,
                 Some(&self.common_pools),
                 dpu_machine_id,
@@ -1059,8 +1101,6 @@ impl MachineCreator {
             ManagedHostState::Created,
             machine_data,
             CURRENT_STATE_MODEL_VERSION,
-            // Hosts never receive a DPU loopback reservation.
-            None,
         )
         .await?;
 
