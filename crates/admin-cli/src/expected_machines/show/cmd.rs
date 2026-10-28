@@ -219,10 +219,13 @@ fn dpu_policy_display(dpu_mode: Option<i32>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use carbide_test_support::value_scenarios;
     use rpc::forge::DpuMode;
 
-    use super::*;
+    use super::{convert_and_print_into_nice_table, dpu_policy_display};
+    use crate::async_write::CapturedOutput;
 
     #[test]
     fn dpu_policy_display_uses_canonical_policy_vocabulary() {
@@ -254,36 +257,6 @@ mod tests {
         );
     }
 
-    /// A `'static` in-memory sink, because the renderer takes
-    /// `Box<dyn AsyncWrite + Unpin>` and that box cannot borrow a local buffer.
-    #[derive(Clone, Default)]
-    struct SharedBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl tokio::io::AsyncWrite for SharedBuffer {
-        fn poll_write(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-            buf: &[u8],
-        ) -> std::task::Poll<std::io::Result<usize>> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            std::task::Poll::Ready(Ok(buf.len()))
-        }
-
-        fn poll_flush(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Ok(()))
-        }
-
-        fn poll_shutdown(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Ok(()))
-        }
-    }
-
     /// The rendered table must carry the lifecycle-profile columns and their
     /// cell values. A machine with a profile shows each stored flag; a machine
     /// without one falls back to `false` rather than rendering an empty cell.
@@ -309,15 +282,17 @@ mod tests {
             ],
         };
 
-        let captured = SharedBuffer::default();
-        let mut sink: Box<dyn tokio::io::AsyncWrite + Unpin> = Box::new(captured.clone());
-        convert_and_print_into_nice_table(&mut sink, &machines, &HashMap::new(), &HashMap::new())
-            .await
-            .unwrap();
-        drop(sink);
+        let mut captured = CapturedOutput::new();
+        convert_and_print_into_nice_table(
+            captured.writer(),
+            &machines,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
 
-        let bytes = captured.0.lock().unwrap().clone();
-        let rendered = String::from_utf8(bytes).unwrap();
+        let rendered = String::from_utf8(captured.into_bytes().await).unwrap();
 
         // Split a rendered row into trimmed cells. prettytable wraps every row
         // in `|`, so the first and last split parts are empty padding.
