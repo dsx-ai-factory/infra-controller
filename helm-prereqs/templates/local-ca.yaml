@@ -1,0 +1,36 @@
+{{- if .Values.certManager.localCA.enabled }}
+{{- if or .Values.externalSecrets.enabled .Values.certManager.siteRoot.create }}
+{{- fail "certManager.localCA requires externalSecrets.enabled=false and certManager.siteRoot.create=false" }}
+{{- end }}
+{{- $certificate := required "certManager.localCA.certificate is required" .Values.certManager.localCA.certificate }}
+{{- $key := required "certManager.localCA.privateKey is required" .Values.certManager.localCA.privateKey }}
+# One supplied CA signs local certificates and provides Core's trust bundle.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nico-local-ca
+  namespace: {{ .Values.namespace }}
+type: kubernetes.io/tls
+stringData:
+  tls.crt: {{ $certificate | quote }}
+  tls.key: {{ $key | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nico-roots
+  namespace: {{ .Values.namespace }}
+type: Opaque
+stringData:
+  ca.crt: {{ $certificate | quote }}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: local-ca-issuer
+  namespace: {{ .Values.namespace }}
+spec:
+  ca:
+    secretName: nico-local-ca
+{{- end }}

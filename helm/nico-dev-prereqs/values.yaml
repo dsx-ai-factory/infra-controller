@@ -1,0 +1,10 @@
+# Names and database identities come from the shared development profile.
+coreNamespace: nico-system
+clusterName: nico-pg-cluster
+localConfig:
+  restNamespace: nico-rest
+  temporalNamespace: temporal
+  observabilityNamespace: observability
+  database: {}
+# Dashboard filenames mapped to JSON contents; supplied by the caller.
+dashboards: {}
