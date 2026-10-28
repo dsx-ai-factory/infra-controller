@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+ARG BOOT_ARTIFACT_IMAGE
+FROM ${BOOT_ARTIFACT_IMAGE}
+ARG ARTIFACT_ARCH
+COPY ubuntu.img /${ARTIFACT_ARCH}/ubuntu.img
