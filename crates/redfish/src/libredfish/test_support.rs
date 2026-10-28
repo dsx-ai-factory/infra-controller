@@ -70,6 +70,7 @@ struct RedfishSimState {
     next_lockdown_bmc_error: Option<(EnabledDisabled, String)>,
     /// Fail one power-state read without changing the host's actual power.
     next_power_state_error: Option<(usize, String)>,
+    next_onboard_nics_error: Option<String>,
     /// Fail the next matching power action before changing the host's power.
     next_power_action_error: Option<(SystemPowerControl, RedfishError)>,
     /// Value of `ac_powercycle_supported_by_power`. Defaults to `false`.
@@ -222,6 +223,7 @@ pub struct RedfishSimAuthAttempt {
 #[derive(Debug)]
 struct RedfishSimHostState {
     power: PowerState,
+    onboard_nics: Option<EnabledDisabled>,
     lockdown: libredfish::EnabledDisabled,
     actions: Vec<RedfishSimAction>,
     boot_interface_targets: Vec<Option<RedfishSimBootInterfaceRef>>,
@@ -247,6 +249,7 @@ impl Default for RedfishSimHostState {
     fn default() -> Self {
         Self {
             power: PowerState::default(),
+            onboard_nics: None,
             lockdown: libredfish::EnabledDisabled::Disabled,
             actions: Vec::default(),
             boot_interface_targets: Vec::default(),
@@ -465,6 +468,11 @@ impl RedfishSim {
     /// Fail one IPMI access repair before enabling access.
     pub fn fail_next_ipmi_access(&self, error: &str) {
         self.state.lock().unwrap().next_ipmi_access_error = Some(error.to_string());
+    }
+
+    /// Fail one onboard NIC write before applying the setting.
+    pub fn fail_next_onboard_nics_write(&self, error: &str) {
+        self.state.lock().unwrap().next_onboard_nics_error = Some(error.to_string());
     }
 
     /// Fail the next matching power action, recording the attempt but applying no change.
@@ -777,6 +785,10 @@ impl From<libredfish::BootInterfaceRef<'_>> for RedfishSimBootInterfaceRef {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RedfishSimAction {
+    /// Records a successfully applied onboard NIC setting.
+    SetEnableOnboardNics(EnabledDisabled),
+    /// Records an onboard NIC write rejected before it was applied.
+    SetEnableOnboardNicsFailed(EnabledDisabled),
     Power(libredfish::SystemPowerControl),
     /// A power request rejected before its effect was applied.
     PowerFailed(libredfish::SystemPowerControl),
@@ -2257,6 +2269,43 @@ impl Redfish for RedfishSimClient {
     ) -> libredfish::RedfishFuture<'a, Result<Vec<Drives>, RedfishError>> {
         Box::pin(async move {
             todo!();
+        })
+    }
+
+    fn set_enable_onboard_nics<'a>(
+        &'a self,
+        enable_onboard_nics: EnabledDisabled,
+    ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            let error = state.next_onboard_nics_error.take();
+            let host = state.hosts.get_mut(&self._host).unwrap();
+            if let Some(error) = error {
+                host.actions
+                    .push(RedfishSimAction::SetEnableOnboardNicsFailed(
+                        enable_onboard_nics,
+                    ));
+                return Err(RedfishError::GenericError { error });
+            }
+            host.onboard_nics = Some(enable_onboard_nics);
+            host.actions
+                .push(RedfishSimAction::SetEnableOnboardNics(enable_onboard_nics));
+            Ok(())
+        })
+    }
+
+    fn are_onboard_nics_enabled<'a>(
+        &'a self,
+    ) -> libredfish::RedfishFuture<'a, Result<Option<EnabledDisabled>, RedfishError>> {
+        Box::pin(async move {
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .hosts
+                .get(&self._host)
+                .unwrap()
+                .onboard_nics)
         })
     }
 

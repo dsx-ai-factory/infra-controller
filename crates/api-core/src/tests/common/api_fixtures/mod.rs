@@ -474,6 +474,7 @@ impl TestEnv {
                     model::machine::MachineState::SpdmMeasuring { .. } => machine_state,
 
                     model::machine::MachineState::EnableIpmiOverLan => machine_state,
+                    model::machine::MachineState::DisableOnboardNics { .. } => machine_state,
                     model::machine::MachineState::WaitingForBiosJob { .. } => machine_state,
                 };
                 ManagedHostState::HostInit { machine_state: mc }

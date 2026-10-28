@@ -27,6 +27,7 @@ mod host_uefi_rotation;
 mod host_uefi_setup;
 mod lenovo_lockdown;
 mod maintenance;
+mod onboard_nics;
 mod power_management;
 mod rack_firmware_upgrade;
 mod reboot_verification;

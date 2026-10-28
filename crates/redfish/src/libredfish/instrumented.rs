@@ -287,6 +287,8 @@ impl Redfish for InstrumentedRedfish {
             &'a self,
             boot_interface: Option<BootInterfaceRef<'a>>,
         ) -> MachineSetupStatus;
+        fn set_enable_onboard_nics<'a>(&'a self, enable_onboard_nics: EnabledDisabled) -> ();
+        fn are_onboard_nics_enabled<'a>(&'a self) -> Option<EnabledDisabled>;
         fn is_bios_setup<'a>(&'a self, boot_interface: Option<BootInterfaceRef<'a>>) -> bool;
         fn set_machine_password_policy<'a>(&'a self) -> ();
         fn lockdown<'a>(&'a self, target: EnabledDisabled) -> ();
@@ -527,6 +529,31 @@ mod tests {
         let client = sim_client(&sim).await;
         for required in [false, true] {
             sim.set_lockdown_has_boot_latched_controls(required);
+    }
+
+    #[tokio::test]
+    async fn ok_call_records_the_external_call_histogram() {
+        let sim = RedfishSim::default();
+        let client = sim_client(&sim).await;
+
+        let metrics = MetricsCapture::start();
+        assert_eq!(
+            client.get_power_state().await.expect("sim power state"),
+            PowerState::On,
+        );
+
+        assert_eq!(
+            metrics.histogram_count_delta(
+                "carbide_external_call_duration_milliseconds",
+                &[
+                    ("backend", "redfish"),
+                    ("operation", "get_power_state"),
+                    ("outcome", "ok"),
+                ],
+            ),
+            1,
+        );
+    }
             assert_eq!(
                 client.lockdown_has_boot_latched_controls().await.unwrap(),
                 required
@@ -544,6 +571,32 @@ mod tests {
             .await
             .unwrap();
         assert!(sim.ipmi_account_access_enabled("1"));
+    }
+
+    #[tokio::test]
+    async fn onboard_nics_methods_delegate_to_vendor_client() {
+        let sim = RedfishSim::default();
+        let client = sim_client(&sim).await;
+        assert_eq!(client.are_onboard_nics_enabled().await.unwrap(), None);
+        let timepoint = sim.timepoint();
+        for target in [EnabledDisabled::Enabled, EnabledDisabled::Disabled] {
+            client.set_enable_onboard_nics(target).await.unwrap();
+            assert_eq!(
+                client.are_onboard_nics_enabled().await.unwrap(),
+                Some(target)
+            );
+        }
+        assert_eq!(
+            sim.actions_since(&timepoint).for_host("localhost"),
+            vec![
+                crate::libredfish::test_support::RedfishSimAction::SetEnableOnboardNics(
+                    EnabledDisabled::Enabled
+                ),
+                crate::libredfish::test_support::RedfishSimAction::SetEnableOnboardNics(
+                    EnabledDisabled::Disabled
+                ),
+            ]
+        );
     }
 
     #[tokio::test]

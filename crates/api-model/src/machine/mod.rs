@@ -2487,6 +2487,12 @@ pub enum PerformPowerOperation {
 pub enum MachineState {
     Init,
     EnableIpmiOverLan,
+    /// Toggle onboard NICs off during initialization of Vera Rubin hosts with managed DPUs.
+    /// Other SKUs do not support disabling onboard NICs through the BMC and skip this state.
+    DisableOnboardNics {
+        /// Persist the write or application wait across controller iterations.
+        disable_onboard_nics_state: DisableOnboardNicsState,
+    },
     WaitingForPlatformConfiguration {
         /// Retries after BIOS job failure remediation; re-run machine_setup from this state.
         #[serde(default)]
@@ -2522,6 +2528,24 @@ pub enum MachineState {
         lockdown_info: LockdownInfo,
     },
     // MachineValidating has been moved to ValidationState
+}
+
+/// Vera Rubin-only sequence that enables, then disables onboard NICs, with a
+/// ten-second application wait after each successful write. Other SKUs do not
+/// support this BMC operation; hosts without managed DPUs also skip the sequence.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(tag = "state", rename_all = "lowercase")]
+pub enum DisableOnboardNicsState {
+    /// Write the requested onboard NIC setting; failures retry this substate.
+    ConfigureOnboardNics {
+        /// Enable first (`true`), then disable (`false`).
+        enable: bool,
+    },
+    /// Wait at least ten seconds from entry before continuing the sequence.
+    WaitForConfigToBeApplied {
+        /// Whether the preceding write disabled the NICs, completing the sequence.
+        onboard_nics_disabled: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
