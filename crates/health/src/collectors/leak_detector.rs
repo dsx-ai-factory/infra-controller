@@ -136,16 +136,16 @@ where
             }
         }
 
-        let (detectors, unreadable) = if let Some(state) = &self.state {
+        let (detectors, unreadable, connection_failures) = if let Some(state) = &self.state {
             self.fetch_leak_detectors(&state.detector_ids).await
         } else {
-            (Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), 0)
         };
         let detector_count = detectors.len();
         let fetch_failures = unreadable.len();
         let report = build_health_report(detectors, &unreadable, &self.event_context);
 
-        if should_publish(&report, fetch_failures, self.endpoint.bmc.collector_sweep()) {
+        if should_publish(&report, fetch_failures, connection_failures) {
             self.emit_event(CollectorEvent::HealthReport(Arc::new(report)));
         }
 
@@ -197,8 +197,9 @@ where
         Ok(detector_ids)
     }
 
-    /// Fetches every discovered detector, returning the ones that could be read
-    /// along with the ids and errors of the ones that could not.
+    /// Fetches every discovered detector, returning the ones that could be read,
+    /// the ids and errors of the ones that could not, and how many of those
+    /// failed with the BMC connection circuit open.
     ///
     /// A detector the BMC serves in a shape this client cannot decode costs its
     /// own leak reporting instead of every other detector on the endpoint. It is
@@ -211,20 +212,25 @@ where
     async fn fetch_leak_detectors(
         &self,
         detector_ids: &[ODataId],
-    ) -> (Vec<Arc<LeakDetector>>, Vec<(ODataId, String)>) {
+    ) -> (Vec<Arc<LeakDetector>>, Vec<(ODataId, String)>, usize) {
         let mut detectors = Vec::new();
         let mut unreadable = Vec::new();
+        let mut connection_failures = 0;
         for detector_id in detector_ids {
             match self.bmc.get::<LeakDetector>(detector_id).await {
                 Ok(detector) => detectors.push(detector),
                 Err(error) => {
+                    // A read the BMC answered, like a decode failure, leaves it closed.
+                    if self.endpoint.bmc.collector_sweep() != CollectorSweep::Full {
+                        connection_failures += 1;
+                    }
                     tracing::warn!(?error, detector = %detector_id, "Failed to fetch leak detector");
                     unreadable.push((detector_id.clone(), error.to_string()));
                 }
             }
         }
 
-        (detectors, unreadable)
+        (detectors, unreadable, connection_failures)
     }
 }
 
@@ -298,12 +304,17 @@ fn build_health_report(
     }
 }
 
-/// Whether to publish a pass's report. Reads that failed while the BMC
-/// connection circuit is open say nothing about the detectors, so the previous
-/// report is kept unless this pass still read a leak.
-fn should_publish(report: &HealthReport, fetch_failures: usize, sweep: CollectorSweep) -> bool {
-    fetch_failures == 0
-        || sweep == CollectorSweep::Full
+/// Whether to publish a pass's report. A pass whose only failures happened with
+/// the BMC connection circuit open keeps the previous report unless it read a
+/// leak. Any other failure publishes it, unreachable detectors included, so the
+/// report cannot clear a leak on them.
+fn should_publish(
+    report: &HealthReport,
+    fetch_failures: usize,
+    connection_failures: usize,
+) -> bool {
+    connection_failures == 0
+        || connection_failures < fetch_failures
         || report.alerts.iter().any(|alert| {
             alert
                 .classifications
@@ -668,53 +679,38 @@ mod tests {
             "Id": "Critical",
             "Name": "Critical leak detector",
             "DetectorState": "Critical",
-            "Status": { "Health": "Critical", "State": "Enabled" }
+            "Status": { "State": "Enabled" }
         }"#;
-        let unreadable = [(
-            ODataId::from(format!("{DETECTORS_PATH}/leakage1")),
-            "BMC is unreachable".to_string(),
-        )];
-        // input: (fetch failures, circuit sweep, whether a detector read a leak)
+        // input: (fetch failures, connection failures, whether a detector read a leak)
         check_values(
             [
                 Check {
-                    scenario: "every detector was read",
-                    input: (0, CollectorSweep::Full, false),
+                    scenario: "a decode failure alone is published",
+                    input: (1, 0, false),
                     expect: true,
                 },
                 Check {
-                    scenario: "the BMC answered but a detector could not be decoded",
-                    input: (1, CollectorSweep::Full, false),
+                    scenario: "connection failures alone keep the previous report",
+                    input: (2, 2, false),
+                    expect: false,
+                },
+                Check {
+                    scenario: "a decode failure is published alongside a connection failure",
+                    input: (2, 1, false),
                     expect: true,
                 },
                 Check {
-                    scenario: "reads failed while the connection circuit is open",
-                    input: (1, CollectorSweep::Skip, false),
-                    expect: false,
-                },
-                Check {
-                    scenario: "reads failed while the circuit waits for a probe",
-                    input: (1, CollectorSweep::Probe, false),
-                    expect: false,
-                },
-                Check {
-                    scenario: "a leak read before the connection failed is still published",
-                    input: (1, CollectorSweep::Skip, true),
+                    scenario: "a leak read before the connection failed is published",
+                    input: (1, 1, true),
                     expect: true,
                 },
             ],
-            |(fetch_failures, sweep, leak)| {
-                let detectors = if leak {
-                    vec![Arc::new(
-                        serde_json::from_str::<LeakDetector>(critical)
-                            .expect("valid leak detector"),
-                    )]
-                } else {
-                    Vec::new()
-                };
-                let report =
-                    build_health_report(detectors, &unreadable[..fetch_failures], &context());
-                should_publish(&report, fetch_failures, sweep)
+            |(fetch_failures, connection_failures, leak)| {
+                let detectors = Vec::from_iter(leak.then(|| {
+                    Arc::new(serde_json::from_str(critical).expect("valid leak detector"))
+                }));
+                let report = build_health_report(detectors, &[], &context());
+                should_publish(&report, fetch_failures, connection_failures)
             },
         );
     }
@@ -773,7 +769,8 @@ mod tests {
             .iter()
             .map(|(id, _)| ODataId::from(format!("{DETECTORS_PATH}/{id}")))
             .collect();
-        let (fetched, unreadable) = collector.fetch_leak_detectors(&detector_ids).await;
+        let (fetched, unreadable, connection_failures) =
+            collector.fetch_leak_detectors(&detector_ids).await;
 
         let fetched_ids: Vec<String> = fetched
             .iter()
@@ -781,15 +778,17 @@ mod tests {
             .collect();
         let unreadable_ids: Vec<String> = unreadable.iter().map(|(id, _)| id.to_string()).collect();
         assert_eq!(
-            (fetched_ids, unreadable_ids),
+            (fetched_ids, unreadable_ids, connection_failures),
             (
                 vec![
                     format!("{DETECTORS_PATH}/leakage1"),
                     format!("{DETECTORS_PATH}/leakage3"),
                 ],
                 vec![format!("{DETECTORS_PATH}/leakage2")],
+                0,
             ),
-            "a detector this client cannot decode should be named, not dropped from the batch"
+            "a detector this client cannot decode should be named, not dropped from the batch, \
+             and is not a connection failure"
         );
     }
 }

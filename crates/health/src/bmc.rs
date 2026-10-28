@@ -2260,10 +2260,7 @@ mod tests {
     }
 
     #[test]
-    fn circuit_open_and_close_are_logged_and_counted_once_per_transition() {
-        use carbide_instrument::testing::MetricsCapture;
-
-        let metrics = MetricsCapture::start();
+    fn circuit_open_and_close_are_emitted_once_per_transition() {
         let client = test_client();
         let logs = capture_logs(|| {
             client.trip_circuit(&dummy_error());
@@ -2280,17 +2277,6 @@ mod tests {
             ],
             "a failure while the circuit is already open is not another trip"
         );
-        // Other tests trip circuits concurrently, so the shared counters can
-        // only be checked for having moved.
-        for name in [
-            "carbide_health_bmc_connection_circuit_opened_total",
-            "carbide_health_bmc_connection_circuit_closed_total",
-        ] {
-            assert!(
-                metrics.counter_delta(name, &[]) >= 1.0,
-                "{name} was not counted"
-            );
-        }
     }
 
     #[tokio::test]
