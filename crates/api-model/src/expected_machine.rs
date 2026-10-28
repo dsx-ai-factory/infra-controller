@@ -1003,7 +1003,7 @@ impl ExpectedMachine {
 /// configuration uses one Fixed DpuLoopback interface per address family.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DpuLoopbackReservation {
-    pub dpu_mac_address: MacAddress,
+    pub dpu_oob_mac_address: MacAddress,
     pub loopback_ipv4: Option<Ipv4Addr>,
     pub loopback_ipv6: Option<Ipv6Addr>,
 }
@@ -1016,7 +1016,7 @@ impl DpuLoopbackReservation {
             .into_iter()
             .chain(self.loopback_ipv6.map(IpAddr::V6))
             .map(|fixed_ip| ExpectedInterface {
-                mac_address: Some(self.dpu_mac_address),
+                mac_address: Some(self.dpu_oob_mac_address),
                 role: ExpectedInterfaceRole::DpuLoopback,
                 ip_allocation: Some(ExpectedInterfaceIpAllocation::Fixed),
                 fixed_ip: Some(fixed_ip),
@@ -1101,11 +1101,14 @@ impl ExpectedMachineData {
             interface.validate_ip_allocation()?;
             let mac = interface.require_mac_address()?;
             let address = interface.fixed_reservation_ip()?;
-            let index = match reservations.iter().position(|r| r.dpu_mac_address == mac) {
+            let index = match reservations
+                .iter()
+                .position(|r| r.dpu_oob_mac_address == mac)
+            {
                 Some(index) => index,
                 None => {
                     reservations.push(DpuLoopbackReservation {
-                        dpu_mac_address: mac,
+                        dpu_oob_mac_address: mac,
                         loopback_ipv4: None,
                         loopback_ipv6: None,
                     });
