@@ -32,7 +32,7 @@ use rpc::forge_tls_client::{ForgeClientConfig, ForgeTlsClient};
 
 use crate::config;
 use crate::framework::{ObservationRecorder, Probe};
-use crate::gate::{CallGate, classify_grpc};
+use crate::gate::{CallError, CallGate, classify_grpc};
 
 /// Probes nico-api with the two read-only calls behind `machine show`:
 /// FindMachineIds (the lightest DB-touching read) and FindMachinesByIds on the
@@ -112,7 +112,7 @@ impl Probe for MachinesProbe {
                     .map_err(|e| classify_grpc(&e))
             })
             .await
-            .map_err(|e| eyre!("FindMachineIds: {e}"))?;
+            .map_err(|e| call_failed("FindMachineIds", e))?;
 
         let mut page = ids.into_inner().machine_ids;
         if page.is_empty() {
@@ -133,9 +133,16 @@ impl Probe for MachinesProbe {
                     .map_err(|e| classify_grpc(&e))
             })
             .await
-            .map_err(|e| eyre!("FindMachinesByIds: {e}"))?;
+            .map_err(|e| call_failed("FindMachinesByIds", e))?;
         Ok(())
     }
+}
+
+/// Names the failed call and keeps the [`CallError`] in the chain, so the
+/// scheduler can tell a gate timeout from a failure. `{err:#}` still reads
+/// "FindMachineIds: call timed out".
+fn call_failed(call: &'static str, err: CallError) -> eyre::Report {
+    eyre::Report::new(err).wrap_err(call)
 }
 
 /// Fails with the offending path when the CA bundle is missing or contains no
@@ -154,8 +161,11 @@ pub(crate) async fn preflight_ca(path: &str) -> eyre::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use tokio_util::sync::CancellationToken;
+
     use super::*;
     use crate::config::TlsConfig;
+    use crate::framework::{Outcome, ProbeResult, start};
 
     /// The CA preflight must name the offending path before any dial is
     /// attempted, instead of surfacing a generic handshake error later.
@@ -210,5 +220,141 @@ mod tests {
             err.to_string().contains("no certificates parsed from"),
             "got: {err:#}"
         );
+    }
+
+    /// What the fake nico-api does with a call.
+    #[derive(Clone, Copy)]
+    enum Reply {
+        /// Answers after this long.
+        After(Duration),
+        /// Answers DEADLINE_EXCEEDED at once.
+        DeadlineExceeded,
+    }
+
+    /// The two gate calls of `MachinesProbe::run`, with its error wrapping,
+    /// against a fake server: FindMachineIds answers at once, then
+    /// FindMachinesByIds does what `reply` says.
+    struct GateCallProbe {
+        gate: Arc<CallGate>,
+        timeout: Duration,
+        reply: Reply,
+    }
+
+    #[async_trait::async_trait]
+    impl Probe for GateCallProbe {
+        fn name(&self) -> &'static str {
+            "grpc_machines"
+        }
+
+        fn api(&self) -> &'static str {
+            self.gate.api()
+        }
+
+        fn interval(&self) -> Duration {
+            Duration::from_secs(10)
+        }
+
+        fn timeout(&self) -> Duration {
+            self.timeout
+        }
+
+        async fn run(&self, recorder: &ObservationRecorder) -> eyre::Result<()> {
+            self.gate
+                .call(recorder, "find_machine_ids", || async { Ok(()) })
+                .await
+                .map_err(|e| call_failed("FindMachineIds", e))?;
+
+            self.gate
+                .call(recorder, "find_machines_by_ids", || async {
+                    match self.reply {
+                        Reply::After(took) => {
+                            tokio::time::sleep(took).await;
+                            Ok(())
+                        }
+                        Reply::DeadlineExceeded => {
+                            Err(classify_grpc(&tonic::Status::deadline_exceeded("slow")))
+                        }
+                    }
+                })
+                .await
+                .map_err(|e| call_failed("FindMachinesByIds", e))
+        }
+    }
+
+    /// The first result of a probe run by the scheduler.
+    async fn first_result(probe: GateCallProbe) -> ProbeResult {
+        let cancel = CancellationToken::new();
+        let (mut results, _loops) = start(vec![Arc::new(probe)], cancel.clone());
+        let result = results.recv().await.expect("result");
+        cancel.cancel();
+        result
+    }
+
+    /// The `calls` series counted with result "timeout", from the exposition
+    /// the scraper sees.
+    fn timeout_calls(registry: &prometheus::Registry) -> Option<f64> {
+        use prometheus::Encoder;
+        let mut buffer = Vec::new();
+        prometheus::TextEncoder::new()
+            .encode(&registry.gather(), &mut buffer)
+            .expect("encode");
+        String::from_utf8(buffer)
+            .expect("utf-8 exposition")
+            .lines()
+            .filter(|line| line.starts_with("carbide_site_health_probe_calls_total"))
+            .find(|line| line.contains("result=\"timeout\""))
+            .and_then(|line| line.rsplit(' ').next())
+            .and_then(|value| value.parse().ok())
+    }
+
+    /// A call cut by the gate's call timeout (5 s) before the probe's own
+    /// deadline (8 s), or answered DEADLINE_EXCEEDED by the server, is a probe
+    /// timeout, not a failure. The observation made before it is kept, and the
+    /// gate still counts the cut call as "timeout".
+    #[tokio::test(start_paused = true)]
+    async fn call_timeout_before_probe_deadline_is_a_timeout() {
+        let replies = [
+            Reply::After(Duration::from_secs(6)),
+            Reply::DeadlineExceeded,
+        ];
+        for reply in replies {
+            let setup = metrics_endpoint::new_metrics_setup("site-health-probe", "test", false)
+                .expect("metrics setup");
+            let gate = Arc::new(CallGate::new(
+                "nico-api",
+                2.0,
+                Duration::from_secs(5),
+                Duration::from_secs(30),
+            ));
+            gate.count_calls(
+                setup
+                    .meter
+                    .u64_counter("carbide_site_health_probe_calls")
+                    .build(),
+            );
+
+            let result = first_result(GateCallProbe {
+                gate,
+                timeout: Duration::from_secs(8),
+                reply,
+            })
+            .await;
+
+            assert_eq!(result.outcome, Outcome::Timeout);
+            assert_eq!(
+                result.error.as_deref(),
+                Some("FindMachinesByIds: call timed out")
+            );
+            assert_eq!(
+                result
+                    .observations
+                    .iter()
+                    .map(|o| o.operation)
+                    .collect::<Vec<_>>(),
+                vec!["find_machine_ids"],
+                "the call before the cut one is kept, the cut one is not recorded"
+            );
+            assert_eq!(timeout_calls(&setup.registry), Some(1.0));
+        }
     }
 }

@@ -814,6 +814,23 @@ probes:
         }
     }
 
+    /// The latency probe's timeout is its own budget for the whole run, so it
+    /// may exceed the gate's call timeout: the gate then cuts a slow call at
+    /// 5 s and the probe records a timeout well before its own 8 s.
+    #[test]
+    fn probe_timeout_may_exceed_call_timeout() {
+        let cfg = load_str(
+            "probes:\n  grpc_machines:\n    enabled: true\n    target: t:1\n    \
+             interval: 10s\n    timeout: 8s\n    tls: {ca: a, cert: b, key: c}\n\
+             state:\n  enabled: false\n  caps: {call_timeout: 5s}\n",
+        )
+        .expect("probe timeout above the call timeout loads");
+        assert_eq!(cfg.probes.grpc_machines.timeout, Duration::from_secs(8));
+        assert_eq!(cfg.probes.grpc_machines.interval, Duration::from_secs(10));
+        assert_eq!(cfg.state.caps.call_timeout, Duration::from_secs(5));
+        assert!(!cfg.state.enabled, "no state readers");
+    }
+
     #[test]
     fn disabled_probes_skip_validation() {
         // Disabled probes carry no usable fields, and that must be fine.
