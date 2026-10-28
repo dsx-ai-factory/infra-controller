@@ -120,6 +120,11 @@ async fn test_dhcp_option_set_lifecycle(pool: sqlx::PgPool) {
         .unwrap_err();
     assert_eq!(err.code(), Code::InvalidArgument);
 
+    let err = create_option_set(&env, "UnknownTenant", "http://boot.example.com/x.efi")
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::NotFound);
+
     let created = create_option_set(&env, TENANT, "http://boot.example.com/x.efi")
         .await
         .unwrap();

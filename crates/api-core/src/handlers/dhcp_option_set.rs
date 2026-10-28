@@ -24,6 +24,7 @@ use model::dhcp_option_set::DhcpOptions;
 use model::metadata::Metadata;
 use model::tenant::{InvalidTenantOrg, TenantOrganizationId};
 use tonic::{Request, Response, Status};
+use uuid::Uuid;
 
 use crate::CarbideError;
 use crate::api::{Api, log_request_data, log_tenant_organization_id};
@@ -35,7 +36,9 @@ pub(crate) async fn create(
     log_request_data(&request);
     let req = request.into_inner();
 
-    let id = req.id.unwrap_or_else(DhcpOptionSetId::new);
+    let id = req
+        .id
+        .unwrap_or_else(|| DhcpOptionSetId::from(Uuid::new_v4()));
     let tenant_organization_id = parse_tenant(&req.tenant_organization_id)?;
     let metadata = parse_metadata(req.metadata)?;
     let options = parse_options(req.options)?;
