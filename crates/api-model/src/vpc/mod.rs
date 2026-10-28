@@ -31,6 +31,7 @@ use carbide_uuid::network_security_group::NetworkSecurityGroupId;
 use carbide_uuid::nvlink::NvLinkLogicalPartitionId;
 use carbide_uuid::vpc::VpcId;
 use carbide_uuid::vpc_peering::VpcPeeringId;
+use carbide_uuid::{DbColumns, DbTable};
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
 pub use routing_profile::{
@@ -179,6 +180,61 @@ pub struct UpdateVpcVirtualization {
     pub id: VpcId,
     pub if_version_match: Option<ConfigVersion>,
     pub network_virtualization_type: VpcVirtualizationType,
+}
+
+// `FromRow` builds `config` and `metadata` from several table columns.
+impl DbTable for Vpc {
+    fn db_table_name() -> &'static str {
+        "vpcs"
+    }
+
+    fn db_table_columns() -> DbColumns {
+        DbColumns::new(&[
+            "id",
+            "version",
+            "organization_id",
+            "network_security_group_id",
+            "network_virtualization_type",
+            "routing_profile_type",
+            "routing_profile_overrides",
+            "power_resource_group",
+            "slaac_enabled",
+            "vni",
+            "status",
+            "name",
+            "description",
+            "labels",
+            "created",
+            "updated",
+            "deleted",
+        ])
+    }
+
+    fn db_aliased_table() -> &'static str {
+        "vpcs AS v"
+    }
+
+    fn db_aliased_columns() -> DbColumns {
+        DbColumns::new(&[
+            "v.id",
+            "v.version",
+            "v.organization_id",
+            "v.network_security_group_id",
+            "v.network_virtualization_type",
+            "v.routing_profile_type",
+            "v.routing_profile_overrides",
+            "v.power_resource_group",
+            "v.slaac_enabled",
+            "v.vni",
+            "v.status",
+            "v.name",
+            "v.description",
+            "v.labels",
+            "v.created",
+            "v.updated",
+            "v.deleted",
+        ])
+    }
 }
 
 impl<'r> sqlx::FromRow<'r, PgRow> for Vpc {
