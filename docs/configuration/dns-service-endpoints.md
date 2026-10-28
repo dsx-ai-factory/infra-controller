@@ -182,7 +182,7 @@ The site-local recursive DNS resolver. DPU agents and managed hosts use this res
 - DPU agents - all DNS resolution during provisioning and normal operation
 - Managed host operating systems - configured as the primary name server via DHCP
 
-**Configurability:** The resolver address is not compiled into binaries; it is distributed to clients via DHCP and can be changed by updating the DHCP server configuration. The `.nico` zone data must be loaded into Unbound (see [DNS Configuration](#dns-configuration) below) for all other hostnames in this document to resolve correctly.
+**Configurability:** The resolver address is not compiled into binaries; it is distributed to clients via DHCP and can be changed by updating the DHCP server configuration. The service records must be loaded into Unbound (see [DNS Configuration](#dns-configuration) below) for all other hostnames in this document to resolve correctly.
 
 ---
 
@@ -241,7 +241,7 @@ rebuilt with the rebranded name use `socks.nico` instead.
 
 ## Resolution Flow for DPU Agents and Unallocated Managed Hosts
 
-This section describes how DNS queries flow from the two client types that consume the `.nico` zone: DPU agents (during DPU provisioning and steady-state operation) and managed hosts that have been ingested but not yet allocated to a tenant.
+This section describes how DNS queries flow from the two client types that consume the service zones: DPU agents (during DPU provisioning and steady-state operation) and managed hosts that have been ingested but not yet allocated to a tenant.
 
 ### DPU Agents
 
@@ -353,9 +353,11 @@ dig +short AAAA carbide-ntp.forge @<UNBOUND_VIP>
 ```
 
 For an image rebuilt with the rebranded names, replace the complete
-`carbide-pxe.forge`, `socks.forge`, and `carbide-ntp.forge` hostnames with
-`nico-pxe.nico`, `socks.nico`, and `nico-ntp.nico`. Do not replace only the
-TLD.
+`carbide-api.forge`, `carbide-pxe.forge`, `socks.forge`, and
+`carbide-ntp.forge` hostnames with `nico-api.nico`, `nico-pxe.nico`,
+`socks.nico`, and `nico-ntp.nico` in these checks and the reachability checks
+below. Do not replace only the TLD. If `external_api_url` is set, also check
+its hostname from the static-assignments segment.
 
 Verify reachability on expected ports. For Scout, substitute the selected
 server's scheme, hostname, and port in the Static PXE example. Repeat the
