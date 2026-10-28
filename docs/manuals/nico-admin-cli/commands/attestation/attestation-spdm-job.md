@@ -4,7 +4,7 @@
 
 ## NAME
 
-nico-admin-cli-attestation-spdm-job - Inspect SPDM attestation job
+nico-admin-cli-attestation-spdm-job - Manage SPDM attestation jobs
 
 ## SYNOPSIS
 
@@ -15,7 +15,7 @@ nico-admin-cli attestation spdm job [--sort-by]
 
 ## DESCRIPTION
 
-Inspect SPDM attestation job
+Manage SPDM attestation jobs
 
 ## OPTIONS
 
@@ -37,6 +37,7 @@ Print help (see a summary with -h)
 
 | Subcommand | Description |
 |---|---|
+| [`cancel`](./attestation-spdm-job-cancel.md) | Cancel an attestation job |
 | [`get`](./attestation-spdm-job-get.md) | Get SPDM attestation details for a given job id |
 | [`list`](./attestation-spdm-job-list.md) | List SPDM attestation jobs by status |
 

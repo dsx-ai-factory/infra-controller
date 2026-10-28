@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+mod cancel;
 mod get;
 mod list;
 
@@ -24,6 +25,8 @@ use crate::cfg::dispatch::Dispatch;
 
 #[derive(Dispatch, Parser, Debug)]
 pub(crate) enum Cmd {
+    #[clap(about = "Cancel an attestation job")]
+    Cancel(cancel::args::Args),
     #[clap(about = "Get SPDM attestation details for a given job id")]
     Get(get::args::Args),
     #[clap(about = "List SPDM attestation jobs by status")]

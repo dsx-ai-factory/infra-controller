@@ -15,17 +15,18 @@
  * limitations under the License.
  */
 
-use crate::attestation::spdm::cancel::Args;
-use crate::errors::CarbideCliResult;
-use crate::rpc::ApiClient;
+use clap::Parser;
+use uuid::Uuid;
 
-pub(super) async fn cancel(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
-    api_client
-        .0
-        .cancel_attestation(::rpc::common::Uuid {
-            value: args.job_id.to_string(),
-        })
-        .await?;
-    println!("Successfully submitted the command");
-    Ok(())
+#[derive(Parser, Debug)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Cancel an in-progress SPDM attestation job:
+    $ nico-admin-cli attestation spdm job cancel 12345678-1234-5678-90ab-cdef01234567
+
+")]
+pub(crate) struct Args {
+    #[clap(help = "Attestation job ID")]
+    pub(super) job_id: Uuid,
 }

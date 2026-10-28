@@ -15,18 +15,19 @@
  * limitations under the License.
  */
 
-use clap::Parser;
-use uuid::Uuid;
+pub(super) mod args;
+mod cmd;
+#[cfg(test)]
+mod tests;
 
-#[derive(Parser, Debug)]
-#[command(after_long_help = "\
-EXAMPLES:
+use args::Args;
 
-Cancel an in-progress SPDM attestation job:
-    $ nico-admin-cli attestation spdm cancel 12345678-1234-5678-90ab-cdef01234567
+use crate::cfg::run::Run;
+use crate::cfg::runtime::RuntimeContext;
+use crate::errors::CarbideCliResult;
 
-")]
-pub(crate) struct Args {
-    #[clap(help = "Attestation job ID")]
-    pub(super) job_id: Uuid,
+impl Run for args::Args {
+    async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        cmd::cancel(self, &ctx.api_client).await
+    }
 }

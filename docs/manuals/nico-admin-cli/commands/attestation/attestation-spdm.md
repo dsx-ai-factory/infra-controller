@@ -37,9 +37,8 @@ Print help (see a summary with -h)
 
 | Subcommand | Description |
 |---|---|
-| [`cancel`](./attestation-spdm-cancel.md) | Cancel an attestation job |
 | [`coverage`](./attestation-spdm-coverage.md) | Show which hardware classes the site has and what would attest each |
-| [`job`](./attestation-spdm-job.md) | Inspect SPDM attestation job |
+| [`job`](./attestation-spdm-job.md) | Manage SPDM attestation jobs |
 | [`machines`](./attestation-spdm-machines.md) | Inspect predicted fleet statuses or assess one machine using current attesters |
 | [`profile`](./attestation-spdm-profile.md) | Manage the attestation policy stored for each hardware class |
 | [`trigger`](./attestation-spdm-trigger.md) | Trigger attestation for a given machine with id |

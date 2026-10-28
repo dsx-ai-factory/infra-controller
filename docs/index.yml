@@ -399,6 +399,8 @@ navigation:
               path: development/tls.md
             - page: nico-admin-cli
               path: manuals/nico-admin-cli.md
+            - page: SPDM Job Cancellation
+              path: manuals/nico-admin-cli/commands/attestation/attestation-spdm-job-cancel.md
             - page: SPDM Machine Commands
               path: manuals/nico-admin-cli/commands/attestation/attestation-spdm-machines.md
             - page: SPDM Machine Attestation Status

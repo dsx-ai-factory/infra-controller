@@ -15,7 +15,6 @@
  * limitations under the License.
  */
 
-mod cancel;
 mod coverage;
 mod job;
 mod machines;
@@ -60,14 +59,12 @@ async fn write_output<T: Serialize>(
 // a list of subcommands
 #[derive(Dispatch, Parser, Debug)]
 pub(crate) enum Cmd {
-    #[clap(about = "Cancel an attestation job")]
-    Cancel(cancel::args::Args),
     #[clap(about = "Show which hardware classes the site has and what would attest each")]
     Coverage(coverage::args::Args),
     #[dispatch]
     #[clap(
         subcommand,
-        about = "Inspect SPDM attestation job",
+        about = "Manage SPDM attestation jobs",
         visible_alias = "jobs"
     )]
     Job(job::Cmd),

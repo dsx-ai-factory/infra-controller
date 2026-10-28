@@ -1,15 +1,15 @@
-# `nico-admin-cli attestation spdm cancel`
+# `nico-admin-cli attestation spdm job cancel`
 
-*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [spdm](./attestation-spdm.md) › **cancel***
+*[Hardware commands](../../hardware.md) › [attestation](./attestation.md) › [spdm](./attestation-spdm.md) › [job](./attestation-spdm-job.md) › **cancel***
 
 ## NAME
 
-nico-admin-cli-attestation-spdm-cancel - Cancel an attestation job
+nico-admin-cli-attestation-spdm-job-cancel - Cancel an attestation job
 
 ## SYNOPSIS
 
 ```text
-nico-admin-cli attestation spdm cancel [--sort-by]
+nico-admin-cli attestation spdm job cancel [--sort-by]
 [-h|--help] <JOB_ID>
 ```
 
@@ -40,7 +40,7 @@ Attestation job ID
 ## Examples
 
 ```sh
-nico-admin-cli attestation spdm cancel 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli attestation spdm job cancel 12345678-1234-5678-90ab-cdef01234567
 ```
 
 ---
