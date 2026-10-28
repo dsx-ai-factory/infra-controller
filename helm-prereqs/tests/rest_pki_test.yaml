@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Local REST trust requires the explicit shared CA
+templates:
+  - templates/rest-pki.yaml
+tests:
+  - it: does not create REST trust resources by default
+    asserts:
+      - hasDocuments:
+          count: 0
+  - it: rejects REST trust without the local CA
+    set:
+      certManager.localCA.rest.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: certManager.localCA.rest requires certManager.localCA.enabled=true
+  - it: deduplicates the CA Secret when REST uses the cert-manager namespace
+    set:
+      certManager.localCA.enabled: true
+      certManager.siteRoot.create: false
+      externalSecrets.enabled: false
+      certManager.localCA.certificate: test-certificate
+      certManager.localCA.privateKey: test-key
+      certManager.localCA.rest.enabled: true
+      certManager.localCA.rest.namespace: cert-manager
+    asserts:
+      - hasDocuments:
+          count: 5

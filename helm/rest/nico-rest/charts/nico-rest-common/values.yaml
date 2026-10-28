@@ -7,6 +7,10 @@ namespaceOverride: ""
 secrets:
   # -- Set to false to skip Secret creation (e.g. when migrating from Kustomize with pre-existing Secrets).
   create: true
+  # -- Keep db-creds and image-pull-secret ahead of umbrella migration hooks.
+  # Set false only when this chart is installed as a separate prerequisite
+  # release before services/migrations; Secrets then have ordinary Helm lifecycle.
+  migrationHooks: true
   dbCreds:
     # -- DB username. Replace with real credentials in production.
     username: "nico"

@@ -67,6 +67,7 @@ tests:
   - it: uses explicit indices for MAC bases and relay IPs in both templates
     set:
       dhcpRelay.baseIP: "10.96.127.10"
+      dhcpRelay.serverAddress: "10.96.127.1:67"
       pods:
         mat-10:
           <<: *machines
@@ -101,6 +102,7 @@ tests:
       macAddressPool.enabled: false
       hwMacAddressRanges.enabled: false
       dhcpRelay.baseIP: "10.96.127.10"
+      dhcpRelay.serverAddress: "10.96.127.1:67"
       pods:
         mat-0: null
         mat-10: *machines

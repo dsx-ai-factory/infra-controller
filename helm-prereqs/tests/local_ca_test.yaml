@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Explicit local CA ownership
+templates:
+  - templates/local-ca.yaml
+tests:
+  - it: leaves the existing site PKI unchanged by default
+    asserts:
+      - hasDocuments:
+          count: 0
+  - it: supplies the issuer key and Core trust from the same CA
+    set:
+      namespace: test-core
+      certManager.siteRoot.create: false
+      externalSecrets.enabled: false
+      certManager.localCA.enabled: true
+      certManager.localCA.certificate: test-certificate
+      certManager.localCA.privateKey: test-key
+    asserts:
+      - hasDocuments:
+          count: 3
+      - equal:
+          path: metadata.namespace
+          value: test-core
+      - equal:
+          path: stringData["tls.crt"]
+          value: test-certificate
+        documentIndex: 0
+      - equal:
+          path: stringData["tls.key"]
+          value: test-key
+        documentIndex: 0
+      - equal:
+          path: type
+          value: kubernetes.io/tls
+        documentIndex: 0
+      - equal:
+          path: stringData["ca.crt"]
+          value: test-certificate
+        documentIndex: 1
+      - equal:
+          path: spec.ca.secretName
+          value: nico-local-ca
+        documentIndex: 2
+      - equal:
+          path: metadata.name
+          value: local-ca-issuer
+        documentIndex: 2
+  - it: rejects a second writer for the trust secret
+    set:
+      certManager.localCA.enabled: true
+      certManager.siteRoot.create: false
+    asserts:
+      - failedTemplate:
+          errorMessage: certManager.localCA requires externalSecrets.enabled=false and certManager.siteRoot.create=false
+  - it: rejects concurrent site CA generation
+    set:
+      certManager.localCA.enabled: true
+      externalSecrets.enabled: false
+    asserts:
+      - failedTemplate:
+          errorMessage: certManager.localCA requires externalSecrets.enabled=false and certManager.siteRoot.create=false
+  - it: requires supplied CA material instead of generating replacement trust
+    set:
+      certManager.localCA.enabled: true
+      certManager.siteRoot.create: false
+      externalSecrets.enabled: false
+    asserts:
+      - failedTemplate:
+          errorMessage: certManager.localCA.certificate is required
+  - it: requires the signing key as well as the certificate
+    set:
+      certManager.localCA.enabled: true
+      certManager.siteRoot.create: false
+      externalSecrets.enabled: false
+      certManager.localCA.certificate: test-certificate
+    asserts:
+      - failedTemplate:
+          errorMessage: certManager.localCA.privateKey is required

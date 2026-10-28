@@ -9,4 +9,12 @@ namespace: nico-rest
 resources:
   - deployment.yaml
   - service.yaml
-  - realm-configmap.yaml
+
+configMapGenerator:
+  - name: keycloak-realm
+    files:
+      - nico-dev-realm.json
+generatorOptions:
+  disableNameSuffixHash: true
+  labels:
+    app: keycloak
