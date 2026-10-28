@@ -19,6 +19,7 @@ use std::borrow::Cow;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::SystemTime;
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -38,9 +39,8 @@ use crate::metrics::MetricLabel;
 use crate::sink::MetricSemantics::Gauge;
 use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample, MetricSemantics};
 
-// These Redfish PCIe totals and processor throttle durations do not report
-// when accumulation began, so leave `start_time` unknown; collector startup
-// does not establish it.
+// Device totals without a reported accumulation start keep `start_time`
+// unknown; collector startup does not establish it.
 fn device_total(description: &'static str) -> MetricSemantics {
     MetricSemantics::CumulativeCounter {
         description,
@@ -333,6 +333,7 @@ fn memory_metric_fields(m: &MemoryMetrics) -> Vec<MetricField> {
     scalar!(out, m, block_size_bytes, "block_size", "bytes");
     scalar!(out, m, bandwidth_percent, "bandwidth", "percent");
     scalar!(out, m, operating_speed_mhz, "operating_speed", "mhz");
+    // Redfish does not define an accumulation period for these top-level counts.
     scalar!(
         out,
         m,
@@ -361,58 +362,91 @@ fn memory_metric_fields(m: &MemoryMetrics) -> Vec<MetricField> {
             cp,
             correctable_ecc_error_count,
             "current_correctable_ecc_errors",
-            "count"
+            "count",
+            device_total(
+                "Number of correctable memory ECC errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id"
+            )
         );
         scalar!(
             out,
             cp,
             uncorrectable_ecc_error_count,
             "current_uncorrectable_ecc_errors",
-            "count"
+            "count",
+            device_total(
+                "Number of uncorrectable memory ECC errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id"
+            )
         );
         scalar!(
             out,
             cp,
             indeterminate_correctable_error_count,
             "current_indeterminate_correctable_errors",
-            "count"
+            "count",
+            device_total(
+                "Number of indeterminate correctable memory errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id; the same error may appear for multiple memory resources"
+            )
         );
         scalar!(
             out,
             cp,
             indeterminate_uncorrectable_error_count,
             "current_indeterminate_uncorrectable_errors",
-            "count"
+            "count",
+            device_total(
+                "Number of indeterminate uncorrectable memory errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id; the same error may appear for multiple memory resources"
+            )
         );
     }
     if let Some(lt) = &m.life_time {
+        // `LifetimeStartDateTime` applies to `LifeTime` errors, not `CurrentPeriod`.
+        let lifetime_start_time = m
+            .lifetime_start_date_time
+            .flatten()
+            .and_then(|start| SystemTime::try_from(start).ok());
         scalar!(
             out,
             lt,
             correctable_ecc_error_count,
             "lifetime_correctable_ecc_errors",
-            "count"
+            "count",
+            MetricSemantics::CumulativeCounter {
+                description: "Number of correctable ECC errors over the lifetime of the memory, by memory_id and system_id",
+                start_time: lifetime_start_time,
+            }
         );
         scalar!(
             out,
             lt,
             uncorrectable_ecc_error_count,
             "lifetime_uncorrectable_ecc_errors",
-            "count"
+            "count",
+            MetricSemantics::CumulativeCounter {
+                description: "Number of uncorrectable ECC errors over the lifetime of the memory, by memory_id and system_id",
+                start_time: lifetime_start_time,
+            }
         );
         scalar!(
             out,
             lt,
             indeterminate_correctable_error_count,
             "lifetime_indeterminate_correctable_errors",
-            "count"
+            "count",
+            MetricSemantics::CumulativeCounter {
+                description: "Number of indeterminate correctable errors over the lifetime of the memory, by memory_id and system_id; the same error may appear for multiple memory resources",
+                start_time: lifetime_start_time,
+            }
         );
         scalar!(
             out,
             lt,
             indeterminate_uncorrectable_error_count,
             "lifetime_indeterminate_uncorrectable_errors",
-            "count"
+            "count",
+            MetricSemantics::CumulativeCounter {
+                description: "Number of indeterminate uncorrectable errors over the lifetime of the memory, by memory_id and system_id; the same error may appear for multiple memory resources",
+                start_time: lifetime_start_time,
+            }
         );
     }
     out
@@ -823,33 +857,55 @@ fn nvidia_memory_metric_fields(m: &NvidiaMemoryMetrics) -> Vec<MetricField> {
 
 fn drive_metric_fields(m: &nv_redfish::schema::drive_metrics::DriveMetrics) -> Vec<MetricField> {
     let mut out = Vec::new();
+    // Redfish defines these errors over the drive's lifetime. The BMC can
+    // report its start through `LifetimeStartDateTime`.
+    let lifetime_start_time = m
+        .lifetime_start_date_time
+        .flatten()
+        .and_then(|start| SystemTime::try_from(start).ok());
     scalar!(
         out,
         m,
         correctable_io_read_error_count,
         "correctable_io_read_errors",
-        "count"
+        "count",
+        MetricSemantics::CumulativeCounter {
+            description: "Number of correctable read errors over the lifetime of the drive, by drive_id, storage_id, and system_id",
+            start_time: lifetime_start_time,
+        }
     );
     scalar!(
         out,
         m,
         correctable_io_write_error_count,
         "correctable_io_write_errors",
-        "count"
+        "count",
+        MetricSemantics::CumulativeCounter {
+            description: "Number of correctable write errors over the lifetime of the drive, by drive_id, storage_id, and system_id",
+            start_time: lifetime_start_time,
+        }
     );
     scalar!(
         out,
         m,
         uncorrectable_io_read_error_count,
         "uncorrectable_io_read_errors",
-        "count"
+        "count",
+        MetricSemantics::CumulativeCounter {
+            description: "Number of uncorrectable read errors over the lifetime of the drive, by drive_id, storage_id, and system_id",
+            start_time: lifetime_start_time,
+        }
     );
     scalar!(
         out,
         m,
         uncorrectable_io_write_error_count,
         "uncorrectable_io_write_errors",
-        "count"
+        "count",
+        MetricSemantics::CumulativeCounter {
+            description: "Number of uncorrectable write errors over the lifetime of the drive, by drive_id, storage_id, and system_id",
+            start_time: lifetime_start_time,
+        }
     );
     scalar!(out, m, bad_block_count, "bad_block", "count");
     scalar!(out, m, power_on_hours, "power_on_hours", "hours");
@@ -860,8 +916,27 @@ fn drive_metric_fields(m: &nv_redfish::schema::drive_metrics::DriveMetrics) -> V
         "native_command_queue_depth",
         "count"
     );
-    scalar!(out, m, read_ioki_bytes, "read_io", "kibibytes");
-    scalar!(out, m, write_ioki_bytes, "write_io", "kibibytes");
+    // `ReadIOKiBytes` and `WriteIOKiBytes` total data since the last reset or wrap.
+    scalar!(
+        out,
+        m,
+        read_ioki_bytes,
+        "read_io",
+        "kibibytes",
+        device_total(
+            "Number of kibibytes read from the drive since the last reset or wrap, by drive_id, storage_id, and system_id"
+        )
+    );
+    scalar!(
+        out,
+        m,
+        write_ioki_bytes,
+        "write_io",
+        "kibibytes",
+        device_total(
+            "Number of kibibytes written to the drive since the last reset or wrap, by drive_id, storage_id, and system_id"
+        )
+    );
     out
 }
 
@@ -903,18 +978,70 @@ pub(crate) fn catalogue_samples() -> Result<Vec<MetricSample>, HealthError> {
             "FlowControlTimeoutErrors": 12
         }
     }))?);
-    Ok(processor
-        .into_iter()
-        .map(|field| {
-            field.into_sample(
-                "/redfish/v1/Systems/1/Processors/CPU0",
-                vec![
-                    (Cow::Borrowed("processor_id"), "CPU0".to_string()),
-                    (Cow::Borrowed("system_id"), "1".to_string()),
-                ],
-            )
-        })
-        .collect())
+    let memory = memory_metric_fields(&serde_json::from_value(json!({
+        "@odata.id": "/redfish/v1/Systems/1/Memory/DIMM0/MemoryMetrics",
+        "Id": "MemoryMetrics",
+        "Name": "Memory Metrics",
+        "LifetimeStartDateTime": "1970-01-01T00:01:40Z",
+        "CurrentPeriod": {
+            "CorrectableECCErrorCount": 1,
+            "UncorrectableECCErrorCount": 2,
+            "IndeterminateCorrectableErrorCount": 3,
+            "IndeterminateUncorrectableErrorCount": 4
+        },
+        "LifeTime": {
+            "CorrectableECCErrorCount": 5,
+            "UncorrectableECCErrorCount": 6,
+            "IndeterminateCorrectableErrorCount": 7,
+            "IndeterminateUncorrectableErrorCount": 8
+        }
+    }))?);
+    let drive = drive_metric_fields(&serde_json::from_value(json!({
+        "@odata.id": "/redfish/v1/Systems/1/Storage/1/Drives/D0/Metrics",
+        "Id": "DriveMetrics",
+        "Name": "Drive Metrics",
+        "LifetimeStartDateTime": "1970-01-01T00:01:40Z",
+        "CorrectableIOReadErrorCount": 1,
+        "CorrectableIOWriteErrorCount": 2,
+        "UncorrectableIOReadErrorCount": 3,
+        "UncorrectableIOWriteErrorCount": 4,
+        "ReadIOKiBytes": 5,
+        "WriteIOKiBytes": 6
+    }))?);
+    Ok([
+        (
+            processor,
+            "/redfish/v1/Systems/1/Processors/CPU0",
+            vec![
+                (Cow::Borrowed("processor_id"), "CPU0".to_string()),
+                (Cow::Borrowed("system_id"), "1".to_string()),
+            ],
+        ),
+        (
+            memory,
+            "/redfish/v1/Systems/1/Memory/DIMM0",
+            vec![
+                (Cow::Borrowed("memory_id"), "DIMM0".to_string()),
+                (Cow::Borrowed("system_id"), "1".to_string()),
+            ],
+        ),
+        (
+            drive,
+            "/redfish/v1/Systems/1/Storage/1/Drives/D0",
+            vec![
+                (Cow::Borrowed("drive_id"), "D0".to_string()),
+                (Cow::Borrowed("storage_id"), "1".to_string()),
+                (Cow::Borrowed("system_id"), "1".to_string()),
+            ],
+        ),
+    ]
+    .into_iter()
+    .flat_map(|(fields, entity_key, labels)| {
+        fields
+            .into_iter()
+            .map(move |field| field.into_sample(entity_key, labels.clone()))
+    })
+    .collect())
 }
 
 pub struct MetricsCollectorConfig<B: Bmc> {
@@ -1129,7 +1256,7 @@ impl<B: Bmc + 'static> MetricsCollector<B> {
 mod tests {
     use std::convert::Infallible;
     use std::sync::Mutex as StdMutex;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use carbide_test_support::Outcome::Yields;
     use carbide_test_support::{Case, Check, check_cases_async, check_values};
@@ -1376,6 +1503,11 @@ mod tests {
 
     #[test]
     fn child_metric_projection_cases() {
+        let lifetime = MetricSemantics::CumulativeCounter {
+            description: "",
+            start_time: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(100)),
+        };
+
         check_values(
             [
                 Check {
@@ -1510,7 +1642,7 @@ mod tests {
                     expect: expected([]),
                 },
                 Check {
-                    scenario: "memory nested periods use distinct prefixes",
+                    scenario: "memory lifetime counters keep unknown starts when absent",
                     input: ProjectionCase {
                         projection: Projection::Memory,
                         metrics: json!({
@@ -1522,51 +1654,78 @@ mod tests {
                             "LifeTime": { "UncorrectableECCErrorCount": 9 }
                         }),
                     },
-                    expect: expected([
-                        ("corrected_volatile_errors", "count", 2.0),
-                        ("current_correctable_ecc_errors", "count", 5.0),
-                        ("lifetime_uncorrectable_ecc_errors", "count", 9.0),
+                    expect: expected_with_semantics([
+                        ("corrected_volatile_errors", "count", 2.0, Gauge),
+                        ("current_correctable_ecc_errors", "count", 5.0, COUNTER),
+                        ("lifetime_uncorrectable_ecc_errors", "count", 9.0, COUNTER),
                     ]),
                 },
                 Check {
-                    scenario: "remaining memory scalars and period counters",
+                    scenario: "memory lifetime start applies only to LifeTime counters",
                     input: ProjectionCase {
                         projection: Projection::Memory,
                         metrics: json!({
                             "@odata.id": "/redfish/v1/Systems/1/Memory/DIMM0/MemoryMetrics",
                             "Id": "MemoryMetrics",
                             "Name": "Memory Metrics",
+                            "LifetimeStartDateTime": "1970-01-01T00:01:40Z",
                             "BlockSizeBytes": 4096,
                             "BandwidthPercent": 72.5,
                             "OperatingSpeedMHz": 6400,
+                            "CorrectedVolatileErrorCount": 2,
                             "CorrectedPersistentErrorCount": 3,
                             "DirtyShutdownCount": 4,
                             "CapacityUtilizationPercent": 81.0,
                             "CurrentPeriod": {
+                                "CorrectableECCErrorCount": 12,
                                 "UncorrectableECCErrorCount": 5,
                                 "IndeterminateCorrectableErrorCount": 6,
                                 "IndeterminateUncorrectableErrorCount": 7
                             },
                             "LifeTime": {
                                 "CorrectableECCErrorCount": 8,
+                                "UncorrectableECCErrorCount": 11,
                                 "IndeterminateCorrectableErrorCount": 9,
                                 "IndeterminateUncorrectableErrorCount": 10
                             }
                         }),
                     },
-                    expect: expected([
-                        ("block_size", "bytes", 4096.0),
-                        ("bandwidth", "percent", 72.5),
-                        ("operating_speed", "mhz", 6400.0),
-                        ("corrected_persistent_errors", "count", 3.0),
-                        ("dirty_shutdown", "count", 4.0),
-                        ("capacity_utilization", "percent", 81.0),
-                        ("current_uncorrectable_ecc_errors", "count", 5.0),
-                        ("current_indeterminate_correctable_errors", "count", 6.0),
-                        ("current_indeterminate_uncorrectable_errors", "count", 7.0),
-                        ("lifetime_correctable_ecc_errors", "count", 8.0),
-                        ("lifetime_indeterminate_correctable_errors", "count", 9.0),
-                        ("lifetime_indeterminate_uncorrectable_errors", "count", 10.0),
+                    expect: expected_with_semantics([
+                        ("block_size", "bytes", 4096.0, Gauge),
+                        ("bandwidth", "percent", 72.5, Gauge),
+                        ("operating_speed", "mhz", 6400.0, Gauge),
+                        ("corrected_volatile_errors", "count", 2.0, Gauge),
+                        ("corrected_persistent_errors", "count", 3.0, Gauge),
+                        ("dirty_shutdown", "count", 4.0, Gauge),
+                        ("capacity_utilization", "percent", 81.0, Gauge),
+                        ("current_correctable_ecc_errors", "count", 12.0, COUNTER),
+                        ("current_uncorrectable_ecc_errors", "count", 5.0, COUNTER),
+                        (
+                            "current_indeterminate_correctable_errors",
+                            "count",
+                            6.0,
+                            COUNTER,
+                        ),
+                        (
+                            "current_indeterminate_uncorrectable_errors",
+                            "count",
+                            7.0,
+                            COUNTER,
+                        ),
+                        ("lifetime_correctable_ecc_errors", "count", 8.0, lifetime),
+                        ("lifetime_uncorrectable_ecc_errors", "count", 11.0, lifetime),
+                        (
+                            "lifetime_indeterminate_correctable_errors",
+                            "count",
+                            9.0,
+                            lifetime,
+                        ),
+                        (
+                            "lifetime_indeterminate_uncorrectable_errors",
+                            "count",
+                            10.0,
+                            lifetime,
+                        ),
                     ]),
                 },
                 Check {
@@ -1582,7 +1741,7 @@ mod tests {
                     expect: expected([]),
                 },
                 Check {
-                    scenario: "drive error and lifetime counters",
+                    scenario: "drive I/O error counters keep unknown starts when absent",
                     input: ProjectionCase {
                         projection: Projection::Drive,
                         metrics: json!({
@@ -1594,20 +1753,22 @@ mod tests {
                             "PowerOnHours": 12345.0
                         }),
                     },
-                    expect: expected([
-                        ("correctable_io_read_errors", "count", 11.0),
-                        ("bad_block", "count", 4.0),
-                        ("power_on_hours", "hours", 12345.0),
+                    expect: expected_with_semantics([
+                        ("correctable_io_read_errors", "count", 11.0, COUNTER),
+                        ("bad_block", "count", 4.0, Gauge),
+                        ("power_on_hours", "hours", 12345.0, Gauge),
                     ]),
                 },
                 Check {
-                    scenario: "remaining drive counters",
+                    scenario: "drive lifetime start applies only to I/O error counters",
                     input: ProjectionCase {
                         projection: Projection::Drive,
                         metrics: json!({
                             "@odata.id": "/redfish/v1/Systems/1/Storage/1/Drives/D0/Metrics",
                             "Id": "DriveMetrics",
                             "Name": "Drive Metrics",
+                            "LifetimeStartDateTime": "1970-01-01T00:01:40Z",
+                            "CorrectableIOReadErrorCount": 10,
                             "CorrectableIOWriteErrorCount": 1,
                             "UncorrectableIOReadErrorCount": 2,
                             "UncorrectableIOWriteErrorCount": 3,
@@ -1616,13 +1777,14 @@ mod tests {
                             "WriteIOKiBytes": 6
                         }),
                     },
-                    expect: expected([
-                        ("correctable_io_write_errors", "count", 1.0),
-                        ("uncorrectable_io_read_errors", "count", 2.0),
-                        ("uncorrectable_io_write_errors", "count", 3.0),
-                        ("native_command_queue_depth", "count", 4.0),
-                        ("read_io", "kibibytes", 5.0),
-                        ("write_io", "kibibytes", 6.0),
+                    expect: expected_with_semantics([
+                        ("correctable_io_read_errors", "count", 10.0, lifetime),
+                        ("correctable_io_write_errors", "count", 1.0, lifetime),
+                        ("uncorrectable_io_read_errors", "count", 2.0, lifetime),
+                        ("uncorrectable_io_write_errors", "count", 3.0, lifetime),
+                        ("native_command_queue_depth", "count", 4.0, Gauge),
+                        ("read_io", "kibibytes", 5.0, COUNTER),
+                        ("write_io", "kibibytes", 6.0, COUNTER),
                     ]),
                 },
                 Check {
@@ -2194,7 +2356,7 @@ mod tests {
                     }),
                 },
                 Case {
-                    scenario: "memory metric",
+                    scenario: "memory cumulative error retains its lifetime start",
                     input: CollectionCase {
                         bmc: fixture.bmc(),
                         entity: fixture.entity(TestEntity::Memory).await,
@@ -2203,18 +2365,30 @@ mod tests {
                     expect: Yields(ObservedCollection {
                         field_count: 1,
                         fetch_failures: 0,
-                        events: vec![metric(
-                            "/redfish/v1/Systems/SYS0/Memory/DIMM0/block_size",
-                            "block_size",
-                            "bytes",
-                            4096.0,
-                            &[
+                        events: vec![ObservedEvent::Metric(ObservedMetric {
+                            key: concat!(
+                                "/redfish/v1/Systems/SYS0/Memory/DIMM0/",
+                                "lifetime_uncorrectable_ecc_errors",
+                            )
+                            .to_string(),
+                            name: "hw_metric".to_string(),
+                            metric_type: "lifetime_uncorrectable_ecc_errors".to_string(),
+                            unit: "count".to_string(),
+                            value: 9.0,
+                            semantics: MetricSemantics::CumulativeCounter {
+                                description: "Number of uncorrectable ECC errors over the lifetime of the memory, by memory_id and system_id",
+                                start_time: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(100)),
+                            },
+                            labels: [
                                 ("memory_id", "DIMM0"),
                                 ("system_id", "SYS0"),
                                 ("device_type", "ddr5"),
                                 ("model", "HMCG94AGBRA"),
-                            ],
-                        )],
+                            ]
+                            .map(|(key, value)| (key.to_string(), value.to_string()))
+                            .to_vec(),
+                            has_context: false,
+                        })],
                     }),
                 },
                 Case {

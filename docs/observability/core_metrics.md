@@ -138,6 +138,26 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_gpus_total_count</td><td>gauge</td><td>Number of GPUs in the NICo deployment</td></tr>
 <tr><td>carbide_gpus_usable_count</td><td>gauge</td><td>Number of remaining GPUs in the NICo deployment available for immediate instance creation</td></tr>
 <tr><td>carbide_hardware_health_component_inventory_info</td><td>gauge</td><td>Authoritative NICo component inventory for the current rack-ingestion session</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_correctable_io_read_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_correctable_io_read_errors_count_total</td><td>counter</td><td>Number of correctable read errors over the lifetime of the drive, by drive_id, storage_id, and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_correctable_io_write_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_correctable_io_write_errors_count_total</td><td>counter</td><td>Number of correctable write errors over the lifetime of the drive, by drive_id, storage_id, and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_current_correctable_ecc_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_current_correctable_ecc_errors_count_total</td><td>counter</td><td>Number of correctable memory ECC errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_current_indeterminate_correctable_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_current_indeterminate_correctable_errors_count_total</td><td>counter</td><td>Number of indeterminate correctable memory errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id; the same error may appear for multiple memory resources</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_current_indeterminate_uncorrectable_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_current_indeterminate_uncorrectable_errors_count_total</td><td>counter</td><td>Number of indeterminate uncorrectable memory errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id; the same error may appear for multiple memory resources</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_current_uncorrectable_ecc_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_current_uncorrectable_ecc_errors_count_total</td><td>counter</td><td>Number of uncorrectable memory ECC errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_lifetime_correctable_ecc_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_lifetime_correctable_ecc_errors_count_total</td><td>counter</td><td>Number of correctable ECC errors over the lifetime of the memory, by memory_id and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_lifetime_indeterminate_correctable_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_lifetime_indeterminate_correctable_errors_count_total</td><td>counter</td><td>Number of indeterminate correctable errors over the lifetime of the memory, by memory_id and system_id; the same error may appear for multiple memory resources</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_lifetime_indeterminate_uncorrectable_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_lifetime_indeterminate_uncorrectable_errors_count_total</td><td>counter</td><td>Number of indeterminate uncorrectable errors over the lifetime of the memory, by memory_id and system_id; the same error may appear for multiple memory resources</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_lifetime_uncorrectable_ecc_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_lifetime_uncorrectable_ecc_errors_count_total</td><td>counter</td><td>Number of uncorrectable ECC errors over the lifetime of the memory, by memory_id and system_id</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_pcie_bad_dllp_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_pcie_bad_dllp_count_total</td><td>counter</td><td>Number of bad PCIe data link layer packets issued on the PCIe link by the receiver</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_pcie_bad_tlp_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
@@ -164,8 +184,16 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_hardware_health_hw_metric_pcie_unsupported_request_count_total</td><td>counter</td><td>Number of unsupported PCIe requests received by the device</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_power_limit_throttle_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_power_limit_throttle_seconds_total</td><td>counter</td><td>Number of seconds the processor has throttled due to a power limit since reset</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_read_io_kibibytes</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_read_io_kibibytes_total</td><td>counter</td><td>Number of kibibytes read from the drive since the last reset or wrap, by drive_id, storage_id, and system_id</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_thermal_limit_throttle_seconds</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
 <tr><td>carbide_hardware_health_hw_metric_thermal_limit_throttle_seconds_total</td><td>counter</td><td>Number of seconds the processor has throttled due to a thermal limit since reset</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_uncorrectable_io_read_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_uncorrectable_io_read_errors_count_total</td><td>counter</td><td>Number of uncorrectable read errors over the lifetime of the drive, by drive_id, storage_id, and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_uncorrectable_io_write_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_uncorrectable_io_write_errors_count_total</td><td>counter</td><td>Number of uncorrectable write errors over the lifetime of the drive, by drive_id, storage_id, and system_id</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_write_io_kibibytes</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>
+<tr><td>carbide_hardware_health_hw_metric_write_io_kibibytes_total</td><td>counter</td><td>Number of kibibytes written to the drive since the last reset or wrap, by drive_id, storage_id, and system_id</td></tr>
 <tr><td>carbide_hardware_health_inventory_last_success_time_seconds</td><td>gauge</td><td>Unix timestamp of the last successful NICo inventory reconciliation</td></tr>
 <tr><td>carbide_hardware_health_inventory_refresh_failures_total</td><td>counter</td><td>Number of authoritative hardware inventory refreshes that failed.</td></tr>
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_in_errors_count</td><td>gauge</td><td>Metrics forwarded through sink pipeline</td></tr>

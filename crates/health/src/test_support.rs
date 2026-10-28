@@ -20,6 +20,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use crate::HealthError;
 use crate::collectors::{catalogue_samples, emit_catalogue_samples};
@@ -119,7 +120,11 @@ pub fn hardware_metric_exposition() -> Result<String, HealthError> {
         let expected_value = Some(number_data_point::Value::AsDouble(sample.value));
         assert_eq!(gauge.data_points[0].value, expected_value, "{legacy_name}");
 
-        if let MetricSemantics::CumulativeCounter { description, .. } = sample.semantics {
+        if let MetricSemantics::CumulativeCounter {
+            description,
+            start_time,
+        } = sample.semantics
+        {
             assert!(!description.trim().is_empty(), "{legacy_name}");
             let alias_name = format!("{legacy_name}_total");
             assert_prometheus_family(
@@ -137,7 +142,18 @@ pub fn hardware_metric_exposition() -> Result<String, HealthError> {
             };
             assert_eq!(sum.data_points.len(), 1, "{alias_name}");
             assert_eq!(sum.data_points[0].value, expected_value, "{alias_name}");
-            assert_eq!(sum.data_points[0].start_time_unix_nano, 0, "{alias_name}");
+            let expected_start = start_time.map_or(0, |start| {
+                start
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .expect("fixture start follows Unix epoch")
+                    .as_nanos()
+                    .try_into()
+                    .expect("fixture start fits OTLP timestamp")
+            });
+            assert_eq!(
+                sum.data_points[0].start_time_unix_nano, expected_start,
+                "{alias_name}",
+            );
             assert_eq!(
                 sum.data_points[0].attributes,
                 gauge.data_points[0].attributes
@@ -223,7 +239,7 @@ fn assert_prometheus_family(
     assert_eq!(value, expected_value, "{name}");
 }
 
-const EXPECTED_SOURCE_NAMES: [&str; 31] = [
+const EXPECTED_SOURCE_NAMES: [&str; 45] = [
     "hw_metric_pcie_correctable_errors_count",
     "hw_metric_pcie_non_fatal_errors_count",
     "hw_metric_pcie_fatal_errors_count",
@@ -238,6 +254,20 @@ const EXPECTED_SOURCE_NAMES: [&str; 31] = [
     "hw_metric_pcie_flow_control_timeout_count",
     "hw_metric_power_limit_throttle_seconds",
     "hw_metric_thermal_limit_throttle_seconds",
+    "hw_metric_current_correctable_ecc_errors_count",
+    "hw_metric_current_uncorrectable_ecc_errors_count",
+    "hw_metric_current_indeterminate_correctable_errors_count",
+    "hw_metric_current_indeterminate_uncorrectable_errors_count",
+    "hw_metric_lifetime_correctable_ecc_errors_count",
+    "hw_metric_lifetime_uncorrectable_ecc_errors_count",
+    "hw_metric_lifetime_indeterminate_correctable_errors_count",
+    "hw_metric_lifetime_indeterminate_uncorrectable_errors_count",
+    "hw_metric_correctable_io_read_errors_count",
+    "hw_metric_correctable_io_write_errors_count",
+    "hw_metric_uncorrectable_io_read_errors_count",
+    "hw_metric_uncorrectable_io_write_errors_count",
+    "hw_metric_read_io_kibibytes",
+    "hw_metric_write_io_kibibytes",
     "nvue_gnmi_interface_in_errors_count",
     "nvue_gnmi_interface_out_errors_count",
     "nvue_gnmi_interface_out_discards_count",
