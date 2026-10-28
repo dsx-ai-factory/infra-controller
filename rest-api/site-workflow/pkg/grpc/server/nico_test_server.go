@@ -475,7 +475,7 @@ func (f *NICoServerImpl) InvokeInstancePower(c context.Context, req *corev1.Inst
 	instanceID := req.GetInstanceId().GetValue()
 	_, ok := f.ins[instanceID]
 	if ok {
-		if req.Operation == corev1.InstancePowerRequest_POWER_RESET {
+		if req.Operation == corev1.InstancePowerRequest_POWER_RESET || req.Operation == corev1.InstancePowerRequest_POWER_GRACEFUL_RESTART {
 			return &corev1.InstancePowerResult{}, nil
 		}
 

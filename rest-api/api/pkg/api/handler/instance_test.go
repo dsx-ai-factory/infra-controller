@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
@@ -30,6 +31,7 @@ import (
 	tp "go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/workflow"
+	"google.golang.org/protobuf/encoding/protojson"
 	"gopkg.in/yaml.v3"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
@@ -4554,6 +4556,9 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	assert.NotNil(t, st3)
 
 	tnu1 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-2", tnOrg1, tnOrgRoles1)
+	foreignOrg := "graceful-foreign-org"
+	foreignUser := testInstanceBuildUser(t, dbSession, "graceful-foreign-user", foreignOrg, []string{authz.TenantAdminRole})
+	nonAdmin := testInstanceBuildUser(t, dbSession, "graceful-non-admin", tnOrg1, []string{})
 	tn1 := testInstanceBuildTenant(t, dbSession, "test-tenant", tnOrg1, tnu1)
 
 	tnu2 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-3", tnOrg1, tnOrgRoles1)
@@ -5239,13 +5244,16 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	wrun := &tmocks.WorkflowRun{}
 	wrun.On("GetID").Return(wid)
 
-	wrun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
+	var gracefulCoreFailure bool
+	wrun.Mock.On("Get", mock.Anything, mock.Anything).Return(func(_ context.Context, _ interface{}) error {
+		if gracefulCoreFailure {
+			return tp.NewNonRetryableApplicationError("graceful restart precondition failed", swe.ErrTypeNICoFailedPrecondition, nil)
+		}
+		return nil
+	})
 
 	tc.Mock.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
 		mock.AnythingOfType("func(internal.Context, uuid.UUID, bool, bool) error"), mock.AnythingOfType("uuid.UUID"), true, mock.AnythingOfType("bool")).Return(wrun, nil)
-
-	tsc.Mock.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
-		"RebootInstanceV2", mock.Anything).Return(wrun, nil)
 
 	tsc.Mock.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
 		"UpdateInstance", mock.Anything).Return(wrun, nil)
@@ -5271,6 +5279,26 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 
 	spectrumXRejectedSCP := sc.NewClientPool(tcfg)
 	spectrumXPartitionNotFound := fmt.Sprintf("SPX partition %s is not found", sxpReplacement.ID)
+
+	var rebootRequests []*corev1.InstancePowerRequest
+	tsc.On("ExecuteWorkflow", mock.Anything, mock.Anything, "RebootInstanceV2", mock.Anything).
+		Run(func(args mock.Arguments) {
+			rebootRequests = append(rebootRequests, args.Get(3).(*corev1.InstancePowerRequest))
+		}).Return(wrun, nil)
+	var supportsGraceful bool
+	versionRun := &tmocks.WorkflowRun{}
+	versionRun.On("GetID").Return("version-workflow")
+	versionRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		info := &corev1.BuildInfo{}
+		if supportsGraceful {
+			info.Capabilities = []corev1.BuildCapability{corev1.BuildCapability_BUILD_CAPABILITY_INSTANCE_GRACEFUL_RESTART}
+		}
+		data, err := protojson.Marshal(info)
+		require.NoError(t, err)
+		args.Get(1).(*grpcproxy.Response).ResponseJSON = data
+	}).Return(nil)
+	tsc.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName,
+		mock.MatchedBy(func(req grpcproxy.Request) bool { return req.FullMethod == corev1.Forge_Version_FullMethodName })).Return(versionRun, nil)
 
 	// OTEL Spanner configuration
 	ctx = common.TestCommonTraceProviderSetup(t, ctx)
@@ -5324,7 +5352,9 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		// When true with nvlinkInterfacesToDelete, still assert those rows are Deleting but skip Pending-row count/order checks.
 		nvLinkSkipPendingDBAssertions bool
 		// Optional hook after building the echo context and before Handle (e.g. adjust DB timestamps for time-sensitive branches).
-		beforeHandle func(t *testing.T)
+		beforeHandle        func(t *testing.T)
+		gracefulUnsupported bool
+		gracefulCoreFailure bool
 		// Optional hook after a successful Handle (e.g. assert persisted DB state).
 		afterHandle            func(t *testing.T)
 		ethernetReconciliation *ethernetReconciliationExpectation
@@ -5341,6 +5371,65 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 		verifySiteControllerRequest bool
 		verifyChildSpanner          bool
 	}{
+		{
+			name:   "graceful reboot rejects foreign tenant",
+			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
+			args: args{
+				reqData:     &model.APIInstanceUpdateRequest{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(model.InstanceRebootModeGraceful)},
+				reqInstance: inst1.ID.String(), cleanInstanceToStatus: inst1.Status,
+				reqOrg: foreignOrg, reqUser: foreignUser, respCode: http.StatusForbidden,
+			},
+		},
+		{
+			name:   "graceful reboot rejects member without tenant admin",
+			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
+			args: args{
+				reqData:     &model.APIInstanceUpdateRequest{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(model.InstanceRebootModeGraceful)},
+				reqInstance: inst1.ID.String(), cleanInstanceToStatus: inst1.Status,
+				reqOrg: tnOrg1, reqUser: nonAdmin, respCode: http.StatusForbidden,
+			},
+		},
+		{
+			name:   "graceful reboot rejects terminating instance",
+			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
+			args: args{
+				reqData:     &model.APIInstanceUpdateRequest{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(model.InstanceRebootModeGraceful)},
+				reqInstance: inst3.ID.String(), cleanInstanceToStatus: inst3.Status,
+				reqOrg: tnOrg1, reqUser: tnu1, respCode: http.StatusConflict,
+			},
+		},
+		{
+			name:   "graceful Core rejection rolls back reboot status",
+			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
+			args: args{
+				reqData:     &model.APIInstanceUpdateRequest{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(model.InstanceRebootModeGraceful)},
+				reqInstance: inst1.ID.String(), cleanInstanceToStatus: inst1.Status,
+				reqOrg: tnOrg1, reqUser: tnu1, respCode: http.StatusPreconditionFailed,
+				gracefulCoreFailure: true,
+			},
+		},
+		{
+			name:   "graceful reboot accepted",
+			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
+			args: args{
+				reqData:     &model.APIInstanceUpdateRequest{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(model.InstanceRebootModeGraceful)},
+				reqInstance: inst1.ID.String(), cleanInstanceToStatus: inst1.Status,
+				reqOrg: tnOrg1, reqUser: tnu1, respCode: http.StatusOK,
+				gracefulUnsupported: false,
+			},
+		},
+
+		{
+			name:   "graceful reboot rejected by older Core",
+			fields: fields{dbSession: dbSession, tc: tc, scp: scp, cfg: cfg},
+			args: args{
+				reqData:     &model.APIInstanceUpdateRequest{TriggerReboot: cutil.GetPtr(true), RebootMode: cutil.GetPtr(model.InstanceRebootModeGraceful)},
+				reqInstance: inst1.ID.String(), cleanInstanceToStatus: inst1.Status,
+				reqOrg: tnOrg1, reqUser: tnu1, respCode: http.StatusConflict,
+				gracefulUnsupported: true,
+			},
+		},
+
 		{
 			name: "test Instance update preserves persisted power profile when omitted",
 			fields: fields{
@@ -8152,6 +8241,9 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			rebootRequests = nil
+			supportsGraceful = !tt.args.gracefulUnsupported
+			gracefulCoreFailure = tt.args.gracefulCoreFailure
 			uih := UpdateInstanceHandler{
 				dbSession: tt.fields.dbSession,
 				tc:        tt.fields.tc,
@@ -8208,8 +8300,34 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				require.NotEmpty(t, beforeSpectrumXSSHAssociations)
 			}
 
+			var powerStatusBefore *string
+			if tt.args.reqData.RebootMode != nil {
+				before, err := insDAO.GetByID(ctx, nil, uuid.MustParse(tt.args.reqInstance), nil)
+				require.NoError(t, err)
+				powerStatusBefore = before.PowerStatus
+			}
 			if err := uih.Handle(ec); (err != nil) != tt.wantErr {
 				t.Errorf("UpdateInstanceHandler.Handle() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.args.reqData.RebootMode != nil {
+				if tt.args.respCode == http.StatusOK {
+					require.Len(t, rebootRequests, 1)
+					assert.Equal(t, corev1.InstancePowerRequest_POWER_GRACEFUL_RESTART, rebootRequests[0].Operation)
+					assert.Equal(t, inst1.GetSiteID().String(), rebootRequests[0].InstanceId.Value)
+					persisted, err := insDAO.GetByID(ctx, nil, inst1.ID, nil)
+					require.NoError(t, err)
+					assert.Equal(t, cdbm.InstancePowerStatusRebooting, *persisted.PowerStatus)
+				} else {
+					if tt.args.gracefulCoreFailure {
+						require.Len(t, rebootRequests, 1)
+						assert.Equal(t, corev1.InstancePowerRequest_POWER_GRACEFUL_RESTART, rebootRequests[0].Operation)
+					} else {
+						assert.Empty(t, rebootRequests)
+					}
+					persisted, err := insDAO.GetByID(ctx, nil, uuid.MustParse(tt.args.reqInstance), nil)
+					require.NoError(t, err)
+					assert.Equal(t, powerStatusBefore, persisted.PowerStatus)
+				}
 			}
 			if tt.args.expectSpectrumXUnchanged {
 				var response struct {

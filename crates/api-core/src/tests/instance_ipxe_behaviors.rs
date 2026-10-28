@@ -229,6 +229,24 @@ async fn test_instance_always_boot_with_custom_ipxe(pool: sqlx::PgPool) {
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
     assert_eq!(pxe.pxe_script, "SomeRandomiPxe");
 
+    let checkpoint = env.redfish_sim.timepoint();
+    let err = env
+        .api
+        .invoke_instance_power(tonic::Request::new(rpc::forge::InstancePowerRequest {
+            instance_id: Some(tinstance.id),
+            operation: rpc::forge::instance_power_request::Operation::PowerGracefulRestart as i32,
+            ..Default::default()
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        env.redfish_sim
+            .actions_since(&checkpoint)
+            .all_hosts()
+            .is_empty()
+    );
+
     // A regular reboot attempt should also return custom iPXE instructions
     invoke_instance_power(&env, tinstance.id, false).await;
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
@@ -238,6 +256,178 @@ async fn test_instance_always_boot_with_custom_ipxe(pool: sqlx::PgPool) {
     invoke_instance_power(&env, tinstance.id, true).await;
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
     assert_eq!(pxe.pxe_script, "SomeRandomiPxe");
+}
+
+#[crate::sqlx_test]
+async fn test_instance_power_modes(pool: sqlx::PgPool) {
+    use carbide_redfish::libredfish::test_support::RedfishSimAction;
+    use libredfish::SystemPowerControl;
+    use rpc::forge::instance_power_request::Operation;
+
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let mh = create_managed_host(&env).await;
+    let instance = create_instance(&env, &mh, false, segment_id).await;
+    let mut txn = env.pool.begin().await.unwrap();
+    let host_ip = mh.host().bmc_ip(&mut txn).await.unwrap();
+    txn.rollback().await.unwrap();
+
+    struct Case {
+        name: &'static str,
+        operation: i32,
+        boot_with_custom_ipxe: bool,
+        apply_updates_on_reboot: bool,
+        inject_failure: bool,
+        error: Option<tonic::Code>,
+        expected: Vec<RedfishSimAction>,
+    }
+
+    let cases = [
+        Case {
+            name: "hard default",
+            operation: Operation::PowerReset as i32,
+            boot_with_custom_ipxe: false,
+            apply_updates_on_reboot: false,
+            inject_failure: false,
+            error: None,
+            expected: vec![RedfishSimAction::Power(SystemPowerControl::ForceRestart)],
+        },
+        Case {
+            name: "graceful host restart",
+            operation: Operation::PowerGracefulRestart as i32,
+            boot_with_custom_ipxe: false,
+            apply_updates_on_reboot: false,
+            inject_failure: false,
+            error: None,
+            expected: vec![RedfishSimAction::Power(SystemPowerControl::GracefulRestart)],
+        },
+        Case {
+            name: "unknown operation",
+            operation: 99,
+            boot_with_custom_ipxe: false,
+            apply_updates_on_reboot: false,
+            inject_failure: false,
+            error: Some(tonic::Code::InvalidArgument),
+            expected: vec![],
+        },
+        Case {
+            name: "custom ipxe",
+            operation: Operation::PowerGracefulRestart as i32,
+            boot_with_custom_ipxe: true,
+            apply_updates_on_reboot: false,
+            inject_failure: false,
+            error: Some(tonic::Code::InvalidArgument),
+            expected: vec![],
+        },
+        Case {
+            name: "update approval",
+            operation: Operation::PowerGracefulRestart as i32,
+            boot_with_custom_ipxe: false,
+            apply_updates_on_reboot: true,
+            inject_failure: false,
+            error: Some(tonic::Code::InvalidArgument),
+            expected: vec![],
+        },
+        Case {
+            name: "no hard fallback",
+            operation: Operation::PowerGracefulRestart as i32,
+            boot_with_custom_ipxe: false,
+            apply_updates_on_reboot: false,
+            inject_failure: true,
+            error: Some(tonic::Code::Internal),
+            expected: vec![RedfishSimAction::PowerFailed(
+                SystemPowerControl::GracefulRestart,
+            )],
+        },
+    ];
+    for Case {
+        name,
+        operation,
+        boot_with_custom_ipxe,
+        apply_updates_on_reboot,
+        inject_failure,
+        error,
+        expected,
+    } in cases
+    {
+        let checkpoint = env.redfish_sim.timepoint();
+        if inject_failure {
+            env.redfish_sim
+                .fail_next_power_action(SystemPowerControl::GracefulRestart, "injected failure");
+        }
+        let result = env
+            .api
+            .invoke_instance_power(tonic::Request::new(rpc::forge::InstancePowerRequest {
+                instance_id: Some(instance.id),
+                operation,
+                boot_with_custom_ipxe,
+                apply_updates_on_reboot,
+            }))
+            .await;
+        assert_eq!(result.err().map(|err| err.code()), error, "{name}");
+        let actions = env.redfish_sim.actions_since(&checkpoint);
+        // The exact action and endpoint assertions also exclude DPU power operations.
+        assert_eq!(actions.all_hosts(), expected, "{name}");
+        assert_eq!(actions.for_host(&host_ip.to_string()), expected, "{name}");
+    }
+
+    for (name, vendor, model, missing) in [
+        (
+            "platform requiring IPMI",
+            Some(bmc_vendor::BMCVendor::Lenovo),
+            Some("ThinkSystem SR650 V4"),
+            false,
+        ),
+        ("incomplete discovery", None, None, false),
+        ("missing discovery", None, None, true),
+    ] {
+        let mut txn = env.pool.begin().await.unwrap();
+        if missing {
+            db::explored_endpoints::delete(&mut txn, host_ip)
+                .await
+                .unwrap();
+        } else {
+            let endpoint = db::explored_endpoints::find_by_ips(&mut *txn, vec![host_ip])
+                .await
+                .unwrap()
+                .pop()
+                .unwrap();
+            let mut report = endpoint.report;
+            report.vendor = vendor;
+            report.model = model.map(str::to_owned);
+            assert_eq!(
+                db::explored_endpoints::try_update(
+                    host_ip,
+                    endpoint.report_version,
+                    &report,
+                    endpoint.waiting_for_explorer_refresh,
+                    &mut txn
+                )
+                .await
+                .unwrap(),
+                db::ConditionalWrite::Applied(())
+            );
+        }
+        txn.commit().await.unwrap();
+        let checkpoint = env.redfish_sim.timepoint();
+        let err = env
+            .api
+            .invoke_instance_power(tonic::Request::new(rpc::forge::InstancePowerRequest {
+                instance_id: Some(instance.id),
+                operation: Operation::PowerGracefulRestart as i32,
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition, "{name}");
+        assert!(
+            env.redfish_sim
+                .actions_since(&checkpoint)
+                .all_hosts()
+                .is_empty(),
+            "{name}"
+        );
+    }
 }
 
 async fn invoke_instance_power(

@@ -353,7 +353,8 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 				}
 			}
 
-			// Update power status if appropriate
+			// This reflects inventory readiness, not proof of a completed reboot.
+			// Core may remain READY even if an OS ignores a graceful restart.
 			if status == cdbm.InstanceStatusReady && (instance.PowerStatus == nil || *instance.PowerStatus != cdbm.InstancePowerStatusBootCompleted) {
 				powerStatus = cwutil.GetPtr(cdbm.InstancePowerStatusBootCompleted)
 

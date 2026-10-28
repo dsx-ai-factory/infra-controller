@@ -274,6 +274,51 @@ pub struct EndpointExplorationReport {
 }
 
 impl EndpointExplorationReport {
+    /// Whether Redfish host restarts require the IPMI chassis-reset workaround.
+    /// `None` means discovery lacks the identifiers needed to evaluate the guard;
+    /// `Some(false)` only excludes known workarounds, not all hardware hazards.
+    ///
+    /// Lenovo SR650 V4 Redfish ForceRestart/GracefulRestart cuts DPU power and
+    /// causes PXE failures; IPMI chassis reset avoids this. This guard originated
+    /// in machine-controller's `needs_ipmi_restart`:
+    /// <https://github.com/NVIDIA/bare-metal-manager-core/issues/347>.
+    /// The controller also requires that workaround for NVIDIA DGX/BMC systems.
+    /// Both the controller and the instance graceful-reboot path use this guard.
+    pub fn requires_ipmi_restart(&self) -> Option<bool> {
+        use bmc_vendor::BMCVendor;
+
+        match self.vendor? {
+            BMCVendor::Unknown => None,
+            BMCVendor::Lenovo => self
+                .model
+                .as_deref()
+                .filter(|model| !model.trim().is_empty())
+                .map(|model| model.contains("SR650 V4")),
+            BMCVendor::Nvidia => {
+                if self.systems.iter().any(|system| system.id == "DGX")
+                    && self.managers.iter().any(|manager| manager.id == "BMC")
+                {
+                    Some(true)
+                } else if self.systems.is_empty()
+                    || self.managers.is_empty()
+                    || self
+                        .systems
+                        .iter()
+                        .any(|system| system.id.trim().is_empty())
+                    || self
+                        .managers
+                        .iter()
+                        .any(|manager| manager.id.trim().is_empty())
+                {
+                    None
+                } else {
+                    Some(false)
+                }
+            }
+            _ => Some(false),
+        }
+    }
+
     /// Returns the system selected for endpoint identity and host management.
     /// The first entry is primary; an empty report has no primary system.
     pub fn primary_system(&self) -> Option<&ComputerSystem> {
@@ -2914,6 +2959,46 @@ mod tests {
     use super::*;
     use crate::firmware::FirmwareComponent;
     use crate::machine::machine_id::from_hardware_info;
+
+    #[test]
+    fn restart_workaround_classifies_platforms_and_missing_identity() {
+        use bmc_vendor::BMCVendor::{Dell, Lenovo, Nvidia, Unknown};
+
+        value_scenarios!(run = |(vendor, model, systems, managers): (
+            Option<bmc_vendor::BMCVendor>, Option<&str>, Vec<&str>, Vec<&str>
+        )| {
+            EndpointExplorationReport {
+                vendor,
+                model: model.map(str::to_owned),
+                systems: systems.into_iter().map(|id| ComputerSystem {
+                    id: id.into(), ..Default::default()
+                }).collect(),
+                managers: managers.into_iter().map(|id| Manager {
+                    id: id.into(), ..Default::default()
+                }).collect(),
+                ..Default::default()
+            }.requires_ipmi_restart()
+        };
+            "known platform workarounds" {
+                (Some(Lenovo), Some("ThinkSystem SR650 V4"), vec![], vec![]) => Some(true),
+                (Some(Lenovo), Some("ThinkSystem SR650 V3"), vec![], vec![]) => Some(false),
+                (Some(Nvidia), None, vec!["DGX"], vec!["BMC"]) => Some(true),
+                (Some(Nvidia), None, vec!["Other"], vec!["BMC"]) => Some(false),
+                (Some(Nvidia), None, vec!["DGX"], vec!["Other"]) => Some(false),
+                (Some(Dell), None, vec![], vec![]) => Some(false),
+            }
+            "insufficient platform identity" {
+                (None, None, vec![], vec![]) => None,
+                (Some(Unknown), None, vec![], vec![]) => None,
+                (Some(Lenovo), None, vec![], vec![]) => None,
+                (Some(Lenovo), Some(" "), vec![], vec![]) => None,
+                (Some(Nvidia), None, vec![], vec!["BMC"]) => None,
+                (Some(Nvidia), None, vec!["DGX"], vec![]) => None,
+                (Some(Nvidia), None, vec![""], vec!["BMC"]) => None,
+                (Some(Nvidia), None, vec!["DGX"], vec![""]) => None,
+            }
+        );
+    }
 
     fn processor_position_report() -> EndpointExplorationReport {
         EndpointExplorationReport {
