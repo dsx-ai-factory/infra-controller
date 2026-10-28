@@ -13,6 +13,12 @@
 {{- with .Values.otlpEndpoint -}}
 {{- $_ := set $env "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" . -}}
 {{- end -}}
+{{- /* Artifact-permission group: the value when explicitly set (including 0,
+       which `default` would treat as empty), otherwise 10001 to match the
+       serving container's default runAsGroup. dig over a normalized dict also
+       tolerates a null podSecurityContext. */ -}}
+{{- $artifactFsGroup := dig "fsGroup" 10001 (default (dict) .Values.podSecurityContext) -}}
+{{- if kindIs "invalid" $artifactFsGroup -}}{{- $artifactFsGroup = 10001 -}}{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -37,11 +43,18 @@ spec:
         kubectl.kubernetes.io/default-container: {{ include "nico-pxe.name" . }}
     spec:
       serviceAccountName: {{ include "nico-pxe.name" . }}
+      {{- /* Absent keys (a --reuse-values upgrade from before these values
+             existed) fall back to the pre-configurability defaults, so the
+             pod keeps its fsGroup; a present key — including null — is
+             honored as the operator wrote it. */ -}}
+      {{- $podCtx := .Values.podSecurityContext }}
+      {{- if not (hasKey .Values "podSecurityContext") }}
+      {{-   $podCtx = dict "fsGroup" 10001 }}
+      {{- end }}
+      {{- with $podCtx }}
       securityContext:
-        # The artifact init containers need root to copy from their images.
-        # Only the serving container runs as UID/GID 10001. The final artifact
-        # init container makes restrictive source modes readable by that group.
-        fsGroup: 10001
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -78,7 +91,14 @@ spec:
             - /bin/sh
             - -ec
             - |
-              chgrp -R 10001 /forge-boot-artifacts/blobs/internal
+              # kubelet applies the admitted fsGroup (chart value or SCC-assigned)
+              # to the emptyDir mount; read the effective group off the volume so
+              # the copied trees match whatever group the pod actually runs with.
+              # Fall back to the chart-configured group when the mount is root-
+              # owned (no fsGroup in effect anywhere).
+              target_group="$(stat -c %g /forge-boot-artifacts/blobs/internal)"
+              if [ "$target_group" = "0" ]; then target_group={{ $artifactFsGroup }}; fi
+              chgrp -R "$target_group" /forge-boot-artifacts/blobs/internal
               chmod -R g+rX /forge-boot-artifacts/blobs/internal
           securityContext:
             runAsUser: 0
@@ -130,9 +150,16 @@ spec:
                 optional: {{ .Values.envFrom.pxeEnvConfig.optional | default true }}
           {{- end }}
           imagePullPolicy: {{ include "nico-pxe.imagePullPolicy" . }}
+          {{- /* Absent key (a --reuse-values upgrade from before this value
+                 existed) falls back to the pre-configurability non-root
+                 defaults; a present key — including null — is honored. */ -}}
+          {{- $ctx := .Values.containerSecurityContext }}
+          {{- if not (hasKey .Values "containerSecurityContext") }}
+          {{-   $ctx = dict "runAsNonRoot" true "runAsUser" 10001 "runAsGroup" 10001 }}
+          {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
-            {{- with .Values.containerSecurityContext }}
+            {{- with $ctx }}
             {{- $ctxOverrides := omit . "allowPrivilegeEscalation" }}
             {{- with $ctxOverrides }}
             {{- toYaml $ctxOverrides | nindent 12 }}
