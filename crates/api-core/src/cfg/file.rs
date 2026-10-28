@@ -5653,6 +5653,7 @@ path = "credentials.yaml"
             tenant_keyset_id: None,
             network_virtualization_type: VpcVirtualizationType::Fnn,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             default_nvlink_logical_partition_id: None,
             vni: None,
             routing_profile_type: routing_profile_type.map(str::to_string),

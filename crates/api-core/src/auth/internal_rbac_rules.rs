@@ -706,6 +706,10 @@ impl InternalRBACRules {
             "GetNetworkSecurityGroupAttachments",
             vec![ForgeAdminCLI, SiteAgent],
         );
+        x.perm("CreateDhcpOptionSet", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("FindDhcpOptionSetsByIds", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("UpdateDhcpOptionSet", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("DeleteDhcpOptionSet", vec![ForgeAdminCLI, SiteAgent]);
         x.perm(
             "GetDesiredFirmwareVersions",
             vec![ForgeAdminCLI, Machineatron, Flow],

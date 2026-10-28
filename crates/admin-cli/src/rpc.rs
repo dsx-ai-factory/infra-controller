@@ -1633,6 +1633,7 @@ impl ApiClient {
                     labels: vec![],
                 }),
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 default_nvlink_logical_partition_id: None,
             })
             .await
@@ -1697,6 +1698,7 @@ impl ApiClient {
                     labels: vec![],
                 }),
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 default_nvlink_logical_partition_id: None,
             })
             .await?)
@@ -2341,6 +2343,7 @@ impl ApiClient {
                 auto: allocate_instance.flat_vpc_id.is_some(),
             }),
             network_security_group_id: allocate_instance.network_security_group_id.clone(),
+            dhcp_option_set_id: None,
             infiniband: None,
             dpu_extension_services: None,
             nvlink: None,
@@ -2731,6 +2734,7 @@ impl ApiClient {
             if_version_match: Some(version),
             metadata,
             network_security_group_id,
+            dhcp_option_set_id: None,
             default_nvlink_logical_partition_id: None,
             routing_profile_overrides: None,
             power_resource_group: None,

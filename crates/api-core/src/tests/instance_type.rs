@@ -486,6 +486,7 @@ async fn test_instance_type_delete(pool: sqlx::PgPool) -> Result<(), Box<dyn std
                 nvlink: None,
                 spxconfig: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 power_profile: None,
             }),
@@ -683,6 +684,7 @@ async fn test_instance_type_associate(
             instance_type_id: Some("1fcd4e9a-be16-11ef-b892-0fad889bcd2b".to_string()),
             config: Some(rpc::InstanceConfig {
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 tenant: Some(default_tenant_config()),
                 os: Some(default_os_config()),
                 network: None,
@@ -710,6 +712,7 @@ async fn test_instance_type_associate(
             instance_type_id: machine.config.as_ref().unwrap().instance_type_id.clone(),
             config: Some(rpc::InstanceConfig {
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 tenant: Some(default_tenant_config()),
                 os: Some(default_os_config()),
                 network: Some(single_interface_network_config(

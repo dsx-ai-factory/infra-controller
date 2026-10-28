@@ -103,6 +103,7 @@ async fn create_stretchable_segment_for_svi_test_with_vpc_type(
                 ..Default::default()
             },
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             routing_profile_type: None,
             routing_profile_overrides: None,
             power_resource_group: None,

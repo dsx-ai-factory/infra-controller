@@ -878,6 +878,7 @@ mod tests {
                 tenant_keyset_id: None,
                 network_virtualization_type: VpcVirtualizationType::Fnn,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 default_nvlink_logical_partition_id: None,
                 vni: None,
                 routing_profile_type: Some("ELIGIBLE".to_string()),

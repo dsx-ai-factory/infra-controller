@@ -3062,6 +3062,34 @@ impl Forge for Api {
     ) -> Result<Response<rpc::GetNetworkSecurityGroupAttachmentsResponse>, Status> {
         crate::handlers::network_security_group::get_attachments(self, request).await
     }
+
+    async fn create_dhcp_option_set(
+        &self,
+        request: Request<rpc::CreateDhcpOptionSetRequest>,
+    ) -> Result<Response<rpc::CreateDhcpOptionSetResponse>, Status> {
+        crate::handlers::dhcp_option_set::create(self, request).await
+    }
+
+    async fn find_dhcp_option_sets_by_ids(
+        &self,
+        request: Request<rpc::FindDhcpOptionSetsByIdsRequest>,
+    ) -> Result<Response<rpc::FindDhcpOptionSetsByIdsResponse>, Status> {
+        crate::handlers::dhcp_option_set::find_by_ids(self, request).await
+    }
+
+    async fn update_dhcp_option_set(
+        &self,
+        request: Request<rpc::UpdateDhcpOptionSetRequest>,
+    ) -> Result<Response<rpc::UpdateDhcpOptionSetResponse>, Status> {
+        crate::handlers::dhcp_option_set::update(self, request).await
+    }
+
+    async fn delete_dhcp_option_set(
+        &self,
+        request: Request<rpc::DeleteDhcpOptionSetRequest>,
+    ) -> Result<Response<rpc::DeleteDhcpOptionSetResponse>, Status> {
+        crate::handlers::dhcp_option_set::delete(self, request).await
+    }
     async fn create_compute_allocation(
         &self,
         request: tonic::Request<rpc::CreateComputeAllocationRequest>,

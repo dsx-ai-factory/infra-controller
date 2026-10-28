@@ -779,6 +779,14 @@ service Forge {
   rpc GetNetworkSecurityGroupPropagationStatus(GetNetworkSecurityGroupPropagationStatusRequest) returns (GetNetworkSecurityGroupPropagationStatusResponse);
   rpc GetNetworkSecurityGroupAttachments(GetNetworkSecurityGroupAttachmentsRequest) returns (GetNetworkSecurityGroupAttachmentsResponse);
 
+  //
+  // DhcpOptionSets
+  //
+  rpc CreateDhcpOptionSet(CreateDhcpOptionSetRequest) returns (CreateDhcpOptionSetResponse);
+  rpc FindDhcpOptionSetsByIds(FindDhcpOptionSetsByIdsRequest) returns (FindDhcpOptionSetsByIdsResponse);
+  rpc UpdateDhcpOptionSet(UpdateDhcpOptionSetRequest) returns (UpdateDhcpOptionSetResponse);
+  rpc DeleteDhcpOptionSet(DeleteDhcpOptionSetRequest) returns (DeleteDhcpOptionSetResponse);
+
 
   rpc CreateOsImage(OsImageAttributes) returns (OsImage);
   rpc DeleteOsImage(DeleteOsImageRequest) returns (DeleteOsImageResponse);
@@ -2274,6 +2282,8 @@ message VpcConfig {
   // boundary. Core reports this field explicitly. An absent value indicates a
   // response from a Core version that predates SLAAC support.
   optional bool slaac_enabled = 10;
+  // DHCP option set used by hosts in this VPC unless an instance sets its own.
+  optional string dhcp_option_set_id = 11;
 }
 
 message VpcStatus {
@@ -2386,6 +2396,8 @@ message VpcCreationRequest {
   // SLAAC. Core evaluates this value only during VPC creation.
   // `VpcUpdateRequest` cannot change the resulting policy.
   optional bool slaac_enabled = 20;
+  // DHCP option set used by hosts in this VPC unless an instance sets its own.
+  optional string dhcp_option_set_id = 21;
 }
 
 enum VpcVirtualizationType {
@@ -2444,6 +2456,8 @@ message VpcUpdateRequest {
   // preserve the current association, send an empty string to remove it, or
   // send a non-empty value to replace it.
   optional string power_resource_group = 20;
+  // Omission keeps the current DHCP option set and an empty string removes it.
+  optional string dhcp_option_set_id = 21;
 }
 
 message VpcUpdateResult {
@@ -3834,6 +3848,10 @@ message InstanceConfig {
   // compatibility with older clients, an empty string explicitly clears it,
   // and a non-empty value replaces it.
   optional string power_profile = 26;
+
+  // DHCP option set for this instance; overrides the VPC's option set per field.
+  // On update, omission keeps the current option set and an empty string removes it.
+  optional string dhcp_option_set_id = 27;
 }
 
 // Desired network configuration for an instance
@@ -12913,6 +12931,71 @@ message ExpectedNvLinkDomainsByIdsRequest {
 message ExpectedNvLinkDomainList {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   repeated ExpectedNvLinkDomain domains = 1;
+}
+
+// Values left unset or empty keep NICo's default.
+message DhcpOptions {
+  DhcpOptionsV4 v4 = 1;
+  DhcpOptionsV6 v6 = 2;
+}
+
+message DhcpOptionsV4 {
+  optional string boot_url    = 1;
+  repeated string dns_servers = 2;
+}
+
+message DhcpOptionsV6 {
+  optional string boot_url    = 1;
+  repeated string dns_servers = 2;
+}
+
+message DhcpOptionSet {
+  common.DhcpOptionSetId id     = 1;
+  string tenant_organization_id = 2;
+  Metadata metadata             = 3;
+  DhcpOptions options           = 4;
+  string version                = 5;
+  optional string created_at    = 6;
+}
+
+message CreateDhcpOptionSetRequest {
+  optional common.DhcpOptionSetId id = 1;
+  string tenant_organization_id      = 2;
+  Metadata metadata                  = 3;
+  DhcpOptions options                = 4;
+}
+
+message CreateDhcpOptionSetResponse {
+  DhcpOptionSet dhcp_option_set = 1;
+}
+
+message FindDhcpOptionSetsByIdsRequest {
+  repeated common.DhcpOptionSetId ids    = 1;
+  optional string tenant_organization_id = 2;
+}
+
+message FindDhcpOptionSetsByIdsResponse {
+  repeated DhcpOptionSet dhcp_option_sets = 1;
+}
+
+message UpdateDhcpOptionSetRequest {
+  common.DhcpOptionSetId id        = 1;
+  string tenant_organization_id    = 2;
+  Metadata metadata                = 3;
+  DhcpOptions options              = 4;
+  optional string if_version_match = 5;
+}
+
+message UpdateDhcpOptionSetResponse {
+  DhcpOptionSet dhcp_option_set = 1;
+}
+
+message DeleteDhcpOptionSetRequest {
+  common.DhcpOptionSetId id     = 1;
+  string tenant_organization_id = 2;
+}
+
+message DeleteDhcpOptionSetResponse {
 }
 
 // `InspectResourcePoolsRequest` selects every pool with local inventory or a saved binding.

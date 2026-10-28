@@ -854,7 +854,7 @@ pub async fn update_config(
             operating_system_id=$2, os_ipxe_script=$3, os_user_data=$4, os_always_boot_with_ipxe=$5, os_phone_home_enabled=$6,
             os_image_id=$7, keyset_ids=$8,
             name=$9, description=$10, labels=$11::json, network_security_group_id=$14,
-            power_profile=$15
+            power_profile=$15, dhcp_option_set_id=$16
             WHERE id=$12 AND config_version=$13 AND deleted IS NULL
             RETURNING id";
     let query_result: Result<(InstanceId,), _> = sqlx::query_as(query)
@@ -873,6 +873,7 @@ pub async fn update_config(
         .bind(expected_version)
         .bind(config.network_security_group_id)
         .bind(config.power_profile)
+        .bind(config.dhcp_option_set_id)
         .fetch_one(&mut *txn)
         .await;
 
@@ -1129,7 +1130,7 @@ pub async fn update_extension_services_config(
 /// (126k binds) would fail outright. `batch_persist` chunks the INSERT into
 /// sub-batches of `BIND_LIMIT / BATCH_PERSIST_BINDS_PER_ROW` rows, all issued
 /// on the caller's transaction so the write stays all-or-nothing.
-const BATCH_PERSIST_BINDS_PER_ROW: usize = 28;
+const BATCH_PERSIST_BINDS_PER_ROW: usize = 29;
 
 /// Batch insert for multiple instances.
 /// This is optimized for inserting many instances in a single database operation.
@@ -1177,7 +1178,8 @@ pub async fn batch_persist<'a>(
                         nvlink_config_version,
                         spx_config,
                         spx_config_version,
-                        power_profile
+                        power_profile,
+                        dhcp_option_set_id
                     )
                     SELECT 
                             vals.id, vals.machine_id, vals.operating_system_id, vals.os_user_data, vals.os_ipxe_script,
@@ -1190,7 +1192,7 @@ pub async fn batch_persist<'a>(
                             vals.instance_type_id, vals.extension_services_config::json, 
                             vals.extension_services_config_version, vals.nvlink_config::json, 
                             vals.nvlink_config_version, vals.spx_config::json, vals.spx_config_version,
-                            vals.power_profile
+                            vals.power_profile, vals.dhcp_option_set_id
                     FROM (VALUES ";
 
     let expected_count = values.len() as u64;
@@ -1286,6 +1288,8 @@ pub async fn batch_persist<'a>(
             separated.push_bind_unseparated(value.spx_config_version);
             separated.push_unseparated(",");
             separated.push_bind_unseparated(&value.config.power_profile);
+            separated.push_unseparated(",");
+            separated.push_bind_unseparated(value.config.dhcp_option_set_id);
             separated.push_unseparated(")");
         }
 
@@ -1295,7 +1299,7 @@ pub async fn batch_persist<'a>(
                        description, labels, config_version, hostname, network_security_group_id,
                        instance_type_id, extension_services_config, extension_services_config_version,
                        nvlink_config, nvlink_config_version, spx_config, spx_config_version,
-                       power_profile)
+                       power_profile, dhcp_option_set_id)
             INNER JOIN machines m ON m.id = vals.machine_id
                 AND (vals.instance_type_id IS NULL OR m.instance_type_id = vals.instance_type_id)");
 
@@ -1758,6 +1762,7 @@ mod tests {
             network: InstanceNetworkConfig::default(),
             infiniband: InstanceInfinibandConfig::default(),
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             extension_services: InstanceExtensionServicesConfig::default(),
             nvlink: InstanceNvLinkConfig::default(),
             spxconfig: InstanceSpxConfig::default(),
