@@ -74,12 +74,12 @@ func (h *KeycloakProcessor) ProcessToken(c echo.Context, tokenStr string, jwksCo
 	// Get org name from URL path parameter
 	reqOrgName := c.Param("orgName")
 
-	// A client is a service account only for requests to the configured service account org,
-	// and only if it holds both Provider Admin and Tenant Admin there. A service account org is
-	// set up as its own Provider and Tenant.
+	// A client is a service account only if it holds both Provider Admin and Tenant Admin in the
+	// requested org, and only for the configured service account org when one is set. A service
+	// account org is set up as its own Provider and Tenant.
 	reqOrg, hasReqOrg := tokenOrgData[reqOrgName]
 	isServiceAccount := claims.GetClientId() != "" && jwksConfig.ServiceAccount && hasReqOrg &&
-		reqOrgName == jwksConfig.ServiceAccountOrg &&
+		(jwksConfig.ServiceAccountOrg == "" || reqOrgName == jwksConfig.ServiceAccountOrg) &&
 		authz.ValidateUserHasAllRolesInOrg(reqOrg, config.ServiceAccountRoles...)
 	config.SetIsServiceAccountInContext(c, isServiceAccount)
 

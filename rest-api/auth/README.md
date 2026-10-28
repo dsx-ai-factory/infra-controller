@@ -41,11 +41,11 @@ issuers:
 |------|---------------|-------|----------|
 | **A: Static-Static** | `orgName` + `roles` | Unlimited* | Fixed org & roles |
 | **B: Static-Dynamic** | `orgName` + `rolesAttribute` | Unlimited* | Fixed org, roles from token |
-| **C: Service Account** | `orgName` + `isServiceAccount: true` | 1 global** | M2M with admin roles |
+| **C: Service Account** | `orgName` + `isServiceAccount: true` | 1 when disconnected** | M2M with admin roles |
 | **D: Dynamic-Dynamic** | `orgAttribute` + `orgDisplayAttribute` + `rolesAttribute` | 1 global | Multi-tenant IdP |
 
 \*Each `orgName` must be globally unique across all issuers
-\*\*1 total across all issuers, and only in disconnected mode
+\*\*1 total across all issuers in disconnected mode, any number in connected mode
 
 ---
 
@@ -169,7 +169,7 @@ A token with `aud: ["nico-api", "clientA"]` can access only `orgA`; a token with
 | Issuer name | Must be unique across all configs |
 | Issuer URL | Can only appear once (no merging) |
 | `orgName` | Must be globally unique across all issuers |
-| Type C (Service Account) | 1 total, disconnected mode only |
+| Type C (Service Account) | 1 total in disconnected mode, any number in connected mode |
 | Type D (Dynamic Org) | Only 1 allowed across all issuers |
 | Static `orgDisplayName` | Required for Types A, B, C |
 
@@ -225,8 +225,8 @@ Once Keycloak configuration is finalized, the ingress controller for the Keycloa
 | `keycloak.realm` | Keycloak realm name | `nico` |
 | `keycloak.clientID` | OAuth client ID | `nico-cloud` |
 | `keycloak.clientSecretPath` | Path to mounted client secret | `/var/secrets/keycloak/client-secret` |
-| `keycloak.serviceAccount` | Accept client credentials tokens that hold both `PROVIDER_ADMIN` and `TENANT_ADMIN` in `keycloak.serviceAccountOrg`, as service accounts. Disconnected mode only | `true` |
-| `keycloak.serviceAccountOrg` | The org whose clients can be service accounts. Only a single org in a disconnected NICo Site can have service account privilege. Required when `keycloak.serviceAccount` is `true` | `ncx` |
+| `keycloak.serviceAccount` | Accept client credentials tokens that hold both `PROVIDER_ADMIN` and `TENANT_ADMIN` in the requested org, as service accounts | `true` |
+| `keycloak.serviceAccountOrg` | The org whose clients can be service accounts. Only a single org in a disconnected NICo Site can have service account privilege, so it is required when `keycloak.serviceAccount` is `true` in disconnected mode. Optional in connected mode | `ncx` |
 
 ### Step 1: Create the Client Secret in Kubernetes
 

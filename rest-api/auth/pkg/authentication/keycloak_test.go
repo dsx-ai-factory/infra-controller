@@ -893,15 +893,16 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 	processors.InitializeProcessors(toCfg, dbSession, tc, encCfg, nil)
 
 	tests := []struct {
-		name           string
-		tokenClaims    *claim.KeycloakClaims
-		path           string
-		orgName        string
-		serviceAccount bool
-		expectedStatus int
-		expectedErrMsg string
-		wantErr        bool
-		validateUser   func(*testing.T, echo.Context)
+		name              string
+		tokenClaims       *claim.KeycloakClaims
+		path              string
+		orgName           string
+		serviceAccount    bool
+		serviceAccountOrg string
+		expectedStatus    int
+		expectedErrMsg    string
+		wantErr           bool
+		validateUser      func(*testing.T, echo.Context)
 	}{
 		{
 			name: "successful keycloak user authentication and creation",
@@ -978,10 +979,11 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 				},
 			},
-			path:           "/v2/org/testorg/user/current",
-			orgName:        "testorg",
-			serviceAccount: true,
-			wantErr:        false,
+			path:              "/v2/org/testorg/user/current",
+			orgName:           "testorg",
+			serviceAccount:    true,
+			serviceAccountOrg: "testorg",
+			wantErr:           false,
 			validateUser: func(t *testing.T, c echo.Context) {
 				assert.True(t, config.GetIsServiceAccountFromContext(c))
 			},
@@ -1019,12 +1021,34 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 				},
 			},
+			path:              "/v2/org/otherorg/user/current",
+			orgName:           "otherorg",
+			serviceAccount:    true,
+			serviceAccountOrg: "testorg",
+			wantErr:           false,
+			validateUser: func(t *testing.T, c echo.Context) {
+				assert.False(t, config.GetIsServiceAccountFromContext(c))
+			},
+		},
+		{
+			name: "keycloak client with Provider Admin and Tenant Admin roles is a service account in any org without a service account org",
+			tokenClaims: &claim.KeycloakClaims{
+				ClientId: "connected-org-client",
+				RealmAccess: claim.RealmAccess{
+					Roles: []string{"otherorg:PROVIDER_ADMIN", "otherorg:TENANT_ADMIN"},
+				},
+				RegisteredClaims: jwt.RegisteredClaims{
+					Subject:   "service-account-246",
+					Issuer:    jwksServer.URL + "/realms/nico",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+				},
+			},
 			path:           "/v2/org/otherorg/user/current",
 			orgName:        "otherorg",
 			serviceAccount: true,
 			wantErr:        false,
 			validateUser: func(t *testing.T, c echo.Context) {
-				assert.False(t, config.GetIsServiceAccountFromContext(c))
+				assert.True(t, config.GetIsServiceAccountFromContext(c))
 			},
 		},
 		{
@@ -1087,11 +1111,11 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 
 	jwksCfg := toCfg.GetConfig(jwksServer.URL + "/realms/nico")
 	require.NotNil(t, jwksCfg)
-	jwksCfg.ServiceAccountOrg = "testorg"
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			jwksCfg.ServiceAccount = tt.serviceAccount
+			jwksCfg.ServiceAccountOrg = tt.serviceAccountOrg
 
 			// Create JWT token with the test claims using consistent RSA key
 			privateKey := getConsistentTestRSAKey()
