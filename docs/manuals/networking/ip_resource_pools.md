@@ -171,7 +171,7 @@ A loopback address must belong to a non-auto-assign range (`auto_assign = false`
 
 Loopbacks do not participate in DHCP, physical-interface preallocation, or primary-interface selection. In the example, `192.0.2.20` configures the OS interface and must satisfy its managed-prefix rules; the other addresses come from loopback pools.
 
-Site Explorer matches each declared OS/admin MAC to one discovered DPU within the expected host. Missing or ambiguous matches defer creation with an error. Direct discovery uses the authenticated caller's OS/admin interface MAC. Neither path needs a pre-existing MAC-to-machine association to allocate a loopback. Both claim addresses transactionally with creation, with live pool ownership assigned to the DPU MachineId. A family without a declaration keeps automatic allocation.
+Site Explorer matches each declared OS/admin MAC to one discovered DPU within the expected host. Missing or ambiguous matches defer creation with an error. When the expected host has `dpu_policy: "nic"` or `"ignore"` and no managed DPUs, ingestion proceeds while preserving loopback declarations without allocating their addresses. Direct discovery uses the authenticated caller's OS/admin interface MAC. Neither path needs a pre-existing MAC-to-machine association to allocate a loopback. Both claim addresses transactionally with creation, with live pool ownership assigned to the DPU MachineId. A family without a declaration keeps automatic allocation.
 
 ### Updates and lifecycle
 

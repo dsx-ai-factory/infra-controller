@@ -2020,6 +2020,109 @@ async fn test_machine_creator_rejects_unexpected_host(
 }
 
 #[sqlx_test]
+async fn test_zero_dpu_loopback_reservations_follow_host_policy(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::expected_machine::DpuLoopbackReservation;
+    use model::resource_pool::ResourcePoolEntryState;
+
+    let env = Env::new(pool).await;
+    let creator = machine_creator(&env, machine_creator_config());
+    let common_pools = env.api().common_pools();
+    let loopback_pool = common_pools.ethernet.pool_loopback_ip.as_ref();
+
+    for (policy, suffix, should_create) in [
+        (HostDpuPolicy::Manage, 30, false),
+        (HostDpuPolicy::Nic, 31, true),
+        (HostDpuPolicy::Ignore, 32, true),
+    ] {
+        let reservation = DpuLoopbackReservation {
+            dpu_oob_mac_address: DpuConfig::default().oob_mac_address,
+            loopback_ipv4: Some(std::net::Ipv4Addr::new(192, 0, 2, suffix)),
+            loopback_ipv6: None,
+        };
+        let host = ManagedHostConfig {
+            dpus: vec![],
+            ..ManagedHostConfig::default()
+        }
+        .with_expected_machine_data(ExpectedMachineData {
+            dpu_policy: policy,
+            serial_number: format!("LOOPBACK-POLICY-{suffix}"),
+            interfaces: reservation.interfaces().collect(),
+            ..Default::default()
+        });
+        let expected = expected_machine(&host);
+        let address = IpAddr::V4(reservation.loopback_ipv4.unwrap());
+        let mut txn = env.pool.begin().await?;
+        db::resource_pool::populate(loopback_pool, &mut txn, vec![address], false).await?;
+        db::expected_machine::create(&mut txn, expected.clone()).await?;
+        txn.commit().await?;
+        let mut fixture = explored_host_fixture(&env, &host).await;
+
+        let result = creator
+            .create_managed_host(
+                &fixture.host,
+                &mut fixture.host_report,
+                Some(&expected),
+                &env.pool,
+            )
+            .await;
+        if should_create {
+            assert!(result?, "{policy:?} should allow zero-DPU ingestion");
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("DPU loopback declarations exist but discovery reported no DPUs"),
+                "{policy:?} must reject unmatched reservations"
+            );
+        }
+
+        let mut txn = env.pool.begin().await?;
+        let host_id = db::machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(
+            &mut txn,
+            host.bmc_mac_address,
+        )
+        .await?;
+        assert_eq!(host_id.is_some(), should_create, "{policy:?}");
+        if let Some(host_id) = host_id {
+            assert!(
+                db::machine::find_one(
+                    &mut *txn,
+                    &host_id,
+                    MachineSearchConfig {
+                        include_predicted_host: true,
+                        ..Default::default()
+                    },
+                )
+                .await?
+                .is_some(),
+                "{policy:?} must persist the host"
+            );
+        }
+        assert_eq!(
+            db::expected_dpu_loopback_reservation::find_for_machine(
+                &mut *txn,
+                host.bmc_mac_address,
+            )
+            .await?,
+            vec![reservation],
+            "{policy:?} must preserve reservation intent"
+        );
+        assert!(matches!(
+            db::resource_pool::find_value_in_pool(loopback_pool, &mut *txn, &address)
+                .await?
+                .unwrap()
+                .state,
+            ResourcePoolEntryState::Free
+        ));
+        txn.commit().await?;
+    }
+    Ok(())
+}
+
+#[sqlx_test]
 async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -2069,12 +2172,12 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
             data: ExpectedMachineData {
                 interfaces: [
                     DpuLoopbackReservation {
-                        dpu_mac_address: dpu_a.oob_mac_address,
+                        dpu_oob_mac_address: dpu_a.oob_mac_address,
                         loopback_ipv4: Some(a_v4),
                         loopback_ipv6: Some(a_v6),
                     },
                     DpuLoopbackReservation {
-                        dpu_mac_address: dpu_b.oob_mac_address,
+                        dpu_oob_mac_address: dpu_b.oob_mac_address,
                         loopback_ipv4: Some(b_v4),
                         loopback_ipv6: Some(b_v6),
                     },

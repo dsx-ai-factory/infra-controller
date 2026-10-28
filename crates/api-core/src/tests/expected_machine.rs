@@ -5226,7 +5226,7 @@ async fn create_missing_from_validates_reservation_pool_membership(
         "1A:1B:1C:1D:1E:01",
         "VVG12101",
         model::expected_machine::DpuLoopbackReservation {
-            dpu_mac_address: "02:00:00:00:00:03".parse().unwrap(),
+            dpu_oob_mac_address: "02:00:00:00:00:03".parse().unwrap(),
             loopback_ipv4: Some("198.51.100.1".parse()?),
             loopback_ipv6: None,
         },
@@ -5247,7 +5247,7 @@ async fn create_missing_from_validates_reservation_pool_membership(
         "1A:1B:1C:1D:1E:02",
         "VVG12102",
         model::expected_machine::DpuLoopbackReservation {
-            dpu_mac_address: "02:00:00:00:00:04".parse().unwrap(),
+            dpu_oob_mac_address: "02:00:00:00:00:04".parse().unwrap(),
             loopback_ipv4: Some("192.0.2.10".parse()?),
             loopback_ipv6: None,
         },

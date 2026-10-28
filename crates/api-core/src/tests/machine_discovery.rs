@@ -706,7 +706,7 @@ async fn seed_reservation_host(
                 interfaces: reservation
                     .interfaces()
                     .chain([model::expected_machine::ExpectedInterface {
-                        mac_address: Some(reservation.dpu_mac_address),
+                        mac_address: Some(reservation.dpu_oob_mac_address),
                         role: model::expected_machine::ExpectedInterfaceRole::DpuOs,
                         ip_allocation: Some(
                             model::expected_machine::ExpectedInterfaceIpAllocation::Fixed,
@@ -818,7 +818,7 @@ async fn test_direct_discovery_applies_dpu_loopback_reservation(
         &env,
         "aa:bb:cc:dd:ee:10".parse()?,
         model::expected_machine::DpuLoopbackReservation {
-            dpu_mac_address: dpu.oob_mac_address,
+            dpu_oob_mac_address: dpu.oob_mac_address,
             loopback_ipv4: Some(reserved_v4),
             loopback_ipv6: Some(reserved_v6),
         },
@@ -878,7 +878,7 @@ async fn test_direct_discovery_applies_dpu_loopback_reservation(
     expected.chassis_serial_number = "LOOPBACK-HOST".to_string();
     expected.host_nics.extend(
         model::expected_machine::DpuLoopbackReservation {
-            dpu_mac_address: dpu.oob_mac_address,
+            dpu_oob_mac_address: dpu.oob_mac_address,
             loopback_ipv4: Some(reserved_v4),
             loopback_ipv6: Some(reserved_v6),
         }
@@ -920,7 +920,7 @@ async fn test_direct_discovery_does_not_use_another_mac_reservation(
         &env,
         "aa:bb:cc:dd:ee:20".parse()?,
         model::expected_machine::DpuLoopbackReservation {
-            dpu_mac_address: "02:00:00:00:ff:ff".parse()?,
+            dpu_oob_mac_address: "02:00:00:00:ff:ff".parse()?,
             loopback_ipv4: Some(reserved_v4),
             loopback_ipv6: None,
         },

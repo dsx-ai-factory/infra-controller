@@ -32,14 +32,15 @@ use sqlx::{PgConnection, QueryBuilder, Row};
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
-const SQL_VIOLATION_DUPLICATE_MAC: &str = "expected_dpu_loopback_reservations_dpu_mac_address_key";
+const SQL_VIOLATION_DUPLICATE_MAC: &str =
+    "expected_dpu_loopback_reservations_dpu_oob_mac_address_key";
 const SQL_VIOLATION_DUPLICATE_IPV4: &str = "expected_dpu_loopback_reservations_loopback_ipv4_key";
 const SQL_VIOLATION_DUPLICATE_IPV6: &str = "expected_dpu_loopback_reservations_loopback_ipv6_key";
 
 fn reservation_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> Result<DpuLoopbackReservation, sqlx::Error> {
-    let dpu_mac_address: MacAddress = row.try_get("dpu_mac_address")?;
+    let dpu_oob_mac_address: MacAddress = row.try_get("dpu_oob_mac_address")?;
     // The table's family CHECK constraints guarantee each column holds its own
     // address family. Surface any violation as a decode error rather than
     // silently coercing a wrong-family value to `None`, which would hydrate an
@@ -63,7 +64,7 @@ fn reservation_from_row(
         }
     };
     Ok(DpuLoopbackReservation {
-        dpu_mac_address,
+        dpu_oob_mac_address,
         loopback_ipv4,
         loopback_ipv6,
     })
@@ -72,14 +73,14 @@ fn reservation_from_row(
 /// Reservations declared for one host expected machine, ordered by MAC.
 pub async fn find_for_machine(
     db: impl DbReader<'_>,
-    host_bmc_mac: MacAddress,
+    host_bmc_mac_address: MacAddress,
 ) -> DatabaseResult<Vec<DpuLoopbackReservation>> {
-    let sql = "SELECT dpu_mac_address, loopback_ipv4, loopback_ipv6 \
+    let sql = "SELECT dpu_oob_mac_address, loopback_ipv4, loopback_ipv6 \
                FROM expected_dpu_loopback_reservations \
-               WHERE bmc_mac_address = $1 \
-               ORDER BY dpu_mac_address";
+               WHERE host_bmc_mac_address = $1 \
+               ORDER BY dpu_oob_mac_address";
     let rows = sqlx::query(sql)
-        .bind(host_bmc_mac)
+        .bind(host_bmc_mac_address)
         .fetch_all(db)
         .await
         .map_err(|err| DatabaseError::query(sql, err))?;
@@ -103,17 +104,17 @@ pub async fn find_for_machine(
 /// Call this at the same point the automatic path would read intent, before the
 /// loopback-pool row locks and any admin-segment locks, so the lock order the
 /// creation transaction already establishes is preserved.
-pub async fn find_by_dpu_mac_for_update(
+pub async fn find_by_dpu_oob_mac_for_update(
     txn: &mut PgConnection,
-    dpu_mac_address: MacAddress,
+    dpu_oob_mac_address: MacAddress,
 ) -> DatabaseResult<Option<DpuLoopbackReservation>> {
     lock_inventory(txn).await?;
-    let sql = "SELECT dpu_mac_address, loopback_ipv4, loopback_ipv6 \
+    let sql = "SELECT dpu_oob_mac_address, loopback_ipv4, loopback_ipv6 \
                FROM expected_dpu_loopback_reservations \
-               WHERE dpu_mac_address = $1 \
+               WHERE dpu_oob_mac_address = $1 \
                FOR UPDATE";
     let row = sqlx::query(sql)
-        .bind(dpu_mac_address)
+        .bind(dpu_oob_mac_address)
         .fetch_optional(&mut *txn)
         .await
         .map_err(|err| DatabaseError::query(sql, err))?;
@@ -128,7 +129,7 @@ pub async fn find_by_dpu_mac_for_update(
 /// A reservation writer (add / update / replace-all / patch) calls this before
 /// it validates a replacement set against the live resource pool, so it
 /// serializes with any DPU creation that has locked one of those rows through
-/// [`find_by_dpu_mac_for_update`]. Without it, a same-host "transfer address
+/// [`find_by_dpu_oob_mac_for_update`]. Without it, a same-host "transfer address
 /// X from DPU A to DPU B" could validate X as free while a creating transaction
 /// is mid-flight allocating X to A, then persist B -> X after that creation
 /// commits. Holding the row lock forces the writer to wait and re-observe the
@@ -138,14 +139,14 @@ pub async fn find_by_dpu_mac_for_update(
 /// prior intent for a creation to have read.
 pub async fn lock_for_machine(
     txn: &mut PgConnection,
-    host_bmc_mac: MacAddress,
+    host_bmc_mac_address: MacAddress,
 ) -> DatabaseResult<()> {
     lock_inventory(txn).await?;
     let sql = "SELECT 1 FROM expected_dpu_loopback_reservations \
-               WHERE bmc_mac_address = $1 \
+               WHERE host_bmc_mac_address = $1 \
                FOR UPDATE";
     sqlx::query(sql)
-        .bind(host_bmc_mac)
+        .bind(host_bmc_mac_address)
         .fetch_all(&mut *txn)
         .await
         .map_err(|err| DatabaseError::query(sql, err))?;
@@ -170,17 +171,17 @@ async fn lock_inventory(txn: &mut PgConnection) -> DatabaseResult<()> {
 /// so the two move atomically. An empty slice clears the host's reservations.
 pub async fn replace_for_machine(
     txn: &mut PgConnection,
-    host_bmc_mac: MacAddress,
+    host_bmc_mac_address: MacAddress,
     reservations: &[DpuLoopbackReservation],
 ) -> DatabaseResult<()> {
     lock_inventory(txn).await?;
-    let delete = "DELETE FROM expected_dpu_loopback_reservations WHERE bmc_mac_address = $1 AND NOT (dpu_mac_address = ANY($2))";
+    let delete = "DELETE FROM expected_dpu_loopback_reservations WHERE host_bmc_mac_address = $1 AND NOT (dpu_oob_mac_address = ANY($2))";
     sqlx::query(delete)
-        .bind(host_bmc_mac)
+        .bind(host_bmc_mac_address)
         .bind(
             reservations
                 .iter()
-                .map(|r| r.dpu_mac_address)
+                .map(|r| r.dpu_oob_mac_address)
                 .collect::<Vec<_>>(),
         )
         .execute(&mut *txn)
@@ -200,18 +201,18 @@ pub async fn replace_for_machine(
         .map_err(|error| DatabaseError::query(defer, error))?;
     let mut builder = QueryBuilder::new(
         "INSERT INTO expected_dpu_loopback_reservations \
-         (bmc_mac_address, dpu_mac_address, loopback_ipv4, loopback_ipv6) ",
+         (host_bmc_mac_address, dpu_oob_mac_address, loopback_ipv4, loopback_ipv6) ",
     );
     builder.push_values(reservations, |mut b, reservation| {
-        b.push_bind(host_bmc_mac)
-            .push_bind(reservation.dpu_mac_address)
+        b.push_bind(host_bmc_mac_address)
+            .push_bind(reservation.dpu_oob_mac_address)
             .push_bind(reservation.loopback_ipv4.map(IpAddr::V4))
             .push_bind(reservation.loopback_ipv6.map(IpAddr::V6));
     });
 
     // Keep existing selector rows in place: a creator waiting on FOR UPDATE
     // must see the new intent, not miss a replacement DELETE/INSERT snapshot.
-    builder.push(" ON CONFLICT (dpu_mac_address) DO UPDATE SET loopback_ipv4 = EXCLUDED.loopback_ipv4, loopback_ipv6 = EXCLUDED.loopback_ipv6 WHERE expected_dpu_loopback_reservations.bmc_mac_address = EXCLUDED.bmc_mac_address");
+    builder.push(" ON CONFLICT (dpu_oob_mac_address) DO UPDATE SET loopback_ipv4 = EXCLUDED.loopback_ipv4, loopback_ipv6 = EXCLUDED.loopback_ipv6 WHERE expected_dpu_loopback_reservations.host_bmc_mac_address = EXCLUDED.host_bmc_mac_address");
     let result = builder
         .build()
         .execute(&mut *txn)
@@ -300,7 +301,7 @@ mod tests {
 
     fn reservation(mac: &str, v4: Option<&str>, v6: Option<&str>) -> DpuLoopbackReservation {
         DpuLoopbackReservation {
-            dpu_mac_address: mac.parse().unwrap(),
+            dpu_oob_mac_address: mac.parse().unwrap(),
             loopback_ipv4: v4.map(|s| s.parse::<Ipv4Addr>().unwrap()),
             loopback_ipv6: v6.map(|s| s.parse::<Ipv6Addr>().unwrap()),
         }
@@ -331,18 +332,18 @@ mod tests {
         assert_eq!(
             hydrated
                 .iter()
-                .map(|r| r.dpu_mac_address.to_string())
+                .map(|r| r.dpu_oob_mac_address.to_string())
                 .collect::<Vec<_>>(),
             ["02:00:00:00:00:01", "02:00:00:00:00:02"],
         );
 
         // Direct discovery resolves a reservation by its globally unique MAC.
-        let by_mac = find_by_dpu_mac_for_update(txn.as_mut(), "02:00:00:00:00:02".parse()?)
+        let by_mac = find_by_dpu_oob_mac_for_update(txn.as_mut(), "02:00:00:00:00:02".parse()?)
             .await?
             .unwrap();
         assert_eq!(by_mac.loopback_ipv4, Some("192.0.2.11".parse()?));
         assert!(
-            find_by_dpu_mac_for_update(txn.as_mut(), "02:00:00:00:00:07".parse()?)
+            find_by_dpu_oob_mac_for_update(txn.as_mut(), "02:00:00:00:00:07".parse()?)
                 .await?
                 .is_none()
         );
@@ -385,7 +386,7 @@ mod tests {
         assert_eq!(
             after_preserve
                 .iter()
-                .map(|r| r.dpu_mac_address.to_string())
+                .map(|r| r.dpu_oob_mac_address.to_string())
                 .collect::<Vec<_>>(),
             ["02:00:00:00:00:01"],
         );
@@ -450,7 +451,7 @@ mod tests {
             find_for_machine(txn.as_mut(), mac_b.parse::<MacAddress>()?)
                 .await?
                 .iter()
-                .map(|r| r.dpu_mac_address.to_string())
+                .map(|r| r.dpu_oob_mac_address.to_string())
                 .collect::<Vec<_>>(),
             ["02:00:00:00:00:02"],
         );
@@ -460,7 +461,7 @@ mod tests {
             find_for_machine(txn.as_mut(), mac_a.parse::<MacAddress>()?)
                 .await?
                 .iter()
-                .map(|r| r.dpu_mac_address.to_string())
+                .map(|r| r.dpu_oob_mac_address.to_string())
                 .collect::<Vec<_>>(),
             ["02:00:00:00:00:03"],
         );
@@ -533,7 +534,7 @@ mod tests {
         crate::expected_machine::create(&mut txn, expected_machine(mac, vec![])).await?;
 
         let insert = "INSERT INTO expected_dpu_loopback_reservations \
-                      (bmc_mac_address, dpu_mac_address, loopback_ipv4, loopback_ipv6) \
+                      (host_bmc_mac_address, dpu_oob_mac_address, loopback_ipv4, loopback_ipv6) \
                       VALUES ($1, $2, $3, $4)";
 
         // An IPv6 address in the IPv4 column violates family(loopback_ipv4) = 4.
@@ -644,7 +645,7 @@ mod tests {
                 .fetch_one(writer.as_mut())
                 .await?;
             let mut creator = pool.begin().await?;
-            let lookup = find_by_dpu_mac_for_update(creator.as_mut(), mac);
+            let lookup = find_by_dpu_oob_mac_for_update(creator.as_mut(), mac);
             tokio::pin!(lookup);
             tokio::select! {
                 result = &mut lookup => panic!("creation did not wait for reservation writer: {result:?}"),
