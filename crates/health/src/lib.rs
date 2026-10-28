@@ -522,7 +522,7 @@ pub async fn run_service(
                 Ok(shutdown) => tracing::info!(
                     closed = shutdown.closed,
                     timed_out = shutdown.timed_out,
-                    "graceful_shutdown"
+                    "Collectors drained"
                 ),
                 Err(e) => {
                     tracing::error!(error=?e, "Discovery loop join error during shutdown");
