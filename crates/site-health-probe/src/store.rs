@@ -32,8 +32,12 @@ use crate::framework::ObservationRecorder;
 use crate::gate::{CallError, CallGate, classify_http};
 use crate::rest::client::read_capped;
 
-/// A store reply bigger than this is not a few hours of probe series.
-const REPLY_CAP: usize = 64 << 20;
+/// A store reply bigger than this is not an hour of probe series. One hour
+/// at a 5 s scrape is 720 samples, about 17 KiB of JSON per series, so this
+/// holds about 900 series per query. Decoded, a sample with its value text
+/// takes about twice its JSON, so one reply peaks near 50 MiB, a tenth of
+/// the pod's 512 MiB limit.
+const REPLY_CAP: usize = 16 << 20;
 /// The last time, in Unix seconds, a probe sample can have or show: the end
 /// of year 9999.
 const LAST_TIME_SECS: f64 = 253_402_300_799.0;
@@ -929,12 +933,51 @@ mod tests {
         }
     }
 
+    /// An hour of 900 host series at a 5 s scrape, with every label the
+    /// probe and a scrape add, fits in one reply.
+    #[test]
+    fn reply_cap_holds_an_hour_of_series() {
+        let start = 1_761_213_600.0;
+        let result: Vec<serde_json::Value> = (0..900)
+            .map(|i| {
+                serde_json::json!({
+                    "metric": {
+                        "__name__": "carbide_site_health_probe_hosts",
+                        "model": format!("PowerEdge R760xa model {}", i % 30),
+                        "instance_type": format!("instance-type-{}", i / 30),
+                        "state": "Assigned/Ready",
+                        "allocatable": "true",
+                        "update_complete": "false",
+                        "job": "nico-site-health-probe-metrics",
+                        "namespace": "nico-system",
+                        "instance": "10.233.120.45:9009",
+                        "pod": "nico-site-health-probe-7d9c8b6f5d-x2k4p",
+                        "container": "site-health-probe",
+                        "endpoint": "metrics",
+                        "service": "nico-site-health-probe-metrics",
+                    },
+                    "values": (0..720)
+                        .map(|k| serde_json::json!([start + 5.0 * f64::from(k) + 0.123, "4500"]))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let body = serde_json::json!({
+            "status": "success",
+            "data": {"resultType": "matrix", "result": result},
+        })
+        .to_string();
+        assert!(body.len() <= REPLY_CAP, "{} bytes", body.len());
+        assert_eq!(parse_matrix(body.as_bytes()).expect("parses").len(), 900);
+    }
+
     #[tokio::test]
     async fn prom_store_rejects_oversize_reply() {
-        // A valid empty matrix, padded with whitespace to one byte over.
+        // A valid empty matrix, padded with whitespace to one byte over
+        // 16 MiB, whatever else the cap allows.
         let mut body =
             br#"{"status":"success","data":{"resultType":"matrix","result":[]}}"#.to_vec();
-        body.resize(REPLY_CAP + 1, b' ');
+        body.resize((16 << 20) + 1, b' ');
         let (url, requests) = serve_with(move |_| {
             let body = body.clone();
             async move { body.into_response() }

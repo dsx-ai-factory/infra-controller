@@ -109,7 +109,9 @@ instances are read once the firmware and instance tests need them (issues
 Each reader publishes one immutable snapshot per count family. A family is
 replaced only by a complete sweep: a failed or unresolved read keeps its last
 snapshot and sets `last_attempt_failed`. The pod turns ready once every
-enabled reader has one complete sweep, and stays ready. A replaced snapshot
+enabled reader has one complete sweep, and stays ready. The metrics Service
+publishes the pod before then too, so the store scrapes the sweeps that come
+before readiness, failed ones included. A replaced snapshot
 stays readable for `state.paging.keepSeconds` only when a `/v1/units` cursor
 points into it; otherwise it is dropped at once, so a site nobody pages holds
 one snapshot per family.
@@ -122,7 +124,11 @@ in a Secret, or a token file. `/v1/summary` needs `state.metricsStore.url`, a
 Prometheus-compatible store that scrapes this probe; an empty
 `metricsStore.selector` selects it by job (the metrics Service name) and
 namespace. Sites that scrape through another job, such as the `nico-ipv6`
-job of `helm-prereqs`, set the selector's `job` to that job.
+job of `helm-prereqs`, set the selector's `job` to that job. A summary reads
+its window in one-hour chunks through the metrics-store call gate, and the
+chart and the probe refuse a `metricsStore.maxWindow` whose store calls alone
+would take more than half of `metricsStore.summaryDeadline` (24h fits the
+default 90s).
 
 The nico-api reader runs by default once state is on; the REST reader stays
 off until its inputs exist. A complete REST-enabled state section:
@@ -159,7 +165,8 @@ nico-site-health-probe:
 Served on `api.port` (default 9010) by the `<name>-api` Service. Wire types:
 `crates/site-health-probe-api`. Parameters are camelCase, times RFC 3339 UTC,
 unknown parameters are 400. Errors carry
-`{"error": {"code", "message", "field"}}`.
+`{"error": {"code", "message", "field"}}`. 429, 503 and 504 carry
+`Retry-After`. A 502 names no store detail; the probe logs it.
 
 | Method and path | Answers | Errors |
 |---|---|---|
@@ -171,7 +178,12 @@ unknown parameters are 400. Errors carry
 | `GET /v1/store-status` | The newest host sweep sample in the store and its age | 502, 504 |
 
 `/v1/summary` takes at most 198 quantiles in `q`: each crossing is a point
-its curve of at most 200 always keeps, beside the first and the last.
+its curve of at most 200 always keeps, beside the first and the last. Each
+quantile is a plain decimal in (0, 1] with at most six decimal places. A
+summary holds at most 1,000,000 store samples across its window: a window
+and filter that select more are 400 `invalid_param` on `start`, so shorten
+the window or narrow the filter. At shutdown, requests still running after
+10 s are cut short with 503 and their connections close.
 
 Allocatability and update eligibility filters are 422 `field_unavailable`
 until nico-api serves a compact host read; exact version filters

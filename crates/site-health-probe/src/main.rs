@@ -43,13 +43,23 @@ mod store;
 mod summary;
 
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use carbide_site_health_probe_api::Family;
 use clap::Parser;
 use eyre::{WrapErr, eyre};
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+
+/// How long requests in flight on the /v1 API may finish at shutdown. A
+/// summary can run for its whole deadline; the pod's grace period (30 s by
+/// default) also covers the probes' drain before and the metrics endpoint
+/// after.
+const API_DRAIN: Duration = Duration::from_secs(10);
+/// How long the /v1 connections get to close once their requests are cut
+/// short, and again once their I/O is closed, before the server is stopped.
+const API_CLOSE: Duration = Duration::from_secs(1);
 
 #[derive(Parser)]
 #[command(about = "Synthetic monitoring probes against a NICo site's APIs")]
@@ -138,6 +148,7 @@ async fn run() -> eyre::Result<()> {
     // endpoint lives.
     let stop_probes = CancellationToken::new();
     let stop_api = CancellationToken::new();
+    let api_shutdown = ApiShutdown::default();
     let stop_server = CancellationToken::new();
 
     let mut api_server = if cfg.state.enabled {
@@ -154,14 +165,17 @@ async fn run() -> eyre::Result<()> {
             &cfg.state.metrics_store,
             Arc::new(clock::now),
         );
-        let router =
-            api::router(api::ApiState::new(Arc::clone(&store), &cfg.state).with_summary(summaries));
-        let stop_api = stop_api.clone();
-        Some(tokio::spawn(async move {
-            axum::serve(listener, router)
-                .with_graceful_shutdown(stop_api.cancelled_owned())
-                .await
-        }))
+        let router = api::router(api::ApiState::new(
+            Arc::clone(&store),
+            &cfg.state,
+            summaries,
+        ));
+        Some(serve_api(
+            listener,
+            router,
+            stop_api.clone(),
+            api_shutdown.clone(),
+        ))
     } else {
         None
     };
@@ -245,7 +259,7 @@ async fn run() -> eyre::Result<()> {
     // still land in served /metrics state and no task is left mid-shutdown.
     // Tasks that already ended in the select above must not be polled again.
     tracing::info!("shutting down");
-    readiness.abort();
+    stop_task(readiness).await;
     metrics_setup.health_controller.set_ready(false);
     stop_probes.cancel();
     let mut shutdown: eyre::Result<()> = Ok(());
@@ -265,10 +279,14 @@ async fn run() -> eyre::Result<()> {
     stop_api.cancel();
     if !api_ended
         && let Some(task) = api_server
-        && let Err(err) = task
+        && let Err(err) = drain(task, API_DRAIN, &api_shutdown)
             .await
             .map_err(|e| eyre!("/v1 API server task: {e}"))
-            .and_then(|joined| joined.map_err(|e| eyre!("/v1 API server shutdown: {e}")))
+            .and_then(|joined| {
+                joined
+                    .unwrap_or(Ok(()))
+                    .map_err(|e| eyre!("/v1 API server shutdown: {e}"))
+            })
         && shutdown.is_ok()
     {
         shutdown = Err(err);
@@ -290,17 +308,77 @@ async fn run() -> eyre::Result<()> {
     }
 }
 
-/// Binds the /v1 API. A bare-port address is the IPv6 wildcard, which falls
-/// back to IPv4 where the node has no IPv6, like the metrics listener.
-async fn bind(addr: std::net::SocketAddr) -> eyre::Result<tokio::net::TcpListener> {
-    match tokio::net::TcpListener::bind(addr).await {
-        Ok(listener) => Ok(listener),
-        Err(err) if addr.ip() == std::net::Ipv6Addr::UNSPECIFIED => {
-            tracing::warn!(error = %err, "no IPv6 wildcard, binding IPv4");
-            let v4 = std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, addr.port()));
-            Ok(tokio::net::TcpListener::bind(v4).await?)
-        }
-        Err(err) => Err(err.into()),
+/// Binds the /v1 API like the metrics listener: a bare-port address is the
+/// dual-stack IPv6 wildcard, which falls back to IPv4 only where the node
+/// has no IPv6. A port in use stays an error.
+async fn bind(addr: std::net::SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+    metrics_endpoint::bind_tcp_listener(addr).await
+}
+
+/// Aborts `task` and waits until it no longer runs: an abort alone lets a
+/// task in the middle of a poll finish that poll.
+async fn stop_task(task: JoinHandle<()>) {
+    task.abort();
+    let _ = task.await;
+}
+
+/// How the /v1 server's work ends at shutdown, past its graceful drain.
+#[derive(Clone, Default)]
+struct ApiShutdown {
+    /// Cuts every request short, its body included.
+    requests: CancellationToken,
+    /// Fails every read and write of every connection, so even a reply its
+    /// client never reads ends.
+    connections: CancellationToken,
+}
+
+/// Serves the /v1 API until `stop`, then finishes the requests in flight
+/// until `shutdown` ends them.
+fn serve_api(
+    listener: tokio::net::TcpListener,
+    router: axum::Router,
+    stop: CancellationToken,
+    shutdown: ApiShutdown,
+) -> JoinHandle<std::io::Result<()>> {
+    let router = api::cancellable(router, shutdown.requests);
+    let listener = api::closable::ClosableListener::new(listener, shutdown.connections);
+    tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(stop.cancelled_owned())
+            .await
+    })
+}
+
+/// Waits up to `limit` for the stopped server `task` to finish its
+/// requests. Then it cuts the requests short and, [`API_CLOSE`] later,
+/// closes the connections' I/O, each time waiting [`API_CLOSE`] for the
+/// server to end. `None` when even that did not end it, and it was stopped.
+async fn drain<T>(
+    mut task: JoinHandle<T>,
+    limit: Duration,
+    shutdown: &ApiShutdown,
+) -> Result<Option<T>, tokio::task::JoinError> {
+    if let Ok(joined) = tokio::time::timeout(limit, &mut task).await {
+        return joined.map(Some);
+    }
+    tracing::warn!(
+        ?limit,
+        "/v1 requests still in flight at shutdown, cutting them short"
+    );
+    shutdown.requests.cancel();
+    if let Ok(joined) = tokio::time::timeout(API_CLOSE, &mut task).await {
+        return joined.map(Some);
+    }
+    tracing::warn!("/v1 connections still open at shutdown, closing them");
+    shutdown.connections.cancel();
+    if let Ok(joined) = tokio::time::timeout(API_CLOSE, &mut task).await {
+        return joined.map(Some);
+    }
+    tracing::warn!("/v1 server still running at shutdown, stopping it");
+    task.abort();
+    match task.await {
+        Err(err) if err.is_cancelled() => Ok(None),
+        joined => joined.map(Some),
     }
 }
 
@@ -466,6 +544,263 @@ mod tests {
                     .collect::<Vec<_>>()
             },
         );
+    }
+
+    /// A wildcard bind whose port is in use fails; it never moves to IPv4.
+    #[tokio::test]
+    async fn api_bind_keeps_port_in_use() {
+        // An IPv6-only listener on the wildcard, which an IPv4 bind would
+        // not see. Hosts without IPv6 skip this.
+        let holder = || -> std::io::Result<socket2::Socket> {
+            let socket = socket2::Socket::new(socket2::Domain::IPV6, socket2::Type::STREAM, None)?;
+            socket.set_only_v6(true)?;
+            socket
+                .bind(&std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)).into())?;
+            socket.listen(1)?;
+            Ok(socket)
+        };
+        let Ok(holder) = holder() else {
+            return;
+        };
+        let port = holder
+            .local_addr()
+            .ok()
+            .and_then(|a| a.as_socket())
+            .expect("address")
+            .port();
+        let err = bind(std::net::SocketAddr::from((
+            std::net::Ipv6Addr::UNSPECIFIED,
+            port,
+        )))
+        .await
+        .expect_err("the port is in use");
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+    }
+
+    /// Once stopped, the readiness task cannot mark the pod ready, even from
+    /// the middle of a poll.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopped_readiness_stays_not_ready() {
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (polling, polled) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let task = tokio::spawn({
+            let ready = Arc::clone(&ready);
+            async move {
+                // All families ready; the poll is still running.
+                polling.send(()).expect("test waits");
+                released.recv().expect("test releases");
+                ready.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+        tokio::task::spawn_blocking(move || polled.recv().expect("task polls"))
+            .await
+            .expect("join");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            release.send(()).expect("task waits");
+        });
+        stop_task(task).await;
+        ready.store(false, std::sync::atomic::Ordering::SeqCst);
+        releaser.join().expect("releaser");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!ready.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// A server that does not end even after its requests are cut short is
+    /// stopped, and that is not a shutdown error.
+    #[tokio::test(start_paused = true)]
+    async fn api_drain_is_bounded() {
+        let started = tokio::time::Instant::now();
+        let shutdown = ApiShutdown::default();
+        let stuck = tokio::spawn(std::future::pending::<()>());
+        assert!(matches!(drain(stuck, API_DRAIN, &shutdown).await, Ok(None)));
+        assert_eq!(started.elapsed(), API_DRAIN + API_CLOSE * 2);
+        assert!(shutdown.requests.is_cancelled() && shutdown.connections.is_cancelled());
+
+        let shutdown = ApiShutdown::default();
+        let done = tokio::spawn(async { 7 });
+        assert!(matches!(
+            drain(done, API_DRAIN, &shutdown).await,
+            Ok(Some(7))
+        ));
+        assert!(!shutdown.requests.is_cancelled(), "nothing to cut short");
+    }
+
+    /// A metrics store call that never returns.
+    struct HangingStore {
+        entered: Arc<tokio::sync::Notify>,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct SetOnDrop(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for SetOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl store::MetricsStore for HangingStore {
+        async fn raw(
+            &self,
+            _: &store::RawQuery,
+            _: SystemTime,
+        ) -> Result<Vec<store::RawSeries>, store::StoreError> {
+            let _guard = SetOnDrop(Arc::clone(&self.dropped));
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    /// Reads what the server sends until it closes the connection.
+    async fn until_closed(client: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+
+        let mut reply = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut reply))
+            .await
+            .expect("the server closes the connection")
+            .expect("read");
+        String::from_utf8_lossy(&reply).into_owned()
+    }
+
+    /// At shutdown, a request whose body never finishes and a summary whose
+    /// store call never returns are cut short with 503, both connections
+    /// close with the clients still open, and the server ends on its own.
+    #[tokio::test]
+    async fn api_shutdown_cuts_stalled_requests_short() {
+        use tokio::io::AsyncWriteExt;
+
+        let cfg = Config::default();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hanging = HangingStore {
+            entered: Arc::clone(&entered),
+            dropped: Arc::clone(&dropped),
+        };
+        let router = api::router(api::ApiState::new(
+            Arc::new(state::store::SnapshotStore::new(&cfg.state.paging)),
+            &cfg.state,
+            summary::SummaryState::new(
+                Arc::new(hanging),
+                &cfg.state.metrics_store,
+                Arc::new(clock::now),
+            ),
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("address");
+        let stop = CancellationToken::new();
+        let shutdown = ApiShutdown::default();
+        let server = serve_api(listener, router, stop.clone(), shutdown.clone());
+
+        let mut stalled = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        stalled
+            .write_all(
+                b"POST /v1/units/query HTTP/1.1\r\nhost: probe\r\n\
+                  content-type: application/json\r\ncontent-length: 100\r\n\r\n{\"type\"",
+            )
+            .await
+            .expect("partial request");
+        let end = chrono::DateTime::<chrono::Utc>::from(clock::now() - Duration::from_secs(1));
+        let start = end - chrono::Duration::seconds(600);
+        let query = serde_urlencoded::to_string([
+            ("type", "host".to_string()),
+            ("stage", "ready".to_string()),
+            ("start", start.to_rfc3339()),
+            ("end", end.to_rfc3339()),
+            ("base", "0".to_string()),
+            ("n", "1".to_string()),
+            ("direction", "up".to_string()),
+            ("addWindowSeconds", "0".to_string()),
+        ])
+        .expect("query");
+        let mut summary = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        summary
+            .write_all(
+                format!("GET /v1/summary?{query} HTTP/1.1\r\nhost: probe\r\n\r\n").as_bytes(),
+            )
+            .await
+            .expect("summary request");
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .expect("the summary reaches the store");
+        // Let the server read the stalled request's head.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        stop.cancel();
+        let joined = drain(server, Duration::from_millis(300), &shutdown).await;
+        assert!(
+            matches!(joined, Ok(Some(Ok(())))),
+            "the server ends once its requests are cut short: {joined:?}"
+        );
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "the summary's store call stopped"
+        );
+        for client in [&mut stalled, &mut summary] {
+            let reply = until_closed(client).await;
+            assert!(reply.starts_with("HTTP/1.1 503"), "{reply}");
+            assert!(reply.contains("shutting down"), "{reply}");
+        }
+    }
+
+    /// At shutdown, an HTTP/2 client that keeps its connection open with a
+    /// zero window, so no reply body can reach it, still loses its
+    /// connection, and the server ends on its own.
+    #[tokio::test]
+    async fn api_shutdown_closes_a_connection_that_never_reads() {
+        use hyper_util::rt::{TokioExecutor, TokioIo};
+
+        let cfg = Config::default();
+        let router = api::router(api::ApiState::new(
+            Arc::new(state::store::SnapshotStore::new(&cfg.state.paging)),
+            &cfg.state,
+            summary::SummaryState::unused(&cfg.state.metrics_store),
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("address");
+        let stop = CancellationToken::new();
+        let shutdown = ApiShutdown::default();
+        let server = serve_api(listener, router, stop.clone(), shutdown.clone());
+
+        let tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let (mut sender, connection) =
+            hyper::client::conn::http2::Builder::new(TokioExecutor::new())
+                .initial_stream_window_size(0)
+                .handshake(TokioIo::new(tcp))
+                .await
+                .expect("HTTP/2 handshake");
+        let connection = tokio::spawn(connection);
+        // The reply's head arrives; its body waits for a window that never
+        // opens.
+        let reply = sender
+            .send_request(
+                axum::http::Request::get(format!("http://{addr}/v1/count?type=host&stage=ready"))
+                    .body(axum::body::Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("reply head");
+        assert_eq!(reply.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+
+        stop.cancel();
+        let joined = drain(server, Duration::from_millis(300), &shutdown).await;
+        assert!(
+            matches!(joined, Ok(Some(Ok(())))),
+            "the server ends once its connections close: {joined:?}"
+        );
+        assert!(shutdown.connections.is_cancelled());
+        let _ = tokio::time::timeout(Duration::from_secs(5), connection)
+            .await
+            .expect("the client's connection ends")
+            .expect("join");
+        drop((sender, reply));
     }
 
     /// Each enabled reader is built, readiness waits for all of its

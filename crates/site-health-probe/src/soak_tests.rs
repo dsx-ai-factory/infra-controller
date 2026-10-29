@@ -49,6 +49,7 @@ use crate::readers::devices::{DEVICE_FAMILIES, DevicesReader};
 use crate::snapshot::{AnySnapshot, FailureKind, Reader, SnapshotSink};
 use crate::state::store::SnapshotStore;
 use crate::state_metrics::{CountingSink, StateCollector};
+use crate::summary::SummaryState;
 
 /// Counts the heap bytes each thread holds: what it allocated minus what
 /// it freed.
@@ -306,7 +307,11 @@ async fn soak_retained_state_plateaus() {
         Arc::clone(&sink) as Arc<dyn SnapshotSink>,
         t0,
     );
-    let app = router(ApiState::new(Arc::clone(&store), &cfg));
+    let app = router(ApiState::new(
+        Arc::clone(&store),
+        &cfg,
+        SummaryState::unused(&cfg.metrics_store),
+    ));
     let budget = cfg.paging.needed_for(INTERVAL);
 
     let mut retained: BTreeMap<u32, Retained> = BTreeMap::new();

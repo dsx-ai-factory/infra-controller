@@ -176,13 +176,15 @@ async fn fake_site_counts_ready_and_summary_within_timing_error() {
     );
 
     let metrics_store = Arc::new(FakeStore::new(Arc::new(crate::clock::now)));
-    let app = router(
-        ApiState::new(Arc::clone(&store), &cfg).with_summary(SummaryState::new(
+    let app = router(ApiState::new(
+        Arc::clone(&store),
+        &cfg,
+        SummaryState::new(
             Arc::clone(&metrics_store) as Arc<dyn crate::store::MetricsStore>,
             &cfg.metrics_store,
             Arc::new(crate::clock::now),
-        )),
-    );
+        ),
+    ));
 
     let cancel = CancellationToken::new();
     let probes: Vec<Arc<dyn Probe>> = vec![Arc::new(reader)];

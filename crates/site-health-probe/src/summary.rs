@@ -58,7 +58,18 @@ const Q_PARTS: u64 = 10_u64.pow(Q_DECIMALS as u32);
 
 /// Store queries cover at most this much time each.
 const CHUNK: Duration = Duration::from_secs(3600);
-/// A second summary waits this long for the one in flight.
+/// Store calls per chunk at most: the counts, the sweep times and one
+/// capability flag.
+const CALLS_PER_CHUNK: f64 = 3.0;
+/// Store samples one summary may hold, across every reply, so a long window
+/// of many series cannot grow without bound. A 24h window at a 5 s scrape is
+/// 17,280 samples per series: this holds about 57 series over it, or about
+/// 1,380 over an hour. What a sample costs in memory depends on its labels
+/// and sources, and this sample limit does not establish a whole-process
+/// memory bound.
+const SAMPLE_BUDGET: usize = 1_000_000;
+/// A second summary waits this long for the one in flight, or until its
+/// deadline if that is sooner.
 const BUSY_WAIT: Duration = Duration::from_secs(30);
 /// The curve keeps at most this many points.
 pub(crate) const CURVE_POINTS: usize = 200;
@@ -92,6 +103,8 @@ pub(crate) struct SummaryState {
     pub scrape_interval: Duration,
     pub deadline: Duration,
     pub max_window: Duration,
+    /// Store samples one summary may hold: [`SAMPLE_BUDGET`].
+    pub sample_budget: usize,
     pub clock: Clock,
     /// One summary in flight.
     permit: Semaphore,
@@ -113,9 +126,19 @@ impl SummaryState {
             scrape_interval: cfg.scrape_interval,
             deadline: cfg.summary_deadline,
             max_window: cfg.max_window,
+            sample_budget: SAMPLE_BUDGET,
             clock,
             permit: Semaphore::new(1),
         }
+    }
+
+    /// Summaries from an empty fake store, for tests that never ask for
+    /// one.
+    #[cfg(test)]
+    pub(crate) fn unused(cfg: &MetricsStoreConfig) -> Self {
+        let clock: Clock = Arc::new(crate::clock::now);
+        let store = crate::store::fake::FakeStore::new(Arc::clone(&clock));
+        Self::new(Arc::new(store), cfg, clock)
     }
 
     fn now(&self) -> SystemTime {
@@ -127,6 +150,21 @@ impl SummaryState {
             .iter()
             .map(|(k, v)| (k.clone(), MatchOp::Eq, v.clone()))
     }
+}
+
+/// The least time the store calls of a summary over `window` take through a
+/// gate of `calls_per_second`: the window and two reader intervals before
+/// it, in chunks. Store latency and the wait for the final scrape come on
+/// top.
+pub(crate) fn least_read_time(
+    window: Duration,
+    reader_interval: Duration,
+    calls_per_second: f64,
+) -> Duration {
+    let span = window.saturating_add(reader_interval.saturating_mul(2));
+    let chunks = span.as_nanos().div_ceil(CHUNK.as_nanos()) as f64;
+    Duration::try_from_secs_f64(chunks * CALLS_PER_CHUNK / calls_per_second)
+        .unwrap_or(Duration::MAX)
 }
 
 fn store_error(err: StoreError) -> ApiError {
@@ -505,6 +543,15 @@ pub(crate) fn thin_curve(sweeps: &[&Sweep], keep: &[usize], max: usize) -> Vec<C
 }
 
 /// The summary of `sweeps` over the request's window.
+/// The sweeps a summary from `start` reads out of `usable` (sorted, none
+/// past the end): the last one before the window, which it counts from, and
+/// the window's own. Older history is not read.
+fn read_sweeps<'a>(usable: &[&'a Sweep], start: f64) -> (Option<&'a Sweep>, Vec<&'a Sweep>) {
+    let window = usable.iter().copied().filter(|s| s.end >= start).collect();
+    let before = usable.iter().rev().find(|s| s.end < start).copied();
+    (before, window)
+}
+
 pub(crate) fn compute(
     input: &SummaryInput,
     sweeps: &[Sweep],
@@ -512,12 +559,7 @@ pub(crate) fn compute(
     tail: TailState,
 ) -> SummaryResponse {
     let usable: Vec<&Sweep> = sweeps.iter().filter(|s| s.end <= input.end).collect();
-    let window: Vec<&Sweep> = usable
-        .iter()
-        .copied()
-        .filter(|s| s.end >= input.start)
-        .collect();
-    let before = usable.iter().rev().find(|s| s.end < input.start).copied();
+    let (before, window) = read_sweeps(&usable, input.start);
 
     // Scrape gaps: consecutive scrapes further apart than two intervals that
     // overlap the window, and a missing tail when the final scrape never
@@ -851,6 +893,27 @@ struct Gathered {
     counts: BTreeMap<BTreeMap<String, String>, BTreeMap<i64, f64>>,
     times: BTreeMap<BTreeMap<String, String>, BTreeMap<i64, f64>>,
     caps: Vec<BTreeMap<BTreeMap<String, String>, BTreeMap<i64, f64>>>,
+    /// Samples the store has sent so far, repeats included.
+    samples: usize,
+}
+
+impl Gathered {
+    /// Takes `reply` into the budget, or refuses the summary when the
+    /// samples so far would pass `budget`: each reply is capped, but a long
+    /// window of many series is not.
+    fn admit(&mut self, reply: Vec<RawSeries>, budget: usize) -> Result<Vec<RawSeries>, ApiError> {
+        self.samples += reply.iter().map(|s| s.samples.len()).sum::<usize>();
+        if self.samples > budget {
+            return Err(ApiError::bad_param(
+                "start",
+                format!(
+                    "the window and filter select more than {budget} store samples; shorten \
+                     the window or narrow the filter"
+                ),
+            ));
+        }
+        Ok(reply)
+    }
 }
 
 fn merge(
@@ -888,23 +951,21 @@ impl Plan<'_> {
         into: &mut Gathered,
     ) -> Result<(), ApiError> {
         let store = &self.state.store;
+        let budget = self.state.sample_budget;
         self.count.range = range;
         self.times.range = range;
-        merge(
-            &mut into.counts,
-            store.raw(&self.count, at).await.map_err(store_error)?,
-        );
-        merge(
-            &mut into.times,
-            store.raw(&self.times, at).await.map_err(store_error)?,
-        );
+        let reply = store.raw(&self.count, at).await.map_err(store_error)?;
+        let reply = into.admit(reply, budget)?;
+        merge(&mut into.counts, reply);
+        let reply = store.raw(&self.times, at).await.map_err(store_error)?;
+        let reply = into.admit(reply, budget)?;
+        merge(&mut into.times, reply);
         into.caps.resize_with(self.caps.len(), BTreeMap::new);
         for (i, (query, _, _)) in self.caps.iter_mut().enumerate() {
             query.range = range;
-            merge(
-                &mut into.caps[i],
-                store.raw(query, at).await.map_err(store_error)?,
-            );
+            let reply = store.raw(query, at).await.map_err(store_error)?;
+            let reply = into.admit(reply, budget)?;
+            merge(&mut into.caps[i], reply);
         }
         Ok(())
     }
@@ -934,13 +995,16 @@ impl Plan<'_> {
     }
 }
 
-/// Answers one `/v1/summary` request.
+/// Answers one `/v1/summary` request within the summary deadline, which
+/// covers the wait for the summary in flight, the store reads and the wait
+/// for the final scrape.
 pub(crate) async fn summarize(
     state: &SummaryState,
     spec: &SeriesSpec,
     params: &SummaryParams,
     reader_interval: Duration,
 ) -> Result<SummaryResponse, ApiError> {
+    let deadline = tokio::time::Instant::now() + state.deadline;
     let now = state.now();
     let start = SystemTime::from(params.start);
     let end = SystemTime::from(params.end);
@@ -996,19 +1060,43 @@ pub(crate) async fn summarize(
     // Every target must be a count before any store work.
     input.targets()?;
 
-    // One summary in flight; the next waits, within the deadline.
-    let _permit = tokio::time::timeout(BUSY_WAIT, state.permit.acquire())
+    // One summary in flight; the next waits, within the deadline. A wait
+    // the deadline cuts short is still busy, not a store timeout. A timeout
+    // polls the wait before its timer, so a permit freed after the wait
+    // ended but before the next poll still arrives: that too is busy.
+    let busy = || {
+        ApiError::new(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            ErrorCode::Busy,
+            None,
+            "another summary is running".to_string(),
+        )
+    };
+    let busy_until = deadline.min(tokio::time::Instant::now() + BUSY_WAIT);
+    let _permit = tokio::time::timeout_at(busy_until, state.permit.acquire())
         .await
-        .map_err(|_| {
-            ApiError::new(
-                axum::http::StatusCode::TOO_MANY_REQUESTS,
-                ErrorCode::Busy,
-                None,
-                "another summary is running".to_string(),
-            )
-        })?
+        .map_err(|_| busy())?
         .map_err(|_| store_error(StoreError::Unavailable("summary gate closed".to_string())))?;
+    if tokio::time::Instant::now() >= busy_until {
+        return Err(busy());
+    }
 
+    tokio::time::timeout_at(
+        deadline,
+        read_and_compute(state, spec, &input, (start, end), reader_interval),
+    )
+    .await
+    .unwrap_or_else(|_| Err(store_error(StoreError::Timeout)))
+}
+
+/// Reads the window from the store and computes the summary of `input`.
+async fn read_and_compute(
+    state: &SummaryState,
+    spec: &SeriesSpec,
+    input: &SummaryInput,
+    (start, end): (SystemTime, SystemTime),
+    reader_interval: Duration,
+) -> Result<SummaryResponse, ApiError> {
     let family_matcher = format!("{}|", wire(spec.family));
     let mut plan = Plan {
         state,
@@ -1085,9 +1173,15 @@ pub(crate) async fn summarize(
     let points = plan.points(&gathered, count_dims)?;
     let found = sweeps(&points)?;
     let usable: Vec<&Sweep> = found.iter().filter(|s| s.end <= secs(end)).collect();
-    // Every usable sweep must show the capability its filter needs; a
-    // missing flag is unavailable, never proof.
-    if !spec.needs.is_empty() && usable.iter().any(|s| s.capable != Some(true)) {
+    // Every sweep the summary reads must show the capability its filter
+    // needs; a missing flag is unavailable, never proof.
+    let (before, window) = read_sweeps(&usable, secs(start));
+    if !spec.needs.is_empty()
+        && before
+            .into_iter()
+            .chain(window)
+            .any(|s| s.capable != Some(true))
+    {
         return Err(ApiError::unprocessable(
             ErrorCode::FieldUnavailable,
             None,
@@ -1108,7 +1202,7 @@ pub(crate) async fn summarize(
             end: p.end,
         })
         .collect();
-    Ok(compute(&input, &found, &scrapes, tail))
+    Ok(compute(input, &found, &scrapes, tail))
 }
 
 /// `/v1/store-status`: the newest host sweep end sample in the store.
@@ -1127,6 +1221,11 @@ pub(crate) async fn store_status(state: &SummaryState) -> Result<StoreStatus, Ap
         .flat_map(|s| s.samples.iter())
         .max_by_key(|(at, _)| *at)
         .copied();
+    // The store's own reply is checked as it decodes; any store must hold
+    // a time here.
+    if last.is_some_and(|(_, value)| !is_time(value)) {
+        return Err(bad_store("a sweep or process time is out of range"));
+    }
     Ok(StoreStatus {
         last_sample_at: last.map(|(at, _)| at_secs(ms_secs(at))),
         sample_age_seconds: last.map(|(at, _)| (secs(now) - ms_secs(at)).max(0.0)),
@@ -2075,6 +2174,83 @@ mod tests {
     const READY: &str = "type=host&stage=ready";
     const INTERVAL: Duration = Duration::from_secs(20);
 
+    /// The fake store behind a metrics-store gate, as the probe calls the
+    /// real one.
+    struct Gated {
+        store: Arc<FakeStore>,
+        gate: crate::gate::CallGate,
+    }
+
+    #[async_trait::async_trait]
+    impl MetricsStore for Gated {
+        async fn raw(
+            &self,
+            query: &RawQuery,
+            at: SystemTime,
+        ) -> Result<Vec<RawSeries>, StoreError> {
+            let rec = crate::framework::ObservationRecorder::default();
+            self.gate
+                .call(&rec, "query", || async {
+                    Ok(self.store.raw(query, at).await)
+                })
+                .await
+                .map_err(|_| StoreError::Timeout)?
+        }
+    }
+
+    #[test]
+    fn least_read_time_saturates() {
+        let hour = Duration::from_secs(3600);
+        assert_eq!(
+            least_read_time(hour * 24, Duration::from_secs(120), 2.0),
+            Duration::from_secs_f64(37.5)
+        );
+        assert!(least_read_time(Duration::MAX, Duration::MAX, 2.0) > hour * 1_000_000);
+        assert_eq!(least_read_time(hour, hour, 1e-300), Duration::MAX);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn longest_window_reads_in_half_the_deadline() {
+        let mut site = site();
+        let caps = crate::config::Caps::default();
+        let cfg = MetricsStoreConfig {
+            selector: site.state.selector.iter().cloned().collect(),
+            ..MetricsStoreConfig::default()
+        };
+        let gated = Gated {
+            store: Arc::clone(&site.store),
+            gate: crate::gate::CallGate::new(
+                "metrics-store",
+                caps.calls_per_second,
+                caps.call_timeout,
+                caps.max_backoff,
+            ),
+        };
+        site.state = SummaryState::new(Arc::new(gated), &cfg, Arc::clone(&site.state.clock));
+        site.scrape(0.0, 1.0, -1.0, &[]);
+        let window = site.state.max_window.as_secs_f64();
+        let reader_interval = crate::config::Readers::default().devices.interval;
+        let started = tokio::time::Instant::now();
+        let reply = summarize(
+            &site.state,
+            &spec(READY),
+            &site.params(-window, 0.0, 0, 1, Direction::Up),
+            reader_interval,
+        )
+        .await
+        .expect("the longest window fits the deadline");
+        assert!(reply.final_scrape_seen);
+        let took = started.elapsed();
+        assert!(took <= site.state.deadline / 2, "{took:?}");
+        assert!(
+            took <= least_read_time(
+                site.state.max_window,
+                reader_interval,
+                caps.calls_per_second
+            )
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn summary_waits_for_final_scrape_then_counts_tail() {
         let site = site();
@@ -2130,6 +2306,110 @@ mod tests {
                 );
             } else {
                 let err = result.expect_err("the sweep's own scrape has no total");
+                assert_eq!(err.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+            }
+        }
+    }
+
+    /// Every hourly reply fits, but together they pass the sample budget:
+    /// the summary is refused before it holds more.
+    #[tokio::test(start_paused = true)]
+    async fn sample_budget_spans_the_whole_request() {
+        let mut site = site();
+        site.state.sample_budget = 3_000;
+        // A scrape every 5 s for two hours: 4 samples each (the count and
+        // three sweep times), 2,880 per hourly chunk.
+        for i in 0..1_440 {
+            let at = -7_195.0 + 5.0 * f64::from(i);
+            site.scrape(at, 1.0, at - 1.0, &[]);
+        }
+        let err = summarize(
+            &site.state,
+            &spec(READY),
+            &site.params(-7_000.0, 0.0, 0, 1, Direction::Up),
+            INTERVAL,
+        )
+        .await
+        .expect_err("over the budget");
+        assert_eq!(err.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            site.store.queries.lock().unwrap().len() <= 4,
+            "refused at the second chunk"
+        );
+        // Half an hour fits.
+        summarize(
+            &site.state,
+            &spec(READY),
+            &site.params(-1_800.0, 0.0, 0, 1, Direction::Up),
+            INTERVAL,
+        )
+        .await
+        .expect("within the budget");
+    }
+
+    /// A permit freed after the wait for it ended, but before the waiter
+    /// is polled again, is still busy, and no store work starts.
+    #[tokio::test(start_paused = true)]
+    async fn permit_after_the_busy_wait_is_busy() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let site = site();
+        let held = site.state.permit.acquire().await.expect("permit");
+        let spec = spec(READY);
+        let params = site.params(-100.0, 0.0, 0, 1, Direction::Up);
+        let mut waiter = std::pin::pin!(summarize(&site.state, &spec, &params, INTERVAL));
+        std::future::poll_fn(|cx| {
+            assert!(
+                waiter.as_mut().poll(cx).is_pending(),
+                "waits for the permit"
+            );
+            Poll::Ready(())
+        })
+        .await;
+        // The wait ends unpolled, then the permit is freed.
+        tokio::time::advance(BUSY_WAIT + Duration::from_secs(1)).await;
+        drop(held);
+        let err = waiter.await.expect_err("busy");
+        assert_eq!(err.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            site.store.queries.lock().unwrap().is_empty(),
+            "no store call"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn capability_counts_only_the_sweeps_read() {
+        // A sweep without the total long before the window, then the
+        // baseline the summary counts from, then the window's sweeps.
+        for (baseline, readable) in [(Some(0), true), (None, false)] {
+            let site = site();
+            let probe = ProbeProcess::start(site.at(-10_000.0));
+            for (seq, end, rack) in [
+                (1, -320.0, None),
+                (2, -200.0, baseline),
+                (3, -100.0, Some(1)),
+                (4, -20.0, Some(3)),
+            ] {
+                probe.rack_total(seq, site.at(end), rack);
+                probe.scrape(&site.store, site.at(end + 5.0), "replica-a");
+            }
+            probe.scrape(&site.store, site.at(0.0), "replica-a");
+            let result = summarize(
+                &site.state,
+                &spec("type=rest_total&resource=rack"),
+                &site.params(-120.0, 0.0, 0, 3, Direction::Up),
+                Duration::from_secs(120),
+            )
+            .await;
+            if readable {
+                let reply = result.expect("older history is not read");
+                assert_eq!(
+                    reply.crossings[0].reached_at,
+                    Some(DateTime::<Utc>::from(site.at(-20.0)))
+                );
+            } else {
+                let err = result.expect_err("the baseline has no total");
                 assert_eq!(err.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
             }
         }
@@ -2741,5 +3021,23 @@ mod tests {
         let status = store_status(&empty.state).await.expect("status");
         assert_eq!(status.last_sample_at, None);
         assert_eq!(status.sample_age_seconds, None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn store_status_rejects_out_of_range_sweep_time() {
+        let site = site();
+        let times: Vec<(&str, &str)> = [("reader", "devices"), ("family", "host")]
+            .into_iter()
+            .chain(SELECTOR)
+            .collect();
+        site.store.add(SWEEP_END, &times, site.ms(-5.0), 1e300);
+        let err = store_status(&site.state).await.expect_err("not a time");
+        assert_eq!(
+            (err.status(), err.code()),
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                ErrorCode::StoreUnavailable
+            )
+        );
     }
 }

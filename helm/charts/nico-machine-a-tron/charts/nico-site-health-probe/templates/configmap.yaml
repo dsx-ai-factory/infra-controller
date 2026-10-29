@@ -60,19 +60,20 @@ data:
         ca: {{ . | quote }}
         {{- end }}
     {{- with .Values.state }}
+    {{- /* The latency probes call through the caps' gates with state off too. */}}
+    state:
+      enabled: {{ .enabled }}
+      caps:
+        calls_per_second: {{ .caps.callsPerSecond }}
+        call_timeout: {{ .caps.callTimeout | quote }}
+        max_backoff: {{ .caps.maxBackoff | quote }}
     {{- if .enabled }}
     {{- $tlsDir := include "nico-site-health-probe.stateTlsDir" $ }}
     {{- $selector := .metricsStore.selector }}
     {{- if not $selector }}
     {{- $selector = dict "job" (printf "%s-metrics" (include "nico-site-health-probe.name" $)) "namespace" (include "nico-site-health-probe.namespace" $) }}
     {{- end }}
-    state:
-      enabled: true
       site_id: {{ .siteId | quote }}
-      caps:
-        calls_per_second: {{ .caps.callsPerSecond }}
-        call_timeout: {{ .caps.callTimeout | quote }}
-        max_backoff: {{ .caps.maxBackoff | quote }}
       nico_api:
         target: {{ .nicoApi.target | quote }}
         host_read: {{ .nicoApi.hostRead }}

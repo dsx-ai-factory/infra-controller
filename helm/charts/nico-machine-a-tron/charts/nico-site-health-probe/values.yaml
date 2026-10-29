@@ -167,10 +167,14 @@ state:
   ## The Prometheus-compatible store /v1/summary reads the probe's series
   ## from. An empty selector selects this probe by job (the metrics Service
   ## name) and namespace; a shared store needs both.
+  ## A summary reads its window in one-hour chunks of up to three store
+  ## calls at caps.callsPerSecond, and those calls may take at most half of
+  ## summaryDeadline: 24h fits 90s at 2 calls/s, a longer maxWindow needs a
+  ## longer deadline or a faster gate.
   metricsStore:
     url: ""
     selector: {}
-    maxWindow: 48h
+    maxWindow: 24h
     summaryDeadline: 90s
   ## A replaced snapshot that a /v1/units cursor points into stays readable
   ## this long for the paging client. Others are dropped when replaced.
