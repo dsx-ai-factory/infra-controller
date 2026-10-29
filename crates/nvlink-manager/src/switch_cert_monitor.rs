@@ -15,8 +15,8 @@
  * limitations under the License.
  */
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use std::{fmt, io};
 
@@ -31,16 +31,22 @@ use component_manager::component_manager::{
     ComponentManager, RackMaintenanceEligibility, RackMaintenanceRequestOutcome,
     request_rack_maintenance_via_state_controller,
 };
+use db::ObjectColumnFilter;
 use db::db_read::PgPoolReader;
 use db::work_lock_manager::WorkLockManagerHandle;
 use model::machine::LoadSnapshotOptions;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::nmxc::NvlinkNmxcEndpoint;
-use model::rack::{MaintenanceActivity, MaintenanceScope};
+use model::rack::{MaintenanceActivity, MaintenanceScope, RackState};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::Meter;
-use rustls::{CertificateError, ClientConfig, Error as RustlsError, RootCertStore};
-use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use rustls::client::WebPkiServerVerifier;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::{
+    CertificateError, ClientConfig, DigitallySignedStruct, DistinguishedName, Error as RustlsError,
+    RootCertStore, SignatureScheme,
+};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tokio::net::TcpStream;
@@ -135,7 +141,18 @@ fn merge_switch_certificate_monitor_targets(
 #[derive(Debug, PartialEq, Eq)]
 enum CertificateProbeOutcome {
     Observed(CertificateInfo),
-    Expired,
+    /// The handshake failed because the served leaf certificate is expired, so
+    /// rotating it can repair the chain. `leaf` is absent when the presented
+    /// chain could not be inspected.
+    ExpiredLeaf {
+        leaf: Option<CertificateInfo>,
+    },
+    /// The handshake failed because an intermediate CA certificate served by
+    /// NMX-C is expired. Rotating the leaf cannot repair the chain.
+    ExpiredIntermediate {
+        subject: String,
+        not_after_timestamp: i64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +161,9 @@ enum SwitchCertApplyStatus {
     Pending,
     Error,
     Skipped,
+    /// Rotation was already scheduled for this unchanged certificate the
+    /// maximum number of times without NMX-C serving a new one.
+    RetryExhausted,
 }
 
 impl SwitchCertApplyStatus {
@@ -153,7 +173,129 @@ impl SwitchCertApplyStatus {
             Self::Pending => "pending",
             Self::Error => "error",
             Self::Skipped => "skipped",
+            Self::RetryExhausted => "retry_exhausted",
         }
+    }
+}
+
+/// Delegates every verification decision to the WebPKI verifier and records
+/// the chain NMX-C presented, so an expiry failure can be attributed to the
+/// leaf or to an intermediate. The recorded chain is unverified peer input and
+/// is only used to classify a failed handshake.
+#[derive(Debug)]
+struct ChainRecordingVerifier {
+    inner: Arc<WebPkiServerVerifier>,
+    presented_chain: Mutex<Vec<CertificateDer<'static>>>,
+}
+
+impl ChainRecordingVerifier {
+    fn presented_chain(&self) -> Vec<CertificateDer<'static>> {
+        self.presented_chain
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl ServerCertVerifier for ChainRecordingVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        *self
+            .presented_chain
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = std::iter::once(end_entity)
+            .chain(intermediates)
+            .map(|cert| cert.clone().into_owned())
+            .collect();
+        self.inner
+            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+
+    fn requires_raw_public_keys(&self) -> bool {
+        self.inner.requires_raw_public_keys()
+    }
+
+    fn root_hint_subjects(&self) -> Option<&[DistinguishedName]> {
+        self.inner.root_hint_subjects()
+    }
+}
+
+/// Counts rotations scheduled per endpoint while NMX-C keeps serving the same
+/// certificate. The budget lives in memory, so a restart grants a fresh one.
+#[derive(Debug, Default)]
+struct UnchangedRotationTracker {
+    attempts_by_endpoint: Mutex<HashMap<String, UnchangedRotationAttempts>>,
+}
+
+#[derive(Debug)]
+struct UnchangedRotationAttempts {
+    certificate_signature: String,
+    scheduled: u32,
+}
+
+impl UnchangedRotationTracker {
+    /// Rotations already scheduled for `endpoint` while it served the
+    /// certificate identified by `certificate_signature`.
+    fn scheduled(&self, endpoint: &str, certificate_signature: &str) -> u32 {
+        self.attempts_by_endpoint
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(endpoint)
+            .filter(|attempts| attempts.certificate_signature == certificate_signature)
+            .map_or(0, |attempts| attempts.scheduled)
+    }
+
+    fn record_scheduled(&self, endpoint: &str, certificate_signature: &str) {
+        let mut attempts_by_endpoint = self
+            .attempts_by_endpoint
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let attempts = attempts_by_endpoint
+            .entry(endpoint.to_string())
+            .or_insert_with(|| UnchangedRotationAttempts {
+                certificate_signature: certificate_signature.to_string(),
+                scheduled: 0,
+            });
+        if attempts.certificate_signature != certificate_signature {
+            attempts.certificate_signature = certificate_signature.to_string();
+            attempts.scheduled = 0;
+        }
+        attempts.scheduled += 1;
+    }
+
+    fn forget(&self, endpoint: &str) {
+        self.attempts_by_endpoint
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(endpoint);
     }
 }
 
@@ -178,6 +320,7 @@ enum SwitchCertMonitorErrorKind {
     ServerCertificate,
     Configuration,
     Rms,
+    ExpiredCaChain,
     Other,
 }
 
@@ -193,6 +336,7 @@ impl SwitchCertMonitorErrorKind {
             Self::ServerCertificate => "server_certificate",
             Self::Configuration => "configuration",
             Self::Rms => "rms",
+            Self::ExpiredCaChain => "expired_ca_chain",
             Self::Other => "other",
         }
     }
@@ -472,6 +616,7 @@ pub(crate) struct SwitchCertificateMonitor {
     component_manager: Option<Arc<ComponentManager>>,
     metric_holder: Arc<MetricHolder>,
     work_lock_manager_handle: WorkLockManagerHandle,
+    unchanged_rotations: UnchangedRotationTracker,
 }
 
 #[cfg(feature = "test-support")]
@@ -481,6 +626,7 @@ pub struct SwitchCertificateMonitor {
     component_manager: Option<Arc<ComponentManager>>,
     metric_holder: Arc<MetricHolder>,
     work_lock_manager_handle: WorkLockManagerHandle,
+    unchanged_rotations: UnchangedRotationTracker,
 }
 
 #[cfg(feature = "test-support")]
@@ -534,6 +680,12 @@ impl SwitchCertificateMonitor {
     const ITERATION_WORK_KEY: &'static str = "SwitchCertificateMonitor::run_single_iteration";
     const PROBE_CANCELLED_ERROR: &'static str = "NMX-C server certificate probe cancelled";
     const APPLY_CANCELLED_ERROR: &'static str = "NMX-C server certificate apply cancelled";
+    /// Full-rack ConfigureNmxCluster requests allowed while NMX-C keeps serving
+    /// the same certificate. Beyond this, rotation is not repairing the
+    /// failure and an operator must investigate.
+    const MAX_UNCHANGED_ROTATION_ATTEMPTS: u32 = 2;
+    /// Rotation signature for an expired leaf whose chain could not be inspected.
+    const UNIDENTIFIED_CERTIFICATE_SIGNATURE: &'static str = "unidentified";
 
     #[cfg(not(feature = "test-support"))]
     pub(crate) fn new(
@@ -587,6 +739,7 @@ impl SwitchCertificateMonitor {
             component_manager,
             metric_holder,
             work_lock_manager_handle,
+            unchanged_rotations: UnchangedRotationTracker::default(),
         }
     }
 
@@ -755,22 +908,50 @@ impl SwitchCertificateMonitor {
                     );
                     (Some(observed_cert), rotation_required, true, String::new())
                 }
-                Ok(CertificateProbeOutcome::Expired) => {
+                Ok(CertificateProbeOutcome::ExpiredLeaf { leaf }) => {
                     tracing::warn!(
                         switch_id = %switch_id_label,
                         rack_id = %rack_id_label,
                         endpoint = %target.endpoint_url,
                         target_source,
                         chassis_serials,
+                        observed_fingerprint = leaf.as_ref().map(|leaf| leaf.fingerprint_sha256.as_str()),
+                        observed_not_after = leaf.as_ref().map(|leaf| leaf.not_after_timestamp),
                         "NMX-C server certificate is expired"
                     );
                     (
-                        None,
+                        leaf,
                         true,
                         false,
                         "TLS handshake failed because the NMX-C server certificate is expired"
                             .to_string(),
                     )
+                }
+                Ok(CertificateProbeOutcome::ExpiredIntermediate {
+                    subject,
+                    not_after_timestamp,
+                }) => {
+                    tracing::error!(
+                        switch_id = %switch_id_label,
+                        rack_id = %rack_id_label,
+                        endpoint = %target.endpoint_url,
+                        target_source,
+                        chassis_serials,
+                        intermediate_subject = %subject,
+                        intermediate_not_after = not_after_timestamp,
+                        "NMX-C served an expired intermediate CA certificate; rotating the switch certificate cannot repair the chain, so renew the CA chain"
+                    );
+                    metrics.observed_certs.push(ObservedSwitchCertMetrics {
+                        probe_success: false,
+                        rotation_required: false,
+                        observed_cert: None,
+                        error: format!(
+                            "TLS handshake failed because intermediate CA certificate {subject} served by NMX-C expired at {not_after_timestamp}; CA chain remediation is required"
+                        ),
+                        apply_status: SwitchCertApplyStatus::Skipped,
+                        apply_error: String::new(),
+                    });
+                    continue;
                 }
                 Err(error) if error == Self::PROBE_CANCELLED_ERROR => {
                     tracing::info!("SwitchCertificateMonitor stop was requested");
@@ -799,9 +980,15 @@ impl SwitchCertificateMonitor {
             };
 
             let (apply_status, apply_error) = if rotation_required {
+                let certificate_signature = observed_cert
+                    .as_ref()
+                    .map_or(Self::UNIDENTIFIED_CERTIFICATE_SIGNATURE, |cert| {
+                        cert.fingerprint_sha256.as_str()
+                    });
                 match self
                     .request_nmx_cluster_configuration_with_rack_state_controller(
                         &target,
+                        certificate_signature,
                         cancel_token,
                     )
                     .await
@@ -825,6 +1012,7 @@ impl SwitchCertificateMonitor {
                     }
                 }
             } else {
+                self.unchanged_rotations.forget(&target.endpoint_url);
                 (SwitchCertApplyStatus::NotNeeded, String::new())
             };
 
@@ -938,9 +1126,13 @@ impl SwitchCertificateMonitor {
         }
     }
 
+    /// `certificate_signature` identifies the certificate NMX-C served. Each
+    /// newly scheduled rotation counts against that certificate's retry budget,
+    /// which resets once NMX-C serves a different certificate.
     async fn request_nmx_cluster_configuration_with_rack_state_controller(
         &self,
         target: &SwitchCertificateMonitorTarget,
+        certificate_signature: &str,
         cancel_token: &CancellationToken,
     ) -> Result<SwitchCertApplyStatus, String> {
         let Some(rack_id) = target.rack_id.as_ref() else {
@@ -972,6 +1164,33 @@ impl SwitchCertificateMonitor {
             activities: vec![MaintenanceActivity::ConfigureNmxCluster],
             ..Default::default()
         };
+
+        let scheduled_rotations = self
+            .unchanged_rotations
+            .scheduled(&target.endpoint_url, certificate_signature);
+        if scheduled_rotations >= Self::MAX_UNCHANGED_ROTATION_ATTEMPTS {
+            // Only a request that would schedule new work is withheld. While the
+            // last attempt is still pending or running, the request below reports
+            // that state instead of flagging the budget as exhausted early.
+            let would_schedule = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    return Err(Self::APPLY_CANCELLED_ERROR.to_string());
+                }
+                would_schedule = self.rack_would_accept_maintenance(rack_id) => would_schedule?,
+            };
+            if would_schedule {
+                tracing::error!(
+                    switch_id = %switch_id_label,
+                    rack_id = %rack_id,
+                    endpoint = %target.endpoint_url,
+                    certificate_signature,
+                    scheduled_rotations,
+                    "NMX-C kept serving the same certificate after repeated full-rack NMX-C cluster configuration; not scheduling another rotation, operator investigation is required"
+                );
+                return Ok(SwitchCertApplyStatus::RetryExhausted);
+            }
+        }
+
         let outcome = tokio::select! {
             _ = cancel_token.cancelled() => {
                 return Err(Self::APPLY_CANCELLED_ERROR.to_string());
@@ -991,6 +1210,8 @@ impl SwitchCertificateMonitor {
 
         match outcome {
             RackMaintenanceRequestOutcome::Scheduled => {
+                self.unchanged_rotations
+                    .record_scheduled(&target.endpoint_url, certificate_signature);
                 tracing::info!(
                     switch_id = %switch_id_label,
                     rack_id = %rack_id,
@@ -1030,6 +1251,24 @@ impl SwitchCertificateMonitor {
         }
     }
 
+    /// Mirrors the conditions under which
+    /// `request_rack_maintenance_via_state_controller` with
+    /// `RequireReady` would schedule new maintenance, without writing anything.
+    async fn rack_would_accept_maintenance(&self, rack_id: &RackId) -> Result<bool, String> {
+        let mut db_reader = PgPoolReader::from(self.db_pool.clone());
+        let rack = db::rack::find_by(
+            &mut db_reader,
+            ObjectColumnFilter::One(db::rack::IdColumn, rack_id),
+        )
+        .await
+        .map_err(|error| format!("failed to load rack {rack_id}: {error}"))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("rack {rack_id} not found"))?;
+        Ok(rack.config.maintenance_requested.is_none()
+            && rack.controller_state.value == RackState::Ready)
+    }
+
     async fn probe_endpoint_certificate(
         config: &NvLinkConfig,
         endpoint_url: &str,
@@ -1063,7 +1302,7 @@ impl SwitchCertificateMonitor {
             .map_err(|error| format!("invalid NMX-C TLS authority {tls_authority}: {error}"))?;
 
         let probe_timeout = config.nmx_c_certificate_rotation.probe_timeout;
-        let client_config = tokio::select! {
+        let (client_config, verifier) = tokio::select! {
             _ = cancel_token.cancelled() => {
                 return Err(Self::PROBE_CANCELLED_ERROR.to_string());
             }
@@ -1096,10 +1335,13 @@ impl SwitchCertificateMonitor {
                         "TLS handshake timed out for {endpoint_url} after {probe_timeout:?}"
                     ));
                 }
-                Ok(Err(error)) if tls_error_is_expired_certificate(&error) => {
-                    return Ok(CertificateProbeOutcome::Expired);
-                }
                 Ok(Err(error)) => {
+                    if let Some(verification_time) = expired_certificate_verification_time(&error) {
+                        return Ok(classify_expired_chain(
+                            &verifier.presented_chain(),
+                            verification_time,
+                        ));
+                    }
                     return Err(format!("TLS handshake failed for {endpoint_url}: {error}"));
                 }
                 Ok(Ok(tls_stream)) => tls_stream,
@@ -1117,19 +1359,58 @@ impl SwitchCertificateMonitor {
     }
 }
 
-fn tls_error_is_expired_certificate(error: &io::Error) -> bool {
+/// Returns the verification time when a handshake failed because a presented
+/// certificate is expired.
+fn expired_certificate_verification_time(error: &io::Error) -> Option<UnixTime> {
     // tokio-rustls retains the rustls handshake error inside io::Error.
-    matches!(
-        error
-            .get_ref()
-            .and_then(|source| source.downcast_ref::<RustlsError>()),
-        Some(RustlsError::InvalidCertificate(
-            CertificateError::ExpiredContext { .. }
-        ))
-    )
+    match error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<RustlsError>())
+    {
+        Some(RustlsError::InvalidCertificate(CertificateError::ExpiredContext {
+            time, ..
+        })) => Some(*time),
+        _ => None,
+    }
 }
 
-async fn build_tls_client_config(config: &NvLinkConfig) -> Result<ClientConfig, String> {
+/// Works out which certificate caused an `ExpiredContext` handshake failure,
+/// using the chain NMX-C presented.
+///
+/// - If any intermediate is expired, returns `ExpiredIntermediate`, even when
+///   the leaf is expired too: a rotated leaf would be issued under the same
+///   expired intermediate and still fail.
+/// - Otherwise returns `ExpiredLeaf`. This includes the case where no
+///   certificate in the chain could be parsed or found to be expired; rotating
+///   is the best guess, and the rotation retry limit stops it repeating forever.
+fn classify_expired_chain(
+    presented_chain: &[CertificateDer<'_>],
+    verification_time: UnixTime,
+) -> CertificateProbeOutcome {
+    let verification_time = i64::try_from(verification_time.as_secs()).unwrap_or(i64::MAX);
+    for der in presented_chain.iter().skip(1) {
+        let Ok((_, cert)) = X509Certificate::from_der(der.as_ref()) else {
+            continue;
+        };
+        let not_after_timestamp = cert.validity.not_after.timestamp();
+        // WebPKI treats a certificate as expired once the time passes notAfter.
+        if verification_time > not_after_timestamp {
+            return CertificateProbeOutcome::ExpiredIntermediate {
+                subject: cert.subject().to_string(),
+                not_after_timestamp,
+            };
+        }
+    }
+    CertificateProbeOutcome::ExpiredLeaf {
+        leaf: presented_chain
+            .first()
+            .and_then(|der| certificate_info_from_der(der.as_ref()).ok()),
+    }
+}
+
+async fn build_tls_client_config(
+    config: &NvLinkConfig,
+) -> Result<(ClientConfig, Arc<ChainRecordingVerifier>), String> {
     let mut roots = RootCertStore::empty();
     let ca_cert_path = config
         .nmx_c_tls_ca_cert_path
@@ -1143,14 +1424,22 @@ async fn build_tls_client_config(config: &NvLinkConfig) -> Result<ClientConfig, 
         ));
     }
 
-    let builder = ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|error| format!("failed to build rustls client config: {error}"))?
-    .with_root_certificates(roots);
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    // Same verifier `with_root_certificates` would install, wrapped to record
+    // the presented chain. Each probe builds its own, so chains never mix.
+    let verifier = Arc::new(ChainRecordingVerifier {
+        inner: WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
+            .build()
+            .map_err(|error| format!("failed to build NMX-C TLS certificate verifier: {error}"))?,
+        presented_chain: Mutex::default(),
+    });
+    let builder = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|error| format!("failed to build rustls client config: {error}"))?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier.clone());
 
-    match (
+    let client_config = match (
         &config.nmx_c_tls_client_cert_path,
         &config.nmx_c_tls_client_key_path,
     ) {
@@ -1159,14 +1448,17 @@ async fn build_tls_client_config(config: &NvLinkConfig) -> Result<ClientConfig, 
             let key = read_private_key_from_pem_file(client_key_path).await?;
             builder
                 .with_client_auth_cert(certs, key)
-                .map_err(|error| format!("invalid NMX-C client certificate config: {error}"))
+                .map_err(|error| format!("invalid NMX-C client certificate config: {error}"))?
         }
-        (None, None) => Ok(builder.with_no_client_auth()),
-        _ => Err(
-            "nmx_c_tls_client_cert_path and nmx_c_tls_client_key_path must be configured together"
-                .to_string(),
-        ),
-    }
+        (None, None) => builder.with_no_client_auth(),
+        _ => {
+            return Err(
+                "nmx_c_tls_client_cert_path and nmx_c_tls_client_key_path must be configured together"
+                    .to_string(),
+            );
+        }
+    };
+    Ok((client_config, verifier))
 }
 
 async fn read_certs_from_pem_file(path: &str) -> Result<Vec<CertificateDer<'static>>, String> {
@@ -1288,7 +1580,9 @@ fn apply_status(cert: &ObservedSwitchCertMetrics) -> &'static str {
 
 fn switch_cert_monitor_error_kind(error: &str) -> SwitchCertMonitorErrorKind {
     let error = error.to_ascii_lowercase();
-    if error.contains("timed out") {
+    if error.contains("ca chain remediation") {
+        SwitchCertMonitorErrorKind::ExpiredCaChain
+    } else if error.contains("timed out") {
         SwitchCertMonitorErrorKind::Timeout
     } else if error.contains("failed to connect") || error.contains("connection to") {
         SwitchCertMonitorErrorKind::Connection
@@ -1329,7 +1623,10 @@ mod tests {
     use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::Outcome::{Fails, Yields};
     use carbide_test_support::{Case, Check, check_cases_async, check_values};
-    use rcgen::{CertifiedKey, generate_simple_self_signed};
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedKey, DnType, IsCa, Issuer, KeyPair,
+        generate_simple_self_signed,
+    };
     use rustls::ServerConfig;
     use rustls_pki_types::UnixTime;
     use tempfile::NamedTempFile;
@@ -1415,7 +1712,7 @@ mod tests {
                             )),
                         }),
                     ),
-                    expect: true,
+                    expect: Some(now),
                 },
                 Check {
                     scenario: "certificate hostname mismatch",
@@ -1423,15 +1720,299 @@ mod tests {
                         io::ErrorKind::InvalidData,
                         RustlsError::InvalidCertificate(CertificateError::NotValidForName),
                     ),
-                    expect: false,
+                    expect: None,
                 },
                 Check {
                     scenario: "non-TLS I/O error",
                     input: io::Error::new(io::ErrorKind::ConnectionReset, "connection reset"),
-                    expect: false,
+                    expect: None,
                 },
             ],
-            |error| tls_error_is_expired_certificate(&error),
+            |error| expired_certificate_verification_time(&error),
+        );
+    }
+
+    const TEST_AUTHORITY: &str = "nmxc.example.test";
+
+    fn test_certificate_params(common_name: &str, expired: bool, is_ca: bool) -> CertificateParams {
+        let mut params = CertificateParams::new(if is_ca {
+            vec![]
+        } else {
+            vec![TEST_AUTHORITY.to_string()]
+        })
+        .unwrap();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, common_name);
+        params.not_before = rcgen::date_time_ymd(2000, 1, 1);
+        params.not_after = if expired {
+            rcgen::date_time_ymd(2001, 1, 1)
+        } else {
+            rcgen::date_time_ymd(2999, 1, 1)
+        };
+        if is_ca {
+            params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        }
+        params
+    }
+
+    /// A root -> intermediate -> leaf chain. The server presents the leaf and
+    /// intermediate; the root is the client's trust anchor.
+    struct TestChain {
+        root_pem: String,
+        presented: Vec<CertificateDer<'static>>,
+        leaf_key: KeyPair,
+    }
+
+    fn test_chain(leaf_expired: bool, intermediate_expired: bool) -> TestChain {
+        let root_key = KeyPair::generate().unwrap();
+        let root_params = test_certificate_params("NICo test root", false, true);
+        let root = root_params.self_signed(&root_key).unwrap();
+        let root_issuer = Issuer::new(root_params, root_key);
+
+        let intermediate_key = KeyPair::generate().unwrap();
+        let intermediate_params =
+            test_certificate_params("NICo test intermediate", intermediate_expired, true);
+        let intermediate = intermediate_params
+            .signed_by(&intermediate_key, &root_issuer)
+            .unwrap();
+        let intermediate_issuer = Issuer::new(intermediate_params, intermediate_key);
+
+        let leaf_key = KeyPair::generate().unwrap();
+        let leaf = test_certificate_params("NMX-C test leaf", leaf_expired, false)
+            .signed_by(&leaf_key, &intermediate_issuer)
+            .unwrap();
+
+        TestChain {
+            root_pem: root.pem(),
+            presented: vec![leaf.der().clone(), intermediate.der().clone()],
+            leaf_key,
+        }
+    }
+
+    #[test]
+    fn expired_chain_is_attributed_to_the_expired_certificate() {
+        #[derive(Clone, Copy)]
+        struct ChainCase {
+            leaf_expired: bool,
+            intermediate_expired: bool,
+            presented_certificates: usize,
+        }
+
+        let verification_time = UnixTime::since_unix_epoch(Duration::from_secs(1_800_000_000));
+        check_values(
+            [
+                Check {
+                    scenario: "only the leaf is expired",
+                    input: ChainCase {
+                        leaf_expired: true,
+                        intermediate_expired: false,
+                        presented_certificates: 2,
+                    },
+                    expect: "expired_leaf_identified",
+                },
+                Check {
+                    scenario: "only the intermediate is expired",
+                    input: ChainCase {
+                        leaf_expired: false,
+                        intermediate_expired: true,
+                        presented_certificates: 2,
+                    },
+                    expect: "expired_intermediate",
+                },
+                Check {
+                    scenario: "leaf and intermediate are both expired",
+                    input: ChainCase {
+                        leaf_expired: true,
+                        intermediate_expired: true,
+                        presented_certificates: 2,
+                    },
+                    expect: "expired_intermediate",
+                },
+                Check {
+                    scenario: "no presented chain was recorded",
+                    input: ChainCase {
+                        leaf_expired: true,
+                        intermediate_expired: false,
+                        presented_certificates: 0,
+                    },
+                    expect: "expired_leaf_unidentified",
+                },
+            ],
+            |case| {
+                let chain = test_chain(case.leaf_expired, case.intermediate_expired);
+                match classify_expired_chain(
+                    &chain.presented[..case.presented_certificates],
+                    verification_time,
+                ) {
+                    CertificateProbeOutcome::Observed(_) => "observed",
+                    CertificateProbeOutcome::ExpiredLeaf { leaf: Some(_) } => {
+                        "expired_leaf_identified"
+                    }
+                    CertificateProbeOutcome::ExpiredLeaf { leaf: None } => {
+                        "expired_leaf_unidentified"
+                    }
+                    CertificateProbeOutcome::ExpiredIntermediate { subject, .. } => {
+                        assert!(subject.contains("NICo test intermediate"), "{subject}");
+                        "expired_intermediate"
+                    }
+                }
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn certificate_probe_distinguishes_expired_leaf_from_expired_intermediate() {
+        #[derive(Clone, Copy, Debug)]
+        struct ProbeCase {
+            leaf_expired: bool,
+            intermediate_expired: bool,
+            trusted_root: bool,
+        }
+
+        check_cases_async(
+            [
+                Case {
+                    scenario: "valid chain",
+                    input: ProbeCase {
+                        leaf_expired: false,
+                        intermediate_expired: false,
+                        trusted_root: true,
+                    },
+                    expect: Yields("observed"),
+                },
+                Case {
+                    scenario: "expired leaf is rotatable",
+                    input: ProbeCase {
+                        leaf_expired: true,
+                        intermediate_expired: false,
+                        trusted_root: true,
+                    },
+                    expect: Yields("expired_leaf"),
+                },
+                Case {
+                    scenario: "expired intermediate requires CA remediation",
+                    input: ProbeCase {
+                        leaf_expired: false,
+                        intermediate_expired: true,
+                        trusted_root: true,
+                    },
+                    expect: Yields("expired_intermediate"),
+                },
+                Case {
+                    scenario: "chain from an untrusted root is still rejected",
+                    input: ProbeCase {
+                        leaf_expired: false,
+                        intermediate_expired: false,
+                        trusted_root: false,
+                    },
+                    expect: Fails,
+                },
+            ],
+            |case| async move {
+                let chain = test_chain(case.leaf_expired, case.intermediate_expired);
+                let trusted_root_pem = if case.trusted_root {
+                    chain.root_pem.clone()
+                } else {
+                    test_chain(false, false).root_pem
+                };
+                let ca_file = NamedTempFile::new().unwrap();
+                std::fs::write(ca_file.path(), trusted_root_pem).unwrap();
+                let config = NvLinkConfig {
+                    nmx_c_tls_ca_cert_path: Some(ca_file.path().to_str().unwrap().to_string()),
+                    nmx_c_tls_authority: Some(TEST_AUTHORITY.to_string()),
+                    ..Default::default()
+                };
+                let server_config = ServerConfig::builder_with_provider(Arc::new(
+                    rustls::crypto::aws_lc_rs::default_provider(),
+                ))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(
+                    chain.presented.clone(),
+                    PrivateKeyDer::Pkcs8(chain.leaf_key.serialize_der().into()),
+                )
+                .unwrap();
+                let acceptor = TlsAcceptor::from(Arc::new(server_config));
+                let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0))
+                    .await
+                    .expect("IPv6 loopback listener binds");
+                let endpoint = format!("https://{}", listener.local_addr().unwrap());
+                let cancel_token = CancellationToken::new();
+                let (probe, _server) = tokio::time::timeout(Duration::from_secs(5), async {
+                    tokio::join!(
+                        SwitchCertificateMonitor::probe_endpoint_certificate(
+                            &config,
+                            &endpoint,
+                            &cancel_token,
+                        ),
+                        async {
+                            let (stream, _) = listener.accept().await.unwrap();
+                            acceptor.accept(stream).await
+                        },
+                    )
+                })
+                .await
+                .expect("local certificate probe finishes within five seconds");
+
+                probe.map(|outcome| match outcome {
+                    CertificateProbeOutcome::Observed(_) => "observed",
+                    CertificateProbeOutcome::ExpiredLeaf { leaf } => {
+                        let leaf = leaf.expect("presented leaf is recorded");
+                        assert_eq!(
+                            leaf,
+                            certificate_info_from_der(chain.presented[0].as_ref()).unwrap()
+                        );
+                        "expired_leaf"
+                    }
+                    CertificateProbeOutcome::ExpiredIntermediate { .. } => "expired_intermediate",
+                })
+            },
+        )
+        .await;
+    }
+
+    #[test]
+    fn unchanged_rotation_budget_resets_when_the_certificate_changes() {
+        const ENDPOINT: &str = "https://10.0.0.2:9370";
+        let tracker = UnchangedRotationTracker::default();
+
+        assert_eq!(tracker.scheduled(ENDPOINT, "cert-a"), 0);
+        tracker.record_scheduled(ENDPOINT, "cert-a");
+        tracker.record_scheduled(ENDPOINT, "cert-a");
+        assert_eq!(tracker.scheduled(ENDPOINT, "cert-a"), 2);
+        assert_eq!(
+            tracker.scheduled("https://10.0.0.3:9370", "cert-a"),
+            0,
+            "budgets are per endpoint"
+        );
+
+        assert_eq!(
+            tracker.scheduled(ENDPOINT, "cert-b"),
+            0,
+            "a different certificate starts a fresh budget"
+        );
+        tracker.record_scheduled(ENDPOINT, "cert-b");
+        assert_eq!(tracker.scheduled(ENDPOINT, "cert-b"), 1);
+        assert_eq!(tracker.scheduled(ENDPOINT, "cert-a"), 0);
+
+        tracker.forget(ENDPOINT);
+        assert_eq!(tracker.scheduled(ENDPOINT, "cert-b"), 0);
+    }
+
+    #[test]
+    fn expired_intermediate_probe_error_is_reported_as_expired_ca_chain() {
+        let error = "TLS handshake failed because intermediate CA certificate CN=NICo intermediate served by NMX-C expired at 978307200; CA chain remediation is required";
+        assert_eq!(
+            switch_cert_monitor_error_kind(error),
+            SwitchCertMonitorErrorKind::ExpiredCaChain
+        );
+        assert_eq!(
+            switch_cert_monitor_error_kind(
+                "TLS handshake failed because the NMX-C server certificate is expired"
+            ),
+            SwitchCertMonitorErrorKind::Tls
         );
     }
 
