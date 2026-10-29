@@ -95,10 +95,10 @@ async fn spdm_job_migration_restarts_legacy_polling(
     sqlx::raw_sql(
         r#"INSERT INTO spdm_machine_devices_attestation
                (machine_id, device_id, nonce, state, started_at)
-           SELECT machine_id, device_id, gen_random_uuid(), '"Passed"'::jsonb, now()
-           FROM (VALUES ('spdm-migration-0', 'GPU-1'),
-                        ('spdm-migration-0', 'GPU-2'),
-                        ('spdm-migration-1', 'GPU-1')) AS devices(machine_id, device_id)"#,
+           SELECT machine_id, device_id, gen_random_uuid(), state::jsonb, now()
+           FROM (VALUES ('spdm-migration-0', 'GPU-1', '{"PollEvidenceCollection":{"task_id":"legacy-task","retry_count":0}}'),
+                        ('spdm-migration-0', 'GPU-2', '"Passed"'),
+                        ('spdm-migration-1', 'GPU-1', '"Passed"')) AS devices(machine_id, device_id, state)"#,
     )
     .execute(&pool)
     .await?;
@@ -143,6 +143,22 @@ async fn spdm_job_migration_restarts_legacy_polling(
         )
     })
     .await??;
+
+    // Legacy polling must retain its BMC task ID and claim; other states stay unclaimed.
+    let claims: Vec<(Option<String>, bool)> = sqlx::query_as(
+        "SELECT state #>> '{PollEvidenceCollection,task_id}', evidence_collection_locked
+         FROM spdm_machine_devices_attestation ORDER BY machine_id, device_id",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        claims,
+        vec![
+            (Some("legacy-task".to_string()), true),
+            (None, false),
+            (None, false),
+        ]
+    );
 
     // The primary key must enforce required job IDs after the backfill.
     let jobs: Vec<(String, Vec<uuid::Uuid>)> = sqlx::query_as(

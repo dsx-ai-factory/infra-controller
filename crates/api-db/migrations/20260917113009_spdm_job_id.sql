@@ -14,6 +14,12 @@ FROM (
 ) AS m
 WHERE a.machine_id = m.machine_id;
 
+-- Preserve ownership for evidence collection started before the upgrade.
+UPDATE spdm_machine_devices_attestation
+SET evidence_collection_locked = TRUE
+WHERE state ? 'PollEvidenceCollection'
+  AND completed_at IS NULL;
+
 ALTER TABLE spdm_machine_devices_attestation DROP CONSTRAINT spdm_machine_devices_attestation_pkey;
 ALTER TABLE spdm_machine_devices_attestation ADD PRIMARY KEY (machine_id, device_id, job_id);
 
