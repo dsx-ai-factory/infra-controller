@@ -1647,13 +1647,16 @@ type ForgeClient interface {
 	// explicit empty grants deny callers with an AuthContext before dispatch
 	// (PERMISSION_DENIED). Missing AuthContext is also rejected before dispatch;
 	// no gRPC wire status for that branch is promised here. With RBAC bypassed,
-	// the stubs return UNIMPLEMENTED. Scope is the connected Core site
-	// and configured tenant_org_id. Existing mTLS and method authorization are
-	// required in addition to tenant-scoped checks; request IDs grant no permission.
-	// Discovers hold IDs (active by default) in immutable (created_at, hold_id) order using
-	// exclusive keyset pagination; removal of earlier holds cannot shift pages.
+	// the stubs return UNIMPLEMENTED. Runtime implementation must grant SiteAgent
+	// all six RPCs, including removal: REST calls Core as that service. REST
+	// authorizes the end user's role and Tenant scope, and audits the end user;
+	// Core authorizes/audits the service caller and checks resource/policy bindings.
+	// Core cannot infer a Provider Admin role from the SiteAgent identity. Direct
+	// Core callers need explicit method/site permissions. Request IDs grant none.
+	// Returns all matching hold IDs (active by default) in (created_at, hold_id)
+	// order. Fetch their current state in max_find_by_ids-bounded batches.
 	FindExternalValidationHoldIds(ctx context.Context, in *ExternalValidationHoldSearchFilter, opts ...grpc.CallOption) (*ExternalValidationHoldIdList, error)
-	// Fetches current holds, including Satisfied, by ID within the authorized tenant.
+	// Fetches current holds, including Satisfied, with an optional tenant filter.
 	FindExternalValidationHoldsByIds(ctx context.Context, in *ExternalValidationHoldsByIdsRequest, opts ...grpc.CallOption) (*ExternalValidationHoldList, error)
 	// Atomically opens one attempt or replays the attempt identified by the key.
 	StartExternalValidation(ctx context.Context, in *StartExternalValidationRequest, opts ...grpc.CallOption) (*StartExternalValidationResponse, error)
@@ -1661,7 +1664,8 @@ type ForgeClient interface {
 	CancelExternalValidation(ctx context.Context, in *CancelExternalValidationRequest, opts ...grpc.CallOption) (*ExternalValidationAttempt, error)
 	// Records a result for the bound instance; never clears the hold immediately.
 	CompleteExternalValidation(ctx context.Context, in *CompleteExternalValidationRequest, opts ...grpc.CallOption) (*ExternalValidationAttempt, error)
-	// Site-administrator-only audited recovery, fenced by the expected hold ID.
+	// Privileged audited recovery, fenced by the expected hold ID. For REST calls,
+	// REST enforces Provider Admin authorization; Core sees the SiteAgent caller.
 	// Unresolved allocation or cleanup returns FAILED_PRECONDITION. Successful
 	// removal atomically closes/fences any attempt and removes the matching gate.
 	RemoveExternalValidationHold(ctx context.Context, in *RemoveExternalValidationHoldRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
@@ -8275,13 +8279,16 @@ type ForgeServer interface {
 	// explicit empty grants deny callers with an AuthContext before dispatch
 	// (PERMISSION_DENIED). Missing AuthContext is also rejected before dispatch;
 	// no gRPC wire status for that branch is promised here. With RBAC bypassed,
-	// the stubs return UNIMPLEMENTED. Scope is the connected Core site
-	// and configured tenant_org_id. Existing mTLS and method authorization are
-	// required in addition to tenant-scoped checks; request IDs grant no permission.
-	// Discovers hold IDs (active by default) in immutable (created_at, hold_id) order using
-	// exclusive keyset pagination; removal of earlier holds cannot shift pages.
+	// the stubs return UNIMPLEMENTED. Runtime implementation must grant SiteAgent
+	// all six RPCs, including removal: REST calls Core as that service. REST
+	// authorizes the end user's role and Tenant scope, and audits the end user;
+	// Core authorizes/audits the service caller and checks resource/policy bindings.
+	// Core cannot infer a Provider Admin role from the SiteAgent identity. Direct
+	// Core callers need explicit method/site permissions. Request IDs grant none.
+	// Returns all matching hold IDs (active by default) in (created_at, hold_id)
+	// order. Fetch their current state in max_find_by_ids-bounded batches.
 	FindExternalValidationHoldIds(context.Context, *ExternalValidationHoldSearchFilter) (*ExternalValidationHoldIdList, error)
-	// Fetches current holds, including Satisfied, by ID within the authorized tenant.
+	// Fetches current holds, including Satisfied, with an optional tenant filter.
 	FindExternalValidationHoldsByIds(context.Context, *ExternalValidationHoldsByIdsRequest) (*ExternalValidationHoldList, error)
 	// Atomically opens one attempt or replays the attempt identified by the key.
 	StartExternalValidation(context.Context, *StartExternalValidationRequest) (*StartExternalValidationResponse, error)
@@ -8289,7 +8296,8 @@ type ForgeServer interface {
 	CancelExternalValidation(context.Context, *CancelExternalValidationRequest) (*ExternalValidationAttempt, error)
 	// Records a result for the bound instance; never clears the hold immediately.
 	CompleteExternalValidation(context.Context, *CompleteExternalValidationRequest) (*ExternalValidationAttempt, error)
-	// Site-administrator-only audited recovery, fenced by the expected hold ID.
+	// Privileged audited recovery, fenced by the expected hold ID. For REST calls,
+	// REST enforces Provider Admin authorization; Core sees the SiteAgent caller.
 	// Unresolved allocation or cleanup returns FAILED_PRECONDITION. Successful
 	// removal atomically closes/fences any attempt and removes the matching gate.
 	RemoveExternalValidationHold(context.Context, *RemoveExternalValidationHoldRequest) (*emptypb.Empty, error)

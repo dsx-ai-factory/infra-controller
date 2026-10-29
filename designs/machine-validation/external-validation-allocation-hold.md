@@ -13,6 +13,7 @@
 | 0.5 | 2026-10-01 | Sunil Kumar | Require successful Machine Validation, reuse Create Instance and tenant authorization, and remove workflow-specific timeouts |
 | 0.6 | 2026-10-07 | Sunil Kumar | Clarify shared targeted allocation and repair coexistence with an external-validation hold |
 | 0.7 | 2026-10-19 | Sunil Kumar | Align hold discovery with cursor-paginated IDs and tenant-scoped retrieval |
+| 0.8 | 2026-10-29 | Sunil Kumar | Align Core inventory batching, tenant scope, timestamps, and autonomous allocation recovery |
 
 ## Table of Contents
 
@@ -162,7 +163,7 @@ The following is an illustrative site configuration for every eligible machine:
 [machine_validation_config.external_validation_hold]
 enabled = true
 contexts = ["Discovery"]
-validation_tenant_id = "f97df110-f4de-492e-8849-4a6af68026b0"
+validation_tenant_org_id = "fds34511233a"
 health_report_source = "external-validation-hold"
 alert_id = "ExternalValidationRequired"
 ```
@@ -175,17 +176,24 @@ separate NICo-owned source.
 
 Only one external-validation policy may match a machine for one validation
 cycle. NICo rejects ambiguous configuration at validation time rather than
-creating competing holds. `validation_tenant_id` identifies the tenant permitted
+creating competing holds. `validation_tenant_org_id` identifies the tenant permitted
 to run this workflow. The tenant must not be used for ordinary customer workloads.
 
-`validation_tenant_id` is the REST Tenant UUID used on instances and VPCs, not
-an organization name or a newly created tenant for each attempt. A site may
-reuse an existing validation tenant. The team retrieves its tenant through
-`GET /v2/org/{org}/nico/tenant/current` and uses the returned ID. Site access
-and targeted-instance-creation capability must already be enabled through the
-normal tenant onboarding workflow. The REST layer resolves that UUID to the
-Core tenant organization; Core validates the corresponding organization, not
-the REST UUID against a Core organization ID.
+`validation_tenant_org_id` is the Core tenant organization ID. Obtain it from
+the `org` field returned by `GET /v2/org/{org}/nico/tenant/current`; it is also
+the `{org}` component of REST paths and the `organization_id` REST sends when
+creating the Core Tenant. Do not configure the response's `id` UUID: that
+separate REST Tenant identity is used for REST Instance create's `tenantId`,
+and REST resolves it to the Core organization ID. A site may reuse an existing
+validation tenant. Site access and targeted-instance creation must already be
+enabled through normal onboarding; a new tenant per attempt is unnecessary.
+
+When policy configuration is implemented, advertise its effective validation
+tenant organization IDs in `RuntimeConfig`, analogous to
+`machine_validation_enabled`. REST Site inventory retains that advertisement
+for early validation-Tenant checks, in addition to REST authorization and Core
+binding checks. Missing advertisement on older builds is unknown, not proof of
+authorization or an empty policy. Policy and advertisement are Milestone 4 work.
 
 There is no separate service-identity setting or alias registration. NICo uses
 its existing authentication and tenant-management authorization. Any caller
@@ -245,12 +253,13 @@ The durable model is conceptually:
 ExternalValidationHold
   hold_id
   site_id
-  validation_tenant_id
+  validation_tenant_org_id
   machine_id
   validation_cycle_id
   policy_id
   state                  // Pending, AttemptOpen, AwaitingCleanup, Satisfied, Recovery
   created_at
+  state_changed_at       // created_at initially; advances only on hold-state transitions
   active_attempt_id      // optional
 
 ExternalValidationAttempt
@@ -260,8 +269,11 @@ ExternalValidationAttempt
   caller_idempotency_key
   state                  // Open, Passed, Failed, Cancelled
   opened_at
+  closed_at              // set once for a terminal result; absent while Open
   allocation_state         // NotStarted, Creating, or Created
   allocation_fingerprint   // binds the first accepted Create Instance inputs
+  accepted_instance_inputs // complete inputs for autonomous recovery, not just a hash
+  allocation_instance_id   // chosen ID retained before dispatch, including generated IDs
   allocation_started_at    // optional; set when allocation is accepted
   validation_instance_id // optional until allocation creates the instance
   result_details         // optional, bounded
@@ -275,7 +287,7 @@ audit record after clearing it.
 
 NICo enforces these invariants in the database: a partial unique constraint
 permits only one `Open` attempt per `hold_id`, and the tuple
-`(site_id, validation_tenant_id, caller_idempotency_key)` is unique. Attempt
+`(site_id, validation_tenant_org_id, caller_idempotency_key)` is unique. Attempt
 creation locks the hold and inserts the attempt in the same transaction. These
 constraints, rather than client timing, decide which concurrent `Start` call
 wins.
@@ -360,8 +372,8 @@ NICo provides these workflow APIs:
 
 | API | Purpose |
 | :--- | :--- |
-| `FindExternalValidationHoldIds()` | Discovers hold IDs using tenant-scoped cursor pagination, with optional machine and state filters; active holds are the default. |
-| `FindExternalValidationHoldsByIds()` | Returns current holds, including Satisfied, and attempt status for a bounded batch of IDs in the authorized tenant. Together these reads are the authoritative discovery and recovery path. |
+| `FindExternalValidationHoldIds()` | Returns all matching IDs at the site, with optional tenant, machine, and state filters; active holds are the default. |
+| `FindExternalValidationHoldsByIds()` | Returns current holds and attempt status for batches bounded by the site's `max_find_by_ids`, with an optional tenant filter, including Satisfied holds. Together these reads are the authoritative discovery and recovery path. |
 | `StartExternalValidation(machine_id, caller_idempotency_key)` | Opens an attempt for a pending hold and returns an opaque `request_id`. It reports no active hold or an already-open attempt without creating another one. |
 | `CancelExternalValidation(request_id, details)` | Closes an active attempt only before allocation starts. It is idempotent and leaves the hold in place. |
 | `CompleteExternalValidation(request_id, outcome, details, validation_instance_id)` | Records a result only for the matching active attempt. An identical completion replay is idempotent; a stale request or conflicting completion is rejected. |
@@ -369,6 +381,11 @@ NICo provides these workflow APIs:
 
 There is no separate validation-instance creation API. The existing Create
 Instance API receives the additive request-binding field described below.
+The companion [REST surface PR #8147](https://github.com/dsx-ai-factory/infra-controller/pull/8147)
+publishes the routes, OpenAPI/SDK models, and HTTP 501 placeholders. Core proxying,
+request-bound allocation, and reconciliation follow in the implementation
+milestones. See the [REST integration contract](external-validation-api-contract.md#rest-integration-contract-implementation-deferred)
+for the mapping and schema alignment still required before activation.
 
 #### **3.3.1 Phase 1 API Contract**
 
@@ -377,8 +394,14 @@ Callers of `FindExternalValidationHoldIds`, `FindExternalValidationHoldsByIds`, 
 and authorized to manage validation for the configured tenant at that site.
 Another authorized caller in the same tenant may resume an attempt; it is not
 restricted to the actor that started it. These callers cannot create, modify,
-or clear the NICo health override. `RemoveExternalValidationHold` requires
-site-administrator break-glass authority, not ordinary tenant permissions.
+or clear the NICo health override. REST authorizes the end user's role and
+Tenant/site access, requires Provider Admin authority for
+`RemoveExternalValidationHold`, and audits that user. It calls Core as
+`SiteAgent`; runtime Core grants must include that principal for all six RPCs.
+Core authorizes/audits the service caller and checks resource/policy bindings;
+it cannot infer the original user's role from a Site Agent identity. Direct
+Core callers require explicit method/site permissions. Milestone 1 retains
+empty grants until runtime checks are implemented.
 
 All hold and attempt mutations are persisted and auditable. The API responses
 below are the external service's durable contract; DSX Exchange events are not
@@ -394,21 +417,23 @@ existing behavior for machines without an external-validation hold.
 
 The service calls `FindExternalValidationHoldIds` on startup and periodically
 thereafter, then fetches current state using `FindExternalValidationHoldsByIds`.
-Both operations require the authorized tenant organization ID at the connected
-site. ID discovery is paginated by an exclusive `(created_at, hold_id)` cursor
-over immutable creation timestamps and UUIDs in byte order, rather than a live
-offset. Removing or satisfying earlier holds cannot shift subsequent pages;
-the cursor remains usable after its hold disappears. Retrieval accepts bounded
-ID batches and omits unknown, removed, or out-of-tenant holds. Satisfied holds
+Both operations accept optional tenant organization filtering at the connected
+site. REST supplies the caller's org for Tenant calls; Provider Admin inventory
+may omit it to discover holds across the site. A present empty filter is invalid.
+ID discovery returns all matching IDs in one response, ordered by immutable
+creation time and UUID byte order. Detail retrieval accepts nonempty batches
+bounded by `RuntimeConfig.max_find_by_ids` (default 100) and omits unknown,
+removed, or tenant-filter-mismatched holds. Satisfied holds
 remain readable by ID; discovery excludes them unless explicitly filtered by
 that state. Optional machine and state filters combine with tenant scope using
-AND semantics and remain unchanged throughout a pagination pass.
+AND semantics.
 
-Neither operation promises a frozen snapshot. State can change between calls,
-and newly visible holds behind a cursor are found on the next pass, starting
-without a cursor. An omitted hold does not prove allocation or cleanup finished.
+Neither operation promises a frozen snapshot. State can change between the ID
+lookup and detail batches. Changes cannot shift positions in the saved ID list;
+newly matching holds are found on the next full lookup. An omitted hold does
+not prove allocation or cleanup finished. No cursor or live offset is used.
 See the [gRPC integration contract](external-validation-api-contract.md#discovery-and-pagination)
-for cursor, page-size, and batch bounds. Each retrieved item includes:
+for filtering and batch bounds. Each retrieved item includes:
 
 ```text
 machine_id
@@ -418,6 +443,8 @@ request_id                  // present when an attempt is open, awaiting cleanup
 allocation_state             // NotStarted, Creating, or Created
 validation_instance_id      // present when allocation creates the target instance
 created_at
+state_changed_at             // last hold-state transition; initially created_at
+closed_at                    // terminal attempt result time; absent while Open
 ```
 
 The allocation state and `validation_instance_id` are persisted by NICo as
@@ -527,8 +554,11 @@ explicit repair exception is defined in Section 3.6.
 The request authorizes bypass of this workflow's hold only; unrelated blocking
 health alerts remain enforced for validation allocation.
 
-NICo atomically records `Creating` and a fingerprint of the accepted instance
-inputs before dispatching allocation. The same request ID is the allocation
+NICo atomically records `Creating`, the complete accepted instance inputs, a
+fingerprint, and the chosen instance identity before dispatching allocation.
+Accepted inputs include a supplied Core `instance_id`; changing it conflicts.
+If omitted, Core saves its generated identity and reuses it for replay and
+recovery. The same request ID is the allocation
 idempotency key through every layer. Core enforces one allocation per key and
 commits the request-to-instance binding with the instance before returning
 success. A crash between the allocation commit and REST response cannot leave
@@ -538,8 +568,10 @@ An identical retry returns the original instance or an explicit in-progress
 response while allocation is `Creating`. Reusing the ID with changed creation
 inputs returns a conflict. NICo reconciles ambiguous allocation outcomes by
 that key; the service must not start a fresh attempt. Only a confirmed
-no-allocation outcome can return the attempt to `NotStarted` for cancellation
-or a corrected create request. Closed or superseded requests must never create
+no-allocation outcome, with the old create fenced, can return the attempt to
+`NotStarted` for cancellation. Accepted inputs remain immutable; correcting
+them requires cancellation and a new attempt. A rejection before acceptance
+can be corrected without changing the request ID. Closed or superseded requests must never create
 another instance, even if their prior instance was deleted.
 
 The hold-listing API exposes `allocation_state` and `validation_instance_id`
@@ -560,7 +592,7 @@ the machine and does not remove the hold. A definite pre-allocation rejection
 can be cancelled immediately. An accepted or ambiguous allocation is recovered
 through the same request ID rather than cancelled or replaced by another attempt.
 
-The resulting instance belongs to `validation_tenant_id`; that tenant is the
+The resulting instance belongs to `validation_tenant_org_id`; that tenant is the
 execution environment for the external team's validation or repair work. The
 external-validation service owns the operational lifecycle of that instance:
 it waits for it to become usable, runs the work, reports the outcome through
@@ -604,6 +636,11 @@ NICo owns recovery detection through its existing controller loop, not a
 separate service. It checks saved attempts against allocation, instance, and
 cleanup state, including after restart. Release and deletion also trigger
 checks; missed notifications or an unavailable validator must not stop recovery.
+Core must re-drive every durable Creating record from its saved inputs and
+instance identity without relying on caller retries. When dependencies recover
+and an authoritative outcome can be established, it resolves to Created or
+confirmed NotStarted. Created means the Core instance and request binding have
+committed, not that REST persisted its row or that provisioning reached Ready.
 
 - **Expected release:** After NICo records `Passed`, `Failed`, or `Cancelled`,
   the hold stays `AwaitingCleanup` through instance deletion. NICo retains the
@@ -617,6 +654,12 @@ checks; missed notifications or an unavailable validator must not stop recovery.
   stale inventory, or `Creating` allocation is not proof of loss. NICo retries
   using the saved allocation key and authoritative site state; another
   allocation remains blocked until the outcome is resolved.
+
+No fixed convergence time is promised. Extended dependency outages may leave
+Creating until authoritative checks resume. Contradictory state or an outcome
+requiring operator resolution puts the hold in Recovery with a reason while
+retaining the unresolved allocation record. Recovery is not an automatic
+NotStarted result, and elapsed time cannot authorize cancellation or removal.
 
 An authorized operator must resolve the allocation and cleanup, then explicitly
 close or fence the attempt before returning to `Pending`. Unconfirmed cleanup

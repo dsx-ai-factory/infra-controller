@@ -156,9 +156,12 @@ const (
 	ExternalValidationAllocationState_EXTERNAL_VALIDATION_ALLOCATION_STATE_UNSPECIFIED ExternalValidationAllocationState = 0
 	// Allocation has not been accepted or is confirmed not to have occurred.
 	ExternalValidationAllocationState_EXTERNAL_VALIDATION_ALLOCATION_STATE_NOT_STARTED ExternalValidationAllocationState = 1
-	// Allocation was accepted; an ambiguous outcome blocks another allocation.
+	// Allocation inputs are durable; Core reconciles without caller retries.
+	// An ambiguous outcome blocks another allocation; irreconcilable state puts
+	// the hold in Recovery rather than assuming NotStarted or success.
 	ExternalValidationAllocationState_EXTERNAL_VALIDATION_ALLOCATION_STATE_CREATING ExternalValidationAllocationState = 2
-	// The instance and its request binding committed together.
+	// Core committed the instance and its request binding together. This does not
+	// imply REST persistence or that the instance is provisioned/Ready.
 	ExternalValidationAllocationState_EXTERNAL_VALIDATION_ALLOCATION_STATE_CREATED ExternalValidationAllocationState = 3
 )
 
@@ -336,7 +339,11 @@ type ExternalValidationAttempt struct {
 	// UTC time at which the attempt opened; attempts do not expire automatically.
 	OpenedAt *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=opened_at,json=openedAt,proto3" json:"opened_at,omitempty"`
 	// Optional result/cancellation text or reference, at most 4096 UTF-8 bytes.
-	Details       *string `protobuf:"bytes,8,opt,name=details,proto3,oneof" json:"details,omitempty"`
+	Details *string `protobuf:"bytes,8,opt,name=details,proto3,oneof" json:"details,omitempty"`
+	// UTC terminal-result time, required in Passed/Failed/Cancelled and absent
+	// in Open. Set once and preserved on identical replay, including cancellation
+	// before allocation. Instance deletion does not change it.
+	ClosedAt      *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=closed_at,json=closedAt,proto3" json:"closed_at,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -427,6 +434,13 @@ func (x *ExternalValidationAttempt) GetDetails() string {
 	return ""
 }
 
+func (x *ExternalValidationAttempt) GetClosedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ClosedAt
+	}
+	return nil
+}
+
 // NICo-owned allocation gate; no tenant API creates or removes this resource.
 type ExternalValidationHold struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -448,6 +462,10 @@ type ExternalValidationHold struct {
 	// lost instance, ownership mismatch, failed cleanup, or failed local validation
 	// without exposing credentials or unredacted validation output.
 	RecoveryReason *string `protobuf:"bytes,8,opt,name=recovery_reason,json=recoveryReason,proto3,oneof" json:"recovery_reason,omitempty"`
+	// UTC time of the last hold-state transition; equals created_at initially.
+	// Required for every returned hold. Attempt/allocation updates that leave the
+	// hold state unchanged do not advance it; identical replay never advances it.
+	StateChangedAt *timestamppb.Timestamp `protobuf:"bytes,9,opt,name=state_changed_at,json=stateChangedAt,proto3" json:"state_changed_at,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -538,75 +556,23 @@ func (x *ExternalValidationHold) GetRecoveryReason() string {
 	return ""
 }
 
-// Exclusive position in the immutable (created_at, hold_id) ascending order.
-// Both fields are required when a cursor is supplied; no snapshot is implied.
-type ExternalValidationHoldCursor struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// UTC creation time of the last ID returned on the preceding page.
-	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,1,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	// Last returned hold UUID, compared in UUID byte order to break timestamp ties.
-	HoldId        *ExternalValidationHoldId `protobuf:"bytes,2,opt,name=hold_id,json=holdId,proto3" json:"hold_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *ExternalValidationHoldCursor) Reset() {
-	*x = ExternalValidationHoldCursor{}
-	mi := &file_external_validation_nico_proto_msgTypes[2]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *ExternalValidationHoldCursor) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*ExternalValidationHoldCursor) ProtoMessage() {}
-
-func (x *ExternalValidationHoldCursor) ProtoReflect() protoreflect.Message {
-	mi := &file_external_validation_nico_proto_msgTypes[2]
+func (x *ExternalValidationHold) GetStateChangedAt() *timestamppb.Timestamp {
 	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use ExternalValidationHoldCursor.ProtoReflect.Descriptor instead.
-func (*ExternalValidationHoldCursor) Descriptor() ([]byte, []int) {
-	return file_external_validation_nico_proto_rawDescGZIP(), []int{2}
-}
-
-func (x *ExternalValidationHoldCursor) GetCreatedAt() *timestamppb.Timestamp {
-	if x != nil {
-		return x.CreatedAt
+		return x.StateChangedAt
 	}
 	return nil
 }
 
-func (x *ExternalValidationHoldCursor) GetHoldId() *ExternalValidationHoldId {
-	if x != nil {
-		return x.HoldId
-	}
-	return nil
-}
-
-// Discovers hold IDs in this site's authorized validation-tenant scope.
-// All supplied filters are combined with AND; every page uses the same filters.
+// Discovers matching hold IDs at this site; fetch their state in bounded batches.
+// All supplied filters combine with AND. Method/site authorization still applies
+// when the tenant filter is omitted; REST enforces end-user roles and scope.
 type ExternalValidationHoldSearchFilter struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Required configured Core tenant organization. Other tenants are denied.
-	TenantOrgId string `protobuf:"bytes,1,opt,name=tenant_org_id,json=tenantOrgId,proto3" json:"tenant_org_id,omitempty"`
-	// Omitted defaults to 20. Valid range: 1..100; explicit zero is invalid.
-	PageSize *uint32 `protobuf:"varint,2,opt,name=page_size,json=pageSize,proto3,oneof" json:"page_size,omitempty"`
-	// Omitted starts a reconciliation pass. Otherwise return only IDs whose
-	// immutable (created_at, hold_id) tuple is strictly greater than this cursor.
-	// Continue with the same tenant, machine, and state filters; cursor presence grants no permission.
-	After *ExternalValidationHoldCursor `protobuf:"bytes,3,opt,name=after,proto3" json:"after,omitempty"`
-	// Optional exact host machine; omission searches all hosts in the tenant scope.
+	// Optional exact Core tenant organization; present empty is INVALID_ARGUMENT.
+	// Omitted searches across tenants at the connected site. REST supplies the
+	// caller's org for Tenant requests; Provider Admin inventory may omit it.
+	TenantOrgId *string `protobuf:"bytes,1,opt,name=tenant_org_id,json=tenantOrgId,proto3,oneof" json:"tenant_org_id,omitempty"`
+	// Optional exact host machine; omission searches all hosts in the selected scope.
 	// A malformed ID or a DPU ID is INVALID_ARGUMENT; an unknown host returns no IDs.
 	MachineId *MachineId `protobuf:"bytes,4,opt,name=machine_id,json=machineId,proto3" json:"machine_id,omitempty"`
 	// Omitted searches active states (Pending, AttemptOpen, AwaitingCleanup, Recovery).
@@ -619,7 +585,7 @@ type ExternalValidationHoldSearchFilter struct {
 
 func (x *ExternalValidationHoldSearchFilter) Reset() {
 	*x = ExternalValidationHoldSearchFilter{}
-	mi := &file_external_validation_nico_proto_msgTypes[3]
+	mi := &file_external_validation_nico_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -631,7 +597,7 @@ func (x *ExternalValidationHoldSearchFilter) String() string {
 func (*ExternalValidationHoldSearchFilter) ProtoMessage() {}
 
 func (x *ExternalValidationHoldSearchFilter) ProtoReflect() protoreflect.Message {
-	mi := &file_external_validation_nico_proto_msgTypes[3]
+	mi := &file_external_validation_nico_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -644,28 +610,14 @@ func (x *ExternalValidationHoldSearchFilter) ProtoReflect() protoreflect.Message
 
 // Deprecated: Use ExternalValidationHoldSearchFilter.ProtoReflect.Descriptor instead.
 func (*ExternalValidationHoldSearchFilter) Descriptor() ([]byte, []int) {
-	return file_external_validation_nico_proto_rawDescGZIP(), []int{3}
+	return file_external_validation_nico_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *ExternalValidationHoldSearchFilter) GetTenantOrgId() string {
-	if x != nil {
-		return x.TenantOrgId
+	if x != nil && x.TenantOrgId != nil {
+		return *x.TenantOrgId
 	}
 	return ""
-}
-
-func (x *ExternalValidationHoldSearchFilter) GetPageSize() uint32 {
-	if x != nil && x.PageSize != nil {
-		return *x.PageSize
-	}
-	return 0
-}
-
-func (x *ExternalValidationHoldSearchFilter) GetAfter() *ExternalValidationHoldCursor {
-	if x != nil {
-		return x.After
-	}
-	return nil
 }
 
 func (x *ExternalValidationHoldSearchFilter) GetMachineId() *MachineId {
@@ -682,24 +634,19 @@ func (x *ExternalValidationHoldSearchFilter) GetState() ExternalValidationHoldSt
 	return ExternalValidationHoldState_EXTERNAL_VALIDATION_HOLD_STATE_UNSPECIFIED
 }
 
-// Bounded ID discovery in immutable (created_at, hold_id) ascending order.
+// All matching IDs from one read, in immutable (created_at, hold_id) ascending order.
+// No cursor, offset, or frozen snapshot across subsequent reads is implied.
 type ExternalValidationHoldIdList struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Matching hold UUIDs, at most the effective page size; empty if none match.
-	HoldIds []*ExternalValidationHoldId `protobuf:"bytes,1,rep,name=hold_ids,json=holdIds,proto3" json:"hold_ids,omitempty"`
-	// Last returned ID's tuple when more matches exist at this read; absent at
-	// the end. Presence is the has-more indicator; no separate flag is needed.
-	// Resume strictly after it even if that hold subsequently disappears.
-	// Pages are live observations: newly visible holds behind the cursor are
-	// discovered on the next pass, starting without a cursor.
-	NextCursor    *ExternalValidationHoldCursor `protobuf:"bytes,2,opt,name=next_cursor,json=nextCursor,proto3" json:"next_cursor,omitempty"`
+	// All matching hold UUIDs; empty if none match. UUID ties use byte order.
+	HoldIds       []*ExternalValidationHoldId `protobuf:"bytes,1,rep,name=hold_ids,json=holdIds,proto3" json:"hold_ids,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ExternalValidationHoldIdList) Reset() {
 	*x = ExternalValidationHoldIdList{}
-	mi := &file_external_validation_nico_proto_msgTypes[4]
+	mi := &file_external_validation_nico_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -711,7 +658,7 @@ func (x *ExternalValidationHoldIdList) String() string {
 func (*ExternalValidationHoldIdList) ProtoMessage() {}
 
 func (x *ExternalValidationHoldIdList) ProtoReflect() protoreflect.Message {
-	mi := &file_external_validation_nico_proto_msgTypes[4]
+	mi := &file_external_validation_nico_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -724,7 +671,7 @@ func (x *ExternalValidationHoldIdList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExternalValidationHoldIdList.ProtoReflect.Descriptor instead.
 func (*ExternalValidationHoldIdList) Descriptor() ([]byte, []int) {
-	return file_external_validation_nico_proto_rawDescGZIP(), []int{4}
+	return file_external_validation_nico_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ExternalValidationHoldIdList) GetHoldIds() []*ExternalValidationHoldId {
@@ -734,20 +681,16 @@ func (x *ExternalValidationHoldIdList) GetHoldIds() []*ExternalValidationHoldId 
 	return nil
 }
 
-func (x *ExternalValidationHoldIdList) GetNextCursor() *ExternalValidationHoldCursor {
-	if x != nil {
-		return x.NextCursor
-	}
-	return nil
-}
-
-// Retrieves a bounded batch of discovered holds within an authorized tenant.
+// Retrieves a bounded batch of discovered holds at the connected site.
 type ExternalValidationHoldsByIdsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Required configured Core tenant organization. Other tenants are denied.
-	TenantOrgId string `protobuf:"bytes,1,opt,name=tenant_org_id,json=tenantOrgId,proto3" json:"tenant_org_id,omitempty"`
-	// Required 1..100 hold UUIDs. Malformed UUIDs reject the whole request with
-	// INVALID_ARGUMENT; duplicates are accepted and returned at most once.
+	// Optional exact Core tenant organization; present empty is INVALID_ARGUMENT.
+	// Omission permits site-wide retrieval for an authorized Core caller. REST
+	// always supplies the caller's org for Tenant requests.
+	TenantOrgId *string `protobuf:"bytes,1,opt,name=tenant_org_id,json=tenantOrgId,proto3,oneof" json:"tenant_org_id,omitempty"`
+	// Required nonempty batch, limited by the site's max_find_by_ids setting
+	// (default 100, exposed by RuntimeConfig). Oversized batches or malformed UUIDs
+	// are INVALID_ARGUMENT; duplicates are accepted and returned at most once.
 	HoldIds       []*ExternalValidationHoldId `protobuf:"bytes,2,rep,name=hold_ids,json=holdIds,proto3" json:"hold_ids,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -755,7 +698,7 @@ type ExternalValidationHoldsByIdsRequest struct {
 
 func (x *ExternalValidationHoldsByIdsRequest) Reset() {
 	*x = ExternalValidationHoldsByIdsRequest{}
-	mi := &file_external_validation_nico_proto_msgTypes[5]
+	mi := &file_external_validation_nico_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -767,7 +710,7 @@ func (x *ExternalValidationHoldsByIdsRequest) String() string {
 func (*ExternalValidationHoldsByIdsRequest) ProtoMessage() {}
 
 func (x *ExternalValidationHoldsByIdsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_external_validation_nico_proto_msgTypes[5]
+	mi := &file_external_validation_nico_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -780,12 +723,12 @@ func (x *ExternalValidationHoldsByIdsRequest) ProtoReflect() protoreflect.Messag
 
 // Deprecated: Use ExternalValidationHoldsByIdsRequest.ProtoReflect.Descriptor instead.
 func (*ExternalValidationHoldsByIdsRequest) Descriptor() ([]byte, []int) {
-	return file_external_validation_nico_proto_rawDescGZIP(), []int{5}
+	return file_external_validation_nico_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ExternalValidationHoldsByIdsRequest) GetTenantOrgId() string {
-	if x != nil {
-		return x.TenantOrgId
+	if x != nil && x.TenantOrgId != nil {
+		return *x.TenantOrgId
 	}
 	return ""
 }
@@ -800,8 +743,8 @@ func (x *ExternalValidationHoldsByIdsRequest) GetHoldIds() []*ExternalValidation
 // Current holds requested by ID, including Satisfied, ordered by (created_at, hold_id).
 type ExternalValidationHoldList struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Satisfied holds remain readable by their authorized tenant. Unknown, removed,
-	// and out-of-tenant IDs are omitted without disclosing their state. Holds may
+	// Satisfied holds remain readable. Unknown, removed, and tenant-filter-mismatched
+	// IDs are omitted without disclosing their state. Holds may
 	// change between ID discovery and retrieval;
 	// absence from this response never proves allocation or cleanup succeeded.
 	Holds         []*ExternalValidationHold `protobuf:"bytes,1,rep,name=holds,proto3" json:"holds,omitempty"`
@@ -811,7 +754,7 @@ type ExternalValidationHoldList struct {
 
 func (x *ExternalValidationHoldList) Reset() {
 	*x = ExternalValidationHoldList{}
-	mi := &file_external_validation_nico_proto_msgTypes[6]
+	mi := &file_external_validation_nico_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -823,7 +766,7 @@ func (x *ExternalValidationHoldList) String() string {
 func (*ExternalValidationHoldList) ProtoMessage() {}
 
 func (x *ExternalValidationHoldList) ProtoReflect() protoreflect.Message {
-	mi := &file_external_validation_nico_proto_msgTypes[6]
+	mi := &file_external_validation_nico_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -836,7 +779,7 @@ func (x *ExternalValidationHoldList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExternalValidationHoldList.ProtoReflect.Descriptor instead.
 func (*ExternalValidationHoldList) Descriptor() ([]byte, []int) {
-	return file_external_validation_nico_proto_rawDescGZIP(), []int{6}
+	return file_external_validation_nico_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ExternalValidationHoldList) GetHolds() []*ExternalValidationHold {
@@ -865,7 +808,7 @@ type StartExternalValidationRequest struct {
 
 func (x *StartExternalValidationRequest) Reset() {
 	*x = StartExternalValidationRequest{}
-	mi := &file_external_validation_nico_proto_msgTypes[7]
+	mi := &file_external_validation_nico_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -877,7 +820,7 @@ func (x *StartExternalValidationRequest) String() string {
 func (*StartExternalValidationRequest) ProtoMessage() {}
 
 func (x *StartExternalValidationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_external_validation_nico_proto_msgTypes[7]
+	mi := &file_external_validation_nico_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -890,7 +833,7 @@ func (x *StartExternalValidationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartExternalValidationRequest.ProtoReflect.Descriptor instead.
 func (*StartExternalValidationRequest) Descriptor() ([]byte, []int) {
-	return file_external_validation_nico_proto_rawDescGZIP(), []int{7}
+	return file_external_validation_nico_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *StartExternalValidationRequest) GetMachineId() *MachineId {
@@ -935,7 +878,7 @@ type StartExternalValidationResponse struct {
 
 func (x *StartExternalValidationResponse) Reset() {
 	*x = StartExternalValidationResponse{}
-	mi := &file_external_validation_nico_proto_msgTypes[8]
+	mi := &file_external_validation_nico_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -947,7 +890,7 @@ func (x *StartExternalValidationResponse) String() string {
 func (*StartExternalValidationResponse) ProtoMessage() {}
 
 func (x *StartExternalValidationResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_external_validation_nico_proto_msgTypes[8]
+	mi := &file_external_validation_nico_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -960,7 +903,7 @@ func (x *StartExternalValidationResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartExternalValidationResponse.ProtoReflect.Descriptor instead.
 func (*StartExternalValidationResponse) Descriptor() ([]byte, []int) {
-	return file_external_validation_nico_proto_rawDescGZIP(), []int{8}
+	return file_external_validation_nico_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *StartExternalValidationResponse) GetStatus() ExternalValidationStartStatus {
@@ -998,7 +941,9 @@ func (x *StartExternalValidationResponse) GetReplayed() bool {
 	return false
 }
 
-// Administrator-only break-glass removal after allocation and cleanup are resolved.
+// Privileged break-glass removal after allocation and cleanup are resolved.
+// REST requires Provider Admin authorization; Core authorizes its Site Agent
+// service caller and cannot infer the original end-user role from that identity.
 type RemoveExternalValidationHoldRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Required held host machine at the connected Core site.
@@ -1009,8 +954,8 @@ type RemoveExternalValidationHoldRequest struct {
 	HoldId *ExternalValidationHoldId `protobuf:"bytes,2,opt,name=hold_id,json=holdId,proto3" json:"hold_id,omitempty"`
 	// Required audit reason, 1..4096 UTF-8 bytes. Identical replay of the original
 	// machine, hold, and reason succeeds without affecting a newer hold; a changed
-	// recorded reason returns ALREADY_EXISTS. Ordinary validation tenants cannot
-	// call this RPC. Unresolved allocation/cleanup returns FAILED_PRECONDITION.
+	// recorded reason returns ALREADY_EXISTS. REST rejects ordinary Tenant callers.
+	// Unresolved allocation/cleanup returns FAILED_PRECONDITION.
 	Reason        string `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1018,7 +963,7 @@ type RemoveExternalValidationHoldRequest struct {
 
 func (x *RemoveExternalValidationHoldRequest) Reset() {
 	*x = RemoveExternalValidationHoldRequest{}
-	mi := &file_external_validation_nico_proto_msgTypes[9]
+	mi := &file_external_validation_nico_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1030,7 +975,7 @@ func (x *RemoveExternalValidationHoldRequest) String() string {
 func (*RemoveExternalValidationHoldRequest) ProtoMessage() {}
 
 func (x *RemoveExternalValidationHoldRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_external_validation_nico_proto_msgTypes[9]
+	mi := &file_external_validation_nico_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1043,7 +988,7 @@ func (x *RemoveExternalValidationHoldRequest) ProtoReflect() protoreflect.Messag
 
 // Deprecated: Use RemoveExternalValidationHoldRequest.ProtoReflect.Descriptor instead.
 func (*RemoveExternalValidationHoldRequest) Descriptor() ([]byte, []int) {
-	return file_external_validation_nico_proto_rawDescGZIP(), []int{9}
+	return file_external_validation_nico_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *RemoveExternalValidationHoldRequest) GetMachineId() *MachineId {
@@ -1080,14 +1025,18 @@ type CancelExternalValidationRequest struct {
 	TenantOrgId string `protobuf:"bytes,2,opt,name=tenant_org_id,json=tenantOrgId,proto3" json:"tenant_org_id,omitempty"`
 	// Required nonempty reason, at most 4096 UTF-8 bytes. Identical replay succeeds;
 	// a changed reason conflicts. Creating/Created cannot be cancelled this way.
-	Details       string `protobuf:"bytes,3,opt,name=details,proto3" json:"details,omitempty"`
+	Details string `protobuf:"bytes,3,opt,name=details,proto3" json:"details,omitempty"`
+	// Optional expected host, for callers routing by machine. A valid mismatch
+	// returns NOT_FOUND, including on replay. Malformed/DPU IDs are INVALID_ARGUMENT.
+	// Omission relies on the saved request identity; it never grants permission.
+	MachineId     *MachineId `protobuf:"bytes,4,opt,name=machine_id,json=machineId,proto3" json:"machine_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CancelExternalValidationRequest) Reset() {
 	*x = CancelExternalValidationRequest{}
-	mi := &file_external_validation_nico_proto_msgTypes[10]
+	mi := &file_external_validation_nico_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1099,7 +1048,7 @@ func (x *CancelExternalValidationRequest) String() string {
 func (*CancelExternalValidationRequest) ProtoMessage() {}
 
 func (x *CancelExternalValidationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_external_validation_nico_proto_msgTypes[10]
+	mi := &file_external_validation_nico_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1112,7 +1061,7 @@ func (x *CancelExternalValidationRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelExternalValidationRequest.ProtoReflect.Descriptor instead.
 func (*CancelExternalValidationRequest) Descriptor() ([]byte, []int) {
-	return file_external_validation_nico_proto_rawDescGZIP(), []int{10}
+	return file_external_validation_nico_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *CancelExternalValidationRequest) GetRequestId() *ExternalValidationRequestId {
@@ -1136,6 +1085,13 @@ func (x *CancelExternalValidationRequest) GetDetails() string {
 	return ""
 }
 
+func (x *CancelExternalValidationRequest) GetMachineId() *MachineId {
+	if x != nil {
+		return x.MachineId
+	}
+	return nil
+}
+
 // Records a result for an allocated instance without releasing the allocation gate.
 type CompleteExternalValidationRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -1150,14 +1106,17 @@ type CompleteExternalValidationRequest struct {
 	// Optional text or result reference, at most 4096 UTF-8 bytes. Replay must
 	// repeat the result, instance ID, and details; stale requests, an instance
 	// mismatch, or conflicting completion return ALREADY_EXISTS.
-	Details       *string `protobuf:"bytes,5,opt,name=details,proto3,oneof" json:"details,omitempty"`
+	Details *string `protobuf:"bytes,5,opt,name=details,proto3,oneof" json:"details,omitempty"`
+	// Optional expected host, checked against the saved attempt before replay or
+	// mutation. A valid mismatch is NOT_FOUND; malformed/DPU IDs are INVALID_ARGUMENT.
+	MachineId     *MachineId `protobuf:"bytes,6,opt,name=machine_id,json=machineId,proto3" json:"machine_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CompleteExternalValidationRequest) Reset() {
 	*x = CompleteExternalValidationRequest{}
-	mi := &file_external_validation_nico_proto_msgTypes[11]
+	mi := &file_external_validation_nico_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1169,7 +1128,7 @@ func (x *CompleteExternalValidationRequest) String() string {
 func (*CompleteExternalValidationRequest) ProtoMessage() {}
 
 func (x *CompleteExternalValidationRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_external_validation_nico_proto_msgTypes[11]
+	mi := &file_external_validation_nico_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1182,7 +1141,7 @@ func (x *CompleteExternalValidationRequest) ProtoReflect() protoreflect.Message 
 
 // Deprecated: Use CompleteExternalValidationRequest.ProtoReflect.Descriptor instead.
 func (*CompleteExternalValidationRequest) Descriptor() ([]byte, []int) {
-	return file_external_validation_nico_proto_rawDescGZIP(), []int{11}
+	return file_external_validation_nico_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *CompleteExternalValidationRequest) GetRequestId() *ExternalValidationRequestId {
@@ -1220,11 +1179,18 @@ func (x *CompleteExternalValidationRequest) GetDetails() string {
 	return ""
 }
 
+func (x *CompleteExternalValidationRequest) GetMachineId() *MachineId {
+	if x != nil {
+		return x.MachineId
+	}
+	return nil
+}
+
 var File_external_validation_nico_proto protoreflect.FileDescriptor
 
 const file_external_validation_nico_proto_rawDesc = "" +
 	"\n" +
-	"\x1eexternal_validation_nico.proto\x12\x05forge\x1a\x11common_nico.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x90\x04\n" +
+	"\x1eexternal_validation_nico.proto\x12\x05forge\x1a\x11common_nico.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\xc9\x04\n" +
 	"\x19ExternalValidationAttempt\x12B\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\v2#.common.ExternalValidationRequestIdR\trequestId\x129\n" +
@@ -1234,9 +1200,10 @@ const file_external_validation_nico_proto_rawDesc = "" +
 	"\x10allocation_state\x18\x05 \x01(\x0e2(.forge.ExternalValidationAllocationStateR\x0fallocationState\x12H\n" +
 	"\x16validation_instance_id\x18\x06 \x01(\v2\x12.common.InstanceIdR\x14validationInstanceId\x127\n" +
 	"\topened_at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\bopenedAt\x12\x1d\n" +
-	"\adetails\x18\b \x01(\tH\x00R\adetails\x88\x01\x01B\n" +
+	"\adetails\x18\b \x01(\tH\x00R\adetails\x88\x01\x01\x127\n" +
+	"\tclosed_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\bclosedAtB\n" +
 	"\n" +
-	"\b_details\"\xef\x03\n" +
+	"\b_details\"\xb5\x04\n" +
 	"\x16ExternalValidationHold\x129\n" +
 	"\ahold_id\x18\x01 \x01(\v2 .common.ExternalValidationHoldIdR\x06holdId\x120\n" +
 	"\n" +
@@ -1247,29 +1214,22 @@ const file_external_validation_nico_proto_rawDesc = "" +
 	"\n" +
 	"created_at\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12:\n" +
 	"\aattempt\x18\a \x01(\v2 .forge.ExternalValidationAttemptR\aattempt\x12,\n" +
-	"\x0frecovery_reason\x18\b \x01(\tH\x00R\x0erecoveryReason\x88\x01\x01B\x12\n" +
-	"\x10_recovery_reason\"\x94\x01\n" +
-	"\x1cExternalValidationHoldCursor\x129\n" +
-	"\n" +
-	"created_at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
-	"\ahold_id\x18\x02 \x01(\v2 .common.ExternalValidationHoldIdR\x06holdId\"\xae\x02\n" +
-	"\"ExternalValidationHoldSearchFilter\x12\"\n" +
-	"\rtenant_org_id\x18\x01 \x01(\tR\vtenantOrgId\x12 \n" +
-	"\tpage_size\x18\x02 \x01(\rH\x00R\bpageSize\x88\x01\x01\x129\n" +
-	"\x05after\x18\x03 \x01(\v2#.forge.ExternalValidationHoldCursorR\x05after\x120\n" +
+	"\x0frecovery_reason\x18\b \x01(\tH\x00R\x0erecoveryReason\x88\x01\x01\x12D\n" +
+	"\x10state_changed_at\x18\t \x01(\v2\x1a.google.protobuf.TimestampR\x0estateChangedAtB\x12\n" +
+	"\x10_recovery_reason\"\xf8\x01\n" +
+	"\"ExternalValidationHoldSearchFilter\x12'\n" +
+	"\rtenant_org_id\x18\x01 \x01(\tH\x00R\vtenantOrgId\x88\x01\x01\x120\n" +
 	"\n" +
 	"machine_id\x18\x04 \x01(\v2\x11.common.MachineIdR\tmachineId\x12=\n" +
-	"\x05state\x18\x05 \x01(\x0e2\".forge.ExternalValidationHoldStateH\x01R\x05state\x88\x01\x01B\f\n" +
-	"\n" +
-	"_page_sizeB\b\n" +
-	"\x06_state\"\xa1\x01\n" +
+	"\x05state\x18\x05 \x01(\x0e2\".forge.ExternalValidationHoldStateH\x01R\x05state\x88\x01\x01B\x10\n" +
+	"\x0e_tenant_org_idB\b\n" +
+	"\x06_stateJ\x04\b\x02\x10\x03J\x04\b\x03\x10\x04R\tpage_sizeR\x05after\"n\n" +
 	"\x1cExternalValidationHoldIdList\x12;\n" +
-	"\bhold_ids\x18\x01 \x03(\v2 .common.ExternalValidationHoldIdR\aholdIds\x12D\n" +
-	"\vnext_cursor\x18\x02 \x01(\v2#.forge.ExternalValidationHoldCursorR\n" +
-	"nextCursor\"\x86\x01\n" +
-	"#ExternalValidationHoldsByIdsRequest\x12\"\n" +
-	"\rtenant_org_id\x18\x01 \x01(\tR\vtenantOrgId\x12;\n" +
-	"\bhold_ids\x18\x02 \x03(\v2 .common.ExternalValidationHoldIdR\aholdIds\"Q\n" +
+	"\bhold_ids\x18\x01 \x03(\v2 .common.ExternalValidationHoldIdR\aholdIdsJ\x04\b\x02\x10\x03R\vnext_cursor\"\x9d\x01\n" +
+	"#ExternalValidationHoldsByIdsRequest\x12'\n" +
+	"\rtenant_org_id\x18\x01 \x01(\tH\x00R\vtenantOrgId\x88\x01\x01\x12;\n" +
+	"\bhold_ids\x18\x02 \x03(\v2 .common.ExternalValidationHoldIdR\aholdIdsB\x10\n" +
+	"\x0e_tenant_org_id\"Q\n" +
 	"\x1aExternalValidationHoldList\x123\n" +
 	"\x05holds\x18\x01 \x03(\v2\x1d.forge.ExternalValidationHoldR\x05holds\"\xac\x01\n" +
 	"\x1eStartExternalValidationRequest\x120\n" +
@@ -1288,19 +1248,23 @@ const file_external_validation_nico_proto_rawDesc = "" +
 	"\n" +
 	"machine_id\x18\x01 \x01(\v2\x11.common.MachineIdR\tmachineId\x129\n" +
 	"\ahold_id\x18\x02 \x01(\v2 .common.ExternalValidationHoldIdR\x06holdId\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\"\xa3\x01\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"\xd5\x01\n" +
 	"\x1fCancelExternalValidationRequest\x12B\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\v2#.common.ExternalValidationRequestIdR\trequestId\x12\"\n" +
 	"\rtenant_org_id\x18\x02 \x01(\tR\vtenantOrgId\x12\x18\n" +
-	"\adetails\x18\x03 \x01(\tR\adetails\"\xbc\x02\n" +
+	"\adetails\x18\x03 \x01(\tR\adetails\x120\n" +
+	"\n" +
+	"machine_id\x18\x04 \x01(\v2\x11.common.MachineIdR\tmachineId\"\xee\x02\n" +
 	"!CompleteExternalValidationRequest\x12B\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\v2#.common.ExternalValidationRequestIdR\trequestId\x12\"\n" +
 	"\rtenant_org_id\x18\x02 \x01(\tR\vtenantOrgId\x12H\n" +
 	"\x16validation_instance_id\x18\x03 \x01(\v2\x12.common.InstanceIdR\x14validationInstanceId\x12:\n" +
 	"\aoutcome\x18\x04 \x01(\x0e2 .forge.ExternalValidationOutcomeR\aoutcome\x12\x1d\n" +
-	"\adetails\x18\x05 \x01(\tH\x00R\adetails\x88\x01\x01B\n" +
+	"\adetails\x18\x05 \x01(\tH\x00R\adetails\x88\x01\x01\x120\n" +
+	"\n" +
+	"machine_id\x18\x06 \x01(\v2\x11.common.MachineIdR\tmachineIdB\n" +
 	"\n" +
 	"\b_details*\xba\x02\n" +
 	"\x1bExternalValidationHoldState\x12.\n" +
@@ -1345,7 +1309,7 @@ func file_external_validation_nico_proto_rawDescGZIP() []byte {
 }
 
 var file_external_validation_nico_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_external_validation_nico_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_external_validation_nico_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_external_validation_nico_proto_goTypes = []any{
 	(ExternalValidationHoldState)(0),            // 0: forge.ExternalValidationHoldState
 	(ExternalValidationAttemptState)(0),         // 1: forge.ExternalValidationAttemptState
@@ -1354,56 +1318,55 @@ var file_external_validation_nico_proto_goTypes = []any{
 	(ExternalValidationOutcome)(0),              // 4: forge.ExternalValidationOutcome
 	(*ExternalValidationAttempt)(nil),           // 5: forge.ExternalValidationAttempt
 	(*ExternalValidationHold)(nil),              // 6: forge.ExternalValidationHold
-	(*ExternalValidationHoldCursor)(nil),        // 7: forge.ExternalValidationHoldCursor
-	(*ExternalValidationHoldSearchFilter)(nil),  // 8: forge.ExternalValidationHoldSearchFilter
-	(*ExternalValidationHoldIdList)(nil),        // 9: forge.ExternalValidationHoldIdList
-	(*ExternalValidationHoldsByIdsRequest)(nil), // 10: forge.ExternalValidationHoldsByIdsRequest
-	(*ExternalValidationHoldList)(nil),          // 11: forge.ExternalValidationHoldList
-	(*StartExternalValidationRequest)(nil),      // 12: forge.StartExternalValidationRequest
-	(*StartExternalValidationResponse)(nil),     // 13: forge.StartExternalValidationResponse
-	(*RemoveExternalValidationHoldRequest)(nil), // 14: forge.RemoveExternalValidationHoldRequest
-	(*CancelExternalValidationRequest)(nil),     // 15: forge.CancelExternalValidationRequest
-	(*CompleteExternalValidationRequest)(nil),   // 16: forge.CompleteExternalValidationRequest
-	(*ExternalValidationRequestId)(nil),         // 17: common.ExternalValidationRequestId
-	(*ExternalValidationHoldId)(nil),            // 18: common.ExternalValidationHoldId
-	(*InstanceId)(nil),                          // 19: common.InstanceId
-	(*timestamppb.Timestamp)(nil),               // 20: google.protobuf.Timestamp
-	(*MachineId)(nil),                           // 21: common.MachineId
-	(*ExternalValidationCycleId)(nil),           // 22: common.ExternalValidationCycleId
+	(*ExternalValidationHoldSearchFilter)(nil),  // 7: forge.ExternalValidationHoldSearchFilter
+	(*ExternalValidationHoldIdList)(nil),        // 8: forge.ExternalValidationHoldIdList
+	(*ExternalValidationHoldsByIdsRequest)(nil), // 9: forge.ExternalValidationHoldsByIdsRequest
+	(*ExternalValidationHoldList)(nil),          // 10: forge.ExternalValidationHoldList
+	(*StartExternalValidationRequest)(nil),      // 11: forge.StartExternalValidationRequest
+	(*StartExternalValidationResponse)(nil),     // 12: forge.StartExternalValidationResponse
+	(*RemoveExternalValidationHoldRequest)(nil), // 13: forge.RemoveExternalValidationHoldRequest
+	(*CancelExternalValidationRequest)(nil),     // 14: forge.CancelExternalValidationRequest
+	(*CompleteExternalValidationRequest)(nil),   // 15: forge.CompleteExternalValidationRequest
+	(*ExternalValidationRequestId)(nil),         // 16: common.ExternalValidationRequestId
+	(*ExternalValidationHoldId)(nil),            // 17: common.ExternalValidationHoldId
+	(*InstanceId)(nil),                          // 18: common.InstanceId
+	(*timestamppb.Timestamp)(nil),               // 19: google.protobuf.Timestamp
+	(*MachineId)(nil),                           // 20: common.MachineId
+	(*ExternalValidationCycleId)(nil),           // 21: common.ExternalValidationCycleId
 }
 var file_external_validation_nico_proto_depIdxs = []int32{
-	17, // 0: forge.ExternalValidationAttempt.request_id:type_name -> common.ExternalValidationRequestId
-	18, // 1: forge.ExternalValidationAttempt.hold_id:type_name -> common.ExternalValidationHoldId
+	16, // 0: forge.ExternalValidationAttempt.request_id:type_name -> common.ExternalValidationRequestId
+	17, // 1: forge.ExternalValidationAttempt.hold_id:type_name -> common.ExternalValidationHoldId
 	1,  // 2: forge.ExternalValidationAttempt.state:type_name -> forge.ExternalValidationAttemptState
 	2,  // 3: forge.ExternalValidationAttempt.allocation_state:type_name -> forge.ExternalValidationAllocationState
-	19, // 4: forge.ExternalValidationAttempt.validation_instance_id:type_name -> common.InstanceId
-	20, // 5: forge.ExternalValidationAttempt.opened_at:type_name -> google.protobuf.Timestamp
-	18, // 6: forge.ExternalValidationHold.hold_id:type_name -> common.ExternalValidationHoldId
-	21, // 7: forge.ExternalValidationHold.machine_id:type_name -> common.MachineId
-	22, // 8: forge.ExternalValidationHold.validation_cycle_id:type_name -> common.ExternalValidationCycleId
-	0,  // 9: forge.ExternalValidationHold.state:type_name -> forge.ExternalValidationHoldState
-	20, // 10: forge.ExternalValidationHold.created_at:type_name -> google.protobuf.Timestamp
-	5,  // 11: forge.ExternalValidationHold.attempt:type_name -> forge.ExternalValidationAttempt
-	20, // 12: forge.ExternalValidationHoldCursor.created_at:type_name -> google.protobuf.Timestamp
-	18, // 13: forge.ExternalValidationHoldCursor.hold_id:type_name -> common.ExternalValidationHoldId
-	7,  // 14: forge.ExternalValidationHoldSearchFilter.after:type_name -> forge.ExternalValidationHoldCursor
-	21, // 15: forge.ExternalValidationHoldSearchFilter.machine_id:type_name -> common.MachineId
-	0,  // 16: forge.ExternalValidationHoldSearchFilter.state:type_name -> forge.ExternalValidationHoldState
-	18, // 17: forge.ExternalValidationHoldIdList.hold_ids:type_name -> common.ExternalValidationHoldId
-	7,  // 18: forge.ExternalValidationHoldIdList.next_cursor:type_name -> forge.ExternalValidationHoldCursor
-	18, // 19: forge.ExternalValidationHoldsByIdsRequest.hold_ids:type_name -> common.ExternalValidationHoldId
-	6,  // 20: forge.ExternalValidationHoldList.holds:type_name -> forge.ExternalValidationHold
-	21, // 21: forge.StartExternalValidationRequest.machine_id:type_name -> common.MachineId
-	3,  // 22: forge.StartExternalValidationResponse.status:type_name -> forge.ExternalValidationStartStatus
-	21, // 23: forge.StartExternalValidationResponse.machine_id:type_name -> common.MachineId
-	18, // 24: forge.StartExternalValidationResponse.hold_id:type_name -> common.ExternalValidationHoldId
-	5,  // 25: forge.StartExternalValidationResponse.attempt:type_name -> forge.ExternalValidationAttempt
-	21, // 26: forge.RemoveExternalValidationHoldRequest.machine_id:type_name -> common.MachineId
-	18, // 27: forge.RemoveExternalValidationHoldRequest.hold_id:type_name -> common.ExternalValidationHoldId
-	17, // 28: forge.CancelExternalValidationRequest.request_id:type_name -> common.ExternalValidationRequestId
-	17, // 29: forge.CompleteExternalValidationRequest.request_id:type_name -> common.ExternalValidationRequestId
-	19, // 30: forge.CompleteExternalValidationRequest.validation_instance_id:type_name -> common.InstanceId
-	4,  // 31: forge.CompleteExternalValidationRequest.outcome:type_name -> forge.ExternalValidationOutcome
+	18, // 4: forge.ExternalValidationAttempt.validation_instance_id:type_name -> common.InstanceId
+	19, // 5: forge.ExternalValidationAttempt.opened_at:type_name -> google.protobuf.Timestamp
+	19, // 6: forge.ExternalValidationAttempt.closed_at:type_name -> google.protobuf.Timestamp
+	17, // 7: forge.ExternalValidationHold.hold_id:type_name -> common.ExternalValidationHoldId
+	20, // 8: forge.ExternalValidationHold.machine_id:type_name -> common.MachineId
+	21, // 9: forge.ExternalValidationHold.validation_cycle_id:type_name -> common.ExternalValidationCycleId
+	0,  // 10: forge.ExternalValidationHold.state:type_name -> forge.ExternalValidationHoldState
+	19, // 11: forge.ExternalValidationHold.created_at:type_name -> google.protobuf.Timestamp
+	5,  // 12: forge.ExternalValidationHold.attempt:type_name -> forge.ExternalValidationAttempt
+	19, // 13: forge.ExternalValidationHold.state_changed_at:type_name -> google.protobuf.Timestamp
+	20, // 14: forge.ExternalValidationHoldSearchFilter.machine_id:type_name -> common.MachineId
+	0,  // 15: forge.ExternalValidationHoldSearchFilter.state:type_name -> forge.ExternalValidationHoldState
+	17, // 16: forge.ExternalValidationHoldIdList.hold_ids:type_name -> common.ExternalValidationHoldId
+	17, // 17: forge.ExternalValidationHoldsByIdsRequest.hold_ids:type_name -> common.ExternalValidationHoldId
+	6,  // 18: forge.ExternalValidationHoldList.holds:type_name -> forge.ExternalValidationHold
+	20, // 19: forge.StartExternalValidationRequest.machine_id:type_name -> common.MachineId
+	3,  // 20: forge.StartExternalValidationResponse.status:type_name -> forge.ExternalValidationStartStatus
+	20, // 21: forge.StartExternalValidationResponse.machine_id:type_name -> common.MachineId
+	17, // 22: forge.StartExternalValidationResponse.hold_id:type_name -> common.ExternalValidationHoldId
+	5,  // 23: forge.StartExternalValidationResponse.attempt:type_name -> forge.ExternalValidationAttempt
+	20, // 24: forge.RemoveExternalValidationHoldRequest.machine_id:type_name -> common.MachineId
+	17, // 25: forge.RemoveExternalValidationHoldRequest.hold_id:type_name -> common.ExternalValidationHoldId
+	16, // 26: forge.CancelExternalValidationRequest.request_id:type_name -> common.ExternalValidationRequestId
+	20, // 27: forge.CancelExternalValidationRequest.machine_id:type_name -> common.MachineId
+	16, // 28: forge.CompleteExternalValidationRequest.request_id:type_name -> common.ExternalValidationRequestId
+	18, // 29: forge.CompleteExternalValidationRequest.validation_instance_id:type_name -> common.InstanceId
+	4,  // 30: forge.CompleteExternalValidationRequest.outcome:type_name -> forge.ExternalValidationOutcome
+	20, // 31: forge.CompleteExternalValidationRequest.machine_id:type_name -> common.MachineId
 	32, // [32:32] is the sub-list for method output_type
 	32, // [32:32] is the sub-list for method input_type
 	32, // [32:32] is the sub-list for extension type_name
@@ -1419,15 +1382,16 @@ func file_external_validation_nico_proto_init() {
 	file_common_nico_proto_init()
 	file_external_validation_nico_proto_msgTypes[0].OneofWrappers = []any{}
 	file_external_validation_nico_proto_msgTypes[1].OneofWrappers = []any{}
-	file_external_validation_nico_proto_msgTypes[3].OneofWrappers = []any{}
-	file_external_validation_nico_proto_msgTypes[11].OneofWrappers = []any{}
+	file_external_validation_nico_proto_msgTypes[2].OneofWrappers = []any{}
+	file_external_validation_nico_proto_msgTypes[4].OneofWrappers = []any{}
+	file_external_validation_nico_proto_msgTypes[10].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_external_validation_nico_proto_rawDesc), len(file_external_validation_nico_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   12,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

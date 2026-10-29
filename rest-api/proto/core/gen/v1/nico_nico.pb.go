@@ -20473,25 +20473,21 @@ type InstanceAllocationRequest struct {
 	Metadata       *Metadata `protobuf:"bytes,12,opt,name=metadata,proto3" json:"metadata,omitempty"`
 	// Allow allocation on unhealthy machines
 	AllowUnhealthyMachine bool `protobuf:"varint,13,opt,name=allow_unhealthy_machine,json=allowUnhealthyMachine,proto3" json:"allow_unhealthy_machine,omitempty"`
-	// Opaque UUID returned by StartExternalValidation. Requires the exact held
-	// machine, config.tenant.tenant_organization_id matching the policy, and
-	// allow_unhealthy_machine=true, with instance_type_id omitted. Bypasses only
-	// this workflow's hold; unrelated blocking health alerts and repair admission
-	// are rechecked at allocation commit.
-	// It is an allocation idempotency key, not an authorization token. Identical
-	// retries return the original instance, including a server-generated instance
-	// ID; changed accepted inputs return ALREADY_EXISTS. Creating returns UNAVAILABLE
-	// with ASCII trailing metadata external-validation-allocation-state: creating;
-	// this marker identifies accepted, in-progress allocation without parsing text.
-	// Recover through hold ID discovery and retrieval, or retry the same key and inputs.
-	// The binding must commit with the instance. Omission preserves ordinary allocation.
-	// Contract milestone: present values return FAILED_PRECONDITION until binding
-	// is implemented, including in batch requests. External validation uses only
-	// the single-instance AllocateInstance RPC; request-bound batch allocation is
-	// outside this contract. REST consumers require externalValidationRequestId
-	// propagation and machine-readable allocation outcomes through the REST/workflow
-	// boundary before this feature can be used through REST. That runtime support
-	// is deferred; see designs/machine-validation/external-validation-api-contract.md.
+	// Request ID returned by StartExternalValidation. It binds this allocation
+	// to that attempt and only works with AllocateInstance, not batch requests.
+	// Set machine_id to the held machine and allow_unhealthy_machine to true,
+	// leave instance_type_id empty, and make config.tenant.tenant_organization_id
+	// match the site policy. The ID grants no access on its own.
+	// It only bypasses the external-validation hold. Other blocking health
+	// alerts and repair checks still apply at allocation commit.
+	// A retry with the same ID and inputs, including instance_id when set,
+	// returns the original instance. Changed inputs return ALREADY_EXISTS.
+	// While allocation is still in progress, the call returns UNAVAILABLE with
+	// trailing metadata external-validation-allocation-state: creating. To
+	// recover, retry with the same ID and inputs, or read the hold's allocation
+	// state. Core also reconciles durable Creating records without caller retries.
+	// Leave it unset for ordinary allocations. Until binding is implemented,
+	// any value returns FAILED_PRECONDITION.
 	ExternalValidationRequestId *ExternalValidationRequestId `protobuf:"bytes,14,opt,name=external_validation_request_id,json=externalValidationRequestId,proto3" json:"external_validation_request_id,omitempty"`
 	unknownFields               protoimpl.UnknownFields
 	sizeCache                   protoimpl.SizeCache

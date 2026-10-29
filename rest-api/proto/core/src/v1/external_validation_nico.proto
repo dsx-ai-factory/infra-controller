@@ -43,9 +43,12 @@ enum ExternalValidationAllocationState {
   EXTERNAL_VALIDATION_ALLOCATION_STATE_UNSPECIFIED = 0;
   // Allocation has not been accepted or is confirmed not to have occurred.
   EXTERNAL_VALIDATION_ALLOCATION_STATE_NOT_STARTED = 1;
-  // Allocation was accepted; an ambiguous outcome blocks another allocation.
+  // Allocation inputs are durable; Core reconciles without caller retries.
+  // An ambiguous outcome blocks another allocation; irreconcilable state puts
+  // the hold in Recovery rather than assuming NotStarted or success.
   EXTERNAL_VALIDATION_ALLOCATION_STATE_CREATING = 2;
-  // The instance and its request binding committed together.
+  // Core committed the instance and its request binding together. This does not
+  // imply REST persistence or that the instance is provisioned/Ready.
   EXTERNAL_VALIDATION_ALLOCATION_STATE_CREATED = 3;
 }
 
@@ -90,6 +93,10 @@ message ExternalValidationAttempt {
   google.protobuf.Timestamp opened_at = 7;
   // Optional result/cancellation text or reference, at most 4096 UTF-8 bytes.
   optional string details = 8;
+  // UTC terminal-result time, required in Passed/Failed/Cancelled and absent
+  // in Open. Set once and preserved on identical replay, including cancellation
+  // before allocation. Instance deletion does not change it.
+  google.protobuf.Timestamp closed_at = 9;
 }
 
 // NICo-owned allocation gate; no tenant API creates or removes this resource.
@@ -112,29 +119,23 @@ message ExternalValidationHold {
   // lost instance, ownership mismatch, failed cleanup, or failed local validation
   // without exposing credentials or unredacted validation output.
   optional string recovery_reason = 8;
+  // UTC time of the last hold-state transition; equals created_at initially.
+  // Required for every returned hold. Attempt/allocation updates that leave the
+  // hold state unchanged do not advance it; identical replay never advances it.
+  google.protobuf.Timestamp state_changed_at = 9;
 }
 
-// Exclusive position in the immutable (created_at, hold_id) ascending order.
-// Both fields are required when a cursor is supplied; no snapshot is implied.
-message ExternalValidationHoldCursor {
-  // UTC creation time of the last ID returned on the preceding page.
-  google.protobuf.Timestamp created_at = 1;
-  // Last returned hold UUID, compared in UUID byte order to break timestamp ties.
-  common.ExternalValidationHoldId hold_id = 2;
-}
-
-// Discovers hold IDs in this site's authorized validation-tenant scope.
-// All supplied filters are combined with AND; every page uses the same filters.
+// Discovers matching hold IDs at this site; fetch their state in bounded batches.
+// All supplied filters combine with AND. Method/site authorization still applies
+// when the tenant filter is omitted; REST enforces end-user roles and scope.
 message ExternalValidationHoldSearchFilter {
-  // Required configured Core tenant organization. Other tenants are denied.
-  string tenant_org_id = 1;
-  // Omitted defaults to 20. Valid range: 1..100; explicit zero is invalid.
-  optional uint32 page_size = 2;
-  // Omitted starts a reconciliation pass. Otherwise return only IDs whose
-  // immutable (created_at, hold_id) tuple is strictly greater than this cursor.
-  // Continue with the same tenant, machine, and state filters; cursor presence grants no permission.
-  ExternalValidationHoldCursor after = 3;
-  // Optional exact host machine; omission searches all hosts in the tenant scope.
+  // Optional exact Core tenant organization; present empty is INVALID_ARGUMENT.
+  // Omitted searches across tenants at the connected site. REST supplies the
+  // caller's org for Tenant requests; Provider Admin inventory may omit it.
+  optional string tenant_org_id = 1;
+  reserved 2, 3;
+  reserved "page_size", "after";
+  // Optional exact host machine; omission searches all hosts in the selected scope.
   // A malformed ID or a DPU ID is INVALID_ARGUMENT; an unknown host returns no IDs.
   common.MachineId machine_id = 4;
   // Omitted searches active states (Pending, AttemptOpen, AwaitingCleanup, Recovery).
@@ -143,31 +144,31 @@ message ExternalValidationHoldSearchFilter {
   optional ExternalValidationHoldState state = 5;
 }
 
-// Bounded ID discovery in immutable (created_at, hold_id) ascending order.
+// All matching IDs from one read, in immutable (created_at, hold_id) ascending order.
+// No cursor, offset, or frozen snapshot across subsequent reads is implied.
 message ExternalValidationHoldIdList {
-  // Matching hold UUIDs, at most the effective page size; empty if none match.
+  // All matching hold UUIDs; empty if none match. UUID ties use byte order.
   repeated common.ExternalValidationHoldId hold_ids = 1;
-  // Last returned ID's tuple when more matches exist at this read; absent at
-  // the end. Presence is the has-more indicator; no separate flag is needed.
-  // Resume strictly after it even if that hold subsequently disappears.
-  // Pages are live observations: newly visible holds behind the cursor are
-  // discovered on the next pass, starting without a cursor.
-  ExternalValidationHoldCursor next_cursor = 2;
+  reserved 2;
+  reserved "next_cursor";
 }
 
-// Retrieves a bounded batch of discovered holds within an authorized tenant.
+// Retrieves a bounded batch of discovered holds at the connected site.
 message ExternalValidationHoldsByIdsRequest {
-  // Required configured Core tenant organization. Other tenants are denied.
-  string tenant_org_id = 1;
-  // Required 1..100 hold UUIDs. Malformed UUIDs reject the whole request with
-  // INVALID_ARGUMENT; duplicates are accepted and returned at most once.
+  // Optional exact Core tenant organization; present empty is INVALID_ARGUMENT.
+  // Omission permits site-wide retrieval for an authorized Core caller. REST
+  // always supplies the caller's org for Tenant requests.
+  optional string tenant_org_id = 1;
+  // Required nonempty batch, limited by the site's max_find_by_ids setting
+  // (default 100, exposed by RuntimeConfig). Oversized batches or malformed UUIDs
+  // are INVALID_ARGUMENT; duplicates are accepted and returned at most once.
   repeated common.ExternalValidationHoldId hold_ids = 2;
 }
 
 // Current holds requested by ID, including Satisfied, ordered by (created_at, hold_id).
 message ExternalValidationHoldList {
-  // Satisfied holds remain readable by their authorized tenant. Unknown, removed,
-  // and out-of-tenant IDs are omitted without disclosing their state. Holds may
+  // Satisfied holds remain readable. Unknown, removed, and tenant-filter-mismatched
+  // IDs are omitted without disclosing their state. Holds may
   // change between ID discovery and retrieval;
   // absence from this response never proves allocation or cleanup succeeded.
   repeated ExternalValidationHold holds = 1;
@@ -203,7 +204,9 @@ message StartExternalValidationResponse {
   bool replayed = 5;
 }
 
-// Administrator-only break-glass removal after allocation and cleanup are resolved.
+// Privileged break-glass removal after allocation and cleanup are resolved.
+// REST requires Provider Admin authorization; Core authorizes its Site Agent
+// service caller and cannot infer the original end-user role from that identity.
 message RemoveExternalValidationHoldRequest {
   // Required held host machine at the connected Core site.
   common.MachineId machine_id = 1;
@@ -213,8 +216,8 @@ message RemoveExternalValidationHoldRequest {
   common.ExternalValidationHoldId hold_id = 2;
   // Required audit reason, 1..4096 UTF-8 bytes. Identical replay of the original
   // machine, hold, and reason succeeds without affecting a newer hold; a changed
-  // recorded reason returns ALREADY_EXISTS. Ordinary validation tenants cannot
-  // call this RPC. Unresolved allocation/cleanup returns FAILED_PRECONDITION.
+  // recorded reason returns ALREADY_EXISTS. REST rejects ordinary Tenant callers.
+  // Unresolved allocation/cleanup returns FAILED_PRECONDITION.
   string reason = 3;
 }
 
@@ -231,6 +234,10 @@ message CancelExternalValidationRequest {
   // Required nonempty reason, at most 4096 UTF-8 bytes. Identical replay succeeds;
   // a changed reason conflicts. Creating/Created cannot be cancelled this way.
   string details = 3;
+  // Optional expected host, for callers routing by machine. A valid mismatch
+  // returns NOT_FOUND, including on replay. Malformed/DPU IDs are INVALID_ARGUMENT.
+  // Omission relies on the saved request identity; it never grants permission.
+  common.MachineId machine_id = 4;
 }
 
 // Records a result for an allocated instance without releasing the allocation gate.
@@ -247,4 +254,7 @@ message CompleteExternalValidationRequest {
   // repeat the result, instance ID, and details; stale requests, an instance
   // mismatch, or conflicting completion return ALREADY_EXISTS.
   optional string details = 5;
+  // Optional expected host, checked against the saved attempt before replay or
+  // mutation. A valid mismatch is NOT_FOUND; malformed/DPU IDs are INVALID_ARGUMENT.
+  common.MachineId machine_id = 6;
 }
