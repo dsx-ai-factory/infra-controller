@@ -21,6 +21,11 @@
 //! family. A family is published only when every read it needs succeeded and
 //! no unit is unresolved; otherwise it keeps its last snapshot.
 //!
+//! The families of a sweep are built and published one after another, so a
+//! read between two of them sees some families from this sweep and the
+//! others from the last one. A family is consistent with its own sweep only,
+//! and the window is about as long as building the later families.
+//!
 //! DPUs get no by-ID read: a DPU is attached when a host lists it, and takes
 //! that host's state category.
 
@@ -556,7 +561,9 @@ impl DevicesReader {
         failed: &mut Vec<Family>,
         build: impl FnOnce(&[Arc<Unit>]) -> Built,
     ) {
-        let previous = self.previous().remove(&family).unwrap_or_default();
+        // Copied, not taken, so a panicking build leaves the last units in
+        // place for the next sweep to share against.
+        let previous = self.previous().get(&family).cloned().unwrap_or_default();
         let built = build(&previous);
         let units = built.as_ref().ok().map(|data| data.units.clone());
         let delivered = self
@@ -1557,6 +1564,72 @@ mod tests {
         // Sharing never changes what a unit says.
         let rebuilt = UnitsData::new(second.units.iter().map(|u| Unit::clone(u)).collect(), 0);
         assert_eq!(rebuilt, second);
+    }
+
+    /// With nothing changed, every unit of every family is the last sweep's
+    /// allocation, so each family builds against its own previous units.
+    #[tokio::test(start_paused = true)]
+    async fn every_family_shares_its_unchanged_units() {
+        let h = harness(small_site());
+        h.nico
+            .site
+            .lock()
+            .unwrap()
+            .firmware_requests
+            .push(fake::firmware_request(1, "AdminCli"));
+        h.sweep().await.expect("first sweep");
+        let units = |family| h.sink.latest::<UnitsData>(family).expect("units").1;
+        let first: Vec<_> = DEVICE_FAMILIES.map(units).into();
+        h.sweep().await.expect("second sweep");
+        for (family, first) in DEVICE_FAMILIES.into_iter().zip(first) {
+            let second = units(family);
+            assert_eq!(second.units.len(), first.units.len(), "{family:?}");
+            let shared = first
+                .units
+                .iter()
+                .zip(&second.units)
+                .filter(|(a, b)| Arc::ptr_eq(a, b))
+                .count();
+            assert_eq!(shared, first.units.len(), "{family:?} shares its units");
+        }
+        for family in [
+            Family::Dpu,
+            Family::Expected,
+            Family::Instance,
+            Family::HostFirmwareRequests,
+        ] {
+            assert!(!units(family).units.is_empty(), "{family:?} has units");
+        }
+    }
+
+    /// A build that panics must not cost the family its last units: the next
+    /// sweep still has them to share against.
+    #[tokio::test(start_paused = true)]
+    async fn a_panicking_build_keeps_the_last_units() {
+        let h = harness(small_site());
+        h.sweep().await.expect("first sweep");
+        let kept = h.reader.previous().get(&Family::Switch).cloned();
+        assert_eq!(kept.as_ref().map(Vec::len), Some(2));
+        let meta = h.sink.latest::<UnitsData>(Family::Switch).expect("units").0;
+        let mut failed = Vec::new();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            h.reader
+                .deliver_built(&meta, Family::Switch, &mut failed, |_| {
+                    panic!("build panics")
+                });
+        }));
+        assert!(panicked.is_err());
+        let after = h.reader.previous().get(&Family::Switch).cloned();
+        assert_eq!(after, kept, "the last units stay for the next sweep");
+        h.sweep().await.expect("next sweep");
+        let second = h.sink.latest::<UnitsData>(Family::Switch).expect("units").1;
+        assert!(
+            kept.expect("units")
+                .iter()
+                .zip(&second.units)
+                .all(|(a, b)| Arc::ptr_eq(a, b)),
+            "the next sweep shares them"
+        );
     }
 
     /// A family whose sweep fails keeps its last published units to share

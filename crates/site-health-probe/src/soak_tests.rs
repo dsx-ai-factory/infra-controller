@@ -32,8 +32,11 @@
 //! sweep's snapshot with the site's counts and changes, and the others keep
 //! their last one. After warm-up the retained heap has a least-squares slope
 //! of at most 1 KiB per sweep. The final quiescent state (the starting
-//! fixture, cursors expired, retired labels gone) holds no more bytes and no
-//! more allocations than the same state measured right after warm-up.
+//! fixture, cursors expired) holds at most 1 MiB and 0.1% more allocations
+//! than the same state measured right after warm-up, and no more label sets
+//! and series: retired labels are gone. Every sweep that publishes hosts
+//! shares most of its units with the last host snapshot, and no sweep's peak
+//! heap goes above the bound of its scale.
 //!
 //! Heap is what the test thread holds above the fake site, counted by the
 //! allocator below. It is not RSS. Slow, so ignored by default. Run alone in
@@ -41,7 +44,7 @@
 //! `cargo test --release -p carbide-site-health-probe soak -- --ignored --nocapture --test-threads=1`.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -157,6 +160,9 @@ struct Scale {
     shelves: u32,
     racks: u32,
     instances: bool,
+    /// The most heap the soak's sweeps may hold at their peak, above the
+    /// fake site. Measured, with room for allocator and ordering noise.
+    max_peak: i64,
 }
 
 const RACKS_250: Scale = Scale {
@@ -165,6 +171,7 @@ const RACKS_250: Scale = Scale {
     shelves: 2_000,
     racks: 250,
     instances: false,
+    max_peak: 45 << 20,
 };
 
 const RACKS_1000: Scale = Scale {
@@ -173,6 +180,7 @@ const RACKS_1000: Scale = Scale {
     shelves: 8_000,
     racks: 1_000,
     instances: true,
+    max_peak: 200 << 20,
 };
 
 const SWEEPS: u32 = 500;
@@ -208,6 +216,10 @@ const MAX_SLOPE: f64 = 1024.0;
 /// What the final quiescent state may hold beyond the warm-up one.
 const QUIESCENT_BYTES: i64 = 1 << 20;
 const QUIESCENT_ALLOCATIONS: f64 = 0.001;
+/// A host snapshot shares at least this many tenths of its units with the
+/// last one. A sweep changes about a fifth of them: the open firmware
+/// requests move to another tenth of the hosts every sweep.
+const MIN_SHARED_TENTHS: usize = 7;
 
 fn site(scale: Scale) -> FakeSite {
     let mut site = FakeSite::default();
@@ -465,6 +477,33 @@ fn slope(points: &[(f64, f64)]) -> f64 {
     num / den
 }
 
+/// What a quiescent state holds above the fake site.
+#[derive(Debug, Clone, Copy)]
+struct Quiescent {
+    bytes: i64,
+    allocations: i64,
+    label_sets: usize,
+    series: usize,
+}
+
+/// How many units of `new` are the same allocation as the unit of `old` with
+/// the same ID. Both are sorted by ID, so it allocates nothing.
+fn shared_units(old: &[Arc<Unit>], new: &[Arc<Unit>]) -> usize {
+    let (mut i, mut j, mut shared) = (0, 0, 0);
+    while i < old.len() && j < new.len() {
+        match old[i].id.cmp(&new[j].id) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                shared += usize::from(Arc::ptr_eq(&old[i], &new[j]));
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    shared
+}
+
 /// The soak's moving parts.
 struct Soak {
     scale: Scale,
@@ -480,6 +519,9 @@ struct Soak {
     runs: Cell<u64>,
     /// Calls the last complete sweep made.
     calls: Cell<usize>,
+    /// The units of the last host snapshot a sweep checked, to count what
+    /// the next one shares. Empty after a quiescent sweep.
+    prior_hosts: RefCell<Vec<Arc<Unit>>>,
     /// Heap the fake site and the setup hold before the first sweep.
     base: (i64, i64),
 }
@@ -551,6 +593,7 @@ impl Soak {
             rest_off,
             runs: Cell::new(0),
             calls: Cell::new(0),
+            prior_hosts: RefCell::new(Vec::new()),
             base: (live_bytes(), live_allocations()),
         }
     }
@@ -559,6 +602,12 @@ impl Soak {
     async fn run(&self) -> eyre::Result<()> {
         self.runs.set(self.runs.get() + 1);
         self.reader.run(&ObservationRecorder::default()).await
+    }
+
+    /// Hosts in the current host snapshot.
+    fn hosts_published(&self) -> usize {
+        let current = self.store.current(Family::Host).expect("a host snapshot");
+        units_of(current.as_ref()).expect("units").units.len()
     }
 
     /// One sweep `k` with its clients, failures and cancellations.
@@ -580,7 +629,8 @@ impl Soak {
         // A client starts paging hosts on the current snapshot and finishes
         // after the next one replaced it.
         let across = if k > 1 {
-            Some(first_page(&self.app, "host").await)
+            let before = self.hosts_published();
+            Some((first_page(&self.app, "host").await, before))
         } else {
             None
         };
@@ -608,10 +658,20 @@ impl Soak {
             }
         }
         self.check(k, planned);
-        if let Some(cursor) = across {
-            page_all(&self.app, "host", Some(cursor)).await;
+        // The cursor still pages the snapshot it was taken on, whatever
+        // replaced it since.
+        if let Some((cursor, before)) = across {
+            assert_eq!(
+                page_all(&self.app, "host", Some(cursor)).await,
+                before - PAGE as usize,
+                "sweep {k}: paging across a publication"
+            );
         }
-        page_all(&self.app, "host", None).await;
+        assert_eq!(
+            page_all(&self.app, "host", None).await,
+            self.hosts_published(),
+            "sweep {k}: a full host listing"
+        );
         // Abandoned listings.
         let _dpus = first_page(&self.app, "dpu").await;
         if self.scale.instances {
@@ -704,6 +764,19 @@ impl Soak {
                 if let Some(unit) = unit(churned) {
                     assert_eq!(unit.state, "HostInitializing", "sweep {k}: host {churned}");
                 }
+                // Unchanged hosts are the last snapshot's allocations. Without
+                // sharing every kept snapshot is a full copy.
+                let mut prior = self.prior_hosts.borrow_mut();
+                if !prior.is_empty() {
+                    let shared = shared_units(&prior, units);
+                    assert!(
+                        shared * 10 >= units.len() * MIN_SHARED_TENTHS,
+                        "sweep {k}: {shared} of {} host units shared with the last snapshot",
+                        units.len()
+                    );
+                }
+                prior.clear();
+                prior.extend(units.iter().cloned());
             }
         }
     }
@@ -711,7 +784,8 @@ impl Soak {
     /// Heap bytes and allocations in the starting fixture's quiescent state:
     /// one clean sweep of it, every cursor and retired label expired, the
     /// lazy expiry triggered and the registry gathered.
-    async fn quiescent(&self) -> (i64, i64) {
+    async fn quiescent(&self) -> Quiescent {
+        self.prior_hosts.borrow_mut().clear();
         set_sweep(&mut self.nico.site.lock().unwrap(), self.scale, None, false);
         self.run().await.expect("clean sweep");
         let keep = Duration::from_secs(StateConfig::default().paging.keep_seconds);
@@ -720,9 +794,19 @@ impl Soak {
             let _ = self.store.by_id(family, "expire-now");
         }
         drop(self.registry.gather());
-        drop(self.registry.gather());
+        let series = self
+            .registry
+            .gather()
+            .iter()
+            .map(|family| family.get_metric().len())
+            .sum();
         self.nico.clear_calls();
-        (live_bytes() - self.base.0, live_allocations() - self.base.1)
+        Quiescent {
+            bytes: live_bytes() - self.base.0,
+            allocations: live_allocations() - self.base.1,
+            label_sets: self.collector.tracked_label_sets(),
+            series,
+        }
     }
 }
 
@@ -770,29 +854,51 @@ async fn soak(name: &str, scale: Scale) -> Vec<Retained> {
         .collect();
     let slope = slope(&steady);
     eprintln!(
-        "{name}: peak {:.1} MiB, slope {slope:.1} bytes per sweep, quiescent {:.1} MiB and \
-         {} allocations after warm-up, {:.1} MiB and {} at the end",
-        mib(peak),
-        mib(warm.0),
-        warm.1,
-        mib(last.0),
-        last.1
+        "{name}: peak {:.1} MiB, slope {slope:.1} bytes per sweep",
+        mib(peak)
     );
+    for (when, q) in [("after warm-up", warm), ("at the end", last)] {
+        eprintln!(
+            "{name}: quiescent {when}: {:.1} MiB, {} allocations, {} label sets, {} series",
+            mib(q.bytes),
+            q.allocations,
+            q.label_sets,
+            q.series
+        );
+    }
     assert!(
         slope <= MAX_SLOPE,
         "{name}: retained heap grows {slope:.1} bytes per sweep after warm-up"
     );
     assert!(
-        last.0 <= warm.0 + QUIESCENT_BYTES,
+        last.bytes <= warm.bytes + QUIESCENT_BYTES,
         "{name}: quiescent heap {} bytes at the end, {} after warm-up",
-        last.0,
-        warm.0
+        last.bytes,
+        warm.bytes
     );
     assert!(
-        last.1 as f64 <= warm.1 as f64 * (1.0 + QUIESCENT_ALLOCATIONS),
+        last.allocations as f64 <= warm.allocations as f64 * (1.0 + QUIESCENT_ALLOCATIONS),
         "{name}: {} quiescent allocations at the end, {} after warm-up",
-        last.1,
-        warm.1
+        last.allocations,
+        warm.allocations
+    );
+    assert!(warm.series > 0, "{name}: no series to compare");
+    assert!(
+        last.label_sets <= warm.label_sets,
+        "{name}: {} label sets at the end, {} after warm-up",
+        last.label_sets,
+        warm.label_sets
+    );
+    assert!(
+        last.series <= warm.series,
+        "{name}: {} series at the end, {} after warm-up",
+        last.series,
+        warm.series
+    );
+    assert!(
+        peak <= scale.max_peak,
+        "{name}: peak heap {peak} bytes, bound {}",
+        scale.max_peak
     );
     retained
 }

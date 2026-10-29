@@ -315,6 +315,9 @@ mod tests {
         let previous = UnitsData::new(vec![unit("a", "ready"), unit("b", "ready")], 0);
         let mut units = UnitsBuilder::new(&previous.units);
         units.extend([unit("c", "ready"), unit("b", "error"), unit("a", "ready")]);
+        // Three pushes outgrew the two reserved slots.
+        let grown = units.units.capacity();
+        assert!(grown > 3, "the build grew the vec");
         let units = units.finish(1);
         let ids: Vec<&str> = units.units.iter().map(|u| u.id.as_str()).collect();
         assert_eq!(ids, ["a", "b", "c"], "sorted by key");
@@ -327,7 +330,10 @@ mod tests {
             "b changed"
         );
         assert_eq!(units.units[1].state, "error");
-        assert_eq!(units.units.capacity(), 3);
+        assert!(
+            units.units.capacity() < grown,
+            "finishing gave the extra back"
+        );
         assert_eq!(units.unknown_states, 1);
     }
 }
