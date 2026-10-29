@@ -1781,6 +1781,20 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
     let (rack_id, host_a, host_b) = create_two_compute_rack(&env, &pool).await?;
     let machine_ids = [host_a.host_snapshot.id, host_b.host_snapshot.id];
 
+    // NMX-C has finished. A busy host keeps the rack in the existing certificate
+    // wait state; the next successful poll retries the atomic restart handoff.
+    for _ in 0..2 {
+        env.rms_sim
+            .queue_get_configure_switch_certificate_job_status_response(Ok(
+                rms::GetConfigureSwitchCertificateJobStatusResponse {
+                    status: rms::ReturnCode::Success as i32,
+                    state: "completed".to_string(),
+                    ..Default::default()
+                },
+            ))
+            .await;
+    }
+
     // A previously booted, Ready host must report a new boot for this batch.
     env.api
         .reboot_completed(tonic::Request::new(
@@ -1803,7 +1817,10 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
         &rack_id,
         RackState::Maintenance {
             maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
-                configure_nmx_cluster: ConfigureNmxClusterState::RequestComputeHostRestarts,
+                configure_nmx_cluster:
+                    ConfigureNmxClusterState::WaitForPrimarySwitchCertificateJob {
+                        job_id: "completed-primary-certificate-job".to_string(),
+                    },
             },
         },
     )
@@ -1816,9 +1833,10 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
         rack.controller_state.value,
         RackState::Maintenance {
             maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
-                configure_nmx_cluster: ConfigureNmxClusterState::RequestComputeHostRestarts,
+                configure_nmx_cluster: ConfigureNmxClusterState::WaitForPrimarySwitchCertificateJob { ref job_id },
             },
         }
+        if job_id == "completed-primary-certificate-job"
     ));
     let machine_a = db::machine::find_one(
         &pool,
@@ -5275,17 +5293,6 @@ async fn run_configure_nmx_cluster_v2_workflow(
 
     let rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
 
-    assert!(matches!(
-        rack.controller_state.value,
-        RackState::Maintenance {
-            maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
-                configure_nmx_cluster: ConfigureNmxClusterState::RequestComputeHostRestarts,
-            },
-        }
-    ));
-
-    env.run_rack_controller_iteration().await;
-    let rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
     assert!(matches!(
         rack.controller_state.value,
         RackState::Maintenance {

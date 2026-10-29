@@ -173,9 +173,8 @@ async fn wait_for_compute_host_restarts(
             rack_id = %rack.id,
             "Compute host membership changed while restarts were in progress; restarting the current set"
         );
-        return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
-            maintenance_state: restart_compute_hosts_state(),
-        }));
+        drop(connection);
+        return request_compute_host_restarts(rack, ctx).await;
     }
 
     let initiator = rack_maintenance_initiator(&rack.id);
@@ -1175,12 +1174,6 @@ fn next_state_after_configure(scope: &MaintenanceScope) -> RackMaintenanceState 
     }
 }
 
-fn restart_compute_hosts_state() -> RackMaintenanceState {
-    RackMaintenanceState::ConfigureNmxCluster {
-        configure_nmx_cluster: ConfigureNmxClusterState::RequestComputeHostRestarts,
-    }
-}
-
 /// Returns the first maintenance sub-state to enter based on the requested
 /// activities in the scope. Called from Ready/Error when entering Maintenance.
 pub(crate) fn first_maintenance_state(scope: &MaintenanceScope) -> RackMaintenanceState {
@@ -1219,9 +1212,7 @@ fn next_state_if_activity_not_requested(
         }
         // Once NMX-C completed, finish its restart barrier even if the scope changes.
         RackMaintenanceState::ConfigureNmxCluster {
-            configure_nmx_cluster:
-                ConfigureNmxClusterState::RequestComputeHostRestarts
-                | ConfigureNmxClusterState::WaitForComputeHostRestarts { .. },
+            configure_nmx_cluster: ConfigureNmxClusterState::WaitForComputeHostRestarts { .. },
         } => None,
         RackMaintenanceState::ConfigureNmxCluster { .. } => (!scope
             .should_run(&MaintenanceActivity::ConfigureNmxCluster))
@@ -1642,9 +1633,7 @@ async fn wait_for_switch_certificate_job(
                 configure_scale_up_fabric_manager_v2(id, state, ctx, rack_profile_id, scope).await
             }
             SwitchCertificateJobCompletion::CompleteMaintenanceActivity => {
-                Ok(StateHandlerOutcome::transition(RackState::Maintenance {
-                    maintenance_state: restart_compute_hosts_state(),
-                }))
+                request_compute_host_restarts(state, ctx).await
             }
         },
         ConfigureSwitchCertificateState::Failed => {
@@ -2116,9 +2105,7 @@ async fn verify_scale_up_fabric_manager_v2(
     if !effective_switch_mtls_services(&ctx.services.switch_mtls_services)
         .contains(&SwitchMtlsService::ScaleUpFabricTelemetry)
     {
-        return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
-            maintenance_state: restart_compute_hosts_state(),
-        }));
+        return request_compute_host_restarts(state, ctx).await;
     }
 
     start_primary_switch_certificate_configuration(
@@ -3279,9 +3266,6 @@ pub async fn handle_maintenance(
         RackMaintenanceState::ConfigureNmxCluster {
             configure_nmx_cluster,
         } => match configure_nmx_cluster {
-            ConfigureNmxClusterState::RequestComputeHostRestarts => {
-                request_compute_host_restarts(state, ctx).await
-            }
             ConfigureNmxClusterState::WaitForComputeHostRestarts { machine_ids } => {
                 wait_for_compute_host_restarts(state, scope, machine_ids, ctx).await
             }
@@ -3790,7 +3774,9 @@ mod tests {
 
     fn restarting_compute_hosts() -> RackMaintenanceState {
         RackMaintenanceState::ConfigureNmxCluster {
-            configure_nmx_cluster: ConfigureNmxClusterState::RequestComputeHostRestarts,
+            configure_nmx_cluster: ConfigureNmxClusterState::WaitForComputeHostRestarts {
+                machine_ids: vec![],
+            },
         }
     }
 

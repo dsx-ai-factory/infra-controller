@@ -577,9 +577,6 @@ impl Display for RackMaintenanceState {
 pub enum ConfigureNmxClusterState {
     Start,
 
-    /// Requests compute-host resets after successful NMX-C configuration.
-    RequestComputeHostRestarts,
-
     /// Waits for reset completion and Scout reboot reports newer than this state.
     WaitForComputeHostRestarts {
         /// Exact compute hosts that received the reset request.
@@ -621,9 +618,6 @@ impl Display for ConfigureNmxClusterState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConfigureNmxClusterState::Start => write!(f, "Start"),
-            ConfigureNmxClusterState::RequestComputeHostRestarts => {
-                write!(f, "RequestComputeHostRestarts")
-            }
             ConfigureNmxClusterState::WaitForComputeHostRestarts { .. } => {
                 write!(f, "WaitForComputeHostRestarts")
             }
