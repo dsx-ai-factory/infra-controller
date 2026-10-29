@@ -40,9 +40,9 @@
 //! [`extract_context`] (read) and [`inject_context`] (write) are the underlying primitives,
 //! exposed for direct use when the helpers above don't fit.
 //!
-//! When no propagator has been installed, OpenTelemetry's default is a no-op propagator, so the
-//! propagation helpers are no-ops — safe to wire in unconditionally. [`LogTraceContext`] reads
-//! existing span context for logging independently of the global propagator.
+//! Without an OpenTelemetry propagator, trace propagation is a no-op. Durable
+//! log correlation through [`correlation`] works independently of tracing.
+//! [`LogTraceContext`] reads existing span context for logging.
 
 use std::sync::OnceLock;
 use std::task::{Context as TaskContext, Poll};
@@ -52,6 +52,8 @@ use opentelemetry::{Context, global};
 use opentelemetry_http::{HeaderExtractor, HeaderInjector};
 use tower::Service;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+pub mod correlation;
 
 /// Reads trace IDs for logging layers without retaining their subscriber.
 ///
@@ -141,10 +143,12 @@ pub fn inject_context(cx: &Context, headers: &mut http::HeaderMap) {
 
 /// Inject the *current* tracing span's trace context into outbound request headers.
 ///
-/// Reads the OpenTelemetry context attached to [`tracing::Span::current`]; when there is no active
-/// span / valid context this writes nothing, leaving the request unchanged.
+/// Reads the OpenTelemetry context attached to [`tracing::Span::current`]. Also
+/// injects the originating log trace ID from [`correlation::scope`], even
+/// without an active trace or exporter.
 pub fn inject_current_context(headers: &mut http::HeaderMap) {
     inject_context(&tracing::Span::current().context(), headers);
+    correlation::inject_current(headers);
 }
 
 /// A [`tower::Service`] that injects the current trace context into each outbound request's headers,

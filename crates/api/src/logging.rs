@@ -85,7 +85,10 @@ pub(super) fn setup_logging(
 
     let (logfmt_stdout_filter, logfmt_stdout_reload_handle) =
         reload::Layer::new(initial_log_filter.clone());
-    let mut event_fields = vec![logfmt::EventField::with_default("component", "nico-api")];
+    let mut event_fields = vec![
+        logfmt::EventField::with_default("component", "nico-api"),
+        logfmt::EventField::new("trace_id"),
+    ];
     event_fields.extend(
         extra_logfmt_event_fields
             .into_iter()

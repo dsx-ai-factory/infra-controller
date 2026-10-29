@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/logcorrelation"
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 
@@ -20,6 +21,7 @@ type OperationRun struct {
 	bun.BaseModel `bun:"table:operation_run,alias:orun"`
 
 	ID                uuid.UUID                             `bun:"id,pk,type:uuid,default:gen_random_uuid()"`
+	Metadata          *logcorrelation.Metadata              `bun:"metadata,type:jsonb"`
 	Name              string                                `bun:"name,notnull"`
 	Description       string                                `bun:"description,nullzero"`
 	Status            operationrun.OperationRunStatus       `bun:"status,type:varchar(32),notnull"`        //nolint:lll

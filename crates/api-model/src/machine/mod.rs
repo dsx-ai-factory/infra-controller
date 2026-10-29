@@ -2901,11 +2901,23 @@ pub enum MachineMaintenanceOperation {
     ChassisReset { chassis_id: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct MachineMaintenanceRequest {
+    /// Durable CM action reference, retained by admitted controller state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<uuid::Uuid>,
     pub requested_at: DateTime<Utc>,
     pub initiator: String,
     pub operation: MachineMaintenanceOperation,
+}
+
+// Log correlation is not request identity: legacy controllers may omit it.
+impl PartialEq for MachineMaintenanceRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.requested_at == other.requested_at
+            && self.initiator == other.initiator
+            && self.operation == other.operation
+    }
 }
 
 /// Struct to store information if host reprovision is requested.
@@ -4478,6 +4490,7 @@ mod tests {
     fn ready_host_with_pending_maintenance_is_not_allocatable() {
         let mut snapshot = managed_host_state_snapshot();
         snapshot.host_snapshot.machine_maintenance_requested = Some(MachineMaintenanceRequest {
+            action_id: None,
             requested_at: chrono::Utc::now(),
             initiator: "test".to_string(),
             operation: MachineMaintenanceOperation::ChassisReset {

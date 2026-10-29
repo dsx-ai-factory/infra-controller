@@ -48,6 +48,7 @@ func TaskRequestForTarget(
 	}
 
 	return &operation.Request{
+		TraceID: op.TraceID,
 		Operation: operation.Wrapper{
 			Type: op.Payload.Type(),
 			Code: op.Payload.CodeString(),

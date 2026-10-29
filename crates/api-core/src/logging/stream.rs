@@ -196,8 +196,9 @@ struct SpanData {
 
 /// A `tracing` layer that forwards events and span-completion
 /// summaries to a [`LogStream`].
-/// Includes `trace_id` in the structured fields when an OpenTelemetry context
-/// exists. Install before the OpenTelemetry layer to preserve close-time context.
+/// Includes the originating `trace_id` from a logging scope, falling back to the
+/// current OpenTelemetry context. Install before the OpenTelemetry layer to
+/// preserve close-time context.
 pub struct LogStreamLayer {
     stream: LogStream,
     trace_context: trace_propagation::LogTraceContext,
@@ -247,11 +248,20 @@ where
         event.record(&mut visitor);
         if let Some(trace_id) = ctx.event_span(event).and_then(|span| {
             span.scope()
-                .find_map(|span| self.trace_context.trace_id(&span.id()))
+                .find_map(|span| {
+                    span.extensions()
+                        .get::<SpanData>()
+                        .and_then(|data| data.fields.get("trace_id").cloned())
+                })
+                .or_else(|| {
+                    span.scope().find_map(|span| {
+                        self.trace_context
+                            .trace_id(&span.id())
+                            .map(|id| id.to_string())
+                    })
+                })
         }) {
-            visitor
-                .fields
-                .insert("trace_id".to_string(), trace_id.to_string());
+            visitor.fields.insert("trace_id".to_string(), trace_id);
         }
 
         self.stream.publish(LogLine {
@@ -270,7 +280,18 @@ where
         let Some(span) = ctx.span(&id) else { return };
         let trace_id = span
             .scope()
-            .find_map(|span| self.trace_context.trace_id(&span.id()));
+            .find_map(|span| {
+                span.extensions()
+                    .get::<SpanData>()
+                    .and_then(|data| data.fields.get("trace_id").cloned())
+            })
+            .or_else(|| {
+                span.scope().find_map(|span| {
+                    self.trace_context
+                        .trace_id(&span.id())
+                        .map(|id| id.to_string())
+                })
+            });
 
         // The span is closing and this layer is the only reader of its
         // `SpanData`, so take the data out of the extensions rather than
@@ -284,7 +305,7 @@ where
         } = data;
         let elapsed_ms = opened_at.elapsed().as_millis();
         if let Some(trace_id) = trace_id {
-            fields.insert("trace_id".to_string(), trace_id.to_string());
+            fields.insert("trace_id".to_string(), trace_id);
         }
 
         // Put `span_id` to its own slot (for span click-to-filter)
@@ -411,6 +432,43 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::*;
+
+    #[tokio::test]
+    async fn persisted_trace_id_survives_in_live_and_retained_logs() {
+        use tracing::Instrument;
+        use tracing::instrument::WithSubscriber;
+
+        let id = trace_propagation::correlation::TraceId::generate();
+        let provider = SdkTracerProvider::builder().build();
+        let stream = LogStream::new(16, 64 * 1024);
+        let mut rx = stream.subscribe();
+        let subscriber = tracing_subscriber::registry()
+            .with(LogStreamLayer::new(stream.clone()))
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        async {
+            trace_propagation::correlation::resume(Some(id), async {
+                async {
+                    tracing::info!("restored child event");
+                }
+                .instrument(tracing::info_span!("child"))
+                .await;
+            })
+            .await;
+            tracing::info!("outside event");
+        }
+        .with_subscriber(subscriber)
+        .await;
+        let lines = stream.latest(16);
+        assert_eq!(lines.len(), 4);
+        for line in &lines {
+            if line.message == "outside event" {
+                assert!(!line.fields.contains_key("trace_id"));
+            } else {
+                assert_eq!(line.fields.get("trace_id"), Some(&id.to_string()));
+            }
+            assert!(Arc::ptr_eq(line, &rx.try_recv().unwrap()));
+        }
+    }
 
     #[test]
     fn trace_id_is_preserved_in_live_and_retained_logs() {

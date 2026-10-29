@@ -24,6 +24,7 @@ pub mod bmc_metadata;
 pub mod bmc_redfish_session;
 pub mod bmc_suppression;
 pub mod carbide_version;
+pub mod cm_action;
 pub mod compute_allocation;
 mod conditional_write;
 mod config_drift;
@@ -115,6 +116,9 @@ pub mod vpc_peering;
 pub mod vpc_prefix;
 pub mod work_lock_manager;
 mod writable_pool;
+
+#[cfg(test)]
+mod test_maintenance_correlation;
 
 pub use conditional_write::{
     ConditionalWrite, ControllerStateNotCurrent, MaintenanceRequestNotCurrent,
