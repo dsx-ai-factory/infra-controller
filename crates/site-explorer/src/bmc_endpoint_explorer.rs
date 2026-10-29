@@ -120,6 +120,8 @@ pub struct BmcEndpointExplorer {
     bmc_client: Arc<AuthenticatedBmcClient>,
     rotate_switch_nvos_credentials: Arc<AtomicBool>,
     mode: SiteExplorerExploreMode,
+    /// Whether nv-redfish reports include drive firmware inventory entries.
+    explore_drive_firmware: bool,
     /// Used to record per-device BMC rotation convergence at the moment the
     /// device is moved onto the site-wide BMC root (see
     /// [`Self::set_bmc_root_credentials`]). `None` only for the standalone
@@ -140,8 +142,16 @@ impl BmcEndpointExplorer {
             bmc_client,
             rotate_switch_nvos_credentials,
             mode,
+            explore_drive_firmware: false,
             database_connection,
         }
+    }
+
+    /// Sets whether nv-redfish reports include drive firmware inventory
+    /// entries; off unless set.
+    pub fn with_drive_firmware(mut self, explore_drive_firmware: bool) -> Self {
+        self.explore_drive_firmware = explore_drive_firmware;
+        self
     }
 
     async fn get_sitewide_bmc_password(
@@ -382,7 +392,12 @@ impl BmcEndpointExplorer {
             SiteExplorerExploreMode::NvRedfish => {
                 self.bmc_client
                     .redfish_client
-                    .nv_generate_exploration_report(bmc_ip_address, access, boot_interface)
+                    .nv_generate_exploration_report(
+                        bmc_ip_address,
+                        access,
+                        boot_interface,
+                        self.explore_drive_firmware,
+                    )
                     .await
             }
             SiteExplorerExploreMode::CompareResult => {
@@ -399,7 +414,12 @@ impl BmcEndpointExplorer {
                 let nvredfish = self
                     .bmc_client
                     .redfish_client
-                    .nv_generate_exploration_report(bmc_ip_address, access, boot_interface)
+                    .nv_generate_exploration_report(
+                        bmc_ip_address,
+                        access,
+                        boot_interface,
+                        self.explore_drive_firmware,
+                    )
                     .await;
                 match (&libredfish, &nvredfish) {
                     (Ok(report), Ok(nv_report)) => warn_report_diff(report, nv_report),

@@ -389,6 +389,10 @@ All IPs must be within the `IPAddressPool` ranges you defined in `values/metallb
 - **nico-dns Note**: Use `perPodAnnotations` (a list) rather than `annotations` because each replica gets its own VIP.
 - **nico-api IP and DNS Note**: The nico-api VIP must resolve in external DNS to the `hostname` you set in Step 3c.
 
+For the SSH Console endpoint, DNS, host-key verification, and Tenant access,
+see [SSH Console Setup and Access](../configuration/ssh-console.md).
+The Site's REST console fields do not deploy or enable the service.
+
 ### 3i. (Optional) Pre-set the Site UUID
 
 On a fresh install, you normally leave `NICO_SITE_UUID` unset. `setup.sh` resolves the UUID in several ways: it tries to reuse the UUID from a prior install (site-agent ConfigMap); if that fails, it adopts an existing REST site with the same name, or mints a UUID and seeds the site record itself (see Step 5). You only need to set the UUID explicitly to bind the site-agent to a site that already exists:

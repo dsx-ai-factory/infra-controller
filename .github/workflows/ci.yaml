@@ -1086,7 +1086,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: dev/k8s/machine-a-tron-controller/go.mod
           cache: true
@@ -1750,7 +1750,7 @@ jobs:
   # machine_validation tag below. It bundles the same amd64 runner archive as the
   # amd64 carrier, so the served payload does not depend on the control-plane
   # node's architecture. (The bundled validation runner payload staying
-  # arm64-capable is tracked separately — this only makes the carrier runnable on
+  # arm64-capable is tracked separately. This only makes the carrier runnable on
   # arm64 nodes.)
   build-release-machine-validation-artifacts-arm-host:
     needs:
@@ -1906,9 +1906,9 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: "1.26.4"
+          go-version: "1.27.3"
           cache: true
           cache-dependency-path: rest-api/go.sum
 

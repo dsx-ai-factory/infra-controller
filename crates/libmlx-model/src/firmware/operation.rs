@@ -75,7 +75,7 @@ pub enum ObserverExitBehavior {
 }
 
 /// `FirmwareOperation` is a receipt for one immutable submitted request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FirmwareOperation {
     /// The caller's stable identifier, reused when submitting the same work.

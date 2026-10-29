@@ -314,6 +314,10 @@ async fn test_managed_host_network_config(pool: sqlx::PgPool) {
         .into_inner();
 
     assert!(
+        response.instance.is_none(),
+        "a host without an instance must omit the nested instance"
+    );
+    assert!(
         response
             .managed_host_config
             .as_ref()

@@ -36,7 +36,7 @@ use crate::mac_address_pool::{
 use crate::machine_info::DpuSettings;
 use crate::redfish::computer_system::SystemState;
 use crate::{
-    ActionError, BmcState, Callbacks, CombinedServer, DpuMachineInfo, HardwareType,
+    ActionError, BmcState, Callbacks, CombinedServer, DeviceEffect, DpuMachineInfo, HardwareType,
     HostMachineInfo, ListenerOrAddress, MachineInfo, MachineRouterOptions, POWER_CYCLE_DELAY,
     ResourceResetType,
 };
@@ -44,10 +44,12 @@ use crate::{
 pub mod axum_http_client;
 
 /// Test backend handle. Reset commands are applied by its paired actor;
-/// successful commands and refresh notifications remain available for assertions.
+/// successful commands, device effects and refresh notifications remain available
+/// for assertions.
 #[derive(Debug, Default)]
 pub struct TestCallbacks {
     pub(crate) commands: Mutex<Vec<ResourceResetType>>,
+    pub(crate) effects: Mutex<Vec<DeviceEffect>>,
     pub(crate) refresh_count: AtomicUsize,
     command_received: Notify,
     actor: Mutex<Option<TestActorHandle>>,
@@ -71,13 +73,22 @@ enum TestMessage {
         reset_type: ResourceResetType,
         reply: oneshot::Sender<Result<(), ActionError>>,
     },
-    PowerCycleCompleted,
+    DeviceEffect {
+        effect: DeviceEffect,
+        reply: oneshot::Sender<Result<(), ActionError>>,
+    },
+    /// Completes the power cycle that was scheduled as `generation`; ignored if a
+    /// later transition has superseded it.
+    PowerCycleCompleted { generation: u64 },
 }
 
 /// Owns power transitions and publishes observations to the controlled system.
 struct TestActor {
     power_state: PowerState,
     power_cycle_pending: bool,
+    /// Identifies the latest power cycle or device effect, so a completion scheduled
+    /// before it cannot publish `On` afterwards.
+    cycle_generation: u64,
     state: Weak<SystemState<TestCallbacks>>,
     callbacks: Weak<TestCallbacks>,
 }
@@ -110,10 +121,13 @@ impl TestActor {
                 self.publish(PowerState::Off);
             }
             PowerCycle | FullPowerCycle => {
+                self.cycle_generation += 1;
                 mailbox
                     .send_at(
                         (tokio::time::Instant::now() + POWER_CYCLE_DELAY).into(),
-                        TestMessage::PowerCycleCompleted,
+                        TestMessage::PowerCycleCompleted {
+                            generation: self.cycle_generation,
+                        },
                     )
                     .map_err(|error| ActionError::Internal(error.into()))?;
                 self.power_cycle_pending = true;
@@ -124,6 +138,31 @@ impl TestActor {
         if let Some(callbacks) = self.callbacks.upgrade() {
             callbacks.commands.lock().unwrap().push(reset_type);
             callbacks.command_received.notify_one();
+        }
+        Ok(())
+    }
+}
+
+impl TestActor {
+    /// Applies a device effect the way the contract describes: whatever the power
+    /// state is, the device ends `Off`.
+    async fn device_effect(&mut self, effect: DeviceEffect) -> Result<(), ActionError> {
+        match effect {
+            DeviceEffect::AuxPowerCycle => {
+                self.cycle_generation += 1;
+                self.power_cycle_pending = false;
+                self.publish(PowerState::Off);
+                if let Some(callbacks) = self.callbacks.upgrade() {
+                    callbacks
+                        .effects
+                        .lock()
+                        .unwrap()
+                        .push(DeviceEffect::AuxPowerCycle);
+                }
+            }
+            DeviceEffect::ResetBmcToDefaults(update) => {
+                update.commit().await?;
+            }
         }
         Ok(())
     }
@@ -140,9 +179,15 @@ impl ActorCallbacks<TestMessage> for TestActor {
                 let result = self.reset(mailbox, reset_type);
                 reply.send(result).ok();
             }
-            TestMessage::PowerCycleCompleted => {
-                self.power_cycle_pending = false;
-                self.publish(PowerState::On);
+            TestMessage::DeviceEffect { effect, reply } => {
+                let result = self.device_effect(effect).await;
+                reply.send(result).ok();
+            }
+            TestMessage::PowerCycleCompleted { generation } => {
+                if generation == self.cycle_generation {
+                    self.power_cycle_pending = false;
+                    self.publish(PowerState::On);
+                }
             }
         }
         ActorResult::Noop
@@ -183,6 +228,7 @@ pub(crate) fn create_test_bmc(
     let mut backend = TestActor {
         power_state: config.power_state,
         power_cycle_pending: false,
+        cycle_generation: 0,
         state: Arc::downgrade(&state.system_state),
         callbacks: Arc::downgrade(&callbacks),
     };
@@ -213,6 +259,14 @@ impl TestCallbacks {
 }
 
 impl Callbacks for TestCallbacks {
+    fn supports_bmc_factory_reset(&self) -> bool {
+        true
+    }
+
+    fn supports_aux_power_cycle(&self) -> bool {
+        true
+    }
+
     async fn computer_system_reset(
         &self,
         reset_type: ResourceResetType,
@@ -227,6 +281,23 @@ impl Callbacks for TestCallbacks {
             .ok_or_else(|| ActionError::Internal(eyre::eyre!("test power actor is not running")))?;
         mailbox
             .send(TestMessage::Reset { reset_type, reply })
+            .map_err(|error| ActionError::Internal(error.into()))?;
+        response
+            .await
+            .map_err(|error| ActionError::Internal(error.into()))?
+    }
+
+    async fn device_effect(&self, effect: DeviceEffect) -> Result<(), ActionError> {
+        let (reply, response) = oneshot::channel();
+        let mailbox = self
+            .actor
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|actor| actor.mailbox.clone())
+            .ok_or_else(|| ActionError::Internal(eyre::eyre!("test power actor is not running")))?;
+        mailbox
+            .send(TestMessage::DeviceEffect { effect, reply })
             .map_err(|error| ActionError::Internal(error.into()))?;
         response
             .await
@@ -449,6 +520,21 @@ pub async fn generic_supermicro_bmc_with_callbacks<C: Callbacks>(
     .await
 }
 
+/// Builds a LiteOn power shelf router that enforces Redfish authentication,
+/// as `bmc-mock --redfish-auth` does. Power shelves accept their factory-default
+/// password, [`crate::DUMMY_FACTORY_PASSWORD`] for [`crate::DUMMY_FACTORY_USERNAME`];
+/// rotate it with `state.account_service_state.change_factory_default_password`.
+/// Serve the router with [`serve_https`].
+pub fn liteon_powershelf_router_with_auth() -> (Router, BmcState<TestCallbacks>) {
+    create_test_bmc(
+        &host_info(HardwareType::LiteOnPowerShelf),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        true,
+        MachineRouterOptions::default(),
+    )
+}
+
 pub async fn liteon_powershelf_bmc() -> TestBmcHandle {
     test_bmc(create_test_bmc(
         &host_info(HardwareType::LiteOnPowerShelf),
@@ -520,6 +606,56 @@ pub async fn dell_poweredge_r750_bmc() -> TestBmcHandle {
         MachineRouterOptions::default(),
     ))
     .await
+}
+
+const TEST_DELL_STORAGE: &str = "/redfish/v1/Systems/System.Embedded.1/Storage";
+
+/// Builds a Dell PowerEdge R750 whose Storage collection lists `storages`.
+/// Every Storage and drive resource is served at its own `@odata.id`, so a
+/// Storage can link a drive that is not served to model a partly failing walk.
+pub async fn dell_poweredge_r750_bmc_with_storage(
+    storages: Vec<serde_json::Value>,
+    drives: Vec<serde_json::Value>,
+) -> TestBmcHandle {
+    let (router, state) = create_test_bmc(
+        &host_info(HardwareType::DellPowerEdgeR750),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    );
+    state.injection.upsert(Rule {
+        id: RuleId::from("storage-collection"),
+        selector: Selector::Path {
+            method: Some("GET".to_string()),
+            glob: TEST_DELL_STORAGE.to_string(),
+        },
+        action: Action::Replace(serde_json::json!({
+            "@odata.id": TEST_DELL_STORAGE,
+            "@odata.type": "#StorageCollection.StorageCollection",
+            "Name": "Storage Collection",
+            "Members": storages
+                .iter()
+                .map(|storage| serde_json::json!({ "@odata.id": storage["@odata.id"] }))
+                .collect::<Vec<_>>()
+        })),
+        remaining: None,
+    });
+    let router = storages
+        .into_iter()
+        .chain(drives)
+        .fold(router, |router, resource| {
+            let path = resource["@odata.id"].as_str().unwrap().to_string();
+            let resource = Arc::new(resource);
+            router.route(
+                &path,
+                get(move || {
+                    let resource = Arc::clone(&resource);
+                    async move { Json((*resource).clone()) }
+                }),
+            )
+        });
+    test_bmc((router, state)).await
 }
 
 pub async fn dell_poweredge_r750_bluefield3_bmc(settings: DpuSettings) -> TestBmcHandle {
@@ -1200,5 +1336,84 @@ mod test {
             }
             other => panic!("expected invalid response error, got: {other}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    async fn power_state_of(router: &axum::Router) -> String {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/redfish/v1/Systems/System.Embedded.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        body["PowerState"].as_str().unwrap().to_owned()
+    }
+
+    /// Lets the power actor drain its mailbox at the current (paused) time.
+    async fn settle() {
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// A power cycle scheduled before an AC cycle must not power the device back on,
+    /// even while a newer cycle is pending, and the newer cycle completes at its
+    /// own deadline.
+    #[tokio::test(start_paused = true)]
+    async fn aux_power_cycle_supersedes_a_scheduled_power_cycle() {
+        let (router, state) = create_test_bmc(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            TestBmcConfig::default(),
+            String::new(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        let callbacks = state.callbacks.clone().unwrap();
+        let step = std::time::Duration::from_secs(1);
+
+        // Old cycle at t=0 (deadline T1=5s), AC cycle at t=1s, new cycle at t=2s
+        // (deadline T2=7s). The new cycle starts before T1, so both timers overlap.
+        callbacks
+            .computer_system_reset(ResourceResetType::PowerCycle)
+            .await
+            .unwrap();
+        tokio::time::advance(step).await;
+        callbacks
+            .device_effect(DeviceEffect::AuxPowerCycle)
+            .await
+            .unwrap();
+        tokio::time::advance(step).await;
+        callbacks
+            .computer_system_reset(ResourceResetType::PowerCycle)
+            .await
+            .unwrap();
+
+        tokio::time::advance(POWER_CYCLE_DELAY - step * 2).await;
+        settle().await;
+        assert_eq!(
+            power_state_of(&router).await,
+            "Off",
+            "stale completion at T1"
+        );
+        tokio::time::advance(step * 2 - std::time::Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(power_state_of(&router).await, "Off", "completed before T2");
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(power_state_of(&router).await, "On");
     }
 }

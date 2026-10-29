@@ -19,7 +19,8 @@ use tonic::Code;
 use uuid::Uuid;
 
 use super::{
-    PreparedRegistration, RegistrationError, accepted, define, latest_accepted, prepare, resume,
+    PreparedRegistration, RegistrationError, accepted, accepted_in_transaction, define,
+    latest_accepted, prepare, resume,
 };
 use crate::grpc::test_server::{Fault, FaultProvider, Gate, TestServer, bounded, pool, provider};
 use crate::grpc::{GrpcResourcePoolBackend, GrpcResourcePoolError, MAX_MESSAGE_BYTES};
@@ -475,6 +476,8 @@ async fn failed_acknowledgement_leaves_provider_acceptance_replayable(
 
 /// Inspection keeps using the provider's accepted pool identity while a newer
 /// definition awaits acknowledgement, and switches only after that acknowledgement.
+/// Allocation preparation reads use the caller's transaction so they can see an accepted
+/// definition before it commits.
 #[carbide_macros::sqlx_test]
 async fn latest_accepted_keeps_the_previous_revision_during_pending_growth(
     database: PgPool,
@@ -527,6 +530,21 @@ async fn latest_accepted_keeps_the_previous_revision_during_pending_growth(
         },
     )
     .await?;
+    // Preparation must use this transaction's view. A second connection
+    // would miss the accepted definition until this transaction commits.
+    for (scenario, revision, expected) in [
+        ("accepted revision", Some(1), Some(&original)),
+        ("latest accepted revision", None, Some(&original)),
+        ("pending revision", Some(2), None),
+    ] {
+        assert_eq!(
+            accepted_in_transaction(&mut txn, &binding, revision)
+                .await?
+                .as_ref(),
+            expected,
+            "{scenario}"
+        );
+    }
     txn.commit().await?;
     assert_eq!(latest_accepted(&database, &binding).await?, Some(original));
 

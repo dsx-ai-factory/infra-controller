@@ -111,7 +111,7 @@ unavailable, missing, or unrecognized sensor state uses `SensorFailure`.
 The DSX Exchange consumer maps Building Management System (BMS) leak events to
 rack health reports. The target is the rack ID. Active events prevent
 allocations and use the `SensorCritical` and `Hardware` classifications. The
-two leak-detection probes also use `RackLeak`; the sensor-fault probe does not,
+leak-detection probe also uses `RackLeak`; the sensor-fault probe does not,
 because it does not establish that a leak is active.
 
 ### `BmsLeakDetectRack`
@@ -121,10 +121,6 @@ Indicates that BMS reported a rack-level leak.
 ### `BmsLeakSensorFaultRack`
 
 Indicates that BMS reported a rack-level leak sensor fault.
-
-### `BmsLeakDetectRackTray`
-
-Indicates that BMS reported a rack-tray leak.
 
 ## NVLink domain health probe identifiers
 

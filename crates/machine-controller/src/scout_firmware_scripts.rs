@@ -223,10 +223,11 @@ fn is_safe_path_segment(value: &str) -> bool {
 fn firmware_component_directory_name(
     component_type: FirmwareComponentType,
 ) -> Option<&'static str> {
-    if component_type == FirmwareComponentType::Unknown {
-        None
-    } else {
-        Some(component_type.slug())
+    match component_type {
+        // Each drive model needs its own script directory, which this
+        // resolver does not provide; drive components resolve no script.
+        FirmwareComponentType::Unknown | FirmwareComponentType::Drive { .. } => None,
+        other => Some(other.slug()),
     }
 }
 

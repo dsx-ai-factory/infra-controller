@@ -38,22 +38,18 @@ guide explains each step.
    ```bash
    DPF_SIM_IMAGE="${NICO_IMAGE_REGISTRY}/dpf-sim-controller:$(git rev-parse --short HEAD)"
    make -C dev/k8s/dpf-sim-controller image  IMG="${DPF_SIM_IMAGE}"
-   make -C dev/k8s/dpf-sim-controller deploy IMG="${DPF_SIM_IMAGE}"
-   ```
-
-   For a registry that requires credentials, create the pull Secret in
-   `dpf-operator-system` before `make deploy` and add
-   `PULL_SECRET=dpf-sim-pull` to the deploy line. The `machine-a-tron-pull`
-   Secret in `nico-mat` does not serve the simulator:
-
-   ```bash
    kubectl create namespace dpf-operator-system --dry-run=client -o yaml | kubectl apply -f -
-   kubectl -n dpf-operator-system create secret docker-registry dpf-sim-pull \
-     --docker-server="${NICO_IMAGE_REGISTRY%%/*}" \
-     --docker-username="${REGISTRY_PULL_USERNAME:-\$oauthtoken}" \
-     --docker-password="${REGISTRY_PULL_SECRET}" \
-     --dry-run=client -o yaml | kubectl apply -f -
+   make -C dev/k8s/dpf-sim-controller deploy DPF_NAMESPACE=dpf-operator-system IMG="${DPF_SIM_IMAGE}"
    ```
+
+   `DPF_NAMESPACE` on the `make` line overrides a namespace the Makefile
+   remembers from an earlier deploy. For a registry that requires credentials,
+   create the pull Secret in `dpf-operator-system` after the namespace and
+   before `make deploy` with the command in
+   [Namespace and Pull Secret](#namespace-and-pull-secret), changing `-n` to
+   `dpf-operator-system` and the Secret name to `dpf-sim-pull`, and add
+   `PULL_SECRET=dpf-sim-pull` to the deploy line. The `machine-a-tron-pull`
+   Secret in `nico-mat` does not serve the simulator.
 
    On a site that already runs the real DPF operator, remove it first. Refer
    to the
@@ -96,16 +92,15 @@ The table was measured on a 3-node development cluster with a
 development-sized PostgreSQL at 4,500 hosts with 2 DPUs each (13,500 BMC
 endpoints and machines). The `[site_explorer]` values were `run_interval`
 120 s, `concurrent_explorations` 100, `explorations_per_run` 120, and
-`machines_created_per_run` 40. `nico-core-simulation.yaml` ships 30 s, 400,
-360, and 100, which raise the creation ceiling from 1,200 to 12,000 hosts per
-hour. With the shipped values a 4,500-host run finished in about 3 to 3.5 hours
-at 80 to 100 machines per minute. Expect shorter sweep and creation phases than
-the table shows.
+`machines_created_per_run` 40. `nico-core-simulation.yaml` ships 30 s, 300,
+2000, and 1000. With the shipped values a 4,500-host run finished in about 3
+to 3.5 hours at 80 to 100 machines per minute. Expect shorter sweep and
+creation phases than the table shows.
 
 | Phase | Duration | Notes |
 |-------|----------|-------|
 | Deploy + DHCP registration | ~60-90 min | ~150-180 interfaces/min while 13.5k mock FSMs boot |
-| Exploration sweep | ~3-5 h | Overlaps DHCP. Explores up to `explorations_per_run` endpoints per cycle (120 when measured, 360 in the simulation values) |
+| Exploration sweep | ~3-5 h | Overlaps DHCP. Explores up to `explorations_per_run` endpoints per cycle (120 when measured, 2000 in the simulation values) |
 | Preingestion | tracks the sweep | ~90% conversion, completes shortly after it |
 | Identification + creation | final ~2-3 h | Hosts identify in waves. Creation drains at ~150-300 machines per 120 s explore cycle |
 | **End to end** | **~6-9 h, unattended** | 100 hosts ≈ 12 min and 1000 hosts ≈ 25 min, for calibration |
@@ -201,14 +196,18 @@ configuration JSON to a mode-0600 temporary file and passes it with
 kubectl create namespace nico-mat --dry-run=client -o yaml | kubectl apply -f -
 kubectl label namespace nico-mat nico.nvidia.com/managed=true --overwrite
 
-# Image pull secret (replace the variables with your registry login)
-kubectl create secret docker-registry machine-a-tron-pull \
-  -n nico-mat \
-  --docker-server="${NICO_IMAGE_REGISTRY%%/*}" \
-  --docker-username="${REGISTRY_PULL_USERNAME:-\$oauthtoken}" \
-  --docker-password="${REGISTRY_PULL_SECRET}" \
+# Image pull Secret (replace the variables with your registry login)
+kubectl -n nico-mat create secret generic machine-a-tron-pull \
+  --type=kubernetes.io/dockerconfigjson \
+  --from-file=.dockerconfigjson=<(printf '{"auths":{"%s":{"auth":"%s"}}}' "${NICO_IMAGE_REGISTRY%%/*}" \
+    "$(printf '%s:%s' "${REGISTRY_PULL_USERNAME:-\$oauthtoken}" "${REGISTRY_PULL_SECRET}" | base64 | tr -d '\n')") \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
+
+The Secret holds only an `auth` entry, the base64 of `user:password`, so a
+quote or backslash in the key cannot break the JSON, and the key passes through
+a process substitution fed by the shell's `printf` builtin rather than through
+a process argument.
 
 A pull Secret created this way survives `helm uninstall`, so a redeploy does
 not need the registry key again. The chart-created one is removed with the
@@ -241,8 +240,9 @@ Unified Extensible Firmware Interface (UEFI) defaults. `siteCredentials` in
 nico-api reads as its credential file ahead of Vault. This is the only
 supported path on a machine-a-tron site. Refer to
 [Site Credentials Secret](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#site-credentials-secret)
-for the values. Neither Core values template mounts the Secret, so add the
-reference to your copy of `nico-core-simulation.yaml`:
+for the values. `nico-core-10k-hosts.yaml` already carries the reference.
+`nico-core.yaml` and `nico-core-simulation.yaml` do not, so add it to your copy
+of either:
 
 ```yaml
 nico-api:
@@ -483,6 +483,7 @@ section Per-pod Services). NICo dials each BMC IP directly, with no
 | `machine-a-tron-multipod.yaml` | 2 pods x 100 hosts x 2 DPUs |
 | `machine-a-tron-10racks.yaml` | 10 GB200 NVL72 racks, one per pod, behind the protocol gateway (180 hosts x 2 DPUs, 90 switches, 80 power shelves) |
 | `machine-a-tron-250racks.yaml` | 250 GB200 NVL72 racks, 25 per pod across 10 pods, behind the protocol gateway (4,500 hosts x 2 DPUs, 2,250 switches, 2,000 power shelves) |
+| `machine-a-tron-556racks.yaml` | 556 GB200 NVL72 racks, 24 or 25 per pod across 23 pods, behind the protocol gateway with per-pod Services (10,008 hosts x 2 DPUs, 5,004 switches, 4,448 power shelves). Core values: `nico-core-10k-hosts.yaml` |
 | `machine-a-tron-scale-4500.yaml` | 4,500 hosts x 2 DPUs across 3 pods, one BMC segment per pod |
 | `machine-a-tron-scale-4500-proxy.yaml` | 4,500 hosts x 2 DPUs in one pod behind one shared proxy Service, without the controller |
 
@@ -721,10 +722,11 @@ Usable addresses per prefix = 2^(32 - mask) - reserve_first - 1 (the gateway).
 A `/28` with `reserve_first = 2` yields 13 usable, and a `/18` with
 `reserve_first = 1` yields 16,382. The shipped prefixes fit 4,500 hosts x 2
 DPUs (13,500 BMCs). A 250-rack site needs 17,750 BMC addresses, so widen
-`[networks.simulated-oob]` to a `/17` before nico-api first starts. Do not
-widen further than needed. The allocator materializes the whole host space per
-request while holding the fleet-wide admin-segment lock, about three times
-slower at a `/16` than at a `/18`.
+`[networks.simulated-oob]` to a `/17` before nico-api first starts. The
+556-rack fleet needs 39,476, which `nico-core-10k-hosts.yaml` ships as a
+`/16`. Do not widen further than needed. The allocator materializes the whole
+host space per request while holding the fleet-wide admin-segment lock, about
+three times slower at a `/16` than at a `/18`.
 
 Symptoms of overflow: `No IP addresses left in prefix ...` with machines stuck
 in `BmcInit` (OOB), `No IP addresses left in prefix <admin-cidr>` at creation
@@ -911,6 +913,11 @@ for kind in dpudevices dpunodes dpus dpunodemaintenances; do
   kubectl delete --raw "/apis/provisioning.dpu.nvidia.com/v1alpha1/namespaces/dpf-operator-system/${kind}"
 done
 ```
+
+At tens of thousands of objects one call can return before every object is
+gone. Rerun the loop until
+`kubectl get <kind> -n dpf-operator-system --no-headers | wc -l` prints 0 for
+each kind.
 
 `make -C dev/k8s/dpf-sim-controller undeploy` removes the simulator itself and
 leaves the DPF CRDs in place.

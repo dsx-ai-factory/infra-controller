@@ -16,3 +16,4 @@
  */
 
 pub(crate) mod bluefield;
+pub(crate) mod chassis;

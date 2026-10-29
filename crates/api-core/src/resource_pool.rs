@@ -15,23 +15,30 @@
  * limitations under the License.
  */
 
-//! Resource pool observations shared by admin inspection and background metrics.
+//! Resource pool startup and observations using shared provider connections.
 
 pub(crate) mod metrics;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use ::rpc::forge as rpc;
 use carbide_resource_pool::grpc::{GrpcResourcePoolBackend, GrpcResourcePoolError};
-use carbide_resource_pool::registration;
+use carbide_resource_pool::remote::{RemoteResourcePool, start_cleanup_metrics};
+use carbide_resource_pool::value::ResourcePoolEligibility;
+use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry, registration};
 use carbide_resource_pool_api::v1;
 use chrono::{DateTime, Utc};
+use db::work_lock_manager::WorkLockManagerHandle;
+use eyre::WrapErr;
 use futures::{Stream, StreamExt, stream};
 use model::resource_pool::binding::{
-    INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolBinding,
+    INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolBinding, ResourcePoolSelection,
 };
-use sqlx::PgPool;
+use opentelemetry::metrics::Meter;
+use sqlx::{PgConnection, PgPool};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 use crate::CarbideResult;
 use crate::cfg::resource_pool::ResourcePoolBackendConfig;
@@ -44,12 +51,18 @@ const MAX_CONCURRENT_POOL_OBSERVATIONS: usize = 8;
 // use the shared client's ten-second deadline.
 const DEFINITION_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// `ResourcePoolMonitor` reads local inventory and remote statistics for both
-/// admin inspection and metrics, reusing the same provider connections.
+/// `ResourcePoolMonitor` resolves the registry, registers remote pools, and
+/// starts recovery and cleanup sampling. It also reads local inventory and
+/// remote statistics for admin inspection and metrics, reusing the same
+/// provider connections.
 #[derive(Clone)]
 pub(crate) struct ResourcePoolMonitor {
     database: PgPool,
+    /// Configured connections, keyed by the backend alias used in TOML.
     clients: HashMap<String, GrpcResourcePoolBackend>,
+    /// Resolved connections, keyed by provider authority so observations keep
+    /// working when a saved binding still names an old configuration alias.
+    authority_clients: HashMap<String, GrpcResourcePoolBackend>,
 }
 
 impl ResourcePoolMonitor {
@@ -68,7 +81,202 @@ impl ResourcePoolMonitor {
                 );
             }
         }
-        Ok(Self { database, clients })
+        Ok(Self {
+            database,
+            clients,
+            authority_clients: HashMap::new(),
+        })
+    }
+
+    /// `resolve_registry` uses database state to select one shared coordinator
+    /// per provider authority, without contacting providers. The caller commits
+    /// bindings and seed definitions before calling `register_pools`.
+    pub(crate) async fn resolve_registry(
+        &mut self,
+        source: PoolDefinitionSource,
+        txn: &mut PgConnection,
+        configured: &HashMap<String, ResourcePoolSelection>,
+        work_locks: &WorkLockManagerHandle,
+    ) -> eyre::Result<ResourcePoolRegistry> {
+        let mut remotes = HashMap::new();
+        let bindings = db::resource_pool::binding::all(&mut *txn).await?;
+        // Prefer the current alias for an authority. The saved binding keeps
+        // its original alias even when configuration renames that connection.
+        // Logical pool order makes the choice stable when aliases share an authority.
+        let configured_pools: BTreeMap<_, _> = configured.iter().collect();
+        let providers = configured_pools
+            .values()
+            .map(|pool| {
+                (
+                    &pool.pool_name,
+                    pool.backend_kind,
+                    &pool.authority_id,
+                    pool.backend_name.as_ref(),
+                )
+            })
+            .chain(bindings.iter().map(|pool| {
+                (
+                    &pool.pool_name,
+                    pool.backend_kind,
+                    &pool.authority_id,
+                    pool.backend_name.as_ref(),
+                )
+            }));
+        for (pool_name, kind, authority_id, backend_name) in providers {
+            if kind != ResourcePoolBackendKind::Grpc || remotes.contains_key(authority_id) {
+                continue;
+            }
+            let client = backend_name
+                .and_then(|name| self.clients.get(name))
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "resource pool `{pool_name}` has no configured gRPC backend matching alias {backend_name:?} for authority `{authority_id}`"
+                    )
+                })?;
+            remotes.insert(
+                authority_id.clone(),
+                RemoteResourcePool::new(
+                    self.database.clone(),
+                    work_locks.clone(),
+                    authority_id.clone(),
+                    client.clone(),
+                ),
+            );
+        }
+        let registry =
+            ResourcePoolRegistry::resolve_with_remotes(source, txn, configured, &remotes).await?;
+        self.use_registry_clients(&registry);
+        Ok(registry)
+    }
+
+    /// `use_registry_clients` shares the resolved provider connections with
+    /// status reads, including when a saved binding retains an old backend alias.
+    pub(crate) fn use_registry_clients(&mut self, registry: &ResourcePoolRegistry) {
+        self.authority_clients = registry
+            .pools()
+            .filter_map(|selected| selected.backend.remote())
+            .map(|remote| (remote.authority_id().to_owned(), remote.provider().clone()))
+            .collect();
+    }
+
+    /// `register_pools` finishes saved registrations before pool consumers start.
+    /// New registrations use the stored seed, so restarting with edited TOML
+    /// cannot grow a pool. Listen-only replicas require an accepted definition
+    /// without submitting or acknowledging one. Statistics are not readiness.
+    pub(crate) async fn register_pools(
+        &self,
+        registry: &ResourcePoolRegistry,
+        source: PoolDefinitionSource,
+        cancel: &CancellationToken,
+    ) -> eyre::Result<()> {
+        for selected in registry.pools() {
+            let Some(remote) = selected.backend.remote() else {
+                continue;
+            };
+            let result = cancel
+                .run_until_cancelled(self.register_pool(
+                    remote.provider(),
+                    &selected.binding,
+                    source,
+                ))
+                .await
+                .unwrap_or_else(|| Err(eyre::eyre!("resource pool registration cancelled")));
+            result.wrap_err_with(|| {
+                format!(
+                    "registering resource pool `{}` (binding {})",
+                    selected.binding.pool_name, selected.binding.binding_id,
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    /// `register_pool` resumes the saved request, or defines a pool from its
+    /// original seed. Accepted revisions still need a current protocol check.
+    async fn register_pool(
+        &self,
+        backend: &GrpcResourcePoolBackend,
+        binding: &ResourcePoolBinding,
+        source: PoolDefinitionSource,
+    ) -> eyre::Result<()> {
+        let latest = tokio::time::timeout(DEFINITION_READ_TIMEOUT, async {
+            if matches!(source, PoolDefinitionSource::ListenOnly) {
+                db::resource_pool::registration::latest_accepted(&self.database, binding.binding_id)
+                    .await
+            } else {
+                db::resource_pool::registration::latest(&self.database, binding.binding_id).await
+            }
+        })
+        .await??;
+        let Some(latest) = latest else {
+            eyre::ensure!(
+                !matches!(source, PoolDefinitionSource::ListenOnly),
+                "resource pool `{}` has no accepted definition",
+                binding.pool_name,
+            );
+            let seed = tokio::time::timeout(
+                DEFINITION_READ_TIMEOUT,
+                db::resource_pool::stored_def(&self.database, &binding.pool_name),
+            )
+            .await??
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "resource pool `{}` has no seed definition",
+                    binding.pool_name,
+                )
+            })?;
+            // `define` checks Describe before saving this pool's first request.
+            registration::define(
+                &self.database,
+                backend,
+                binding,
+                None,
+                &ResourcePoolEligibility::try_from(seed)?,
+            )
+            .await?;
+            return Ok(());
+        };
+        let definition =
+            registration::resume(&self.database, backend, binding, latest.revision).await?;
+        // A saved acknowledgement does not contact the provider running now.
+        // Its alias must still identify the saved authority, pool ID, and value domain.
+        let description = Box::pin(backend.describe(v1::DescribeRequest {
+            pool_alias: binding.remote_pool.clone(),
+        }))
+        .await?;
+        let pool = definition
+            .pool
+            .as_ref()
+            .ok_or_else(|| eyre::eyre!("resource pool definition has no provider identity"))?;
+        eyre::ensure!(
+            description.authority_id == pool.authority_id
+                && description.pool_id == pool.pool_id
+                && description.value_domain == definition.value_domain,
+            "resource pool `{}` provider differs from its accepted definition",
+            binding.pool_name,
+        );
+        Ok(())
+    }
+
+    /// `start_recovery` joins provider recovery and one cleanup sampler to the
+    /// API's task set. Start before consumers allocate so saved attempts can be
+    /// reconciled during startup; cancellation and joining belong to the API.
+    pub(crate) fn start_recovery(
+        &self,
+        registry: &ResourcePoolRegistry,
+        meter: Meter,
+        tasks: &mut JoinSet<()>,
+        cancel: CancellationToken,
+    ) -> std::io::Result<()> {
+        let mut started = HashSet::new();
+        for selected in registry.pools() {
+            if let Some(remote) = selected.backend.remote()
+                && started.insert(remote.authority_id())
+            {
+                remote.clone().start(tasks, cancel.clone())?;
+            }
+        }
+        start_cleanup_metrics(self.database.clone(), meter, tasks, cancel)
     }
 
     /// `observe` yields Integrated rows first, then remote rows as calls finish.
@@ -171,10 +379,15 @@ impl ResourcePoolMonitor {
             .as_ref()
             .map(|identity| identity.pool_id.clone());
         pool.accepted_revision = Some(definition.eligibility_revision.clone());
-        let Some(backend) = binding
-            .backend_name
-            .as_ref()
-            .and_then(|name| self.clients.get(name))
+        let Some(backend) = self
+            .authority_clients
+            .get(&binding.authority_id)
+            .or_else(|| {
+                binding
+                    .backend_name
+                    .as_ref()
+                    .and_then(|name| self.clients.get(name))
+            })
         else {
             pool.stats_message = Some("saved gRPC backend is not configured".to_owned());
             return pool;

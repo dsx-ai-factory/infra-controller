@@ -120,10 +120,10 @@ is empty for a retry. If cleanup itself fails, the error names each path it
 could not remove.
 
 All three commands require Python 3.10 or newer. `build` also requires Git,
-[Go 1.26.4 or newer](../../rest-api/go.mod), and the `file` utility; `verify` requires Go
+[Go 1.27.3 or newer](../../rest-api/go.mod), and the `file` utility; `verify` requires Go
 and `file`. Building `linux-amd64` also requires a C compiler for `mock-core`
 and `mock-flow`. CI checks the Python minimum, selects the module's minimum Go
-1.26.4, and checks `file --version` before compiling. A contract, command, tool,
+1.27.3, and checks `file --version` before compiling. A contract, command, tool,
 or verification failure prints `error: <message>` to standard error and exits
 with status 1. Argument parsing and missing required flags print `usage:` and
 exit with status 2.

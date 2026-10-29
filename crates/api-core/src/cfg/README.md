@@ -31,7 +31,7 @@ behavior.
 | `listen` | `SocketAddr` | `[::]:1079` | `server` | Socket address for the gRPC API server. |
 | `listen_only` | `bool` | `false` | `server` | Run passively (no background services, RPC/web only). Used in dev mode. |
 | `metrics_endpoint` | `Option<SocketAddr>` | — | `integrations` | Socket address for the Prometheus `/metrics` HTTP server. |
-| `alt_metric_prefix` | `Option<String>` | — | `integrations` | Alternative metric prefix emitted alongside `nico_` for dashboard migration. |
+| `alt_metric_prefix` | `Option<String>` | — | `integrations` | Alternative metric prefix emitted alongside `carbide_` for dashboard migration. |
 | `database_url` | `String` | **required** | `server` | Postgres connection string for all persistent state. |
 | `max_database_connections` | `u32` | `1000` | `server` | Maximum database connection pool size. |
 | `deny_unknown_fields` | `bool` | `false` | `server` | Reject unknown configuration fields instead of logging warnings and continuing. |
@@ -39,6 +39,7 @@ behavior.
 | `database_pool_idle_timeout` | `Duration` | `10m` | `server` | Idle time after which the pool closes a connection, keeping the pool's own reaping well inside the Postgres server's 60-minute idle-session reaper. Must be greater than zero (startup rejects `0`). |
 | `database_pool_max_lifetime` | `Duration` | `30m` | `server` | Maximum age of a pooled connection before it is recycled, so the pool re-balances onto the current primary after a database failover. Must be greater than zero (startup rejects `0`). |
 | `database_startup_retry_timeout` | `Duration` | `5m` | `server` | How long to keep retrying the initial database connection at startup before giving up, so a transient outage (failover, rolling upgrade, DNS blip) doesn't take the process down. Retries use exponential backoff between attempts, starting at 1s and capped at 30s; each attempt itself is bounded by whatever time remains in this window (independent of `database_pool_acquire_timeout`), so total startup time never exceeds it. The last connection error is reported once the window elapses. `0` disables retrying: fail on the first attempt, bounded only by `database_pool_acquire_timeout` (the old behavior). |
+| `admin_lock_admission_permits` | `Option<usize>` | unset | `server` | Permits of the admission gate in front of the admin-segment advisory locks: how many flows (DHCP discovery, machine discovery, Site Explorer machine creation) may hold an open transaction while waiting on those locks. Must be 1 to 256, and startup rejects other values. When unset, the `ADMIN_LOCK_ADMISSION` environment variable applies, clamped to the same range, then 16. Read at startup. A change needs a restart. Site Explorer creates at most `site_explorer.machine_creation_concurrency` hosts at once and clamps that to at most one below this count. With a count of 1 it still runs one creation at a time, which holds the only permit while it runs. |
 | `api_admission_control` | `ApiAdmissionControlConfig` | *(see below)* | `server` | Fair per-client admission with global execution and pending-request limits for gRPC and admin HTTP business requests. |
 | `ib_config` | `Option<IBFabricConfig>` | — | `hardware` | InfiniBand fabric configuration (see [IBFabricConfig](#ibfabricconfig)). |
 | `asn` | `u32` | **required** | `networking` | Autonomous System Number, fixed per environment. Used by nico-dpu-agent for `frr.conf` BGP routing. |
@@ -537,6 +538,8 @@ leaves an existing pool's values unchanged. Administrative growth must keep the
 pool's stored value family; a pool with only a binding also rejects changes to
 that family.
 
+The v2.4 startup gate also rejects saved gRPC bindings, even when their pools no longer appear in configuration, before registry construction or pool writes.
+
 Administrative growth accepts a bare map of pool names to `ResourcePoolDef`
 tables, without the `pools` wrapper or the `backend` and `remote_pool` selectors.
 A new pool created through growth receives the default Integrated binding.
@@ -685,10 +688,13 @@ to keep the previous behavior.
 | ------- | ------ | --------- | ------------- |
 | `enabled` | `bool` | `true` | Enables hardware discovery. |
 | `run_interval` | `Duration` | `120s` | Interval between exploration runs. |
-| `concurrent_explorations` | `u64` | `100` | Max nodes explored in parallel. |
+| `concurrent_explorations` | `u64` | `100` | Max nodes explored in parallel. `0` is treated as `1`. |
 | `explorations_per_run` | `u64` | `360` | Max nodes explored per run. |
+| `exploration_timeouts_before_prevent_allocations` | `u32` | `3` | Explorations of a BMC in a row that must time out before its `BmcExplorationFailure` alert prevents allocations. Other exploration errors prevent allocations immediately. `1` blocks on the first timeout. Until then the BMC is re-explored ahead of the routine refresh. |
 | `create_machines` | `bool` | `true` | When false, SiteExplorer skips creating ManagedHost state machines; the DPU agent (scout) must self-register via DiscoverMachine gRPC endpoint with create_machine=true. Dynamically toggleable. |
-| `machines_created_per_run` | `u64` | `100` | Max ManagedHosts created per run. |
+| `machines_created_per_run` | `u64` | `100` | Max ManagedHosts created per run. `0` creates none. |
+| `machine_creation_concurrency` | `u64` | `4` | ManagedHosts created at the same time within one run, each in its own transaction under its own admin-lock admission permit. Clamped to at most one below `admin_lock_admission_permits`, and still `1` when the permit count is `1`, in which case that single creation holds the only permit while it runs. `1` creates hosts one after another and `0` is treated as `1`. Read at startup. A change needs a restart. |
+| `switch_and_power_shelf_pass_interval` | `Duration` | `15m` | Minimum time between extra identify-and-create passes for switches and power shelves whose endpoints have completed preingestion while a run is still creating hosts. A pass starts once the interval has elapsed since the run started or since the previous pass and the in-flight host creations have finished. The pass also runs at the end of every run, and `switches_created_per_run` and `power_shelves_created_per_run` count across all passes of a run. `0s` disables the extra passes. Read at startup. A change needs a restart. |
 | `rotate_switch_nvos_credentials` | `bool` | `false` | Auto-rotate switch NVOS admin credentials. |
 | `override_target_ip` | `Option<String>` | — | **Deprecated.** Use `bmc_proxy`. Debug BMC IP override. |
 | `override_target_port` | `Option<u16>` | — | **Deprecated.** Use `bmc_proxy`. Debug BMC port override. |
@@ -697,10 +703,11 @@ to keep the previous behavior.
 | `reset_rate_limit` | `Duration` | `1h` | Minimum time between SiteExplorer-initiated BMC resets. |
 | `admin_segment_type_non_dpu` | `bool` | `false` | Non-DPU hosts use `HostInband` admin segment type. |
 | `create_power_shelves` | `bool` | `true` | Auto-create Power Shelf state machines for explored shelves with a matching `expected_power_shelves` record. Shelves are discovered at their `expected_power_shelves` static IP even without a DHCP lease. |
-| `power_shelves_created_per_run` | `u64` | `1` | Max power shelves created per run. |
+| `power_shelves_created_per_run` | `u64` | `1` | Max power shelves created per run. `0` creates none. |
 | `create_switches` | `bool` | `true` | Auto-create Switch state machines for explored switches with a matching `expected_switches` record. |
-| `switches_created_per_run` | `u64` | `9` | Max switches created per run. |
+| `switches_created_per_run` | `u64` | `9` | Max switches created per run. `0` creates none. |
 | `explore_mode` | `SiteExplorerExploreMode` | `NvRedfish` | Redfish backend: `libredfish`, `nv-redfish`, or `compare-result`. |
+| `explore_drive_firmware` | `bool` | `false` | Reads drive firmware versions from each host's Redfish Storage subsystems and reports each enabled drive with a usable model and version as a `Drive_<Model>_<DriveId>` firmware inventory entry. Adds one request per Storage subsystem and per drive to every exploration. Takes effect only when `explore_mode` is `nv-redfish`: `libredfish` ignores it, and `compare-result` reads the drives but returns the libredfish report, which omits them. |
 | `dpu_policy` | `Option<HostDpuPolicy>` | — (effective: `manage`) | Site-wide policy for DPU hardware: `manage`, `nic`, or `ignore`. Per-host `nic` and `ignore` override it; per-host `manage` inherits it for backward compatibility. When omitted, the site default is `manage`. The previous `use_as_nic` value and the legacy `dpu_mode` field with `dpu_mode` / `nic_mode` / `no_dpu` values remain accepted during deserialization. |
 
 ### `StateControllerConfig`
@@ -1527,7 +1534,7 @@ warning. Nest them under `[ewethers_config.svpc]` in new configurations.
 | `enabled` | `bool` | `false` | Enable Cluster Interconnect Network. |
 | `svpc_enabled` | `bool` | `false` | Enable the SVPC path. Not mutually exclusive with `astra_enabled`. |
 | `astra_enabled` | `bool` | `false` | Enable the Astra path. Not mutually exclusive with `svpc_enabled`. |
-| `partial-multiplane` | `"enabled"` or `"disabled"` | `"enabled"` | Site-wide partial multiplane maintenance control. `"disabled"` rejects maintenance operator RPCs, stops maintenance configuration delivery and observation recording, and omits maintenance initialization from newly provisioned Astra flavors. Saved requests and current plane states are preserved. Maintenance delivery and observations require `enabled` and `astra_enabled` to be `true` and an eligible BF4 DPU. See [partial multiplane maintenance](../../../../docs/manuals/dpf.md#site-wide-partial-multiplane-maintenance). |
+| `partial-multiplane` | `"enabled"` or `"disabled"` | `"enabled"` | Controls maintenance initialization for newly provisioned Astra planes. `"enabled"` initializes all planes in maintenance mode; `"disabled"` skips initialization, so planes will not be set in maintenance mode on provisioning. The setting does not impact runtime maintenance requests or observations. See [partial-multiplane maintenance](../../../../docs/manuals/dpf.md#site-wide-partial-multiplane-maintenance). |
 | `subnet_ip` | `Ipv4Addr` | `0.0.0.0` | Base IPv4 address of the DPA overlay network. |
 | `subnet_mask` | `i32` | `11` | IPv4 CIDR prefix length (0–32) for the DPA overlay network; also sets Weave `underlayConfigMapData.overlayNetworkPrefixLength` in the generated `DPUServiceConfiguration`. If weave is configured, it uses the default `11` when this field or the entire `ewethers_config` section is omitted. A functional Astra/Weave deployment requires explicit ewethers configuration with the appropriate enable flags and intended overlay subnet address and mask. |
 | `astra` | `AstraConfig` | *(defaults)* | Astra settings (see [AstraConfig](#astraconfig)). |

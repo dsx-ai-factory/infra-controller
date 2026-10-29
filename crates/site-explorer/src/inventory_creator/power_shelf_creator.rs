@@ -110,6 +110,13 @@ impl PowerShelfCreator {
 
         let mut skipped_existing_power_shelves = 0usize;
         for (endpoint, _report) in explored_power_shelves {
+            // The cap counts every pass of the run, so a later pass starts
+            // from where the earlier ones left the count.
+            if metrics.created_power_shelves_count as u64
+                >= self.config.power_shelves_created_per_run
+            {
+                break;
+            }
             let address = endpoint.address;
             let Some(expected_power_shelf) =
                 expected_endpoint_index.matched_expected_power_shelf(&endpoint.address)
@@ -133,11 +140,6 @@ impl PowerShelfCreator {
             {
                 Ok(true) => {
                     metrics.created_power_shelves_count += 1;
-                    if metrics.created_power_shelves_count as u64
-                        == self.config.power_shelves_created_per_run
-                    {
-                        break;
-                    }
                 }
                 Ok(false) => {}
                 Err(error) => {

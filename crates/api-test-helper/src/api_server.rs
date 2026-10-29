@@ -51,9 +51,12 @@ pub struct StartArgs {
     pub(crate) spdm_enabled: bool,
 }
 
-pub async fn start(
+pub async fn start(args: StartArgs) -> eyre::Result<()> {
+    start_with_config(args, toml::Table::new()).await
+}
+
+pub(crate) async fn start_with_config(
     StartArgs {
-        // Destructure start args
         addr,
         metrics_addr,
         root_dir,
@@ -66,6 +69,7 @@ pub async fn start(
         insecure_discovery,
         spdm_enabled,
     }: StartArgs,
+    overrides: toml::Table,
 ) -> eyre::Result<()> {
     let firmware_directory_str = firmware_directory.to_string_lossy();
     let root_dir_str = root_dir.to_string_lossy();
@@ -348,6 +352,14 @@ pub async fn start(
         )
     };
 
+    let carbide_config_str = if overrides.is_empty() {
+        carbide_config_str
+    } else {
+        let mut config: toml::Table = toml::from_str(&carbide_config_str)?;
+        merge_config(&mut config, overrides);
+        toml::to_string(&config)?
+    };
+
     let mut tmp = tempfile::NamedTempFile::new()?;
     std::io::Write::write_all(&mut tmp, carbide_config_str.as_bytes())?;
     carbide::run(
@@ -360,4 +372,36 @@ pub async fn start(
         ready_channel,
     )
     .await
+}
+
+fn merge_config(config: &mut toml::Table, overrides: toml::Table) {
+    for (key, value) in overrides {
+        match (config.get_mut(&key), value) {
+            (Some(toml::Value::Table(existing)), toml::Value::Table(overrides)) => {
+                merge_config(existing, overrides);
+            }
+            (_, value) => {
+                config.insert(key, value);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::merge_config;
+
+    #[test]
+    fn nested_overrides_preserve_siblings_and_replace_scalars_and_arrays() {
+        let mut config: toml::Table = toml::from_str("[rack]\nvendor='old'\ncount=1\nmembers=['a','b']\n[rack.details]\npreserved=true\nchanged=1").unwrap();
+        let original = config.clone();
+        merge_config(&mut config, toml::Table::new());
+        assert_eq!(config, original);
+        let overrides =
+            toml::from_str("[rack]\nvendor='new'\nmembers=['c']\n[rack.details]\nchanged=2")
+                .unwrap();
+        merge_config(&mut config, overrides);
+        let expected: toml::Table = toml::from_str("[rack]\nvendor='new'\ncount=1\nmembers=['c']\n[rack.details]\npreserved=true\nchanged=2").unwrap();
+        assert_eq!(config, expected);
+    }
 }

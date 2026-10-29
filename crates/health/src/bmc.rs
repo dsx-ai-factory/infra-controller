@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
+use carbide_instrument::emit;
 use carbide_utils::redfish::{
     format_forwarded_host_parameter, log_redfish_http_error, redact_redfish_response_body,
     redfish_basic_authorization_context,
@@ -102,6 +103,42 @@ enum CircuitState {
         deadline: Instant,
         backoff: Duration,
     },
+}
+
+/// A BMC's connection circuit opened after a connect-level failure.
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "bmc_connection_circuit_opened",
+    metric_name = "carbide_health_bmc_connection_circuit_opened_total",
+    component = "nico-hardware-health",
+    log = warn,
+    metric = counter,
+    message = "BMC connect failure; opening connection circuit to stop request flood",
+    describe = "Number of times a BMC connection circuit opened after a connect-level failure."
+)]
+struct ConnectionCircuitOpened {
+    #[context]
+    bmc_ip: std::net::IpAddr,
+    #[context]
+    backoff_seconds: u64,
+    #[context]
+    error: String,
+}
+
+/// A BMC's connection circuit closed because the BMC answered again.
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "bmc_connection_circuit_closed",
+    metric_name = "carbide_health_bmc_connection_circuit_closed_total",
+    component = "nico-hardware-health",
+    log = info,
+    metric = counter,
+    message = "BMC is reachable again; closing connection circuit",
+    describe = "Number of times a BMC connection circuit closed because the BMC answered again."
+)]
+struct ConnectionCircuitClosed {
+    #[context]
+    bmc_ip: std::net::IpAddr,
 }
 
 /// What a batch-oriented collector should do this iteration, derived from the
@@ -202,7 +239,7 @@ struct BmcIdentity {
     model: Option<String>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct BmcLatencyEndpointLabels {
     pub(crate) machine_id: Option<String>,
     pub(crate) rack_id: Option<String>,
@@ -758,7 +795,9 @@ impl BmcClient {
         }
         let mut state = self.circuit.lock().expect("circuit mutex poisoned");
         if !matches!(*state, CircuitState::Closed) {
-            tracing::info!(endpoint = ?self.addr, "BMC is reachable again; closing connection circuit");
+            emit(ConnectionCircuitClosed {
+                bmc_ip: self.addr.ip,
+            });
             *state = CircuitState::Closed;
         }
         // Clear the hint while still holding the lock so it can never lag the
@@ -776,12 +815,11 @@ impl BmcClient {
                     until: Instant::now() + CIRCUIT_INITIAL_BACKOFF,
                     backoff: CIRCUIT_INITIAL_BACKOFF,
                 };
-                tracing::warn!(
-                    endpoint = ?self.addr,
-                    backoff_seconds = CIRCUIT_INITIAL_BACKOFF.as_secs(),
-                    error = ?error,
-                    "BMC connect failure; opening connection circuit to stop request flood"
-                );
+                emit(ConnectionCircuitOpened {
+                    bmc_ip: self.addr.ip,
+                    backoff_seconds: CIRCUIT_INITIAL_BACKOFF.as_secs(),
+                    error: error.to_string(),
+                });
             }
             CircuitState::Probing { backoff, .. } => {
                 // The half-open probe failed: keep the circuit open and back off
@@ -838,10 +876,7 @@ impl BmcClient {
     }
 
     fn circuit_open_error(&self) -> HealthError {
-        HealthError::GenericError(format!(
-            "BMC {} is unreachable; request skipped while the connection circuit breaker is open",
-            self.addr.ip
-        ))
+        HealthError::BmcCircuitOpen(self.addr.ip)
     }
 
     /// Seed the circuit state and its fast-path hint coherently. Tests use this
@@ -1741,17 +1776,19 @@ fn is_auth_bmc_error(error: &BmcError) -> bool {
 }
 
 /// Whether an error represents the BMC being unreachable at the transport layer
-/// (TCP connect refused/timed out, or a request that timed out) — as opposed to
-/// the BMC answering with an error. Only these trip the connection circuit
-/// breaker; an HTTP 404 or a decode error means the BMC is alive and talking.
+/// (TCP connect refused/timed out, a request that timed out, or one skipped
+/// while the circuit is open) — as opposed to the BMC answering with an error.
+/// Only these trip the connection circuit breaker; an HTTP 404 or a decode
+/// error means the BMC is alive and talking.
 pub(crate) fn is_connection_error(error: &HealthError) -> bool {
     match error {
         HealthError::BmcError(inner) => is_connection_bmc_source_error(inner.as_ref()),
+        HealthError::BmcCircuitOpen(_) => true,
         _ => false,
     }
 }
 
-fn is_connection_bmc_source_error(error: &(dyn std::error::Error + 'static)) -> bool {
+pub(crate) fn is_connection_bmc_source_error(error: &(dyn std::error::Error + 'static)) -> bool {
     error
         .downcast_ref::<BmcError>()
         .is_some_and(is_connection_bmc_error)
@@ -2211,14 +2248,36 @@ mod tests {
         client.trip_circuit(&dummy_error());
         assert_eq!(client.collector_sweep(), CollectorSweep::Skip);
         assert!(
-            client.check_circuit().is_err(),
-            "open circuit must fast-fail"
+            client
+                .check_circuit()
+                .is_err_and(|error| is_connection_error(&error)),
+            "open circuit must fast-fail with a connection error"
         );
 
         // A success closes it again.
         client.note_reachable();
         assert_eq!(client.collector_sweep(), CollectorSweep::Full);
         assert!(client.check_circuit().is_ok());
+    }
+
+    #[test]
+    fn circuit_open_and_close_are_emitted_once_per_transition() {
+        let client = test_client();
+        let logs = capture_logs(|| {
+            client.trip_circuit(&dummy_error());
+            client.trip_circuit(&dummy_error());
+            client.note_reachable();
+        });
+
+        let messages: Vec<&str> = logs.iter().map(|log| log.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            [
+                "BMC connect failure; opening connection circuit to stop request flood",
+                "BMC is reachable again; closing connection circuit",
+            ],
+            "a failure while the circuit is already open is not another trip"
+        );
     }
 
     #[tokio::test]

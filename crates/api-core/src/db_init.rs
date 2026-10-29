@@ -18,9 +18,7 @@
 use std::collections::HashMap;
 
 use carbide_network::virtualization::VpcVirtualizationType;
-use carbide_resource_pool::{
-    ResourcePoolRegistry, ResourcePoolRegistryError, ResourcePoolWithBackend,
-};
+use carbide_resource_pool::{ResourcePoolRegistry, ResourcePoolRegistryError};
 use carbide_uuid::domain::DomainId;
 use carbide_uuid::vpc::VpcId;
 use db::dns::domain;
@@ -280,11 +278,10 @@ pub(crate) async fn create_initial_vpcs(
             .await
         {
             Ok(Some(backend)) => {
-                let selected_pool = ResourcePoolWithBackend::new(vni_pool, backend.as_ref());
-                selected_pool
-                    .backend()
+                backend
+                    .require_integrated()?
                     .allocate(
-                        selected_pool.pool(),
+                        vni_pool,
                         &mut txn,
                         resource_pool::OwnerType::Vpc,
                         &owner_id,

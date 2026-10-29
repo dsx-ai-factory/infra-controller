@@ -44,6 +44,7 @@
 mod chassis;
 mod component_integrity;
 mod computer_system;
+mod drives;
 mod error;
 pub mod hw;
 mod inventories;
@@ -60,6 +61,7 @@ use std::time::Duration;
 use chassis::ExploredChassisCollection;
 use component_integrity::ExploredComponentIntegrity;
 use computer_system::ExploredComputerSystem;
+use drives::ExploredDrives;
 pub use error::Error;
 use inventories::ExploredInventories;
 use itertools::Itertools;
@@ -101,6 +103,11 @@ pub struct Config<'a, B: Bmc> {
     pub boot_interface_mac: Option<MacAddress>,
     pub error_classifier: ErrorClassifier<'a, B>,
     pub retry_timeout: Duration,
+    /// Whether to read drive firmware versions from the primary system's
+    /// Storage subsystems and report each enabled drive with a usable model
+    /// and version as a `Drive_<Model>_<DriveId>` firmware inventory entry.
+    /// Costs one request per Storage subsystem and per drive.
+    pub explore_drive_firmware: bool,
 }
 
 pub fn is_bf4_product(product: Option<Product<&str>>) -> bool {
@@ -269,6 +276,11 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     };
 
     let hw_type = hw_type(&root, explored_system, &explored_chassis);
+    let explored_drives = if config.explore_drive_firmware {
+        Some(ExploredDrives::explore(&explored_system.system).await)
+    } else {
+        None
+    };
     let linked_chassis_ids = explored_system.linked_chassis_ids();
     let has_system_mac_address = explored_system.has_usable_ethernet_mac_address();
     if should_use_network_adapter_port_fallback(
@@ -413,7 +425,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let manager = explored_manager.to_model()?;
-    let service = explored_inventories.to_model(hw_type);
+    let service = explored_inventories.to_model(hw_type, explored_drives.as_ref());
     let hardware_class = hardware_class(&root, &systems[0]);
     let chassis = explored_chassis.to_model();
     let component_integrities = explored_component_integrities.to_model();
@@ -504,7 +516,7 @@ async fn build_delta_powershelf_report<B: Bmc>(
         managers: vec![explored_manager.to_model()?],
         systems: vec![system],
         chassis: explored_chassis.to_model(),
-        service: explored_inventories.to_model(Some(hw_type)),
+        service: explored_inventories.to_model(Some(hw_type), None),
         component_integrities: component_integrities.entries,
         component_integrity_unavailable: component_integrities.unavailable,
         vendor: hw_type.bmc_vendor(),

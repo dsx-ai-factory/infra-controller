@@ -121,7 +121,7 @@ async fn test_add_expected_switch(pool: sqlx::PgPool) {
 }
 
 #[crate::sqlx_test()]
-async fn expected_switch_writes_reject_invalid_bmc_ip_without_mutation(pool: sqlx::PgPool) {
+async fn expected_switch_writes_reject_invalid_addresses_without_mutation(pool: sqlx::PgPool) {
     #[derive(Debug)]
     enum Operation {
         Add,
@@ -129,6 +129,9 @@ async fn expected_switch_writes_reject_invalid_bmc_ip_without_mutation(pool: sql
         Update,
         MaskedUpdate,
     }
+
+    const NOT_SINGLE_INTERFACE: &str =
+        "must not be an unspecified, multicast or IPv4 limited-broadcast address";
 
     let env = create_test_env(pool).await;
     env.api
@@ -150,14 +153,62 @@ async fn expected_switch_writes_reject_invalid_bmc_ip_without_mutation(pool: sql
         .expect("read baseline switches")
         .into_inner();
 
-    for operation in [
-        Operation::Add,
-        Operation::ReplaceAll,
-        Operation::Update,
-        Operation::MaskedUpdate,
+    // Malformed addresses fail request conversion on every write path. Addresses
+    // that cannot identify one interface fail the switch validator, which add,
+    // replace-all and the update transaction each call.
+    for (operation, bmc_ip_address, nvos_ip_address, message) in [
+        (
+            Operation::Add,
+            "not-an-ip",
+            None,
+            "IP address not-an-ip is not valid".to_string(),
+        ),
+        (
+            Operation::ReplaceAll,
+            "not-an-ip",
+            None,
+            "IP address not-an-ip is not valid".to_string(),
+        ),
+        (
+            Operation::Update,
+            "not-an-ip",
+            None,
+            "IP address not-an-ip is not valid".to_string(),
+        ),
+        (
+            Operation::MaskedUpdate,
+            "not-an-ip",
+            None,
+            "IP address not-an-ip is not valid".to_string(),
+        ),
+        (
+            Operation::Add,
+            "0.0.0.0",
+            None,
+            format!("bmc_ip_address 0.0.0.0 {NOT_SINGLE_INTERFACE}"),
+        ),
+        (
+            Operation::ReplaceAll,
+            "255.255.255.255",
+            None,
+            format!("bmc_ip_address 255.255.255.255 {NOT_SINGLE_INTERFACE}"),
+        ),
+        (
+            Operation::Update,
+            "0.0.0.0",
+            None,
+            format!("bmc_ip_address 0.0.0.0 {NOT_SINGLE_INTERFACE}"),
+        ),
+        (
+            Operation::Add,
+            "192.0.2.11",
+            Some("0.0.0.0"),
+            format!("nvos_ip_address 0.0.0.0 {NOT_SINGLE_INTERFACE}"),
+        ),
     ] {
         let mut invalid = before.expected_switches[0].clone();
-        invalid.bmc_ip_address = "not-an-ip".to_string();
+        invalid.bmc_ip_address = bmc_ip_address.to_string();
+        invalid.nvos_ip_address = nvos_ip_address.map(str::to_string);
         invalid.switch_serial_number = "MUST-NOT-PERSIST".to_string();
         let result = match operation {
             Operation::Add => {
@@ -194,20 +245,17 @@ async fn expected_switch_writes_reject_invalid_bmc_ip_without_mutation(pool: sql
                 env.api.update_expected_switch(request).await
             }
         };
-        let error = result.expect_err("malformed BMC IP must be rejected");
-        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{operation:?}");
-        assert_eq!(
-            error.message(),
-            "IP address not-an-ip is not valid",
-            "{operation:?}"
-        );
+        let case = format!("{operation:?} bmc={bmc_ip_address} nvos={nvos_ip_address:?}");
+        let error = result.expect_err("invalid address must be rejected");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument, "{case}");
+        assert_eq!(error.message(), message, "{case}");
         let after = env
             .api
             .get_all_expected_switches(tonic::Request::new(()))
             .await
             .expect("read switches after rejected write")
             .into_inner();
-        assert_eq!(after, before, "{operation:?} must not alter inventory");
+        assert_eq!(after, before, "{case} must not alter inventory");
     }
 }
 

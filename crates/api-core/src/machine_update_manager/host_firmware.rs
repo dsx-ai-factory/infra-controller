@@ -31,6 +31,7 @@ use opentelemetry::metrics::Meter;
 use sqlx::PgConnection;
 use tokio::sync::Mutex;
 
+use super::host_on_disable_list;
 use super::machine_update_module::MachineUpdateModule;
 use super::metrics::{FirmwareUpdatePhase, FirmwareUpdateProgress, FirmwareUpdateTarget};
 use crate::CarbideResult;
@@ -239,13 +240,7 @@ impl HostFirmwareUpdate {
             if available_updates == 0 {
                 return Ok(machines);
             };
-            if self
-                .config
-                .firmware_global
-                .host_disable_autoupdate
-                .iter()
-                .any(|x| **x == update_needed.id.to_string())
-            {
+            if host_on_disable_list(&self.config.firmware_global, &update_needed.id) {
                 // This machine is specifically disabled
                 break;
             }

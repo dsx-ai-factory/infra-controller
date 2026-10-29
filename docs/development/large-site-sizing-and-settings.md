@@ -9,7 +9,11 @@ which asked for site controller sizing guidance for large sites, and
 which asked for cluster sizing for large simulated fleets. This page is a
 companion to
 [Scaling NICo with Machine-a-Tron](machine-a-tron-scale-testing.md), which
-describes the simulator setup.
+describes the simulator setup. The versioned scale table, the status and
+validation method of every published figure, and the site controller sizing
+guidance per fleet size are on
+[Sizing and Scale Guidance](../getting-started/sizing-and-scale.md). This page
+is the detailed record of the 250-rack measurement and the settings it needed.
 
 ## What Was Measured
 
@@ -23,16 +27,22 @@ nodes as NICo. The runs covered ingestion only: discovery, preingestion, machine
 creation, and the machine state controller up to `ready`. Provisioning, firmware
 updates, and tenant workflows were not exercised. Storage input/output
 operations per second (IOPS) were not measured, and no node failed during a run.
-Hours are counted from fleet-up, the point at which every simulated BMC endpoint
-is deployed and reachable. The fleet-up burst is the elevated kube-apiserver
-load in the first 2 to 3 hours after that point.
+Times count from fleet-up, the point at which every simulator pod is Ready, the
+protocol gateway answers, and the controller has published every pod's
+Services, so every simulated BMC address is reachable. It is the same gate as
+[fleet-up](machine-a-tron-scale-testing.md#10000-host-simulated-fleet) on the
+10,000-host page. The fleet-up burst is the elevated kube-apiserver load in the
+first 2 to 3 hours after that point.
 
 ## Site Controller Sizing
 
-The three nodes had 96 cores and 251 GiB of allocatable memory each. They
-carried NICo, its Postgres, and the simulator. The figures below are from the
-runs at controller concurrency 80 to 140, the measured range around the
-recommended 80 to 120.
+The three nodes are baseline nodes: two Intel Xeon Gold 6442Y sockets of 24
+cores each with Hyper-Threading on, 96 logical CPUs as Kubernetes counts them,
+and eight 32 GiB DIMMs, 251 GiB of allocatable memory each. The core figures
+on this page are logical CPUs. They carried NICo, its Postgres, and the
+simulator. The
+figures below are from the runs at controller concurrency 80 to 140, the
+measured range around the recommended 80 to 120.
 
 | Resource | Highest per-node peak | Highest per-node 95th percentile (p95) over the run |
 |---|---|---|
@@ -57,23 +67,26 @@ Server (IPVS) at 2 to 3 cores per node. During the fleet-up burst it was
 kube-apiserver, at up to 39 cores on the busiest node at its peak sample,
 measured at controller concurrency 140.
 
-Memory fits the 256 GiB minimum node with room to spare. The highest reading was
-62 GiB on one node, during the two-sample Postgres spike late in the 20-hour run
-at the default concurrency. That run is outside the table's range. These runs do
-not show the CPU headroom of a node with two 24-core CPUs (48 cores). At
-controller concurrency 80 to 140 the highest per-node 95th percentile was 31 to
-50 cores and the highest per-node peak was 38 to 54 cores. At the busiest
-samples kube-apiserver was anywhere from a small share to three quarters of
-that, and the rest was Postgres, nico-api, hardware-health, and kube-proxy. For
-a site of this size, plan nodes with more cores than the 48-core minimum, or 5
-nodes. The measurements cover three 96-core nodes only, so validate the sizing
-for each deployment. The 512 GiB memory recommendation is growth headroom. Give
-Postgres a 16-core limit: at its 8-core default it was throttled in 88 percent
-of Completely Fair Scheduler (CFS) periods. Its memory needed no raise: the
-54-hour run completed at the 16 GiB default, and the 32 GiB of the later runs
-was headroom. The sizing table in `helm-prereqs/values.yaml` stays the memory
-guidance. Give nico-api 8 cores: it used 5 to 6 of them at controller
-concurrency 80 and above.
+Memory fits the 256 GiB minimum node with room to spare. The highest reading
+was 62 GiB on one node, during the two-sample Postgres spike late in the
+20-hour run at the default concurrency. That run is outside the table's range.
+These runs show the CPU headroom of a baseline node with two 24-core
+sockets and Hyper-Threading. At controller concurrency 80 to
+140 the highest per-node 95th percentile was 31 to 50 logical CPUs and the
+highest per-node peak was 38 to 54 of the 96. At the busiest samples
+kube-apiserver was anywhere from a small share to three quarters of that, and
+the rest was Postgres, nico-api, hardware-health, and kube-proxy. Three
+baseline nodes carried a site of this size with CPU headroom, and up to 39 of
+the peak logical CPUs were kube-apiserver load that a production site does not
+carry. The hardware prerequisites still recommend 5 nodes, or nodes with more
+logical CPUs, for larger GB200-class sites. The measurements cover three nodes
+of 96 logical CPUs only, so validate the sizing for each deployment. The 512
+GiB memory recommendation is growth headroom. Give Postgres a 16-core limit: at
+its 8-core default it was throttled in 88 percent of Completely Fair Scheduler
+(CFS) periods. Its memory needed no raise: the 54-hour run completed at the 16
+GiB default, and the 32 GiB of the later runs was headroom. The sizing table in
+`helm-prereqs/values.yaml` stays the memory guidance. Give nico-api 8 cores: it
+used 5 to 6 of them at controller concurrency 80 and above.
 
 ## Time to Ready Is a Concurrency Setting
 
@@ -124,6 +137,44 @@ base configuration.
 | `[machine_state_controller.controller] max_concurrency` (chart value `machineStateController.maxConcurrency`) | 80 to 120 recommended. The runs covered 10 to 160 | 10, refer to the table above |
 | `[api_admission_control]` `enabled` (chart value `apiAdmissionControl.enabled`) | `false` for the simulated fleet | `true`, with per-client limits of 8 requests in flight and 64 pending. All Machine-a-Tron agents share one client key and retry rejected calls at once, which rejected 819,130 calls in 11 minutes and restarted nico-api three times. Keep admission control on for real hardware |
 | Vault server probes (`helm-prereqs/operators/values/vault.yaml`) | `timeoutSeconds` 10, `failureThreshold` 5 | 3 seconds and 2 failures: the active node missed two probes under load, was killed, and came back sealed |
+
+Two settings bound how many managed hosts Site Explorer creates at once:
+`[site_explorer] machine_creation_concurrency` (default 4) is the number of
+hosts one explorer iteration creates at the same time, and each in-flight
+creation holds one permit of the top-level `admin_lock_admission_permits`
+(default 16), which DHCP discovery and machine discovery share. Raise the two
+together. Site Explorer clamps its concurrency to at most one below the
+permit count so the other flows keep a permit, except that a permit count of
+1 still runs one creation at a time, and that creation holds the only permit
+while it runs. The
+[configuration reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md)
+has both contracts.
+
+Two further behaviors decide when racks complete rather than how fast hosts
+are created. Site Explorer dispatches the hosts of one run in rack order:
+racks with the fewest expected hosts still lacking a machine once this run's
+hosts are created come first, so the racks the run completes lead. Racks equal
+on that count are ordered by how many hosts lack a machine now, then by rack
+id, with one rack's hosts kept together, and hosts without an expected rack
+come last. Up to `machine_creation_concurrency` creations are in flight at
+once, so the last hosts of one rack overlap the first hosts of the next. A
+smaller `machines_created_per_run` therefore makes each run finish a few racks
+instead of spreading its budget over many, at the cost of more runs and their
+fixed per-run phases. Hosts that already have a machine and need only the
+steady-state repair come after every host that still needs one. A repair takes
+one of the `machine_creation_concurrency` slots and does not count toward
+`machines_created_per_run`, so the repairs of a run are made even after the
+run has created its `machines_created_per_run` hosts. The
+`carbide_site_explorer_rack_host_fill_count` gauge reports, by `kind`, the
+racks with expected hosts, the racks whose hosts all have a machine, and the
+racks whose missing hosts the last run had all identified, so it could
+complete them. `[site_explorer]
+switch_and_power_shelf_pass_interval` (default `15m`) sets the minimum time
+between switch and power shelf creation passes during the host creation phase.
+A pass starts once the interval has elapsed and the host creations in flight
+have finished, and one more pass runs at the end of the run, so switches and
+shelves that complete preingestion while hosts are being created wait about
+one interval rather than for the end of a long run.
 
 The TOML keys are nico-api configuration: the chart's base file merged with the
 site config overlay `siteConfig.nicoApiSiteConfig`. Set them in the overlay.

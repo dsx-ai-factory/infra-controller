@@ -18,7 +18,7 @@
 use carbide_uuid::DbTable;
 
 #[derive(carbide_macros::DbTable)]
-#[db_table(name = "generic_records")]
+#[db_table(alias = "r", name = "generic_records")]
 struct Record<'a, T = u32, const N: usize = 2>
 where
     T: Copy,
@@ -30,7 +30,7 @@ where
 }
 
 #[test]
-fn generics_and_active_fields_reach_the_generated_impl() {
+fn generics_alias_and_active_fields_reach_the_generated_impl() {
     let record = Record {
         z_value: &7u32,
         samples: [1, 2],
@@ -43,4 +43,10 @@ fn generics_and_active_fields_reach_the_generated_impl() {
         format!("{columns} | {columns}"),
         "z_value, samples | z_value, samples",
     );
+    assert_eq!(
+        Record::<'_, u32, 2>::db_aliased_table(),
+        "generic_records AS r",
+    );
+    let aliased_columns = Record::<'_, u32, 2>::db_aliased_columns();
+    assert_eq!(aliased_columns.as_slice(), &["r.z_value", "r.samples"]);
 }

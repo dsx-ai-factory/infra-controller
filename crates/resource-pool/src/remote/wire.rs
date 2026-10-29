@@ -201,7 +201,7 @@ pub(super) fn release(
     })
 }
 
-pub(super) fn value(value: &ResourcePoolValue) -> Result<v1::Value, ValueConversionError> {
+pub(crate) fn value(value: &ResourcePoolValue) -> Result<v1::Value, ValueConversionError> {
     match value {
         ResourcePoolValue::Integer(value) => value_to_wire(ResourcePoolValueDomain::Integer, value),
         ResourcePoolValue::IpAddress(value) => {

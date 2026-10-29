@@ -2,9 +2,9 @@
 
 Thank you for your interest in contributing to NVIDIA Infra Controller!
 
-We welcome contributions of all sizes — from fixing a typo in the docs to
-adding a new API endpoint. Whether you're a first-time contributor or a
-seasoned open-source developer, there's a place for you here.
+We welcome contributions of all sizes — from fixing a typo in the docs to adding
+a new API endpoint. Whether you're a first-time contributor or a seasoned
+open-source developer, there's a place for you here.
 
 All project participants are expected to follow the
 [code of conduct](CODE_OF_CONDUCT.md).
@@ -29,8 +29,8 @@ All project participants are expected to follow the
 
 For substantial changes:
 
-- If you've encountered a problem or limitation that isn't already tracked,
-  open an issue describing it, your proposed approach, and that you'd like to
+- If you've encountered a problem or limitation that isn't already tracked, open
+  an issue describing it, your proposed approach, and that you'd like to
   implement a solution.
 - If you'd like to work on an existing, unassigned issue, comment there with
   your proposed approach and say you'd like to take it on.
@@ -48,9 +48,9 @@ NVIDIA Infra Controller requires the Developer Certificate of Origin (DCO)
 process to be followed for all contributions.
 
 The DCO is a lightweight way for contributors to certify that they wrote or
-otherwise have the right to submit the code they are contributing. The full
-text of the DCO can be found at
-[developercertificate.org](https://developercertificate.org/):
+otherwise have the right to submit the code they are contributing. The full text
+of the DCO can be found at
+[developercertificate.org][dco]:
 
 ```text
 Developer Certificate of Origin
@@ -103,7 +103,8 @@ The `-s` flag adds the DCO sign-off trailer. The `-S` flag cryptographically
 signs the commit, which is also required for this repository. See
 [Cryptographic Commit Signatures](#cryptographic-commit-signatures) for details.
 
-**Tip:** You can create a Git alias to always sign off and cryptographically sign:
+**Tip:** You can create a Git alias to always sign off and cryptographically
+sign:
 
 ```bash
 git config --global alias.ci 'commit -s -S'
@@ -116,7 +117,8 @@ This will automatically add a line like this to your commit message:
 Signed-off-by: Your Name <your.email@example.com>
 ```
 
-Make sure your `user.name` and `user.email` are set correctly in your Git configuration:
+Make sure your `user.name` and `user.email` are set correctly in your Git
+configuration:
 
 ```bash
 git config --global user.name "Your Name"
@@ -144,19 +146,22 @@ protection.
 
 ### DCO Enforcement
 
-All pull requests are automatically checked for DCO compliance via DCO bot.
-Pull requests with commits missing a DCO sign-off cannot be merged until all
-commits are properly signed off.
+All pull requests are automatically checked for DCO compliance via DCO bot. Pull
+requests with commits missing a DCO sign-off cannot be merged until all commits
+are properly signed off.
 
 ## Cryptographic Commit Signatures
 
 The `main` branch requires cryptographically signed commits. This is separate
 from the DCO sign-off:
 
-- `-s` or `--signoff` adds the `Signed-off-by` DCO trailer to the commit message.
-- `-S` cryptographically signs the commit with your configured GPG or SSH signing key.
+- `-s` or `--signoff` adds the `Signed-off-by` DCO trailer to the commit
+  message.
+- `-S` cryptographically signs the commit with your configured GPG or SSH
+  signing key.
 
-Every commit in a pull request must include both. For new commits, use both flags:
+Every commit in a pull request must include both. For new commits, use both
+flags:
 
 ```bash
 git commit -s -S -m "Your commit message"
@@ -175,13 +180,11 @@ git commit --amend -s -S --no-edit
 ## Fork and Setup
 
 Developers must first fork the upstream
-[Infra Controller repository](https://github.com/dsx-ai-factory/infra-controller).
+[Infra Controller repository][infra-controller].
 
 ### 1. Fork the Repository
 
-1. Navigate to the
-   [Infra Controller repository](https://github.com/dsx-ai-factory/infra-controller)
-   on GitHub.
+1. Navigate to the [Infra Controller repository][infra-controller] on GitHub.
 2. Click the **Fork** button in the upper right corner.
 3. Select your GitHub account as the destination.
 
@@ -235,8 +238,11 @@ Use descriptive branch names like:
 
 ## Secret Scanning
 
-Credentials are the one class of mistake that a later commit cannot take back, so this repository scans for them locally as well as in CI.
-The [`.pre-commit-config.yaml`](.pre-commit-config.yaml) at the repository root declares a single hook, `secret-scan-trufflehog`, from [`NVIDIA/security-workflows`](https://github.com/NVIDIA/security-workflows).
+Credentials are the one class of mistake that a later commit cannot take back,
+so this repository scans for them locally as well as in CI. The
+[`.pre-commit-config.yaml`](.pre-commit-config.yaml) at the repository root
+declares a single hook, `secret-scan-trufflehog`, from
+[`NVIDIA/security-workflows`][security-workflows].
 
 It checks your staged files at `git commit` time:
 
@@ -245,12 +251,19 @@ pip install pre-commit   # or: brew install pre-commit
 pre-commit install
 ```
 
-The hook installs its own pinned TruffleHog build into an isolated environment on first run, so there is no scanner to install separately, on Linux, macOS, or Windows.
+The hook installs its own pinned TruffleHog build into an isolated environment
+on first run, so there is no scanner to install separately, on Linux, macOS, or
+Windows.
 
-When the hook reports a finding, treat the credential as compromised — remove it *and* rotate it, because deleting the line leaves the value in your local history.
+When the hook reports a finding, treat the credential as compromised — remove it
+*and* rotate it, because deleting the line leaves the value in your local
+history.
 
-This check is advisory and skippable (`git commit --no-verify`).
-The authoritative check is the Pulse secret scan in [`.github/workflows/security-suite.yml`](.github/workflows/security-suite.yml), which runs server-side on pushes to `main` and to the `pull-request/[0-9]+` mirror of your pull request, and fails on verified secrets.
+This check is advisory and skippable (`git commit --no-verify`). The
+authoritative check is the Pulse secret scan in
+[`.github/workflows/security-suite.yml`](.github/workflows/security-suite.yml),
+which runs server-side on pushes to `main` and to the `pull-request/[0-9]+`
+mirror of your pull request, and fails on verified secrets.
 
 ## Pull Request Process
 
@@ -268,8 +281,8 @@ reviewable, low risk, and consistent with the existing codebase.
 ### Scope and ownership
 
 - Make the smallest correct change that solves the problem. Avoid unrelated
-  refactors, formatting churn, new configuration paths, compatibility layers,
-  or feature flags unless the change requires them.
+  refactors, formatting churn, new configuration paths, compatibility layers, or
+  feature flags unless the change requires them.
 - If requirements are unclear, ask before changing scope. Do not silently
   simplify, rename, collapse, or replace the requested behavior with an adjacent
   improvement or quick win.
@@ -281,8 +294,8 @@ reviewable, low risk, and consistent with the existing codebase.
 - Keep pull requests focused on one behavioral or documentation outcome. Remove
   unused code, temporary logging, skipped assertions, placeholders, and hidden
   TODOs before asking for review.
-- Do not commit secrets, credentials, local environment files, generated
-  private keys, or machine-specific artifacts.
+- Do not commit secrets, credentials, local environment files, generated private
+  keys, or machine-specific artifacts.
 
 ### Reuse before adding code
 
@@ -319,18 +332,18 @@ for the requested behavior.
 - Verification should exercise the behavior that changed. Do not claim a fix is
   covered by an unrelated build, a nearby test, generated examples, or a mocked
   path that avoids the real integration being changed.
-- Report relevant checks in the task handoff or [PR comments](#pull-request-guidelines):
-  command or manual check, scope, and outcome (passed, failed, blocked, timed out,
-  or not run).
-  Explain incomplete checks. An interrupted run or a filtered run that selects
-  no intended tests does not verify that behavior. Reporting a limitation does
-  not waive required checks.
+- Report relevant checks in the task handoff or
+  [PR comments](#pull-request-guidelines): command or manual check, scope, and
+  outcome (passed, failed, blocked, timed out, or not run). Explain incomplete
+  checks. An interrupted run or a filtered run that selects no intended tests
+  does not verify that behavior. Reporting a limitation does not waive required
+  checks.
 - Use the real service, repository, dataset, device, workflow, command, and
   integration path that the change affects whenever practical. Call out any
   lower-fidelity substitute instead of treating it as equivalent coverage.
 - Add or update focused tests for bug fixes, shared behavior, API contracts,
-  migrations, and cross-module changes. For narrow documentation-only changes,
-  a diff review is usually sufficient.
+  migrations, and cross-module changes. For narrow documentation-only changes, a
+  diff review is usually sufficient.
 - Keep OpenAPI specs, protobufs, database migrations, Helm manifests, generated
   code, and documentation in sync with the behavior they describe.
 
@@ -369,8 +382,10 @@ above.
   exempt from the stale PR policy described below.
 - Be responsive to feedback and code review comments.
 - Ensure all CI checks pass before requesting review.
-- The pull request description is what ends-up in the final immutable git
-  message, it needs to be as concise as possible.
+- Our PR workflow squashes branches into a single Git commit when merging, and
+  the PR title and description will become the resulting commit message.
+- Format your PR title according to the
+  [Conventional Commits][conventional-commits] specification.
 - Do not put test results or irrelevant details into the pull request
   description, add them as comments if you really feel the need to explain how
   it was tested.
@@ -381,11 +396,11 @@ The AI agent must use the .github/PULL_REQUEST_TEMPLATE.md file and adhere to
 the structure.
 
 The human submitter must proofread the pull request text before submitting, the
-human is accountable for the pull-request description, comments, and code
-that's being assisted with AI.
+human is accountable for the pull-request description, comments, and code that's
+being assisted with AI.
 
-Do not submit AI slop in pull requests or in comments. A human is reviewing
-your submission, treat their time with respect.
+Do not submit AI slop in pull requests or in comments. A human is reviewing your
+submission, treat their time with respect.
 
 ### Pull request review
 
@@ -395,19 +410,19 @@ or update, comment on the pull request to request an update from a maintainer.
 
 ## Pull Request Lifecycle and Stale PR Policy
 
-To keep the review queue healthy and make sure good work does not get lost,
-open pull requests are actively managed with automation. This section explains
-what to expect as an author or reviewer.
+To keep the review queue healthy and make sure good work does not get lost, open
+pull requests are actively managed with automation. This section explains what
+to expect as an author or reviewer.
 
 ### Review expectations
 
 - **Reviewers** aim to give a first response within a few business days. As
-  noted in the project status above, review timelines may vary while the
-  project is experimental — if you are waiting on a maintainer, that is on us,
-  not you. A polite ping in the PR after a week of silence is always welcome.
-- **Authors** are expected to respond to review feedback within about a week.
-  If you are blocked or busy, a one-line comment ("back on this next week")
-  resets the clock and keeps reviewers aligned.
+  noted in the project status above, review timelines may vary while the project
+  is experimental — if you are waiting on a maintainer, that is on us, not you.
+  A polite ping in the PR after a week of silence is always welcome.
+- **Authors** are expected to respond to review feedback within about a week. If
+  you are blocked or busy, a one-line comment ("back on this next week") resets
+  the clock and keeps reviewers aligned.
 - If a PR is waiting on an external dependency, a design decision, or another
   team, say so explicitly in the PR and apply the appropriate exemption label
   below.
@@ -418,14 +433,14 @@ Open pull requests are managed by automation with the following rules:
 
 1. **After 30 days of inactivity**, the PR is labeled `stale` and receives a
    comment explaining what happens next.
-2. **After 7 more days of inactivity** (37 days total), the PR is
-   automatically closed.
-3. **Any activity resets the clock.** A comment, commit, rebase, or review
-   all count as activity and remove the `stale` label.
+2. **After 7 more days of inactivity** (37 days total), the PR is automatically
+   closed.
+3. **Any activity resets the clock.** A comment, commit, rebase, or review all
+   count as activity and remove the `stale` label.
 
 The policy applies to author inactivity. If a PR is stalled because it is
-waiting on maintainer review, comment to that effect — that activity both
-resets the timer and surfaces the PR back to the review queue.
+waiting on maintainer review, comment to that effect — that activity both resets
+the timer and surfaces the PR back to the review queue.
 
 ### Being closed for staleness is not a rejection
 
@@ -461,12 +476,29 @@ forward.
 ### Keeping your PR mergeable
 
 - Rebase or merge `upstream/main` regularly, especially if your PR touches
-  high-churn areas. The longer a PR sits, the more expensive conflict
-  resolution becomes.
+  high-churn areas. The longer a PR sits, the more expensive conflict resolution
+  becomes.
 - Keep CI green. A PR with failing checks is unlikely to get review attention
   and will still age under the stale policy.
 
 ## Build Guide
 
-For pinned dependency updates, image testing, and build optimization trade-offs, see the
-[Build Guide](docs/development/build-guide.md).
+For pinned dependency updates, image testing, and build optimization trade-offs,
+see the [Build Guide](docs/development/build-guide.md).
+
+## Issue Priority
+
+Maintainers will set a GitHub issue's Priority field to record its importance.
+New issues are triaged weekly, and issue priority is mapped according to
+severity, user impact, and relationship to the roadmap. To request a different
+priority, please comment on the issue with context or supporting evidence.
+
+## Extending NICo
+
+- [DPU Extension Services](docs/design/dpf-helm-chart-extension-services.md)
+- [New Hardware Support](docs/development/new_hardware_support.md)
+
+[dco]: https://developercertificate.org/
+[infra-controller]: https://github.com/dsx-ai-factory/infra-controller
+[security-workflows]: https://github.com/NVIDIA/security-workflows
+[conventional-commits]: https://www.conventionalcommits.org/en/v1.0.0/

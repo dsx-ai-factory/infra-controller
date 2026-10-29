@@ -1384,7 +1384,7 @@ pub(super) async fn update_firmware(
                     FirmwareSupervisorClientError::UnsupportedProtocol(_),
                 ) => (
                     Code::Unsupported,
-                    "firmware supervisor does not support checked NIC firmware updates",
+                    "firmware supervisor protocol version does not match the client",
                 ),
                 SupervisorLaunchError::Client(FirmwareSupervisorClientError::Rpc(status)) => {
                     match status.code() {
@@ -1486,6 +1486,7 @@ async fn submit_firmware_update(
     let context = FirmwareUpdateContext {
         phase_id: task.phase_id.clone(),
         expected_digests,
+        expected_device: None,
     };
     context.validate(&profile).map_err(|_| invalid())?;
     validate_preflight_request(device, &profile.firmware_spec).map_err(|_| invalid())?;
@@ -2360,7 +2361,8 @@ mod tests {
         use rpc::protos::firmware_supervisor::{
             CancelFirmwareOperationRequest, CancelFirmwareOperationResponse,
             GetFirmwareOperationRequest, GetFirmwareOperationResponse, GetSupervisorStatusRequest,
-            GetSupervisorStatusResponse, SubmitFirmwareOperationRequest,
+            GetSupervisorStatusResponse, ObserveFirmwareOperationResponse,
+            ObserveFirmwareUpdateRequest, SubmitFirmwareOperationRequest,
             SubmitFirmwareOperationResponse,
         };
         use tokio_stream::wrappers::UnixListenerStream;
@@ -2405,6 +2407,13 @@ mod tests {
                 ))
             }
 
+            async fn observe_firmware_update(
+                &self,
+                _: Request<ObserveFirmwareUpdateRequest>,
+            ) -> Result<Response<ObserveFirmwareOperationResponse>, Status> {
+                Err(Status::unimplemented("checked updates submit exact inputs"))
+            }
+
             async fn get_supervisor_status(
                 &self,
                 _: Request<GetSupervisorStatusRequest>,
@@ -2430,34 +2439,34 @@ mod tests {
             .trim()
             .to_string();
         for case in [
-            // A predecessor cannot silently discard checked-update fields.
+            // A mismatched helper must fail at the handshake, before admission.
             Case {
-                name: "protocol 2 rejects before Submit",
-                supervisor: Some((2, Status::unimplemented("must not receive submit"))),
+                name: "incompatible supervisor rejects before Submit",
+                supervisor: Some((3, Status::unimplemented("must not receive submit"))),
                 expected_code: Some(Code::Unsupported),
             },
             // A matching handshake can still expose an unsupported RPC.
             Case {
                 name: "unimplemented Submit reports unsupported",
-                supervisor: Some((3, Status::unimplemented("checked admission unavailable"))),
+                supervisor: Some((4, Status::unimplemented("checked admission unavailable"))),
                 expected_code: Some(Code::Unsupported),
             },
             Case {
                 name: "invalid Submit reports an invalid task",
-                supervisor: Some((3, Status::invalid_argument("invalid checked context"))),
+                supervisor: Some((4, Status::invalid_argument("invalid checked context"))),
                 expected_code: Some(Code::InvalidTask),
             },
             // Capacity is a deferred poll, not a failed or empty publication.
             Case {
                 name: "occupied supervisor defers publication",
-                supervisor: Some((3, Status::resource_exhausted("host is occupied"))),
+                supervisor: Some((4, Status::resource_exhausted("host is occupied"))),
                 expected_code: None,
             },
             // An uncertain reply cannot leak URLs or authorize replacement work.
             Case {
                 name: "failed precondition keeps correlated redacted uncertainty",
                 supervisor: Some((
-                    3,
+                    4,
                     Status::failed_precondition(format!(
                         "cannot resolve https://user:{SECRET}@firmware.example/image.bin"
                     )),
@@ -2546,7 +2555,7 @@ mod tests {
 
             assert_eq!(
                 submissions.load(Ordering::SeqCst),
-                usize::from(protocol_version == Some(3)),
+                usize::from(protocol_version == Some(4)),
                 "{}",
                 case.name,
             );
@@ -2557,6 +2566,9 @@ mod tests {
                 let diagnostic = match code {
                     Code::InvalidTask => {
                         "invalid NIC firmware update identity, profile, source, or digest"
+                    }
+                    Code::Unsupported if protocol_version == Some(3) => {
+                        "firmware supervisor protocol version does not match the client"
                     }
                     Code::Unsupported => {
                         "firmware supervisor does not support checked NIC firmware updates"
@@ -2606,14 +2618,14 @@ mod tests {
                 assert_eq!(
                     failure.field("failure_stage"),
                     Some(match protocol_version {
-                        Some(2) => "protocol",
+                        Some(3) => "protocol",
                         Some(_) => "rpc",
                         None => "launch firmware supervisor",
                     }),
                     "{}",
                     case.name
                 );
-                let expected_status = if protocol_version == Some(3) {
+                let expected_status = if protocol_version == Some(4) {
                     format!("{status_code:?}")
                 } else {
                     "None".to_string()
@@ -3059,7 +3071,8 @@ mod tests {
         use rpc::protos::firmware_supervisor::{
             CancelFirmwareOperationRequest, CancelFirmwareOperationResponse,
             GetFirmwareOperationRequest, GetFirmwareOperationResponse, GetSupervisorStatusRequest,
-            GetSupervisorStatusResponse, SubmitFirmwareOperationRequest,
+            GetSupervisorStatusResponse, ObserveFirmwareOperationResponse,
+            ObserveFirmwareUpdateRequest, SubmitFirmwareOperationRequest,
             SubmitFirmwareOperationResponse,
         };
         use tokio_stream::wrappers::UnixListenerStream;
@@ -3118,6 +3131,13 @@ mod tests {
                 ))
             }
 
+            async fn observe_firmware_update(
+                &self,
+                _: Request<ObserveFirmwareUpdateRequest>,
+            ) -> Result<Response<ObserveFirmwareOperationResponse>, Status> {
+                Err(Status::unimplemented("legacy polling only reads receipts"))
+            }
+
             async fn get_supervisor_status(
                 &self,
                 _: Request<GetSupervisorStatusRequest>,
@@ -3137,11 +3157,11 @@ mod tests {
             Deferred,
             RequestFailure,
             RecoveredReceipt,
+            IncompatibleHelper,
         }
 
         struct Case {
             name: &'static str,
-            protocol_version: u32,
             receipt: Result<Option<mlx_device_pb::FirmwareOperation>, Status>,
             profile: Option<FirmwareFlasherProfile>,
             admission_error: Option<Status>,
@@ -3163,11 +3183,19 @@ mod tests {
             .trim()
             .to_string();
         for (case_index, case) in [
-            // Upgrading Scout and losing a live profile must not erase an
-            // unresolved burn receipt still owned by a protocol-1 daemon.
+            // Even an existing receipt must not be read through a mismatched
+            // helper. The DPA dispatcher reports the request failure locally.
+            Case {
+                name: "incompatible helper rejects before reading a receipt",
+                receipt: Ok(Some(receipt.clone())),
+                profile: None,
+                admission_error: None,
+                submits: false,
+                expected: Expected::IncompatibleHelper,
+            },
+            // Losing a live profile must not erase an unresolved burn receipt.
             Case {
                 name: "existing work survives a missing profile",
-                protocol_version: 1,
                 receipt: Ok(Some(receipt.clone())),
                 profile: None,
                 admission_error: None,
@@ -3177,7 +3205,6 @@ mod tests {
             // A catalog edit is not permission to replace this state's request.
             Case {
                 name: "existing work ignores a changed live profile",
-                protocol_version: 2,
                 receipt: Ok(Some(receipt.clone())),
                 profile: Some(changed_profile.clone()),
                 admission_error: None,
@@ -3187,7 +3214,6 @@ mod tests {
             // New work is submitted once with the caller's original state ID.
             Case {
                 name: "missing receipt submits the profile",
-                protocol_version: 3,
                 receipt: Err(Status::not_found("unknown operation")),
                 profile: Some(changed_profile.clone()),
                 admission_error: None,
@@ -3197,29 +3223,16 @@ mod tests {
             // A no-work decision still goes through durable admission.
             Case {
                 name: "missing receipt submits the no-profile decision",
-                protocol_version: 3,
                 receipt: Err(Status::not_found("unknown operation")),
                 profile: None,
                 admission_error: None,
                 submits: true,
                 expected: Expected::Receipt,
             },
-            // Reading predecessor receipts does not permit new admission to
-            // that daemon, even for a no-profile decision.
-            Case {
-                name: "protocol-2 daemon refuses new work",
-                protocol_version: 2,
-                receipt: Err(Status::not_found("unknown operation")),
-                profile: None,
-                admission_error: None,
-                submits: false,
-                expected: Expected::RequestFailure,
-            },
             // Another card's operation defers this request without a failed
             // firmware observation or a failed-supervisor metric on each poll.
             Case {
                 name: "host capacity defers submission",
-                protocol_version: 3,
                 receipt: Err(Status::not_found("unknown operation")),
                 profile: None,
                 admission_error: Some(Status::resource_exhausted("host is owned")),
@@ -3229,7 +3242,6 @@ mod tests {
             // Permanent receipt exhaustion is reported, not silently deferred.
             Case {
                 name: "receipt capacity reports a request failure",
-                protocol_version: 3,
                 receipt: Err(Status::not_found("unknown operation")),
                 profile: None,
                 admission_error: Some(Status::failed_precondition("receipt capacity exhausted")),
@@ -3239,7 +3251,6 @@ mod tests {
             // An inconclusive read cannot authorize resubmission or a skip.
             Case {
                 name: "failed lookup does not submit",
-                protocol_version: 3,
                 receipt: Err(Status::unavailable("journal unavailable")),
                 profile: None,
                 admission_error: None,
@@ -3249,7 +3260,6 @@ mod tests {
             // Transport success without a receipt is still inconclusive.
             Case {
                 name: "malformed successful lookup does not submit",
-                protocol_version: 3,
                 receipt: Ok(None),
                 profile: None,
                 admission_error: None,
@@ -3260,7 +3270,6 @@ mod tests {
             // Later polls must recover that receipt and count its failure once.
             Case {
                 name: "lost submit response is recovered without resubmission",
-                protocol_version: 3,
                 receipt: Err(Status::not_found("unknown operation")),
                 profile: Some(firmware_profile("/original-firmware.bin", None, None, None)),
                 admission_error: Some(Status::unavailable("submission response was lost")),
@@ -3272,6 +3281,7 @@ mod tests {
         .enumerate()
         {
             let recovering = matches!(case.expected, Expected::RecoveredReceipt);
+            let incompatible_helper = matches!(case.expected, Expected::IncompatibleHelper);
             // Each case gets a separate ID in Scout's process-wide metric cache.
             let operation_id = format!("{}-{case_index}", module_path!());
             let mut receipt = receipt.clone();
@@ -3320,7 +3330,7 @@ mod tests {
                 lookups: lookups.clone(),
                 operation_id: operation_id.clone(),
                 boot_id: boot_id.clone(),
-                protocol_version: case.protocol_version,
+                protocol_version: if incompatible_helper { 3 } else { 4 },
             };
             let stop = CancellationToken::new();
             let server = tokio::spawn(
@@ -3334,10 +3344,15 @@ mod tests {
 
             // Exercise the production trust checks during fixture setup so a
             // rejected directory/socket reports its actual launcher error.
-            let client = connect_or_launch("0000:03:00.0", &config)
-                .await
-                .unwrap_or_else(|error| panic!("supervisor fixture failed trust checks: {error}"));
-            drop(client);
+            // The mismatch case checks its handshake through dispatch below.
+            if !incompatible_helper {
+                let client = connect_or_launch("0000:03:00.0", &config)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("supervisor fixture failed trust checks: {error}")
+                    });
+                drop(client);
+            }
 
             // Use the actual dispatcher and discovery's abbreviated address.
             // The fake protocol server never queries or mutates real hardware.
@@ -3428,7 +3443,12 @@ mod tests {
                         case.name,
                     );
                 }
-                assert_eq!(lookups.load(Ordering::SeqCst), poll + 1, "{}", case.name);
+                assert_eq!(
+                    lookups.load(Ordering::SeqCst),
+                    if incompatible_helper { 0 } else { poll + 1 },
+                    "{}",
+                    case.name,
+                );
                 assert_eq!(
                     submissions.lock().unwrap().len(),
                     usize::from(case.submits),
@@ -3452,7 +3472,9 @@ mod tests {
             }
             let request_failed = matches!(
                 case.expected,
-                Expected::RequestFailure | Expected::RecoveredReceipt
+                Expected::RequestFailure
+                    | Expected::RecoveredReceipt
+                    | Expected::IncompatibleHelper
             );
             assert_eq!(
                 logs.iter()
@@ -3465,14 +3487,20 @@ mod tests {
                 "{}",
                 case.name,
             );
-            if case.protocol_version == 2 && request_failed {
+            if incompatible_helper {
                 assert!(
                     logs.iter().any(|log| {
                         log.field("error")
-                            == Some("unsupported firmware supervisor protocol version 2")
+                            == Some("firmware supervisor readiness failed: unsupported firmware supervisor protocol version 3")
                     }),
                     "{}",
-                    case.name
+                    case.name,
+                );
+                // Launch opens this log before spawning the configured helper.
+                assert!(
+                    !directory.path().join("0000:03:00.supervisor.log").exists(),
+                    "{}: mismatched helper must not trigger a replacement launch",
+                    case.name,
                 );
             }
             assert_eq!(
@@ -3531,13 +3559,14 @@ mod tests {
                         observer_exit_behavior: 0,
                         expected_identity: Some(
                             rpc::protos::firmware_supervisor::SupervisorIdentity {
-                                protocol_version: case.protocol_version,
+                                protocol_version: 4,
                                 device_identity: "0000:03:00".to_string(),
                                 boot_id: boot_id.clone(),
                                 execution_device: "0000:03:00.0".to_string(),
                             },
                         ),
                         update_context: None,
+                        expected_supervisor_instance_id: None,
                     }],
                     "{}",
                     case.name

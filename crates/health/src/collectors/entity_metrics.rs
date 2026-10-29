@@ -19,6 +19,7 @@ use std::borrow::Cow;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::SystemTime;
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -35,12 +36,23 @@ use crate::collectors::inventory::{DiscoveredEntity, SharedInventory};
 use crate::collectors::runtime::{IterationResult, PeriodicCollector};
 use crate::endpoint::BmcEndpoint;
 use crate::metrics::MetricLabel;
-use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample};
+use crate::sink::MetricSemantics::Gauge;
+use crate::sink::{CollectorEvent, DataSink, EventContext, MetricSample, MetricSemantics};
+
+// Device totals without a reported accumulation start keep `start_time`
+// unknown; collector startup does not establish it.
+fn device_total(description: &'static str) -> MetricSemantics {
+    MetricSemantics::CumulativeCounter {
+        description,
+        start_time: None,
+    }
+}
 
 struct MetricField {
     metric_type: Cow<'static, str>,
     unit: &'static str,
     value: f64,
+    semantics: MetricSemantics,
 }
 
 impl MetricField {
@@ -51,29 +63,38 @@ impl MetricField {
             metric_type: self.metric_type.into_owned(),
             unit: self.unit.to_string(),
             value: self.value,
-            semantics: crate::sink::MetricSemantics::Gauge,
+            semantics: self.semantics,
             labels,
             context: None,
         }
     }
 }
 
-/// Push a scalar `Option<Option<T: Into<f64>>>` field if present
+/// Push a scalar `Option<Option<T>>` field if present, defaulting to `Gauge`
+/// unless a `MetricSemantics` argument is supplied.
 macro_rules! scalar {
     ($out:expr, $src:expr, $field:ident, $mt:literal, $unit:literal) => {
+        scalar!($out, $src, $field, $mt, $unit, Gauge);
+    };
+    ($out:expr, $src:expr, $field:ident, $mt:literal, $unit:literal, $semantics:expr) => {
         if let Some(Some(value)) = $src.$field {
             $out.push(MetricField {
                 metric_type: Cow::Borrowed($mt),
                 unit: $unit,
                 value: value as f64,
+                semantics: $semantics,
             });
         }
     };
 }
 
-/// Push a field only when it is not backed by a sensor
+/// Push a field only when it is not backed by a sensor.
+/// Optional semantics default to `Gauge`.
 macro_rules! excerpt {
     ($out:expr, $src:expr, $field:ident, $mt:literal, $unit:literal) => {
+        excerpt!($out, $src, $field, $mt, $unit, Gauge);
+    };
+    ($out:expr, $src:expr, $field:ident, $mt:literal, $unit:literal, $semantics:expr) => {
         if let Some(excerpt) = &$src.$field {
             let sensor_backed = excerpt
                 .data_source_uri
@@ -86,6 +107,7 @@ macro_rules! excerpt {
                         metric_type: Cow::Borrowed($mt),
                         unit: $unit,
                         value,
+                        semantics: $semantics,
                     });
                 }
             }
@@ -94,13 +116,18 @@ macro_rules! excerpt {
 }
 
 /// Push an ISO 8601 `Edm.Duration` field (e.g. `"PT0S"`) as seconds.
+/// Optional semantics default to `Gauge`.
 macro_rules! duration_seconds {
     ($out:expr, $src:expr, $field:ident, $mt:literal) => {
+        duration_seconds!($out, $src, $field, $mt, Gauge);
+    };
+    ($out:expr, $src:expr, $field:ident, $mt:literal, $semantics:expr) => {
         if let Some(Some(duration)) = &$src.$field {
             $out.push(MetricField {
                 metric_type: Cow::Borrowed($mt),
                 unit: "seconds",
                 value: duration.as_f64_seconds(),
+                semantics: $semantics,
             });
         }
     };
@@ -117,59 +144,113 @@ macro_rules! boolean {
                 metric_type: Cow::Borrowed($mt),
                 unit: "bool",
                 value: if value { 1.0 } else { 0.0 },
+                semantics: Gauge,
             });
         }
     };
 }
 
 fn pcie_error_fields(out: &mut Vec<MetricField>, pcie: &PcieErrors) {
+    // Redfish defines these properties as total event counts.
     scalar!(
         out,
         pcie,
         correctable_error_count,
         "pcie_correctable_errors",
-        "count"
+        "count",
+        device_total("Number of PCIe correctable errors reported by the device")
     );
     scalar!(
         out,
         pcie,
         non_fatal_error_count,
         "pcie_non_fatal_errors",
-        "count"
+        "count",
+        device_total("Number of PCIe non-fatal errors reported by the device")
     );
-    scalar!(out, pcie, fatal_error_count, "pcie_fatal_errors", "count");
+    scalar!(
+        out,
+        pcie,
+        fatal_error_count,
+        "pcie_fatal_errors",
+        "count",
+        device_total("Number of PCIe fatal errors reported by the device")
+    );
     scalar!(
         out,
         pcie,
         l0to_recovery_count,
         "pcie_l0_to_recovery",
-        "count"
+        "count",
+        device_total("Number of PCIe link transitions from L0 to recovery for the device")
     );
-    scalar!(out, pcie, replay_count, "pcie_replay", "count");
+    scalar!(
+        out,
+        pcie,
+        replay_count,
+        "pcie_replay",
+        "count",
+        device_total("Number of PCIe replays issued by the device")
+    );
     scalar!(
         out,
         pcie,
         replay_rollover_count,
         "pcie_replay_rollover",
-        "count"
+        "count",
+        device_total("Number of PCIe replay rollovers issued by the device")
     );
-    scalar!(out, pcie, nak_sent_count, "pcie_nak_sent", "count");
-    scalar!(out, pcie, nak_received_count, "pcie_nak_received", "count");
+    scalar!(
+        out,
+        pcie,
+        nak_sent_count,
+        "pcie_nak_sent",
+        "count",
+        device_total("Number of PCIe negative acknowledgements sent by the device")
+    );
+    scalar!(
+        out,
+        pcie,
+        nak_received_count,
+        "pcie_nak_received",
+        "count",
+        device_total("Number of PCIe negative acknowledgements received by the device")
+    );
     scalar!(
         out,
         pcie,
         unsupported_request_count,
         "pcie_unsupported_request",
-        "count"
+        "count",
+        device_total("Number of unsupported PCIe requests received by the device")
     );
-    scalar!(out, pcie, bad_tlp_count, "pcie_bad_tlp", "count");
-    scalar!(out, pcie, bad_dllp_count, "pcie_bad_dllp", "count");
+    scalar!(
+        out,
+        pcie,
+        bad_tlp_count,
+        "pcie_bad_tlp",
+        "count",
+        device_total(
+            "Number of bad PCIe transaction layer packets issued on the PCIe link by the receiver"
+        )
+    );
+    scalar!(
+        out,
+        pcie,
+        bad_dllp_count,
+        "pcie_bad_dllp",
+        "count",
+        device_total(
+            "Number of bad PCIe data link layer packets issued on the PCIe link by the receiver"
+        )
+    );
     scalar!(
         out,
         pcie,
         flow_control_timeout_errors,
         "pcie_flow_control_timeout",
-        "count"
+        "count",
+        device_total("Number of PCIe flow control credit timeouts reported by the device")
     );
 }
 
@@ -230,13 +311,19 @@ fn processor_metric_fields(m: &ProcessorMetrics) -> Vec<MetricField> {
         out,
         m,
         power_limit_throttle_duration,
-        "power_limit_throttle"
+        "power_limit_throttle",
+        device_total(
+            "Number of seconds the processor has throttled due to a power limit since reset"
+        )
     );
     duration_seconds!(
         out,
         m,
         thermal_limit_throttle_duration,
-        "thermal_limit_throttle"
+        "thermal_limit_throttle",
+        device_total(
+            "Number of seconds the processor has throttled due to a thermal limit since reset"
+        )
     );
     excerpt!(out, m, core_voltage, "core_voltage", "volts");
     if let Some(pcie) = &m.pcie_errors {
@@ -250,6 +337,7 @@ fn memory_metric_fields(m: &MemoryMetrics) -> Vec<MetricField> {
     scalar!(out, m, block_size_bytes, "block_size", "bytes");
     scalar!(out, m, bandwidth_percent, "bandwidth", "percent");
     scalar!(out, m, operating_speed_mhz, "operating_speed", "mhz");
+    // Redfish does not define an accumulation period for these top-level counts.
     scalar!(
         out,
         m,
@@ -278,58 +366,91 @@ fn memory_metric_fields(m: &MemoryMetrics) -> Vec<MetricField> {
             cp,
             correctable_ecc_error_count,
             "current_correctable_ecc_errors",
-            "count"
+            "count",
+            device_total(
+                "Number of correctable memory ECC errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id"
+            )
         );
         scalar!(
             out,
             cp,
             uncorrectable_ecc_error_count,
             "current_uncorrectable_ecc_errors",
-            "count"
+            "count",
+            device_total(
+                "Number of uncorrectable memory ECC errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id"
+            )
         );
         scalar!(
             out,
             cp,
             indeterminate_correctable_error_count,
             "current_indeterminate_correctable_errors",
-            "count"
+            "count",
+            device_total(
+                "Number of indeterminate correctable memory errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id; the same error may appear for multiple memory resources"
+            )
         );
         scalar!(
             out,
             cp,
             indeterminate_uncorrectable_error_count,
             "current_indeterminate_uncorrectable_errors",
-            "count"
+            "count",
+            device_total(
+                "Number of indeterminate uncorrectable memory errors since the last system reset or ClearCurrentPeriod action, by memory_id and system_id; the same error may appear for multiple memory resources"
+            )
         );
     }
     if let Some(lt) = &m.life_time {
+        // `LifetimeStartDateTime` applies to `LifeTime` errors, not `CurrentPeriod`.
+        let lifetime_start_time = m
+            .lifetime_start_date_time
+            .flatten()
+            .and_then(|start| SystemTime::try_from(start).ok());
         scalar!(
             out,
             lt,
             correctable_ecc_error_count,
             "lifetime_correctable_ecc_errors",
-            "count"
+            "count",
+            MetricSemantics::CumulativeCounter {
+                description: "Number of correctable ECC errors over the lifetime of the memory, by memory_id and system_id",
+                start_time: lifetime_start_time,
+            }
         );
         scalar!(
             out,
             lt,
             uncorrectable_ecc_error_count,
             "lifetime_uncorrectable_ecc_errors",
-            "count"
+            "count",
+            MetricSemantics::CumulativeCounter {
+                description: "Number of uncorrectable ECC errors over the lifetime of the memory, by memory_id and system_id",
+                start_time: lifetime_start_time,
+            }
         );
         scalar!(
             out,
             lt,
             indeterminate_correctable_error_count,
             "lifetime_indeterminate_correctable_errors",
-            "count"
+            "count",
+            MetricSemantics::CumulativeCounter {
+                description: "Number of indeterminate correctable errors over the lifetime of the memory, by memory_id and system_id; the same error may appear for multiple memory resources",
+                start_time: lifetime_start_time,
+            }
         );
         scalar!(
             out,
             lt,
             indeterminate_uncorrectable_error_count,
             "lifetime_indeterminate_uncorrectable_errors",
-            "count"
+            "count",
+            MetricSemantics::CumulativeCounter {
+                description: "Number of indeterminate uncorrectable errors over the lifetime of the memory, by memory_id and system_id; the same error may appear for multiple memory resources",
+                start_time: lifetime_start_time,
+            }
         );
     }
     out
@@ -432,8 +553,27 @@ macro_rules! nvidia_common_processor_fields {
             "nvidia_nvofa_utilization",
             "percent"
         );
-        scalar!(out, m, pcie_tx_bytes, "nvidia_pcie_tx", "bytes");
-        scalar!(out, m, pcie_rx_bytes, "nvidia_pcie_rx", "bytes");
+        // NVIDIA defines these as total bytes sent and received over PCIe.
+        scalar!(
+            out,
+            m,
+            pcie_tx_bytes,
+            "nvidia_pcie_tx",
+            "bytes",
+            device_total(
+                "Number of bytes sent by the NVIDIA processor PCIe transmitter, by processor_id and system_id"
+            )
+        );
+        scalar!(
+            out,
+            m,
+            pcie_rx_bytes,
+            "nvidia_pcie_rx",
+            "bytes",
+            device_total(
+                "Number of bytes received by the NVIDIA processor PCIe receiver, by processor_id and system_id"
+            )
+        );
         scalar!(
             out,
             m,
@@ -476,29 +616,45 @@ macro_rules! nvidia_common_processor_fields {
             "nvidia_nvlink_data_rx_bandwidth",
             "gbps"
         );
+        // NVIDIA defines these throttling durations as totals since reset.
         duration_seconds!(
             out,
             m,
             hardware_violation_throttle_duration,
-            "nvidia_hardware_violation_throttle"
+            "nvidia_hardware_violation_throttle",
+            device_total(
+                "Number of seconds the NVIDIA processor has throttled due to hardware violation since reset, by processor_id and system_id"
+            )
         );
         duration_seconds!(
             out,
             m,
             global_software_violation_throttle_duration,
-            "nvidia_global_software_violation_throttle"
+            "nvidia_global_software_violation_throttle",
+            device_total(
+                "Number of seconds the NVIDIA processor has throttled due to global software violation since reset, by processor_id and system_id"
+            )
         );
+        // These accumulate while the driver is loaded. SBR or fundamental resets
+        // and `ClearAccumulatedUtilizationCounters` clear them; they also roll
+        // over to zero after about 49 days of activity.
         duration_seconds!(
             out,
             m,
             accumulated_gpu_context_utilization_duration,
-            "nvidia_accumulated_gpu_context_utilization"
+            "nvidia_accumulated_gpu_context_utilization",
+            device_total(
+                "Number of seconds of GPU context utilization accumulated with the driver loaded, by processor_id and system_id; resets on SBR, fundamental reset, or ClearAccumulatedUtilizationCounters and wraps after approximately 49 days of activity"
+            )
         );
         duration_seconds!(
             out,
             m,
             accumulated_sm_utilization_duration,
-            "nvidia_accumulated_sm_utilization"
+            "nvidia_accumulated_sm_utilization",
+            device_total(
+                "Number of seconds of SM utilization accumulated with the driver loaded, by processor_id and system_id; resets on SBR, fundamental reset, or ClearAccumulatedUtilizationCounters and wraps after approximately 49 days of activity"
+            )
         );
 
         // `ThrottleReasons` is a list of strings; project only how many
@@ -514,6 +670,7 @@ macro_rules! nvidia_common_processor_fields {
                 metric_type: Cow::Borrowed("nvidia_throttle_reasons"),
                 unit: "count",
                 value: active as f64,
+                semantics: Gauge,
             });
         }
     }};
@@ -546,6 +703,7 @@ fn nvidia_processor_metric_fields(m: &NvidiaProcessorMetrics) -> Vec<MetricField
             metric_type: Cow::Borrowed("nvidia_integer_activity_utilization"),
             unit: "percent",
             value,
+            semantics: Gauge,
         });
     }
 
@@ -656,11 +814,15 @@ fn nvidia_processor_metric_fields(m: &NvidiaProcessorMetrics) -> Vec<MetricField
                 memory_spare_channel_presence,
                 "nvidia_memory_spare_channel_present"
             );
+            // NVIDIA defines power-brake duration as total asserted time since reset.
             duration_seconds!(
                 out,
                 generic,
                 power_brake_assertion_duration,
-                "nvidia_power_brake_assertion"
+                "nvidia_power_brake_assertion",
+                device_total(
+                    "Number of seconds the NVIDIA processor power brake has been asserted since reset, by processor_id and system_id"
+                )
             );
             duration_seconds!(out, generic, cpu_uptime, "nvidia_cpu_uptime");
         }
@@ -675,19 +837,26 @@ fn nvidia_memory_metric_fields(m: &NvidiaMemoryMetrics) -> Vec<MetricField> {
         return out;
     };
 
+    // NVIDIA defines these as total row remappings caused by memory errors.
     scalar!(
         out,
         rr,
         correctable_row_remapping_count,
         "nvidia_correctable_row_remapping",
-        "count"
+        "count",
+        device_total(
+            "Number of memory row remappings due to correctable errors reported by the NVIDIA device, by memory_id and system_id"
+        )
     );
     scalar!(
         out,
         rr,
         uncorrectable_row_remapping_count,
         "nvidia_uncorrectable_row_remapping",
-        "count"
+        "count",
+        device_total(
+            "Number of memory row remappings due to uncorrectable errors reported by the NVIDIA device, by memory_id and system_id"
+        )
     );
 
     // The schema carries each bank-availability counter under both the
@@ -701,6 +870,7 @@ fn nvidia_memory_metric_fields(m: &NvidiaMemoryMetrics) -> Vec<MetricField> {
                     metric_type: Cow::Borrowed($mt),
                     unit: "count",
                     value: value as f64,
+                    semantics: Gauge,
                 });
             }
         };
@@ -737,36 +907,68 @@ fn nvidia_memory_metric_fields(m: &NvidiaMemoryMetrics) -> Vec<MetricField> {
 
 fn drive_metric_fields(m: &nv_redfish::schema::drive_metrics::DriveMetrics) -> Vec<MetricField> {
     let mut out = Vec::new();
+    // Redfish defines these errors and power-on hours over the drive's
+    // lifetime, starting at `LifetimeStartDateTime` when the BMC reports it.
+    let lifetime_start_time = m
+        .lifetime_start_date_time
+        .flatten()
+        .and_then(|start| SystemTime::try_from(start).ok());
     scalar!(
         out,
         m,
         correctable_io_read_error_count,
         "correctable_io_read_errors",
-        "count"
+        "count",
+        MetricSemantics::CumulativeCounter {
+            description: "Number of correctable read errors over the lifetime of the drive, by drive_id, storage_id, and system_id",
+            start_time: lifetime_start_time,
+        }
     );
     scalar!(
         out,
         m,
         correctable_io_write_error_count,
         "correctable_io_write_errors",
-        "count"
+        "count",
+        MetricSemantics::CumulativeCounter {
+            description: "Number of correctable write errors over the lifetime of the drive, by drive_id, storage_id, and system_id",
+            start_time: lifetime_start_time,
+        }
     );
     scalar!(
         out,
         m,
         uncorrectable_io_read_error_count,
         "uncorrectable_io_read_errors",
-        "count"
+        "count",
+        MetricSemantics::CumulativeCounter {
+            description: "Number of uncorrectable read errors over the lifetime of the drive, by drive_id, storage_id, and system_id",
+            start_time: lifetime_start_time,
+        }
     );
     scalar!(
         out,
         m,
         uncorrectable_io_write_error_count,
         "uncorrectable_io_write_errors",
-        "count"
+        "count",
+        MetricSemantics::CumulativeCounter {
+            description: "Number of uncorrectable write errors over the lifetime of the drive, by drive_id, storage_id, and system_id",
+            start_time: lifetime_start_time,
+        }
     );
     scalar!(out, m, bad_block_count, "bad_block", "count");
-    scalar!(out, m, power_on_hours, "power_on_hours", "hours");
+    scalar!(
+        out,
+        m,
+        power_on_hours,
+        "power_on_hours",
+        "hours",
+        MetricSemantics::CumulativeCounter {
+            description: "Number of power-on hours over the lifetime of the drive, by drive_id, storage_id, system_id, and optional model",
+            start_time: lifetime_start_time,
+        }
+    );
     scalar!(
         out,
         m,
@@ -774,17 +976,53 @@ fn drive_metric_fields(m: &nv_redfish::schema::drive_metrics::DriveMetrics) -> V
         "native_command_queue_depth",
         "count"
     );
-    scalar!(out, m, read_ioki_bytes, "read_io", "kibibytes");
-    scalar!(out, m, write_ioki_bytes, "write_io", "kibibytes");
+    // `ReadIOKiBytes` and `WriteIOKiBytes` total data since the last reset or wrap.
+    scalar!(
+        out,
+        m,
+        read_ioki_bytes,
+        "read_io",
+        "kibibytes",
+        device_total(
+            "Number of kibibytes read from the drive since the last reset or wrap, by drive_id, storage_id, and system_id"
+        )
+    );
+    scalar!(
+        out,
+        m,
+        write_ioki_bytes,
+        "write_io",
+        "kibibytes",
+        device_total(
+            "Number of kibibytes written to the drive since the last reset or wrap, by drive_id, storage_id, and system_id"
+        )
+    );
     out
 }
 
 fn power_supply_metric_fields(m: &PowerSupplyMetrics) -> Vec<MetricField> {
     let mut out = Vec::new();
+    // `SensorResetTime` applies to `Reading`; `LifetimeReading` has a
+    // separate accumulation epoch.
+    let energy_start_time = m
+        .energyk_wh
+        .as_ref()
+        .and_then(|energy| energy.sensor_reset_time.flatten())
+        .and_then(|start| SystemTime::try_from(start).ok());
     excerpt!(out, m, input_voltage, "input_voltage", "volts");
     excerpt!(out, m, input_current_amps, "input_current", "amperes");
     excerpt!(out, m, input_power_watts, "input_power", "watts");
-    excerpt!(out, m, energyk_wh, "energy", "kilowatt_hours");
+    excerpt!(
+        out,
+        m,
+        energyk_wh,
+        "energy",
+        "kilowatt_hours",
+        MetricSemantics::CumulativeCounter {
+            description: "Number of kilowatt-hours consumed by the power supply since the last sensor reset, by powersupply_id, chassis_id, and optional model",
+            start_time: energy_start_time,
+        }
+    );
     excerpt!(out, m, frequency_hz, "frequency", "hertz");
     excerpt!(out, m, output_power_watts, "output_power", "watts");
     excerpt!(out, m, temperature_celsius, "temperature", "celsius");
@@ -800,7 +1038,7 @@ pub(crate) fn catalogue_samples() -> Result<Vec<MetricSample>, HealthError> {
         "@odata.id": "/redfish/v1/Systems/1/Processors/CPU0/ProcessorMetrics",
         "Id": "ProcessorMetrics",
         "Name": "Processor Metrics",
-        "PowerLimitThrottleDuration": "PT1S",
+        "PowerLimitThrottleDuration": "PT1.25S",
         "ThermalLimitThrottleDuration": "PT2S",
         "PCIeErrors": {
             "CorrectableErrorCount": 1,
@@ -817,18 +1055,124 @@ pub(crate) fn catalogue_samples() -> Result<Vec<MetricSample>, HealthError> {
             "FlowControlTimeoutErrors": 12
         }
     }))?);
-    Ok(processor
-        .into_iter()
-        .map(|field| {
-            field.into_sample(
-                "/redfish/v1/Systems/1/Processors/CPU0",
-                vec![
-                    (Cow::Borrowed("processor_id"), "CPU0".to_string()),
-                    (Cow::Borrowed("system_id"), "1".to_string()),
-                ],
-            )
-        })
-        .collect())
+    let memory = memory_metric_fields(&serde_json::from_value(json!({
+        "@odata.id": "/redfish/v1/Systems/1/Memory/DIMM0/MemoryMetrics",
+        "Id": "MemoryMetrics",
+        "Name": "Memory Metrics",
+        "LifetimeStartDateTime": "1970-01-01T00:01:40Z",
+        "CurrentPeriod": {
+            "CorrectableECCErrorCount": 1,
+            "UncorrectableECCErrorCount": 2,
+            "IndeterminateCorrectableErrorCount": 3,
+            "IndeterminateUncorrectableErrorCount": 4
+        },
+        "LifeTime": {
+            "CorrectableECCErrorCount": 5,
+            "UncorrectableECCErrorCount": 6,
+            "IndeterminateCorrectableErrorCount": 7,
+            "IndeterminateUncorrectableErrorCount": 8
+        }
+    }))?);
+    let drive = drive_metric_fields(&serde_json::from_value(json!({
+        "@odata.id": "/redfish/v1/Systems/1/Storage/1/Drives/D0/Metrics",
+        "Id": "DriveMetrics",
+        "Name": "Drive Metrics",
+        "LifetimeStartDateTime": "1970-01-01T00:01:40Z",
+        "CorrectableIOReadErrorCount": 1,
+        "CorrectableIOWriteErrorCount": 2,
+        "UncorrectableIOReadErrorCount": 3,
+        "UncorrectableIOWriteErrorCount": 4,
+        "ReadIOKiBytes": 5,
+        "WriteIOKiBytes": 6,
+        "PowerOnHours": 12345.5
+    }))?);
+    let power_supply = power_supply_metric_fields(&serde_json::from_value(json!({
+        "@odata.id": "/redfish/v1/Chassis/1/PowerSubsystem/PowerSupplies/PSU0/Metrics",
+        "Id": "PowerSupplyMetrics",
+        "Name": "Power Supply Metrics",
+        "EnergykWh": {
+            "Reading": 2.5,
+            "SensorResetTime": "1970-01-01T00:01:40Z"
+        }
+    }))?);
+    let nvidia_processor = nvidia_processor_metric_fields(&NvidiaProcessorMetrics::Generic(
+        Arc::new(serde_json::from_value(json!({
+            "@odata.type": "#NvidiaProcessorMetrics.v1_5_0.NvidiaProcessorMetrics",
+            "PCIeTXBytes": 1,
+            "PCIeRXBytes": 2,
+            "HardwareViolationThrottleDuration": "PT3S",
+            "GlobalSoftwareViolationThrottleDuration": "PT4S",
+            "AccumulatedGPUContextUtilizationDuration": "PT5S",
+            "AccumulatedSMUtilizationDuration": "PT6S",
+            "PowerBrakeAssertionDuration": "PT7S"
+        }))?),
+    ));
+    let nvidia_memory = nvidia_memory_metric_fields(&serde_json::from_value(json!({
+        "@odata.type": "#NvidiaMemoryMetrics.v1_2_0.NvidiaMemoryMetrics",
+        "RowRemapping": {
+            "CorrectableRowRemappingCount": 1,
+            "UncorrectableRowRemappingCount": 2
+        }
+    }))?);
+
+    Ok([
+        (
+            processor,
+            "/redfish/v1/Systems/1/Processors/CPU0",
+            vec![
+                (Cow::Borrowed("processor_id"), "CPU0".to_string()),
+                (Cow::Borrowed("system_id"), "1".to_string()),
+            ],
+        ),
+        (
+            memory,
+            "/redfish/v1/Systems/1/Memory/DIMM0",
+            vec![
+                (Cow::Borrowed("memory_id"), "DIMM0".to_string()),
+                (Cow::Borrowed("system_id"), "1".to_string()),
+            ],
+        ),
+        (
+            drive,
+            "/redfish/v1/Systems/1/Storage/1/Drives/D0",
+            vec![
+                (Cow::Borrowed("drive_id"), "D0".to_string()),
+                (Cow::Borrowed("storage_id"), "1".to_string()),
+                (Cow::Borrowed("system_id"), "1".to_string()),
+            ],
+        ),
+        (
+            power_supply,
+            "/redfish/v1/Chassis/1/PowerSubsystem/PowerSupplies/PSU0",
+            vec![
+                (Cow::Borrowed("powersupply_id"), "PSU0".to_string()),
+                (Cow::Borrowed("chassis_id"), "1".to_string()),
+            ],
+        ),
+        (
+            nvidia_processor,
+            "/redfish/v1/Systems/1/Processors/GPU0",
+            vec![
+                (Cow::Borrowed("processor_id"), "GPU0".to_string()),
+                (Cow::Borrowed("system_id"), "1".to_string()),
+            ],
+        ),
+        (
+            nvidia_memory,
+            "/redfish/v1/Systems/1/Memory/GPU0_DRAM",
+            vec![
+                (Cow::Borrowed("memory_id"), "GPU0_DRAM".to_string()),
+                (Cow::Borrowed("system_id"), "1".to_string()),
+            ],
+        ),
+    ]
+    .into_iter()
+    .flat_map(|(fields, entity_key, labels)| {
+        fields
+            .into_iter()
+            .map(move |field| field.into_sample(entity_key, labels.clone()))
+    })
+    .collect())
 }
 
 pub struct MetricsCollectorConfig<B: Bmc> {
@@ -1043,7 +1387,7 @@ impl<B: Bmc + 'static> MetricsCollector<B> {
 mod tests {
     use std::convert::Infallible;
     use std::sync::Mutex as StdMutex;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use carbide_test_support::Outcome::Yields;
     use carbide_test_support::{Case, Check, check_cases_async, check_values};
@@ -1053,7 +1397,114 @@ mod tests {
     use crate::collectors::inventory::EntityInventory;
     use crate::collectors::projection_test_support::{ProjectionFixture, TestBmc, TestEntity};
     use crate::endpoint::test_support::{mac, test_endpoint};
-    use crate::sink::MetricSemantics;
+
+    #[test]
+    fn source_totals_stay_absolute_in_prometheus_and_otlp_conversion() {
+        use crate::metrics::MetricsManager;
+        use crate::otlp::convert::build_metrics_export_request;
+        use crate::otlp::metrics::{metric, number_data_point};
+        use crate::sink::PrometheusSink;
+
+        let manager = Arc::new(MetricsManager::new("service").expect("metrics manager"));
+        let sink = PrometheusSink::new(manager.clone(), "custom").expect("Prometheus sink");
+        let context = EventContext::from_endpoint(
+            &test_endpoint(mac("00:11:22:33:44:55")),
+            "metrics_collector",
+        );
+        const PCIE_COUNTER: &str = "custom_hw_metric_pcie_correctable_errors_count_total";
+        const PCIE_GAUGE: &str = "custom_hw_metric_pcie_correctable_errors_count";
+        const BANDWIDTH_GAUGE: &str = "custom_hw_metric_bandwidth_percent";
+
+        // One persistent Prometheus sink and stateless OTLP conversion preserve
+        // repeated totals, decreases, and later increases without adding offsets.
+        for (step, total, bandwidth) in [
+            ("initial", 10, 9),
+            ("repeated", 10, 8),
+            ("increased", 13, 7),
+            ("lower", 2, 6),
+            ("zero", 0, 5),
+            ("increased from zero", 1, 4),
+        ] {
+            let source = serde_json::from_value(json!({
+                "@odata.id": "/redfish/v1/Systems/1/Processors/CPU0/ProcessorMetrics",
+                "Id": "ProcessorMetrics",
+                "Name": "Processor Metrics",
+                "BandwidthPercent": bandwidth,
+                "PCIeErrors": { "CorrectableErrorCount": total }
+            }))
+            .expect("processor metrics");
+            let batch: Vec<_> = processor_metric_fields(&source)
+                .into_iter()
+                .map(|field| {
+                    let sample = field.into_sample(
+                        "CPU0",
+                        vec![(Cow::Borrowed("processor_id"), "CPU0".to_string())],
+                    );
+                    (context.clone(), sample)
+                })
+                .collect();
+            sink.try_handle_event(&context, &CollectorEvent::MetricCollectionStart)
+                .expect("start metric collection");
+            for (context, sample) in &batch {
+                sink.try_handle_event(context, &CollectorEvent::Metric(sample.clone().into()))
+                    .expect("record source sample");
+            }
+            sink.try_handle_event(&context, &CollectorEvent::MetricCollectionEnd)
+                .expect("end metric collection");
+
+            let prometheus = manager.export_telemetry().expect("export telemetry");
+            for (name, kind, value) in [
+                (PCIE_GAUGE, "gauge", total),
+                (PCIE_COUNTER, "counter", total),
+                (BANDWIDTH_GAUGE, "gauge", bandwidth),
+            ] {
+                assert!(
+                    prometheus.contains(&format!("# TYPE {name} {kind}\n")),
+                    "{step}: {name} type"
+                );
+                let row = prometheus
+                    .lines()
+                    .find(|line| line.starts_with(&format!("{name}{{")))
+                    .expect("metric row");
+                assert_eq!(
+                    row.rsplit_once(' ').expect("metric value").1,
+                    value.to_string(),
+                    "{step}: {name} value"
+                );
+            }
+
+            let request = build_metrics_export_request(&batch, 100, "custom");
+            let metrics = &request.resource_metrics[0].scope_metrics[0].metrics;
+            assert_eq!(metrics.len(), 3, "{step}: OTLP metric count");
+            for (name, value) in [
+                (PCIE_GAUGE, total),
+                (PCIE_COUNTER, total),
+                (BANDWIDTH_GAUGE, bandwidth),
+            ] {
+                let exported = metrics
+                    .iter()
+                    .find(|metric| metric.name == name)
+                    .expect("OTLP metric");
+                let points = match exported.data.as_ref().expect("metric data") {
+                    metric::Data::Sum(sum) => {
+                        assert_eq!(name, PCIE_COUNTER, "{step}: OTLP Sum");
+                        &sum.data_points
+                    }
+                    metric::Data::Gauge(gauge) => {
+                        assert_ne!(name, PCIE_COUNTER, "{step}: OTLP Gauge");
+                        &gauge.data_points
+                    }
+                    _ => panic!("unexpected metric type"),
+                };
+                assert_eq!(points.len(), 1, "{step}: {name} point count");
+                assert_eq!(
+                    points[0].value,
+                    Some(number_data_point::Value::AsDouble(value as f64)),
+                    "{step}: {name} OTLP value"
+                );
+            }
+        }
+    }
 
     #[derive(Clone, Copy)]
     enum Projection {
@@ -1074,7 +1525,30 @@ mod tests {
         metrics: serde_json::Value,
     }
 
-    type ProjectedMetric = (String, &'static str, f64);
+    const COUNTER: MetricSemantics = MetricSemantics::CumulativeCounter {
+        description: "",
+        start_time: None,
+    };
+
+    // Compare classifications independently of HELP wording; the catalogue
+    // check verifies that descriptions propagate unchanged.
+    fn observed_semantics(semantics: MetricSemantics) -> MetricSemantics {
+        match semantics {
+            Gauge => Gauge,
+            MetricSemantics::CumulativeCounter {
+                description,
+                start_time,
+            } => {
+                assert!(!description.is_empty(), "counter description");
+                MetricSemantics::CumulativeCounter {
+                    description: "",
+                    start_time,
+                }
+            }
+        }
+    }
+
+    type ProjectedMetric = (String, &'static str, f64, MetricSemantics);
 
     fn sort_projected_metrics(mut fields: Vec<ProjectedMetric>) -> Vec<ProjectedMetric> {
         fields.sort_by(|left, right| {
@@ -1123,7 +1597,14 @@ mod tests {
         sort_projected_metrics(
             fields
                 .into_iter()
-                .map(|field| (field.metric_type.into_owned(), field.unit, field.value))
+                .map(|field| {
+                    (
+                        field.metric_type.into_owned(),
+                        field.unit,
+                        field.value,
+                        observed_semantics(field.semantics),
+                    )
+                })
                 .collect(),
         )
     }
@@ -1131,16 +1612,33 @@ mod tests {
     fn expected(
         fields: impl IntoIterator<Item = (&'static str, &'static str, f64)>,
     ) -> Vec<ProjectedMetric> {
+        expected_with_semantics(
+            fields
+                .into_iter()
+                .map(|(metric_type, unit, value)| (metric_type, unit, value, Gauge)),
+        )
+    }
+
+    fn expected_with_semantics(
+        fields: impl IntoIterator<Item = (&'static str, &'static str, f64, MetricSemantics)>,
+    ) -> Vec<ProjectedMetric> {
         sort_projected_metrics(
             fields
                 .into_iter()
-                .map(|(metric_type, unit, value)| (metric_type.to_string(), unit, value))
+                .map(|(metric_type, unit, value, semantics)| {
+                    (metric_type.to_string(), unit, value, semantics)
+                })
                 .collect(),
         )
     }
 
     #[test]
     fn child_metric_projection_cases() {
+        let reported_start = MetricSemantics::CumulativeCounter {
+            description: "",
+            start_time: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(100)),
+        };
+
         check_values(
             [
                 Check {
@@ -1163,15 +1661,15 @@ mod tests {
                             "ThermalLimitThrottleDuration": "PT1M30S"
                         }),
                     },
-                    expect: expected([
-                        ("bandwidth", "percent", 42.5),
-                        ("operating_speed", "mhz", 3200.0),
-                        ("correctable_core_errors", "count", 7.0),
-                        ("uncorrectable_core_errors", "count", 0.0),
-                        ("power_limit_throttle", "seconds", 0.0),
-                        ("thermal_limit_throttle", "seconds", 90.0),
-                        ("pcie_correctable_errors", "count", 3.0),
-                        ("pcie_fatal_errors", "count", 1.0),
+                    expect: expected_with_semantics([
+                        ("bandwidth", "percent", 42.5, Gauge),
+                        ("operating_speed", "mhz", 3200.0, Gauge),
+                        ("correctable_core_errors", "count", 7.0, Gauge),
+                        ("uncorrectable_core_errors", "count", 0.0, Gauge),
+                        ("power_limit_throttle", "seconds", 0.0, COUNTER),
+                        ("thermal_limit_throttle", "seconds", 90.0, COUNTER),
+                        ("pcie_correctable_errors", "count", 3.0, COUNTER),
+                        ("pcie_fatal_errors", "count", 1.0, COUNTER),
                     ]),
                 },
                 Check {
@@ -1236,28 +1734,28 @@ mod tests {
                             }
                         }),
                     },
-                    expect: expected([
-                        ("average_frequency", "mhz", 2800.5),
-                        ("throttling", "celsius", 95.0),
-                        ("temperature", "celsius", 65.0),
-                        ("consumed_power", "watts", 250.0),
-                        ("frequency_ratio", "ratio", 0.75),
-                        ("local_memory_bandwidth", "bytes", 1000.0),
-                        ("remote_memory_bandwidth", "bytes", 2000.0),
-                        ("kernel_time", "percent", 4.5),
-                        ("user_time", "percent", 10.5),
-                        ("correctable_other_errors", "count", 2.0),
-                        ("uncorrectable_other_errors", "count", 3.0),
-                        ("pcie_non_fatal_errors", "count", 1.0),
-                        ("pcie_l0_to_recovery", "count", 2.0),
-                        ("pcie_replay", "count", 3.0),
-                        ("pcie_replay_rollover", "count", 4.0),
-                        ("pcie_nak_sent", "count", 5.0),
-                        ("pcie_nak_received", "count", 6.0),
-                        ("pcie_unsupported_request", "count", 7.0),
-                        ("pcie_bad_tlp", "count", 8.0),
-                        ("pcie_bad_dllp", "count", 9.0),
-                        ("pcie_flow_control_timeout", "count", 10.0),
+                    expect: expected_with_semantics([
+                        ("average_frequency", "mhz", 2800.5, Gauge),
+                        ("throttling", "celsius", 95.0, Gauge),
+                        ("temperature", "celsius", 65.0, Gauge),
+                        ("consumed_power", "watts", 250.0, Gauge),
+                        ("frequency_ratio", "ratio", 0.75, Gauge),
+                        ("local_memory_bandwidth", "bytes", 1000.0, Gauge),
+                        ("remote_memory_bandwidth", "bytes", 2000.0, Gauge),
+                        ("kernel_time", "percent", 4.5, Gauge),
+                        ("user_time", "percent", 10.5, Gauge),
+                        ("correctable_other_errors", "count", 2.0, Gauge),
+                        ("uncorrectable_other_errors", "count", 3.0, Gauge),
+                        ("pcie_non_fatal_errors", "count", 1.0, COUNTER),
+                        ("pcie_l0_to_recovery", "count", 2.0, COUNTER),
+                        ("pcie_replay", "count", 3.0, COUNTER),
+                        ("pcie_replay_rollover", "count", 4.0, COUNTER),
+                        ("pcie_nak_sent", "count", 5.0, COUNTER),
+                        ("pcie_nak_received", "count", 6.0, COUNTER),
+                        ("pcie_unsupported_request", "count", 7.0, COUNTER),
+                        ("pcie_bad_tlp", "count", 8.0, COUNTER),
+                        ("pcie_bad_dllp", "count", 9.0, COUNTER),
+                        ("pcie_flow_control_timeout", "count", 10.0, COUNTER),
                     ]),
                 },
                 Check {
@@ -1275,7 +1773,7 @@ mod tests {
                     expect: expected([]),
                 },
                 Check {
-                    scenario: "memory nested periods use distinct prefixes",
+                    scenario: "memory lifetime counters keep unknown starts when absent",
                     input: ProjectionCase {
                         projection: Projection::Memory,
                         metrics: json!({
@@ -1287,51 +1785,88 @@ mod tests {
                             "LifeTime": { "UncorrectableECCErrorCount": 9 }
                         }),
                     },
-                    expect: expected([
-                        ("corrected_volatile_errors", "count", 2.0),
-                        ("current_correctable_ecc_errors", "count", 5.0),
-                        ("lifetime_uncorrectable_ecc_errors", "count", 9.0),
+                    expect: expected_with_semantics([
+                        ("corrected_volatile_errors", "count", 2.0, Gauge),
+                        ("current_correctable_ecc_errors", "count", 5.0, COUNTER),
+                        ("lifetime_uncorrectable_ecc_errors", "count", 9.0, COUNTER),
                     ]),
                 },
                 Check {
-                    scenario: "remaining memory scalars and period counters",
+                    scenario: "memory lifetime start applies only to LifeTime counters",
                     input: ProjectionCase {
                         projection: Projection::Memory,
                         metrics: json!({
                             "@odata.id": "/redfish/v1/Systems/1/Memory/DIMM0/MemoryMetrics",
                             "Id": "MemoryMetrics",
                             "Name": "Memory Metrics",
+                            "LifetimeStartDateTime": "1970-01-01T00:01:40Z",
                             "BlockSizeBytes": 4096,
                             "BandwidthPercent": 72.5,
                             "OperatingSpeedMHz": 6400,
+                            "CorrectedVolatileErrorCount": 2,
                             "CorrectedPersistentErrorCount": 3,
                             "DirtyShutdownCount": 4,
                             "CapacityUtilizationPercent": 81.0,
                             "CurrentPeriod": {
+                                "CorrectableECCErrorCount": 12,
                                 "UncorrectableECCErrorCount": 5,
                                 "IndeterminateCorrectableErrorCount": 6,
                                 "IndeterminateUncorrectableErrorCount": 7
                             },
                             "LifeTime": {
                                 "CorrectableECCErrorCount": 8,
+                                "UncorrectableECCErrorCount": 11,
                                 "IndeterminateCorrectableErrorCount": 9,
                                 "IndeterminateUncorrectableErrorCount": 10
                             }
                         }),
                     },
-                    expect: expected([
-                        ("block_size", "bytes", 4096.0),
-                        ("bandwidth", "percent", 72.5),
-                        ("operating_speed", "mhz", 6400.0),
-                        ("corrected_persistent_errors", "count", 3.0),
-                        ("dirty_shutdown", "count", 4.0),
-                        ("capacity_utilization", "percent", 81.0),
-                        ("current_uncorrectable_ecc_errors", "count", 5.0),
-                        ("current_indeterminate_correctable_errors", "count", 6.0),
-                        ("current_indeterminate_uncorrectable_errors", "count", 7.0),
-                        ("lifetime_correctable_ecc_errors", "count", 8.0),
-                        ("lifetime_indeterminate_correctable_errors", "count", 9.0),
-                        ("lifetime_indeterminate_uncorrectable_errors", "count", 10.0),
+                    expect: expected_with_semantics([
+                        ("block_size", "bytes", 4096.0, Gauge),
+                        ("bandwidth", "percent", 72.5, Gauge),
+                        ("operating_speed", "mhz", 6400.0, Gauge),
+                        ("corrected_volatile_errors", "count", 2.0, Gauge),
+                        ("corrected_persistent_errors", "count", 3.0, Gauge),
+                        ("dirty_shutdown", "count", 4.0, Gauge),
+                        ("capacity_utilization", "percent", 81.0, Gauge),
+                        ("current_correctable_ecc_errors", "count", 12.0, COUNTER),
+                        ("current_uncorrectable_ecc_errors", "count", 5.0, COUNTER),
+                        (
+                            "current_indeterminate_correctable_errors",
+                            "count",
+                            6.0,
+                            COUNTER,
+                        ),
+                        (
+                            "current_indeterminate_uncorrectable_errors",
+                            "count",
+                            7.0,
+                            COUNTER,
+                        ),
+                        (
+                            "lifetime_correctable_ecc_errors",
+                            "count",
+                            8.0,
+                            reported_start,
+                        ),
+                        (
+                            "lifetime_uncorrectable_ecc_errors",
+                            "count",
+                            11.0,
+                            reported_start,
+                        ),
+                        (
+                            "lifetime_indeterminate_correctable_errors",
+                            "count",
+                            9.0,
+                            reported_start,
+                        ),
+                        (
+                            "lifetime_indeterminate_uncorrectable_errors",
+                            "count",
+                            10.0,
+                            reported_start,
+                        ),
                     ]),
                 },
                 Check {
@@ -1347,7 +1882,7 @@ mod tests {
                     expect: expected([]),
                 },
                 Check {
-                    scenario: "drive error and lifetime counters",
+                    scenario: "drive I/O errors and power-on hours keep unknown starts when absent",
                     input: ProjectionCase {
                         projection: Projection::Drive,
                         metrics: json!({
@@ -1359,35 +1894,45 @@ mod tests {
                             "PowerOnHours": 12345.0
                         }),
                     },
-                    expect: expected([
-                        ("correctable_io_read_errors", "count", 11.0),
-                        ("bad_block", "count", 4.0),
-                        ("power_on_hours", "hours", 12345.0),
+                    expect: expected_with_semantics([
+                        ("correctable_io_read_errors", "count", 11.0, COUNTER),
+                        ("bad_block", "count", 4.0, Gauge),
+                        ("power_on_hours", "hours", 12345.0, COUNTER),
                     ]),
                 },
                 Check {
-                    scenario: "remaining drive counters",
+                    scenario: "drive lifetime start applies to I/O errors and power-on hours",
                     input: ProjectionCase {
                         projection: Projection::Drive,
                         metrics: json!({
                             "@odata.id": "/redfish/v1/Systems/1/Storage/1/Drives/D0/Metrics",
                             "Id": "DriveMetrics",
                             "Name": "Drive Metrics",
+                            "LifetimeStartDateTime": "1970-01-01T00:01:40Z",
+                            "CorrectableIOReadErrorCount": 10,
                             "CorrectableIOWriteErrorCount": 1,
                             "UncorrectableIOReadErrorCount": 2,
                             "UncorrectableIOWriteErrorCount": 3,
+                            "PowerOnHours": 12345.5,
                             "NativeCommandQueueDepth": 4,
                             "ReadIOKiBytes": 5,
                             "WriteIOKiBytes": 6
                         }),
                     },
-                    expect: expected([
-                        ("correctable_io_write_errors", "count", 1.0),
-                        ("uncorrectable_io_read_errors", "count", 2.0),
-                        ("uncorrectable_io_write_errors", "count", 3.0),
-                        ("native_command_queue_depth", "count", 4.0),
-                        ("read_io", "kibibytes", 5.0),
-                        ("write_io", "kibibytes", 6.0),
+                    expect: expected_with_semantics([
+                        ("correctable_io_read_errors", "count", 10.0, reported_start),
+                        ("correctable_io_write_errors", "count", 1.0, reported_start),
+                        ("uncorrectable_io_read_errors", "count", 2.0, reported_start),
+                        (
+                            "uncorrectable_io_write_errors",
+                            "count",
+                            3.0,
+                            reported_start,
+                        ),
+                        ("power_on_hours", "hours", 12345.5, reported_start),
+                        ("native_command_queue_depth", "count", 4.0, Gauge),
+                        ("read_io", "kibibytes", 5.0, COUNTER),
+                        ("write_io", "kibibytes", 6.0, COUNTER),
                     ]),
                 },
                 Check {
@@ -1414,6 +1959,11 @@ mod tests {
                             "InputVoltage": {
                                 "DataSourceUri": "/redfish/v1/Chassis/1/Sensors/PSU0_Vin",
                                 "Reading": 230.0
+                            },
+                            "EnergykWh": {
+                                "DataSourceUri": "/redfish/v1/Chassis/1/Sensors/PSU0_Energy",
+                                "Reading": 2.5,
+                                "SensorResetTime": "1970-01-01T00:01:40Z"
                             },
                             "InputPowerWatts": {
                                 "DataSourceUri": null,
@@ -1463,14 +2013,51 @@ mod tests {
                             }
                         }),
                     },
-                    expect: expected([
-                        ("input_voltage", "volts", 230.0),
-                        ("input_current", "amperes", 2.0),
-                        ("energy", "kilowatt_hours", 2.5),
-                        ("frequency", "hertz", 60.0),
-                        ("temperature", "celsius", 35.0),
-                        ("fan_speed", "percent", 50.0),
+                    expect: expected_with_semantics([
+                        ("input_voltage", "volts", 230.0, Gauge),
+                        ("input_current", "amperes", 2.0, Gauge),
+                        ("energy", "kilowatt_hours", 2.5, COUNTER),
+                        ("frequency", "hertz", 60.0, Gauge),
+                        ("temperature", "celsius", 35.0, Gauge),
+                        ("fan_speed", "percent", 50.0, Gauge),
                     ]),
+                },
+                Check {
+                    scenario: "inline power supply energy uses the sensor reset time",
+                    input: ProjectionCase {
+                        projection: Projection::PowerSupply,
+                        metrics: json!({
+                            "@odata.id":
+                                "/redfish/v1/Chassis/1/PowerSubsystem/PowerSupplies/PSU0/Metrics",
+                            "Id": "PowerSupplyMetrics",
+                            "Name": "Power Supply Metrics",
+                            "EnergykWh": {
+                                "Reading": 2.5,
+                                "LifetimeReading": 99.5,
+                                "SensorResetTime": "1970-01-01T00:01:40Z"
+                            }
+                        }),
+                    },
+                    expect: expected_with_semantics([(
+                        "energy",
+                        "kilowatt_hours",
+                        2.5,
+                        reported_start,
+                    )]),
+                },
+                Check {
+                    scenario: "inline power supply energy does not fall back to lifetime reading",
+                    input: ProjectionCase {
+                        projection: Projection::PowerSupply,
+                        metrics: json!({
+                            "@odata.id":
+                                "/redfish/v1/Chassis/1/PowerSubsystem/PowerSupplies/PSU0/Metrics",
+                            "Id": "PowerSupplyMetrics",
+                            "Name": "Power Supply Metrics",
+                            "EnergykWh": { "LifetimeReading": 99.5 }
+                        }),
+                    },
+                    expect: expected([]),
                 },
                 Check {
                     scenario: "NVIDIA GPU OEM metrics, common and GPU-only properties",
@@ -1488,6 +2075,11 @@ mod tests {
                             "NVLinkRawTxBandwidthGbps": 100.0,
                             "NVLinkRawRxBandwidthGbps": 99.0,
                             "PCIeRawTxBandwidthGbps": 25.0,
+                            "PCIeTXBytes": 21,
+                            "PCIeRXBytes": 22,
+                            "HardwareViolationThrottleDuration": "PT1S",
+                            "GlobalSoftwareViolationThrottleDuration": "PT2S",
+                            "AccumulatedGPUContextUtilizationDuration": "PT3S",
                             "AccumulatedSMUtilizationDuration": "PT1M30S",
                             "SMUtilizationPercent": 77.0,
                             "IntegerActivityUtilizationPercent": 5.0,
@@ -1497,23 +2089,53 @@ mod tests {
                             "SRAMECCErrorThresholdExceeded": true
                         }),
                     },
-                    expect: expected([
-                        ("nvidia_sm_activity", "percent", 88.0),
-                        ("nvidia_sm_occupancy", "percent", 41.0),
-                        ("nvidia_graphics_engine_activity", "percent", 90.5),
-                        ("nvidia_fp64_activity", "percent", 10.0),
-                        ("nvidia_fp32_activity", "percent", 20.0),
-                        ("nvidia_fp16_activity", "percent", 30.0),
-                        ("nvidia_nvlink_raw_tx_bandwidth", "gbps", 100.0),
-                        ("nvidia_nvlink_raw_rx_bandwidth", "gbps", 99.0),
-                        ("nvidia_pcie_raw_tx_bandwidth", "gbps", 25.0),
-                        ("nvidia_accumulated_sm_utilization", "seconds", 90.0),
-                        ("nvidia_sm_utilization", "percent", 77.0),
-                        ("nvidia_integer_activity_utilization", "percent", 5.0),
-                        ("nvidia_dram_memory_cache_hit", "percent", 95.0),
-                        ("nvidia_dram_memory_cache_miss", "percent", 5.0),
-                        ("nvidia_c2c_data_tx_bandwidth", "gbps", 300.0),
-                        ("nvidia_sramecc_error_threshold_exceeded", "bool", 1.0),
+                    expect: expected_with_semantics([
+                        ("nvidia_sm_activity", "percent", 88.0, Gauge),
+                        ("nvidia_sm_occupancy", "percent", 41.0, Gauge),
+                        ("nvidia_graphics_engine_activity", "percent", 90.5, Gauge),
+                        ("nvidia_fp64_activity", "percent", 10.0, Gauge),
+                        ("nvidia_fp32_activity", "percent", 20.0, Gauge),
+                        ("nvidia_fp16_activity", "percent", 30.0, Gauge),
+                        ("nvidia_nvlink_raw_tx_bandwidth", "gbps", 100.0, Gauge),
+                        ("nvidia_nvlink_raw_rx_bandwidth", "gbps", 99.0, Gauge),
+                        ("nvidia_pcie_raw_tx_bandwidth", "gbps", 25.0, Gauge),
+                        ("nvidia_pcie_tx", "bytes", 21.0, COUNTER),
+                        ("nvidia_pcie_rx", "bytes", 22.0, COUNTER),
+                        (
+                            "nvidia_hardware_violation_throttle",
+                            "seconds",
+                            1.0,
+                            COUNTER,
+                        ),
+                        (
+                            "nvidia_global_software_violation_throttle",
+                            "seconds",
+                            2.0,
+                            COUNTER,
+                        ),
+                        (
+                            "nvidia_accumulated_gpu_context_utilization",
+                            "seconds",
+                            3.0,
+                            COUNTER,
+                        ),
+                        (
+                            "nvidia_accumulated_sm_utilization",
+                            "seconds",
+                            90.0,
+                            COUNTER,
+                        ),
+                        ("nvidia_sm_utilization", "percent", 77.0, Gauge),
+                        ("nvidia_integer_activity_utilization", "percent", 5.0, Gauge),
+                        ("nvidia_dram_memory_cache_hit", "percent", 95.0, Gauge),
+                        ("nvidia_dram_memory_cache_miss", "percent", 5.0, Gauge),
+                        ("nvidia_c2c_data_tx_bandwidth", "gbps", 300.0, Gauge),
+                        (
+                            "nvidia_sramecc_error_threshold_exceeded",
+                            "bool",
+                            1.0,
+                            Gauge,
+                        ),
                     ]),
                 },
                 Check {
@@ -1532,12 +2154,12 @@ mod tests {
                             "SMUtilizationPercent": 99.0
                         }),
                     },
-                    expect: expected([
-                        ("nvidia_sm_activity", "percent", 12.0),
-                        ("nvidia_memory_page_retirement", "count", 4.0),
-                        ("nvidia_memory_spare_channel_present", "bool", 0.0),
-                        ("nvidia_power_brake_assertion", "seconds", 3.0),
-                        ("nvidia_cpu_uptime", "seconds", 86400.0),
+                    expect: expected_with_semantics([
+                        ("nvidia_sm_activity", "percent", 12.0, Gauge),
+                        ("nvidia_memory_page_retirement", "count", 4.0, Gauge),
+                        ("nvidia_memory_spare_channel_present", "bool", 0.0, Gauge),
+                        ("nvidia_power_brake_assertion", "seconds", 3.0, COUNTER),
+                        ("nvidia_cpu_uptime", "seconds", 86400.0, Gauge),
                     ]),
                 },
                 Check {
@@ -1593,14 +2215,14 @@ mod tests {
                             }
                         }),
                     },
-                    expect: expected([
-                        ("nvidia_correctable_row_remapping", "count", 12.0),
-                        ("nvidia_uncorrectable_row_remapping", "count", 0.0),
-                        ("nvidia_max_availability_banks", "count", 30.0),
-                        ("nvidia_high_availability_banks", "count", 6.0),
-                        ("nvidia_partial_availability_banks", "count", 2.0),
-                        ("nvidia_low_availability_banks", "count", 1.0),
-                        ("nvidia_no_availability_banks", "count", 0.0),
+                    expect: expected_with_semantics([
+                        ("nvidia_correctable_row_remapping", "count", 12.0, COUNTER),
+                        ("nvidia_uncorrectable_row_remapping", "count", 0.0, COUNTER),
+                        ("nvidia_max_availability_banks", "count", 30.0, Gauge),
+                        ("nvidia_high_availability_banks", "count", 6.0, Gauge),
+                        ("nvidia_partial_availability_banks", "count", 2.0, Gauge),
+                        ("nvidia_low_availability_banks", "count", 1.0, Gauge),
+                        ("nvidia_no_availability_banks", "count", 0.0, Gauge),
                     ]),
                 },
                 Check {
@@ -1729,13 +2351,24 @@ mod tests {
         value: f64,
         labels: &[(&str, &str)],
     ) -> ObservedEvent {
+        metric_with_semantics(key, metric_type, unit, value, Gauge, labels)
+    }
+
+    fn metric_with_semantics(
+        key: &str,
+        metric_type: &str,
+        unit: &str,
+        value: f64,
+        semantics: MetricSemantics,
+        labels: &[(&str, &str)],
+    ) -> ObservedEvent {
         ObservedEvent::Metric(ObservedMetric {
             key: key.to_string(),
             name: "hw_metric".to_string(),
             metric_type: metric_type.to_string(),
             unit: unit.to_string(),
             value,
-            semantics: MetricSemantics::Gauge,
+            semantics,
             labels: labels
                 .iter()
                 .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
@@ -1751,27 +2384,55 @@ mod tests {
         check_cases_async(
             [
                 Case {
-                    scenario: "processor metric",
+                    scenario: "processor gauge and cumulative duration",
                     input: CollectionCase {
                         bmc: fixture.bmc(),
                         entity: fixture.entity(TestEntity::Processor).await,
                         with_sink: true,
                     },
                     expect: Yields(ObservedCollection {
-                        field_count: 1,
+                        field_count: 2,
                         fetch_failures: 0,
-                        events: vec![metric(
-                            "/redfish/v1/Systems/SYS0/Processors/CPU0/bandwidth",
-                            "bandwidth",
-                            "percent",
-                            42.0,
-                            &[
+                        events: {
+                            const LABELS: &[(&str, &str)] = &[
                                 ("processor_id", "CPU0"),
                                 ("system_id", "SYS0"),
                                 ("processor_type", "cpu"),
                                 ("model", "Grace"),
-                            ],
-                        )],
+                            ];
+                            vec![
+                                metric(
+                                    "/redfish/v1/Systems/SYS0/Processors/CPU0/bandwidth",
+                                    "bandwidth",
+                                    "percent",
+                                    42.0,
+                                    LABELS,
+                                ),
+                                ObservedEvent::Metric(ObservedMetric {
+                                    key: concat!(
+                                        "/redfish/v1/Systems/SYS0/Processors/CPU0/",
+                                        "power_limit_throttle"
+                                    )
+                                    .to_string(),
+                                    name: "hw_metric".to_string(),
+                                    metric_type: "power_limit_throttle".to_string(),
+                                    unit: "seconds".to_string(),
+                                    value: 1.25,
+                                    semantics: MetricSemantics::CumulativeCounter {
+                                        description: concat!(
+                                            "Number of seconds the processor has throttled ",
+                                            "due to a power limit since reset"
+                                        ),
+                                        start_time: None,
+                                    },
+                                    labels: LABELS
+                                        .iter()
+                                        .map(|(key, value)| (key.to_string(), value.to_string()))
+                                        .collect(),
+                                    has_context: false,
+                                }),
+                            ]
+                        },
                     }),
                 },
                 Case {
@@ -1817,18 +2478,26 @@ mod tests {
                                     12.25,
                                     LABELS,
                                 ),
-                                metric(
+                                metric_with_semantics(
                                     &format!("{PREFIX}/nvidia_pcie_tx"),
                                     "nvidia_pcie_tx",
                                     "bytes",
                                     51108.0,
+                                    MetricSemantics::CumulativeCounter {
+                                        description: "Number of bytes sent by the NVIDIA processor PCIe transmitter, by processor_id and system_id",
+                                        start_time: None,
+                                    },
                                     LABELS,
                                 ),
-                                metric(
+                                metric_with_semantics(
                                     &format!("{PREFIX}/nvidia_pcie_rx"),
                                     "nvidia_pcie_rx",
                                     "bytes",
                                     45388.0,
+                                    MetricSemantics::CumulativeCounter {
+                                        description: "Number of bytes received by the NVIDIA processor PCIe receiver, by processor_id and system_id",
+                                        start_time: None,
+                                    },
                                     LABELS,
                                 ),
                                 metric(
@@ -1838,11 +2507,15 @@ mod tests {
                                     18.5,
                                     LABELS,
                                 ),
-                                metric(
+                                metric_with_semantics(
                                     &format!("{PREFIX}/nvidia_hardware_violation_throttle"),
                                     "nvidia_hardware_violation_throttle",
                                     "seconds",
                                     2.0,
+                                    MetricSemantics::CumulativeCounter {
+                                        description: "Number of seconds the NVIDIA processor has throttled due to hardware violation since reset, by processor_id and system_id",
+                                        start_time: None,
+                                    },
                                     LABELS,
                                 ),
                                 metric(
@@ -1896,18 +2569,26 @@ mod tests {
                                     8192.0,
                                     LABELS,
                                 ),
-                                metric(
+                                metric_with_semantics(
                                     &format!("{PREFIX}/nvidia_correctable_row_remapping"),
                                     "nvidia_correctable_row_remapping",
                                     "count",
                                     3.0,
+                                    MetricSemantics::CumulativeCounter {
+                                        description: "Number of memory row remappings due to correctable errors reported by the NVIDIA device, by memory_id and system_id",
+                                        start_time: None,
+                                    },
                                     LABELS,
                                 ),
-                                metric(
+                                metric_with_semantics(
                                     &format!("{PREFIX}/nvidia_uncorrectable_row_remapping"),
                                     "nvidia_uncorrectable_row_remapping",
                                     "count",
                                     1.0,
+                                    MetricSemantics::CumulativeCounter {
+                                        description: "Number of memory row remappings due to uncorrectable errors reported by the NVIDIA device, by memory_id and system_id",
+                                        start_time: None,
+                                    },
                                     LABELS,
                                 ),
                                 metric(
@@ -1931,7 +2612,7 @@ mod tests {
                     }),
                 },
                 Case {
-                    scenario: "memory metric",
+                    scenario: "memory cumulative error retains its lifetime start",
                     input: CollectionCase {
                         bmc: fixture.bmc(),
                         entity: fixture.entity(TestEntity::Memory).await,
@@ -1940,18 +2621,30 @@ mod tests {
                     expect: Yields(ObservedCollection {
                         field_count: 1,
                         fetch_failures: 0,
-                        events: vec![metric(
-                            "/redfish/v1/Systems/SYS0/Memory/DIMM0/block_size",
-                            "block_size",
-                            "bytes",
-                            4096.0,
-                            &[
+                        events: vec![ObservedEvent::Metric(ObservedMetric {
+                            key: concat!(
+                                "/redfish/v1/Systems/SYS0/Memory/DIMM0/",
+                                "lifetime_uncorrectable_ecc_errors",
+                            )
+                            .to_string(),
+                            name: "hw_metric".to_string(),
+                            metric_type: "lifetime_uncorrectable_ecc_errors".to_string(),
+                            unit: "count".to_string(),
+                            value: 9.0,
+                            semantics: MetricSemantics::CumulativeCounter {
+                                description: "Number of uncorrectable ECC errors over the lifetime of the memory, by memory_id and system_id",
+                                start_time: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(100)),
+                            },
+                            labels: [
                                 ("memory_id", "DIMM0"),
                                 ("system_id", "SYS0"),
                                 ("device_type", "ddr5"),
                                 ("model", "HMCG94AGBRA"),
-                            ],
-                        )],
+                            ]
+                            .map(|(key, value)| (key.to_string(), value.to_string()))
+                            .to_vec(),
+                            has_context: false,
+                        })],
                     }),
                 },
                 Case {
@@ -2066,7 +2759,7 @@ mod tests {
                         with_sink: false,
                     },
                     expect: Yields(ObservedCollection {
-                        field_count: 1,
+                        field_count: 2,
                         fetch_failures: 0,
                         events: vec![],
                     }),
@@ -2081,12 +2774,15 @@ mod tests {
     async fn iteration_counts_every_entity_when_entities_exceed_request_slots() {
         let fixture = ProjectionFixture::new().await;
         let mut entities = Vec::new();
+        // Six inventory entries produce five fields, so counting scheduled
+        // entities cannot satisfy the aggregate assertion.
         for entity in [
             TestEntity::Processor,
             TestEntity::Memory,
             TestEntity::Drive,
             TestEntity::PowerSupply,
             TestEntity::ProcessorWithMalformedMetrics,
+            TestEntity::Chassis,
         ] {
             entities.push(fixture.entity(entity).await);
         }
@@ -2113,7 +2809,7 @@ mod tests {
 
         assert_eq!(
             (iteration.entity_count, iteration.fetch_failures),
-            (Some(4), 1)
+            (Some(5), 1)
         );
     }
 }

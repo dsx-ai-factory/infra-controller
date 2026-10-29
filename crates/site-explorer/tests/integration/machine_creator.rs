@@ -32,25 +32,34 @@ use carbide_uuid::machine::{HostMachineId, MachineId, MachineInterfaceId, Stable
 use carbide_uuid::rack::{RackId, RackProfileId};
 use component_manager::TestMachineInfoProvider;
 use db::ObjectFilter;
-use db::test_support::postgres::wait_for_blocked_query;
+use db::test_support::postgres::{
+    count_blocked_queries, wait_for_blocked_queries, wait_for_blocked_query,
+};
 use mac_address::MacAddress;
 use model::expected_machine::{ExpectedMachineData, HostDpuPolicy};
+use model::expected_rack::ExpectedRack;
 use model::machine::MachineInterfaceSnapshot;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine_boot_interface::{MachineBootInterface, MachineBootInterfaceTarget};
 use model::machine_interface_address::MachineInterfaceAssociation;
 use model::network_segment::NetworkSegmentType;
 use model::rack::RackConfig;
-use model::site_explorer::ExploredManagedHost;
+use model::site_explorer::{EndpointExplorationReport, ExploredManagedHost};
 use model::test_support::{DpuConfig, ManagedHostConfig};
 use rpc::forge::forge_server::Forge;
 use rpc::{DiscoveryData, DiscoveryInfo, MachineDiscoveryInfo};
 use tonic::Request;
 
 use super::machine_fixtures::{
-    Env, ExploredHostFixture, expected_machine, explored_host_fixture, machine_creator,
-    machine_creator_config, machine_creator_with_dpf, machine_creator_with_info_provider,
+    Env, ExploredHostFixture, TEST_MACHINE_INFO_RACK_PROFILE_ID, discover_bmc, expected_machine,
+    explored_host_fixture, machine_creator, machine_creator_config, machine_creator_with_dpf,
+    machine_creator_with_info_provider,
 };
+
+// Serializes tests that drain `admin_lock_admission` permits with tests that
+// wait for several creations behind a database gate. Each can retain permits
+// the other needs until `wait_for_blocked_queries` times out.
+static ADMIN_LOCK_ADMISSION_TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn assert_no_machines_created(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let machines = db::machine::find(
@@ -932,6 +941,7 @@ async fn test_explored_host_admin_address_pass_waits_for_admission(
 ) -> Result<(), Box<dyn std::error::Error>> {
     const NUM_DPUS: usize = 2;
 
+    let _admission_test_guard = ADMIN_LOCK_ADMISSION_TEST_SERIAL.lock().await;
     let env = Env::new(pool).await;
     let hosts = [ManagedHostConfig::default().with_dpu_count(NUM_DPUS)];
     let (explorer, fixtures) = ingest_hosts_then_disable_creation(&env, &hosts).await?;
@@ -972,13 +982,9 @@ async fn test_explored_host_admin_address_pass_waits_for_admission(
     Ok(())
 }
 
-/// Every permit of the admin-lock admission gate: `ADMIN_LOCK_ADMISSION` of
-/// them, 16 by default.
+/// Every permit of the admin-lock admission gate.
 async fn hold_every_admin_lock_admission_permit() -> Vec<tokio::sync::OwnedSemaphorePermit> {
-    let permits = std::env::var("ADMIN_LOCK_ADMISSION")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(16);
+    let permits = db::machine_interface::admin_lock_admission_permits();
     let mut held = Vec::with_capacity(permits);
     for _ in 0..permits {
         held.push(db::machine_interface::admin_lock_admission().await);
@@ -1083,6 +1089,714 @@ async fn network_config_version(
         .await?
         .version
         .version_nr())
+}
+
+/// A host whose expected machine record carries its serial, so one iteration
+/// identifies it from its explored endpoints.
+fn ingestible_host(expected_machine_data: ExpectedMachineData) -> ManagedHostConfig {
+    let host = ManagedHostConfig::default();
+    let serial_number = host.serial.clone();
+    host.with_expected_machine_data(ExpectedMachineData {
+        serial_number,
+        ..expected_machine_data
+    })
+}
+
+type IngestibleHosts = (
+    Vec<ExploredHostFixture>,
+    Vec<(IpAddr, EndpointExplorationReport)>,
+);
+
+/// Registers `hosts` as expected machines with preingestion-complete explored
+/// endpoints, and returns the fixtures with the endpoint reports to seed the
+/// mock explorer with.
+async fn register_ingestible_hosts(
+    env: &Env,
+    hosts: &[ManagedHostConfig],
+) -> Result<IngestibleHosts, Box<dyn std::error::Error>> {
+    let mut fixtures = Vec::new();
+    for host in hosts {
+        fixtures.push(explored_host_fixture(env, host).await);
+    }
+    let mut endpoints = Vec::new();
+    let mut txn = env.pool.begin().await?;
+    for (host, fixture) in hosts.iter().zip(&fixtures) {
+        db::expected_machine::create(txn.as_mut(), expected_machine(host)).await?;
+        endpoints.push((fixture.host.host_bmc_ip, fixture.host_report.clone()));
+        for dpu in &fixture.host.dpus {
+            endpoints.push((dpu.bmc_ip, (*dpu.report).clone()));
+        }
+    }
+    for (ip, report) in &endpoints {
+        db::explored_endpoints::insert(*ip, report, false, txn.as_mut()).await?;
+        db::explored_endpoints::set_preingestion_complete(*ip, txn.as_mut()).await?;
+    }
+    txn.commit().await?;
+    Ok((fixtures, endpoints))
+}
+
+/// The identify phase trusts the stored power state of an uningested host
+/// whose probe produced a report in this iteration and reads it live only for
+/// the host whose stored report is older.
+#[sqlx_test]
+async fn test_identify_skips_the_live_power_read_for_endpoints_explored_this_run(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let hosts = [
+        ingestible_host(ExpectedMachineData::default()),
+        ingestible_host(ExpectedMachineData::default()),
+    ];
+    let (fixtures, endpoints) = register_ingestible_hosts(&env, &hosts).await?;
+    let refreshed_bmc_ip = fixtures[0].host.host_bmc_ip;
+    let stale_bmc_ip = fixtures[1].host.host_bmc_ip;
+
+    // Nothing is explored unless requested, so only this host's stored
+    // report is from the iteration below.
+    let mut txn = env.pool.begin().await?;
+    db::explored_endpoints::request_exploration_for_addresses(&[refreshed_bmc_ip], txn.as_mut())
+        .await?;
+    txn.commit().await?;
+
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            create_machines: Arc::new(false.into()),
+            ..Default::default()
+        },
+    );
+    explorer.insert_endpoints(endpoints);
+    explorer.run_single_iteration().await?;
+
+    let live_power_reads = explorer
+        .endpoint_explorer()
+        .redfish_get_power_state_calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|address| address.ip())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        live_power_reads,
+        vec![stale_bmc_ip],
+        "only the host whose report was not refreshed this iteration is read live"
+    );
+
+    Ok(())
+}
+
+/// Hosts of `fixtures` whose BMC belongs to a machine.
+async fn ingested_host_count(
+    pool: &PgPool,
+    fixtures: &[ExploredHostFixture],
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let ingested = db::machine_topology::find_all_ingested_bmc_ips(pool).await?;
+    Ok(fixtures
+        .iter()
+        .filter(|fixture| ingested.contains(&fixture.host.host_bmc_ip))
+        .count())
+}
+
+/// `machines_created_per_run` holds exactly under concurrency: in-flight
+/// creations count against the cap, so no host beyond it is created.
+#[sqlx_test]
+async fn test_create_machines_respects_the_per_run_cap_under_concurrency(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let hosts = (0..6)
+        .map(|_| ingestible_host(ExpectedMachineData::default()))
+        .collect::<Vec<_>>();
+    let (fixtures, endpoints) = register_ingestible_hosts(&env, &hosts).await?;
+
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            machines_created_per_run: 4,
+            machine_creation_concurrency: 3,
+            ..Default::default()
+        },
+    );
+    explorer.insert_endpoints(endpoints);
+    explorer.run_single_iteration().await?;
+
+    assert_eq!(
+        ingested_host_count(&env.pool, &fixtures).await?,
+        4,
+        "exactly the cap is created; the other hosts wait for the next iteration"
+    );
+
+    Ok(())
+}
+
+/// With the admin segments held exclusively, exactly the effective creation
+/// concurrency of creations (`machine_creation_concurrency`, clamped below
+/// the admission permits) wait on the shared segment lock while the other
+/// hosts stay queued in memory. Releasing the segments lets every host
+/// through.
+#[sqlx_test]
+async fn test_create_machines_bounds_in_flight_creations_by_the_configured_concurrency(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const CONCURRENCY: usize = 3;
+    const SHARED_LOCK_REQUEST: &str = "pg_advisory_xact_lock_shared(";
+
+    let _admission_test_guard = ADMIN_LOCK_ADMISSION_TEST_SERIAL.lock().await;
+    let env = Env::new(pool).await;
+    // Mirrors `creation_concurrency` in the machine creator.
+    let expected_in_flight = CONCURRENCY.min(
+        db::machine_interface::admin_lock_admission_permits()
+            .saturating_sub(1)
+            .max(1),
+    );
+    let hosts = (0..5)
+        .map(|_| ingestible_host(ExpectedMachineData::default()))
+        .collect::<Vec<_>>();
+    let (fixtures, endpoints) = register_ingestible_hosts(&env, &hosts).await?;
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            machine_creation_concurrency: CONCURRENCY as u64,
+            ..Default::default()
+        },
+    );
+    explorer.insert_endpoints(endpoints);
+
+    let mut gate = env.pool.begin().await?;
+    db::machine_interface::lock_all_admin_segments(gate.as_mut()).await?;
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(gate.as_mut())
+        .await?;
+
+    let iteration = explorer.run_single_iteration();
+    tokio::pin!(iteration);
+    let blocked = tokio::select! {
+        result = &mut iteration => {
+            panic!(
+                "the iteration finished while the admin segments were held exclusively: {:?}",
+                result.map(|hosts| hosts.len())
+            )
+        }
+        blocked = wait_for_blocked_queries(&env.pool, gate_pid, SHARED_LOCK_REQUEST, expected_in_flight) => blocked,
+    };
+    assert_eq!(blocked, expected_in_flight);
+    // The other hosts wait in memory: nothing more queues on the segments
+    // while the iteration keeps running, and no host has a machine yet.
+    tokio::select! {
+        result = &mut iteration => {
+            panic!(
+                "the iteration finished while the admin segments were held exclusively: {:?}",
+                result.map(|hosts| hosts.len())
+            )
+        }
+        _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+    }
+    assert_eq!(
+        count_blocked_queries(&env.pool, gate_pid, SHARED_LOCK_REQUEST).await,
+        expected_in_flight
+    );
+    assert_eq!(ingested_host_count(&env.pool, &fixtures).await?, 0);
+
+    gate.rollback().await?;
+    iteration.await?;
+    assert_eq!(
+        ingested_host_count(&env.pool, &fixtures).await?,
+        hosts.len()
+    );
+
+    Ok(())
+}
+
+/// Concurrent hosts of one new rack share the rack row created before their
+/// dispatch instead of racing to insert it in their own transactions.
+#[sqlx_test]
+async fn test_concurrent_hosts_of_one_new_rack_share_one_rack_row(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
+    let mut txn = env.pool.begin().await?;
+    db::expected_rack::create(
+        txn.as_mut(),
+        &ExpectedRack {
+            rack_group_id: None,
+            rack_id: rack_id.clone(),
+            rack_profile_id: RackProfileId::new(TEST_MACHINE_INFO_RACK_PROFILE_ID),
+            metadata: Default::default(),
+        },
+    )
+    .await?;
+    txn.commit().await?;
+    let hosts = (0..3)
+        .map(|_| {
+            ingestible_host(ExpectedMachineData {
+                rack_id: Some(rack_id.clone()),
+                ..Default::default()
+            })
+        })
+        .collect::<Vec<_>>();
+    let (fixtures, endpoints) = register_ingestible_hosts(&env, &hosts).await?;
+
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            machine_creation_concurrency: 3,
+            ..Default::default()
+        },
+    );
+    explorer.insert_endpoints(endpoints);
+    explorer.run_single_iteration().await?;
+
+    assert_eq!(
+        ingested_host_count(&env.pool, &fixtures).await?,
+        hosts.len(),
+        "every host of the rack is created in one iteration"
+    );
+    let rack_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM racks WHERE id = $1")
+        .bind(&rack_id)
+        .fetch_one(&env.pool)
+        .await?;
+    assert_eq!(rack_rows, 1);
+
+    Ok(())
+}
+
+/// A failed rack pre-creation does not stop the iteration: no host is
+/// dispatched before it returns, the hosts are dispatched anyway afterwards,
+/// and they create the rack in their own transactions.
+#[sqlx_test]
+async fn test_create_machines_continues_when_the_rack_pre_creation_fails(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let rack_a = RackId::new(format!("rack-a-{}", uuid::Uuid::new_v4()));
+    let rack_b = RackId::new(format!("rack-b-{}", uuid::Uuid::new_v4()));
+    create_expected_racks(&env.pool, &[&rack_a, &rack_b]).await?;
+    let rack_host = |rack_id: &RackId| {
+        ingestible_host(ExpectedMachineData {
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
+        })
+    };
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            machine_creation_concurrency: 3,
+            ..Default::default()
+        },
+    );
+    let (rack_a_hosts, endpoints) = register_ingestible_hosts(
+        &env,
+        &[rack_host(&rack_a), rack_host(&rack_a), rack_host(&rack_a)],
+    )
+    .await?;
+    explorer.insert_endpoints(endpoints);
+    let (rack_b_hosts, endpoints) = register_ingestible_hosts(&env, &[rack_host(&rack_b)]).await?;
+    explorer.insert_endpoints(endpoints);
+
+    // Rack B's row is inserted but not committed: the pre-creation
+    // transaction blocks on it and fails when it commits, which also rolls
+    // back rack A's row and leaves it to the host transactions.
+    let mut gate = env.pool.begin().await?;
+    let expected_rack_b = db::expected_rack::find_by_rack_id(gate.as_mut(), &rack_b)
+        .await?
+        .expect("expected rack B is registered");
+    db::rack::create_from_expected(gate.as_mut(), &expected_rack_b, &RackConfig::default()).await?;
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(gate.as_mut())
+        .await?;
+
+    let iteration = explorer.run_single_iteration();
+    tokio::pin!(iteration);
+    tokio::select! {
+        result = &mut iteration => {
+            panic!(
+                "the iteration finished while the rack row was held uncommitted: {:?}",
+                result.map(|hosts| hosts.len())
+            )
+        }
+        _ = wait_for_blocked_query(&env.pool, gate_pid, "INSERT INTO racks") => {}
+    }
+    assert_eq!(
+        ingested_host_count(&env.pool, &rack_a_hosts).await?,
+        0,
+        "no host is dispatched before the pre-creation returns"
+    );
+    gate.commit().await?;
+    tokio::time::timeout(Duration::from_secs(120), iteration)
+        .await
+        .expect("the iteration finishes after the failed rack pre-creation")?;
+
+    assert_eq!(ingested_host_count(&env.pool, &rack_b_hosts).await?, 1);
+    assert!(
+        ingested_host_count(&env.pool, &rack_a_hosts).await? >= 1,
+        "a host of rack A creates the rack in its own transaction"
+    );
+    for rack_id in [&rack_a, &rack_b] {
+        let rack_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM racks WHERE id = $1")
+            .bind(rack_id)
+            .fetch_one(&env.pool)
+            .await?;
+        assert_eq!(rack_rows, 1, "one row for rack {rack_id}");
+    }
+
+    explorer.run_single_iteration().await?;
+    assert_eq!(
+        ingested_host_count(&env.pool, &rack_a_hosts).await?,
+        rack_a_hosts.len(),
+        "a host that lost the rack insert is created in the next run"
+    );
+
+    Ok(())
+}
+
+/// A failed creation attempt frees its cap slot: with one creation per run,
+/// the host after the one whose attempt failed is created in the same
+/// iteration.
+#[sqlx_test]
+async fn test_create_machines_moves_on_after_a_failed_attempt_within_the_cap(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let rack_a = RackId::new(format!("rack-a-{}", uuid::Uuid::new_v4()));
+    let rack_b = RackId::new(format!("rack-b-{}", uuid::Uuid::new_v4()));
+    create_expected_racks(&env.pool, &[&rack_a, &rack_b]).await?;
+    let rack_host = |rack_id: &RackId| {
+        ingestible_host(ExpectedMachineData {
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
+        })
+    };
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            machines_created_per_run: 1,
+            machine_creation_concurrency: 1,
+            ..Default::default()
+        },
+    );
+
+    // Rack A's host sorts first. Its DPU report carries no machine id, so its
+    // creation transaction fails before it writes anything.
+    let (failing_host, endpoints) = register_ingestible_hosts(&env, &[rack_host(&rack_a)]).await?;
+    explorer.insert_endpoints(endpoints);
+    let dpu_bmc_ip = failing_host[0].host.dpus[0].bmc_ip;
+    let dpu_endpoint = db::explored_endpoints::find_by_ips(&env.pool, vec![dpu_bmc_ip])
+        .await?
+        .pop()
+        .expect("the DPU endpoint is registered");
+    let mut dpu_report = dpu_endpoint.report.clone();
+    dpu_report.machine_id = None;
+    let mut txn = env.pool.begin().await?;
+    let write = db::explored_endpoints::try_update(
+        dpu_bmc_ip,
+        dpu_endpoint.report_version,
+        &dpu_report,
+        false,
+        txn.as_mut(),
+    )
+    .await?;
+    assert_eq!(write, db::ConditionalWrite::Applied(()));
+    txn.commit().await?;
+    let (healthy_host, endpoints) = register_ingestible_hosts(&env, &[rack_host(&rack_b)]).await?;
+    explorer.insert_endpoints(endpoints);
+
+    let metrics = MetricsCapture::start();
+    explorer.run_single_iteration().await?;
+
+    assert_eq!(
+        metrics.histogram_count_delta(
+            "carbide_site_explorer_managed_host_creation_latency_milliseconds",
+            &[("outcome", "failed")]
+        ),
+        1
+    );
+    assert_eq!(ingested_host_count(&env.pool, &failing_host).await?, 0);
+    assert_eq!(
+        ingested_host_count(&env.pool, &healthy_host).await?,
+        1,
+        "the failed attempt frees its cap slot for the next host"
+    );
+
+    Ok(())
+}
+
+/// Creates the expected rack rows for `rack_ids`.
+async fn create_expected_racks(
+    pool: &PgPool,
+    rack_ids: &[&RackId],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = pool.begin().await?;
+    for rack_id in rack_ids {
+        db::expected_rack::create(
+            txn.as_mut(),
+            &ExpectedRack {
+                rack_group_id: None,
+                rack_id: (*rack_id).clone(),
+                rack_profile_id: RackProfileId::new(TEST_MACHINE_INFO_RACK_PROFILE_ID),
+                metadata: Default::default(),
+            },
+        )
+        .await?;
+    }
+    txn.commit().await?;
+    Ok(())
+}
+
+/// Hosts are created in rack order: with one creation per run, the host that
+/// completes a rack is created before any host of a rack with no machine yet,
+/// whatever order the identify phase produced.
+#[sqlx_test]
+async fn test_create_machines_completes_the_closest_rack_first(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let rack_a = RackId::new(format!("rack-a-{}", uuid::Uuid::new_v4()));
+    let rack_b = RackId::new(format!("rack-b-{}", uuid::Uuid::new_v4()));
+    create_expected_racks(&env.pool, &[&rack_a, &rack_b]).await?;
+    let rack_host = |rack_id: &RackId| {
+        ingestible_host(ExpectedMachineData {
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
+        })
+    };
+
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            machines_created_per_run: 1,
+            ..Default::default()
+        },
+    );
+
+    // Rack A's first host is the only candidate of the first run, so rack A
+    // is one host from complete when the second run identifies the rest.
+    let (rack_a_first, endpoints) = register_ingestible_hosts(&env, &[rack_host(&rack_a)]).await?;
+    explorer.insert_endpoints(endpoints);
+    explorer.run_single_iteration().await?;
+    assert_eq!(ingested_host_count(&env.pool, &rack_a_first).await?, 1);
+
+    let (rack_b_hosts, endpoints) =
+        register_ingestible_hosts(&env, &[rack_host(&rack_b), rack_host(&rack_b)]).await?;
+    explorer.insert_endpoints(endpoints);
+    let (rack_a_second, endpoints) = register_ingestible_hosts(&env, &[rack_host(&rack_a)]).await?;
+    explorer.insert_endpoints(endpoints);
+    explorer.run_single_iteration().await?;
+
+    assert_eq!(
+        ingested_host_count(&env.pool, &rack_a_second).await?,
+        1,
+        "the host that completes rack A is created first"
+    );
+    assert_eq!(
+        ingested_host_count(&env.pool, &rack_b_hosts).await?,
+        0,
+        "rack B's hosts wait for the next run"
+    );
+    let rack_fill = env
+        .test_harness
+        .test_meter
+        .parsed_metrics("carbide_site_explorer_rack_host_fill_count");
+    for (kind, count) in [
+        ("expected", "2"),
+        ("all_hosts_ingested", "0"),
+        ("completable_this_run", "2"),
+    ] {
+        assert!(
+            rack_fill.iter().any(|(attributes, value)| {
+                attributes.contains(&format!("kind=\"{kind}\"")) && value == count
+            }),
+            "expected kind {kind} = {count} in {rack_fill:?}"
+        );
+    }
+
+    Ok(())
+}
+
+/// A repair takes no cap slot: with one creation per run, an ingested host
+/// explored this run is repaired in the same iteration whose cap the first new
+/// host spends, while the second new host waits.
+#[sqlx_test]
+async fn test_create_machines_repairs_an_ingested_host_after_the_cap_is_spent(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const NUM_DPUS: usize = 2;
+
+    let env = Env::new(pool).await;
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            machines_created_per_run: 1,
+            machine_creation_concurrency: 1,
+            ..Default::default()
+        },
+    );
+
+    // The OOB interface exists before creation, so creation links it.
+    let ingested_host = ingestible_host(ExpectedMachineData::default()).with_dpu_count(NUM_DPUS);
+    let oob_mac = ingested_host.dpus[0].oob_mac_address;
+    dhcp_discover_dpu_oob_iface(env.api(), env.underlay_segment, oob_mac).await;
+    let (ingested, endpoints) =
+        register_ingestible_hosts(&env, std::slice::from_ref(&ingested_host)).await?;
+    explorer.insert_endpoints(endpoints);
+    explorer.run_single_iteration().await?;
+    assert!(interface_machine_id(&env.pool, oob_mac).await?.is_some());
+
+    // Unlink the OOB interface, move the admin address to the dormant link,
+    // and request the host BMC's exploration so the next run revisits the host.
+    unlink_machine_interface(&env.pool, oob_mac).await?;
+    let repair = leave_admin_address_on_dormant_link(&env.pool, &ingested_host).await?;
+    let mut txn = env.pool.begin().await?;
+    db::explored_endpoints::request_exploration_for_addresses(
+        &[ingested[0].host.host_bmc_ip],
+        txn.as_mut(),
+    )
+    .await?;
+    txn.commit().await?;
+
+    // Rack A's host sorts first, so it takes the one cap slot.
+    let rack_a = RackId::new(format!("rack-a-{}", uuid::Uuid::new_v4()));
+    let rack_b = RackId::new(format!("rack-b-{}", uuid::Uuid::new_v4()));
+    create_expected_racks(&env.pool, &[&rack_a, &rack_b]).await?;
+    let rack_host = |rack_id: &RackId| {
+        ingestible_host(ExpectedMachineData {
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
+        })
+    };
+    let (rack_a_host, endpoints) = register_ingestible_hosts(&env, &[rack_host(&rack_a)]).await?;
+    explorer.insert_endpoints(endpoints);
+    let (rack_b_host, endpoints) = register_ingestible_hosts(&env, &[rack_host(&rack_b)]).await?;
+    explorer.insert_endpoints(endpoints);
+
+    explorer.run_single_iteration().await?;
+
+    assert_eq!(ingested_host_count(&env.pool, &rack_a_host).await?, 1);
+    assert_eq!(
+        ingested_host_count(&env.pool, &rack_b_host).await?,
+        0,
+        "the cap admits one new host"
+    );
+    assert!(
+        interface_machine_id(&env.pool, oob_mac).await?.is_some(),
+        "the repair runs once the cap is spent"
+    );
+    let dormant = db::machine_interface::find_one(&env.pool, repair.dormant_link_id).await?;
+    assert!(dormant.addresses.is_empty(), "{dormant:?}");
+    assert_host_links_reconciled(&env.pool, &ingested_host, NUM_DPUS).await?;
+    assert_eq!(
+        network_config_version(&env.pool, &repair.host_machine_id).await?,
+        repair.version_before + 1,
+        "the repaired admin config is republished"
+    );
+
+    Ok(())
+}
+
+/// Registers an expected switch whose explored endpoint has completed
+/// preingestion, so the next switch pass creates it.
+async fn register_ingestible_switch(
+    env: &Env,
+    serial_number: &str,
+    bmc_mac_address: MacAddress,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let bmc_ip = discover_bmc(
+        env.api(),
+        env.underlay_segment,
+        bmc_mac_address,
+        "NVIDIA/OOB",
+    )
+    .await;
+    let report =
+        super::env::explored_managed_switch_fixture(bmc_ip, bmc_mac_address, Some(serial_number))
+            .report;
+    let mut txn = env.pool.begin().await?;
+    db::expected_switch::create(
+        &mut txn,
+        super::env::expected_switch_fixture(bmc_mac_address, bmc_mac_address, serial_number),
+    )
+    .await?;
+    db::explored_endpoints::insert(bmc_ip, &report, false, txn.as_mut()).await?;
+    db::explored_endpoints::set_preingestion_complete(bmc_ip, txn.as_mut()).await?;
+    txn.commit().await?;
+    Ok(())
+}
+
+async fn switch_count(pool: &PgPool) -> Result<i64, Box<dyn std::error::Error>> {
+    Ok(sqlx::query_scalar("SELECT count(*) FROM switches")
+        .fetch_one(pool)
+        .await?)
+}
+
+/// The switch and power shelf pass runs between host creations once the
+/// interval has elapsed, so a switch that completed preingestion is created
+/// while hosts are still being created, and the per-run switch cap holds
+/// across the passes of one run.
+#[sqlx_test]
+async fn test_create_machines_runs_the_switch_pass_between_hosts(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let hosts = (0..3)
+        .map(|_| ingestible_host(ExpectedMachineData::default()))
+        .collect::<Vec<_>>();
+    let (fixtures, endpoints) = register_ingestible_hosts(&env, &hosts).await?;
+    register_ingestible_switch(&env, "SW-SN-001", "B8:3F:D2:90:97:C0".parse().unwrap()).await?;
+    register_ingestible_switch(&env, "SW-SN-002", "B8:3F:D2:90:97:C2".parse().unwrap()).await?;
+
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            machine_creation_concurrency: 1,
+            switches_created_per_run: 1,
+            switch_and_power_shelf_pass_interval: Duration::from_nanos(1),
+            ..Default::default()
+        },
+    );
+    explorer.insert_endpoints(endpoints);
+    explorer.run_single_iteration().await?;
+
+    assert_eq!(
+        ingested_host_count(&env.pool, &fixtures).await?,
+        hosts.len()
+    );
+    // One pass after each host that left another host to create, then the
+    // end-of-run pass.
+    let create_switches_passes = env
+        .test_harness
+        .test_meter
+        .parsed_metrics("carbide_site_explorer_phase_latency_milliseconds_count")
+        .into_iter()
+        .find(|(attributes, _)| attributes.contains("phase=\"create_switches\""))
+        .map(|(_, count)| count);
+    assert_eq!(
+        create_switches_passes.as_deref(),
+        Some("3"),
+        "two passes between the three hosts plus the end-of-run pass"
+    );
+    assert_eq!(
+        switch_count(&env.pool).await?,
+        1,
+        "the per-run switch cap holds across the passes of one run"
+    );
+
+    explorer.run_single_iteration().await?;
+    assert_eq!(
+        switch_count(&env.pool).await?,
+        2,
+        "the next run creates the remaining switch"
+    );
+
+    Ok(())
 }
 
 async fn interface_machine_id(
