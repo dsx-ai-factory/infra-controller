@@ -21527,7 +21527,11 @@ func (x *InstanceDpuExtensionServiceConfig) GetServiceVpcIds() []*VpcId {
 
 // Extension services configuration for an instance
 type InstanceDpuExtensionServicesConfig struct {
-	state          protoimpl.MessageState               `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Removing an existing entry begins asynchronous termination. Re-adding the same
+	// (`service_id`, `version`) returns `FAILED_PRECONDITION` while that attachment retains
+	// service interfaces, even when `service_vpc_ids` is empty. Endpoint-free attachments,
+	// including `KUBERNETES_POD` attachments, can be re-added while terminating.
 	ServiceConfigs []*InstanceDpuExtensionServiceConfig `protobuf:"bytes,1,rep,name=service_configs,json=serviceConfigs,proto3" json:"service_configs,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache

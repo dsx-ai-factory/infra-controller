@@ -926,6 +926,39 @@ async fn release_one_instance(
         return Ok(());
     }
 
+    // Mark every networked attachment as removed before marking the Instance deleted so cleanup
+    // retains its service-interface records until external cleanup has been observed.
+    if let Some(terminating_services) =
+        crate::instance::service_vpc::terminate_networked_attachments(
+            &instance.extension_services_config,
+            &instance.network_config,
+            chrono::Utc::now(),
+        )
+    {
+        match db::instance::update_service_network_config(
+            txn.as_mut(),
+            instance.id,
+            instance.extension_services_config_version,
+            &instance.extension_services_config,
+            &terminating_services,
+            instance.network_config_version,
+            &instance.network_config,
+            &instance.network_config,
+            true,
+        )
+        .await?
+        {
+            ConditionalWrite::Applied(_) => {}
+            ConditionalWrite::NotApplied(_) => {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "service-VPC state for instance {} changed during release; retry the release",
+                    instance.id
+                ))
+                .into());
+            }
+        }
+    }
+
     let pkeys = load_ib_partition_pkeys(txn.as_mut(), &[&instance.infiniband_config]).await?;
     let memberships = ib_memberships_from_config(&instance.infiniband_config, &pkeys);
     for membership in memberships {
@@ -1581,6 +1614,45 @@ pub(crate) async fn update_instance_config(
     )
     .await?;
 
+    // Revalidate each persisted service interface's registration, attachment, DPU, ordinal, UUID,
+    // MAC, slot, VPC prefix, network segment, network prefix, and normalized address on exact
+    // retries without changing `prepared_extension_services_config = None`.
+    let service_network_validation_config =
+        prepared_extension_services_config.as_ref().or_else(|| {
+            (!initial_instance
+                .config
+                .network
+                .service_interfaces
+                .is_empty())
+            .then_some(&initial_instance.config.extension_services)
+        });
+
+    // Plan and allocate service interfaces against the requested host network, preserving persisted
+    // `service_interfaces` for combined overlap validation and any later combined configuration write.
+    let prepared_service_network =
+        if let Some(extension_services) = service_network_validation_config {
+            let mut candidate_network = config.network.clone();
+            candidate_network.service_interfaces =
+                initial_instance.config.network.service_interfaces.clone();
+            let allocated_network = crate::instance::service_vpc::allocate_for_instance(
+                api,
+                &mut txn,
+                initial_instance.id,
+                extension_services,
+                &requested_extension_services,
+                &candidate_network,
+                &mh_snapshot,
+                expected_machine_declares_cx9(expected_machine.as_ref()),
+                Some(initial_instance),
+            )
+            .await?;
+            let mut live_network = initial_instance.config.network.clone();
+            live_network.service_interfaces = allocated_network.service_interfaces;
+            Some(live_network)
+        } else {
+            None
+        };
+
     update_instance_network_config(
         api,
         initial_instance,
@@ -1592,26 +1664,99 @@ pub(crate) async fn update_instance_config(
     )
     .await?;
 
+    // Recheck the combined network configuration after host allocation resolves an explicit
+    // `vpc_selection` so a tenant interface and a newly allocated service interface cannot share a VPC.
+    if let Some(service_network) = prepared_service_network.as_ref() {
+        let mut combined_network = config.network.clone();
+        combined_network.service_interfaces = service_network.service_interfaces.clone();
+        let mut baseline = vec![&initial_instance.config.network];
+        if let Some(pending) = &initial_instance.update_network_config_request {
+            baseline.push(&pending.old_config);
+            baseline.push(&pending.new_config);
+        }
+        let mut candidate = baseline.clone();
+        candidate.push(&combined_network);
+        crate::instance::service_vpc::validate_tenant_overlap(
+            api.runtime_config
+                .dpu_config
+                .allow_service_vpc_tenant_overlap,
+            &baseline,
+            &candidate,
+        )?;
+    }
+
     // Every required resource lock is now held. Persist against the original
     // attachment version so any concurrent cleanup defeats the entire update.
     if let Some(new_extension_services_config) = prepared_extension_services_config {
-        match db::instance::update_extension_services_config(
-            &mut txn,
-            initial_instance.id,
-            initial_instance.extension_services_config_version,
-            &initial_instance.config.extension_services,
-            &new_extension_services_config,
-            true,
-        )
-        .await?
-        {
-            ConditionalWrite::Applied(()) => {}
-            ConditionalWrite::NotApplied(InstanceExtensionServicesNotCurrent) => {
-                return Err(CarbideError::FailedPrecondition(format!(
-                    "extension-service attachments for instance {} changed or the instance no longer exists; read the instance again before updating",
-                    initial_instance.id,
-                ))
-                .into());
+        let changes_networked_attachment = prepared_service_network
+            .as_ref()
+            .is_some_and(|network| network != &initial_instance.config.network)
+            || initial_instance
+                .config
+                .network
+                .service_interfaces
+                .iter()
+                .any(|interface| {
+                    new_extension_services_config
+                        .service_configs
+                        .iter()
+                        .find(|attachment| attachment.id == Some(interface.attachment_id))
+                        .is_some_and(|updated| {
+                            initial_instance
+                                .config
+                                .extension_services
+                                .service_configs
+                                .iter()
+                                .find(|current| current.id == updated.id)
+                                .is_some_and(|current| current.removed != updated.removed)
+                        })
+                });
+        // Changes affecting a networked attachment write both `extension_services_config` and
+        // `network_config`; other attachment changes preserve `network_config` and its version.
+        if changes_networked_attachment {
+            match db::instance::update_service_network_config(
+                txn.as_mut(),
+                initial_instance.id,
+                initial_instance.extension_services_config_version,
+                &initial_instance.config.extension_services,
+                &new_extension_services_config,
+                initial_instance.network_config_version,
+                &initial_instance.config.network,
+                prepared_service_network
+                    .as_ref()
+                    .unwrap_or(&initial_instance.config.network),
+                true,
+            )
+            .await?
+            {
+                ConditionalWrite::Applied(_) => {}
+                ConditionalWrite::NotApplied(_) => {
+                    return Err(CarbideError::FailedPrecondition(format!(
+                        "service-VPC state for instance {} changed; read the instance again before updating",
+                        initial_instance.id,
+                    ))
+                    .into());
+                }
+            }
+        } else {
+            match db::instance::update_extension_services_config(
+                &mut txn,
+                initial_instance.id,
+                initial_instance.extension_services_config_version,
+                &initial_instance.config.extension_services,
+                &new_extension_services_config,
+                true,
+            )
+            .await?
+            {
+                ConditionalWrite::Applied(()) => {}
+                ConditionalWrite::NotApplied(InstanceExtensionServicesNotCurrent) => {
+                    return Err(CarbideError::FailedPrecondition(format!(
+                        "extension-service attachments for instance {} changed or the instance no longer exists; read the instance again before updating",
+                        initial_instance.id,
+                    ))
+                    .into());
+                }
             }
         }
     }
@@ -1753,6 +1898,7 @@ async fn update_instance_network_config(
     }
     let runtime_config = &api.runtime_config;
     let network = &mut config.network;
+    network.service_interfaces = instance.config.network.service_interfaces.clone();
 
     // Auto-ness can't change for an existing instance. If a tenant has created
     // an instance with auto, it must remain auto until it is released. Maybe
@@ -1870,6 +2016,8 @@ async fn update_instance_network_config(
     )?;
     validate_instance_interface_routing_profiles(txn, network, runtime_config.fnn.as_ref()).await?;
 
+    validate_service_vpc_tenant_overlap(api, txn, instance, network).await?;
+
     if needs_overlap_check {
         tenant_prefix_overlap::validate_instance_network(api, txn, config, Some(instance)).await?;
     }
@@ -1894,6 +2042,75 @@ async fn update_instance_network_config(
     .await?;
 
     Ok(())
+}
+
+/// Serializes host-network changes with extension-service and service-interface configurations and
+/// rejects only new host/service VPC conflicts so previously accepted bindings remain updateable.
+async fn validate_service_vpc_tenant_overlap(
+    api: &Api,
+    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    instance: &InstanceSnapshot,
+    requested_network: &InstanceNetworkConfig,
+) -> Result<(), CarbideError> {
+    if api
+        .runtime_config
+        .dpu_config
+        .allow_service_vpc_tenant_overlap
+    {
+        return Ok(());
+    }
+
+    // The `instance_addresses` table lock precedes the Instance row lock, matching service-VPC
+    // activation, address allocation, and deletion before reading the locked Instance configurations.
+    db::instance_address::lock_table_for_allocation(txn.as_mut()).await?;
+    let locked = db::instance::find_by_id_for_update(txn.as_mut(), instance.id)
+        .await?
+        .ok_or(CarbideError::NotFoundError {
+            kind: "instance",
+            id: instance.id.to_string(),
+        })?;
+    let locked_snapshot = db::instance::find_by_id(txn.as_mut(), instance.id)
+        .await?
+        .ok_or(CarbideError::NotFoundError {
+            kind: "instance",
+            id: instance.id.to_string(),
+        })?;
+    if locked.network_config_version != instance.network_config_version
+        || locked.extension_services_config_version != instance.extension_services_config_version
+        || locked.network_config != instance.config.network
+        || locked.extension_services_config != instance.config.extension_services
+        || locked_snapshot.update_network_config_request != instance.update_network_config_request
+    {
+        return Err(CarbideError::ConcurrentModificationError(
+            "instance",
+            instance.network_config_version.to_string(),
+        ));
+    }
+
+    // Resolve requested host-interface VPC IDs before comparing bindings because automatic VPC
+    // selection and newly generated segments may not yet have populated `interface.vpc_id`.
+    let mut resolved_requested_network = requested_network.clone();
+    for interface in &mut resolved_requested_network.interfaces {
+        if interface.vpc_id.is_none() {
+            interface.vpc_id = interface.vpc_selection.map(|selection| selection.vpc_id);
+            if interface.vpc_id.is_none()
+                && let Some(segment_id) = interface.network_segment_id
+            {
+                interface.vpc_id = db::vpc::find_by_segment(txn.as_mut(), segment_id)
+                    .await?
+                    .map(|vpc| vpc.id);
+            }
+        }
+    }
+
+    let mut baseline = vec![&instance.config.network];
+    if let Some(pending) = &instance.update_network_config_request {
+        baseline.push(&pending.old_config);
+        baseline.push(&pending.new_config);
+    }
+    let mut candidate = baseline.clone();
+    candidate.push(&resolved_requested_network);
+    crate::instance::service_vpc::validate_tenant_overlap(false, &baseline, &candidate)
 }
 
 /// Validates explicit primary update intent before stored resources can replace it.
@@ -2104,20 +2321,40 @@ async fn prepare_instance_extension_services_config(
 ) -> Result<Option<InstanceExtensionServicesConfig>, CarbideError> {
     let current = &instance.config.extension_services;
 
-    // A client may repeat the current VPC selection, but creating service-interface
-    // records or moving them to another VPC requires reconciliation planned in issue #6125.
+    // Exact retries of active attachments retain stored service-interface records. A terminating
+    // attachment blocks reactivation only while its ID still references a persisted service interface.
     for requested in &requested_extension_services.service_configs {
+        let active_attachment = current.active_services().into_iter().find(|attachment| {
+            attachment.service_id == requested.service_id && attachment.version == requested.version
+        });
+        if active_attachment.is_none()
+            && current
+                .terminating_services()
+                .into_iter()
+                .any(|attachment| {
+                    attachment.service_id == requested.service_id
+                        && attachment.version == requested.version
+                        && attachment.id.is_some_and(|attachment_id| {
+                            instance
+                                .config
+                                .network
+                                .service_interfaces
+                                .iter()
+                                .any(|interface| interface.attachment_id == attachment_id)
+                        })
+                })
+        {
+            return Err(CarbideError::FailedPrecondition(
+                "a terminating networked extension-service attachment cannot be reactivated; wait for service-interface cleanup and attach it again"
+                    .to_string(),
+            ));
+        }
+        let Some(attachment) = active_attachment else {
+            continue;
+        };
         if requested.service_vpc_ids.is_empty() {
             continue;
         }
-        let Some(attachment) = current.active_services().into_iter().find(|attachment| {
-            attachment.service_id == requested.service_id && attachment.version == requested.version
-        }) else {
-            return Err(CarbideError::FailedPrecondition(
-                "service VPC attachment is unavailable until network resource reconciliation is implemented"
-                    .to_string(),
-            ));
-        };
         let mut selected_vpcs = BTreeMap::new();
         for service_interface in instance
             .config
@@ -2137,14 +2374,21 @@ async fn prepare_instance_extension_services_config(
                 )));
             }
         }
-        if selected_vpcs.len() != requested.service_vpc_ids.len()
-            || selected_vpcs
-                .iter()
-                .zip(&requested.service_vpc_ids)
-                .enumerate()
-                .any(|(ordinal, ((stored_ordinal, stored_vpc), requested_vpc))| {
-                    *stored_ordinal as usize != ordinal || stored_vpc != requested_vpc
-                })
+        if selected_vpcs.is_empty() && !requested.service_vpc_ids.is_empty() {
+            return Err(CarbideError::FailedPrecondition(
+                "service VPC selections cannot be added to an existing extension-service attachment; remove it and create a new attachment after cleanup"
+                    .to_string(),
+            ));
+        }
+        if !selected_vpcs.is_empty()
+            && (selected_vpcs.len() != requested.service_vpc_ids.len()
+                || selected_vpcs
+                    .iter()
+                    .zip(&requested.service_vpc_ids)
+                    .enumerate()
+                    .any(|(ordinal, ((stored_ordinal, stored_vpc), requested_vpc))| {
+                        *stored_ordinal as usize != ordinal || stored_vpc != requested_vpc
+                    }))
         {
             return Err(CarbideError::FailedPrecondition(
                 "the VPC selection of an existing extension-service attachment cannot be changed"

@@ -38,12 +38,18 @@ use carbide_instrument::testing::MetricsCapture;
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
 use carbide_secrets::credentials::{CredentialKey, Credentials};
 use carbide_uuid::extension_service::ExtensionServiceId;
+use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
+use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use config_version::ConfigVersion;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::extension_service::{
     DPF_HELM_CHART_OWNER_LABEL, ExtensionServiceDeploymentType, ExtensionServiceInterfaceMac,
     ExtensionServiceLifecycleState, ExtensionServiceType, ServiceVpcAddressFamily,
 };
+use model::instance::config::extension_services::{
+    InstanceExtensionServiceConfig, InstanceExtensionServicesConfig,
+};
+use model::instance::config::network::{InstanceNetworkConfig, InstanceServiceInterfaceConfig};
 use model::tenant::TenantOrganizationId;
 use state_controller::controller::Enqueuer;
 use state_controller::io::StateControllerIO;
@@ -3022,10 +3028,11 @@ async fn test_ready_networked_registration_rejects_service_interface_network_dri
     Ok(())
 }
 
-/// Verifies an endpoint-free instance reference permits disabled-family repair and parent shrink
-/// without claiming active or terminating slot safety.
+/// Verifies successful mutable DPUService repair remains non-Ready while a retained endpoint
+/// defers slot shrink, then permits retiring slot-specific DPUServiceInterface and DPUServiceChain
+/// resources only after reclamation drains that capacity.
 #[crate::sqlx_test]
-async fn test_endpoint_free_reference_repairs_shrunk_slots_after_family_disable(
+async fn test_retained_endpoint_defers_shrunk_slots_until_capacity_drains(
     db_pool: sqlx::PgPool,
 ) -> Result<(), eyre::Report> {
     // Establish a Ready two-slot registration and the durable attachment consumed by repair policy.
@@ -3082,26 +3089,8 @@ async fn test_endpoint_free_reference_repairs_shrunk_slots_after_family_disable(
         .await?;
     mark_dpf_service_ready_for_update(&initial_env, service_id).await?;
 
-    // Seed attachment membership with no service interface so the instance references the
-    // registration without occupying a slot.
-    let attachment = serde_json::json!({
-        "service_configs": [{
-            "id": Uuid::new_v4(),
-            "service_id": service_id,
-            "version": ConfigVersion::initial(),
-            "removed": null
-        }]
-    });
-    sqlx::query(
-        "INSERT INTO instances (machine_id, os_ipxe_script, network_config, nvlink_config, extension_services_config) \
-         VALUES ($1, '#!ipxe', '{\"interfaces\": [], \"service_interfaces\": []}'::jsonb, '{\"gpu_configs\": []}'::jsonb, $2)",
-    )
-    .bind(managed_host.id)
-    .bind(sqlx::types::Json(attachment))
-    .execute(&initial_env.pool)
-    .await?;
-
-    // Materialize the old graph, with only the now-obsolete slot-one chain held by a finalizer.
+    // Seed an active attachment and slot-one endpoint so a one-slot restart must preserve
+    // DPUServiceInterface and DPUServiceChain resources for both slots while capacity drains.
     let mac = db::extension_service::find_interface_macs(
         &mut *initial_env.pool.acquire().await?,
         service_id,
@@ -3109,6 +3098,72 @@ async fn test_endpoint_free_reference_repairs_shrunk_slots_after_family_disable(
     .await?
     .pop()
     .expect("networked registration has stable identity");
+    let attachment_id = Uuid::new_v4();
+    let attachment = InstanceExtensionServicesConfig {
+        service_configs: vec![InstanceExtensionServiceConfig {
+            id: Some(attachment_id),
+            service_id,
+            version: ConfigVersion::initial(),
+            dpu_target: Some(model::extension_service::DpuTarget::All),
+            removed: None,
+        }],
+    };
+    let service_vpc_id = VpcId::new();
+    let service_segment_id = NetworkSegmentId::new();
+    sqlx::query(
+        "INSERT INTO vpcs (id, name, organization_id, version) \
+         VALUES ($1, 'slot-shrink-service-vpc', 'best_org', 'V1-T0')",
+    )
+    .bind(service_vpc_id)
+    .execute(&initial_env.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO network_segments (id, name, version, vpc_id) \
+         VALUES ($1, 'slot-shrink-service-segment', 'V1-T0', $2)",
+    )
+    .bind(service_segment_id)
+    .bind(service_vpc_id)
+    .execute(&initial_env.pool)
+    .await?;
+    let endpoint = InstanceServiceInterfaceConfig {
+        attachment_id,
+        interface_ordinal: 0,
+        dpu_id: managed_host.dpu_ids[0],
+        slot_index: 1, // Places the endpoint above the restarted one-slot capacity.
+        vpc_id: service_vpc_id,
+        vpc_prefix_id: VpcPrefixId::new(),
+        network_segment_id: service_segment_id,
+        network_prefix_id: NetworkPrefixId::new(),
+        link_prefix: "192.0.2.0/31".parse()?,
+        mac_address: mac.mac_address,
+        internal_uuid: Uuid::new_v4(),
+    };
+    let network = InstanceNetworkConfig {
+        service_interfaces: vec![endpoint.clone()],
+        ..Default::default()
+    };
+    let instance_id: carbide_uuid::instance::InstanceId = sqlx::query_scalar(
+        "INSERT INTO instances (machine_id, os_ipxe_script, network_config, nvlink_config, extension_services_config) \
+         VALUES ($1, '#!ipxe', $2, '{\"gpu_configs\": []}'::jsonb, $3) RETURNING id",
+    )
+    .bind(managed_host.id)
+    .bind(sqlx::types::Json(&network))
+    .bind(sqlx::types::Json(&attachment))
+    .fetch_one(&initial_env.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO instance_addresses \
+            (instance_id, address, prefix, segment_id, vpc_id) \
+         VALUES ($1, '192.0.2.1'::inet, '192.0.2.0/31'::cidr, $2, $3)",
+    )
+    .bind(instance_id)
+    .bind(service_segment_id)
+    .bind(service_vpc_id)
+    .execute(&initial_env.pool)
+    .await?;
+
+    // Materialize the existing DPUServiceInterface and DPUServiceChain resources so the retained
+    // endpoint's slot-one resources are observable.
     let data =
         model::extension_service::DpfHelmChartServiceData::parse(TEST_DPF_HELM_CHART_SERVICE_DATA)?;
     let original = project_service_vpc_registration(
@@ -3119,9 +3174,21 @@ async fn test_endpoint_free_reference_repairs_shrunk_slots_after_family_disable(
         mac,
         ServiceVpcSlots::new(2)?,
     )?;
+    // Change DPUService.security.privileged so capacity-drain reconciliation must repair the
+    // DPUService before treating the DPUServiceInterface and DPUServiceChain observations as converged.
+    let mut drifted_service = dpu_service_observation(&original.service);
+    drifted_service
+        .security
+        .as_mut()
+        .expect("projected service includes security")
+        .privileged = Some(!original.service.security.privileged);
+    let expected_service_patch =
+        dpu_service_mutable_patch(&original.service, &drifted_service, "1");
+    let converged_service = dpu_service_observation(&original.service);
     let obsolete_patch_name = original.interfaces[2].name.clone();
     let obsolete_patch_uid = format!("uid-{obsolete_patch_name}");
     let obsolete_chain_name = original.chains[1].name.clone();
+    let obsolete_chain_uid = format!("uid-{obsolete_chain_name}");
     let interfaces = Arc::new(Mutex::new(
         original
             .interfaces
@@ -3129,47 +3196,67 @@ async fn test_endpoint_free_reference_repairs_shrunk_slots_after_family_disable(
             .map(service_interface_observation)
             .collect::<Vec<_>>(),
     ));
-    let mut original_chains = original
+    let original_chains = original
         .chains
         .iter()
         .map(service_chain_observation)
         .collect::<Vec<_>>();
-    // Keep the obsolete second-slot chain finalizing so its dependent interface cannot retire
-    // early.
-    original_chains[1].is_deleting = true;
     let chains = Arc::new(Mutex::new(original_chains));
+    let chain_delete_calls = Arc::new(AtomicUsize::new(0));
     let patch_delete_calls = Arc::new(AtomicUsize::new(0));
+    let service_patch_calls = Arc::new(AtomicUsize::new(0));
 
-    // Restart with one slot and disabled admission; no DPUService remains, so the reference enables
-    // repair.
+    // Restart with one configured slot, no enabled service-VPC family, and mismatched
+    // DPUService.security.privileged; the retained slot-one service interface must keep
+    // controller_state at Updating until reclamation.
     let restart_pool = initial_env.pool.clone();
     drop(initial_env);
+    let live_service = Arc::new(Mutex::new(None));
     let mut mock = MockDpfOperations::new();
-    mock.expect_get_dpu_service()
-        .times(4)
-        .returning(|_| Ok(None));
+    mock.expect_get_dpu_service().returning({
+        let live_service = Arc::clone(&live_service);
+        move |_| Ok(live_service.lock().unwrap().clone())
+    });
     mock.expect_list_detached_dpu_service_interfaces()
-        .times(3)
         .returning({
             let interfaces = Arc::clone(&interfaces);
             move |_| Ok(interfaces.lock().unwrap().clone())
         });
-    mock.expect_list_detached_dpu_service_chains()
-        .times(3)
-        .returning({
-            let chains = Arc::clone(&chains);
-            let obsolete_chain_name = obsolete_chain_name.clone();
-            move |_| {
-                let mut chains = chains.lock().unwrap();
-                let observed = chains.clone();
-                // Return the finalizing chain once, then model its removal before the next pass.
-                chains.retain(|chain| chain.name.as_deref() != Some(obsolete_chain_name.as_str()));
-                Ok(observed)
-            }
-        });
+    mock.expect_list_detached_dpu_service_chains().returning({
+        let chains = Arc::clone(&chains);
+        let obsolete_chain_name = obsolete_chain_name.clone();
+        move |_| {
+            let mut chains = chains.lock().unwrap();
+            let observed = chains.clone();
+            // Once reclamation allows shrink, return the finalizing chain once before its
+            // simulated finalizer removes it.
+            chains.retain(|chain| {
+                chain.name.as_deref() != Some(obsolete_chain_name.as_str()) || !chain.is_deleting
+            });
+            Ok(observed)
+        }
+    });
     mock.expect_get_detached_dpu_service_interface().times(0);
     mock.expect_get_detached_dpu_service_chain().times(0);
-    mock.expect_delete_detached_dpu_service_chain().times(0);
+    mock.expect_delete_detached_dpu_service_chain()
+        .times(1)
+        .returning({
+            let chains = Arc::clone(&chains);
+            let chain_delete_calls = Arc::clone(&chain_delete_calls);
+            move |name, preconditions| {
+                assert_eq!(name, obsolete_chain_name);
+                assert_eq!(preconditions.uid, obsolete_chain_uid);
+                assert_eq!(preconditions.resource_version, "1");
+                let mut chains = chains.lock().unwrap();
+                let obsolete_chain = chains
+                    .iter_mut()
+                    .find(|chain| chain.name.as_deref() == Some(name))
+                    .expect("the obsolete chain remains observable at delete acceptance");
+                obsolete_chain.is_deleting = true;
+                chain_delete_calls.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+        });
     mock.expect_delete_detached_dpu_service_interface()
         .times(1)
         .returning({
@@ -3191,12 +3278,32 @@ async fn test_endpoint_free_reference_repairs_shrunk_slots_after_family_disable(
         });
     mock.expect_create_detached_dpu_service_interface().times(0);
     mock.expect_create_detached_dpu_service_chain().times(0);
-    mock.expect_patch_dpu_service().times(0);
-    mock.expect_create_dpu_service()
-        .times(1)
-        .returning(|service| Ok(dpu_service_observation(service)));
-    // Shrink to one compatible slot and leave family admission empty; the durable reference permits
-    // repair.
+    mock.expect_patch_dpu_service().times(1).returning({
+        let live_service = Arc::clone(&live_service);
+        let service_patch_calls = Arc::clone(&service_patch_calls);
+        let expected_service_name = original.service.name.clone();
+        move |name, patch| {
+            assert_eq!(name, expected_service_name.as_str());
+            assert_eq!(patch, expected_service_patch);
+            service_patch_calls.fetch_add(1, Ordering::Relaxed);
+            *live_service.lock().unwrap() = Some(converged_service.clone());
+            Ok(converged_service.clone())
+        }
+    });
+    mock.expect_create_dpu_service().times(1).returning({
+        let live_service = Arc::clone(&live_service);
+        let drifted_service = drifted_service.clone();
+        move |service| {
+            assert_eq!(
+                service.name.as_str(),
+                drifted_service.name.as_deref().unwrap()
+            );
+            *live_service.lock().unwrap() = Some(drifted_service.clone());
+            Ok(drifted_service.clone())
+        }
+    });
+    // Shrink to one compatible slot and leave family admission empty; the retained endpoint keeps
+    // slot-zero and slot-one DPUServiceInterface and DPUServiceChain resources until reclamation completes.
     let mut config = get_config();
     config.dpf.enabled = true;
     config.dpu_config.service_vpc_slot_count = 1;
@@ -3211,7 +3318,7 @@ async fn test_endpoint_free_reference_repairs_shrunk_slots_after_family_disable(
     overrides.create_network_segments = Some(false);
     let restarted = create_test_env_with_overrides(restart_pool, overrides).await;
 
-    // Missing consumer state first publishes the non-Ready barrier and queues repair.
+    // The first pass publishes Updating instead of Ready while the retained slot exceeds capacity.
     restarted.run_extension_service_controller_iteration().await;
     let mut connection = restarted.pool.acquire().await?;
     let updating = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
@@ -3226,16 +3333,18 @@ async fn test_endpoint_free_reference_repairs_shrunk_slots_after_family_disable(
     let enqueuer = Enqueuer::<ExtensionServiceStateControllerIO>::new(restarted.pool.clone());
     assert!(!enqueuer.enqueue_object(&service_id).await?);
 
-    // The queued pass observes the obsolete chain finalizer and cannot delete its patch yet.
+    // The queued pass patches mutable DPUService drift and converges the retained slot-zero and
+    // slot-one DPUServiceInterface and DPUServiceChain resources,
+    // but remains waiting for reclamation.
     restarted
         .run_queued_extension_service_controller_iterations()
         .await;
-    // Reload the row so this proves the finalizer branch persisted its specific Wait outcome.
+    // Reload the row so this proves the capacity-drain branch persisted its specific Wait outcome.
     let mut connection = restarted.pool.acquire().await?;
     let waiting = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
         .await?
         .pop()
-        .expect("referenced registration remains durable while chain finalization is pending");
+        .expect("referenced registration remains durable while retained-slot capacity drains");
     assert_eq!(
         waiting.status.controller_state.value,
         ExtensionServiceLifecycleState::Updating
@@ -3243,18 +3352,125 @@ async fn test_endpoint_free_reference_repairs_shrunk_slots_after_family_disable(
     assert!(matches!(
         waiting.status.controller_state_outcome,
         Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
-            if reason.contains("chain finalization")
+            if reason.contains("slot capacity is draining retained endpoints")
     ));
     drop(connection);
+    assert_eq!(service_patch_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(chain_delete_calls.load(Ordering::Relaxed), 0);
     assert_eq!(patch_delete_calls.load(Ordering::Relaxed), 0);
     assert_eq!(interfaces.lock().unwrap().len(), 3);
+    assert_eq!(chains.lock().unwrap().len(), 2);
 
-    // Once the chain disappears, one pass removes its patch and the next recreates the consumer.
+    // Mark removal through `update_service_network_config` so guarded reclamation receives the same attachment,
+    // service-interface records, and configuration versions that cleanup must validate.
+    let stored = db::instance::find_by_id(&restarted.pool, instance_id)
+        .await?
+        .expect("capacity-drain instance remains stored");
+    let mut terminating_attachments = stored.config.extension_services.clone();
+    terminating_attachments.service_configs[0].removed = Some(chrono::Utc::now());
+    let mut txn = restarted.pool.begin().await?;
+    assert!(matches!(
+        db::instance::update_service_network_config(
+            txn.as_mut(),
+            instance_id,
+            stored.extension_services_config_version,
+            &stored.config.extension_services,
+            &terminating_attachments,
+            stored.network_config_version,
+            &stored.config.network,
+            &stored.config.network,
+            true,
+        )
+        .await?,
+        db::ConditionalWrite::Applied(_)
+    ));
+    txn.commit().await?;
+
+    // Reclaim only after the service-interface record and both configuration versions match the locked Instance.
+    let terminating = db::instance::find_by_id(&restarted.pool, instance_id)
+        .await?
+        .expect("terminating capacity-drain instance remains stored");
+    let mut txn = restarted.pool.begin().await?;
+    assert_eq!(
+        db::instance::reclaim_service_vpc_attachment(
+            txn.as_mut(),
+            instance_id,
+            attachment_id,
+            terminating.extension_services_config_version,
+            terminating.network_config_version,
+            std::slice::from_ref(&endpoint),
+            None,
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    txn.commit().await?;
+
+    // Fresh database reads confirm reclamation removed the attachment, service interface, and address and set the
+    // generated segment's deletion timestamp.
+    let drained = db::instance::find_by_id(&restarted.pool, instance_id)
+        .await?
+        .expect("reclaimed capacity-drain instance remains stored");
+    assert!(drained.config.extension_services.service_configs.is_empty());
+    assert!(drained.config.network.service_interfaces.is_empty());
+    assert_eq!(
+        db::instance_address::count_by_segment_id(
+            &mut *restarted.pool.acquire().await?,
+            &service_segment_id,
+        )
+        .await?,
+        0
+    );
+    let service_segment_deleted: bool =
+        sqlx::query_scalar("SELECT deleted IS NOT NULL FROM network_segments WHERE id=$1")
+            .bind(service_segment_id)
+            .fetch_one(&restarted.pool)
+            .await?;
+    assert!(service_segment_deleted);
+
+    // The first post-drain pass starts obsolete chain deletion and leaves its dependent patch
+    // untouched until Kubernetes confirms finalization.
+    restarted.run_extension_service_controller_iteration().await;
+    let mut connection = restarted.pool.acquire().await?;
+    let deletion_started =
+        db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+            .await?
+            .pop()
+            .expect("registration remains durable after chain deletion starts");
+    assert!(matches!(
+        deletion_started.status.controller_state_outcome,
+        Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
+            if reason == "obsolete service-VPC chain deletion is awaiting finalization"
+    ));
+    drop(connection);
+    assert_eq!(chain_delete_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(patch_delete_calls.load(Ordering::Relaxed), 0);
+
+    // A later observation sees the chain finalizing and still preserves its dependent patch.
+    restarted.run_extension_service_controller_iteration().await;
+    let mut connection = restarted.pool.acquire().await?;
+    let finalizing =
+        db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+            .await?
+            .pop()
+            .expect("registration remains durable while chain finalization is pending");
+    assert!(matches!(
+        finalizing.status.controller_state_outcome,
+        Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
+            if reason == "service-VPC chain finalization is in progress; retrying"
+    ));
+    drop(connection);
+    assert_eq!(chain_delete_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(patch_delete_calls.load(Ordering::Relaxed), 0);
+
+    // Confirmed chain absence lets the next pass delete the dependent patch.
     restarted.run_extension_service_controller_iteration().await;
     assert_eq!(patch_delete_calls.load(Ordering::Relaxed), 1);
+
+    // Confirmed patch absence lets the following pass publish Ready.
     restarted.run_extension_service_controller_iteration().await;
 
-    // Ready now represents the configured one-slot graph despite disabled new admission.
+    // Ready now represents the configured slot-zero DPUServiceInterface and DPUServiceChain resources despite disabled admission.
     let mut connection = restarted.pool.acquire().await?;
     let ready = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
         .await?

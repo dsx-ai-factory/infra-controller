@@ -3905,6 +3905,10 @@ message InstanceDpuExtensionServiceConfig {
 // Extension services configuration for an instance
 message InstanceDpuExtensionServicesConfig {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Removing an existing entry begins asynchronous termination. Re-adding the same
+  // (`service_id`, `version`) returns `FAILED_PRECONDITION` while that attachment retains
+  // service interfaces, even when `service_vpc_ids` is empty. Endpoint-free attachments,
+  // including `KUBERNETES_POD` attachments, can be re-added while terminating.
   repeated InstanceDpuExtensionServiceConfig service_configs = 1;
 }
 

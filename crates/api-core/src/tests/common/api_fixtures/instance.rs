@@ -193,11 +193,11 @@ impl<'a, 'b> TestInstance<'a, 'b> {
     }
 }
 
-/// Persists a synthetic, attachment-correlated endpoint for lifecycle guard tests.
+/// Persists a synthetic attachment and matching service interface for lifecycle guard tests.
 ///
-/// Public endpoint creation is not available until issue #6125. Matching IDs
-/// satisfy snapshot ownership validation, while writing both records in one
-/// transaction and reloading after commit prove durable correlated state.
+/// Public activation remains fail-closed until the complete lifecycle is enabled. Matching IDs
+/// satisfy attachment-to-service-interface validation, while one transaction and a committed
+/// reread prove both configurations were stored for cleanup tests.
 pub(in crate::tests) async fn seed_service_vpc_endpoint(
     env: &TestEnv,
     instance_id: InstanceId,
@@ -264,8 +264,8 @@ pub(in crate::tests) async fn seed_service_vpc_endpoint(
         internal_uuid: uuid::Uuid::new_v4(),
     };
 
-    // Keep the attachment identity and endpoint owner in one transaction so
-    // no persisted snapshot can observe only half of the relationship.
+    // Write the attachment and service interface in one conditional statement so a committed
+    // Instance cannot contain only one side of the relationship.
     let mut txn = env.db_txn().await;
     let stored = db::instance::find_by_id(txn.as_mut(), instance_id)
         .await
@@ -287,28 +287,22 @@ pub(in crate::tests) async fn seed_service_vpc_endpoint(
     network_with_endpoint
         .service_interfaces
         .push(endpoint.clone());
-    assert_eq!(
-        db::instance::update_extension_services_config(
+    assert!(matches!(
+        db::instance::update_service_network_config(
             txn.as_mut(),
             instance_id,
             stored.extension_services_config_version,
             &current_services,
             &services_with_attachment,
+            stored.network_config_version,
+            &stored.config.network,
+            &network_with_endpoint,
             false,
         )
         .await
         .unwrap(),
-        db::ConditionalWrite::Applied(())
-    );
-    db::instance::update_network_config(
-        txn.as_mut(),
-        instance_id,
-        stored.network_config_version,
-        &network_with_endpoint,
-        false,
-    )
-    .await
-    .unwrap();
+        db::ConditionalWrite::Applied(_)
+    ));
     txn.commit().await.unwrap();
 
     // Reload committed state so an ineffective seed cannot make a guard test pass.
