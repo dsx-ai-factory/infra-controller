@@ -535,7 +535,7 @@ async fn patch_expected_machine_dpu_loopback_reservation_restore_owned(pool: PgP
         .fetch_one(&mut *txn)
         .await
         .unwrap();
-    db::expected_dpu_loopback_reservation::find_by_dpu_oob_mac_for_update(
+    db::expected_dpu_loopback_reservation::find_by_dpu_oob_net0_mac_for_update(
         &mut txn,
         "02:00:00:00:00:01".parse().unwrap(),
     )

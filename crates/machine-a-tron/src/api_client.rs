@@ -169,6 +169,7 @@ impl ExpectedRecord {
                 id: None,
                 host_nics: interfaces,
                 replace_host_nics: false,
+                replace_dpu_loopbacks: false,
                 rack_id,
                 default_pause_ingestion_and_poweron: None,
                 #[allow(deprecated)]
@@ -773,6 +774,7 @@ mod tests {
                         id: None,
                         host_nics: vec![nic],
                         replace_host_nics: false,
+                        replace_dpu_loopbacks: false,
                         rack_id: Some(rack_id.clone()),
                         default_pause_ingestion_and_poweron: None,
                         #[allow(deprecated)]
@@ -807,6 +809,7 @@ mod tests {
                         id: None,
                         host_nics: Vec::new(),
                         replace_host_nics: false,
+                        replace_dpu_loopbacks: false,
                         rack_id: None,
                         default_pause_ingestion_and_poweron: None,
                         #[allow(deprecated)]

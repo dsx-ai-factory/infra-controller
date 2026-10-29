@@ -2037,7 +2037,7 @@ async fn test_zero_dpu_loopback_reservations_follow_host_policy(
         (HostDpuPolicy::Ignore, 32, true),
     ] {
         let reservation = DpuLoopbackReservation {
-            dpu_oob_mac_address: DpuConfig::default().oob_mac_address,
+            dpu_oob_net0_mac_address: DpuConfig::default().oob_mac_address,
             loopback_ipv4: Some(std::net::Ipv4Addr::new(192, 0, 2, suffix)),
             loopback_ipv6: None,
         };
@@ -2172,12 +2172,12 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
             data: ExpectedMachineData {
                 interfaces: [
                     DpuLoopbackReservation {
-                        dpu_oob_mac_address: dpu_a.oob_mac_address,
+                        dpu_oob_net0_mac_address: dpu_a.oob_mac_address,
                         loopback_ipv4: Some(a_v4),
                         loopback_ipv6: Some(a_v6),
                     },
                     DpuLoopbackReservation {
-                        dpu_oob_mac_address: dpu_b.oob_mac_address,
+                        dpu_oob_net0_mac_address: dpu_b.oob_mac_address,
                         loopback_ipv4: Some(b_v4),
                         loopback_ipv6: Some(b_v6),
                     },

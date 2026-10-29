@@ -447,7 +447,12 @@ impl<'de> Deserialize<'de> for ExpectedInterface {
             primary: Option<bool>,
         }
         let raw = UncheckedExpectedInterface::deserialize(deserializer)?;
-        if raw.role.is_dpu_loopback() && raw.fixed_gateway.is_some() {
+        if raw.role.is_dpu_loopback()
+            && raw
+                .fixed_gateway
+                .as_ref()
+                .is_some_and(|gateway| !gateway.is_empty())
+        {
             return Err(serde::de::Error::custom(
                 "dpu_loopback does not accept fixed_gateway",
             ));
@@ -1003,7 +1008,7 @@ impl ExpectedMachine {
 /// configuration uses one Fixed DpuLoopback interface per address family.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DpuLoopbackReservation {
-    pub dpu_oob_mac_address: MacAddress,
+    pub dpu_oob_net0_mac_address: MacAddress,
     pub loopback_ipv4: Option<Ipv4Addr>,
     pub loopback_ipv6: Option<Ipv6Addr>,
 }
@@ -1016,7 +1021,7 @@ impl DpuLoopbackReservation {
             .into_iter()
             .chain(self.loopback_ipv6.map(IpAddr::V6))
             .map(|fixed_ip| ExpectedInterface {
-                mac_address: Some(self.dpu_oob_mac_address),
+                mac_address: Some(self.dpu_oob_net0_mac_address),
                 role: ExpectedInterfaceRole::DpuLoopback,
                 ip_allocation: Some(ExpectedInterfaceIpAllocation::Fixed),
                 fixed_ip: Some(fixed_ip),
@@ -1103,12 +1108,12 @@ impl ExpectedMachineData {
             let address = interface.fixed_reservation_ip()?;
             let index = match reservations
                 .iter()
-                .position(|r| r.dpu_oob_mac_address == mac)
+                .position(|r| r.dpu_oob_net0_mac_address == mac)
             {
                 Some(index) => index,
                 None => {
                     reservations.push(DpuLoopbackReservation {
-                        dpu_oob_mac_address: mac,
+                        dpu_oob_net0_mac_address: mac,
                         loopback_ipv4: None,
                         loopback_ipv6: None,
                     });
@@ -1531,6 +1536,32 @@ mod tests {
         let nic: ExpectedInterface = serde_json::from_str(json).unwrap();
 
         assert_eq!(nic.fixed_gateway, Some("2001:db8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn loopback_gateway_accepts_only_absent_or_empty_values() {
+        scenarios!(
+            run = |gateway: Option<&str>| {
+                let mut json = serde_json::json!({
+                    "mac_address": "02:00:00:00:00:20",
+                    "role": "dpu_loopback",
+                    "fixed_ip": "198.51.100.20"
+                });
+                if let Some(gateway) = gateway {
+                    json["fixed_gateway"] = serde_json::json!(gateway);
+                }
+                serde_json::from_value::<ExpectedInterface>(json)
+                    .map(|interface| interface.fixed_gateway).map_err(drop)
+            };
+            "absent gateway" {
+                None => Yields(None),
+                Some("") => Yields(None),
+            }
+            "non-empty gateway" {
+                Some("198.51.100.1") => Fails,
+                Some("not-an-ip") => Fails,
+            }
+        );
     }
 
     #[test]

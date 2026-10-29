@@ -2,7 +2,7 @@
 CREATE TABLE expected_dpu_loopback_reservations (
     host_bmc_mac_address macaddr NOT NULL
         REFERENCES expected_machines (bmc_mac_address) ON DELETE CASCADE,
-    dpu_oob_mac_address macaddr NOT NULL UNIQUE,
+    dpu_oob_net0_mac_address macaddr NOT NULL UNIQUE,
     loopback_ipv4 inet UNIQUE DEFERRABLE INITIALLY IMMEDIATE,
     loopback_ipv6 inet UNIQUE DEFERRABLE INITIALLY IMMEDIATE,
     CHECK (loopback_ipv4 IS NOT NULL OR loopback_ipv6 IS NOT NULL),
