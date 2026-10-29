@@ -58,7 +58,7 @@ jobs:
 
       - name: Test Temporal chart addresses
         if: matrix.chart == 'rest-api/temporal-helm/temporal'
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@fdc2fa4b5f14ae570f290218f102f9b4aad3b26e
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@234cbe468a00506a2a497e9671c8846c56b8ac24
         with:
           plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
           registry-password: ${{ secrets.NVCR_STG_TOKEN }}
@@ -85,7 +85,7 @@ jobs:
 
       - name: Install yq for umbrella packaging
         if: matrix.chart == 'helm/rest/nico-rest' && inputs.ngc_path != ''
-        uses: dcarbone/install-yq-action@64b1b9eb28920bb1a4c13c05321df284f9a8f940 # v1.1.1
+        uses: dcarbone/install-yq-action@4075b4dca348d74bd83f2bf82d30f25d7c54539b # v1.3.1
         with:
           version: v4.35.1
 
