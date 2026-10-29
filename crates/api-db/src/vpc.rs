@@ -16,6 +16,7 @@
  */
 use std::ops::DerefMut;
 
+use carbide_uuid::DbTable;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
 use config_version::ConfigVersion;
@@ -320,13 +321,11 @@ pub async fn find_by_segment(
     txn: impl DbReader<'_>,
     segment_id: NetworkSegmentId,
 ) -> Result<Option<Vpc>, DatabaseError> {
-    let mut query = FilterableQueryBuilder::new(
-        "SELECT v.id, v.version, v.organization_id, v.network_security_group_id,
-                v.network_virtualization_type, v.routing_profile_type, v.routing_profile_overrides,
-                v.power_resource_group, v.slaac_enabled, v.vni, v.status, v.name, v.description,
-                v.labels, v.created, v.updated, v.deleted
-         from vpcs v INNER JOIN network_segments s ON v.id = s.vpc_id",
-    )
+    let mut query = FilterableQueryBuilder::new(format!(
+        "SELECT {} FROM {} INNER JOIN network_segments s ON v.id = s.vpc_id",
+        Vpc::db_aliased_columns(),
+        Vpc::db_aliased_table(),
+    ))
     .filter_relation(
         &ObjectColumnFilter::One(network_segment::IdColumn, &segment_id),
         Some("s"),

@@ -292,6 +292,9 @@ service Forge {
   rpc FindIpAddress(FindIpAddressRequest) returns (FindIpAddressResponse);
   rpc FindMachineIds(MachineSearchConfig) returns (common.MachineIdList);
   rpc FindMachinesByIds(MachinesByIdsRequest) returns (MachineList);
+  // Compact per-host state for monitoring: allocatability, update eligibility
+  // and the explored firmware report, read from one database snapshot.
+  rpc FindHostStatesByIds(HostStatesByIdsRequest) returns (HostStateList);
   rpc FindMachineStateHistories(MachineStateHistoriesRequest) returns (MachineStateHistories);
   rpc FindMachineHealthHistories(MachineHealthHistoriesRequest) returns (HealthHistories);
   rpc FindPowerShelfStateHistories(PowerShelfStateHistoriesRequest) returns (StateHistories);
@@ -13178,4 +13181,106 @@ message MachineUpdatePolicy {
   // Also apply the absolute cap when it is nonnegative. An absolute cap of 0 gives 0.
   optional int32 max_concurrent_updates_absolute = 3;
   optional int32 max_concurrent_updates_percent = 4;
+}
+
+message HostStatesByIdsRequest {
+  // Host or predicted-host IDs, 1 to max_find_by_ids. DPU IDs are INVALID_ARGUMENT.
+  repeated common.MachineId host_ids = 1;
+}
+
+message HostStateList {
+  // One entry per existing requested host, sorted by ID.
+  repeated HostState hosts = 1;
+  // Taken after the read transaction commits. All hosts come from one database snapshot.
+  google.protobuf.Timestamp read_at = 2;
+}
+
+message HostState {
+  common.MachineId id = 1;
+  // The same string as Machine.state.
+  string state = 2;
+  string state_version = 3;
+  optional ControllerStateReason state_reason = 4;
+  optional common.RackId rack_id = 5;
+  optional common.NVLinkDomainId nvlink_domain_id = 6;
+  optional string instance_type_id = 7;
+  optional string bmc_ip = 8;
+  optional string bmc_mac = 9;
+  repeated common.MachineId dpu_ids = 10 [(carbide.codegen.v1.field_rust_type) = ".common.DpuMachineId"];
+  bool update_complete = 11;
+  // The host's own flag. Unset means the global default applies.
+  optional bool firmware_autoupdate = 12;
+  // Aggregate alerts, as Machine.status.health.
+  repeated health.HealthProbeAlert health_alerts = 13;
+  optional ManagedHostQuarantineState quarantine = 14;
+  HostAllocation allocation = 15;
+  // Unset when no explored report exists for bmc_ip.
+  HostExploredFirmware explored = 16;
+  HostUpdateEligibility update = 17;
+}
+
+message HostAllocation {
+  // is_usable_as_instance with allow_unhealthy = false. Quota, instance type
+  // and other allocation request checks are not included.
+  bool allocatable = 1;
+  // Stable snake_case code, for example maintenance_mode or health_alert.
+  optional string blocking_reason = 2;
+  // Human-readable detail, informational only.
+  optional string blocking_detail = 3;
+}
+
+message HostExploredFirmware {
+  string address = 1;
+  // BMC vendor as FindExploredEndpointsByIds reports it. Unset when unknown.
+  optional string vendor = 2;
+  // The report's Model.
+  optional string model = 3;
+  // The report's Versions["bmc"].
+  optional string bmc_version = 4;
+  // The report's Versions["uefi"].
+  optional string uefi_version = 5;
+  // The last report write of any kind, not the last successful exploration.
+  google.protobuf.Timestamp report_at = 6;
+  string report_version = 7;
+  // The same text as EndpointExplorationReport.last_exploration_error.
+  optional string last_exploration_error = 8;
+  // True when the report was rewritten without a fresh exploration, so the
+  // versions may be stale.
+  optional bool waiting_for_explorer_refresh = 9;
+  // Installed inventory matched to the configured components of the report's
+  // vendor and model, as the update manager matches it. Unset when the catalog
+  // has no entry for them, or a configured component is unknown.
+  HostFirmwareInventory firmware_inventory = 10;
+}
+
+message HostUpdateEligibility {
+  // The next machine update manager pass with spare capacity would select
+  // this host, by the per-host rule.
+  bool eligible = 1;
+  // Stable snake_case code, for example firmware_current or outside_update_window.
+  optional string blocking_reason = 2;
+  // The host's own flag or the global default allows automatic updates, and
+  // the host is not on the disable list. State, versions and the update
+  // window are ignored.
+  optional bool firmware_policy_eligible = 3;
+  optional string firmware_policy_blocking_reason = 4;
+}
+
+message HostFirmwareInventory {
+  // One group per configured component, sorted by component name.
+  repeated HostFirmwareComponentInventory components = 1;
+}
+
+message HostFirmwareComponentInventory {
+  // The component's serde name, for example bmc or cx7.
+  string component = 1;
+  // Every matching inventory entry, sorted by service, inventory and version.
+  // Empty when nothing matches.
+  repeated HostFirmwareInventoryEntry entries = 2;
+}
+
+message HostFirmwareInventoryEntry {
+  string service_id = 1;
+  string inventory_id = 2;
+  optional string version = 3;
 }

@@ -40,6 +40,7 @@ mod finder;
 mod firmware_component_manager;
 mod host_bmc_firmware_test;
 mod host_firmware_config;
+mod host_state_find;
 mod ib_fabric_monitor;
 mod ib_instance;
 mod ib_machine;

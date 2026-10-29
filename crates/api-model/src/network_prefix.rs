@@ -18,6 +18,7 @@ use std::net::IpAddr;
 
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::vpc::VpcPrefixId;
+use carbide_uuid::{DbColumns, DbTable};
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
@@ -59,6 +60,45 @@ impl From<NetworkPrefix> for NewNetworkPrefix {
             dhcpv6_link_address: prefix.dhcpv6_link_address,
             num_reserved: prefix.num_reserved,
         }
+    }
+}
+
+// `num_free_ips` is calculated separately and is not a table column.
+impl DbTable for NetworkPrefix {
+    fn db_table_name() -> &'static str {
+        "network_prefixes"
+    }
+
+    fn db_table_columns() -> DbColumns {
+        DbColumns::new(&[
+            "id",
+            "segment_id",
+            "prefix",
+            "gateway",
+            "dhcpv6_link_address",
+            "num_reserved",
+            "vpc_prefix_id",
+            "vpc_prefix",
+            "svi_ip",
+        ])
+    }
+
+    fn db_aliased_table() -> &'static str {
+        "network_prefixes AS np"
+    }
+
+    fn db_aliased_columns() -> DbColumns {
+        DbColumns::new(&[
+            "np.id",
+            "np.segment_id",
+            "np.prefix",
+            "np.gateway",
+            "np.dhcpv6_link_address",
+            "np.num_reserved",
+            "np.vpc_prefix_id",
+            "np.vpc_prefix",
+            "np.svi_ip",
+        ])
     }
 }
 

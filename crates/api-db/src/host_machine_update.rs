@@ -120,6 +120,7 @@ pub async fn find_update_gates(
             explored_endpoints.exploration_report->>'Model' AS report_model,
             NULLIF(explored_endpoints.exploration_report->'Versions', 'null'::jsonb) AS report_versions,
             NULLIF(explored_endpoints.exploration_report->'LastExplorationError', 'null'::jsonb) AS report_error,
+            NULLIF(explored_endpoints.exploration_report->'Service', 'null'::jsonb) AS report_service,
             desired_firmware.vendor IS NOT NULL AS has_target,
             ",
         PRED_HOST,
