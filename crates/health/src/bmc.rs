@@ -186,7 +186,6 @@ struct AuthenticationProbe<'a> {
     epoch: u64,
     /// Cooldown to restore when the probe never tested the credentials.
     previous_backoff: Duration,
-    previous_protected_probe_pending: bool,
 }
 
 impl AuthenticationProbe<'_> {
@@ -229,13 +228,11 @@ impl AuthenticationProbe<'_> {
         });
     }
 
-    /// The probe never reached the BMC, or credentials could not be fetched,
-    /// so no login was rejected. Restore the cooldown without escalating it.
+    /// The probe gave no verdict on the credentials, so restore the cooldown
+    /// without escalating it. A public-root handoff the probe used stays spent,
+    /// so later protected reads wait out the cooldown.
     fn inconclusive(&self) {
-        self.finish(|circuit, _| {
-            circuit.protected_probe_pending = self.previous_protected_probe_pending;
-            circuit.open(self.previous_backoff);
-        });
+        self.finish(|circuit, _| circuit.open(self.previous_backoff));
     }
 }
 
@@ -786,7 +783,6 @@ impl BmcClient {
             client: self,
             epoch: circuit.epoch,
             previous_backoff,
-            previous_protected_probe_pending,
         }
     }
 

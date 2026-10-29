@@ -155,6 +155,26 @@ async fn unavailable_probe_does_not_escalate_authentication_cooldown() {
 }
 
 #[tokio::test]
+async fn inconclusive_probe_spends_the_public_root_handoff() {
+    let client = test_client();
+    expire(&client);
+    let (op, _) = scripted_op(vec![Ok("root")]);
+    client.read_with_auth_retry(false, op).await.unwrap();
+    let (op, _) = scripted_op(vec![Err(HealthError::BmcError(Box::new(
+        bmc_status_error(http::StatusCode::SERVICE_UNAVAILABLE),
+    )))]);
+    client.read_with_auth_retry(true, op).await.unwrap_err();
+    assert_eq!(client.collector_sweep(), CollectorSweep::Skip);
+    let (op, attempts) = scripted_op(vec![]);
+    client.read_with_auth_retry(true, op).await.unwrap_err();
+    assert_eq!(
+        attempts.load(AtomicOrdering::SeqCst),
+        0,
+        "later protected reads wait out the cooldown"
+    );
+}
+
+#[tokio::test]
 async fn authentication_recovery_waits_for_the_connection_circuit() {
     let client = test_client();
     expire(&client);
