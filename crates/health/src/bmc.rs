@@ -158,6 +158,23 @@ struct AuthenticationCircuit {
     /// A public-root probe can supply discovery links, but cannot validate the
     /// credentials. Its next protected read may probe without another cooldown.
     protected_probe_pending: bool,
+    /// The provider changed credentials while a probe was in flight, possibly
+    /// after it fetched the old ones. Its cooldown ends at once.
+    credentials_changed: bool,
+}
+
+impl AuthenticationCircuit {
+    fn open(&mut self, backoff: Duration) {
+        let cooldown = if std::mem::take(&mut self.credentials_changed) {
+            Duration::ZERO
+        } else {
+            backoff
+        };
+        self.state = CircuitState::Open {
+            until: Instant::now() + cooldown,
+            backoff,
+        };
+    }
 }
 
 /// Owns refresh and probe together. Dropping a cancelled or rejected probe
@@ -199,6 +216,7 @@ impl AuthenticationProbe<'_> {
             tracing::info!(endpoint = ?self.client.addr,
                 "BMC accepted credentials; closing authentication circuit");
             circuit.protected_probe_pending = false;
+            circuit.credentials_changed = false;
             circuit.state = CircuitState::Closed;
         });
     }
@@ -207,10 +225,7 @@ impl AuthenticationProbe<'_> {
     fn await_protected_read(&self) {
         self.finish(|circuit, backoff| {
             circuit.protected_probe_pending = true;
-            circuit.state = CircuitState::Open {
-                until: Instant::now() + backoff,
-                backoff,
-            };
+            circuit.open(backoff);
         });
     }
 
@@ -219,10 +234,7 @@ impl AuthenticationProbe<'_> {
     fn inconclusive(&self) {
         self.finish(|circuit, _| {
             circuit.protected_probe_pending = self.previous_protected_probe_pending;
-            circuit.state = CircuitState::Open {
-                until: Instant::now() + self.previous_backoff,
-                backoff: self.previous_backoff,
-            };
+            circuit.open(self.previous_backoff);
         });
     }
 }
@@ -238,10 +250,7 @@ impl Drop for AuthenticationProbe<'_> {
             return;
         }
         if let CircuitState::Probing { backoff, .. } = circuit.state {
-            circuit.state = CircuitState::Open {
-                until: Instant::now() + backoff,
-                backoff,
-            };
+            circuit.open(backoff);
             tracing::info!(endpoint = ?self.client.addr, backoff_seconds = backoff.as_secs(),
                 "BMC authentication not recovered; authentication circuit stays open");
         }
@@ -451,6 +460,7 @@ impl BmcClient {
                 state: CircuitState::Closed,
                 epoch: 0,
                 protected_probe_pending: false,
+                credentials_changed: false,
             }),
             credential_fetch_failure: StdMutex::new(None),
             bmc_identity,
@@ -564,7 +574,17 @@ impl BmcClient {
                 "failed to refresh BMC credentials after auth error {error}: {refresh_error}"
             ))
         })?;
-        let _credentials = self.credential_use.write().await;
+        // A writer queued on this fair lock also holds back new operations, so
+        // an operation that never finishes must not stall the client.
+        let _credentials =
+            tokio::time::timeout(CREDENTIAL_REFRESH_TIMEOUT, self.credential_use.write())
+                .await
+                .map_err(|_elapsed| {
+                    HealthError::GenericError(format!(
+                        "timed out after {}s waiting for in-flight BMC operations to install refreshed credentials",
+                        CREDENTIAL_REFRESH_TIMEOUT.as_secs(),
+                    ))
+                })?;
         self.inner.set_credentials(credentials.into());
         self.credential_generation.fetch_add(1, Ordering::AcqRel);
         Ok(())
@@ -785,15 +805,17 @@ impl BmcClient {
     }
 
     /// The provider now issues different credentials. End any authentication
-    /// cooldown so the next read tests them; escalation is kept in case they
-    /// are rejected too.
+    /// cooldown so the next read tests them, or the one an in-flight probe is
+    /// about to restore. Escalation is kept in case they are rejected too.
     pub(crate) fn credentials_changed(&self) {
         let mut circuit = self.authentication.lock().expect("auth circuit poisoned");
-        if let CircuitState::Open { backoff, .. } = circuit.state {
-            circuit.state = CircuitState::Open {
-                until: Instant::now(),
-                backoff,
-            };
+        match circuit.state {
+            CircuitState::Closed => {}
+            CircuitState::Open { backoff, .. } => {
+                circuit.credentials_changed = true;
+                circuit.open(backoff);
+            }
+            CircuitState::Probing { .. } => circuit.credentials_changed = true,
         }
     }
 
@@ -2940,6 +2962,29 @@ mod tests {
         tokio::time::advance(CREDENTIAL_REFRESH_TIMEOUT + Duration::from_secs(1)).await;
         let result = refresh.await.expect("task joined");
         assert!(result.is_err(), "hanging provider must surface as timeout");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refresh_does_not_wait_forever_for_an_operation_using_credentials() {
+        let client = Arc::new(test_client());
+        let in_flight = client.credential_use.read().await;
+        let refresh_client = client.clone();
+        let refresh = tokio::spawn(async move {
+            refresh_client
+                .refresh_credentials(&HealthError::HttpError("HTTP 401".to_string()), None)
+                .await
+        });
+        tokio::time::advance(CREDENTIAL_REFRESH_TIMEOUT + Duration::from_secs(1)).await;
+        assert!(
+            refresh.await.expect("task joined").is_err(),
+            "a stuck operation must surface as a timeout"
+        );
+        assert_eq!(
+            client.credential_generation.load(Ordering::Acquire),
+            0,
+            "credentials are not replaced while still in use"
+        );
+        drop(in_flight);
     }
 
     #[tokio::test(start_paused = true)]

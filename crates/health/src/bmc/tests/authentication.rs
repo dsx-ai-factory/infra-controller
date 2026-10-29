@@ -251,6 +251,25 @@ async fn changed_credentials_end_cooldown_without_resetting_escalation() {
     assert_eq!(client.collector_sweep(), CollectorSweep::Full);
 }
 
+#[test]
+fn credentials_changed_during_a_probe_end_its_cooldown() {
+    let client = test_client();
+    expire(&client);
+    let probe = client.authentication_probe(true).unwrap().unwrap();
+    client.credentials_changed();
+    drop(probe);
+    assert_eq!(
+        open_backoff(&client),
+        Some(Duration::from_secs(120)),
+        "the probe's own rejection still escalates"
+    );
+    assert_eq!(
+        client.collector_sweep(),
+        CollectorSweep::Probe,
+        "the changed credentials are tested at once"
+    );
+}
+
 #[tokio::test]
 async fn concurrent_collectors_admit_one_recovery_probe() {
     let (provider, calls) =
