@@ -741,9 +741,11 @@ When an archive is split, its envelope is rendered as JSON, which is valid YAML.
 String-valued part metadata and the remaining embedded YAML strings are preserved,
 but envelope comments and formatting are not. Use quoted strings for filenames
 and other MIME header metadata to avoid YAML scalar interpretation differences.
-An archive without network settings is served
-unchanged. Archives with custom merge rules, launch-index filters, templates,
-unsupported part types or layouts, malformed content, or references that prevent
+Unquoted metadata values can change meaning under cloud-init's YAML 1.1 rules
+when NICo rewrites the archive as JSON. An archive without network settings is
+served unchanged. Archives with custom merge rules, launch-index filters,
+templates, unsupported part types or layouts, malformed content, metadata that
+cannot survive JSON conversion (such as YAML tags), or references that prevent
 safe splitting are also served unchanged. In these archive fallback cases, the
 separate network response supplies NICo's default DHCPv4 and DHCPv6 configuration
 for interfaces matching `en*` and `eth*`. Do not rely on archive-contained static

@@ -527,6 +527,12 @@ mod tests {
             "inferred script leaves cloud-config networking available" {
                 "- content: |\n    #!/bin/sh\n    echo ready\n- content: 'network: {version: 2}'\n" => Some(2),
             }
+            "script frequency suffix leaves cloud-config networking available" {
+                "- type: text/x-shellscript-per-boot\n  content: |\n    #!/bin/sh\n    echo ready\n- content: 'network: {version: 2}'\n" => Some(2),
+            }
+            "typed boothook leaves cloud-config networking available" {
+                "- type: text/cloud-boothook\n  content: |\n    #cloud-boothook\n    echo ready\n- content: 'network: {version: 2}'\n" => Some(2),
+            }
         );
         let output = user_data_without_network(
             "#cloud-config-archive\n- |\n  #cloud-config\n  network: {version: 2}\n",
