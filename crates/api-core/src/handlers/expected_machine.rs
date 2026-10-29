@@ -181,7 +181,7 @@ fn validate_expected_machine_for_insert(machine: &ExpectedMachine) -> Result<(),
         .validate(machine.data.bmc_ip_address.is_some())
         .map_err(|msg| CarbideError::InvalidArgument(msg.to_string()))?;
     validate_fixed_addresses(&machine.data)?;
-    validate_control_plane_designation(&machine.data)?;
+    validate_control_plane_designation(machine)?;
 
     Ok(())
 }
@@ -195,16 +195,31 @@ fn validate_expected_machine_for_insert(machine: &ExpectedMachine) -> Result<(),
 /// exactly the outage this designation exists for. Host data interfaces are
 /// unconstrained, because they are not on the path that brings the machine and
 /// its DPU back without NICo.
-fn validate_control_plane_designation(data: &ExpectedMachineData) -> Result<(), CarbideError> {
-    if data.host_lifecycle_profile.control_plane != Some(true) {
+///
+/// The Host BMC is judged through `effective_host_bmc`, because
+/// `normalize_host_bmc` deliberately leaves a legacy-only declaration in the
+/// compatibility columns instead of `interfaces`. Walking `interfaces` alone
+/// accepts a Dynamic Host BMC that every runtime reader then honours.
+/// Normalization runs before this check, so both representations agree here.
+fn validate_control_plane_designation(machine: &ExpectedMachine) -> Result<(), CarbideError> {
+    if machine.data.host_lifecycle_profile.control_plane != Some(true) {
         return Ok(());
     }
-    for interface in &data.interfaces {
+
+    let host_bmc = machine.effective_host_bmc();
+    if host_bmc.resolved_ip_allocation() == ExpectedInterfaceIpAllocation::Dynamic {
+        return Err(CarbideError::InvalidArgument(format!(
+            "host bmc {}: a control-plane machine requires a fixed or retained \
+             ip_allocation on every {} interface, not dynamic",
+            host_bmc.identity(),
+            host_bmc.role,
+        )));
+    }
+
+    for interface in &machine.data.interfaces {
         if !matches!(
             interface.role,
-            ExpectedInterfaceRole::HostBmc
-                | ExpectedInterfaceRole::DpuBmc
-                | ExpectedInterfaceRole::DpuOs
+            ExpectedInterfaceRole::DpuBmc | ExpectedInterfaceRole::DpuOs
         ) {
             continue;
         }
@@ -1651,19 +1666,87 @@ mod tests {
                 },
             ],
             |(control_plane, role, ip_allocation, fixed)| {
-                validate_control_plane_designation(&ExpectedMachineData {
-                    host_lifecycle_profile: model::expected_machine::HostLifecycleProfile {
-                        disable_lockdown: None,
-                        control_plane,
-                    },
-                    interfaces: vec![ExpectedInterface {
-                        mac_address: Some(mac),
-                        role,
-                        ip_allocation,
-                        fixed_ip: fixed.then(|| "192.0.2.85".parse().unwrap()),
+                // `normalize_host_bmc` syncs the compatibility columns before
+                // this validator runs, so mirror a Host BMC declaration onto
+                // them here rather than leaving them at their default.
+                let bmc_ip_allocation = if role.is_host_bmc() {
+                    ip_allocation.map_or(BmcIpAllocationType::Auto, Into::into)
+                } else {
+                    BmcIpAllocationType::Auto
+                };
+                validate_control_plane_designation(&ExpectedMachine {
+                    id: None,
+                    bmc_mac_address: mac,
+                    data: ExpectedMachineData {
+                        bmc_ip_allocation,
+                        host_lifecycle_profile: model::expected_machine::HostLifecycleProfile {
+                            disable_lockdown: None,
+                            control_plane,
+                        },
+                        interfaces: vec![ExpectedInterface {
+                            mac_address: Some(mac),
+                            role,
+                            ip_allocation,
+                            fixed_ip: fixed.then(|| "192.0.2.85".parse().unwrap()),
+                            ..Default::default()
+                        }],
                         ..Default::default()
-                    }],
-                    ..Default::default()
+                    },
+                })
+                .map_err(drop)
+            },
+        );
+    }
+
+    /// A Host BMC declared only through the legacy `bmc_ip_allocation` and
+    /// `bmc_ip_address` columns never reaches `interfaces`, so the designation
+    /// check has to resolve it from the compatibility columns. Without this,
+    /// an explicit legacy `Dynamic` is stored on a control-plane machine.
+    #[test]
+    fn control_plane_designation_checks_legacy_host_bmc_columns() {
+        let mac: MacAddress = "7A:7B:7C:7D:7E:86".parse().unwrap();
+        check_cases(
+            [
+                Case {
+                    scenario: "legacy dynamic host BMC with no interface entry",
+                    input: (Some(true), BmcIpAllocationType::Dynamic, false),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "omitted legacy allocation resolves to retained",
+                    input: (Some(true), BmcIpAllocationType::Auto, false),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "legacy retained host BMC",
+                    input: (Some(true), BmcIpAllocationType::Retained, false),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "legacy fixed host BMC with an address",
+                    input: (Some(true), BmcIpAllocationType::Fixed, true),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "undesignated machine keeps a legacy dynamic host BMC",
+                    input: (None, BmcIpAllocationType::Dynamic, false),
+                    expect: Yields(()),
+                },
+            ],
+            |(control_plane, bmc_ip_allocation, addressed)| {
+                validate_control_plane_designation(&ExpectedMachine {
+                    id: None,
+                    bmc_mac_address: mac,
+                    data: ExpectedMachineData {
+                        bmc_ip_allocation,
+                        bmc_ip_address: addressed.then(|| "192.0.2.86".parse().unwrap()),
+                        host_lifecycle_profile: model::expected_machine::HostLifecycleProfile {
+                            disable_lockdown: None,
+                            control_plane,
+                        },
+                        interfaces: Vec::new(),
+                        ..Default::default()
+                    },
                 })
                 .map_err(drop)
             },

@@ -589,6 +589,7 @@ func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachin
 			util.ExpectedComponentUpdateField{Path: "server_name", Present: emur.ServerName != nil},
 			util.ExpectedComponentUpdateField{Path: "is_dpf_enabled", Present: emur.IsDpfEnabled != nil},
 			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.disable_lockdown", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.DisableLockdown != nil},
+			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.control_plane", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.ControlPlane != nil},
 		),
 	}
 }
