@@ -5633,8 +5633,11 @@ mod test {
     async fn rack_reset_admission_and_cancellation_use_machine_boundaries(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        use chrono::Utc;
+        use config_version::ConfigVersion;
         use model::machine::{
-            FailureCause, FailureSource, HostReprovisionState, MachineState, ReadyBootConfigState,
+            FailureCause, FailureDetails, FailureSource, HostReprovisionState, MachineState,
+            ReadyBootConfigState,
         };
         use model::machine_boot_interface::MachineBootInterfaceTarget;
 
