@@ -99,7 +99,9 @@ async fn request_compute_host_restarts(
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
     let mut txn = ctx.services.db_pool.begin().await?;
-    let machines = super::get_machines_from_rack(rack, txn.as_mut()).await?;
+    let mut machines = super::get_machines_from_rack(rack, txn.as_mut()).await?;
+    // Match allocation's lock order when claiming multiple hosts.
+    machines.sort_by_key(|machine| machine.id);
 
     let unavailable_machine_ids = machines
         .iter()
@@ -129,7 +131,7 @@ async fn request_compute_host_restarts(
         {
             txn.rollback().await?;
             return Ok(StateHandlerOutcome::wait(format!(
-                "machine {} received another maintenance request before the rack restart request",
+                "machine {} is no longer eligible for the rack restart request",
                 machine.id
             )));
         }
@@ -158,8 +160,10 @@ async fn wait_for_compute_host_restarts(
     requested_machine_ids: &[HostMachineId],
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
-    let mut connection = ctx.services.db_pool.acquire().await?;
-    let machines = super::get_machines_from_rack(rack, &mut connection).await?;
+    let machines = {
+        let mut connection = ctx.services.db_pool.acquire().await?;
+        super::get_machines_from_rack(rack, &mut connection).await?
+    };
     let current_machine_ids = machines
         .iter()
         .map(|machine| HostMachineId::from(machine.id))
@@ -173,7 +177,6 @@ async fn wait_for_compute_host_restarts(
             rack_id = %rack.id,
             "Compute host membership changed while restarts were in progress; restarting the current set"
         );
-        drop(connection);
         return request_compute_host_restarts(rack, ctx).await;
     }
 
@@ -427,6 +430,17 @@ async fn terminate_active_rack_maintenance(
                 job.completed_at.get_or_insert(now);
                 db_rack::update_nvos_update_job(txn.as_mut(), rack_id, Some(&job)).await?;
                 state.nvos_update_job = Some(job);
+            }
+        }
+        RackMaintenanceState::ConfigureNmxCluster {
+            configure_nmx_cluster:
+                ConfigureNmxClusterState::WaitForComputeHostRestarts { machine_ids },
+        } => {
+            // Resets cover the saved batch, not the possibly narrower maintenance scope
+            // or the rack's current membership.
+            for machine_id in machine_ids {
+                db_machine::clear_ready_machine_reset_request(txn.as_mut(), machine_id, &initiator)
+                    .await?;
             }
         }
         RackMaintenanceState::ConfigureNmxCluster { .. }

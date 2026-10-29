@@ -2860,7 +2860,8 @@ where
 ///
 /// The caller supplies `new_version` for every machine and its history entry.
 /// `NotApplied(ControllerStateNotCurrent)` means the host is missing or its
-/// version changed; no state or history changes remain. Successful writes return
+/// version changed, or a maintenance request was cancelled/replaced; no state or
+/// history changes remain. Successful writes return
 /// `Applied(())` and remain in the caller's transaction. Database failures remain
 /// errors.
 pub async fn try_update_controller_state(
@@ -2884,10 +2885,16 @@ pub async fn try_update_controller_state(
     )
     .await?;
 
+    // A cancelled request must not be claimed from a stale controller snapshot.
+    let maintenance_request = match new_state {
+        ManagedHostState::Maintenance { request, .. } => request.as_ref(),
+        _ => None,
+    };
     let query = r#"
         UPDATE machines
         SET controller_state_version = $1, controller_state = $2
         WHERE id = $3 AND controller_state_version = $4
+          AND ($5::jsonb IS NULL OR machine_maintenance_requested = $5)
         RETURNING id
     "#;
     let updated: Option<HostMachineId> = sqlx::query_scalar(query)
@@ -2895,6 +2902,7 @@ pub async fn try_update_controller_state(
         .bind(sqlx::types::Json(new_state))
         .bind(host_id)
         .bind(expected_version)
+        .bind(maintenance_request.map(sqlx::types::Json))
         .fetch_optional(inner_txn.as_pgconn())
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
@@ -3362,22 +3370,38 @@ pub async fn set_machine_maintenance_requested(
     Ok(())
 }
 
-/// Sets a machine maintenance request only when no request is already pending.
+/// Claims maintenance on an unallocated Ready machine with no pending request.
 ///
-/// Returns `false` when the machine is missing or another request won the race;
-/// in either case no existing request is replaced.
+/// The caller must use a transaction. The machine row lock serializes with instance
+/// allocation; eligibility is rechecked after acquiring it. Returns `false` when
+/// the machine is missing or ineligible, without replacing an existing request.
 pub async fn try_set_machine_maintenance_requested(
     txn: &mut PgConnection,
     machine_id: impl MachineIdSubtypeTrait,
     initiator: &str,
     operation: MachineMaintenanceOperation,
 ) -> DatabaseResult<bool> {
+    let lock_query = "SELECT id FROM machines WHERE id = $1 FOR UPDATE";
+    if sqlx::query_as::<_, MachineId>(lock_query)
+        .bind(machine_id)
+        .fetch_optional(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(lock_query, error))?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    // A separate statement observes an allocation committed while the lock was awaited.
     let request = model::machine::MachineMaintenanceRequest {
         requested_at: Utc::now(),
         initiator: initiator.to_string(),
         operation,
     };
-    let query = "UPDATE machines SET machine_maintenance_requested = $1 WHERE id = $2 AND machine_maintenance_requested IS NULL RETURNING id";
+    let query = r#"UPDATE machines SET machine_maintenance_requested = $1
+        WHERE id = $2 AND machine_maintenance_requested IS NULL
+          AND controller_state->>'state' = 'ready'
+          AND NOT EXISTS (SELECT 1 FROM instances WHERE machine_id = $2)
+        RETURNING id"#;
     sqlx::query_as::<_, MachineId>(query)
         .bind(sqlx::types::Json(request))
         .bind(machine_id)
@@ -3385,6 +3409,28 @@ pub async fn try_set_machine_maintenance_requested(
         .await
         .map(|row| row.is_some())
         .map_err(|error| DatabaseError::new("try_set_machine_maintenance_requested", error))
+}
+
+/// Cancels only an unstarted Reset owned by the given rack initiator.
+/// Requests already claimed by a machine controller or owned by others are preserved.
+pub async fn clear_ready_machine_reset_request(
+    txn: &mut PgConnection,
+    machine_id: &HostMachineId,
+    initiator: &str,
+) -> DatabaseResult<bool> {
+    let query = r#"UPDATE machines SET machine_maintenance_requested = NULL
+        WHERE id = $1 AND controller_state->>'state' = 'ready'
+          AND machine_maintenance_requested->>'initiator' = $2
+          AND machine_maintenance_requested->'operation' = $3
+        RETURNING id"#;
+    Ok(sqlx::query_as::<_, MachineId>(query)
+        .bind(machine_id)
+        .bind(initiator)
+        .bind(sqlx::types::Json(MachineMaintenanceOperation::Reset))
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?
+        .is_some())
 }
 
 pub async fn set_decommission_requested(
@@ -5514,6 +5560,155 @@ mod test {
         assert_eq!(renamed_rows, interface_ids);
         txn.rollback().await?;
 
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn rack_reset_claim_serializes_with_allocation(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let mut setup = pool.begin().await?;
+        super::create(
+            setup.as_mut(),
+            None,
+            &machine_id.into(),
+            ManagedHostState::Ready,
+            None,
+            super::CURRENT_STATE_MODEL_VERSION,
+        )
+        .await?;
+        setup.commit().await?;
+
+        let mut allocation = pool.begin().await?;
+        let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(allocation.as_mut())
+            .await?;
+        sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE")
+            .bind(machine_id)
+            .execute(allocation.as_mut())
+            .await?;
+        sqlx::query("INSERT INTO instances (machine_id) VALUES ($1)")
+            .bind(machine_id)
+            .execute(allocation.as_mut())
+            .await?;
+        let claim = async {
+            let mut txn = pool.begin().await?;
+            let claimed = super::try_set_machine_maintenance_requested(
+                txn.as_mut(),
+                machine_id,
+                "rack-test",
+                super::MachineMaintenanceOperation::Reset,
+            )
+            .await?;
+            txn.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(claimed)
+        };
+        let commit_allocation = async {
+            crate::test_support::postgres::wait_for_blocked_query(&pool, blocker, "FOR UPDATE")
+                .await;
+            allocation.commit().await?;
+            Ok::<_, Box<dyn std::error::Error>>(())
+        };
+        let (claimed, ()) = tokio::time::timeout(std::time::Duration::from_secs(40), async {
+            tokio::try_join!(claim, commit_allocation)
+        })
+        .await??;
+        assert!(
+            !claimed,
+            "a committed instance must block Reset even while the host is Ready"
+        );
+        let pending: Option<serde_json::Value> =
+            sqlx::query_scalar("SELECT machine_maintenance_requested FROM machines WHERE id = $1")
+                .bind(machine_id)
+                .fetch_one(&pool)
+                .await?;
+        assert!(pending.is_none());
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn rack_reset_cancellation_preserves_claimed_and_foreign_requests(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use super::MachineMaintenanceOperation::{PowerOn, Reset};
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        for (initiator, operation, started, should_clear) in [
+            ("rack-test", Reset, false, true),
+            ("operator", Reset, false, false),
+            ("rack-test", PowerOn, false, false),
+            ("rack-test", Reset, true, false),
+        ] {
+            let mut txn = pool.begin().await?;
+            super::create(
+                txn.as_mut(),
+                None,
+                &machine_id.into(),
+                ManagedHostState::Ready,
+                None,
+                super::CURRENT_STATE_MODEL_VERSION,
+            )
+            .await?;
+            super::set_machine_maintenance_requested(
+                txn.as_mut(),
+                machine_id,
+                initiator,
+                operation,
+            )
+            .await?;
+            let machine = super::find_one(txn.as_mut(), &machine_id, Default::default())
+                .await?
+                .unwrap();
+            let request = machine.machine_maintenance_requested.unwrap();
+            let claimed_state = ManagedHostState::maintenance_for_request(request.clone());
+            if started {
+                assert_eq!(
+                    super::try_update_controller_state(
+                        txn.as_mut(),
+                        &machine_id,
+                        machine.state.version,
+                        machine.state.version.increment(),
+                        &claimed_state
+                    )
+                    .await?,
+                    crate::ConditionalWrite::Applied(())
+                );
+            }
+            assert_eq!(
+                super::clear_ready_machine_reset_request(txn.as_mut(), &machine_id, "rack-test")
+                    .await?,
+                should_clear
+            );
+            let after = super::find_one(txn.as_mut(), &machine_id, Default::default())
+                .await?
+                .unwrap();
+            assert_eq!(
+                after.machine_maintenance_requested,
+                (!should_clear).then_some(request)
+            );
+            if should_clear {
+                // A controller that read the request before cancellation cannot resurrect it.
+                assert_eq!(
+                    super::try_update_controller_state(
+                        txn.as_mut(),
+                        &machine_id,
+                        machine.state.version,
+                        machine.state.version.increment(),
+                        &claimed_state
+                    )
+                    .await?,
+                    crate::ConditionalWrite::NotApplied(super::ControllerStateNotCurrent)
+                );
+                let after = super::find_one(txn.as_mut(), &machine_id, Default::default())
+                    .await?
+                    .unwrap();
+                assert_eq!(after.state.value, machine.state.value);
+                assert_eq!(after.state.version, machine.state.version);
+            }
+            txn.rollback().await?;
+        }
         Ok(())
     }
 

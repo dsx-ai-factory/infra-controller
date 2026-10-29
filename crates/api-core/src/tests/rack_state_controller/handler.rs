@@ -1783,7 +1783,7 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
 
     // NMX-C has finished. A busy host keeps the rack in the existing certificate
     // wait state; the next successful poll retries the atomic restart handoff.
-    for _ in 0..2 {
+    for _ in 0..3 {
         env.rms_sim
             .queue_get_configure_switch_certificate_job_status_response(Ok(
                 rms::GetConfigureSwitchCertificateJobStatusResponse {
@@ -1877,6 +1877,35 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
     );
     txn.commit().await?;
 
+    // Allocation can commit before the machine controller leaves Ready. Put it
+    // on the last lock target to prove earlier claims roll back with the batch.
+    let allocated_id = *machine_ids.iter().max().unwrap();
+    sqlx::query("INSERT INTO instances (machine_id) VALUES ($1)")
+        .bind(allocated_id)
+        .execute(&pool)
+        .await?;
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
+                configure_nmx_cluster:
+                    ConfigureNmxClusterState::WaitForPrimarySwitchCertificateJob { .. },
+            }
+        }
+    ));
+    for machine_id in machine_ids {
+        let machine = db::machine::find_one(&pool, &machine_id, Default::default())
+            .await?
+            .unwrap();
+        assert!(machine.machine_maintenance_requested.is_none());
+    }
+    sqlx::query("DELETE FROM instances WHERE machine_id = $1")
+        .bind(allocated_id)
+        .execute(&pool)
+        .await?;
+
     env.run_rack_controller_iteration().await;
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     assert!(matches!(
@@ -1901,7 +1930,7 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
     {
         assert_eq!(targets.len(), 2);
         for machine_id in machine_ids {
-            assert!(targets.contains(&machine_id.into()));
+            assert!(targets.contains(&machine_id));
         }
     }
 
@@ -1982,6 +2011,78 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
         }
     ));
 
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_terminate_compute_restarts_uses_saved_targets(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides {
+            config: Some(config_with_rack_profiles()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let (rack_id, host_a, host_b) = create_two_compute_rack(&env, &pool).await?;
+    let ids = vec![host_a.host_snapshot.id, host_b.host_snapshot.id];
+    let mut txn = pool.begin().await?;
+    for id in &ids {
+        db::machine::set_machine_maintenance_requested(
+            txn.as_mut(),
+            *id,
+            &format!("rack-{rack_id}"),
+            MachineMaintenanceOperation::Reset,
+        )
+        .await?;
+    }
+    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+        txn.as_mut(),
+        &rack_id,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
+                configure_nmx_cluster: ConfigureNmxClusterState::WaitForComputeHostRestarts {
+                    machine_ids: ids.clone(),
+                },
+            },
+        },
+    )
+    .await?;
+    db_rack::update(
+        txn.as_mut(),
+        &rack_id,
+        &RackConfig {
+            maintenance_requested: Some(MaintenanceScope {
+                machine_ids: vec![ids[0]],
+                ..Default::default()
+            }),
+            maintenance_termination_requested: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    // The second target is outside both the original scope and current membership.
+    sqlx::query("UPDATE machines SET rack_id = NULL WHERE id = $1")
+        .bind(ids[1])
+        .execute(txn.as_mut())
+        .await?;
+    txn.commit().await?;
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Error { .. }
+    ));
+    assert!(rack.config.maintenance_requested.is_none());
+    assert!(!rack.config.maintenance_termination_requested);
+    for id in ids {
+        let machine = db::machine::find_one(&pool, &id, Default::default())
+            .await?
+            .unwrap();
+        assert!(machine.machine_maintenance_requested.is_none());
+    }
     Ok(())
 }
 
