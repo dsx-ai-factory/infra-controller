@@ -330,8 +330,8 @@ on the caller's instances, plus interfaces on other tenants' instances that sele
 caller's VPCs or VPC prefixes. Listing does not require either capability. Set
 `crossTenant=true` to return only interfaces whose instance and VPC have different owners. On
 those results, `instanceTenantId` and `vpcTenantId` name the two owners. Both are `null` when
-the owners match. `includeRelation` expands another tenant's instance or VPC prefix only when
-`crossTenant=true`. Otherwise that relation is left out of the response.
+the owners match. Filter by either owner with the `instanceTenantId` or `vpcTenantId` query
+parameter. `includeRelation` expands the instance or VPC prefix, including another tenant's.
 
 A VPC cannot be deleted while another tenant's instance still has an interface on it.
 
