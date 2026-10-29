@@ -54,15 +54,31 @@ async fn failed_recoveries_escalate_cooldown_until_credentials_are_accepted() {
 }
 
 #[tokio::test]
-async fn only_protected_answers_without_401_close_authentication() {
+async fn only_authenticated_protected_answers_close_authentication() {
     let cases = [
         ("protected success", true, Ok("body"), true),
         ("public root", false, Ok("body"), false),
         ("credentials rejected", true, Err(auth_error()), false),
         (
-            "server error answers without 401",
+            "server error may precede authentication",
             true,
             Err(HealthError::HttpError("HTTP 500".into())),
+            false,
+        ),
+        (
+            "unavailable BMC may precede authentication",
+            true,
+            Err(HealthError::BmcError(Box::new(bmc_status_error(
+                http::StatusCode::SERVICE_UNAVAILABLE,
+            )))),
+            false,
+        ),
+        (
+            "missing resource answers after authentication",
+            true,
+            Err(HealthError::BmcError(Box::new(bmc_status_error(
+                http::StatusCode::NOT_FOUND,
+            )))),
             true,
         ),
         (
@@ -118,6 +134,22 @@ async fn unreachable_probe_does_not_escalate_authentication_cooldown() {
         open_backoff(&client),
         Some(AUTH_CIRCUIT_INITIAL_BACKOFF),
         "no login was rejected"
+    );
+    assert_eq!(client.collector_sweep(), CollectorSweep::Skip);
+}
+
+#[tokio::test]
+async fn unavailable_probe_does_not_escalate_authentication_cooldown() {
+    let client = test_client();
+    expire(&client);
+    let (op, _) = scripted_op(vec![Err(HealthError::BmcError(Box::new(
+        bmc_status_error(http::StatusCode::SERVICE_UNAVAILABLE),
+    )))]);
+    client.read_with_auth_retry(true, op).await.unwrap_err();
+    assert_eq!(
+        open_backoff(&client),
+        Some(AUTH_CIRCUIT_INITIAL_BACKOFF),
+        "a 503 is no verdict on the credentials"
     );
     assert_eq!(client.collector_sweep(), CollectorSweep::Skip);
 }

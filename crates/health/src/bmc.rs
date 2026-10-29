@@ -628,8 +628,9 @@ impl BmcClient {
 
     /// After the first 401, one caller owns credential refresh and a read-only
     /// retry. Other reads, writes and SSE handshakes fail locally until a
-    /// protected probe is answered with anything but a 401. A 403 remains a
-    /// resource-specific failure.
+    /// protected probe is answered after authentication: a success, a 403, a
+    /// 404 or a body that does not decode. A 403 remains a resource-specific
+    /// failure.
     async fn read_with_auth_retry<T, Op, Fut>(
         &self,
         protected: bool,
@@ -705,7 +706,7 @@ impl BmcClient {
                 if is_credential_rejection(&failure.error) {
                     tracing::warn!(error = ?failure.error, endpoint = ?self.addr,
                         "BMC rejected refreshed credentials");
-                } else if failure.answered {
+                } else if failure.answered && !is_unauthenticated_refusal(&failure.error) {
                     probe.succeeded(protected);
                 } else {
                     probe.inconclusive();
@@ -1963,6 +1964,23 @@ fn is_credential_rejection_bmc_source_error(error: &(dyn std::error::Error + 'st
     }) || error
         .downcast_ref::<HealthError>()
         .is_some_and(is_credential_rejection)
+}
+
+/// Whether the BMC refused a request without necessarily checking its
+/// credentials. An overloaded BMC or a proxy can answer 429 or a 5xx before
+/// authentication, so such an answer must not close the authentication circuit.
+fn is_unauthenticated_refusal(error: &HealthError) -> bool {
+    let status = match error {
+        HealthError::HttpError(message) => message
+            .split_once("HTTP ")
+            .and_then(|(_, rest)| rest.get(..3))
+            .and_then(|code| code.parse::<u16>().ok()),
+        _ => bmc_source_error(error).and_then(|error| match error {
+            BmcError::InvalidResponse { status, .. } => Some(status.as_u16()),
+            _ => None,
+        }),
+    };
+    status.is_some_and(|status| status == 429 || status >= 500)
 }
 
 pub(crate) fn is_auth_bmc_source_error(error: &(dyn std::error::Error + 'static)) -> bool {
