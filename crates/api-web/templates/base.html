@@ -158,12 +158,24 @@
 				}
 
 				nav.addEventListener('click', function(e) {
-					if (e.target.closest('a')) {
-						sessionStorage.setItem('navScrollTop', nav.scrollTop);
+					const link = e.target.closest('a');
+					// Ctrl/Cmd/Shift/Alt clicks and other targets open the link elsewhere and leave
+					// this page in place, so a later, unrelated page would restore their position.
+					if (!link || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey
+						|| (link.target && link.target !== '_self')) {
+						return;
 					}
+					try {
+						sessionStorage.setItem('navScrollTop', nav.scrollTop);
+					} catch(err) {}
 				});
-				const savedScrollTop = sessionStorage.getItem('navScrollTop');
-				sessionStorage.removeItem('navScrollTop');
+				// sessionStorage throws when the browser blocks site data; without a saved
+				// position the current link is centered below.
+				let savedScrollTop = null;
+				try {
+					savedScrollTop = sessionStorage.getItem('navScrollTop');
+					sessionStorage.removeItem('navScrollTop');
+				} catch(err) {}
 				if (savedScrollTop !== null) {
 					nav.scrollTop = Number(savedScrollTop);
 				} else if (activeLink && activeLink.offsetTop + activeLink.offsetHeight > nav.clientHeight) {
