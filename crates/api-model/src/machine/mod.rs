@@ -1154,10 +1154,12 @@ pub struct HostProfile {
     /// When `true` the ingestion state machine skips re-enabling lockdown
     /// after BIOS/UEFI configuration.
     pub disable_lockdown: bool,
-    /// When `true` this machine is designated as a control-plane machine, so
-    /// its management addresses stay usable while the control plane is down.
-    /// Defaulted on deserialization because snapshots written before this
-    /// field exists omit it.
+    /// When `true` this machine is designated as a control-plane machine.
+    /// After completion of
+    /// <https://github.com/dsx-ai-factory/infra-controller/issues/7568>, its
+    /// management addresses stay usable while the control plane is down. No
+    /// state machine reads this field yet. Defaulted on deserialization
+    /// because snapshots written before this field exists omit it.
     #[serde(default)]
     pub control_plane: bool,
 }

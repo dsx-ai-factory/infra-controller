@@ -280,9 +280,11 @@ type APIHostLifecycleProfile struct {
 	// DisableLockdown, when true, skips locking down the server during host
 	// lifecycle management. When omitted, the existing value is preserved.
 	DisableLockdown *bool `json:"disableLockdown"`
-	// ControlPlane, when true, designates the machine as a control-plane machine,
-	// so its management addresses stay usable while the control plane is down.
-	// When omitted, the existing value is preserved.
+	// ControlPlane, when true, designates the machine as a control-plane
+	// machine. After completion of
+	// https://github.com/dsx-ai-factory/infra-controller/issues/7568, its
+	// management addresses stay usable while the control plane is down. When
+	// omitted, the existing value is preserved.
 	ControlPlane *bool `json:"controlPlane"`
 }
 

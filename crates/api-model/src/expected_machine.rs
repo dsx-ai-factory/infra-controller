@@ -1047,13 +1047,15 @@ pub struct HostLifecycleProfile {
     /// If unset or false, preserve the default behavior of locking down the server after configuring the BIOS.
     #[serde(default)]
     pub disable_lockdown: Option<bool>,
-    /// If true, designate this machine as a control-plane machine. NICo keeps
-    /// its management addresses usable while the control plane is down, so the
-    /// machine and its DPU can complete a full power-on cycle without NICo.
-    /// Every host BMC, DPU BMC, and DPU OS interface must therefore resolve to
-    /// a `Fixed` or `Retained` allocation; see
+    /// If true, designate this machine as a control-plane machine. After
+    /// completion of
+    /// <https://github.com/dsx-ai-factory/infra-controller/issues/7568>, NICo
+    /// keeps its management addresses usable while the control plane is down,
+    /// so the machine and its DPU can complete a full power-on cycle without
+    /// NICo. Every host BMC, DPU BMC, and DPU OS interface must resolve to a
+    /// `Fixed` or `Retained` allocation; see
     /// [`ExpectedInterface::resolved_ip_allocation`]. If unset or false, the
-    /// machine depends on the control plane to boot.
+    /// machine has no control-plane designation.
     #[serde(default)]
     pub control_plane: Option<bool>,
 }

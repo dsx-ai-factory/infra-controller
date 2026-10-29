@@ -69,8 +69,7 @@ machine-interface record:
     --bmc-ip-allocation retained
 
 Add a control-plane machine. Every host BMC, DPU BMC, and DPU OS interface must
-use a fixed or retained IP allocation, so the machine and its DPU can boot while
-the control plane is down:
+use a fixed or retained IP allocation:
     $ nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 \
     --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 \
     --control-plane true \
@@ -212,7 +211,7 @@ pub(crate) struct Args {
     #[clap(
         long = "control-plane",
         value_name = "CONTROL_PLANE",
-        help = "If true, designate the machine as a control-plane machine, so its management addresses stay usable while the control plane is down. Every host BMC, DPU BMC, and DPU OS interface must then use a fixed or retained IP allocation. If unset or false, the machine depends on the control plane to boot."
+        help = "If true, designate the machine as a control-plane machine. After completion of <https://github.com/dsx-ai-factory/infra-controller/issues/7568>, its management addresses stay usable while the control plane is down. Every host BMC, DPU BMC, and DPU OS interface must then use a fixed or retained IP allocation. If unset or false, the machine has no control-plane designation."
     )]
     control_plane: Option<bool>,
 }

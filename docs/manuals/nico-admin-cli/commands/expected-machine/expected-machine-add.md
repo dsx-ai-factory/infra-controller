@@ -196,11 +196,13 @@ behavior of locking down the server after configuring the BIOS.
 
 `--control-plane <CONTROL_PLANE>`
 
-If true, designate the machine as a control-plane machine, so its
+If true, designate the machine as a control-plane machine. After
+completion of
+`<https://github.com/dsx-ai-factory/infra-controller/issues/7568>`, its
 management addresses stay usable while the control plane is down. Every
 host BMC, DPU BMC, and DPU OS interface must then use a fixed or
-retained IP allocation. If unset or false, the machine depends on the
-control plane to boot.
+retained IP allocation. If unset or false, the machine has no
+control-plane designation.
 
 *Possible values:*
 

@@ -163,9 +163,11 @@ type HostLifecycleProfile struct {
 	// Core preserves its existing value (patch semantics).
 	DisableLockdown *bool `json:"disable_lockdown,omitempty"`
 	// ControlPlane, when non-nil, controls whether the machine is designated as
-	// a control-plane machine, so its management addresses stay usable while the
-	// control plane is down. A nil value means the setting is unset, so Core
-	// preserves its existing value (patch semantics).
+	// a control-plane machine. After completion of
+	// https://github.com/dsx-ai-factory/infra-controller/issues/7568, a
+	// designated machine keeps its management addresses usable while the control
+	// plane is down. A nil value means the setting is unset, so Core preserves
+	// its existing value (patch semantics).
 	ControlPlane *bool `json:"control_plane,omitempty"`
 }
 

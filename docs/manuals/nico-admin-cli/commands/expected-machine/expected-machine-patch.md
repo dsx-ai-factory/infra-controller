@@ -227,11 +227,13 @@ setting
 
 `--control-plane <CONTROL_PLANE>`
 
-Set true to designate the machine as a control-plane machine, so its
-management addresses stay usable while the control plane is down, or
-false to remove the designation. A designated machine requires a fixed
-or retained IP allocation on every host BMC, DPU BMC, and DPU OS
-interface. Omission preserves the stored setting
+Set true to designate the machine as a control-plane machine, or false
+to remove the designation. After completion of
+`<https://github.com/dsx-ai-factory/infra-controller/issues/7568>`, its
+management addresses stay usable while the control plane is down. A
+designated machine requires a fixed or retained IP allocation on every
+host BMC, DPU BMC, and DPU OS interface. Omission preserves the stored
+setting
 
 *Possible values:*
 

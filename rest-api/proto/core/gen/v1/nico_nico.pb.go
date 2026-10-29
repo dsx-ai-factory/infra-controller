@@ -40694,10 +40694,12 @@ type HostLifecycleProfile struct {
 	// If true, do not lock down the server as part of host lifecycle management. If unset or false, preserve
 	// the default behavior of locking down the server after configuring the BIOS.
 	DisableLockdown *bool `protobuf:"varint,1,opt,name=disable_lockdown,json=disableLockdown,proto3,oneof" json:"disable_lockdown,omitempty"`
-	// If true, designate the machine as a control-plane machine, so its management
-	// addresses stay usable while the control plane is down. Every host BMC, DPU BMC,
-	// and DPU OS interface must then use a fixed or retained IP allocation. If unset
-	// or false, the machine depends on the control plane to boot.
+	// If true, designate the machine as a control-plane machine. After completion
+	// of https://github.com/dsx-ai-factory/infra-controller/issues/7568, its
+	// management addresses stay usable while the control plane is down. Every
+	// host BMC, DPU BMC, and DPU OS interface must then use a fixed or retained
+	// IP allocation. If unset or false, the machine has no control-plane
+	// designation.
 	ControlPlane  *bool `protobuf:"varint,2,opt,name=control_plane,json=controlPlane,proto3,oneof" json:"control_plane,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

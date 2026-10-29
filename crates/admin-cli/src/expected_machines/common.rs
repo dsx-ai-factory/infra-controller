@@ -190,9 +190,10 @@ pub(crate) struct HostLifecycleProfile {
     /// If unset or false, preserve the default behavior of locking down the server after configuring the BIOS.
     #[serde(default)]
     pub(crate) disable_lockdown: Option<bool>,
-    /// If true, designate the machine as a control-plane machine so its management
-    /// addresses stay usable while the control plane is down. If unset or false, the
-    /// machine depends on the control plane to boot.
+    /// If true, designate the machine as a control-plane machine. The API
+    /// records the designation and requires a fixed or retained IP allocation
+    /// on every host BMC, DPU BMC, and DPU OS interface. If unset or false,
+    /// the machine has no control-plane designation.
     #[serde(default)]
     pub(crate) control_plane: Option<bool>,
 }
