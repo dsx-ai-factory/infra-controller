@@ -731,12 +731,17 @@ precedence over content headers. Header matching is case-insensitive and permits
 leading whitespace. Under the default merge rules, the last part defining
 `network` supplies the entire network configuration. NICo removes that key from
 each supported cloud-config part; a network-only part becomes an empty
-cloud-config mapping. Scripts, phone-home settings, and nested installer settings
-such as `autoinstall.network` are preserved.
+cloud-config mapping. Script parts with a `text/x-shellscript` type (including its
+frequency suffixes), untyped scripts beginning with `#!`, and parts explicitly
+typed as `text/cloud-boothook` are preserved. An untyped `#cloud-boothook` part is
+unsupported and causes the entire archive to use the fallback below. Phone-home
+settings and nested installer settings such as `autoinstall.network` are preserved.
 
 When an archive is split, its envelope is rendered as JSON, which is valid YAML.
-Part metadata and the remaining embedded YAML strings are preserved, but envelope
-comments and formatting are not. An archive without network settings is served
+String-valued part metadata and the remaining embedded YAML strings are preserved,
+but envelope comments and formatting are not. Use quoted strings for filenames
+and other MIME header metadata to avoid YAML scalar interpretation differences.
+An archive without network settings is served
 unchanged. Archives with custom merge rules, launch-index filters, templates,
 unsupported part types or layouts, malformed content, or references that prevent
 safe splitting are also served unchanged. In these archive fallback cases, the

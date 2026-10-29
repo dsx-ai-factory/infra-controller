@@ -524,6 +524,9 @@ mod tests {
             "explicit script type overrides content header" {
                 "- type: text/x-shellscript\n  content: |\n    #cloud-config\n    network: {version: 2}\n" => None,
             }
+            "inferred script leaves cloud-config networking available" {
+                "- content: |\n    #!/bin/sh\n    echo ready\n- content: 'network: {version: 2}'\n" => Some(2),
+            }
         );
         let output = user_data_without_network(
             "#cloud-config-archive\n- |\n  #cloud-config\n  network: {version: 2}\n",
@@ -581,6 +584,9 @@ mod tests {
             }
             "malformed embedded YAML" {
                 "- type: text/cloud-config\n  content: 'network: ['\n" => (None, None),
+            }
+            "metadata cannot survive JSON rendering" {
+                "- filename: !custom preserved\n  content: 'hostname: node'\n" => (None, None),
             }
             "source cannot be split safely" {
                 "- content: |\n    network: &net {version: 1}\n    x-network: *net\n" => (None, None),
