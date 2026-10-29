@@ -82,13 +82,15 @@ fn user_data_without_network(custom_cloud_init: &str) -> Option<String> {
     if !header.eq_ignore_ascii_case(CLOUD_CONFIG_HEADER) {
         return None;
     }
-    cloud_config_without_network(custom_cloud_init)
+    split_cloud_config_network(custom_cloud_init).map(|split| split.user_data)
 }
 
-/// Removes an unindented `network:` entry while preserving the remaining YAML
-/// source, including quoted strings interpreted with cloud-init's YAML 1.1 rules.
+/// Separates an unindented `network:` entry while preserving both YAML sources,
+/// including quoted strings interpreted with cloud-init's YAML 1.1 rules.
 /// Archive parts may declare their format through a MIME type instead of a header.
-fn cloud_config_without_network(custom_cloud_init: &str) -> Option<String> {
+/// Callers must check that the network source stands alone: its aliases may
+/// reference anchors in the retained user-data.
+fn split_cloud_config_network(custom_cloud_init: &str) -> Option<NetworkConfigSplit> {
     let mut expected: serde_yaml::Value = serde_yaml::from_str(custom_cloud_init).ok()?;
     expected.as_mapping_mut()?.remove(NETWORK_CONFIG_KEY)?;
 
@@ -110,6 +112,7 @@ fn cloud_config_without_network(custom_cloud_init: &str) -> Option<String> {
         offset += line.len();
     }
     let start = start?;
+    let network_config = custom_cloud_init[start + NETWORK_CONFIG_KEY.len() + 1..end].to_string();
     let mut user_data = custom_cloud_init.to_string();
     user_data.replace_range(start..end, "");
     // A network-only document must still contain an empty cloud-config mapping.
@@ -117,10 +120,13 @@ fn cloud_config_without_network(custom_cloud_init: &str) -> Option<String> {
         user_data = format!("{CLOUD_CONFIG_HEADER}\n{{}}\n");
     }
     let actual: serde_yaml::Value = serde_yaml::from_str(&user_data).ok()?;
-    (actual == expected).then_some(user_data)
+    (actual == expected).then_some(NetworkConfigSplit {
+        user_data,
+        network_config,
+    })
 }
 
-struct ArchiveNetworkSplit {
+struct NetworkConfigSplit {
     user_data: String,
     network_config: String,
 }
@@ -129,7 +135,7 @@ struct ArchiveNetworkSplit {
 /// cloud-init's default merge rules, the last part defining `network` wins.
 /// Custom mergers, launch-index filters, dynamic parts, and unsafe source edits
 /// leave the entire archive on its existing passthrough/default-network path.
-fn split_archive_network(custom_cloud_init: &str) -> Option<ArchiveNetworkSplit> {
+fn split_archive_network(custom_cloud_init: &str) -> Option<NetworkConfigSplit> {
     let mut archive: serde_yaml::Value = serde_yaml::from_str(custom_cloud_init).ok()?;
     let mut network_config = None;
     for part in archive.as_sequence_mut()? {
@@ -184,8 +190,14 @@ fn split_archive_network(custom_cloud_init: &str) -> Option<ArchiveNetworkSplit>
             return None;
         }
         if let Some(network) = mapping.get(NETWORK_CONFIG_KEY) {
-            network_config = Some(serde_yaml::to_string(network).ok()?);
-            *content = cloud_config_without_network(text)?.into();
+            let split = split_cloud_config_network(text)?;
+            let actual_network: serde_yaml::Value =
+                serde_yaml::from_str(&split.network_config).ok()?;
+            if &actual_network != network {
+                return None;
+            }
+            network_config = Some(split.network_config);
+            *content = split.user_data.into();
         }
     }
     let network_config = network_config?;
@@ -195,7 +207,7 @@ fn split_archive_network(custom_cloud_init: &str) -> Option<ArchiveNetworkSplit>
     if serde_yaml::from_str::<serde_yaml::Value>(&envelope).ok()? != archive {
         return None;
     }
-    Some(ArchiveNetworkSplit {
+    Some(NetworkConfigSplit {
         user_data: format!("{CLOUD_CONFIG_ARCHIVE_HEADER}\n{envelope}\n"),
         network_config,
     })
@@ -243,7 +255,16 @@ fn extract_network_config(custom_cloud_init: &str) -> Option<String> {
         return split_archive_network(custom_cloud_init).map(|split| split.network_config);
     }
     let value: serde_yaml::Value = serde_yaml::from_str(custom_cloud_init).ok()?;
-    serde_yaml::to_string(value.get(NETWORK_CONFIG_KEY)?).ok()
+    let network = value.get(NETWORK_CONFIG_KEY)?;
+    if let Some(split) = split_cloud_config_network(custom_cloud_init)
+        && serde_yaml::from_str::<serde_yaml::Value>(&split.network_config)
+            .ok()
+            .as_ref()
+            == Some(network)
+    {
+        return Some(split.network_config);
+    }
+    serde_yaml::to_string(network).ok()
 }
 
 /// Default network-config served when a tenant hasn't provided a custom
@@ -429,6 +450,8 @@ mod tests {
       version: 2
       ethernets:
         eth1:
+          match: {macaddress: '52:54:00:12:34:56'}
+          dhcp4: on
           addresses: [2001:db8::10/64]
     hostname: 'on'
     autoinstall:
@@ -457,7 +480,7 @@ mod tests {
             .unwrap();
         let actual_network: serde_yaml::Value = serde_yaml::from_slice(&body).unwrap();
         let expected_network: serde_yaml::Value = serde_yaml::from_str(
-            "version: 2\nethernets: {eth1: {addresses: ['2001:db8::10/64']}}\n",
+            "version: 2\nethernets: {eth1: {match: {macaddress: '52:54:00:12:34:56'}, dhcp4: on, addresses: ['2001:db8::10/64']}}\n",
         )
         .unwrap();
         assert_eq!(
@@ -511,6 +534,31 @@ mod tests {
     }
 
     #[test]
+    fn network_config_preserves_quoted_network_scalars() {
+        let network = "\n  version: 2\n  ethernets:\n    eth0:\n      match: {macaddress: '52:54:00:12:34:56'}\n      dhcp4: on\n";
+        let cloud_config = format!("#cloud-config\nnetwork:{network}");
+        let archive = format!(
+            "#cloud-config-archive\n- content: {}\n",
+            serde_json::to_string(&cloud_config).unwrap(),
+        );
+        for input in [cloud_config, archive] {
+            assert_eq!(extract_network_config(&input).as_deref(), Some(network));
+        }
+    }
+
+    #[test]
+    fn cloud_config_network_alias_can_reference_retained_installer_config() {
+        let retained = "#cloud-config\nautoinstall:\n  version: 1\n  network: &net {version: 2, ethernets: {}}\n";
+        let input = format!("{retained}network: *net\n");
+        assert_eq!(user_data_without_network(&input).as_deref(), Some(retained));
+        let network = extract_network_config(&input).unwrap();
+        assert_eq!(
+            serde_yaml::from_str::<serde_yaml::Value>(&network).unwrap(),
+            serde_yaml::from_str::<serde_yaml::Value>("version: 2\nethernets: {}\n").unwrap(),
+        );
+    }
+
+    #[test]
     fn archive_network_leaves_unsupported_archives_intact() {
         value_scenarios!(run = |part: &str| {
             let input = format!("{CLOUD_CONFIG_ARCHIVE_HEADER}\n- content: |\n    network: {{version: 2}}\n{part}");
@@ -528,11 +576,17 @@ mod tests {
             "dynamic content" {
                 "- content: |\n    ## template: jinja\n    #cloud-config\n    network: {{ v1.network }}\n" => (None, None),
             }
+            "explicit type can modify the merged network" {
+                "- type: text/cloud-config-jsonp\n  content: '[{\"op\":\"remove\",\"path\":\"/network\"}]'\n" => (None, None),
+            }
             "malformed embedded YAML" {
                 "- type: text/cloud-config\n  content: 'network: ['\n" => (None, None),
             }
             "source cannot be split safely" {
                 "- content: |\n    network: &net {version: 1}\n    x-network: *net\n" => (None, None),
+            }
+            "network source depends on a retained anchor" {
+                "- content: |\n    autoinstall:\n      version: 1\n      network: &net {version: 2, ethernets: {}}\n    network: *net\n" => (None, None),
             }
         );
     }
@@ -561,6 +615,12 @@ mod tests {
                 Some("#cloud-config\nnetwork: [\n"),
             ),
             ("unmarked YAML", Some("network: {}\n")),
+            (
+                "phone-home archive without network",
+                Some(
+                    "#cloud-config-archive\n# preserve envelope comments\n- type: text/cloud-config\n  content: |\n    #cloud-config\n    phone_home:\n      url: http://169.254.169.254/latest/meta-data/phone_home\n      post: all\n",
+                ),
+            ),
             (
                 "flow mapping",
                 Some("#cloud-config\n{network: {version: 2}, hostname: 'on'}\n"),
