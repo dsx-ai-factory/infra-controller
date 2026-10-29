@@ -106,6 +106,11 @@ impl StateHandler for TestRackStateHandler {
                     },
                 },
                 RackMaintenanceState::ConfigureNmxCluster { .. } => RackState::Maintenance {
+                    maintenance_state: RackMaintenanceState::RestartComputeHosts {
+                        restart_compute_hosts: model::rack::ComputeHostRestartState::Request,
+                    },
+                },
+                RackMaintenanceState::RestartComputeHosts { .. } => RackState::Maintenance {
                     maintenance_state: RackMaintenanceState::Completed,
                 },
                 RackMaintenanceState::Completed => RackState::Validating {

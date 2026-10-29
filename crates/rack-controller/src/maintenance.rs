@@ -52,13 +52,14 @@ use db::{
     power_shelf as db_power_shelf, rack as db_rack, switch as db_switch,
 };
 use model::component_manager::ConfigureSwitchCertificateState;
-use model::machine::HostMachine;
+use model::machine::{HostMachine, MachineMaintenanceOperation, ManagedHostState};
 use model::rack::{
-    ConfigureNmxClusterState, FirmwareProgressState, FirmwareUpgradeDeviceStatus,
-    FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope, NvosPasswordUpdateState,
-    NvosUpdateState, NvosUpdateSwitchStatus, Rack, RackErrorRecoveryPolicy,
-    RackFirmwareUpgradeState, RackFirmwareUpgradeStatus, RackMaintenanceState, RackPowerState,
-    RackState, RackValidationState, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
+    ComputeHostRestartState, ConfigureNmxClusterState, FirmwareProgressState,
+    FirmwareUpgradeDeviceStatus, FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope,
+    NvosPasswordUpdateState, NvosUpdateState, NvosUpdateSwitchStatus, Rack,
+    RackErrorRecoveryPolicy, RackFirmwareUpgradeState, RackFirmwareUpgradeStatus,
+    RackMaintenanceState, RackPowerState, RackState, RackValidationState, SwitchNvosUpdateState,
+    SwitchNvosUpdateStatus,
 };
 use model::rack_type::RackProfile;
 use state_controller::state_handler::{
@@ -92,6 +93,142 @@ async fn clear_rv_labels(
 
     txn.commit().await?;
     Ok(())
+}
+
+async fn request_compute_host_restarts(
+    rack: &Rack,
+    ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
+    let mut txn = ctx.services.db_pool.begin().await?;
+    let machines = super::get_machines_from_rack(rack, txn.as_mut()).await?;
+
+    let unavailable_machine_ids = machines
+        .iter()
+        .filter(|machine| {
+            !matches!(machine.state.value, ManagedHostState::Ready)
+                || machine.machine_maintenance_requested.is_some()
+        })
+        .map(|machine| machine.id.to_string())
+        .collect::<Vec<_>>();
+    if !unavailable_machine_ids.is_empty() {
+        txn.rollback().await?;
+        return Ok(StateHandlerOutcome::wait(format!(
+            "waiting to request compute host restarts; unavailable machines: {}",
+            unavailable_machine_ids.join(", ")
+        )));
+    }
+
+    let initiator = rack_maintenance_initiator(&rack.id);
+    for machine in &machines {
+        if !db_machine::try_set_machine_maintenance_requested(
+            txn.as_mut(),
+            machine.id,
+            &initiator,
+            MachineMaintenanceOperation::Reset,
+        )
+        .await?
+        {
+            txn.rollback().await?;
+            return Ok(StateHandlerOutcome::wait(format!(
+                "machine {} received another maintenance request before the rack restart request",
+                machine.id
+            )));
+        }
+    }
+
+    tracing::info!(
+        rack_id = %rack.id,
+        machine_count = machines.len(),
+        "Requested compute host restarts after NMX-C configuration"
+    );
+    let machine_ids = machines
+        .iter()
+        .map(|machine| machine.id.into())
+        .collect();
+
+    Ok(StateHandlerOutcome::transition(RackState::Maintenance {
+        maintenance_state: RackMaintenanceState::RestartComputeHosts {
+            restart_compute_hosts: ComputeHostRestartState::WaitForComplete { machine_ids },
+        },
+    })
+    .with_txn(txn))
+}
+
+async fn wait_for_compute_host_restarts(
+    rack: &mut Rack,
+    scope: &MaintenanceScope,
+    requested_machine_ids: &[HostMachineId],
+    ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
+    let mut connection = ctx.services.db_pool.acquire().await?;
+    let machines = super::get_machines_from_rack(rack, &mut connection).await?;
+    let current_machine_ids = machines
+        .iter()
+        .map(|machine| HostMachineId::from(machine.id))
+        .collect::<std::collections::HashSet<_>>();
+    let requested_machine_ids = requested_machine_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    if current_machine_ids != requested_machine_ids {
+        tracing::info!(
+            rack_id = %rack.id,
+            "Compute host membership changed while restarts were in progress; restarting the current set"
+        );
+        return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
+            maintenance_state: restart_compute_hosts_state(),
+        }));
+    }
+
+    let initiator = rack_maintenance_initiator(&rack.id);
+    if let Some(machine) = machines.iter().find(|machine| {
+        machine
+            .machine_maintenance_requested
+            .as_ref()
+            .is_some_and(|request| {
+                request.initiator != initiator
+                    || request.operation != MachineMaintenanceOperation::Reset
+            })
+    }) {
+        let rack_id = rack.id.clone();
+        return transition_to_rack_error(
+            &rack_id,
+            rack,
+            format!(
+                "compute host {} rack restart request was replaced by another maintenance request",
+                machine.id
+            ),
+            ctx,
+        )
+        .await;
+    }
+
+    let incomplete_machine_ids = machines
+        .iter()
+        .filter(|machine| {
+            !matches!(machine.state.value, ManagedHostState::Ready)
+                || machine.machine_maintenance_requested.is_some()
+        })
+        .map(|machine| machine.id.to_string())
+        .collect::<Vec<_>>();
+
+    if !incomplete_machine_ids.is_empty() {
+        return Ok(StateHandlerOutcome::wait(format!(
+            "waiting for compute host restarts to complete: {}",
+            incomplete_machine_ids.join(", ")
+        )));
+    }
+
+    let next = next_state_after_configure(scope);
+    tracing::info!(
+        rack_id = %rack.id,
+        machine_count = machines.len(),
+        next_state = %next,
+        "Compute host restarts completed, advancing rack maintenance"
+    );
+    Ok(StateHandlerOutcome::transition(RackState::Maintenance {
+        maintenance_state: next,
+    }))
 }
 
 fn rack_maintenance_initiator(rack_id: &RackId) -> String {
@@ -291,6 +428,7 @@ async fn terminate_active_rack_maintenance(
             }
         }
         RackMaintenanceState::ConfigureNmxCluster { .. }
+        | RackMaintenanceState::RestartComputeHosts { .. }
         | RackMaintenanceState::PowerSequence { .. }
         | RackMaintenanceState::Completed => {}
     }
@@ -1035,6 +1173,12 @@ fn next_state_after_configure(scope: &MaintenanceScope) -> RackMaintenanceState 
     }
 }
 
+fn restart_compute_hosts_state() -> RackMaintenanceState {
+    RackMaintenanceState::RestartComputeHosts {
+        restart_compute_hosts: ComputeHostRestartState::Request,
+    }
+}
+
 /// Returns the first maintenance sub-state to enter based on the requested
 /// activities in the scope. Called from Ready/Error when entering Maintenance.
 pub(crate) fn first_maintenance_state(scope: &MaintenanceScope) -> RackMaintenanceState {
@@ -1074,6 +1218,7 @@ fn next_state_if_activity_not_requested(
         RackMaintenanceState::ConfigureNmxCluster { .. } => (!scope
             .should_run(&MaintenanceActivity::ConfigureNmxCluster))
         .then(|| next_state_after_configure(scope)),
+        RackMaintenanceState::RestartComputeHosts { .. } => None,
         RackMaintenanceState::PowerSequence { .. } => (!scope
             .should_run(&MaintenanceActivity::PowerSequence))
         .then_some(RackMaintenanceState::Completed),
@@ -1491,7 +1636,7 @@ async fn wait_for_switch_certificate_job(
             }
             SwitchCertificateJobCompletion::CompleteMaintenanceActivity => {
                 Ok(StateHandlerOutcome::transition(RackState::Maintenance {
-                    maintenance_state: next_state_after_configure(scope),
+                    maintenance_state: restart_compute_hosts_state(),
                 }))
             }
         },
@@ -1965,7 +2110,7 @@ async fn verify_scale_up_fabric_manager_v2(
         .contains(&SwitchMtlsService::ScaleUpFabricTelemetry)
     {
         return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
-            maintenance_state: next_state_after_configure(scope),
+            maintenance_state: restart_compute_hosts_state(),
         }));
     }
 
@@ -3175,6 +3320,14 @@ pub async fn handle_maintenance(
                 .await
             }
         },
+        RackMaintenanceState::RestartComputeHosts {
+            restart_compute_hosts,
+        } => match restart_compute_hosts {
+            ComputeHostRestartState::Request => request_compute_host_restarts(state, ctx).await,
+            ComputeHostRestartState::WaitForComplete { machine_ids } => {
+                wait_for_compute_host_restarts(state, scope, machine_ids, ctx).await
+            }
+        },
         RackMaintenanceState::PowerSequence { rack_power } => match rack_power {
             RackPowerState::PoweringOn => {
                 tracing::info!(
@@ -3238,9 +3391,9 @@ mod tests {
     use carbide_uuid::rack::RackId;
     use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
     use model::rack::{
-        ConfigureNmxClusterState, FirmwareUpgradeDeviceInfo, FirmwareUpgradeState,
-        MaintenanceActivity, MaintenanceScope, NvosUpdateState, RackMaintenanceState,
-        RackPowerState,
+        ComputeHostRestartState, ConfigureNmxClusterState, FirmwareUpgradeDeviceInfo,
+        FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope, NvosUpdateState,
+        RackMaintenanceState, RackPowerState,
     };
     use model::rack_type::{RackHardwareType, RackProfile};
 
@@ -3249,6 +3402,7 @@ mod tests {
         explicit_nvos_config_json, filter_inventory_by_scope, first_maintenance_state,
         next_state_after_configure, next_state_after_firmware, next_state_after_nvos,
         next_state_if_activity_not_requested, profile_hardware_type_or_any,
+        restart_compute_hosts_state,
         summarize_firmware_outcomes, validate_complete_nmx_fabric_inventory,
     };
 
@@ -3630,6 +3784,12 @@ mod tests {
         }
     }
 
+    fn restarting_compute_hosts() -> RackMaintenanceState {
+        RackMaintenanceState::RestartComputeHosts {
+            restart_compute_hosts: ComputeHostRestartState::Request,
+        }
+    }
+
     // ── current-state scope enforcement ─────────────────────────────────
 
     #[test]
@@ -3688,6 +3848,14 @@ mod tests {
                     input: (
                         powering_on(),
                         scope_of(vec![MaintenanceActivity::PowerSequence]),
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "compute restart always continues",
+                    input: (
+                        restarting_compute_hosts(),
+                        scope_of(vec![firmware_upgrade()]),
                     ),
                     expect: None,
                 },
@@ -3855,5 +4023,10 @@ mod tests {
             ],
             |scope| next_state_after_configure(&scope),
         );
+    }
+
+    #[test]
+    fn test_successful_nmx_configuration_restarts_compute_hosts() {
+        assert_eq!(restart_compute_hosts_state(), restarting_compute_hosts());
     }
 }

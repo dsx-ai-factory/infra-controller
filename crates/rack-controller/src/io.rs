@@ -147,6 +147,9 @@ impl StateControllerIO for RackStateControllerIO {
                 RackMaintenanceState::ConfigureNmxCluster { .. } => {
                     ("maintenance", "configure_nmx_cluster")
                 }
+                RackMaintenanceState::RestartComputeHosts { .. } => {
+                    ("maintenance", "restart_compute_hosts")
+                }
                 RackMaintenanceState::PowerSequence { .. } => ("maintenance", "power_sequence"),
                 RackMaintenanceState::Completed => ("maintenance", "completed"),
             },

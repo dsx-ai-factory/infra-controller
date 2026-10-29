@@ -452,7 +452,7 @@ pub enum RackErrorRecoveryPolicy {
 /// ### Maintenance Sub-states
 ///
 /// ```text
-/// FirmwareUpgrade -> NVOSUpdate -> ConfigureNmxCluster -> Completed -> Validating(Pending)
+/// FirmwareUpgrade -> NVOSUpdate -> ConfigureNmxCluster -> RestartComputeHosts -> Completed -> Validating(Pending)
 /// ```
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -517,7 +517,7 @@ pub enum RackState {
 /// ## Sub-state Flow
 ///
 /// ```text
-/// FirmwareUpgrade -> NVOSUpdate -> ConfigureNmxCluster -> Completed -> Validation(Pending)
+/// FirmwareUpgrade -> NVOSUpdate -> ConfigureNmxCluster -> RestartComputeHosts -> Completed -> Validation(Pending)
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RackMaintenanceState {
@@ -529,6 +529,11 @@ pub enum RackMaintenanceState {
     },
     ConfigureNmxCluster {
         configure_nmx_cluster: ConfigureNmxClusterState,
+    },
+    /// Restarts every compute host after NMX-C configuration and before validation.
+    RestartComputeHosts {
+        /// Tracks whether reset requests still need to be submitted or completed.
+        restart_compute_hosts: ComputeHostRestartState,
     },
     PowerSequence {
         rack_power: RackPowerState,
@@ -552,10 +557,36 @@ impl Display for RackMaintenanceState {
             } => {
                 write!(f, "ConfigureNmxCluster({})", configure_nmx_cluster)
             }
+            RackMaintenanceState::RestartComputeHosts {
+                restart_compute_hosts,
+            } => {
+                write!(f, "RestartComputeHosts({restart_compute_hosts})")
+            }
             RackMaintenanceState::PowerSequence { rack_power } => {
                 write!(f, "PowerSequence({})", rack_power)
             }
             RackMaintenanceState::Completed => write!(f, "Completed"),
+        }
+    }
+}
+
+/// Progress of the mandatory compute-host restart after NMX-C configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ComputeHostRestartState {
+    /// Waits until every compute host can atomically receive a reset request.
+    Request,
+    /// Waits until every reset request completes and every compute host is ready.
+    WaitForComplete {
+        /// Exact compute hosts that received the reset request.
+        machine_ids: Vec<HostMachineId>,
+    },
+}
+
+impl Display for ComputeHostRestartState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Request => write!(f, "Request"),
+            Self::WaitForComplete { .. } => write!(f, "WaitForComplete"),
         }
     }
 }

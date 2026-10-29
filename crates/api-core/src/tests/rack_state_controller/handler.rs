@@ -41,14 +41,14 @@ use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::expected_machine::ExpectedMachineData;
 use model::expected_rack::ExpectedRack;
-use model::machine::LoadSnapshotOptions;
+use model::machine::{LoadSnapshotOptions, MachineMaintenanceOperation};
 use model::rack::{
-    ConfigureNmxClusterState, FirmwareProgressState, FirmwareUpgradeDeviceStatus,
-    FirmwareUpgradeJob, FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope,
-    NvosPasswordUpdateState, NvosUpdateJob, NvosUpdateState, NvosUpdateSwitchStatus, Rack,
-    RackConfig, RackErrorRecoveryPolicy, RackFirmwareUpgradeState, RackFirmwareUpgradeStatus,
-    RackMaintenanceState, RackPowerState, RackState, RackValidationState, SwitchNvosUpdateState,
-    SwitchNvosUpdateStatus,
+    ComputeHostRestartState, ConfigureNmxClusterState, FirmwareProgressState,
+    FirmwareUpgradeDeviceStatus, FirmwareUpgradeJob, FirmwareUpgradeState, MaintenanceActivity,
+    MaintenanceScope, NvosPasswordUpdateState, NvosUpdateJob, NvosUpdateState,
+    NvosUpdateSwitchStatus, Rack, RackConfig, RackErrorRecoveryPolicy, RackFirmwareUpgradeState,
+    RackFirmwareUpgradeStatus, RackMaintenanceState, RackPowerState, RackState,
+    RackValidationState, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
 };
 use model::rack_type::{
     RackCapabilitiesSet, RackCapabilityCompute, RackCapabilityPowerShelf, RackCapabilitySwitch,
@@ -1762,6 +1762,141 @@ async fn test_maintenance_completed_transitions_to_validation(
             std::mem::discriminant(&other)
         ),
     }
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_compute_hosts_restart_before_validation_without_overwriting_pending_request(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides {
+            config: Some(config_with_rack_profiles()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let (rack_id, host_a, host_b) = create_two_compute_rack(&env, &pool).await?;
+    let machine_ids = [host_a.host_snapshot.id, host_b.host_snapshot.id];
+
+    let mut txn = pool.begin().await?;
+    db::machine::set_machine_maintenance_requested(
+        txn.as_mut(),
+        machine_ids[0],
+        "operator",
+        MachineMaintenanceOperation::PowerOn,
+    )
+    .await?;
+    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+        txn.as_mut(),
+        &rack_id,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::RestartComputeHosts {
+                restart_compute_hosts: ComputeHostRestartState::Request,
+            },
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::RestartComputeHosts {
+                restart_compute_hosts: ComputeHostRestartState::Request,
+            },
+        }
+    ));
+    let machine_a = db::machine::find_one(
+        &pool,
+        &machine_ids[0],
+        model::machine::machine_search_config::MachineSearchConfig::default(),
+    )
+    .await?
+    .expect("machine A should exist");
+    let machine_b = db::machine::find_one(
+        &pool,
+        &machine_ids[1],
+        model::machine::machine_search_config::MachineSearchConfig::default(),
+    )
+    .await?
+    .expect("machine B should exist");
+    assert_eq!(
+        machine_a
+            .machine_maintenance_requested
+            .as_ref()
+            .expect("operator request should remain")
+            .initiator,
+        "operator"
+    );
+    assert!(machine_b.machine_maintenance_requested.is_none());
+
+    let operator_request = machine_a
+        .machine_maintenance_requested
+        .expect("operator request should remain");
+    let mut txn = pool.begin().await?;
+    assert_eq!(
+        db::machine::clear_machine_maintenance_requested(
+            txn.as_mut(),
+            machine_ids[0],
+            &operator_request,
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    txn.commit().await?;
+
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::RestartComputeHosts {
+                restart_compute_hosts: ComputeHostRestartState::WaitForComplete { .. },
+            },
+        }
+    ));
+
+    let mut txn = pool.begin().await?;
+    for machine_id in machine_ids {
+        let machine = db::machine::find_one(
+            txn.as_mut(),
+            &machine_id,
+            model::machine::machine_search_config::MachineSearchConfig::default(),
+        )
+        .await?
+        .expect("restart target should exist");
+        let request = machine
+            .machine_maintenance_requested
+            .expect("rack restart request should be pending");
+        assert_eq!(request.initiator, format!("rack-{rack_id}"));
+        assert_eq!(request.operation, MachineMaintenanceOperation::Reset);
+        assert_eq!(
+            db::machine::clear_machine_maintenance_requested(
+                txn.as_mut(),
+                machine_id,
+                &request,
+            )
+            .await?,
+            db::ConditionalWrite::Applied(())
+        );
+    }
+    txn.commit().await?;
+
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::PowerSequence {
+                rack_power: RackPowerState::PoweringOn,
+            },
+        }
+    ));
 
     Ok(())
 }
@@ -5074,6 +5209,28 @@ async fn run_configure_nmx_cluster_v2_workflow(
 
     let rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
 
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::RestartComputeHosts {
+                restart_compute_hosts: ComputeHostRestartState::Request,
+            },
+        }
+    ));
+
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
+    assert!(matches!(
+        rack.controller_state.value,
+        RackState::Maintenance {
+            maintenance_state: RackMaintenanceState::RestartComputeHosts {
+                restart_compute_hosts: ComputeHostRestartState::WaitForComplete { .. },
+            },
+        }
+    ));
+
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), rack_id).await;
     assert!(matches!(
         rack.controller_state.value,
         RackState::Maintenance {

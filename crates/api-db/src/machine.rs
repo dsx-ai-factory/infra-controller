@@ -3362,6 +3362,31 @@ pub async fn set_machine_maintenance_requested(
     Ok(())
 }
 
+/// Sets a machine maintenance request only when no request is already pending.
+///
+/// Returns `false` when the machine is missing or another request won the race;
+/// in either case no existing request is replaced.
+pub async fn try_set_machine_maintenance_requested(
+    txn: &mut PgConnection,
+    machine_id: impl MachineIdSubtypeTrait,
+    initiator: &str,
+    operation: MachineMaintenanceOperation,
+) -> DatabaseResult<bool> {
+    let request = model::machine::MachineMaintenanceRequest {
+        requested_at: Utc::now(),
+        initiator: initiator.to_string(),
+        operation,
+    };
+    let query = "UPDATE machines SET machine_maintenance_requested = $1 WHERE id = $2 AND machine_maintenance_requested IS NULL RETURNING id";
+    sqlx::query_as::<_, MachineId>(query)
+        .bind(sqlx::types::Json(request))
+        .bind(machine_id)
+        .fetch_optional(txn)
+        .await
+        .map(|row| row.is_some())
+        .map_err(|error| DatabaseError::new("try_set_machine_maintenance_requested", error))
+}
+
 pub async fn set_decommission_requested(
     txn: &mut PgConnection,
     machine_id: impl MachineIdSubtypeTrait,
