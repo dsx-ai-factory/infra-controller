@@ -54,7 +54,7 @@ async fn failed_recoveries_escalate_cooldown_until_credentials_are_accepted() {
 }
 
 #[tokio::test]
-async fn only_protected_success_closes_authentication() {
+async fn only_protected_answers_without_401_close_authentication() {
     let cases = [
         ("protected success", true, Ok("body"), true),
         ("public root", false, Ok("body"), false),

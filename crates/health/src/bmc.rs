@@ -628,7 +628,8 @@ impl BmcClient {
 
     /// After the first 401, one caller owns credential refresh and a read-only
     /// retry. Other reads, writes and SSE handshakes fail locally until a
-    /// protected probe succeeds. A 403 remains a resource-specific failure.
+    /// protected probe is answered with anything but a 401. A 403 remains a
+    /// resource-specific failure.
     async fn read_with_auth_retry<T, Op, Fut>(
         &self,
         protected: bool,
