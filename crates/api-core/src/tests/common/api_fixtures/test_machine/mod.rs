@@ -129,6 +129,7 @@ where
             .forge_agent_control(Request::new(rpc::forge::ForgeAgentControlRequest {
                 machine_id: Some(self.id.into()),
                 nic_firmware_site_cache_supported: false,
+                ..Default::default()
             }))
             .await
             .unwrap()

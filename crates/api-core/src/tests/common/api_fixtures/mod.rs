@@ -2720,6 +2720,7 @@ pub(in crate::tests) async fn forge_agent_control(
         .forge_agent_control(Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(machine_id.into()),
             nic_firmware_site_cache_supported: false,
+            ..Default::default()
         }))
         .await
         .unwrap()

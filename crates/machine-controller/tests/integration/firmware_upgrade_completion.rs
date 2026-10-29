@@ -95,6 +95,7 @@ impl TestManagedHostFirmwareExt for TestManagedHost {
                 power_drains_needed,
                 started_at: chrono::Utc::now(),
                 deadline,
+                delivery: None,
                 task_json: String::new(),
                 result,
             },
@@ -351,6 +352,64 @@ async fn scout_upgrade_before_deadline_waits(pool: PgPool) {
         ),
         "expected to remain in WaitingForScoutUpgrade, got {reprovision_state:?}",
     );
+}
+
+#[sqlx_test]
+async fn scout_upgrade_delivery_and_completion_have_independent_deadlines(pool: PgPool) {
+    let TestContext { mut env, mh } = TestContext::init(pool).await;
+    let now = chrono::Utc::now();
+    for (scenario, delivery_deadline, accepted_at, completion_deadline, expected_reason) in [
+        (
+            "delivery expires independently",
+            now - chrono::TimeDelta::minutes(1),
+            None,
+            now + chrono::TimeDelta::hours(1),
+            "scout firmware task delivery timed out without acceptance",
+        ),
+        (
+            "accepted task has no completion report",
+            now - chrono::TimeDelta::minutes(5),
+            Some(now - chrono::TimeDelta::minutes(4)),
+            now - chrono::TimeDelta::minutes(1),
+            "scout firmware upgrade completion report missing",
+        ),
+    ] {
+        let state = ManagedHostState::HostReprovision {
+            retry_count: 1,
+            reprovision_state: HostReprovisionState::WaitingForScoutUpgrade {
+                upgrade_task_id: scenario.into(),
+                firmware_type: FirmwareComponentType::Bmc,
+                final_version: "1.2.3".into(),
+                power_drains_needed: None,
+                started_at: now - chrono::TimeDelta::minutes(10),
+                deadline: completion_deadline,
+                delivery: Some(model::machine::ScoutUpgradeDelivery {
+                    deadline: delivery_deadline,
+                    accepted_at,
+                }),
+                task_json: String::new(),
+                result: None,
+            },
+        };
+        mh.advance_state(state.clone()).await;
+        env.run_single_iteration().await;
+        let machine = mh.host.machine().await;
+        let ManagedHostState::HostReprovision {
+            retry_count,
+            reprovision_state:
+                HostReprovisionState::FailedFirmwareUpgrade {
+                    reason: Some(reason),
+                    report_time,
+                    ..
+                },
+        } = machine.current_state()
+        else {
+            panic!("{scenario}: {:?}", machine.current_state())
+        };
+        assert!(reason.starts_with(expected_reason), "{scenario}: {reason}");
+        assert!(report_time.is_some(), "{scenario}");
+        assert_eq!(*retry_count, 1, "{scenario}");
+    }
 }
 
 /// Drives the `FailedFirmwareUpgrade` arm through all three of its retry

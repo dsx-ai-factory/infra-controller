@@ -162,6 +162,93 @@ pub(crate) async fn mark_manual_firmware_upgrade_complete(
     Ok(Response::new(()))
 }
 
+pub(crate) async fn acknowledge_scout_firmware_upgrade(
+    api: &Api,
+    request: Request<rpc::ScoutFirmwareUpgradeAcknowledgement>,
+) -> Result<Response<()>, Status> {
+    log_request_data(&request);
+    let req = request.into_inner();
+    let machine_id: HostMachineId = convert_and_log_machine_id(req.machine_id.as_ref())?;
+    let (machine, mut txn) = api.load_machine(&machine_id, Default::default()).await?;
+    let mut new_state = machine.current_state().clone();
+    let reprovision_state = match &mut new_state {
+        ManagedHostState::HostReprovision {
+            reprovision_state, ..
+        }
+        | ManagedHostState::Assigned {
+            instance_state: InstanceState::HostReprovision { reprovision_state },
+        } => reprovision_state,
+        _ => {
+            return Err(CarbideError::FailedPrecondition(
+                "machine is not awaiting a scout firmware upgrade".into(),
+            )
+            .into());
+        }
+    };
+    let HostReprovisionState::WaitingForScoutUpgrade {
+        upgrade_task_id,
+        started_at,
+        deadline,
+        delivery: Some(delivery),
+        result,
+        ..
+    } = reprovision_state
+    else {
+        return Err(CarbideError::FailedPrecondition(
+            "task does not support scout acknowledgement".into(),
+        )
+        .into());
+    };
+    if req.upgrade_task_id != *upgrade_task_id || result.is_some() {
+        return Err(CarbideError::FailedPrecondition(
+            "scout firmware task is stale or already complete".into(),
+        )
+        .into());
+    }
+    let now = chrono::Utc::now();
+    let (active_deadline, deadline_expired_message) = if delivery.accepted_at.is_some() {
+        (
+            *deadline,
+            "scout firmware task completion deadline has expired",
+        )
+    } else {
+        (
+            delivery.deadline,
+            "scout firmware task delivery deadline has expired",
+        )
+    };
+    if now > active_deadline {
+        return Err(CarbideError::FailedPrecondition(deadline_expired_message.into()).into());
+    }
+    // Repeated acknowledgement is a no-op.
+    if delivery.accepted_at.is_some() {
+        return Ok(Response::new(()));
+    }
+    // Instead of retaining the upgrade completion deadline based on the time that core created the upgrade
+    // task, move it forward so that it starts now, the time by which scout is confirmed to have actually
+    // accepted the task
+    *deadline += now.signed_duration_since(*started_at);
+    delivery.accepted_at = Some(now);
+    let version = machine.state.version;
+    if matches!(
+        db::machine::try_update_controller_state(
+            &mut txn,
+            &machine_id,
+            version,
+            version.increment(),
+            &new_state,
+        )
+        .await?,
+        db::ConditionalWrite::NotApplied(_)
+    ) {
+        return Err(Status::aborted(
+            "scout firmware task state changed; retry acknowledgement",
+        ));
+    }
+    txn.commit().await?;
+    Ok(Response::new(()))
+}
+
 pub(crate) async fn report_scout_firmware_upgrade_status(
     api: &Api,
     request: Request<rpc::ScoutFirmwareUpgradeStatusRequest>,
@@ -204,6 +291,7 @@ pub(crate) async fn report_scout_firmware_upgrade_status(
         power_drains_needed,
         started_at,
         deadline,
+        delivery,
         task_json,
         ..
     } = reprovision_state
@@ -227,6 +315,13 @@ pub(crate) async fn report_scout_firmware_upgrade_status(
         .into());
     }
 
+    if delivery.as_ref().is_some_and(|d| d.accepted_at.is_none()) {
+        return Err(CarbideError::FailedPrecondition(
+            "scout firmware task has not been acknowledged".into(),
+        )
+        .into());
+    }
+
     // Cap stdout/stderr/error so the JSON state row stays small; full output
     // is available in the scout logs if an operator needs to dig deeper.
     const MAX_STORED_OUTPUT_SIZE: usize = 1500;
@@ -238,6 +333,7 @@ pub(crate) async fn report_scout_firmware_upgrade_status(
         power_drains_needed,
         started_at,
         deadline,
+        delivery,
         task_json,
         result: Some(ScoutUpgradeResult {
             success: req.success,
@@ -257,7 +353,22 @@ pub(crate) async fn report_scout_firmware_upgrade_status(
         },
     };
 
-    db::machine::advance(&machine, &mut txn, &new_state, None).await?;
+    let version = machine.state.version;
+    if matches!(
+        db::machine::try_update_controller_state(
+            &mut txn,
+            &machine_id,
+            version,
+            version.increment(),
+            &new_state,
+        )
+        .await?,
+        db::ConditionalWrite::NotApplied(_)
+    ) {
+        return Err(Status::aborted(
+            "scout firmware task state changed; retry completion report",
+        ));
+    }
 
     txn.commit().await?;
 
