@@ -64,6 +64,7 @@ mod machine_validation;
 mod metrics;
 mod mlx_access;
 mod mlx_device;
+mod mlx_lockdown;
 mod nic_firmware_preflight;
 mod platform;
 mod register;
@@ -543,6 +544,9 @@ async fn handle_action(
             handle_mlxreport_action(config, machine_id, mlx_action).await;
             return Ok(());
         }
+        fac::Action::MlxDeviceInfoReport(_) => {
+            mlx_device::publish_requested_device_report(config, *machine_id).await?;
+        }
         fac::Action::FirmwareUpgrade(firmware_upgrade) => {
             handle_firmware_upgrade_action(config, machine_id, firmware_upgrade.task).await?;
         }
@@ -667,7 +671,7 @@ async fn collect_and_publish_mlx_observations<PublishFuture>(
                 failure_stage = "configuration",
                 "cannot reconcile NIC commands: invalid firmware supervisor configuration"
             );
-            // The advertised command still needs a correlated response when
+            // Advertised generic commands still need correlated responses when
             // local configuration prevents connection. Legacy work remains
             // deferred, and neither path touches hardware in this branch.
             MlxObservationReport {
@@ -675,19 +679,32 @@ async fn collect_and_publish_mlx_observations<PublishFuture>(
                 timestamp: Some(Utc::now().into()),
                 observations: commands
                     .into_iter()
-                    .filter_map(|action| match action.command {
-                        Some(fac::mlx_device_action::Command::UpdateFirmware(task)) => {
-                            Some(MlxObservation {
-                                firmware_update_result: Some(mlx_device::firmware_update_request_error(
-                                    &action.pci_name,
-                                    &task,
-                                    rpc::protos::mlx_device::MlxDeviceUpdateFirmwareErrorCode::Unavailable,
-                                    "firmware supervisor configuration is invalid; no authoritative receipt is available",
-                                )),
-                                ..Default::default()
-                            })
+                    .filter_map(|action| {
+                        let pci_name = &action.pci_name;
+                        match action.command.as_ref()? {
+                            fac::mlx_device_action::Command::UpdateFirmware(task) => {
+                                Some(unavailable_supervisor_observation(
+                                    pci_name,
+                                    &task.operation_id,
+                                    &task.phase_id,
+                                ))
+                            }
+                            fac::mlx_device_action::Command::ObserveFirmwareUpdate(task) => {
+                                Some(unavailable_supervisor_observation(
+                                    pci_name,
+                                    &task.operation_id,
+                                    &task.phase_id,
+                                ))
+                            }
+                            fac::mlx_device_action::Command::Lockdown(task) => {
+                                Some(mlx_lockdown::lockdown_error_observation(
+                                    pci_name,
+                                    task,
+                                    INVALID_CONFIGURATION_LOCKDOWN,
+                                ))
+                            }
+                            _ => None,
                         }
-                        _ => None,
                     })
                     .collect(),
             }
@@ -708,10 +725,36 @@ async fn collect_and_publish_mlx_observations<PublishFuture>(
     }
 }
 
+// A configuration error can contain credentials, so its text stays local and
+// Core gets one of these fixed diagnostics, correlated to the command.
+const INVALID_CONFIGURATION_RECEIPT: &str =
+    "firmware supervisor configuration is invalid; no authoritative receipt is available";
+const INVALID_CONFIGURATION_LOCKDOWN: &str =
+    "firmware supervisor configuration is invalid; the lockdown step was not attempted";
+
+fn unavailable_supervisor_observation(
+    pci_name: &str,
+    operation_id: &str,
+    phase_id: &str,
+) -> MlxObservation {
+    MlxObservation {
+        firmware_update_result: Some(mlx_device::firmware_update_request_error(
+            pci_name,
+            operation_id,
+            phase_id,
+            rpc::protos::mlx_device::MlxDeviceUpdateFirmwareErrorCode::Unavailable,
+            INVALID_CONFIGURATION_RECEIPT,
+        )),
+        ..Default::default()
+    }
+}
+
 /// Sequence automatic hardware commands through the shared host mutation claim.
 /// Discovery is supplied separately so receipt-only and deferred paths can prove
-/// they never probe the card. Direct commands hold the same claim as operator
-/// streams and supervisors, including while discovering the selected device.
+/// they never probe the card; lockdown steps instead run their own bounded
+/// discovery under the claim they take. Direct commands hold the same claim as
+/// operator streams and supervisors, including while discovering the selected
+/// device.
 async fn collect_mlx_observations(
     machine_id: &MachineId,
     commands: Vec<fac::MlxDeviceAction>,
@@ -728,21 +771,40 @@ async fn collect_mlx_observations(
     };
 
     for device_action in commands {
-        // This command cannot become a DPA no-work decision. Submit the exact
-        // task on every delivery so the supervisor also checks conflicts when
-        // the caller reuses an operation ID with different immutable inputs.
-        if let Some(fac::mlx_device_action::Command::UpdateFirmware(task)) =
-            device_action.command.as_ref()
-        {
-            if let Some(result) =
-                mlx_device::update_firmware(&device_action.pci_name, task, supervisor_config).await
-            {
-                report.observations.push(MlxObservation {
-                    firmware_update_result: Some(result),
-                    ..Default::default()
-                });
+        // Generic NIC commands bypass legacy DPA conversion and its discovery.
+        // A firmware delivery that passes Scout's input checks reaches the
+        // supervisor, which rejects an operation ID reused with different
+        // immutable inputs. A handler that defers returns `None`, and the
+        // command can run again on a later poll.
+        let pci_name = &device_action.pci_name;
+        match device_action.command.as_ref() {
+            Some(fac::mlx_device_action::Command::UpdateFirmware(task)) => {
+                let result = mlx_device::update_firmware(pci_name, task, supervisor_config).await;
+                report
+                    .observations
+                    .extend(result.map(|result| MlxObservation {
+                        firmware_update_result: Some(result),
+                        ..Default::default()
+                    }));
+                continue;
             }
-            continue;
+            Some(fac::mlx_device_action::Command::ObserveFirmwareUpdate(task)) => {
+                let result =
+                    mlx_device::observe_firmware_update(pci_name, task, supervisor_config).await;
+                report
+                    .observations
+                    .extend(result.map(|result| MlxObservation {
+                        firmware_update_result: Some(result),
+                        ..Default::default()
+                    }));
+                continue;
+            }
+            Some(fac::mlx_device_action::Command::Lockdown(task)) => {
+                let observation = mlx_lockdown::handle(pci_name, task, supervisor_config).await;
+                report.observations.extend(observation);
+                continue;
+            }
+            _ => {}
         }
 
         let dpa_cmd = match DpaCommand::try_from(&device_action) {
@@ -875,27 +937,7 @@ fn with_direct_mlx_device(
         &mut mlx_access::DirectMlxAccess,
     ) -> Option<MlxObservation>,
 ) -> Option<MlxObservation> {
-    let mut access = match mlx_access::DirectMlxAccess::acquire(config, device) {
-        Ok(access) => access,
-        Err(mlx_access::DirectMlxAccessError::Acquire(error))
-            if error.kind() == std::io::ErrorKind::AlreadyExists =>
-        {
-            match libmlx::firmware::operation::has_unresolved_firmware_claim(config) {
-                Ok(_) => tracing::debug!(
-                    pci_name = device,
-                    "deferring automatic NIC command while hardware access is occupied"
-                ),
-                Err(error) => {
-                    tracing::warn!(pci_name = device, %error, "deferring automatic NIC command because the hardware claim is unsafe or unreadable")
-                }
-            }
-            return None;
-        }
-        Err(error) => {
-            tracing::warn!(pci_name = device, %error, "deferring automatic NIC command without probing hardware");
-            return None;
-        }
-    };
+    let mut access = mlx_access::DirectMlxAccess::acquire_or_defer(config, device)?;
     let observation = match discover(device) {
         Ok(device_info) => execute(device_info, &mut access),
         Err(error) => {
@@ -1139,14 +1181,6 @@ async fn report_scout_error(
     Ok(())
 }
 
-/// Advertise the firmware command this Scout can accept with its machine identity.
-fn agent_control_request(machine_id: &MachineId) -> rpc_forge::ForgeAgentControlRequest {
-    rpc_forge::ForgeAgentControlRequest {
-        machine_id: Some(*machine_id),
-        capabilities: vec![rpc_forge::ForgeAgentControlCapability::NicFirmwareUpdateV1.into()],
-    }
-}
-
 /// Ask API if we need to do anything after discovery.
 async fn query_api(
     config: &Options,
@@ -1159,7 +1193,10 @@ async fn query_api(
         query_attempt,
         "Sending ForgeAgentControlRequest",
     );
-    let request = tonic::Request::new(agent_control_request(machine_id));
+    let query = rpc_forge::ForgeAgentControlRequest {
+        machine_id: Some(*machine_id),
+    };
+    let request = tonic::Request::new(query);
     let mut client = client::create_forge_client(config).await?;
     let response = client.forge_agent_control(request).await?.into_inner();
     let action_str = response
@@ -1331,30 +1368,13 @@ mod tests {
 
     use super::*;
 
-    /// Core must see the checked firmware capability on the request identifying
-    /// this Scout, so it can select commands the agent understands.
-    #[test]
-    fn agent_control_request_advertises_checked_firmware_with_machine_identity() {
-        let machine_id = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg"
-            .parse()
-            .unwrap();
-
-        assert_eq!(
-            agent_control_request(&machine_id),
-            rpc_forge::ForgeAgentControlRequest {
-                machine_id: Some(machine_id),
-                capabilities: vec![
-                    rpc_forge::ForgeAgentControlCapability::NicFirmwareUpdateV1.into(),
-                ],
-            }
-        );
-    }
-
-    /// Invalid local configuration still produces a correlated generic error.
-    /// Legacy work defers without discovery, and neither response nor logs may
-    /// expose a configuration value that could contain credentials.
+    /// Invalid local configuration still produces a correlated error for every
+    /// generic command. Legacy work defers without discovery, and neither
+    /// response nor logs may expose a configuration value that could contain
+    /// credentials.
     #[tokio::test]
-    async fn invalid_supervisor_configuration_reports_generic_update_without_hardware_or_secrets() {
+    async fn invalid_supervisor_configuration_reports_generic_commands_without_hardware_or_secrets()
+    {
         use std::env::VarError;
         use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
@@ -1385,12 +1405,39 @@ mod tests {
                 image_sha256: "00".repeat(32),
                 configuration_sha256: None,
             }),
+            ..Default::default()
+        };
+        let observe_task = fac::MlxDeviceObserveFirmwareUpdate {
+            operation_id: "nic-observe-config-failure".into(),
+            phase_id: task.phase_id.clone(),
+            profile: task.profile.clone(),
+            expected_digests: task.expected_digests.clone(),
+            expected_device: None,
+        };
+        let lockdown_task = fac::MlxDeviceLockdown {
+            controller_state_version: "lockdown-state-version".into(),
+            expected_device: Some(pb::MlxDeviceSelector {
+                identity: Some(pb::mlx_device_selector::Identity::BaseGuid(
+                    "fixture-guid".into(),
+                )),
+            }),
+            request: Some(fac::mlx_device_lockdown::Request::Unlock(
+                fac::MlxDeviceUnlock {
+                    key: "0123456789abcdef".into(),
+                },
+            )),
         };
         let commands = vec![
             fac::MlxDeviceAction {
                 pci_name: pci_name.into(),
                 command: Some(fac::mlx_device_action::Command::UpdateFirmware(
                     task.clone(),
+                )),
+            },
+            fac::MlxDeviceAction {
+                pci_name: pci_name.into(),
+                command: Some(fac::mlx_device_action::Command::ObserveFirmwareUpdate(
+                    observe_task.clone(),
                 )),
             },
             // This command would probe hardware if invalid configuration fell
@@ -1400,6 +1447,14 @@ mod tests {
                 command: Some(fac::mlx_device_action::Command::Lock(fac::MlxDeviceLock {
                     key: "0123456789abcdef".into(),
                 })),
+            },
+            // A lockdown step never reaches the claim or discovery either, so its
+            // answer cannot depend on a card Scout did not query.
+            fac::MlxDeviceAction {
+                pci_name: pci_name.into(),
+                command: Some(fac::mlx_device_action::Command::Lockdown(
+                    lockdown_task.clone(),
+                )),
             },
         ];
         let configuration_error = SupervisorLaunchError::Environment(VarError::NotUnicode(
@@ -1426,20 +1481,35 @@ mod tests {
             .report
             .unwrap();
         assert_eq!(report.machine_id, Some(machine_id));
+        let update_error = |operation_id: String| MlxObservation {
+            firmware_update_result: Some(pb::MlxDeviceUpdateFirmwareResult {
+                operation_id,
+                phase_id: task.phase_id.clone(),
+                pci_name: pci_name.into(),
+                result: Some(UpdateResult::Error(pb::MlxDeviceUpdateFirmwareError {
+                    code: pb::MlxDeviceUpdateFirmwareErrorCode::Unavailable.into(),
+                    diagnostic: INVALID_CONFIGURATION_RECEIPT.into(),
+                })),
+            }),
+            ..Default::default()
+        };
         assert_eq!(
             report.observations,
-            vec![MlxObservation {
-                firmware_update_result: Some(pb::MlxDeviceUpdateFirmwareResult {
-                    operation_id: task.operation_id,
-                    phase_id: task.phase_id,
-                    pci_name: pci_name.into(),
-                    result: Some(UpdateResult::Error(pb::MlxDeviceUpdateFirmwareError {
-                        code: pb::MlxDeviceUpdateFirmwareErrorCode::Unavailable.into(),
-                        diagnostic: "firmware supervisor configuration is invalid; no authoritative receipt is available".into(),
-                    })),
-                }),
-                ..Default::default()
-            }]
+            vec![
+                update_error(task.operation_id.clone()),
+                update_error(observe_task.operation_id),
+                MlxObservation {
+                    lockdown_result: Some(pb::MlxDeviceLockdownResult {
+                        controller_state_version: lockdown_task.controller_state_version,
+                        pci_name: pci_name.into(),
+                        expected_device: lockdown_task.expected_device,
+                        result: Some(pb::mlx_device_lockdown_result::Result::Error(
+                            INVALID_CONFIGURATION_LOCKDOWN.into(),
+                        )),
+                    }),
+                    ..Default::default()
+                },
+            ]
         );
         let configuration_failure = logs
             .iter()

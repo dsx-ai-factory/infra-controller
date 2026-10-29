@@ -6364,21 +6364,10 @@ message MachineCredentialsUpdateRequest {
 message MachineCredentialsUpdateResponse {
 }
 
-// Optional actions understood by a Scout control client. Core ignores unknown
-// values and must not send an action whose capability is absent.
-enum ForgeAgentControlCapability {
-  // No optional capability; this value never enables an action.
-  FORGE_AGENT_CONTROL_CAPABILITY_UNSPECIFIED = 0;
-  // Supports immutable, digest-checked MlxDeviceUpdateFirmware workflows and
-  // correlated firmware_update_result observations.
-  NIC_FIRMWARE_UPDATE_V1 = 1;
-}
-
 message ForgeAgentControlRequest {
   common.MachineId machine_id = 1;
-  // Unordered supported capabilities. Omitted/empty advertises no optional
-  // capabilities; duplicates have no additional meaning.
-  repeated ForgeAgentControlCapability capabilities = 2;
+  reserved 2;
+  reserved "capabilities";
 }
 
 message ForgeAgentControlResponse {
@@ -6461,8 +6450,14 @@ message ForgeAgentControlResponse {
       // Durable firmware work uses a distinct tag so older Scouts ignore it.
       MlxDeviceApplyFirmwareOperation apply_firmware_operation = 7;
       // Whole NIC firmware workflow with immutable identity and checked inputs.
-      // Requires NIC_FIRMWARE_UPDATE_V1; never projected into legacy JSON.
+      // Never projected into legacy JSON.
       MlxDeviceUpdateFirmware update_firmware = 8;
+      // Read the receipt for an earlier update without submitting new work.
+      // Never projected into legacy JSON.
+      MlxDeviceObserveFirmwareUpdate observe_firmware_update = 9;
+      // Read or change the lockdown state of one exact physical card.
+      // Never projected into legacy JSON.
+      MlxDeviceLockdown lockdown = 10;
     }
   }
 
@@ -6475,6 +6470,10 @@ message ForgeAgentControlResponse {
 
   message MlxDeviceUnlock {
     string key = 1;
+  }
+
+  // Read the current lock status without changing it.
+  message MlxDeviceLockStatus {
   }
 
   message MlxDeviceApplyProfile {
@@ -6523,6 +6522,58 @@ message ForgeAgentControlResponse {
     // Required expected bytes, checked after supervisor-owned staging and before
     // configuration or burn. A configuration digest is required iff configured.
     mlx_device.FirmwareArtifactDigests expected_digests = 4;
+    // Supervisor instance from an earlier MlxDeviceObserveFirmwareUpdate that
+    // found no receipt. A matching receipt is still returned after a supervisor
+    // restart, but new work is admitted only by this exact instance, so a
+    // replacement that lost its journal cannot burn the card again. Callers keep
+    // the first value across retries. Omission submits without this guard;
+    // present empty or malformed values are invalid.
+    optional string supervisor_instance_id = 5;
+    // Physical card this update is for, checked by the supervisor before any
+    // mutation. Omission targets the PCI address alone.
+    mlx_device.MlxDeviceSelector expected_device = 6;
+  }
+
+  // Read the receipt for an earlier MlxDeviceUpdateFirmware without submitting,
+  // resuming, or probing the card. Results use MlxDeviceUpdateFirmwareResult.
+  // The fields repeat that update unchanged, with the same requirements: the
+  // supervisor compares them with its saved request and reports a conflict
+  // instead of a receipt. A missing receipt names the supervisor instance that
+  // answered; it does not prove that an earlier instance never ran the update.
+  message MlxDeviceObserveFirmwareUpdate {
+    string operation_id = 1;
+    string phase_id = 2;
+    mlx_device.FirmwareFlasherProfile profile = 3;
+    mlx_device.FirmwareArtifactDigests expected_digests = 4;
+    mlx_device.MlxDeviceSelector expected_device = 5;
+  }
+
+  // Read or change the lockdown state of one physical card for the controller
+  // state version that asked. Results use MlxDeviceLockdownResult. A
+  // completed lock or unlock reports `changed`, not an observed status, and so
+  // does a card already in the requested state, whichever key locked it.
+  // Callers read the status separately before relying on it.
+  message MlxDeviceLockdown {
+    // Required opaque controller state version with 1-256 printable nonspace
+    // ASCII bytes, echoed unchanged so a delayed result cannot answer a later
+    // request.
+    string controller_state_version = 1;
+    // Required physical identity. Scout checks it under the same hardware claim
+    // as the step and refuses a card that reports a different identity.
+    mlx_device.MlxDeviceSelector expected_device = 2;
+    // Required step.
+    oneof request {
+      MlxDeviceLockStatus status = 3;
+      MlxDeviceLock lock = 4;
+      MlxDeviceUnlock unlock = 5;
+    }
+  }
+
+  // Publish a fresh, complete NIC inventory through PublishMlxDeviceReport.
+  // The report has no correlation token. Core keeps it only when the report's
+  // own timestamp is at least as new as the stored inventory, and acknowledges
+  // an older report without replacing that inventory.
+  message MlxDeviceInfoReport {
   }
 
   message FirmwareUpgrade {
@@ -6541,6 +6592,7 @@ message ForgeAgentControlResponse {
     MachineValidation machine_validation = 10;
     MlxAction mlx_action = 11;
     FirmwareUpgrade firmware_upgrade = 12;
+    MlxDeviceInfoReport mlx_device_info_report = 13;
   }
 }
 

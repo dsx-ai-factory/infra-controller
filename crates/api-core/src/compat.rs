@@ -91,14 +91,17 @@ impl BuildAndFillLegacyFields for ForgeAgentControlResponse {
                         .device_actions
                         .iter()
                         .filter_map(|action| Some((action, action.command.as_ref()?)))
-                        // Legacy JSON cannot preserve operation identity or
-                        // required digest checks. Keep both firmware commands
-                        // on the typed interface.
+                        // Legacy JSON cannot preserve operation identity,
+                        // digest checks, the controller revision, or the
+                        // physical card. Keep these commands on the typed
+                        // interface.
                         .filter(|(_, command)| {
                             !matches!(
                                 command,
                                 fac::mlx_device_action::Command::ApplyFirmwareOperation(_)
                                     | fac::mlx_device_action::Command::UpdateFirmware(_)
+                                    | fac::mlx_device_action::Command::ObserveFirmwareUpdate(_)
+                                    | fac::mlx_device_action::Command::Lockdown(_)
                             )
                         })
                         .map(|(action, command)| {
@@ -129,6 +132,9 @@ impl BuildAndFillLegacyFields for ForgeAgentControlResponse {
                     })
                     .transpose()?,
             ),
+            // No legacy action requests inventory, and DISCOVERY would also
+            // re-register the host, so older readers see a no-op.
+            fac::Action::MlxDeviceInfoReport(_) => (fac::LegacyAction::Noop, None),
         };
         Ok(ForgeAgentControlResponse {
             action: Some(action),
@@ -306,28 +312,63 @@ mod tests {
         );
     }
 
+    /// Commands whose identity or checks legacy JSON cannot express stay on the
+    /// typed action only, without dropping the DPA command beside them.
     #[test]
-    fn response_from_mlx_action_omits_durable_firmware_from_legacy_pairs() {
-        let firmware_action = fac::MlxDeviceAction {
-            pci_name: "05:00.0".to_string(),
-            command: Some(fac::mlx_device_action::Command::ApplyFirmwareOperation(
-                fac::MlxDeviceApplyFirmwareOperation {
-                    profile: None,
-                    operation_id: "dpa-firmware:card:state-version".to_string(),
-                },
-            )),
-        };
+    fn response_from_mlx_action_omits_typed_firmware_commands_from_legacy_pairs() {
+        let typed_actions = vec![
+            fac::MlxDeviceAction {
+                pci_name: "05:00.0".to_string(),
+                command: Some(fac::mlx_device_action::Command::ApplyFirmwareOperation(
+                    fac::MlxDeviceApplyFirmwareOperation {
+                        profile: None,
+                        operation_id: "dpa-firmware:card:state-version".to_string(),
+                    },
+                )),
+            },
+            fac::MlxDeviceAction {
+                pci_name: "0000:06:00.0".to_string(),
+                command: Some(fac::mlx_device_action::Command::ObserveFirmwareUpdate(
+                    fac::MlxDeviceObserveFirmwareUpdate {
+                        operation_id: "nic-firmware:attempt".to_string(),
+                        phase_id: "update:1".to_string(),
+                        ..Default::default()
+                    },
+                )),
+            },
+            fac::MlxDeviceAction {
+                pci_name: "0000:07:00.0".to_string(),
+                command: Some(fac::mlx_device_action::Command::Lockdown(
+                    fac::MlxDeviceLockdown {
+                        controller_state_version: "state-version".to_string(),
+                        request: Some(fac::mlx_device_lockdown::Request::Status(
+                            fac::MlxDeviceLockStatus {},
+                        )),
+                        ..Default::default()
+                    },
+                )),
+            },
+            fac::MlxDeviceAction {
+                pci_name: "0000:08:00.0".to_string(),
+                command: Some(fac::mlx_device_action::Command::UpdateFirmware(
+                    fac::MlxDeviceUpdateFirmware {
+                        operation_id: "nic-firmware:attempt".to_string(),
+                        phase_id: "update:1".to_string(),
+                        ..Default::default()
+                    },
+                )),
+            },
+        ];
         let response = ForgeAgentControlResponse::build_and_fill_legacy_fields(
             fac::Action::MlxAction(fac::MlxAction {
-                device_actions: vec![
-                    fac::MlxDeviceAction {
-                        pci_name: "04:00.0".to_string(),
-                        command: Some(fac::mlx_device_action::Command::Lock(fac::MlxDeviceLock {
-                            key: "secret".to_string(),
-                        })),
-                    },
-                    firmware_action.clone(),
-                ],
+                device_actions: std::iter::once(fac::MlxDeviceAction {
+                    pci_name: "04:00.0".to_string(),
+                    command: Some(fac::mlx_device_action::Command::Lock(fac::MlxDeviceLock {
+                        key: "secret".to_string(),
+                    })),
+                })
+                .chain(typed_actions.clone())
+                .collect(),
             }),
         )
         .unwrap();
@@ -340,8 +381,7 @@ mod tests {
         let legacy_pair = &legacy_pairs[0];
 
         assert_eq!(response.legacy_action(), fac::LegacyAction::MlxAction);
-        assert_eq!(mlx_action.device_actions.len(), 2);
-        assert_eq!(mlx_action.device_actions[1], firmware_action);
+        assert_eq!(mlx_action.device_actions[1..], typed_actions);
         assert_eq!(mlx_action.device_actions[0].pci_name, "04:00.0");
         assert!(matches!(
             mlx_action.device_actions[0].command.as_ref(),
@@ -359,6 +399,20 @@ mod tests {
                 },
             })
         );
+    }
+
+    /// No legacy action requests inventory; mapping it to DISCOVERY would make
+    /// an older reader re-register the host.
+    #[test]
+    fn response_from_inventory_refresh_sets_legacy_noop() {
+        let action = fac::Action::MlxDeviceInfoReport(fac::MlxDeviceInfoReport {});
+
+        let response =
+            ForgeAgentControlResponse::build_and_fill_legacy_fields(action.clone()).unwrap();
+
+        assert_eq!(response.legacy_action(), fac::LegacyAction::Noop);
+        assert_eq!(response.action, Some(action));
+        assert!(response.data.is_none());
     }
 
     #[test]
