@@ -645,6 +645,7 @@ async fn polling_keeps_healthy_pools_moving_and_stops_active_calls(
         requests: Arc::default(),
         calls: Arc::default(),
     };
+    let requests = provider.requests.clone();
     let shutdown = CancellationToken::new();
     let _shutdown_guard = shutdown.clone().drop_guard();
     let mut provider_tasks = JoinSet::new();
@@ -748,6 +749,12 @@ async fn polling_keeps_healthy_pools_moving_and_stops_active_calls(
 
     assert!(!timed_out_call.stopped.is_cancelled());
 
+    // The healthy observations are complete and the stalled call has entered
+    // the provider. Advance its deadline without racing real connection setup.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(10)).await;
+    tokio::time::resume();
+
     assert_eq!(
         wait_for_pool_observation(
             &observations,
@@ -817,13 +824,35 @@ async fn polling_keeps_healthy_pools_moving_and_stops_active_calls(
         })
         .await??;
     }
-    env.api
+    // Advancing time can expire HTTP/2 keepalive and reconnect the shared
+    // channel. With this poll finished, inspection should reuse its connection.
+    let connections_before_inspection = connections.load(Ordering::SeqCst);
+    // Inspection must fetch new Stats even when the sampler has cached rows.
+    let requests_before_inspection = requests.lock().expect("recorded requests").len();
+    let inspected = env
+        .api
         .admin_inspect_resource_pools(Request::new(forge::InspectResourcePoolsRequest {}))
-        .await?;
+        .await?
+        .into_inner()
+        .pools
+        .into_iter()
+        .find(|pool| pool.name == "a-poll-stalled")
+        .expect("recovered provider pool");
+    assert_eq!(
+        requests.lock().expect("recorded requests").len(),
+        requests_before_inspection + 2,
+        "inspection must request fresh statistics for both remote pools"
+    );
+    assert_eq!(
+        inspected.stats_status(),
+        forge::ResourcePoolStatsStatus::Known
+    );
+    let inspected_counts = inspected.stats.expect("fresh provider counts");
+    assert_eq!((inspected_counts.used, inspected_counts.free), (7, 11));
     assert_eq!(
         connections.load(Ordering::SeqCst),
-        1,
-        "successive polls and public inspection must reuse the same provider connection"
+        connections_before_inspection,
+        "public inspection must reuse the poller's current provider connection"
     );
 
     // A successful retry replaces the retained sample. Stall the other pool

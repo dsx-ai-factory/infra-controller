@@ -34,7 +34,7 @@ use super::journal::{
     PreparedInputs,
 };
 use crate::device::discovery::DeviceDiscoveryError;
-use crate::firmware::config::{FirmwareFlasherProfile, FlashSpec};
+use crate::firmware::config::{FirmwareFlasherProfile, FirmwareUpdateContext, FlashSpec};
 use crate::firmware::credentials::Credentials;
 use crate::firmware::error::{
     AttemptError, AttemptFailure, FirmwareApplyError, FirmwareError, FirmwarePhase, FirmwareResult,
@@ -77,7 +77,7 @@ pub(super) async fn run_operation(
     });
     let result = async {
         let inspecting = progress.clone();
-        let checked_update = tokio::task::spawn_blocking(move || inspecting.inspect())
+        let update_context = tokio::task::spawn_blocking(move || inspecting.inspect())
             .await
             .map_err(|source| progress_error(source.into()))??;
         let flasher = FirmwareFlasher::new_with_executor(
@@ -88,8 +88,8 @@ pub(super) async fn run_operation(
         .await?
         .with_progress(progress.clone())
         .with_preparation_cancel(operation_id, cancellation);
-        let flasher = if checked_update {
-            flasher.with_update_validation()
+        let flasher = if let Some(context) = update_context {
+            flasher.with_update_validation(context.expected_device)
         } else {
             flasher
         };
@@ -126,8 +126,8 @@ struct ArtifactProofGate {
 impl JournalProgress {
     /// `inspect` preserves the admission report before device discovery and
     /// honors cancellation before any inspection or preparation starts.
-    /// Returns whether the saved request requires checked-update validation.
-    fn inspect(&self) -> FirmwareResult<bool> {
+    /// Returns the saved context required for checked-update validation.
+    fn inspect(&self) -> FirmwareResult<Option<FirmwareUpdateContext>> {
         let mut journal = self
             .journal
             .lock()
@@ -140,10 +140,10 @@ impl JournalProgress {
             return Err(FirmwareError::OperationCanceled);
         }
         let report = record.operation.report.clone();
-        let checked_update = record
+        let update_context = record
             .requested
             .as_ref()
-            .is_some_and(|requested| requested.update_context.is_some());
+            .and_then(|requested| requested.update_context.clone());
         journal
             .update(
                 &self.operation_id,
@@ -157,7 +157,7 @@ impl JournalProgress {
                 },
             )
             .map_err(progress_error)?;
-        Ok(checked_update)
+        Ok(update_context)
     }
 
     /// `record_failure` saves the settled report without erasing mutation intent.
@@ -1033,6 +1033,7 @@ printf '{frame_prefix}%s' '{response}'
                     image_sha256: expected_image,
                     configuration_sha256: Some(expected_configuration),
                 },
+                expected_device: None,
             };
             let progress =
                 admitted_progress(&directory, FlashOptions::default(), Some(context.clone()));

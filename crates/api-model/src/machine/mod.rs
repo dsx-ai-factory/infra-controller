@@ -1349,9 +1349,9 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
     }
 
     pub fn to_capabilities(&self) -> Option<MachineCapabilitiesSet> {
-        self.status.hardware_info.clone().map(|info| {
+        self.status.hardware_info.as_ref().map(|info| {
             MachineCapabilitiesSet::from_hardware_info(
-                &info,
+                info,
                 self.status.infiniband_status_observation.as_ref(),
                 self.associated_dpu_machine_ids(),
                 &self.status.interfaces,

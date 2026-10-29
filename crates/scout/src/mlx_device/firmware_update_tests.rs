@@ -281,6 +281,7 @@ async fn checked_update_rejects_redirects_and_mismatched_pci_before_mutation() {
             let expected_context = FirmwareUpdateContext {
                 phase_id: task.phase_id.clone(),
                 expected_digests: task.expected_digests.clone().unwrap().try_into().unwrap(),
+                expected_device: None,
             };
             let mut daemon = TestDaemon::start(fixture).await;
             let config = SupervisorConfig {

@@ -96,11 +96,12 @@ pub async fn host_power_control_with_location(
         trigger_location = %trigger_location,
         "Host Power Control"
     );
+    let requested_at = Utc::now();
     ctx.pending_db_writes
         .push(MachineWriteOp::UpdateRebootRequestedTime {
             machine_id: machine.id.into(),
             mode: machine_last_reboot_requested_mode(action),
-            time: Utc::now(),
+            time: requested_at,
         });
 
     if (action == SystemPowerControl::GracefulRestart)
@@ -138,7 +139,24 @@ pub async fn host_power_control_with_location(
             );
             redfish_client.power(SystemPowerControl::ForceOff).await?;
         }
-        redfish_client.power(action).await?
+        match redfish_client.power(action).await {
+            // The BMC has no AC power cycle action. Treat it like a BMC without
+            // AC power cycle support: the host stays off.
+            Err(RedfishError::NotSupported(error)) => {
+                tracing::warn!(
+                    machine_id = machine.id.to_string(),
+                    %error,
+                    "ACPowercycle is not supported, leaving host powered off"
+                );
+                ctx.pending_db_writes
+                    .push(MachineWriteOp::UpdateRebootRequestedTime {
+                        machine_id: machine.id.into(),
+                        mode: machine_last_reboot_requested_mode(SystemPowerControl::ForceOff),
+                        time: requested_at,
+                    });
+            }
+            result => result?,
+        }
     } else {
         redfish_client.power(action).await?
     }

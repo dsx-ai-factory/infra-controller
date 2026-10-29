@@ -78,20 +78,24 @@ pub(super) fn run() -> io::Result<()> {
     nonblocking(&control)?;
     nonblocking(&result)?;
     write_until(&mut result, HELLO, Instant::now() + REQUEST_TIMEOUT)?;
-    let request = read_request(&mut control)?;
+    let request = read_request(&mut control, REQUEST_TIMEOUT)?;
     let response = supervise(request, &mut control);
-    let bytes = serde_json::to_vec(&response).map_err(io::Error::other)?;
+    write_response(&mut result, &response, RESULT_TIMEOUT)
+}
+
+fn write_response(result: &mut File, response: &Response, timeout: Duration) -> io::Result<()> {
+    let bytes = serde_json::to_vec(response).map_err(io::Error::other)?;
     if bytes.len() > RESPONSE_LIMIT {
         return Err(io::Error::other("supervisor response exceeded its bound"));
     }
     // A completed helper also bounds delivery if its caller stops reading.
-    let deadline = Instant::now() + RESULT_TIMEOUT;
-    write_until(&mut result, &(bytes.len() as u32).to_be_bytes(), deadline)?;
-    write_until(&mut result, &bytes, deadline)
+    let deadline = Instant::now() + timeout;
+    write_until(result, &(bytes.len() as u32).to_be_bytes(), deadline)?;
+    write_until(result, &bytes, deadline)
 }
 
-fn read_request(control: &mut File) -> io::Result<Request> {
-    let deadline = Instant::now() + REQUEST_TIMEOUT;
+fn read_request(control: &mut File, timeout: Duration) -> io::Result<Request> {
+    let deadline = Instant::now() + timeout;
     let mut length = [0; 4];
     read_until(control, &mut length, deadline)?;
     let length = u32::from_be_bytes(length) as usize;
@@ -464,4 +468,98 @@ fn check_deadline(deadline: Instant) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::thread;
+
+    use nix::unistd::pipe2;
+
+    use super::*;
+
+    const IO_TIMEOUT: Duration = Duration::from_millis(100);
+    const WATCHDOG: Duration = Duration::from_secs(10);
+
+    /// A partial frame must consume the request deadline while its writer stays open.
+    #[test]
+    fn stalled_request_expires_without_eof() {
+        let (reader, writer) = pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).unwrap();
+        let mut reader = File::from(reader);
+        let mut writer = File::from(writer);
+        writer.write_all(&100_u32.to_be_bytes()).unwrap();
+        writer.write_all(b"{").unwrap();
+
+        let (finished, completion) = mpsc::sync_channel(1);
+        let started = Instant::now();
+        let worker = thread::spawn(move || {
+            finished
+                .send(read_request(&mut reader, IO_TIMEOUT).map(|_| ()))
+                .unwrap();
+        });
+        let result = completion.recv_timeout(WATCHDOG);
+        // If the watchdog fired, closing the writer lets `read_request` observe
+        // EOF. Join the worker before reporting the watchdog failure.
+        drop(writer);
+        worker.join().expect("join request reader");
+        let error = result
+            .expect("request read finishes within its independent watchdog")
+            .expect_err("incomplete request must expire");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(error.to_string(), "supervisor deadline expired");
+        assert!(started.elapsed() >= IO_TIMEOUT);
+    }
+
+    /// A result larger than the pipe must expire without reader progress.
+    #[test]
+    fn blocked_result_delivery_expires_without_reader_progress() {
+        let (reader, writer) = pipe2(OFlag::O_CLOEXEC | OFlag::O_NONBLOCK).unwrap();
+        let mut reader = File::from(reader);
+        let mut writer = File::from(writer);
+        fcntl(&reader, FcntlArg::F_SETPIPE_SZ(4096)).expect("reduce result pipe capacity");
+        let capacity = usize::try_from(fcntl(&reader, FcntlArg::F_GETPIPE_SZ).unwrap()).unwrap();
+        let response = Response::Finished {
+            status: 0,
+            stdout: vec![b'0'; capacity + 1],
+            stderr: Vec::new(),
+        };
+        let expected = serde_json::to_vec(&response).unwrap();
+
+        let (finished, completion) = mpsc::sync_channel(1);
+        let started = Instant::now();
+        let worker = thread::spawn(move || {
+            finished
+                .send(write_response(&mut writer, &response, IO_TIMEOUT))
+                .unwrap();
+        });
+        let result = match completion.recv_timeout(WATCHDOG) {
+            Ok(result) => result,
+            Err(error) => {
+                // Closing the reader makes a blocked write return `BrokenPipe`,
+                // so we can join the worker before reporting the failed deadline.
+                drop(reader);
+                worker.join().expect("join stalled result writer");
+                panic!("result delivery exceeded its independent watchdog: {error}");
+            }
+        };
+        worker.join().expect("join result writer");
+        let error = result.expect_err("unread result must expire");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(error.to_string(), "supervisor deadline expired");
+        let elapsed = started.elapsed();
+        assert!(elapsed >= IO_TIMEOUT);
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "delivery must use its supplied timeout, not the production result timeout: {elapsed:?}"
+        );
+
+        let mut frame = Vec::new();
+        reader.read_to_end(&mut frame).unwrap();
+        let length = u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize;
+        assert_eq!(length, expected.len());
+        assert!(length > capacity, "result exceeds measured pipe capacity");
+        assert!(frame.len() - 4 < length, "delivery remains incomplete");
+        assert_eq!(&frame[4..], &expected[..frame.len() - 4]);
+    }
 }

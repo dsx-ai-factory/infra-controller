@@ -82,6 +82,9 @@ impl<B: Bmc> ExploredInventories<B> {
                                 x.strip_prefix("GB200Nvl-").unwrap_or(x).to_string()
                             })
                         }
+                        Some(hw::HwType::Supermicro) => inventory
+                            .version()
+                            .map(|v| hw::supermicro::firmware_version(v.into_inner()).to_string()),
                         _ => inventory.version().map(|v| v.to_string()),
                     },
                     release_date: inventory.release_date().map(|v| v.into_inner().to_string()),

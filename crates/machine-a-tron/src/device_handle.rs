@@ -174,6 +174,16 @@ impl DeviceHandle {
         }
     }
 
+    /// Observes live BMC effects without contacting its leased address.
+    /// Returns None when the live BMC resource state is unavailable.
+    pub fn bmc_effect_snapshot(&self) -> Option<bmc_mock::persistence::BmcEffectSnapshot> {
+        match &self.0 {
+            DeviceHandleInner::Machine(handle) => handle.bmc_effect_snapshot(),
+            DeviceHandleInner::Switch(handle) => handle.bmc_effect_snapshot(),
+            DeviceHandleInner::PowerShelf(handle) => handle.bmc_effect_snapshot(),
+        }
+    }
+
     pub fn persisted(&self) -> PersistedDevice {
         match &self.0 {
             DeviceHandleInner::Machine(handle) => handle.persisted(),
@@ -186,6 +196,24 @@ impl DeviceHandle {
         match &self.0 {
             DeviceHandleInner::Machine(handle) => handle.dpus(),
             DeviceHandleInner::Switch(_) | DeviceHandleInner::PowerShelf(_) => &[],
+        }
+    }
+
+    /// Applied tray AC power drops in this actor's lifetime. Switches and power
+    /// shelves have no tray AC-reset effect and return `None`.
+    pub fn aux_power_cycle_generation(&self) -> Option<u64> {
+        match &self.0 {
+            DeviceHandleInner::Machine(handle) => Some(handle.aux_power_cycle_generation()),
+            DeviceHandleInner::Switch(_) | DeviceHandleInner::PowerShelf(_) => None,
+        }
+    }
+
+    /// Switch power drops caused by restart requests in this actor's lifetime.
+    /// Other device kinds return `None`.
+    pub fn switch_reboot_generation(&self) -> Option<u64> {
+        match &self.0 {
+            DeviceHandleInner::Switch(handle) => Some(handle.reboot_generation()),
+            DeviceHandleInner::Machine(_) | DeviceHandleInner::PowerShelf(_) => None,
         }
     }
 

@@ -188,7 +188,13 @@ async fn get_managed_host_network_config_inner(
         }
     };
 
-    let mut maybe_instance = super::instance::snapshot_to_optional_instance(snapshot.clone())?;
+    // `snapshot_to_optional_instance` returns `Ok(None)` without an instance,
+    // so skip cloning the whole `ManagedHostStateSnapshot` in that case.
+    let mut maybe_instance = if snapshot.instance.is_some() {
+        super::instance::snapshot_to_optional_instance(snapshot.clone())?
+    } else {
+        None
+    };
 
     let primary_dpu_snapshot = snapshot
         .host_snapshot

@@ -547,6 +547,7 @@ impl ClusterEndpointSource {
             let bmc = match clients.get(&node.bmc_ip) {
                 Some(cached) if cached.rack_id == rack_id => {
                     if cached.provider.update(credentials) {
+                        cached.bmc.credentials_changed();
                         tracing::info!(
                             hostname = %node.hostname,
                             bmc_ip_address = %node.bmc_ip,
@@ -649,6 +650,7 @@ mod tests {
     use carbide_test_support::{Check, check_values};
 
     use super::*;
+    use crate::bmc::CollectorSweep;
     use crate::endpoint::test_support::reqwest;
     use crate::sink::EventContext;
 
@@ -829,13 +831,17 @@ mod tests {
             Some("old-secret")
         );
 
-        // A rotated password reaches the client running collectors already hold.
+        // A rotated password reaches the client running collectors already hold,
+        // and ends a cooldown the old password caused.
+        first.bmc().reject_credentials_for_test();
+        assert_eq!(first.bmc().collector_sweep(), CollectorSweep::Skip);
         write_inventory("new-secret", in_rack("rack-a"));
         let rotated = load().await.expect("endpoint");
         assert!(
             Arc::ptr_eq(first.bmc(), rotated.bmc()),
             "rotation keeps the client"
         );
+        assert_eq!(first.bmc().collector_sweep(), CollectorSweep::Probe);
         assert_eq!(
             inventory_password(&first).await.as_deref(),
             Some("new-secret")

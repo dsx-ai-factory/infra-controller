@@ -317,7 +317,52 @@ impl StateSla {
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::value_scenarios;
+    use carbide_uuid::{DbColumns, DbTable};
+
     use super::*;
+    use crate::network_devices::NetworkDevice;
+    use crate::network_prefix::NetworkPrefix;
+    use crate::storage::OsImage;
+    use crate::vpc::Vpc;
+
+    #[test]
+    fn manual_db_table_aliases_preserve_table_and_column_order() {
+        value_scenarios!(run = |(table, columns, alias): (&str, DbColumns, &str)| {
+            (
+                format!("{table} AS {alias}"),
+                columns
+                    .as_slice()
+                    .iter()
+                    .map(|column| format!("{alias}.{column}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )
+        };
+            "manual column mappings" {
+                (NetworkDevice::db_table_name(), NetworkDevice::db_table_columns(), "l")
+                    => (
+                        NetworkDevice::db_aliased_table().to_string(),
+                        NetworkDevice::db_aliased_columns().to_string(),
+                    ),
+                (NetworkPrefix::db_table_name(), NetworkPrefix::db_table_columns(), "np")
+                    => (
+                        NetworkPrefix::db_aliased_table().to_string(),
+                        NetworkPrefix::db_aliased_columns().to_string(),
+                    ),
+                (Vpc::db_table_name(), Vpc::db_table_columns(), "v")
+                    => (
+                        Vpc::db_aliased_table().to_string(),
+                        Vpc::db_aliased_columns().to_string(),
+                    ),
+                (OsImage::db_table_name(), OsImage::db_table_columns(), "l")
+                    => (
+                        OsImage::db_aliased_table().to_string(),
+                        OsImage::db_aliased_columns().to_string(),
+                    ),
+            }
+        );
+    }
 
     #[test]
     fn serialize_mac_address() {

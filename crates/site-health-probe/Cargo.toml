@@ -29,6 +29,7 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait = { workspace = true }
+chrono = { workspace = true }
 clap = { features = ["derive", "env"], workspace = true }
 duration-str = { workspace = true }
 eyre = { workspace = true }
@@ -43,13 +44,16 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { features = ["env-filter"], workspace = true }
 url = { workspace = true }
 
 # [local-dependencies]
 carbide-rpc = { path = "../rpc" }
+carbide-site-health-probe-api = { path = "../site-health-probe-api" }
 carbide-tls = { path = "../tls" }
+carbide-uuid = { path = "../uuid" }
 logfmt = { path = "../logfmt" }
 metrics-endpoint = { path = "../metrics-endpoint" }
 
@@ -58,6 +62,7 @@ axum = { workspace = true }
 carbide-test-support = { path = "../test-support" }
 prometheus = { workspace = true }
 tempfile = { workspace = true }
+tokio = { features = ["test-util"], workspace = true }
 
 [lints]
 workspace = true

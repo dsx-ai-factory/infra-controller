@@ -15,18 +15,24 @@
  * limitations under the License.
  */
 
-use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::str::FromStr;
 
 use db::DatabaseError;
 use db::resource_pool::binding::{self, BindingError};
+use model::resource_pool::ResourcePool;
 use model::resource_pool::binding::{
     INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolBinding, ResourcePoolSelection,
     ResourcePoolValueDomain,
 };
 use sqlx::PgConnection;
 
-use crate::{IntegratedResourcePoolBackend, ResourcePoolBackend};
+use crate::remote::RemoteResourcePool;
+use crate::{IntegratedResourcePoolBackend, ResourcePoolBackend, ResourcePoolWithBackend};
+
+// Integrated has no per-pool state. Sharing its adapter does not cache a binding.
+static INTEGRATED_BACKEND: ResourcePoolBackend =
+    ResourcePoolBackend::Integrated(IntegratedResourcePoolBackend);
 
 /// `ResolvedResourcePool` pairs a pool's saved binding with its allocation backend.
 pub struct ResolvedResourcePool {
@@ -69,12 +75,22 @@ pub enum ResourcePoolRegistryError {
     /// The database could not read pool bindings or stored values.
     #[error(transparent)]
     Database(#[from] DatabaseError),
-    /// v2.4 supports only the database-local Integrated authority.
-    #[error(
-        "pool {name:?} selects an unsupported allocation authority; v2.4 requires integrated in the local database"
-    )]
+    /// The pool has neither a backend binding nor stored values.
+    #[error("resource pool `{name}` has neither a backend binding nor stored values")]
+    MissingPool {
+        /// Pool whose backend could not be found.
+        name: String,
+    },
+    /// No matching runtime exists for the selected allocation authority.
+    #[error("pool {name:?} selects an unsupported allocation authority")]
     UnsupportedAuthority {
         /// Pool whose selected allocator is unsupported.
+        name: String,
+    },
+    /// A pool with unbound local inventory or a saved definition must stay Integrated.
+    #[error("pool {name:?} already has integrated values or a saved definition")]
+    IntegratedInventory {
+        /// Pool whose existing data prevents remote selection.
         name: String,
     },
     /// Integrated allocations use the logical pool name in SQL.
@@ -111,14 +127,40 @@ impl ResourcePoolRegistry {
         self.pools.get(name)
     }
 
+    /// `pools` visits every resolved binding, including pools absent from configuration.
+    /// Iteration order is unspecified.
+    pub fn pools(&self) -> impl Iterator<Item = &ResolvedResourcePool> {
+        self.pools.values()
+    }
+
+    /// `select` pairs a typed pool with its backend, checking SQL for pools added
+    /// after startup as [`Self::get_or_load_backend`] does. Missing pools return
+    /// `None`; invalid bindings and database errors are returned unchanged.
+    /// The result borrows the pool and backend, so it can outlive this transaction.
+    pub async fn select<'a, T>(
+        &'a self,
+        txn: &mut PgConnection,
+        pool: &'a ResourcePool<T>,
+    ) -> Result<Option<ResourcePoolWithBackend<'a, T>>, ResourcePoolRegistryError>
+    where
+        T: ToString + FromStr + Send + Sync + 'static,
+        T::Err: std::error::Error,
+    {
+        Ok(self
+            .get_or_load_backend(txn, pool.name())
+            .await?
+            .map(|backend| ResourcePoolWithBackend { pool, backend }))
+    }
+
     /// `get_or_load_backend` borrows a resolved backend or checks the database for
     /// a pool added after startup, using the caller's transaction.
     ///
     /// During a rolling upgrade, replicas that do not write pool bindings can
     /// still grow SQL pools. Existing rows let us use Integrated for those pools.
-    /// A saved binding always takes precedence and must select a supported
-    /// Integrated backend with the same pool name; invalid bindings and database
-    /// errors are returned to the caller.
+    /// A resolved remote backend is borrowed unchanged. A pool added after startup
+    /// must select Integrated with the same pool name; remote pools require registry
+    /// resolution with their provider runtime. Invalid bindings and database errors
+    /// are returned to the caller.
     ///
     /// This does not change the registry or save a binding. `None` means the pool
     /// has neither a binding nor any stored values.
@@ -126,9 +168,9 @@ impl ResourcePoolRegistry {
         &'a self,
         txn: &mut PgConnection,
         name: &str,
-    ) -> Result<Option<Cow<'a, ResourcePoolBackend>>, ResourcePoolRegistryError> {
+    ) -> Result<Option<&'a ResourcePoolBackend>, ResourcePoolRegistryError> {
         if let Some(resolved) = self.get(name) {
-            return Ok(Some(Cow::Borrowed(&resolved.backend)));
+            return Ok(Some(&resolved.backend));
         }
         if let Some(stored) = binding::load(&mut *txn, name).await? {
             validate_integrated(
@@ -140,9 +182,7 @@ impl ResourcePoolRegistry {
         } else if !db::resource_pool::pool_has_rows(txn, name).await? {
             return Ok(None);
         }
-        Ok(Some(Cow::Owned(ResourcePoolBackend::Integrated(
-            IntegratedResourcePoolBackend,
-        ))))
+        Ok(Some(&INTEGRATED_BACKEND))
     }
 
     /// `resolve` checks each pool's backend selection and saves new bindings in
@@ -169,25 +209,47 @@ impl ResourcePoolRegistry {
         txn: &mut PgConnection,
         configured: &HashMap<String, ResourcePoolSelection>,
     ) -> Result<Self, ResourcePoolRegistryError> {
+        Self::resolve_with_remotes(source, txn, configured, &HashMap::new()).await
+    }
+
+    /// `resolve_with_remotes` resolves bindings using the supplied provider runtimes.
+    /// `remotes` is keyed by provider authority ID; configuration aliases may change
+    /// without changing that identity. Missing or mismatched runtimes fail before
+    /// binding writes, and saved bindings cannot switch providers or value families.
+    /// Unbound local inventory and saved definitions still belong to Integrated.
+    /// The source and transaction rules are the same as [`Self::resolve`].
+    /// This lower-level entry point does not enable remote selection in configuration.
+    pub async fn resolve_with_remotes(
+        source: PoolDefinitionSource,
+        txn: &mut PgConnection,
+        configured: &HashMap<String, ResourcePoolSelection>,
+        remotes: &HashMap<String, RemoteResourcePool>,
+    ) -> Result<Self, ResourcePoolRegistryError> {
         for (name, selection) in configured {
             if *name != selection.pool_name {
                 return Err(ResourcePoolRegistryError::NameMismatch { name: name.clone() });
             }
-            validate_integrated(
+            resolve_backend(
                 name,
                 selection.backend_kind,
                 &selection.authority_id,
                 &selection.remote_pool,
+                remotes,
             )?;
         }
 
-        let bindings = binding::all(&mut *txn).await?;
-        for stored in &bindings {
-            validate_integrated(
+        let bindings: BTreeMap<_, _> = binding::all(&mut *txn)
+            .await?
+            .into_iter()
+            .map(|binding| (binding.pool_name.clone(), binding))
+            .collect();
+        for stored in bindings.values() {
+            resolve_backend(
                 &stored.pool_name,
                 stored.backend_kind,
                 &stored.authority_id,
                 &stored.remote_pool,
+                remotes,
             )?;
         }
 
@@ -195,6 +257,15 @@ impl ResourcePoolRegistry {
         let mut selections = configured.clone();
         for (name, &value_domain) in &existing_domains {
             if let Some(selection) = selections.get_mut(name) {
+                // Existing SQL values cannot become a provider's allocations merely
+                // because the first explicit binding asks for a remote backend.
+                if !bindings.contains_key(name)
+                    && selection.backend_kind != ResourcePoolBackendKind::Integrated
+                {
+                    return Err(ResourcePoolRegistryError::IntegratedInventory {
+                        name: name.clone(),
+                    });
+                }
                 if matches!(source, PoolDefinitionSource::GrowthRequest)
                     && selection.value_domain != value_domain
                 {
@@ -205,7 +276,10 @@ impl ResourcePoolRegistry {
                     });
                 }
                 selection.value_domain = value_domain;
-            } else {
+            } else if bindings
+                .get(name)
+                .is_none_or(|binding| binding.backend_kind == ResourcePoolBackendKind::Integrated)
+            {
                 selections.insert(
                     name.clone(),
                     ResourcePoolSelection {
@@ -221,7 +295,7 @@ impl ResourcePoolRegistry {
         }
 
         let mut pools = bindings
-            .into_iter()
+            .into_values()
             .map(|binding| {
                 if let Some(selection) = selections.remove(&binding.pool_name)
                     && !binding.matches(&selection)
@@ -230,17 +304,22 @@ impl ResourcePoolRegistry {
                         name: binding.pool_name.clone(),
                         stored: Box::new(binding),
                         requested: Box::new(selection),
-                    });
+                    }
+                    .into());
                 }
+                let backend = resolve_backend(
+                    &binding.pool_name,
+                    binding.backend_kind,
+                    &binding.authority_id,
+                    &binding.remote_pool,
+                    remotes,
+                )?;
                 Ok((
                     binding.pool_name.clone(),
-                    ResolvedResourcePool {
-                        binding,
-                        backend: ResourcePoolBackend::Integrated(IntegratedResourcePoolBackend),
-                    },
+                    ResolvedResourcePool { binding, backend },
                 ))
             })
-            .collect::<Result<HashMap<_, _>, BindingError>>()?;
+            .collect::<Result<HashMap<_, _>, ResourcePoolRegistryError>>()?;
 
         // Insert pools in name order so instances registering the same pools
         // do not deadlock by locking them in opposite orders.
@@ -253,15 +332,45 @@ impl ResourcePoolRegistry {
                 continue;
             }
             let binding = binding::bind_or_verify(txn, &selection).await?;
+            let backend = resolve_backend(
+                &binding.pool_name,
+                binding.backend_kind,
+                &binding.authority_id,
+                &binding.remote_pool,
+                remotes,
+            )?;
             pools.insert(
                 binding.pool_name.clone(),
-                ResolvedResourcePool {
-                    binding,
-                    backend: ResourcePoolBackend::Integrated(IntegratedResourcePoolBackend),
-                },
+                ResolvedResourcePool { binding, backend },
             );
         }
         Ok(Self { pools })
+    }
+}
+
+/// `resolve_backend` checks authority identity before returning a shared runtime.
+fn resolve_backend(
+    name: &str,
+    backend_kind: ResourcePoolBackendKind,
+    authority_id: &str,
+    remote_pool: &str,
+    remotes: &HashMap<String, RemoteResourcePool>,
+) -> Result<ResourcePoolBackend, ResourcePoolRegistryError> {
+    match backend_kind {
+        ResourcePoolBackendKind::Integrated => {
+            validate_integrated(name, backend_kind, authority_id, remote_pool)?;
+            Ok(ResourcePoolBackend::Integrated(
+                IntegratedResourcePoolBackend,
+            ))
+        }
+        ResourcePoolBackendKind::Grpc => remotes
+            .get(authority_id)
+            .filter(|remote| remote.authority_id() == authority_id)
+            .cloned()
+            .map(ResourcePoolBackend::Grpc)
+            .ok_or_else(|| ResourcePoolRegistryError::UnsupportedAuthority {
+                name: name.to_owned(),
+            }),
     }
 }
 

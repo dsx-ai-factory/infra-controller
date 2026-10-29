@@ -31,7 +31,7 @@ use crate::CarbideError;
 use crate::api::{Api, log_request_data_redacted};
 use crate::handlers::expected_component_patch::{
     ExpectedComponent, UpdateField, UpdateMask, parse_bmc_ip, required_id, required_value,
-    validate_bmc_mac,
+    validate_bmc_mac, validate_single_interface_address,
 };
 use crate::handlers::machine_interface_address::update_preallocated_machine_interface;
 use crate::handlers::static_address_metrics::{
@@ -176,6 +176,8 @@ fn validate_expected_switch(
     }
     validate_nvos_ip_pairing(switch)?;
     validate_nvos_credentials_pair(switch)?;
+    validate_single_interface_address("bmc_ip_address", switch.bmc_ip_address)?;
+    validate_single_interface_address("nvos_ip_address", switch.nvos_ip_address)?;
 
     Ok(())
 }

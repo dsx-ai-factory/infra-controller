@@ -5,8 +5,8 @@
 //!
 //! [`crate::remote::RemoteResourcePool`] uses this client for allocation and
 //! recovery; [`crate::registration`] uses it to register pool definitions.
-//! Production wiring follows in
-//! [P11](https://github.com/dsx-ai-factory/infra-controller/issues/7140).
+//! API startup shares these connections with pool inspection and recovery.
+//! Configuration rejects remote pool selection before provider calls.
 
 mod config;
 mod response;
