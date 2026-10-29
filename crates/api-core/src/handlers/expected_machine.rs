@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::str::FromStr;
 
 use ::rpc::forge as rpc;
@@ -200,15 +200,6 @@ fn validate_fixed_addresses(data: &ExpectedMachineData) -> Result<(), CarbideErr
         )?;
     }
     Ok(())
-}
-
-/// Matches the REST API's `ValidateExpectedBmcIPAddress`, including its
-/// treatment of IPv4-mapped IPv6 addresses.
-fn identifies_single_interface(address: IpAddr) -> bool {
-    let address = address.to_canonical();
-    !(address.is_unspecified()
-        || address.is_multicast()
-        || address == IpAddr::V4(Ipv4Addr::BROADCAST))
 }
 
 /// Full pre-insert validation: the pure shape checks in
