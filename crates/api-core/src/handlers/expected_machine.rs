@@ -269,7 +269,7 @@ async fn validate_reservation_pool_membership(
     for reservation in incoming {
         let stored = existing
             .iter()
-            .find(|r| r.dpu_oob_mac_address == reservation.dpu_oob_mac_address);
+            .find(|r| r.dpu_oob_net0_mac_address == reservation.dpu_oob_net0_mac_address);
         if let Some(ipv4) = reservation.loopback_ipv4
             && stored.and_then(|r| r.loopback_ipv4) != Some(ipv4)
         {
@@ -278,7 +278,7 @@ async fn validate_reservation_pool_membership(
                 common_pools.ethernet.pool_loopback_ip.as_ref(),
                 IpAddr::V4(ipv4),
                 model::resource_pool::common::LOOPBACK_IP,
-                reservation.dpu_oob_mac_address,
+                reservation.dpu_oob_net0_mac_address,
             )
             .await?;
         }
@@ -290,7 +290,7 @@ async fn validate_reservation_pool_membership(
                 common_pools.ethernet.pool_loopback_ip_v6.as_ref(),
                 ipv6,
                 model::resource_pool::common::LOOPBACK_IP_V6,
-                reservation.dpu_oob_mac_address,
+                reservation.dpu_oob_net0_mac_address,
             )
             .await?;
         }
@@ -300,14 +300,14 @@ async fn validate_reservation_pool_membership(
 
 /// Check one reserved address against its pool: it must exist, be
 /// non-auto-assignable, and be either free or already allocated to the DPU this
-/// reservation targets (identified by `intended_dpu_oob_mac`). A value owned by
+/// reservation targets (identified by `intended_dpu_oob_net0_mac`). A value owned by
 /// any other DPU is rejected.
 async fn validate_reserved_pool_address<T>(
     txn: &mut sqlx::PgConnection,
     pool: &ResourcePool<T>,
     value: T,
     pool_label: &str,
-    intended_dpu_oob_mac: MacAddress,
+    intended_dpu_oob_net0_mac: MacAddress,
 ) -> Result<(), CarbideError>
 where
     T: ToString + FromStr + Send + Sync + 'static,
@@ -328,7 +328,7 @@ where
     match info.state {
         model::resource_pool::ResourcePoolEntryState::Free => Ok(()),
         model::resource_pool::ResourcePoolEntryState::Allocated { owner, .. }
-            if pool_owner_is_dpu_oob_mac(txn, &owner, intended_dpu_oob_mac).await? =>
+            if pool_owner_is_dpu_oob_net0_mac(txn, &owner, intended_dpu_oob_net0_mac).await? =>
         {
             // The address is already this DPU's live allocation: restoring the
             // same declaration must not fail while the DPU still owns it.
@@ -343,21 +343,21 @@ where
 }
 
 /// Accept an address already held by the DPU with this OS/admin MAC.
-async fn pool_owner_is_dpu_oob_mac(
+async fn pool_owner_is_dpu_oob_net0_mac(
     txn: &mut sqlx::PgConnection,
     owner: &str,
-    intended_dpu_oob_mac: MacAddress,
+    intended_dpu_oob_net0_mac: MacAddress,
 ) -> Result<bool, CarbideError> {
     let Ok(owner_id) = owner.parse::<carbide_uuid::machine::DpuMachineId>() else {
         tracing::warn!(
             pool_owner = owner,
-            dpu_oob_mac_address = %intended_dpu_oob_mac,
+            dpu_oob_net0_mac_address = %intended_dpu_oob_net0_mac,
             "Loopback pool owner is not a valid DPU machine ID"
         );
         return Ok(false);
     };
     let interfaces =
-        db::machine_interface::find_by_mac_address(&mut *txn, intended_dpu_oob_mac).await?;
+        db::machine_interface::find_by_mac_address(&mut *txn, intended_dpu_oob_net0_mac).await?;
     Ok(interfaces
         .iter()
         .any(|interface| interface.machine_id == Some(owner_id.into())))
