@@ -782,6 +782,19 @@ impl BmcClient {
         }
     }
 
+    /// The provider now issues different credentials. End any authentication
+    /// cooldown so the next read tests them; escalation is kept in case they
+    /// are rejected too.
+    pub(crate) fn credentials_changed(&self) {
+        let mut circuit = self.authentication.lock().expect("auth circuit poisoned");
+        if let CircuitState::Open { backoff, .. } = circuit.state {
+            circuit.state = CircuitState::Open {
+                until: Instant::now(),
+                backoff,
+            };
+        }
+    }
+
     fn authentication_error(&self) -> HealthError {
         HealthError::GenericError(format!(
             "BMC {} authentication circuit is open; request skipped during recovery or cooldown",
@@ -1069,6 +1082,18 @@ impl BmcClient {
         let tripped = !matches!(state, CircuitState::Closed);
         *self.circuit.lock().expect("circuit mutex poisoned") = state;
         self.circuit_tripped.store(tripped, Ordering::Release);
+    }
+
+    /// Put the client in authentication cooldown, as after rejected credentials.
+    #[cfg(test)]
+    pub(crate) fn reject_credentials_for_test(&self) {
+        self.authentication
+            .lock()
+            .expect("auth circuit poisoned")
+            .state = CircuitState::Open {
+            until: Instant::now() + AUTH_CIRCUIT_INITIAL_BACKOFF,
+            backoff: AUTH_CIRCUIT_INITIAL_BACKOFF,
+        };
     }
 
     /// Backdate the fetch-failure record without sleeping in tests.

@@ -194,6 +194,32 @@ fn public_root_paths_cannot_validate_credentials() {
 }
 
 #[tokio::test]
+async fn changed_credentials_end_cooldown_without_resetting_escalation() {
+    let client = test_client();
+    let (op, _) = scripted_op(vec![Err(auth_error()), Err(auth_error())]);
+    client.read_with_auth_retry(true, op).await.unwrap_err();
+    assert_eq!(client.collector_sweep(), CollectorSweep::Skip);
+
+    client.credentials_changed();
+    assert_eq!(client.collector_sweep(), CollectorSweep::Probe);
+    let (op, _) = scripted_op(vec![Err(auth_error())]);
+    client.read_with_auth_retry(true, op).await.unwrap_err();
+    assert_eq!(
+        open_backoff(&client),
+        Some(Duration::from_secs(120)),
+        "rejected new credentials still escalate"
+    );
+
+    client.credentials_changed();
+    let (op, _) = scripted_op(vec![Ok("accepted")]);
+    assert_eq!(
+        client.read_with_auth_retry(true, op).await.unwrap(),
+        "accepted"
+    );
+    assert_eq!(client.collector_sweep(), CollectorSweep::Full);
+}
+
+#[tokio::test]
 async fn concurrent_collectors_admit_one_recovery_probe() {
     let (provider, calls) =
         CountingProvider::new(BmcCredentials::SessionToken { token: "t".into() }, None);
