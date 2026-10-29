@@ -1645,10 +1645,7 @@ impl MachineStateHandler {
                         deconfiguring_state,
                         mh_snapshot,
                         ctx,
-                        self.host_handler
-                            .host_handler_params
-                            .reachability_params
-                            .uefi_boot_wait,
+                        &self.host_handler.host_handler_params.reachability_params,
                     )
                     .await
                 }
@@ -8828,12 +8825,13 @@ impl StateHandler for HostMachineStateHandler {
                                         .services
                                         .create_redfish_client_from_machine(host)
                                         .await?;
-                                    if redfish_client
+                                    let has_boot_latched_controls = redfish_client
                                         .lockdown_has_boot_latched_controls()
                                         .await
                                         .map_err(|e| {
                                             redfish_error("lockdown_has_boot_latched_controls", e)
-                                        })?
+                                        })?;
+                                    if has_boot_latched_controls
                                         && !host.status.last_reboot_requested.as_ref().is_some_and(
                                             |request| {
                                                 host.status
@@ -8855,21 +8853,23 @@ impl StateHandler for HostMachineStateHandler {
                                             status.status
                                         )));
                                     }
-                                    return complete_host_init_lockdown(
-                                        ctx,
-                                        mh_snapshot,
-                                        ManagedHostState::BomValidating {
-                                            bom_validating_state: BomValidating::MatchingSku(
-                                                BomValidatingContext {
-                                                    machine_validation_context: Some(
-                                                        MachineValidationContext::Discovery,
-                                                    ),
-                                                    ..BomValidatingContext::default()
-                                                },
-                                            ),
-                                        },
-                                    )
-                                    .await;
+                                    if !has_boot_latched_controls {
+                                        return complete_host_init_lockdown(
+                                            ctx,
+                                            mh_snapshot,
+                                            ManagedHostState::BomValidating {
+                                                bom_validating_state: BomValidating::MatchingSku(
+                                                    BomValidatingContext {
+                                                        machine_validation_context: Some(
+                                                            MachineValidationContext::Discovery,
+                                                        ),
+                                                        ..BomValidatingContext::default()
+                                                    },
+                                                ),
+                                            },
+                                        )
+                                        .await;
+                                    }
                                 }
                                 return Ok(StateHandlerOutcome::transition(
                                     ManagedHostState::HostInit {
@@ -14008,12 +14008,7 @@ async fn do_ipmi_restart(
         trigger_location = %trigger_location,
         "IPMI Host Power Control"
     );
-    ctx.pending_db_writes
-        .push(MachineWriteOp::UpdateRebootRequestedTime {
-            machine_id: machine.id.into(),
-            mode: machine_last_reboot_requested_mode(action),
-            time: Utc::now(),
-        });
+    let requested_at = Utc::now();
 
     let bmc_mac = machine
         .status
@@ -14048,7 +14043,15 @@ async fn do_ipmi_restart(
         .await
         .map_err(|e| {
             StateHandlerError::GenericError(eyre!("IPMI restart failed for {}: {}", machine.id, e))
-        })
+        })?;
+    ctx.pending_db_writes
+        .push(MachineWriteOp::UpdateRebootRequestedTime {
+            machine_id: machine.id.into(),
+            mode: machine_last_reboot_requested_mode(action),
+            time: requested_at,
+        });
+
+    Ok(())
 }
 
 async fn resolve_ipmi_address(

@@ -97,12 +97,21 @@ pub async fn host_power_control_with_location(
         "Host Power Control"
     );
     let requested_at = Utc::now();
-    ctx.pending_db_writes
-        .push(MachineWriteOp::UpdateRebootRequestedTime {
-            machine_id: machine.id.into(),
-            mode: machine_last_reboot_requested_mode(action),
-            time: requested_at,
-        });
+    // Boot-latched policy waits use these timestamps as accepted boot requests.
+    let record_after_success = matches!(
+        action,
+        SystemPowerControl::ForceRestart
+            | SystemPowerControl::GracefulRestart
+            | SystemPowerControl::On
+    );
+    if !record_after_success {
+        ctx.pending_db_writes
+            .push(MachineWriteOp::UpdateRebootRequestedTime {
+                machine_id: machine.id.into(),
+                mode: machine_last_reboot_requested_mode(action),
+                time: requested_at,
+            });
+    }
 
     if (action == SystemPowerControl::GracefulRestart)
         || (action == SystemPowerControl::ForceRestart)
@@ -119,11 +128,7 @@ pub async fn host_power_control_with_location(
                 action = "Manual intervention required to initiate power-on".to_string(),
                 "Host Power Action"
             );
-            /* // reserve for future proactive power on action
-            redfish_client
-            .power(SystemPowerControl::On)
-            .await?
-            */
+            return Ok(());
         } else {
             redfish_client.power(action).await?
         }
@@ -157,6 +162,15 @@ pub async fn host_power_control_with_location(
         }
     } else {
         redfish_client.power(action).await?
+    }
+
+    if record_after_success {
+        ctx.pending_db_writes
+            .push(MachineWriteOp::UpdateRebootRequestedTime {
+                machine_id: machine.id.into(),
+                mode: machine_last_reboot_requested_mode(action),
+                time: requested_at,
+            });
     }
 
     Ok(())

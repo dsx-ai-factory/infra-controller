@@ -37,7 +37,9 @@ use state_controller::state_handler::{
 
 use crate::context::MachineStateHandlerContextObjects;
 use crate::dpf::{DpfOperations, dpf_dpudevices_and_dpunode_crs_noexist};
-use crate::handler::wait;
+use crate::handler::{
+    ReachabilityParams, handler_host_power_control, trigger_reboot_if_needed, wait,
+};
 use crate::redfish::{did_dpu_finish_booting, host_power_control};
 
 fn deconfiguring_dpus_after_host_reset(state: &ManagedHostStateSnapshot) -> ManagedHostState {
@@ -114,7 +116,7 @@ pub(super) async fn handle_deconfiguring_host(
     deconfiguring_state: &DeconfiguringHostState,
     state: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
-    uefi_boot_wait: chrono::Duration,
+    reachability_params: &ReachabilityParams,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let machine = &state.host_snapshot;
     match deconfiguring_state {
@@ -174,25 +176,48 @@ pub(super) async fn handle_deconfiguring_host(
                     ))
                 })?;
             if has_boot_latched_controls {
-                // Keep this persisted step until the requested reboot has had
-                // time to apply runtime policy. Do not restart on every tick.
                 if let Some(reboot) = &machine.status.last_reboot_requested
                     && reboot.time >= machine.state.version.timestamp()
-                    && reboot.mode == MachineLastRebootRequestedMode::Reboot
                 {
-                    if wait(&reboot.time, uefi_boot_wait) {
-                        return Ok(StateHandlerOutcome::wait(
-                            "Waiting for host boot to release runtime EFI protection".to_string(),
+                    if matches!(
+                        reboot.mode,
+                        MachineLastRebootRequestedMode::Reboot
+                            | MachineLastRebootRequestedMode::PowerOn
+                    ) && machine
+                        .status
+                        .last_reboot_time
+                        .is_some_and(|boot| boot > reboot.time)
+                    {
+                        if wait(&reboot.time, reachability_params.uefi_boot_wait) {
+                            return Ok(StateHandlerOutcome::wait(
+                                "Waiting for host boot interval to release runtime EFI protection"
+                                    .to_string(),
+                            ));
+                        }
+                        return Ok(StateHandlerOutcome::transition(
+                            ManagedHostState::Decommissioning {
+                                decommissioning_state: DecommissioningState::DeconfiguringHost {
+                                    deconfiguring_state:
+                                        DeconfiguringHostState::ClearSuperNicLockdown,
+                                },
+                            },
                         ));
                     }
-                    return Ok(StateHandlerOutcome::transition(
-                        ManagedHostState::Decommissioning {
-                            decommissioning_state: DecommissioningState::DeconfiguringHost {
-                                deconfiguring_state: DeconfiguringHostState::ClearSuperNicLockdown,
-                            },
-                        },
-                    ));
+                    let status =
+                        trigger_reboot_if_needed(machine, state, None, reachability_params, ctx)
+                            .await?;
+                    return Ok(StateHandlerOutcome::wait(format!(
+                        "Waiting for host boot to release runtime EFI protection: {}",
+                        status.status
+                    )));
                 }
+                // The managed-host wrapper powers on an off host and preserves
+                // vendor-specific restart selection. Only an observed boot can
+                // complete this boundary.
+                handler_host_power_control(state, ctx, SystemPowerControl::ForceRestart).await?;
+                return Ok(StateHandlerOutcome::wait(
+                    "Host boot requested to release runtime EFI protection".to_string(),
+                ));
             }
             host_power_control(
                 redfish_client.as_ref(),
@@ -206,11 +231,6 @@ pub(super) async fn handle_deconfiguring_host(
                     "failed to reboot host after disabling BMC lockdown: {error}"
                 ))
             })?;
-            if has_boot_latched_controls {
-                return Ok(StateHandlerOutcome::wait(
-                    "Host restart requested to release runtime EFI protection".to_string(),
-                ));
-            }
             Ok(StateHandlerOutcome::transition(
                 ManagedHostState::Decommissioning {
                     decommissioning_state: DecommissioningState::DeconfiguringHost {

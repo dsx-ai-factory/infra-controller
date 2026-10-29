@@ -70,18 +70,27 @@ async fn decommission_retries_runtime_unlock_reboot_before_advancing(pool: PgPoo
     let reboot = deconfiguring(DeconfiguringHostState::RebootAfterLockdown);
     assert_eq!(mh.host.machine().await.current_state(), &reboot);
 
+    let previous_request = mh.host.machine().await.status.last_reboot_requested;
     env.redfish_sim.fail_next_power_action(
         libredfish::SystemPowerControl::ForceRestart,
         "transient restart failure",
     );
     env.run_single_iteration().await;
     assert_eq!(mh.host.machine().await.current_state(), &reboot);
+    assert_eq!(
+        mh.host.machine().await.status.last_reboot_requested,
+        previous_request
+    );
     env.run_single_iteration().await;
     let machine = mh.host.machine().await;
     assert_eq!(machine.current_state(), &reboot);
     let requested = machine.status.last_reboot_requested.unwrap();
     assert!(requested.time >= machine.state.version.timestamp());
 
+    // An accepted restart and zero wait interval still do not prove a boot.
+    env.run_single_iteration().await;
+    assert_eq!(mh.host.machine().await.current_state(), &reboot);
+    mh.host.reboot_completed().await;
     env.run_single_iteration().await;
     assert_eq!(
         mh.host.machine().await.current_state(),
@@ -114,6 +123,8 @@ async fn decommission_waits_for_runtime_unlock_boot_without_restarting_again(poo
         .status
         .last_reboot_requested
         .unwrap();
+    // Even a reported boot must respect the configured post-request interval.
+    mh.host.reboot_completed().await;
     let timepoint = env.redfish_sim.timepoint();
     env.run_single_iteration().await;
     let machine = mh.host.machine().await;
@@ -243,8 +254,96 @@ async fn no_dpu_lockdown_waits_for_boot_only_when_runtime_controls_exist(pool: P
     );
     mh.host.reboot_completed().await;
     env.run_single_iteration().await;
+    let polling = ManagedHostState::HostInit {
+        machine_state: model::machine::MachineState::WaitingForLockdown {
+            lockdown_info: model::machine::LockdownInfo {
+                state: model::machine::LockdownState::PollingLockdownStatus,
+                mode: model::machine::LockdownMode::Enable,
+            },
+        },
+    };
+    assert_eq!(mh.host.machine().await.current_state(), &polling);
+    // A successful boot cannot substitute for the BMC applying lockdown.
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Disabled);
+    env.run_single_iteration().await;
+    assert_eq!(mh.host.machine().await.current_state(), &polling);
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Enabled);
+    env.run_single_iteration().await;
     assert!(matches!(
         mh.host.machine().await.current_state(),
         ManagedHostState::BomValidating { .. }
     ));
+}
+
+#[sqlx_test]
+async fn decommission_powers_on_off_host_and_waits_for_reported_boot(pool: PgPool) {
+    let (mut env, mh) = setup(pool, chrono::Duration::zero()).await;
+    env.redfish_sim.set_lockdown_has_boot_latched_controls(true);
+    env.run_single_iteration().await;
+    let reboot = deconfiguring(DeconfiguringHostState::RebootAfterLockdown);
+    let machine = mh.host.machine().await;
+    let bmc_ip = machine
+        .status
+        .bmc_info
+        .ip
+        .expect("fixture host BMC IP")
+        .to_string();
+    env.redfish_sim
+        .set_power_state(&bmc_ip, libredfish::PowerState::Off);
+    env.redfish_sim
+        .fail_next_power_action(libredfish::SystemPowerControl::On, "power-on rejected");
+    let previous_request = machine.status.last_reboot_requested;
+    env.run_single_iteration().await;
+    assert_eq!(mh.host.machine().await.current_state(), &reboot);
+    assert_eq!(
+        mh.host.machine().await.status.last_reboot_requested,
+        previous_request
+    );
+
+    env.run_single_iteration().await;
+    let machine = mh.host.machine().await;
+    assert_eq!(machine.current_state(), &reboot);
+    let request = machine.status.last_reboot_requested.unwrap();
+    assert_eq!(
+        request.mode,
+        model::machine::MachineLastRebootRequestedMode::PowerOn
+    );
+    assert!(request.time >= machine.state.version.timestamp());
+    env.run_single_iteration().await;
+    assert_eq!(mh.host.machine().await.current_state(), &reboot);
+
+    // Missing boot reports use the existing bounded retry instead of advancing.
+    let entered_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+    let stale_version: config_version::ConfigVersion = format!(
+        "V{}-T{}",
+        machine.state.version.version_nr(),
+        entered_at.timestamp_micros()
+    )
+    .parse()
+    .unwrap();
+    let mut stale_request = request;
+    stale_request.time = entered_at;
+    stale_request.restart_verified = None;
+    sqlx::query("UPDATE machines SET controller_state_version = $1, last_reboot_requested = $2 WHERE id = $3")
+        .bind(stale_version).bind(sqlx::types::Json(stale_request)).bind(mh.host.id)
+        .execute(&env.test_harness.api().database_connection).await.unwrap();
+    let timepoint = env.redfish_sim.timepoint();
+    env.run_single_iteration().await;
+    assert_eq!(mh.host.machine().await.current_state(), &reboot);
+    assert!(
+        env.redfish_sim
+            .actions_since(&timepoint)
+            .all_hosts()
+            .contains(&RedfishSimAction::Power(
+                libredfish::SystemPowerControl::ForceRestart
+            ))
+    );
+    mh.host.reboot_completed().await;
+    env.run_single_iteration().await;
+    assert_eq!(
+        mh.host.machine().await.current_state(),
+        &deconfiguring(DeconfiguringHostState::ClearSuperNicLockdown)
+    );
 }
