@@ -42,6 +42,10 @@ GetCurrentServiceAccount Retrieve Service Account status for current org
 
 API service must be configured for Service Account access at the time of deployment. It cannot be enabled or disabled via API.
 
+`enabled` is returned `true` when:
+- Custom JWT issuer auth is configured and `isServiceAccount` is `true` in claim mapping for the org in request
+- Keycloak auth is configured with `keycloak.serviceAccount` set to `true`, the token is a client credentials token, `keycloak.serviceAccountOrg` is unset (in connected mode) or matches org in request, and the token carries both roles with both `PROVIDER_ADMIN` and `TENANT_ADMIN` suffix
+
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
 	@return ApiGetCurrentServiceAccountRequest

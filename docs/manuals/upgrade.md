@@ -430,7 +430,7 @@ nico-rest-api:
       serviceAccountOrg: ncx
 ```
 
-Only that org's client is a service account, and only for requests to that org. A client credentials token from any other client is now accepted with the roles it holds, including with `serviceAccount: false`, where it used to get `401`. A disconnected config with more than one `isServiceAccount: true` claim mapping across custom issuers also fails to start.
+Only that org's client is a service account, and only for requests to that org. A client credentials token from any other client is now authorized by its roles in the requested org, like a user token. That includes `serviceAccount: false`, where it used to get `401`. A disconnected config with more than one `isServiceAccount: true` claim mapping across custom issuers also fails to start.
 
 In connected mode, `serviceAccountOrg` is optional. When it is unset, a client holding both roles in an org is a service account for that org. Custom issuer `isServiceAccount` mappings, which used to require disconnected mode, are now accepted in connected mode with no limit on their number.
 
