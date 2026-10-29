@@ -158,7 +158,7 @@ impl Probe for ReadProbe {
                 Ok(())
             })
             .await
-            .map_err(|e| eyre!("{e}"))
+            .map_err(eyre::Report::new)
     }
 }
 
@@ -179,9 +179,11 @@ mod tests {
     use axum::http::HeaderMap;
     use axum::response::{IntoResponse, Json, Response};
     use axum::routing::{get, post};
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::config::RestAuth;
+    use crate::framework::{Outcome, start};
 
     /// Shared state of the fake Keycloak + fake API server.
     #[derive(Default)]
@@ -196,6 +198,8 @@ mod tests {
         seen_secret: std::sync::Mutex<Option<String>>,
         /// The Authorization header the API last received.
         seen_authorization: std::sync::Mutex<Option<String>>,
+        /// How long the API waits before it answers.
+        api_delay: std::sync::Mutex<Duration>,
     }
 
     async fn token_handler(
@@ -217,6 +221,8 @@ mod tests {
             .get(AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
+        let delay = *site.api_delay.lock().expect("mutex");
+        tokio::time::sleep(delay).await;
         if let Some(target) = site.redirect_to.lock().expect("mutex").clone() {
             return (
                 axum::http::StatusCode::TEMPORARY_REDIRECT,
@@ -252,6 +258,10 @@ mod tests {
     }
 
     async fn harness() -> Harness {
+        harness_with_call_timeout(Duration::from_secs(5)).await
+    }
+
+    async fn harness_with_call_timeout(call_timeout: Duration) -> Harness {
         let site = Arc::new(FakeSite::default());
         let addr = serve(Arc::clone(&site)).await;
         let mut secret_file = tempfile::NamedTempFile::new().expect("secret file");
@@ -274,7 +284,7 @@ mod tests {
         let gate = Arc::new(CallGate::new(
             "nico-rest-api",
             100.0,
-            Duration::from_secs(5),
+            call_timeout,
             Duration::from_secs(30),
         ));
         Harness {
@@ -307,6 +317,22 @@ mod tests {
             Some("s3cr3t"),
             "the mounted secret is sent trimmed"
         );
+    }
+
+    /// A call cut by the gate's call timeout, well before the probe's own
+    /// 5 s deadline, is a probe timeout, not a failure.
+    #[tokio::test]
+    async fn gate_call_timeout_is_a_probe_timeout() {
+        let h = harness_with_call_timeout(Duration::from_millis(100)).await;
+        *h.site.api_delay.lock().expect("mutex") = Duration::from_secs(2);
+
+        let cancel = CancellationToken::new();
+        let (mut results, _loops) = start(vec![Arc::new(h.probe)], cancel.clone());
+        let result = results.recv().await.expect("result");
+        cancel.cancel();
+
+        assert_eq!(result.outcome, Outcome::Timeout);
+        assert_eq!(result.error.as_deref(), Some("call timed out"));
     }
 
     #[tokio::test]
