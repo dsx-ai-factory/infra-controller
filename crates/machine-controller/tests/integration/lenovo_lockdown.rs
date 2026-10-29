@@ -197,6 +197,43 @@ async fn no_dpu_lockdown_waits_for_boot_only_when_runtime_controls_exist(pool: P
     env.redfish_sim.set_lockdown_has_boot_latched_controls(true);
     env.run_single_iteration().await;
     assert_eq!(mh.host.machine().await.current_state(), &waiting);
+    assert!(matches!(
+        mh.host.machine().await.controller_state_outcome,
+        Some(model::controller_outcome::PersistentStateHandlerOutcome::Wait { reason, .. })
+            if reason.contains("Waiting for host boot to apply lockdown")
+    ));
+
+    // A powered-off host that never reported the boot is retried after the
+    // existing recovery interval, rather than waiting indefinitely.
+    let machine = mh.host.machine().await;
+    let entered_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+    let stale_version: config_version::ConfigVersion = format!(
+        "V{}-T{}",
+        machine.state.version.version_nr(),
+        entered_at.timestamp_micros()
+    )
+    .parse()
+    .unwrap();
+    let mut request = machine.status.last_reboot_requested.unwrap();
+    request.time = entered_at;
+    request.restart_verified = None;
+    sqlx::query("UPDATE machines SET controller_state_version = $1, last_reboot_requested = $2, last_reboot_time = NULL WHERE id = $3")
+        .bind(stale_version)
+        .bind(sqlx::types::Json(request))
+        .bind(mh.host.id)
+        .execute(&env.test_harness.api().database_connection)
+        .await.unwrap();
+    env.redfish_sim
+        .set_power_state(&mh.host_bmc_ip().to_string(), libredfish::PowerState::Off);
+    let timepoint = env.redfish_sim.timepoint();
+    env.run_single_iteration().await;
+    assert_eq!(mh.host.machine().await.current_state(), &waiting);
+    assert!(
+        env.redfish_sim
+            .actions_since(&timepoint)
+            .all_hosts()
+            .contains(&RedfishSimAction::Power(libredfish::SystemPowerControl::On))
+    );
     mh.host.reboot_completed().await;
     env.run_single_iteration().await;
     assert!(matches!(

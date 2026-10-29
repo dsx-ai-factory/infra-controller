@@ -67,6 +67,7 @@ struct RedfishSimState {
     /// accepting the write without applying the requested policy.
     lockdown_bmc_applies: Option<bool>,
     next_lockdown_status_error: Option<RedfishError>,
+    next_lockdown_bmc_error: Option<(EnabledDisabled, String)>,
     /// Fail one power-state read without changing the host's actual power.
     next_power_state_error: Option<(usize, String)>,
     /// Fail the next matching power action before changing the host's power.
@@ -431,6 +432,11 @@ impl RedfishSim {
     /// Fail one lockdown observation without changing the actual policy.
     pub fn fail_next_lockdown_status(&self, error: RedfishError) {
         self.state.lock().unwrap().next_lockdown_status_error = Some(error);
+    }
+
+    /// Fail the next matching BMC lockdown write without applying it.
+    pub fn fail_next_lockdown_bmc(&self, target: EnabledDisabled, error: &str) {
+        self.state.lock().unwrap().next_lockdown_bmc_error = Some((target, error.to_string()));
     }
 
     /// Set one simulated host's power state, as a BMC would report it; the
@@ -2222,6 +2228,14 @@ impl Redfish for RedfishSimClient {
     ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
         Box::pin(async move {
             let mut state = self.state.lock().unwrap();
+            if state
+                .next_lockdown_bmc_error
+                .as_ref()
+                .is_some_and(|(failed, _)| *failed == target)
+            {
+                let (_, error) = state.next_lockdown_bmc_error.take().unwrap();
+                return Err(RedfishError::GenericError { error });
+            }
             if state.lockdown_bmc_applies.unwrap_or(true) {
                 let host_state = state.hosts.get_mut(&self._host).unwrap();
                 host_state.lockdown = target;

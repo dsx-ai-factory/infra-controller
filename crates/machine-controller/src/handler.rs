@@ -8842,7 +8842,18 @@ impl StateHandler for HostMachineStateHandler {
                                             },
                                         )
                                     {
-                                        return Ok(StateHandlerOutcome::do_nothing());
+                                        let status = trigger_reboot_if_needed(
+                                            host,
+                                            mh_snapshot,
+                                            None,
+                                            &self.host_handler_params.reachability_params,
+                                            ctx,
+                                        )
+                                        .await?;
+                                        return Ok(StateHandlerOutcome::wait(format!(
+                                            "Waiting for host boot to apply lockdown: {}",
+                                            status.status
+                                        )));
                                     }
                                     return complete_host_init_lockdown(
                                         ctx,

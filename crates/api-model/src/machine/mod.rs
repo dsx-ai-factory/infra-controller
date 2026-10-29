@@ -2553,8 +2553,8 @@ pub enum UefiSetupState {
     WaitForPasswordJobScheduled,
     PowercycleHost,
     WaitForPasswordJobCompletion,
-    // Deprecated: no-op state, transitions directly to WaitingForLockdown::SetLockdown
-    // Kept for backwards compatibility with hosts that may be in this state
+    /// Legacy ingestion no-op; transitions to WaitingForLockdown::SetLockdown.
+    /// Lenovo rotation retries BMC re-locking here after a failed password change.
     LockdownHost,
 }
 

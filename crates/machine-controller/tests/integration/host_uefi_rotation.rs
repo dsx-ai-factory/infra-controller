@@ -108,17 +108,13 @@ async fn ready_host_with_config(
     (mh, host_mac)
 }
 
-#[sqlx_test]
-async fn lenovo_uefi_rotation_unlocks_and_restores_bmc_lockdown(
-    pool: PgPool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut env = Env::builder(pool.clone())
-        .configure_runtime(|c| c.uefi_rotation_enabled = true)
-        .build()
-        .await;
+async fn ready_lenovo_host(
+    env: &Env,
+    pool: &PgPool,
+) -> Result<(TestManagedHost, MacAddress), Box<dyn std::error::Error>> {
     let (mh, mac) = ready_host_with_config(
-        &env,
-        &pool,
+        env,
+        pool,
         ManagedHostConfig {
             vendor: Some(bmc_vendor::BMCVendor::Lenovo),
             ..ManagedHostConfig::default()
@@ -136,6 +132,18 @@ async fn lenovo_uefi_rotation_unlocks_and_restores_bmc_lockdown(
         mh.host.machine().await.bmc_vendor(),
         bmc_vendor::BMCVendor::Lenovo
     );
+    Ok((mh, mac))
+}
+
+#[sqlx_test]
+async fn lenovo_uefi_rotation_unlocks_and_restores_bmc_lockdown(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut env = Env::builder(pool.clone())
+        .configure_runtime(|c| c.uefi_rotation_enabled = true)
+        .build()
+        .await;
+    let (mh, mac) = ready_lenovo_host(&env, &pool).await?;
     stage_lagging_host_uefi(&env, &pool, mac).await?;
     env.redfish_sim
         .set_lockdown(libredfish::EnabledDisabled::Enabled);
@@ -416,6 +424,11 @@ async fn uefi_change_failure_quarantines_and_returns_to_ready(
         mh.host.machine().await.state.value,
     );
 
+    // Dell retains its existing best-effort re-lock behavior.
+    env.redfish_sim.fail_next_lockdown_bmc(
+        libredfish::EnabledDisabled::Enabled,
+        "Dell re-lock unavailable",
+    );
     // The failing change must land the host back in Ready rather than looping in
     // the state.
     run_until_ready(&mut env, &mh).await;
@@ -449,6 +462,72 @@ async fn uefi_change_failure_quarantines_and_returns_to_ready(
         );
     }
 
+    Ok(())
+}
+
+#[sqlx_test]
+async fn lenovo_failed_rotation_retries_only_relock_before_ready(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut env = Env::builder(pool.clone())
+        .configure_runtime(|c| c.uefi_rotation_enabled = true)
+        .build()
+        .await;
+    let (mh, mac) = ready_lenovo_host(&env, &pool).await?;
+    stage_lagging_host_uefi(&env, &pool, mac).await?;
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Enabled);
+    env.redfish_sim
+        .set_uefi_password_change_error("rotation rejected");
+    env.redfish_sim
+        .fail_next_lockdown_bmc(libredfish::EnabledDisabled::Enabled, "relock unavailable");
+
+    // Enter rotation, unlock, then fail the password change and its cleanup.
+    for _ in 0..3 {
+        env.run_single_iteration().await;
+    }
+    let cleanup = mh.host.machine().await.state.value;
+    assert!(matches!(
+        cleanup,
+        ManagedHostState::RotatingHostUefi {
+            uefi_setup_info: model::machine::UefiSetupInfo {
+                uefi_setup_state: UefiSetupState::LockdownHost,
+                ..
+            }
+        }
+    ));
+    let failed = device_rotation_status(&mut *pool.acquire().await?, HOST_UEFI, mac)
+        .await?
+        .unwrap();
+    assert!(failed.quarantined);
+    assert!(!failed.converged);
+
+    env.redfish_sim
+        .fail_next_lockdown_bmc(libredfish::EnabledDisabled::Enabled, "still unavailable");
+    env.run_single_iteration().await;
+    assert_eq!(mh.host.machine().await.state.value, cleanup);
+    assert_eq!(
+        device_rotation_status(&mut *pool.acquire().await?, HOST_UEFI, mac)
+            .await?
+            .unwrap(),
+        failed
+    );
+
+    env.run_single_iteration().await;
+    assert_eq!(mh.host.machine().await.state.value, ManagedHostState::Ready);
+    assert!(
+        env.redfish_sim
+            .lockdown_states()
+            .iter()
+            .all(|state| *state == libredfish::EnabledDisabled::Enabled)
+    );
+    // Cleanup must neither retry/promote the password nor count another failure.
+    assert_eq!(
+        device_rotation_status(&mut *pool.acquire().await?, HOST_UEFI, mac)
+            .await?
+            .unwrap(),
+        failed
+    );
     Ok(())
 }
 
