@@ -43,12 +43,12 @@ use model::expected_machine::ExpectedMachineData;
 use model::expected_rack::ExpectedRack;
 use model::machine::{LoadSnapshotOptions, MachineMaintenanceOperation};
 use model::rack::{
-    ComputeHostRestartState, ConfigureNmxClusterState, FirmwareProgressState,
-    FirmwareUpgradeDeviceStatus, FirmwareUpgradeJob, FirmwareUpgradeState, MaintenanceActivity,
-    MaintenanceScope, NvosPasswordUpdateState, NvosUpdateJob, NvosUpdateState,
-    NvosUpdateSwitchStatus, Rack, RackConfig, RackErrorRecoveryPolicy, RackFirmwareUpgradeState,
-    RackFirmwareUpgradeStatus, RackMaintenanceState, RackPowerState, RackState,
-    RackValidationState, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
+    ConfigureNmxClusterState, FirmwareProgressState, FirmwareUpgradeDeviceStatus,
+    FirmwareUpgradeJob, FirmwareUpgradeState, MaintenanceActivity, MaintenanceScope,
+    NvosPasswordUpdateState, NvosUpdateJob, NvosUpdateState, NvosUpdateSwitchStatus, Rack,
+    RackConfig, RackErrorRecoveryPolicy, RackFirmwareUpgradeState, RackFirmwareUpgradeStatus,
+    RackMaintenanceState, RackPowerState, RackState, RackValidationState, SwitchNvosUpdateState,
+    SwitchNvosUpdateStatus,
 };
 use model::rack_type::{
     RackCapabilitiesSet, RackCapabilityCompute, RackCapabilityPowerShelf, RackCapabilitySwitch,
@@ -1781,6 +1781,15 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
     let (rack_id, host_a, host_b) = create_two_compute_rack(&env, &pool).await?;
     let machine_ids = [host_a.host_snapshot.id, host_b.host_snapshot.id];
 
+    // A previously booted, Ready host must report a new boot for this batch.
+    env.api
+        .reboot_completed(tonic::Request::new(
+            rpc::forge::MachineRebootCompletedRequest {
+                machine_id: Some(machine_ids[0].into()),
+            },
+        ))
+        .await?;
+
     let mut txn = pool.begin().await?;
     db::machine::set_machine_maintenance_requested(
         txn.as_mut(),
@@ -1793,8 +1802,8 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
         txn.as_mut(),
         &rack_id,
         RackState::Maintenance {
-            maintenance_state: RackMaintenanceState::RestartComputeHosts {
-                restart_compute_hosts: ComputeHostRestartState::Request,
+            maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
+                configure_nmx_cluster: ConfigureNmxClusterState::RequestComputeHostRestarts,
             },
         },
     )
@@ -1806,8 +1815,8 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
     assert!(matches!(
         rack.controller_state.value,
         RackState::Maintenance {
-            maintenance_state: RackMaintenanceState::RestartComputeHosts {
-                restart_compute_hosts: ComputeHostRestartState::Request,
+            maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
+                configure_nmx_cluster: ConfigureNmxClusterState::RequestComputeHostRestarts,
             },
         }
     ));
@@ -1855,12 +1864,31 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
     assert!(matches!(
         rack.controller_state.value,
         RackState::Maintenance {
-            maintenance_state: RackMaintenanceState::RestartComputeHosts {
-                restart_compute_hosts: ComputeHostRestartState::WaitForComplete { .. },
+            maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
+                configure_nmx_cluster: ConfigureNmxClusterState::WaitForComputeHostRestarts { .. },
             },
         }
     ));
 
+    let restart_state = rack.controller_state.clone();
+    if let RackState::Maintenance {
+        maintenance_state:
+            RackMaintenanceState::ConfigureNmxCluster {
+                configure_nmx_cluster:
+                    ConfigureNmxClusterState::WaitForComputeHostRestarts {
+                        machine_ids: targets,
+                    },
+            },
+    } = &restart_state.value
+    {
+        assert_eq!(targets.len(), 2);
+        for machine_id in machine_ids {
+            assert!(targets.contains(&machine_id.into()));
+        }
+    }
+
+    // Simulate successful power-control calls: these clear requests but do not
+    // prove that the hosts have booted. Keep both hosts Ready throughout.
     let mut txn = pool.begin().await?;
     for machine_id in machine_ids {
         let machine = db::machine::find_one(
@@ -1876,25 +1904,63 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
         assert_eq!(request.initiator, format!("rack-{rack_id}"));
         assert_eq!(request.operation, MachineMaintenanceOperation::Reset);
         assert_eq!(
-            db::machine::clear_machine_maintenance_requested(
-                txn.as_mut(),
-                machine_id,
-                &request,
-            )
-            .await?,
+            db::machine::clear_machine_maintenance_requested(txn.as_mut(), machine_id, &request,)
+                .await?,
             db::ConditionalWrite::Applied(())
         );
     }
     txn.commit().await?;
 
+    // Missing, stale, and boundary-equal reports cannot satisfy the barrier.
+    // Reload the persisted state/version on each pass to exercise resume behavior.
+    for reboot_time in [
+        None,
+        Some(restart_state.version.timestamp() - chrono::Duration::seconds(1)),
+        Some(restart_state.version.timestamp()),
+    ] {
+        sqlx::query("UPDATE machines SET last_reboot_time = $1 WHERE id = $2")
+            .bind(reboot_time)
+            .bind(machine_ids[1])
+            .execute(&pool)
+            .await?;
+        env.run_rack_controller_iteration().await;
+        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        assert_eq!(rack.controller_state.value, restart_state.value);
+        assert_eq!(rack.controller_state.version, restart_state.version);
+    }
+
+    for (index, machine_id) in machine_ids.into_iter().enumerate() {
+        env.api
+            .reboot_completed(tonic::Request::new(
+                rpc::forge::MachineRebootCompletedRequest {
+                    machine_id: Some(machine_id.into()),
+                },
+            ))
+            .await?;
+        env.run_rack_controller_iteration().await;
+        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        if index == 0 {
+            assert_eq!(rack.controller_state.value, restart_state.value);
+            assert_eq!(rack.controller_state.version, restart_state.version);
+        } else {
+            assert!(matches!(
+                rack.controller_state.value,
+                RackState::Maintenance {
+                    maintenance_state: RackMaintenanceState::PowerSequence {
+                        rack_power: RackPowerState::PoweringOn,
+                    },
+                }
+            ));
+        }
+    }
+
+    env.run_rack_controller_iteration().await;
     env.run_rack_controller_iteration().await;
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     assert!(matches!(
         rack.controller_state.value,
-        RackState::Maintenance {
-            maintenance_state: RackMaintenanceState::PowerSequence {
-                rack_power: RackPowerState::PoweringOn,
-            },
+        RackState::Validating {
+            validating_state: RackValidationState::Pending,
         }
     ));
 
@@ -5212,8 +5278,8 @@ async fn run_configure_nmx_cluster_v2_workflow(
     assert!(matches!(
         rack.controller_state.value,
         RackState::Maintenance {
-            maintenance_state: RackMaintenanceState::RestartComputeHosts {
-                restart_compute_hosts: ComputeHostRestartState::Request,
+            maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
+                configure_nmx_cluster: ConfigureNmxClusterState::RequestComputeHostRestarts,
             },
         }
     ));
@@ -5223,8 +5289,8 @@ async fn run_configure_nmx_cluster_v2_workflow(
     assert!(matches!(
         rack.controller_state.value,
         RackState::Maintenance {
-            maintenance_state: RackMaintenanceState::RestartComputeHosts {
-                restart_compute_hosts: ComputeHostRestartState::WaitForComplete { .. },
+            maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
+                configure_nmx_cluster: ConfigureNmxClusterState::WaitForComputeHostRestarts { .. },
             },
         }
     ));
