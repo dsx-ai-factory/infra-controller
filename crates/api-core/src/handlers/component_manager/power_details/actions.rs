@@ -192,6 +192,7 @@ mod tests {
     #[test]
     fn machine_actions_keep_replacements_and_legacy_metadata() {
         let admitted = MachineMaintenanceRequest {
+            action_id: None,
             requested_at: "2026-10-01T00:00:00Z".parse().unwrap(),
             initiator: "operator".into(),
             operation: MachineMaintenanceOperation::PowerOff { graceful: false },
@@ -309,11 +310,13 @@ mod tests {
     fn switch_and_shelf_actions_keep_replacements_and_legacy_shutdowns() {
         let requested_at = "2026-10-01T00:00:00Z".parse().unwrap();
         let switch_request = SwitchMaintenanceRequest {
+            action_id: None,
             requested_at,
             initiator: "operator".into(),
             operation: SwitchMaintenanceOperation::PowerOff { graceful: false },
         };
         let shelf_request = PowerShelfMaintenanceRequest {
+            action_id: None,
             requested_at,
             initiator: "operator".into(),
             operation: PowerShelfMaintenanceOperation::PowerOff { graceful: false },
@@ -480,6 +483,7 @@ mod tests {
     #[test]
     fn switch_actions_exclude_certificate_requests_in_both_positions() {
         let certificate = SwitchMaintenanceRequest {
+            action_id: None,
             requested_at: "2026-10-01T00:00:00Z".parse().unwrap(),
             initiator: "operator".into(),
             operation: SwitchMaintenanceOperation::ReconfigureCertificate,
