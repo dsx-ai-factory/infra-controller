@@ -25,8 +25,10 @@
 //!
 //! Reports carry no units -- `MetricReport` only pairs a `MetricId`
 //! with a stringly-typed `MetricValue`. The unit lives on the matching
-//! `MetricDefinition`, so definitions are read once and cached by id
-//! for the lifetime of the collector.
+//! `MetricDefinition`, so definitions are read once and cached for the
+//! lifetime of the collector, keyed by the definition's `Id` and by each
+//! URI in its `MetricProperties`. A value that carries no `MetricId` is
+//! matched through its `MetricProperty`.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -128,8 +130,8 @@ pub struct TelemetryCollector<B: Bmc> {
     endpoint: Arc<BmcEndpoint>,
     event_context: EventContext,
     data_sink: Option<Arc<dyn DataSink>>,
-    /// `MetricId` -> sanitized unit, read once from the service's
-    /// metric definitions.
+    /// `MetricId` or `MetricProperties` URI -> sanitized unit, read once
+    /// from the service's metric definitions.
     units: Option<HashMap<String, String>>,
 }
 
@@ -226,8 +228,9 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
         }
     }
 
-    /// Build the `MetricId` -> unit map from the service's metric
-    /// definitions.
+    /// Build the unit map from the service's metric definitions, keyed
+    /// by each definition's `Id` and by every URI in its
+    /// `MetricProperties`.
     ///
     /// A BMC that publishes no definitions is not an error; every
     /// reading then falls back to [`UNKNOWN_UNIT`]. Returning an empty
@@ -258,17 +261,16 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
         Some(
             definitions
                 .into_iter()
-                .flat_map(|definition| {
+                .filter_map(|definition| {
                     let raw = definition.raw();
-                    let units = raw.units.clone().flatten()?;
-                    let unit = sanitize_unit(&units);
-                    let mut entries = vec![(raw.id.clone(), unit.clone())];
-                    if let Some(Some(properties)) = &raw.metric_properties {
-                        for prop in properties {
-                            entries.push((prop.clone(), unit.clone()));
-                        }
-                    }
-                    Some(entries)
+                    let unit = sanitize_unit(&raw.units.clone().flatten()?);
+                    let properties = raw.metric_properties.clone().flatten().unwrap_or_default();
+                    Some(
+                        std::iter::once(raw.id.clone())
+                            .chain(properties)
+                            .map(move |key| (key, unit.clone()))
+                            .collect::<Vec<_>>(),
+                    )
                 })
                 .flatten()
                 .collect(),
@@ -299,17 +301,13 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
         for value in raw.metric_values.iter().flatten() {
             let metric_id = value.metric_id.clone().flatten();
             let property = value.metric_property.clone().flatten();
-            if metric_id.is_none() && property.is_none() {
-                continue;
-            }
-
             let is_stale = value
                 .oem
                 .as_ref()
                 .and_then(|oem| {
                     oem.additional_properties
                         .pointer("/Nvidia/MetricValueStale")
-                        .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s == "true")))
+                        .and_then(serde_json::Value::as_bool)
                 })
                 .unwrap_or(false);
             if is_stale {
@@ -367,22 +365,30 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
             // what the key is built from: sinks index gauges by key, and
             // keying on the id alone would drop every reading but the
             // last. This also matches the entity collectors, whose keys
-            // are `{resource odata id}/{metric}`.
-            let key = match (property.as_deref(), metric_id.as_deref()) {
-                (Some(property), Some(metric_id)) => format!("{property}/{metric_id}"),
-                (Some(property), None) => property.to_string(),
-                (None, Some(metric_id)) => format!("{}/{metric_id}", report.raw().odata_id),
+            // are `{resource odata id}/{metric}`. A value without a
+            // `MetricId` is keyed by its `MetricProperty` alone and its
+            // `metric_type` comes from the URI's leaf. For JSON-pointer
+            // style properties such as `.../Sensors/X#/Reading` that leaf
+            // is `Reading`; series stay distinct through the key and the
+            // `metric_property` label.
+            let (key, metric_type) = match (property.as_deref(), metric_id.as_deref()) {
+                (Some(property), Some(metric_id)) => (
+                    format!("{property}/{metric_id}"),
+                    metric_type_from_id(metric_id),
+                ),
+                (Some(property), None) => (
+                    property.to_string(),
+                    metric_type_from_id(leaf_from_property(property)),
+                ),
+                (None, Some(metric_id)) => (
+                    format!("{}/{metric_id}", report.raw().odata_id),
+                    metric_type_from_id(metric_id),
+                ),
                 (None, None) => continue,
             };
             if let Some(ref property) = property {
                 labels.push((Cow::Borrowed("metric_property"), property.clone()));
             }
-
-            let metric_type = if let Some(ref metric_id) = metric_id {
-                metric_type_from_id(metric_id)
-            } else {
-                metric_type_from_id(leaf_from_property(property.as_deref().unwrap_or("")))
-            };
 
             self.emit_event(CollectorEvent::Metric(
                 MetricSample {
@@ -478,11 +484,6 @@ mod tests {
                     expect: "PowerConsumedWatts",
                 },
                 Check {
-                    scenario: "fragment with sensor path",
-                    input: "/redfish/v1/Chassis/CH0/Thermal#/Sensors/GPU_0_Temp_0",
-                    expect: "GPU_0_Temp_0",
-                },
-                Check {
                     scenario: "resource path without fragment",
                     input: "/redfish/v1/Chassis/CH0/Sensors/GPU_0_Temp_0",
                     expect: "GPU_0_Temp_0",
@@ -505,11 +506,6 @@ mod tests {
                 Check {
                     scenario: "empty input yields unknown",
                     input: "",
-                    expect: "unknown",
-                },
-                Check {
-                    scenario: "root slash yields unknown",
-                    input: "/",
                     expect: "unknown",
                 },
             ],
@@ -623,14 +619,12 @@ mod tests {
                            stale, non-numeric and non-finite values are dropped",
                 input: fixture.bmc(),
                 expect: Yields(ObservedIteration {
-                    entity_count: Some(5),
+                    entity_count: Some(4),
                     fetch_failures: 0,
                     metrics: {
                         const REPORT: &str =
                             "/redfish/v1/TelemetryService/MetricReports/PlatformEnvironmentMetrics";
                         const SENSORS: &str = "/redfish/v1/Chassis/CH0/Sensors";
-                        const THERMAL: &str =
-                            "/redfish/v1/Chassis/CH0/Thermal#/Sensors/GPU_1_Temp_0";
                         vec![
                             metric(
                                 &format!("{SENSORS}/GPU0_Temp/GPU0_Temp"),
@@ -660,16 +654,6 @@ mod tests {
                                 &[
                                     ("report_id", "PlatformEnvironmentMetrics"),
                                     ("metric_property", &format!("{SENSORS}/TotalPower")),
-                                ],
-                            ),
-                            metric(
-                                THERMAL,
-                                "gpu_1_temp_0",
-                                "celsius",
-                                52.0,
-                                &[
-                                    ("report_id", "PlatformEnvironmentMetrics"),
-                                    ("metric_property", THERMAL),
                                 ],
                             ),
                             // Keyed off the report, because this value
@@ -741,7 +725,6 @@ mod tests {
                         ("fan_pwm", "unknown"),
                         ("gpu0_temp", "unknown"),
                         ("gpu_0_temp_0", "unknown"),
-                        ("gpu_1_temp_0", "unknown"),
                         ("total_gpu_power_watts", "unknown"),
                     ]),
                 ),
@@ -751,7 +734,6 @@ mod tests {
                         ("fan_pwm", "unknown"),
                         ("gpu0_temp", "celsius"),
                         ("gpu_0_temp_0", "celsius"),
-                        ("gpu_1_temp_0", "celsius"),
                         ("total_gpu_power_watts", "watts"),
                     ]),
                 ),

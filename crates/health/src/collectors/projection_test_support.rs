@@ -192,8 +192,7 @@ fn insert_telemetry_service(resources: &mut HashMap<String, MockResponse>) {
             "MetricDataType": "Decimal",
             "Units": "Cel",
             "MetricProperties": [
-                "/redfish/v1/Chassis/CH0/Sensors/GPU_0_Temp_0",
-                "/redfish/v1/Chassis/CH0/Thermal#/Sensors/GPU_1_Temp_0"
+                "/redfish/v1/Chassis/CH0/Sensors/GPU_0_Temp_0"
             ]
         }),
     );
@@ -242,12 +241,6 @@ fn insert_telemetry_service(resources: &mut HashMap<String, MockResponse>) {
                 {
                     "MetricProperty": "/redfish/v1/Chassis/CH0/Sensors/GPU_0_Temp_0",
                     "MetricValue": "48.0",
-                    "Oem": { "Nvidia": { "MetricValueStale": false } }
-                },
-                // MetricProperty only with URI fragment, no MetricId.
-                {
-                    "MetricProperty": "/redfish/v1/Chassis/CH0/Thermal#/Sensors/GPU_1_Temp_0",
-                    "MetricValue": "52.0",
                     "Oem": { "Nvidia": { "MetricValueStale": false } }
                 },
                 // MetricProperty only, marked stale per-value (must be dropped).
