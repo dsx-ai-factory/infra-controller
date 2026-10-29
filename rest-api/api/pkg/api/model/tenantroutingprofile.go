@@ -10,14 +10,14 @@ import (
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 )
 
-// APITenantAccountRoutingProfileUpdateRequest changes a Tenant's default at one Site.
-type APITenantAccountRoutingProfileUpdateRequest struct {
+// APITenantRoutingProfileUpdateRequest changes a Tenant's default at one Site.
+type APITenantRoutingProfileUpdateRequest struct {
 	SiteID                string `json:"siteId"`
 	DefaultRoutingProfile string `json:"defaultRoutingProfile"`
 }
 
 // Validate requires a Site and a nonempty configured profile name.
-func (r *APITenantAccountRoutingProfileUpdateRequest) Validate() error {
+func (r *APITenantRoutingProfileUpdateRequest) Validate() error {
 	return validation.ValidateStruct(r,
 		validation.Field(&r.SiteID, validation.Required, validationis.UUID),
 		validation.Field(&r.DefaultRoutingProfile, validation.Required),
@@ -25,7 +25,7 @@ func (r *APITenantAccountRoutingProfileUpdateRequest) Validate() error {
 }
 
 // ToProto preserves the observed metadata and guards it with the shared Tenant version.
-func (r *APITenantAccountRoutingProfileUpdateRequest) ToProto(tenant *corev1.Tenant) *corev1.UpdateTenantRequest {
+func (r *APITenantRoutingProfileUpdateRequest) ToProto(tenant *corev1.Tenant) *corev1.UpdateTenantRequest {
 	return &corev1.UpdateTenantRequest{
 		OrganizationId:     tenant.GetOrganizationId(),
 		Metadata:           tenant.GetMetadata(),
@@ -34,8 +34,8 @@ func (r *APITenantAccountRoutingProfileUpdateRequest) ToProto(tenant *corev1.Ten
 	}
 }
 
-// APITenantAccountRoutingProfile reports the default accepted by the Site.
-type APITenantAccountRoutingProfile struct {
+// APITenantDefaultRoutingProfile reports the default accepted by the Site.
+type APITenantDefaultRoutingProfile struct {
 	SiteID                string `json:"siteId"`
 	DefaultRoutingProfile string `json:"defaultRoutingProfile"`
 }
