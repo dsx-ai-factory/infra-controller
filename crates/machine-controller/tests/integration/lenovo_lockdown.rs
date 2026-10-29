@@ -223,8 +223,15 @@ async fn no_dpu_lockdown_waits_for_boot_only_when_runtime_controls_exist(pool: P
         .bind(mh.host.id)
         .execute(&env.test_harness.api().database_connection)
         .await.unwrap();
-    env.redfish_sim
-        .set_power_state(&mh.host_bmc_ip().to_string(), libredfish::PowerState::Off);
+    env.redfish_sim.set_power_state(
+        &machine
+            .status
+            .bmc_info
+            .ip
+            .expect("fixture host BMC IP")
+            .to_string(),
+        libredfish::PowerState::Off,
+    );
     let timepoint = env.redfish_sim.timepoint();
     env.run_single_iteration().await;
     assert_eq!(mh.host.machine().await.current_state(), &waiting);
