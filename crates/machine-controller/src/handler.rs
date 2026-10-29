@@ -13798,6 +13798,9 @@ async fn handle_instance_host_platform_config(
                 )
                 .await
                 {
+                    // When the BMC has no AC power cycle, `host_power_control` leaves
+                    // the host off and returns `Ok`, so the power-on happens on the next
+                    // retry after `power_down_wait`.
                     Ok(()) => {
                         return Ok(StateHandlerOutcome::transition(
                             ManagedHostState::Assigned {
@@ -13810,10 +13813,6 @@ async fn handle_instance_host_platform_config(
                                 },
                             },
                         ));
-                    }
-                    Err(RedfishError::NotSupported(_)) => {
-                        // if not supported, just power on
-                        tracing::info!("AC Powercycle not supported, skipping to power on");
                     }
                     Err(e) => {
                         // TODO: Dell's return a generic error if in lockdown which needs to be changed in Redfish SDK
