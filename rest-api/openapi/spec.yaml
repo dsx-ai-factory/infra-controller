@@ -16191,6 +16191,69 @@ paths:
         in: path
         required: true
         description: Component ID or component MAC address
+    get:
+      summary: Get Tray power state
+      operationId: get-tray-power-state
+      description: |-
+        Read actual power, stored desired policy, tracked power actions, and outstanding power tasks for a compute tray, NVLink switch, or power shelf. Accepts the same component ID or BMC/PMC MAC selector as tray inventory. These passive reads retrieve state without issuing power commands.
+
+        Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix in that Org. The Site must belong to that Provider and have the `flow` capability enabled.
+
+        Each section is independent: a failed hardware read does not hide desired policy or outstanding work. A successful `Unknown` hardware observation differs from a null state with an error. Desired policy applies to compute trays; managed switches and shelves report `NotApplicable`. Observations, stored policy, actions and tasks can describe different instants; a `Running` task does not prove hardware dispatch or correlate to an `Active` action.
+
+        Live observations are supported by the Core Redfish compute reader and by RMS for compute trays, switches, and shelves. Standalone hosts (no rack association and no MNNVL capability) use Core's direct Redfish reader; rack-scale hosts use the configured compute reader. Switches and shelves use their configured readers. NSM, PSM, and mock backends report `Unsupported` for live observations; policy, actions, and Flow tasks remain independently available.
+
+        All response fields are present. Null indicates unavailable or inapplicable information as documented on each field; successful empty `actions` and `tasks` lists are arrays with a null `actionsError` or `tasksError`. More than 256 outstanding power tasks across the rack makes `operations.tasks` unavailable with `operations.tasksError: LimitExceeded`, before filtering for this tray. The separate waiting-context limit is 256 nonterminal tasks of all types across the rack; exceeding it sets `waitingContext.error` to `LimitExceeded` while retaining the power tasks.
+
+        Component and rack IDs are external inventory identifiers. Task targets use identities from retained inventory, including soft-deleted rows, at read time; they are not historical copies saved with the task. A component can have moved racks since the task was recorded. A task's unavailable target metadata sets its `rackId` and `targets` to null and reports `targetsError`, preserving the task's other fields and other task rows. Missing metadata from a service or proxy reports `Unsupported`. A successful empty selection is `targets: []` with `targetsError: null`. Internal hardware UUIDs are never substituted for external IDs.
+
+        Flow also limits the encoded proxy response to 1,991,680 bytes; this is not an HTTP response-body limit. When that allowance is exceeded, Flow first clears nonempty waiting-context lists that have no error and sets their `waitingContext.error` to `LimitExceeded`, retaining the power tasks. Empty contexts and existing context errors are unchanged. If the response still exceeds the allowance, successful external target results become null `rackId` and `targets` with `targetsError: LimitExceeded`; missing metadata and existing target errors are unchanged. If the response remains too large, Flow removes the complete task section and reports `operations.tasksError: LimitExceeded`. Target selections are never truncated. If the remaining encoded response is still too large, the request fails with HTTP 429.
+      parameters:
+        - name: siteId
+          in: query
+          required: true
+          description: ID of the Site that owns the tray.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Tray power state, including independently unavailable sections.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrayPowerState'
+        '400':
+          description: The Org has no Infrastructure Provider, the site selector is invalid, missing, or names a site that does not exist, the component selector is empty, or the selected component type does not support power state reads.
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: No tray matches the component ID or MAC address.
+          $ref: '#/components/responses/GenericHttpError'
+        '412':
+          description: Flow is disabled for the Site, or the selector matches multiple trays.
+          $ref: '#/components/responses/GenericHttpError'
+        '429':
+          description: The encoded Flow proxy response still exceeds 1,991,680 bytes after the task section is removed. Retrying an unchanged response cannot resolve this limit.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: Internal or dependency failure, including an inventory read deadline reported by Flow.
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: The Site's Flow service or site-agent proxy does not implement the power state read.
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: Flow returned a response without tray power state.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: The Site's Flow service or inventory is unavailable.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: The proxy execution timed out, or the REST caller stopped waiting for it. A deadline reported by Flow itself can instead return HTTP 500.
+          $ref: '#/components/responses/GatewayTimeoutError'
+      tags:
+        - Tray
     patch:
       summary: Power control a Tray
       operationId: power-control-tray
@@ -27206,6 +27269,550 @@ components:
             on the owning rack for rack-scoped components) are reported as not
             ready by their persisted status. Intended for operator-supervised
             maintenance.
+    TrayPowerState:
+      title: TrayPowerState
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - id
+        - rackId
+      description: Power information for one tray, using external inventory identifiers. Readable by MAC before a managed
+        component ID exists; unavailable IDs are null without an internal UUID or MAC fallback.
+      required:
+        - id
+        - type
+        - rackId
+        - actual
+        - desired
+        - operations
+      properties:
+        id:
+          type:
+          - string
+          - 'null'
+          description: External inventory component ID, matching the tray's ID. Null until the inventory member has a
+            managed Core identity or when the service or proxy does not supply the ID.
+        type:
+          type: string
+          description: Tray type; `Unknown` is reserved for an unrecognized service value.
+          enum:
+          - Compute
+          - NVSwitch
+          - PowerShelf
+          - Unknown
+        rackId:
+          type:
+          - string
+          - 'null'
+          description: External inventory ID of the tray's assigned rack, including a retained soft-deleted rack.
+            Null without rack assignment, when its external identity cannot be read, or when the service or proxy
+            does not supply the ID.
+        actual:
+          $ref: '#/components/schemas/PowerObservation'
+        desired:
+          $ref: '#/components/schemas/PowerPolicy'
+        operations:
+          $ref: '#/components/schemas/PowerOperations'
+      example:
+        id: null
+        type: NVSwitch
+        rackId: rack-01
+        actual:
+          state: null
+          source: null
+          observed: null
+          error: NotLinked
+        desired:
+          status: Unavailable
+          state: null
+          error: NotLinked
+        operations:
+          actions: []
+          actionsError: NotLinked
+          tasks: []
+          tasksError: null
+    PowerObservation:
+      title: PowerObservation
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - state
+        - source
+        - observed
+        - error
+      description: A live hardware observation or a categorized failure. Explicit `Unknown` is a successful observation.
+        An observation state this API cannot represent reports `Unsupported`. A present observation without a required
+        state or error outcome reports `InvalidResponse`.
+      required:
+        - state
+        - source
+        - observed
+        - error
+      properties:
+        state:
+          type:
+          - string
+          - 'null'
+          description: Observed state, or null if the read failed or the service cannot represent the state.
+          enum:
+          - Unknown
+          - 'On'
+          - 'Off'
+          - PoweringOn
+          - PoweringOff
+          - Paused
+          - Reset
+          - null
+        source:
+          type:
+          - string
+          - 'null'
+          description: Selected hardware reader. Null before backend selection or when the source is unavailable.
+          enum:
+          - Redfish
+          - RMS
+          - null
+        observed:
+          type:
+          - string
+          - 'null'
+          description: NICo receipt time, not a device timestamp; null without an observation.
+          format: date-time
+        error:
+          $ref: '#/components/schemas/PowerReadError'
+      example:
+        state: 'On'
+        source: RMS
+        observed: '2026-10-07T18:00:02Z'
+        error: null
+    PowerPolicy:
+      title: PowerPolicy
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - state
+        - error
+      description: Stored compute policy, independent of hardware reads. `Unavailable` means the policy or managed target
+        was not found; it does not prove an intentionally absent policy.
+        A policy status or state this API cannot represent reports `Unsupported`. An `Available` policy without a required
+        state reports `InvalidResponse`.
+      required:
+        - status
+        - state
+        - error
+      properties:
+        status:
+          type: string
+          description: '`Available` includes disabled power management. `NotApplicable` applies to managed switches and shelves.
+            `Unavailable` also accompanies section errors.'
+          enum:
+          - Available
+          - Unavailable
+          - NotApplicable
+        state:
+          type:
+          - string
+          - 'null'
+          description: Stored policy when `Available`; null otherwise. `PowerManagerDisabled` is a policy, not missing information.
+          enum:
+          - 'On'
+          - 'Off'
+          - PowerManagerDisabled
+          - null
+        error:
+          $ref: '#/components/schemas/PowerReadError'
+      example:
+        status: NotApplicable
+        state: null
+        error: null
+    PowerOperations:
+      title: PowerOperations
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - actionsError
+        - tasksError
+      description: Tracked maintenance actions and outstanding power tasks, without an inferred relationship between
+        them. Each list is read separately and has its own error, so one list can be unavailable while the other is
+        returned.
+      required:
+        - actions
+        - actionsError
+        - tasks
+        - tasksError
+      properties:
+        actions:
+          type: array
+          description: At most two explicit tracked power-maintenance actions, `Active` before `Pending`. Empty with a null
+            `actionsError` means no tracked maintenance; direct power dispatch and power steps inside other workflows are
+            not tracked here. Always empty when `actionsError` is set.
+          items:
+            $ref: '#/components/schemas/PowerAction'
+        actionsError:
+          $ref: '#/components/schemas/PowerReadError'
+          description: Why `actions` couldn't be read, or null when the read succeeded. It never describes an individual
+            action.
+        tasks:
+          type: array
+          description: Outstanding power tasks for the current Flow rack that explicitly select this tray, plus tasks
+            selecting a shelf in this tray's current rack that can affect this tray. Ordered by creation time then task
+            UUID ascending. Former-rack tasks and execution reports are excluded; non-power tasks appear only as brief
+            waiting-context references. Always empty when `tasksError` is set.
+          items:
+            $ref: '#/components/schemas/PowerTask'
+        tasksError:
+          $ref: '#/components/schemas/PowerReadError'
+          description: Why `tasks` couldn't be read, or null when the read succeeded. It never describes an individual
+            task; each task reports its own `status` and `targetsError`. A missing rack makes the list unavailable. More
+            than 256 outstanding power tasks across the rack, before filtering for this tray, reports `LimitExceeded`. To
+            fit the encoded proxy response allowance, Flow removes optional waiting-context references first, then
+            external target information with a per-task `targetsError` of `LimitExceeded`. If the response is still too
+            large, `tasks` is emptied and this reports `LimitExceeded`; refer to the endpoint description.
+      example:
+        actions: []
+        actionsError: null
+        tasks: []
+        tasksError: null
+    PowerAction:
+      title: PowerAction
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - requested
+        - initiator
+        - graceful
+        - chassisId
+      description: Saved Core maintenance; no stable action ID, Flow task correlation ID or execution-start time is
+        available.
+      required:
+        - status
+        - operation
+        - requested
+        - initiator
+        - graceful
+        - chassisId
+      properties:
+        status:
+          type: string
+          description: '`Active` means admitted maintenance, not hardware dispatch. `Pending` is a distinct saved request,
+            without a promise of admission. `Unknown` represents an unrecognized service value.'
+          enum:
+          - Active
+          - Pending
+          - Unknown
+        operation:
+          type: string
+          description: Recorded operation. `Reset` does not preserve the original graceful/forced/AC-cycle distinction.
+          enum:
+          - PowerOn
+          - PowerOff
+          - Reset
+          - ChassisReset
+          - Unknown
+        requested:
+          type:
+          - string
+          - 'null'
+          description: Saved submission time, not admission/start time; null for legacy admitted requests without metadata.
+          format: date-time
+        initiator:
+          type:
+          - string
+          - 'null'
+          description: Saved initiator, including an explicitly empty string; null when unavailable.
+        graceful:
+          type:
+          - boolean
+          - 'null'
+          description: 'Present for `PowerOff` only: true is graceful, false is forced. Null for other operations.'
+        chassisId:
+          type:
+          - string
+          - 'null'
+          description: Recorded Redfish chassis identifier for `ChassisReset`, otherwise null.
+      example:
+        status: Active
+        operation: PowerOff
+        requested: '2026-10-07T18:00:02Z'
+        initiator: admin
+        graceful: true
+        chassisId: null
+    PowerTask:
+      title: PowerTask
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - rackId
+        - targets
+        - targetsError
+        - created
+        - updated
+        - started
+        - waitingContext
+      description: Power task metadata with external target identities from retained inventory at read time, including
+        soft-deleted rows. An identity lookup failure leaves the task's other fields and other task rows available.
+      required:
+        - id
+        - rackId
+        - operation
+        - overrideReadinessCheck
+        - targets
+        - targetsError
+        - status
+        - created
+        - updated
+        - started
+        - relevance
+        - waitingContext
+      properties:
+        id:
+          type: string
+          description: Flow-generated task UUID, usable with the existing task APIs.
+          format: uuid
+        rackId:
+          type:
+          - string
+          - 'null'
+          description: External inventory ID of the task's recorded rack. Null together with targets when targetsError
+            is non-null; never falls back to an internal rack UUID.
+        operation:
+          type: string
+          description: Requested Flow power operation, kept separate from the operation Core stores.
+          enum:
+          - PowerOn
+          - ForcePowerOn
+          - PowerOff
+          - ForcePowerOff
+          - Restart
+          - ForceRestart
+          - WarmReset
+          - ColdReset
+          - Unknown
+        overrideReadinessCheck:
+          type: boolean
+          description: Whether the task bypasses the component readiness gate when it executes.
+        targets:
+          x-go-required-nullable: true
+          type:
+          - array
+          - 'null'
+          description: Complete recorded selection grouped by type, using external inventory IDs available at read time.
+            Null with targetsError when any external target metadata is unavailable; an empty array with no error means
+            an explicitly empty selection. Groups follow Flow's component-type name order; IDs retain recorded UUID order,
+            including repeated external IDs. IDs are not sorted by their external values or deduplicated across types.
+          items:
+            $ref: '#/components/schemas/PowerTaskTargetGroup'
+        targetsError:
+          $ref: '#/components/schemas/PowerReadError'
+          description: Null when rackId and the complete target selection are available. Missing metadata reports
+            `Unsupported`; missing, empty, or purged inventory identities report `NotLinked`. Malformed metadata reports
+            `InvalidResponse`; lookup failures retain their error category. `LimitExceeded` means the recorded target
+            identifiers alone exceed the proxy response allowance, or external metadata was removed to meet that allowance.
+            Any error makes rackId and targets null, without removing the task or returning a partial selection.
+        status:
+          type: string
+          description: '`Pending` includes Flow `Waiting` and admitted `Pending`; `Running` does not prove hardware dispatch.
+            `Unknown` represents an unrecognized service value.'
+          enum:
+          - Pending
+          - Running
+          - Unknown
+          - Succeeded
+          - Failed
+          - Terminated
+        created:
+          type:
+          - string
+          - 'null'
+          description: Task creation time; null if the service did not supply a usable timestamp.
+          format: date-time
+        updated:
+          type:
+          - string
+          - 'null'
+          description: Last recorded task update time; null if unavailable.
+          format: date-time
+        started:
+          type:
+          - string
+          - 'null'
+          description: Recorded execution start; null until recorded.
+          format: date-time
+        relevance:
+          type: string
+          description: '`Selected` means a recorded target; `RackAffected` means the task selects a shelf in this tray''s
+            current rack and can affect this tray without selecting it.'
+          enum:
+          - Selected
+          - RackAffected
+          - Unknown
+        waitingContext:
+          oneOf:
+          - $ref: '#/components/schemas/PowerTaskWaitingContext'
+          - type: 'null'
+          description: Present for every Flow `Waiting` task, which reports public status `Pending`, and null for every
+            other task. When an older service doesn't supply the context, both lists are empty and `error` is
+            `Unsupported`. Neither list establishes a definitive blocker, queue position or future execution order.
+      example:
+        id: 550e8400-e29b-41d4-a716-446655440000
+        rackId: rack-01
+        operation: PowerOn
+        overrideReadinessCheck: false
+        targets:
+        - type: Compute
+          componentIds:
+          - z-compute
+          - a-compute
+        targetsError: null
+        status: Pending
+        created: '2026-10-07T18:00:02Z'
+        updated: '2026-10-07T18:00:02Z'
+        started: null
+        relevance: Selected
+        waitingContext:
+          activeConflicts:
+          - id: 02583c20-fb2a-4ee2-ae39-ed621ed7be3b
+            type: FirmwareControl
+            status: Running
+          earlierWaiting: []
+          error: null
+    PowerTaskTargetGroup:
+      title: PowerTaskTargetGroup
+      type: object
+      description: One recorded component-type selection expressed as external IDs from retained inventory at read time,
+        including soft-deleted rows. These IDs are not historical copies saved with the task.
+      required:
+        - type
+        - componentIds
+      properties:
+        type:
+          type: string
+          description: Recorded component type. A mixed task can select component types beyond those supported as the
+            requested power tray.
+          enum:
+          - CDU
+          - Compute
+          - NVSwitch
+          - PowerShelf
+          - TORSwitch
+          - UMS
+        componentIds:
+          type: array
+          description: External inventory component IDs in recorded selection order. A component can have moved racks
+            since the task was recorded. Repeated IDs remain present; IDs are not sorted by external value.
+          items:
+            type: string
+            description: External inventory component ID; never an internal hardware UUID fallback.
+      example:
+        type: Compute
+        componentIds:
+        - z-compute
+        - a-compute
+    PowerTaskWaitingContext:
+      title: PowerTaskWaitingContext
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - error
+      description: Scheduling context evaluated once per rack. Present empty lists with no error mean evaluation succeeded
+        with no matching work. Neither list establishes a definitive blocker, queue position or future execution order.
+        More than 256 nonterminal tasks of all types across the rack makes this context unavailable with `LimitExceeded`
+        while retaining primary power tasks. This count limit is independent of the rack power-task limit.
+        The encoded proxy response allowance can also clear nonempty context lists and set the context error to
+        `LimitExceeded` before removing external target information or primary power tasks. Empty contexts and existing
+        context errors are unchanged; refer to the endpoint description for the fallback order.
+      required:
+        - activeConflicts
+        - earlierWaiting
+        - error
+      properties:
+        activeConflicts:
+          type: array
+          description: '`Pending` or `Running` tasks that conflict under the current scheduler rule, ordered by creation
+            time then UUID.'
+          items:
+            $ref: '#/components/schemas/TaskSummary'
+        earlierWaiting:
+          type: array
+          description: All strictly earlier `Waiting` tasks in this rack, ordered by creation time then UUID. They can
+            delay promotion without directly conflicting with this task.
+          items:
+            $ref: '#/components/schemas/TaskSummary'
+        error:
+          $ref: '#/components/schemas/PowerReadError'
+      example:
+        activeConflicts:
+        - id: 550e8400-e29b-41d4-a716-446655440000
+          type: FirmwareControl
+          status: Running
+        earlierWaiting: []
+        error: null
+    TaskSummary:
+      title: TaskSummary
+      type: object
+      description: Brief metadata for an active conflicting task or an earlier waiting task, including non-power tasks;
+        no reports or targets are exposed here.
+      required:
+        - id
+        - type
+        - status
+      properties:
+        id:
+          type: string
+          description: Flow-generated task UUID.
+          format: uuid
+        type:
+          type: string
+          description: Task type, which can be non-power work such as `BringUp`. `Unknown` represents an unrecognized
+            service value.
+          enum:
+          - PowerControl
+          - FirmwareControl
+          - BringUp
+          - Decommission
+          - InjectExpectation
+          - Unknown
+        status:
+          type: string
+          description: Public task status; Flow `Waiting` maps to `Pending`.
+          enum:
+          - Pending
+          - Running
+          - Unknown
+          - Succeeded
+          - Failed
+          - Terminated
+      example:
+        id: 550e8400-e29b-41d4-a716-446655440000
+        type: FirmwareControl
+        status: Running
+    PowerReadError:
+      title: PowerReadError
+      type:
+        - string
+        - 'null'
+      description: Null on success. `NotLinked` means a required managed identity, rack assignment, or retained external
+        inventory identity is absent; `NotConfigured` means no provider client; `Unsupported` includes services or proxies
+        that omit a section, external target metadata or waiting context, or observation states and policy statuses or states this API cannot
+        represent. `InvalidResponse` means unusable dependency data, including a present observation without a required
+        outcome or an `Available` policy without a required state.
+        Other categories distinguish missing managed targets, disabled readers, unavailable endpoints or credentials,
+        missing observations, deadlines, read failures and exceeded limits.
+      enum:
+        - NotLinked
+        - NotConfigured
+        - Unsupported
+        - DeadlineExceeded
+        - ReadFailed
+        - InvalidResponse
+        - LimitExceeded
+        - NotFound
+        - Disabled
+        - EndpointUnavailable
+        - CredentialsUnavailable
+        - NoObservation
+        - null
+      example: Unsupported
     BatchUpdateTrayPowerStateRequest:
       title: BatchUpdateTrayPowerStateRequest
       type: object
