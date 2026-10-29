@@ -215,7 +215,8 @@ fn insert_telemetry_service(resources: &mut HashMap<String, MockResponse>) {
             ],
             "Wildcards": [
                 { "Name": "ChassisId", "Values": ["CH0"] },
-                { "Name": "GpuId", "Values": ["0", "1"] }
+                // "0" matches exactly; "*" (all values) must still match GPU 1.
+                { "Name": "GpuId", "Values": ["0", "*"] }
             ]
         }),
     );

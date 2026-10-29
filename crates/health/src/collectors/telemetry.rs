@@ -127,9 +127,10 @@ fn leaf_from_property(property: &str) -> &str {
 ///
 /// Each wildcard is replaced by every one of its listed values, so a URI
 /// with several wildcards expands to their cross product. A `*` value
-/// stands for "all possible values" and cannot be enumerated, so it is
-/// skipped. A URI that still contains a placeholder afterwards matches no
-/// concrete `MetricProperty` and is dropped.
+/// stands for "all possible values" and cannot be enumerated, so it stays
+/// in the URI as a literal `*` that [`glob_matches`] treats as a pattern. A
+/// URI that still contains a placeholder afterwards matches no concrete
+/// `MetricProperty` and is dropped.
 fn expand_wildcards(template: &str, wildcards: &[(String, Vec<String>)]) -> Vec<String> {
     let mut expanded = vec![template.to_string()];
     for (name, values) in wildcards {
@@ -139,16 +140,27 @@ fn expand_wildcards(template: &str, wildcards: &[(String, Vec<String>)]) -> Vec<
         }
         expanded = expanded
             .iter()
-            .flat_map(|uri| {
-                values
-                    .iter()
-                    .filter(|value| value.as_str() != "*")
-                    .map(|value| uri.replace(&placeholder, value))
-            })
+            .flat_map(|uri| values.iter().map(|value| uri.replace(&placeholder, value)))
             .collect();
     }
     expanded.retain(|uri| !uri.contains('{'));
     expanded
+}
+
+/// Whether `text` matches `pattern`, where each `*` stands for one or more
+/// characters that do not cross a `/`, i.e. at most one URI path segment
+/// (or the part of it a wildcard fills).
+fn glob_matches(pattern: &str, text: &str) -> bool {
+    let Some((head, rest)) = pattern.split_once('*') else {
+        return pattern == text;
+    };
+    let Some(after_head) = text.strip_prefix(head) else {
+        return false;
+    };
+    let longest = after_head.find('/').unwrap_or(after_head.len());
+    (1..=longest)
+        .filter(|&len| after_head.is_char_boundary(len))
+        .any(|len| glob_matches(rest, &after_head[len..]))
 }
 
 /// Units declared by the service's metric definitions.
@@ -158,6 +170,9 @@ struct UnitIndex {
     by_id: HashMap<String, String>,
     /// Concrete `MetricProperties` URI -> sanitized unit.
     by_property: HashMap<String, String>,
+    /// `MetricProperties` URIs with a `*` ("all values") wildcard, tried in
+    /// definition order when no concrete URI matches.
+    property_patterns: Vec<(String, String)>,
 }
 
 impl UnitIndex {
@@ -168,7 +183,14 @@ impl UnitIndex {
     fn unit(&self, metric_id: Option<&str>, property: Option<&str>) -> Option<&str> {
         match metric_id {
             Some(metric_id) => self.by_id.get(metric_id),
-            None => property.and_then(|property| self.by_property.get(property)),
+            None => property.and_then(|property| {
+                self.by_property.get(property).or_else(|| {
+                    self.property_patterns
+                        .iter()
+                        .find(|(pattern, _)| glob_matches(pattern, property))
+                        .map(|(_, unit)| unit)
+                })
+            }),
         }
         .map(String::as_str)
     }
@@ -330,7 +352,11 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
                 .collect();
             for template in raw.metric_properties.iter().flatten().flatten() {
                 for property in expand_wildcards(template, &wildcards) {
-                    index.by_property.insert(property, unit.clone());
+                    if property.contains('*') {
+                        index.property_patterns.push((property, unit.clone()));
+                    } else {
+                        index.by_property.insert(property, unit.clone());
+                    }
                 }
             }
             index.by_id.insert(raw.id.clone(), unit);
@@ -605,7 +631,7 @@ mod tests {
                     ]),
                 },
                 Check {
-                    scenario: "the all-values marker cannot be enumerated",
+                    scenario: "the all-values marker is kept as a pattern",
                     input: (
                         GPU_TEMP,
                         vec![
@@ -613,7 +639,10 @@ mod tests {
                             wildcard("GpuId", &["*", "2"]),
                         ],
                     ),
-                    expect: uris(&["/redfish/v1/Chassis/CH0/Sensors/GPU_2_Temp"]),
+                    expect: uris(&[
+                        "/redfish/v1/Chassis/CH0/Sensors/GPU_*_Temp",
+                        "/redfish/v1/Chassis/CH0/Sensors/GPU_2_Temp",
+                    ]),
                 },
                 Check {
                     scenario: "a placeholder without a wildcard entry is dropped",
@@ -622,6 +651,49 @@ mod tests {
                 },
             ],
             |(template, wildcards)| expand_wildcards(template, &wildcards),
+        );
+    }
+
+    #[test]
+    fn glob_matches_cases() {
+        const PATTERN: &str = "/redfish/v1/Chassis/CH0/Sensors/GPU_*_Power";
+        check_values(
+            [
+                Check {
+                    scenario: "a pattern without a star needs an exact match",
+                    input: ("/redfish/v1/A", "/redfish/v1/A"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "the star fills part of a path segment",
+                    input: (PATTERN, "/redfish/v1/Chassis/CH0/Sensors/GPU_7_Power"),
+                    expect: true,
+                },
+                Check {
+                    scenario: "the star needs at least one character",
+                    input: (PATTERN, "/redfish/v1/Chassis/CH0/Sensors/GPU__Power"),
+                    expect: false,
+                },
+                Check {
+                    scenario: "the star does not cross a path separator",
+                    input: (PATTERN, "/redfish/v1/Chassis/CH0/Sensors/GPU_7/8_Power"),
+                    expect: false,
+                },
+                Check {
+                    scenario: "text after the pattern is not matched",
+                    input: (PATTERN, "/redfish/v1/Chassis/CH0/Sensors/GPU_7_Power_0"),
+                    expect: false,
+                },
+                Check {
+                    scenario: "several stars each fill their own segment",
+                    input: (
+                        "/redfish/v1/Chassis/*/Sensors/*",
+                        "/redfish/v1/Chassis/CH0/Sensors/Temp",
+                    ),
+                    expect: true,
+                },
+            ],
+            |(pattern, text)| glob_matches(pattern, text),
         );
     }
 
