@@ -168,6 +168,14 @@ health_report_source = "external-validation-hold"
 alert_id = "ExternalValidationRequired"
 ```
 
+`health_report_source` sets the `source` value of the NICo-owned health report
+used by this workflow. The configured name is reused across machines, with each
+held machine having its own report. `alert_id` identifies the allocation-blocking
+alert inside that report. Neither value identifies an individual hold; `hold_id`
+serves that purpose. NICo manages this source through the hold lifecycle.
+External validators must use the hold/attempt APIs rather than modifying the
+health report directly.
+
 The final configuration API must make the selected scope explicit; it must not
 enable the policy for every machine by default.
 Configuration validation rejects a health source shared with repair,
