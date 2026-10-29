@@ -2240,9 +2240,12 @@ pub enum HostReprovisionState {
         #[serde(default)]
         power_drains_needed: Option<u32>,
         started_at: DateTime<Utc>,
-        /// Absolute deadline; the API declares failure past this time.
-        /// Derived from scout's execution/download timeouts plus slack.
+        /// Completion deadline. For acknowledged tasks this is shifted by the
+        /// delivery wait when Scout accepts; it is inactive before acceptance.
         deadline: DateTime<Utc>,
+        /// Absent on tasks created before Scout acknowledgement was supported.
+        #[serde(default)]
+        delivery: Option<ScoutUpgradeDelivery>,
         /// Serialized FirmwareUpgradeTask JSON for the scout
         task_json: String,
         #[serde(default)]
@@ -2257,6 +2260,15 @@ pub struct ScoutUpgradeResult {
     pub stdout: String,
     pub stderr: String,
     pub error: String,
+}
+
+/// Task-specific delivery tracking, independent of the execution budget.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct ScoutUpgradeDelivery {
+    /// Latest time at which Scout may first accept the task.
+    pub deadline: DateTime<Utc>,
+    /// First successful acknowledgement; retries preserve this timestamp.
+    pub accepted_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -4011,6 +4023,29 @@ mod tests {
         dpu_machine, dpu_machine_id, host_machine, managed_host_state_snapshot,
     };
 
+    #[test]
+    fn scout_upgrade_pre_acknowledgement_state_remains_readable() {
+        let fixture = r#"{"waitingforscoutupgrade":{
+            "upgrade_task_id":"legacy-task","firmware_type":"bmc",
+            "final_version":"1.2.3","started_at":"2026-10-28T12:00:00Z",
+            "deadline":"2026-10-28T13:00:00Z","task_json":"{}","result":null
+        }}"#;
+        let state: HostReprovisionState = serde_json::from_str(fixture).unwrap();
+        let HostReprovisionState::WaitingForScoutUpgrade {
+            delivery, deadline, ..
+        } = &state
+        else {
+            panic!("unexpected state")
+        };
+        assert!(delivery.is_none());
+        assert_eq!(
+            *deadline,
+            "2026-10-28T13:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
+        let roundtrip: HostReprovisionState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(roundtrip, state);
+    }
     #[derive(Clone, Copy)]
     struct DpuProvisioningInput {
         part_number: &'static str,

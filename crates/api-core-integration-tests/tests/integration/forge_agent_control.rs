@@ -101,6 +101,7 @@ async fn host_reprovision_scout_upgrade_does_not_reset_without_cleanup_timestamp
             power_drains_needed: None,
             started_at: chrono::Utc::now(),
             deadline: chrono::Utc::now() + chrono::TimeDelta::minutes(60),
+            delivery: None,
             task_json,
             result: None,
         },
@@ -176,6 +177,7 @@ async fn waiting_for_scout_upgrade_returns_task_without_cleanup_timestamp(pool: 
             power_drains_needed: None,
             started_at: chrono::Utc::now(),
             deadline: chrono::Utc::now() + chrono::TimeDelta::minutes(60),
+            delivery: None,
             task_json: task_json.clone(),
             result: None,
         },
@@ -248,6 +250,7 @@ async fn assigned_waiting_for_scout_upgrade_returns_task(pool: PgPool) {
                 power_drains_needed: Some(1),
                 started_at: chrono::Utc::now(),
                 deadline: chrono::Utc::now() + chrono::TimeDelta::hours(3),
+                delivery: None,
                 task_json,
                 result: None,
             },
@@ -280,6 +283,7 @@ async fn invalid_json_falls_back_to_noop(pool: PgPool) {
             power_drains_needed: None,
             started_at: chrono::Utc::now(),
             deadline: chrono::Utc::now() + chrono::TimeDelta::minutes(60),
+            delivery: None,
             task_json: "{not valid json".to_string(),
             result: None,
         },
@@ -291,6 +295,128 @@ async fn invalid_json_falls_back_to_noop(pool: PgPool) {
     let response = mh.host.forge_agent_control().await;
     assert!(matches!(response.action, Some(Action::Noop(_))));
     assert_eq!(response.legacy_action(), LegacyAction::Noop);
+}
+
+#[sqlx_test]
+async fn firmware_delivery_requires_capability_and_polling_does_not_acknowledge(pool: PgPool) {
+    let TestContext { env, mh, .. } = init(pool).await;
+    let now = chrono::Utc::now();
+    let task = rpc::scout_firmware_upgrade::ScoutFirmwareUpgradeTask {
+        upgrade_task_id: "pending-task".into(),
+        component_type: "bmc".into(),
+        target_version: "1.2.3".into(),
+        execution_timeout_seconds: 30,
+        ..Default::default()
+    };
+    let state = ManagedHostState::HostReprovision {
+        retry_count: 0,
+        reprovision_state: HostReprovisionState::WaitingForScoutUpgrade {
+            upgrade_task_id: task.upgrade_task_id.clone(),
+            firmware_type: FirmwareComponentType::Bmc,
+            final_version: task.target_version.clone(),
+            power_drains_needed: None,
+            started_at: now,
+            deadline: now + chrono::TimeDelta::minutes(10),
+            delivery: Some(model::machine::ScoutUpgradeDelivery {
+                deadline: now + chrono::TimeDelta::minutes(1),
+                accepted_at: None,
+            }),
+            task_json: serde_json::to_string(&task).unwrap(),
+            result: None,
+        },
+    };
+    mh.advance_state(state.clone()).await;
+    let mut request = rpc::forge::ForgeAgentControlRequest {
+        machine_id: Some(mh.host.id.into()),
+        capabilities: vec![],
+    };
+    let error = env
+        .api()
+        .forge_agent_control(tonic::Request::new(request.clone()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(mh.host.machine().await.current_state(), &state);
+
+    request
+        .capabilities
+        .push(rpc::forge::ForgeAgentControlCapability::ScoutFirmwareUpgradeAckV1.into());
+    let response = env
+        .api()
+        .forge_agent_control(tonic::Request::new(request.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(Action::FirmwareUpgrade(action)) = response.action else {
+        panic!("expected firmware task")
+    };
+    assert!(action.requires_acknowledgement);
+    assert_eq!(action.task, Some(task.clone()));
+    let polled = mh.host.machine().await;
+    assert_eq!(polled.current_state(), &state);
+    assert!(polled.status.last_scout_contact_time.is_some());
+
+    for (scenario, accepted_at, completion_deadline, deliver) in [
+        (
+            "delivery expired",
+            None,
+            now + chrono::TimeDelta::minutes(40),
+            false,
+        ),
+        (
+            "accepted before delivery expired",
+            Some(now - chrono::TimeDelta::minutes(2)),
+            now + chrono::TimeDelta::minutes(38),
+            true,
+        ),
+        (
+            "completion expired",
+            Some(now - chrono::TimeDelta::minutes(42)),
+            now - chrono::TimeDelta::minutes(2),
+            false,
+        ),
+    ] {
+        let mut state = state.clone();
+        let ManagedHostState::HostReprovision {
+            reprovision_state:
+                HostReprovisionState::WaitingForScoutUpgrade {
+                    deadline,
+                    delivery: Some(delivery),
+                    ..
+                },
+            ..
+        } = &mut state
+        else {
+            unreachable!()
+        };
+        delivery.deadline = now - chrono::TimeDelta::minutes(1);
+        delivery.accepted_at = accepted_at;
+        *deadline = completion_deadline;
+        mh.advance_state(state.clone()).await;
+        let response = env
+            .api()
+            .forge_agent_control(tonic::Request::new(request.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        if deliver {
+            let Some(Action::FirmwareUpgrade(action)) = response.action else {
+                panic!("{scenario}: expected firmware task")
+            };
+            assert!(action.requires_acknowledgement);
+            assert_eq!(action.task, Some(task.clone()));
+        } else {
+            assert!(
+                matches!(response.action, Some(Action::Noop(_))),
+                "{scenario}"
+            );
+        }
+        assert_eq!(
+            mh.host.machine().await.current_state(),
+            &state,
+            "{scenario}"
+        );
+    }
 }
 
 #[sqlx_test]

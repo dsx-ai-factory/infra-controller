@@ -2,7 +2,7 @@
 
 `setup.sh` is designed to be **idempotent** for supported deployment topologies: running it against an existing NICo installation upgrades each component in place. The same script and values files used for initial installation are the mechanism for upgrades — there is no separate upgrade script. For a predecessor Flow Deployment that bundles PSM or NSM, first choose whether to preserve it or follow the [manual Flow-only overwrite guidance](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#upgrading-deployments-that-bundled-psm-and-nsm).
 
-This page documents how each component behaves when you re-run `setup.sh` against a live cluster, what to prepare before upgrading, and version-specific considerations for the 2.0-to-2.1 upgrade path.
+This page documents how each component behaves when you re-run `setup.sh` against a live cluster, what to prepare before upgrading, and version-specific upgrade requirements.
 
 ## How setup.sh handles upgrades
 
@@ -45,6 +45,11 @@ After any required manual Flow overwrite, every installation phase is safe to re
 ## Pre-upgrade checklist
 
 Complete every item before running `setup.sh`. Missing any of these can cause the upgrade to fail or leave the cluster in a partially upgraded state.
+
+For the first upgrade from a version older than NICo 2.5 to 2.5 or later, follow
+the [Scout firmware acknowledgement rollout](#nico-25-scout-firmware-acknowledgement).
+It requires an API maintenance window: stop every old Core process before
+starting any new one, and prepare acknowledgement-capable Scouts.
 
 If you are upgrading to
 [asynchronous VPC peering deletion](#upgrades-that-introduce-asynchronous-peering-deletion)
@@ -374,6 +379,42 @@ Migrating an existing site's credentials from Vault to Postgres is a configurati
 Once the writer is Postgres, the KEK backup above belongs in every pre-upgrade checklist.
 
 ## Version-specific upgrade notes
+
+### NICo 2.5: Scout firmware acknowledgement
+
+NICo 2.5 requires Scout to acknowledge every new firmware task before its
+execution timeout starts. This behavior is always enabled; there is no
+activation setting. Tasks persisted by older Core versions retain their
+original deadline and delivery behavior.
+
+The first upgrade from an older version to NICo 2.5 or later must not overlap
+old and new Core processes. Old Core can serve a new task without its
+acknowledgement requirement or rewrite its state without the acknowledgement
+metadata. The chart's default `RollingUpdate` permits that overlap even with
+one replica; neither disabling automatic firmware updates nor waiting for
+individual controller handlers to finish proves that firmware work is drained.
+
+During this API maintenance window:
+
+1. Record every Core Deployment serving the site, its namespace, and its desired
+   replica count. Pause automation that could restore old replicas.
+2. Prepare NICo 2.5 Scout boot artifacts and update the running Scouts that may
+   receive firmware tasks. Updating a boot artifact alone does not replace an
+   already-running Scout. Scouts must advertise `SCOUT_FIRMWARE_UPGRADE_ACK_V1`
+   to receive new tasks.
+3. Scale every old Core Deployment to zero and wait for all old pods, any Core
+   processes outside those Deployments, and their requests to drain. Only then
+   run the normal upgrade with the new image and recorded replica counts.
+   With `setup.sh`, set `nico-api.replicas` in the Core values file to the
+   intended count; Phase 6 runs migrations and starts the new API pods.
+4. Verify that every Core process serving the site runs the new version before
+   restoring automation. Do not restore old Core replicas after new tasks can
+   be created.
+
+This is a one-time compatibility boundary, not a new site setting or a change
+to the chart's default strategy. See
+[host firmware task delivery](../operations/firmware-updates/host-firmware.md#installation-route)
+for acceptance, completion, and legacy-task behavior.
 
 ### Upgrades That Introduce Asynchronous Peering Deletion
 
