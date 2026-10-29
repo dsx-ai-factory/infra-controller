@@ -96,7 +96,7 @@ func decodeOneLogLine(t *testing.T, buf *bytes.Buffer) map[string]any {
 	return line
 }
 
-func TestUnaryInterceptorsTraceCorrelation(t *testing.T) {
+func TestUnaryServerInterceptor_TraceCorrelation(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		context trace.SpanContext
@@ -109,27 +109,55 @@ func TestUnaryInterceptorsTraceCorrelation(t *testing.T) {
 			buf := captureLogs(t)
 			ctx := trace.ContextWithSpanContext(context.Background(), tc.context)
 			_, err := UnaryServerInterceptor()(ctx, nil, &grpc.UnaryServerInfo{FullMethod: "/flow.v1.Flow/Version"},
-				func(ctx context.Context, _ any) (any, error) {
-					return nil, UnaryClientInterceptor("nico-core-api")(ctx, "/forge.Forge/Version", nil, nil, nil,
-						func(context.Context, string, any, any, *grpc.ClientConn, ...grpc.CallOption) error { return nil })
-				})
+				func(context.Context, any) (any, error) { return nil, nil })
 			require.NoError(t, err)
-			lines := bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n"))
-			require.Len(t, lines, 2)
-			for _, raw := range lines {
-				var line map[string]any
-				require.NoError(t, json.Unmarshal(raw, &line))
-				if tc.context.IsValid() {
-					assert.Equal(t, tc.context.TraceID().String(), line["trace_id"])
-					assert.Equal(t, tc.context.SpanID().String(), line["span_id"])
-				} else {
-					assert.NotContains(t, line, "trace_id")
-					assert.NotContains(t, line, "span_id")
-				}
+			line := decodeOneLogLine(t, buf)
+			assert.Equal(t, "flow rpc handled", line["message"])
+			if tc.context.IsValid() {
+				assert.Equal(t, tc.context.TraceID().String(), line["trace_id"])
+				assert.Equal(t, tc.context.SpanID().String(), line["span_id"])
+			} else {
+				assert.NotContains(t, line, "trace_id")
+				assert.NotContains(t, line, "span_id")
 			}
 			buf.Reset()
 			log.Info().Msg("outside request")
-			assert.NotContains(t, decodeOneLogLine(t, buf), "trace_id")
+			line = decodeOneLogLine(t, buf)
+			assert.NotContains(t, line, "trace_id")
+			assert.NotContains(t, line, "span_id")
+		})
+	}
+}
+
+func TestUnaryClientInterceptor_TraceCorrelation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		context trace.SpanContext
+	}{
+		{name: "no trace"},
+		{name: "sampled", context: trace.NewSpanContext(trace.SpanContextConfig{TraceID: trace.TraceID{1}, SpanID: trace.SpanID{2}, TraceFlags: trace.FlagsSampled})},
+		{name: "unsampled", context: trace.NewSpanContext(trace.SpanContextConfig{TraceID: trace.TraceID{3}, SpanID: trace.SpanID{4}})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := captureLogs(t)
+			ctx := trace.ContextWithSpanContext(context.Background(), tc.context)
+			err := UnaryClientInterceptor("nico-core-api")(ctx, "/forge.Forge/Version", nil, nil, nil,
+				func(context.Context, string, any, any, *grpc.ClientConn, ...grpc.CallOption) error { return nil })
+			require.NoError(t, err)
+			line := decodeOneLogLine(t, buf)
+			assert.Equal(t, "grpc client call", line["message"])
+			if tc.context.IsValid() {
+				assert.Equal(t, tc.context.TraceID().String(), line["trace_id"])
+				assert.Equal(t, tc.context.SpanID().String(), line["span_id"])
+			} else {
+				assert.NotContains(t, line, "trace_id")
+				assert.NotContains(t, line, "span_id")
+			}
+			buf.Reset()
+			log.Info().Msg("outside request")
+			line = decodeOneLogLine(t, buf)
+			assert.NotContains(t, line, "trace_id")
+			assert.NotContains(t, line, "span_id")
 		})
 	}
 }
