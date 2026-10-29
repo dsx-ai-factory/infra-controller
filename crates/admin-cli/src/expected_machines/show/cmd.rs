@@ -193,6 +193,7 @@ async fn convert_and_print_into_nice_table(
                 .to_string(),
             expected_machine
                 .host_lifecycle_profile
+                .as_ref()
                 .and_then(|hlp| hlp.control_plane)
                 .unwrap_or_default()
                 .to_string(),
