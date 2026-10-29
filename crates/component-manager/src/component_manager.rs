@@ -176,10 +176,17 @@ pub async fn request_rack_maintenance_via_state_controller(
                 let mut accepted_scope = scope;
                 accepted_scope.requested_at = Some(chrono::Utc::now());
                 let mut config = rack.config;
-                config.maintenance_requested = Some(accepted_scope.clone());
-                db::rack::update(txn.as_mut(), &transaction_rack_id, &config)
+                config.maintenance_requested = Some(accepted_scope);
+                let updated = db::rack::update(txn.as_mut(), &transaction_rack_id, &config)
                     .await
                     .map_err(|error| ComponentManagerError::Internal(error.to_string()))?;
+                // Compensation must compare the exact persisted request, including
+                // the action identity assigned by the database layer.
+                let accepted_scope = updated.config.maintenance_requested.ok_or_else(|| {
+                    ComponentManagerError::Internal(
+                        "rack update did not retain the accepted maintenance request".into(),
+                    )
+                })?;
 
                 // Preserve the operator API's existing behavior, and keep this
                 // reset atomic with accepting the maintenance request.
@@ -1171,9 +1178,17 @@ mod tests {
         let requested_at = scheduled
             .requested_at
             .expect("acceptance stamps the request time");
+        let action_id = scheduled.action_id.expect("acceptance retains log context");
+        assert!(
+            db::cm_action::trace_id(&pool, Some(action_id))
+                .await
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(
             scheduled,
             MaintenanceScope {
+                action_id: Some(action_id),
                 requested_at: Some(requested_at),
                 ..scope.clone()
             },
@@ -1231,6 +1246,7 @@ mod tests {
                 .config
                 .maintenance_requested,
             Some(MaintenanceScope {
+                action_id: Some(action_id),
                 requested_at: Some(requested_at),
                 ..scope
             }),
@@ -1433,6 +1449,14 @@ mod tests {
                 .maintenance_requested
                 .is_none()
         );
+        let actions: (i64, i64) = sqlx::query_as(
+            "SELECT count(*), count(*) FILTER (WHERE completed_at IS NULL) FROM cm_actions WHERE rack_id = $1",
+        )
+        .bind(&credential_failure_rack)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(actions, (1, 0), "compensation retires the accepted action");
     }
 
     fn rms_rack_profiles(profile: RackProfile) -> RackProfileConfig {

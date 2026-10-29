@@ -110,6 +110,8 @@ type OperationRuleListOptions struct {
 // TaskAttributes holds flexible task metadata stored as a single jsonb
 // column. New fields can be added here without requiring a DB migration.
 type TaskAttributes struct {
+	// TraceID correlates execution attempts, including after queueing or restart.
+	TraceID string `json:"trace_id,omitempty"`
 	// ComponentsByType maps each targeted component type to its UUIDs.
 	// Nil means the task targets no specific components.
 	ComponentsByType map[devicetypes.ComponentType][]uuid.UUID `json:"components_by_type,omitempty"` //nolint:lll
