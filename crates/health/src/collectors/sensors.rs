@@ -162,7 +162,7 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for SensorCollector<B> {
             tracing::debug!(
                 bmc_address = ?self.endpoint.addr,
                 rack_id = self.event_context.rack_id().map(tracing::field::display),
-                "BMC connection circuit is open; skipping sensor iteration"
+                "BMC connection or authentication circuit is open; skipping sensor iteration"
             );
             return Ok(IterationResult {
                 refresh_triggered: false,

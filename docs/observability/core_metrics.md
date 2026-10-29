@@ -254,6 +254,8 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_hardware_health_nvue_gnmi_interface_vl15_dropped_count_total</td><td>counter</td><td>Number of VL15 packets dropped by the InfiniBand port</td></tr>
 <tr><td>carbide_hardware_health_rack_nvlink_domain_info</td><td>gauge</td><td>Authoritative NICo rack-to-NVLink-domain assignments for current rack-ingestion sessions</td></tr>
 <tr><td>carbide_hardware_health_rack_session_start_time_seconds</td><td>gauge</td><td>NICo rack creation time in Unix seconds, labeled by its ingestion session</td></tr>
+<tr><td>carbide_health_bmc_auth_circuit_closed_total</td><td>counter</td><td>Number of times a BMC authentication circuit closed because a protected request succeeded.</td></tr>
+<tr><td>carbide_health_bmc_auth_circuit_opened_total</td><td>counter</td><td>Number of times a BMC authentication circuit opened because refreshed credentials were rejected.</td></tr>
 <tr><td>carbide_health_bmc_connection_circuit_closed_total</td><td>counter</td><td>Number of times a BMC connection circuit closed because the BMC answered again.</td></tr>
 <tr><td>carbide_health_bmc_connection_circuit_opened_total</td><td>counter</td><td>Number of times a BMC connection circuit opened after a connect-level failure.</td></tr>
 <tr><td>carbide_health_otlp_egress_records_total</td><td>counter</td><td>Number of OTLP log records or metric data points acknowledged by the receiver, excluding explicit partial-success rejections, by target and signal.</td></tr>
