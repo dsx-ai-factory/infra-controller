@@ -162,7 +162,11 @@ fn insert_telemetry_service(resources: &mut HashMap<String, MockResponse>) {
         }),
     );
 
-    let definition_paths = [definition("TotalGPUPowerWatts"), definition("GPU0_Temp")];
+    let definition_paths = [
+        definition("TotalGPUPowerWatts"),
+        definition("GPU0_Temp"),
+        definition("GPU_Power"),
+    ];
     let definition_members: Vec<_> = definition_paths.iter().map(String::as_str).collect();
     insert(
         resources,
@@ -193,6 +197,25 @@ fn insert_telemetry_service(resources: &mut HashMap<String, MockResponse>) {
             "Units": "Cel",
             "MetricProperties": [
                 "/redfish/v1/Chassis/CH0/Sensors/GPU_0_Temp_0"
+            ]
+        }),
+    );
+
+    insert_resource(
+        resources,
+        &definition("GPU_Power"),
+        "#MetricDefinition.v1_3_3.MetricDefinition",
+        "GPU_Power",
+        "GPU power",
+        json!({
+            "MetricDataType": "Decimal",
+            "Units": "W",
+            "MetricProperties": [
+                "/redfish/v1/Chassis/{ChassisId}/Sensors/GPU_{GpuId}_Power_0"
+            ],
+            "Wildcards": [
+                { "Name": "ChassisId", "Values": ["CH0"] },
+                { "Name": "GpuId", "Values": ["0", "1"] }
             ]
         }),
     );
@@ -248,6 +271,18 @@ fn insert_telemetry_service(resources: &mut HashMap<String, MockResponse>) {
                     "MetricProperty": "/redfish/v1/Chassis/CH0/Sensors/GPU_0_Power_0",
                     "MetricValue": "612.5",
                     "Oem": { "Nvidia": { "MetricValueStale": true } }
+                },
+                // MetricProperty only, matched through a wildcard definition.
+                {
+                    "MetricProperty": "/redfish/v1/Chassis/CH0/Sensors/GPU_1_Power_0",
+                    "MetricValue": "600"
+                },
+                // MetricId with no definition, on a property another
+                // definition covers.
+                {
+                    "MetricId": "GPU1_PowerAvg",
+                    "MetricProperty": "/redfish/v1/Chassis/CH0/Sensors/GPU_1_Power_0",
+                    "MetricValue": "590"
                 }
             ]
         }),

@@ -26,9 +26,11 @@
 //! Reports carry no units -- `MetricReport` only pairs a `MetricId`
 //! with a stringly-typed `MetricValue`. The unit lives on the matching
 //! `MetricDefinition`, so definitions are read once and cached for the
-//! lifetime of the collector, keyed by the definition's `Id` and by each
-//! URI in its `MetricProperties`. A value that carries no `MetricId` is
-//! matched through its `MetricProperty`.
+//! lifetime of the collector, indexed by the definition's `Id` and by each
+//! URI in its `MetricProperties`, with `{Name}` wildcards expanded from
+//! the definition's `Wildcards`. A value that carries a `MetricId` takes
+//! its unit from that definition only; a value without one is matched
+//! through its `MetricProperty`.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -121,6 +123,57 @@ fn leaf_from_property(property: &str) -> &str {
     .unwrap_or("unknown")
 }
 
+/// Expand the `{Name}` wildcards in a `MetricDefinition` property URI.
+///
+/// Each wildcard is replaced by every one of its listed values, so a URI
+/// with several wildcards expands to their cross product. A `*` value
+/// stands for "all possible values" and cannot be enumerated, so it is
+/// skipped. A URI that still contains a placeholder afterwards matches no
+/// concrete `MetricProperty` and is dropped.
+fn expand_wildcards(template: &str, wildcards: &[(String, Vec<String>)]) -> Vec<String> {
+    let mut expanded = vec![template.to_string()];
+    for (name, values) in wildcards {
+        let placeholder = format!("{{{name}}}");
+        if !template.contains(&placeholder) {
+            continue;
+        }
+        expanded = expanded
+            .iter()
+            .flat_map(|uri| {
+                values
+                    .iter()
+                    .filter(|value| value.as_str() != "*")
+                    .map(|value| uri.replace(&placeholder, value))
+            })
+            .collect();
+    }
+    expanded.retain(|uri| !uri.contains('{'));
+    expanded
+}
+
+/// Units declared by the service's metric definitions.
+#[derive(Debug, Default)]
+struct UnitIndex {
+    /// Definition `Id` (what a value's `MetricId` names) -> sanitized unit.
+    by_id: HashMap<String, String>,
+    /// Concrete `MetricProperties` URI -> sanitized unit.
+    by_property: HashMap<String, String>,
+}
+
+impl UnitIndex {
+    /// The unit for a value. A `MetricId` names the definition that
+    /// describes the reading -- which may be a calculation over the
+    /// property in another unit -- so the property is consulted only
+    /// when the value carries no `MetricId`.
+    fn unit(&self, metric_id: Option<&str>, property: Option<&str>) -> Option<&str> {
+        match metric_id {
+            Some(metric_id) => self.by_id.get(metric_id),
+            None => property.and_then(|property| self.by_property.get(property)),
+        }
+        .map(String::as_str)
+    }
+}
+
 pub struct TelemetryCollectorConfig {
     pub data_sink: Option<Arc<dyn DataSink>>,
 }
@@ -130,9 +183,8 @@ pub struct TelemetryCollector<B: Bmc> {
     endpoint: Arc<BmcEndpoint>,
     event_context: EventContext,
     data_sink: Option<Arc<dyn DataSink>>,
-    /// `MetricId` or `MetricProperties` URI -> sanitized unit, read once
-    /// from the service's metric definitions.
-    units: Option<HashMap<String, String>>,
+    /// Units read once from the service's metric definitions.
+    units: Option<UnitIndex>,
 }
 
 impl<B: Bmc + 'static> PeriodicCollector<B> for TelemetryCollector<B> {
@@ -228,9 +280,9 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
         }
     }
 
-    /// Build the unit map from the service's metric definitions, keyed
+    /// Build the unit index from the service's metric definitions, keyed
     /// by each definition's `Id` and by every URI in its
-    /// `MetricProperties`.
+    /// `MetricProperties` after wildcard expansion.
     ///
     /// A BMC that publishes no definitions is not an error; every
     /// reading then falls back to [`UNKNOWN_UNIT`]. Returning an empty
@@ -242,7 +294,7 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
     async fn load_units(
         &self,
         telemetry_service: &nv_redfish::telemetry_service::TelemetryService<B>,
-    ) -> Option<HashMap<String, String>> {
+    ) -> Option<UnitIndex> {
         let definitions = match telemetry_service.metric_definitions().await {
             Ok(Some(definitions)) => definitions,
             Ok(None) => Vec::new(),
@@ -258,23 +310,32 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
             }
         };
 
-        Some(
-            definitions
-                .into_iter()
-                .filter_map(|definition| {
-                    let raw = definition.raw();
-                    let unit = sanitize_unit(&raw.units.clone().flatten()?);
-                    let properties = raw.metric_properties.clone().flatten().unwrap_or_default();
-                    Some(
-                        std::iter::once(raw.id.clone())
-                            .chain(properties)
-                            .map(move |key| (key, unit.clone()))
-                            .collect::<Vec<_>>(),
-                    )
-                })
+        let mut index = UnitIndex::default();
+        for definition in definitions {
+            let raw = definition.raw();
+            let Some(unit) = raw.units.clone().flatten() else {
+                continue;
+            };
+            let unit = sanitize_unit(&unit);
+            let wildcards: Vec<(String, Vec<String>)> = raw
+                .wildcards
+                .iter()
                 .flatten()
-                .collect(),
-        )
+                .filter_map(|wildcard| {
+                    Some((
+                        wildcard.name.clone().flatten()?,
+                        wildcard.values.clone().flatten().unwrap_or_default(),
+                    ))
+                })
+                .collect();
+            for template in raw.metric_properties.iter().flatten().flatten() {
+                for property in expand_wildcards(template, &wildcards) {
+                    index.by_property.insert(property, unit.clone());
+                }
+            }
+            index.by_id.insert(raw.id.clone(), unit);
+        }
+        Some(index)
     }
 
     /// Emit one sample per numeric reading in `report`, returning how
@@ -348,13 +409,8 @@ impl<B: Bmc + 'static> TelemetryCollector<B> {
             }
 
             let unit = units
-                .and_then(|units| {
-                    metric_id
-                        .as_deref()
-                        .and_then(|id| units.get(id))
-                        .or_else(|| property.as_deref().and_then(|prop| units.get(prop)))
-                })
-                .map_or(UNKNOWN_UNIT, String::as_str);
+                .and_then(|units| units.unit(metric_id.as_deref(), property.as_deref()))
+                .unwrap_or(UNKNOWN_UNIT);
 
             let mut labels: Vec<MetricLabel> =
                 vec![(Cow::Borrowed("report_id"), report_id.clone())];
@@ -513,6 +569,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn expand_wildcards_cases() {
+        const GPU_TEMP: &str = "/redfish/v1/Chassis/{ChassisId}/Sensors/GPU_{GpuId}_Temp";
+        let wildcard = |name: &str, values: &[&str]| {
+            (
+                name.to_string(),
+                values.iter().map(|value| (*value).to_string()).collect(),
+            )
+        };
+        let uris =
+            |uris: &[&str]| -> Vec<String> { uris.iter().map(|uri| (*uri).to_string()).collect() };
+        check_values(
+            [
+                Check {
+                    scenario: "URI without placeholders is kept as is",
+                    input: ("/redfish/v1/Chassis/CH0/Sensors/GPU_0_Temp", vec![]),
+                    expect: uris(&["/redfish/v1/Chassis/CH0/Sensors/GPU_0_Temp"]),
+                },
+                Check {
+                    scenario: "several wildcards expand to their cross product",
+                    input: (
+                        GPU_TEMP,
+                        vec![
+                            wildcard("ChassisId", &["CH0", "CH1"]),
+                            wildcard("GpuId", &["0", "1"]),
+                            wildcard("Unused", &["x"]),
+                        ],
+                    ),
+                    expect: uris(&[
+                        "/redfish/v1/Chassis/CH0/Sensors/GPU_0_Temp",
+                        "/redfish/v1/Chassis/CH0/Sensors/GPU_1_Temp",
+                        "/redfish/v1/Chassis/CH1/Sensors/GPU_0_Temp",
+                        "/redfish/v1/Chassis/CH1/Sensors/GPU_1_Temp",
+                    ]),
+                },
+                Check {
+                    scenario: "the all-values marker cannot be enumerated",
+                    input: (
+                        GPU_TEMP,
+                        vec![
+                            wildcard("ChassisId", &["CH0"]),
+                            wildcard("GpuId", &["*", "2"]),
+                        ],
+                    ),
+                    expect: uris(&["/redfish/v1/Chassis/CH0/Sensors/GPU_2_Temp"]),
+                },
+                Check {
+                    scenario: "a placeholder without a wildcard entry is dropped",
+                    input: (GPU_TEMP, vec![wildcard("GpuId", &["0"])]),
+                    expect: uris(&[]),
+                },
+            ],
+            |(template, wildcards)| expand_wildcards(template, &wildcards),
+        );
+    }
+
     #[derive(Clone, Debug, PartialEq)]
     struct ObservedMetric {
         key: String,
@@ -619,7 +731,7 @@ mod tests {
                            stale, non-numeric and non-finite values are dropped",
                 input: fixture.bmc(),
                 expect: Yields(ObservedIteration {
-                    entity_count: Some(4),
+                    entity_count: Some(6),
                     fetch_failures: 0,
                     metrics: {
                         const REPORT: &str =
@@ -644,6 +756,30 @@ mod tests {
                                 &[
                                     ("report_id", "PlatformEnvironmentMetrics"),
                                     ("metric_property", &format!("{SENSORS}/GPU_0_Temp_0")),
+                                ],
+                            ),
+                            // Unit resolved through the wildcard-expanded
+                            // MetricProperties of the GPU_Power definition.
+                            metric(
+                                &format!("{SENSORS}/GPU_1_Power_0"),
+                                "gpu_1_power_0",
+                                "watts",
+                                600.0,
+                                &[
+                                    ("report_id", "PlatformEnvironmentMetrics"),
+                                    ("metric_property", &format!("{SENSORS}/GPU_1_Power_0")),
+                                ],
+                            ),
+                            // A MetricId without a unit-bearing definition
+                            // does not borrow the property's unit.
+                            metric(
+                                &format!("{SENSORS}/GPU_1_Power_0/GPU1_PowerAvg"),
+                                "gpu1_power_avg",
+                                "unknown",
+                                590.0,
+                                &[
+                                    ("report_id", "PlatformEnvironmentMetrics"),
+                                    ("metric_property", &format!("{SENSORS}/GPU_1_Power_0")),
                                 ],
                             ),
                             metric(
@@ -724,7 +860,9 @@ mod tests {
                     unit_pairs(&[
                         ("fan_pwm", "unknown"),
                         ("gpu0_temp", "unknown"),
+                        ("gpu1_power_avg", "unknown"),
                         ("gpu_0_temp_0", "unknown"),
+                        ("gpu_1_power_0", "unknown"),
                         ("total_gpu_power_watts", "unknown"),
                     ]),
                 ),
@@ -733,7 +871,9 @@ mod tests {
                     unit_pairs(&[
                         ("fan_pwm", "unknown"),
                         ("gpu0_temp", "celsius"),
+                        ("gpu1_power_avg", "unknown"),
                         ("gpu_0_temp_0", "celsius"),
+                        ("gpu_1_power_0", "watts"),
                         ("total_gpu_power_watts", "watts"),
                     ]),
                 ),
