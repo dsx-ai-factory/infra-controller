@@ -14,7 +14,7 @@ In disconnected mode with `keycloak.serviceAccount: true`, set `keycloak.service
 
 ### Changed behavior
 
-- A client credentials token from a client that is not a service account is accepted with the roles it holds. This includes `keycloak.serviceAccount: false`, where such a token previously got `401`.
+- A client credentials token from a client that is not a service account is authorized by its roles in the requested org, like a user token. This includes `keycloak.serviceAccount: false`, where such a token previously got `401`.
 - In disconnected mode, a config with more than one `isServiceAccount: true` claim mapping across custom issuers fails to start.
 - In connected mode, Keycloak service accounts are allowed in every org unless `keycloak.serviceAccountOrg` is set, and custom issuer `isServiceAccount` mappings are accepted with no limit on their number.
 
