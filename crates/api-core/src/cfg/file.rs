@@ -3842,12 +3842,49 @@ impl SwitchStateControllerConfig {
 }
 
 /// SpdmStateController related config
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct SpdmStateControllerConfig {
     /// Common state controller configs
     #[serde(default = "StateControllerConfig::default")]
     pub controller: StateControllerConfig,
+    /// Maximum wait from the persisted cancellation time before releasing an
+    /// evidence collection lock without BMC confirmation. Accepts positive
+    /// durations up to five minutes (e.g. "30s", "5m"); defaults to "2m".
+    /// Requires an API restart; controller retries do not reset the deadline.
+    #[serde(
+        deserialize_with = "SpdmStateControllerConfig::deserialize_cancellation_timeout",
+        serialize_with = "as_duration"
+    )]
+    pub cancellation_timeout: chrono::Duration,
+}
+
+impl SpdmStateControllerConfig {
+    // Bound how long an unresponsive BMC can hold a cancelled job's collection lock.
+    const MAX_CANCELLATION_TIMEOUT: Duration = Duration::minutes(5);
+
+    fn deserialize_cancellation_timeout<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let timeout = deserialize_duration_chrono(deserializer)?;
+        if timeout <= Duration::zero() || timeout > Self::MAX_CANCELLATION_TIMEOUT {
+            return Err(serde::de::Error::custom(
+                "spdm_state_controller.cancellation_timeout must be greater than 0s and at most 5m",
+            ));
+        }
+        Ok(timeout)
+    }
+}
+
+impl Default for SpdmStateControllerConfig {
+    fn default() -> Self {
+        // Preserve the cancellation grace period when the section or field is omitted.
+        Self {
+            controller: StateControllerConfig::default(),
+            cancellation_timeout: Duration::minutes(2),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

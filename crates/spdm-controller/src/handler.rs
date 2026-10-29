@@ -39,13 +39,20 @@ use crate::context::SpdmStateHandlerContextObjects;
 pub struct SpdmAttestationStateHandler {
     verifier: Arc<dyn Verifier>,
     nras_config: nras::Config,
+    cancellation_timeout: chrono::Duration,
 }
 
 impl SpdmAttestationStateHandler {
-    pub fn new(verifier: Arc<dyn Verifier>, nras_config: nras::Config) -> Self {
+    /// Creates a handler with a timeout measured from each job's persisted cancellation time.
+    pub fn new(
+        verifier: Arc<dyn Verifier>,
+        nras_config: nras::Config,
+        cancellation_timeout: chrono::Duration,
+    ) -> Self {
         Self {
             verifier,
             nras_config,
+            cancellation_timeout,
         }
     }
 
@@ -60,7 +67,7 @@ impl SpdmAttestationStateHandler {
             && let Some(cancelled_at) = snapshot.cancelled_at
         {
             // Keep the original deadline across retries and controller restarts.
-            if chrono::Utc::now() < cancelled_at + chrono::Duration::minutes(2) {
+            if chrono::Utc::now() - cancelled_at < self.cancellation_timeout {
                 let SpdmAttestationState::PollEvidenceCollection {
                     task_id,
                     retry_count,
@@ -69,7 +76,7 @@ impl SpdmAttestationStateHandler {
                 else {
                     // An ambiguous collection POST can hold the lock without a task ID.
                     return Ok(StateHandlerOutcome::wait(
-                        "Cancellation has no BMC task ID; waiting two minutes to release the evidence collection lock"
+                        "Cancellation has no BMC task ID; waiting for the cancellation timeout to release the evidence collection lock"
                             .to_string(),
                     ));
                 };
