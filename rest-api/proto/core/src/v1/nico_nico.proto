@@ -8,6 +8,7 @@ package forge;
 import "common_nico.proto";
 import "console_log_nico.proto";
 import "dns_nico.proto";
+import "external_validation_nico.proto";
 import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";
 import "google/protobuf/field_mask.proto";
@@ -1296,6 +1297,34 @@ service Forge {
 
   // Secrets management
   rpc ReWrapSecrets(ReWrapSecretsRequest) returns (ReWrapSecretsResponse);
+
+  // External-validation contract only: these methods are not implemented until
+  // durable holds and attempts are delivered. With internal RBAC enabled, the
+  // explicit empty grants deny callers with an AuthContext before dispatch
+  // (PERMISSION_DENIED). Missing AuthContext is also rejected before dispatch;
+  // no gRPC wire status for that branch is promised here. With RBAC bypassed,
+  // the stubs return UNIMPLEMENTED. Runtime implementation must grant SiteAgent
+  // all six RPCs, including removal: REST calls Core as that service. REST
+  // authorizes the end user's role and Tenant scope, and audits the end user;
+  // Core authorizes/audits the service caller and checks resource/policy bindings.
+  // Core cannot infer a Provider Admin role from the SiteAgent identity. Direct
+  // Core callers need explicit method/site permissions. Request IDs grant none.
+  // Returns all matching hold IDs (active by default) in (created_at, hold_id)
+  // order. Fetch their current state in max_find_by_ids-bounded batches.
+  rpc FindExternalValidationHoldIds(ExternalValidationHoldSearchFilter) returns (ExternalValidationHoldIdList);
+  // Fetches current holds, including Satisfied, with an optional tenant filter.
+  rpc FindExternalValidationHoldsByIds(ExternalValidationHoldsByIdsRequest) returns (ExternalValidationHoldList);
+  // Atomically opens one attempt or replays the attempt identified by the key.
+  rpc StartExternalValidation(StartExternalValidationRequest) returns (StartExternalValidationResponse);
+  // Cancels only a NotStarted allocation; Creating or Created must be reconciled.
+  rpc CancelExternalValidation(CancelExternalValidationRequest) returns (ExternalValidationAttempt);
+  // Records a result for the bound instance; never clears the hold immediately.
+  rpc CompleteExternalValidation(CompleteExternalValidationRequest) returns (ExternalValidationAttempt);
+  // Privileged audited recovery, fenced by the expected hold ID. For REST calls,
+  // REST enforces Provider Admin authorization; Core sees the SiteAgent caller.
+  // Unresolved allocation or cleanup returns FAILED_PRECONDITION. Successful
+  // removal atomically closes/fences any attempt and removes the matching gate.
+  rpc RemoveExternalValidationHold(RemoveExternalValidationHoldRequest) returns (google.protobuf.Empty);
 }
 
 // Indicates the lifecycle state of a resource that is controlled by a state controller
@@ -3569,6 +3598,23 @@ message InstanceAllocationRequest {
 
   // Allow allocation on unhealthy machines
   bool allow_unhealthy_machine = 13;
+
+  // Request ID returned by StartExternalValidation. It binds this allocation
+  // to that attempt and only works with AllocateInstance, not batch requests.
+  // Set machine_id to the held machine and allow_unhealthy_machine to true,
+  // leave instance_type_id empty, and make config.tenant.tenant_organization_id
+  // match the site policy. The ID grants no access on its own.
+  // It only bypasses the external-validation hold. Other blocking health
+  // alerts and repair checks still apply at allocation commit.
+  // A retry with the same ID and inputs, including instance_id when set,
+  // returns the original instance. Changed inputs return ALREADY_EXISTS.
+  // While allocation is still in progress, the call returns UNAVAILABLE with
+  // trailing metadata external-validation-allocation-state: creating. To
+  // recover, retry with the same ID and inputs, or read the hold's allocation
+  // state. Core also reconciles durable Creating records without caller retries.
+  // Leave it unset for ordinary allocations. Until binding is implemented,
+  // any value returns FAILED_PRECONDITION.
+  common.ExternalValidationRequestId external_validation_request_id = 14;
 }
 
 // Batch instance allocation request

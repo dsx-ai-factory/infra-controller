@@ -192,6 +192,27 @@ message MachineValidationId {
   string value = 1;
 }
 
+// Identifies one external-validation hold; the value is a UUID.
+message ExternalValidationHoldId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::external_validation::ExternalValidationHoldId";
+  // Canonical UUID string; missing required IDs are rejected by the owning RPC.
+  string value = 1;
+}
+
+// Identifies one external-validation lifecycle cycle; the value is a UUID.
+message ExternalValidationCycleId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::external_validation::ExternalValidationCycleId";
+  // Canonical UUID string; missing required IDs are rejected by the owning RPC.
+  string value = 1;
+}
+
+// Identifies one external-validation attempt request; the value is a UUID.
+message ExternalValidationRequestId {
+  option (carbide.codegen.v1.message_extern_path) = "::carbide_uuid::external_validation::ExternalValidationRequestId";
+  // Canonical UUID string; missing required IDs are rejected by the owning RPC.
+  string value = 1;
+}
+
 // ID of a physical device managed by NICo. Individual RPCs may support only a
 // subset of these device kinds.
 message DeviceId {
