@@ -31,12 +31,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use carbide_site_health_probe_api::{
-    Crossing, CurvePoint, Direction, ErrorCode, Family, ScrapeGap, SummaryResponse, UnitsPerMinute,
+    Crossing, CurvePoint, Direction, ErrorCode, Family, MAX_COUNT, Q_DECIMALS, ScrapeGap,
+    SummaryResponse, UnitsPerMinute,
 };
 use chrono::{DateTime, Utc};
 
 use crate::api::ApiError;
-use crate::store::RawSeries;
+use crate::store::{RawSeries, is_time};
 
 const PREFIX: &str = "carbide_site_health_probe_";
 const SWEEP_START: &str = "carbide_site_health_probe_sweep_start_timestamp_seconds";
@@ -46,6 +47,9 @@ const PROCESS_START: &str = "carbide_site_health_probe_process_start_timestamp_s
 /// The dimension labels of the time series; every other label names the
 /// scrape source.
 const TIME_DIMS: [&str; 3] = ["reader", "family", "result"];
+
+/// 10^[`Q_DECIMALS`]: every accepted q is a whole number of these parts.
+const Q_PARTS: u64 = 10_u64.pow(Q_DECIMALS as u32);
 
 /// The curve keeps at most this many points.
 pub(crate) const CURVE_POINTS: usize = 200;
@@ -63,8 +67,14 @@ fn secs(at: SystemTime) -> f64 {
         .as_secs_f64()
 }
 
+/// The date of Unix time `secs`. Times come from store samples, so any
+/// value is possible: one before the epoch (or NaN) is the epoch, one past
+/// the last date chrono holds is that date.
 fn at_secs(secs: f64) -> DateTime<Utc> {
-    DateTime::<Utc>::from(UNIX_EPOCH + Duration::from_secs_f64(secs.max(0.0)))
+    Duration::try_from_secs_f64(secs.max(0.0))
+        .ok()
+        .and_then(|d| DateTime::from_timestamp(i64::try_from(d.as_secs()).ok()?, d.subsec_nanos()))
+        .unwrap_or(DateTime::<Utc>::MAX_UTC)
 }
 
 fn ms_secs(ms: i64) -> f64 {
@@ -118,18 +128,25 @@ pub(crate) struct CapSeries<'a> {
 
 /// Joins count, time and capability samples on `(source, timestamp)`. A
 /// point needs a sweep end, a sweep start and a process start; a missing
-/// count series is 0.
+/// count series is 0. Counts add up in integers: every sample, and every
+/// sum, is a whole number from 0 to [`MAX_COUNT`], or the store is not
+/// showing the probe's series.
 pub(crate) fn join_points(
     counts: &[RawSeries],
     count_dims: &[&str],
     times: &[RawSeries],
     caps: &[CapSeries<'_>],
-) -> Vec<ScrapePoint> {
-    let mut count: BTreeMap<PointKey, f64> = BTreeMap::new();
+) -> Result<Vec<ScrapePoint>, ApiError> {
+    let mut count: BTreeMap<PointKey, u64> = BTreeMap::new();
     for series in counts {
         let source = source_of(&series.labels, count_dims);
         for (at, value) in &series.samples {
-            *count.entry((source.clone(), *at)).or_default() += value;
+            let total = count.entry((source.clone(), *at)).or_default();
+            *total = (value.fract() == 0.0 && (0.0..=MAX_COUNT as f64).contains(value))
+                .then_some(*value as u64)
+                .and_then(|value| total.checked_add(value))
+                .filter(|sum| *sum <= MAX_COUNT)
+                .ok_or_else(|| bad_store("a count is not a number of units"))?;
         }
     }
     let mut by_name: BTreeMap<&str, BTreeMap<PointKey, f64>> = BTreeMap::new();
@@ -159,7 +176,8 @@ pub(crate) fn join_points(
     let ends = by_name.get(SWEEP_END).unwrap_or(&empty);
     let starts = by_name.get(SWEEP_START).unwrap_or(&empty);
     let processes = by_name.get(PROCESS_START).unwrap_or(&empty);
-    ends.iter()
+    Ok(ends
+        .iter()
         .filter_map(|(key, end)| {
             let start = starts.get(key)?;
             let process = processes.get(key)?;
@@ -171,14 +189,14 @@ pub(crate) fn join_points(
             Some(ScrapePoint {
                 source: key.0.clone(),
                 at_ms: key.1,
-                count: count.get(key).copied().unwrap_or(0.0),
+                count: count.get(key).copied().unwrap_or(0) as f64,
                 end: *end,
                 start: *start,
                 process: *process,
                 capable,
             })
         })
-        .collect()
+        .collect())
 }
 
 /// What two scrapes of one sweep show about its capability: any false
@@ -191,6 +209,17 @@ fn merge_capable(a: Option<bool>, b: Option<bool>) -> Option<bool> {
     }
 }
 
+/// 502 `store_unavailable`: the store's series are not what the probe
+/// publishes.
+fn bad_store(message: &str) -> ApiError {
+    ApiError::new(
+        axum::http::StatusCode::BAD_GATEWAY,
+        ErrorCode::StoreUnavailable,
+        None,
+        message.to_string(),
+    )
+}
+
 /// Collapses scrapes to sweeps: one per `(process start, sweep end)`, as
 /// its first scrape saw it, sorted by sweep end. Monitoring replicas at equal
 /// or offset times collapse, and the capability of every scrape of a sweep
@@ -201,15 +230,21 @@ pub(crate) fn sweeps(points: &[ScrapePoint]) -> Result<Vec<Sweep>, ApiError> {
     sorted.sort_by_key(|p| p.at_ms);
     let mut seen: BTreeMap<(u64, u64), Sweep> = BTreeMap::new();
     for point in sorted {
+        // Each sample is finite, but one can be out of range and series
+        // summed into one count can overflow.
+        if !(0.0..=MAX_COUNT as f64).contains(&point.count) {
+            return Err(bad_store("a count is not a number of units"));
+        }
+        if ![point.end, point.start, point.process]
+            .into_iter()
+            .all(is_time)
+        {
+            return Err(bad_store("a sweep or process time is out of range"));
+        }
         let key = (point.process.to_bits(), point.end.to_bits());
         match seen.get_mut(&key) {
             Some(sweep) if sweep.count != point.count => {
-                return Err(ApiError::new(
-                    axum::http::StatusCode::BAD_GATEWAY,
-                    ErrorCode::StoreUnavailable,
-                    None,
-                    "inconsistent sources: one sweep has two counts".to_string(),
-                ));
+                return Err(bad_store("inconsistent sources: one sweep has two counts"));
             }
             Some(sweep) => sweep.capable = merge_capable(sweep.capable, point.capable),
             None => {
@@ -247,15 +282,25 @@ pub(crate) struct SummaryInput {
 }
 
 impl SummaryInput {
+    /// ceil(q·n), or `None` for a `q` with more than six decimal places.
+    /// In integers: q·n in f64 can land just above the whole number it is
+    /// (0.55 × 100 is 55.00000000000001), and n above 2^53 loses units as
+    /// f64.
+    fn delta(&self, q: f64) -> Option<u64> {
+        let parts = u128::from(q_parts(q)?);
+        u64::try_from((parts * u128::from(self.n)).div_ceil(u128::from(Q_PARTS))).ok()
+    }
+
     /// The count that crosses `q`, or `None` when no count can: above the
-    /// largest count going up, below 0 going down.
+    /// largest count, below 0 going down, or a `q` with more than six
+    /// decimal places.
     fn target(&self, q: f64) -> Option<u64> {
-        // `as` saturates, and the checked arithmetic below rejects that.
-        let delta = (q * self.n as f64).ceil() as u64;
+        let delta = self.delta(q)?;
         match self.direction {
             Direction::Up => self.base.checked_add(delta),
             Direction::Down => self.base.checked_sub(delta),
         }
+        .filter(|target| *target <= MAX_COUNT)
     }
 
     /// The target of every requested quantile, or the parameter at fault.
@@ -264,15 +309,28 @@ impl SummaryInput {
             .iter()
             .map(|q| match self.target(*q) {
                 Some(target) => Ok((*q, target)),
-                None if self.direction == Direction::Up => Err(ApiError::bad_param(
-                    "base",
-                    "an up target would exceed the largest count: base + n is too large"
-                        .to_string(),
-                )),
-                None => Err(ApiError::bad_param(
-                    "n",
-                    "a down target would be below 0: n is larger than base".to_string(),
-                )),
+                None => match (self.delta(*q), self.direction) {
+                    (None, _) => Err(ApiError::bad_param(
+                        "q",
+                        format!("q entry {q} has more than six decimal places"),
+                    )),
+                    (Some(delta), Direction::Down) if delta > self.base => {
+                        Err(ApiError::bad_param(
+                            "n",
+                            "a down target would be below 0: n is larger than base".to_string(),
+                        ))
+                    }
+                    (Some(_), Direction::Up) => Err(ApiError::bad_param(
+                        "base",
+                        "an up target would exceed the largest count: base + n is too large"
+                            .to_string(),
+                    )),
+                    (Some(_), Direction::Down) => Err(ApiError::bad_param(
+                        "base",
+                        "a down target would exceed the largest count: base is too large"
+                            .to_string(),
+                    )),
+                },
             })
             .collect()
     }
@@ -291,6 +349,14 @@ impl SummaryInput {
             Direction::Down => a < b,
         }
     }
+}
+
+/// `q` in millionths, or `None` when it has more than six decimal places:
+/// when it is not the nearest f64 of a whole number of millionths, as a
+/// decimal with at most six places parses to.
+fn q_parts(q: f64) -> Option<u64> {
+    let parts = (q * Q_PARTS as f64).round();
+    ((0.0..=Q_PARTS as f64).contains(&parts) && parts / Q_PARTS as f64 == q).then_some(parts as u64)
 }
 
 /// One scrape's time and the sweep end it showed.
@@ -562,14 +628,15 @@ pub(crate) fn compute(
     } else {
         input.end
     };
-    let mut best = before.map(|s| s.count);
+    // Without a sweep before the window, the count it starts from is `base`.
+    let mut best = before.map_or(input.base as f64, |s| s.count);
     let mut last_progress = input.start;
     let mut longest: f64 = 0.0;
     for sweep in window.iter().filter(|s| s.end <= stop) {
-        if best.is_none_or(|b| input.better(sweep.count, b)) {
+        if input.better(sweep.count, best) {
             longest = longest.max(sweep.end - last_progress);
             last_progress = sweep.end;
-            best = Some(sweep.count);
+            best = sweep.count;
         }
     }
     longest = longest.max(stop - last_progress);
@@ -679,6 +746,8 @@ pub(crate) fn probe_restarts(times: &[RawSeries], start: f64, end: f64) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use carbide_site_health_probe_api::{DEFAULT_Q, parse_q};
+
     use super::*;
 
     const T0: f64 = 1_000_000.0;
@@ -959,7 +1028,7 @@ mod tests {
             counts.extend(c);
             times.extend(t);
         }
-        join_points(&counts, &["type", "stage", "state"], &times, &[])
+        join_points(&counts, &["type", "stage", "state"], &times, &[]).expect("joins")
     }
 
     #[test]
@@ -1071,7 +1140,8 @@ mod tests {
                     dims: &["resource"],
                     ok: |v| v == 1.0,
                 }],
-            );
+            )
+            .expect("joins");
             let found = sweeps(&points).expect("one count");
             assert_eq!(found.len(), 1);
             assert_eq!(found[0].capable, want, "a {a:?}, b {b:?}");
@@ -1253,5 +1323,209 @@ mod tests {
         );
         assert_eq!(uncovered(10.0, 30.0, (20.0, 100.0)), 10.0);
         assert_eq!(uncovered(30.0, 40.0, (20.0, 100.0)), 0.0);
+    }
+
+    #[test]
+    fn zero_progress_counts_from_base() {
+        // No sweep before the window: the first sweeps show `base`, which
+        // is no progress.
+        let up = vec![
+            sweep(T0 + 20.0, 0.0),
+            sweep(T0 + 40.0, 0.0),
+            sweep(T0 + 60.0, 1.0),
+        ];
+        let input_up = input(T0, T0 + 100.0, 0, 1, Direction::Up, &[1.0]);
+        let reply = compute(&input_up, &up, &scrapes_of(&up, T0, T0 + 100.0), seen());
+        assert_eq!(reply.max_zero_progress_seconds, Some(60.0));
+
+        let down = vec![
+            sweep(T0 + 20.0, 10.0),
+            sweep(T0 + 40.0, 10.0),
+            sweep(T0 + 60.0, 9.0),
+        ];
+        let input_down = input(T0, T0 + 100.0, 10, 1, Direction::Down, &[1.0]);
+        let reply = compute(
+            &input_down,
+            &down,
+            &scrapes_of(&down, T0, T0 + 100.0),
+            seen(),
+        );
+        assert_eq!(reply.max_zero_progress_seconds, Some(60.0));
+    }
+
+    #[test]
+    fn count_out_of_range_is_store_error() {
+        let times = [
+            series(SWEEP_END, &[], &[(1_000, 1.0)]),
+            series(SWEEP_START, &[], &[(1_000, 0.5)]),
+            series(PROCESS_START, &[], &[(1_000, 0.1)]),
+        ];
+        // Count series of one source, by state.
+        let join = |values: &[f64]| {
+            let counts: Vec<RawSeries> = values
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    series(
+                        "carbide_site_health_probe_units",
+                        &[("state", &i.to_string())],
+                        &[(1_000, *v)],
+                    )
+                })
+                .collect();
+            join_points(&counts, &["state"], &times, &[])
+        };
+        let max = MAX_COUNT as f64;
+        let points = join(&[max - 1.0, 1.0]).expect("2^53 is a count");
+        assert_eq!(points[0].count, max);
+        // 2^53 + 1 rounds to 2^53 in f64, so the sum is checked in integers.
+        assert_eq!(max + 1.0, max);
+        for values in [
+            &[max, 1.0][..],
+            &[1e308, 1e308],
+            &[1e308],
+            &[max + 2.0],
+            &[-1.0],
+            &[0.5],
+        ] {
+            let err = join(values).expect_err("not a count");
+            assert_eq!(
+                err.status(),
+                axum::http::StatusCode::BAD_GATEWAY,
+                "{values:?}"
+            );
+        }
+
+        // Points built some other way are checked again.
+        let mut points = join(&[1.0]).expect("joins");
+        points[0].count = 1e308;
+        let err = sweeps(&points).expect_err("not a count");
+        assert_eq!(err.status(), axum::http::StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn out_of_range_sweep_time_is_store_error() {
+        let counts = [series(
+            "carbide_site_health_probe_units",
+            &[],
+            &[(1_000, 1.0)],
+        )];
+        let times = |end: f64, start: f64, process: f64| {
+            [
+                series(SWEEP_END, &[], &[(1_000, end)]),
+                series(SWEEP_START, &[], &[(1_000, start)]),
+                series(PROCESS_START, &[], &[(1_000, process)]),
+            ]
+        };
+        let good = join_points(&counts, &[], &times(1.0, 0.5, 0.1), &[]).expect("joins");
+        assert!(sweeps(&good).is_ok());
+        for (end, start, process) in [
+            (1e308, 0.5, 0.1),
+            (-1.0, 0.5, 0.1),
+            (1.0, 1e13, 0.1),
+            (1.0, 0.5, -5.0),
+            (1.0, 0.5, 1e308),
+        ] {
+            let points =
+                join_points(&counts, &[], &times(end, start, process), &[]).expect("joins");
+            let err = sweeps(&points).expect_err("not a time");
+            assert_eq!(
+                err.status(),
+                axum::http::StatusCode::BAD_GATEWAY,
+                "{end} {start} {process}"
+            );
+        }
+    }
+
+    #[test]
+    fn target_is_exact_ceil() {
+        // q·n in f64 lands just above a whole number for these.
+        let up = |q: f64, n: u64| input(T0, T0 + 1.0, 0, n, Direction::Up, &[q]).target(q);
+        assert_eq!(up(0.55, 100), Some(55));
+        assert_eq!(up(0.56, 4500), Some(2520));
+        assert_eq!(up(0.07, 4500), Some(315));
+        assert_eq!(up(0.07, 100), Some(7));
+        let down = |q: f64, base: u64, n: u64| {
+            input(T0, T0 + 1.0, base, n, Direction::Down, &[q]).target(q)
+        };
+        assert_eq!(down(0.55, 4500, 100), Some(4445));
+        assert_eq!(down(0.07, 100, 100), Some(93));
+
+        // The crossing is at the exact target, not one past it.
+        let ramp_up = ramp(10, |i| i as f64);
+        let input_up = input(T0 - 5.0, T0 + 200.0, 0, 100, Direction::Up, &[0.07]);
+        let reply = compute(
+            &input_up,
+            &ramp_up,
+            &scrapes_of(&ramp_up, T0, T0 + 200.0),
+            seen(),
+        );
+        assert_eq!(reply.crossings[0].target, 7);
+        assert_eq!(reply.crossings[0].reached_at, Some(at_secs(T0 + 140.0)));
+
+        // Against integer math, for the default quantiles and the ones
+        // above, all whole thousandths.
+        let mut milli: Vec<u64> = parse_q(DEFAULT_Q)
+            .unwrap()
+            .iter()
+            .map(|q| (q * 1000.0).round() as u64)
+            .collect();
+        milli.extend([550, 560, 70, 1]);
+        for n in 0..=20_000 {
+            for m in &milli {
+                let q = *m as f64 / 1000.0;
+                assert_eq!(up(q, n), Some((m * n).div_ceil(1000)), "q={q} n={n}");
+            }
+        }
+        // Just above a whole number is the next count, at six places.
+        assert_eq!(up(0.500001, 100), Some(51));
+        assert_eq!(down(0.500001, 100, 100), Some(49));
+        assert_eq!(up(0.500001, 1_000_000), Some(500_001));
+
+        // More places are refused, never rounded to a nearby target.
+        assert_eq!(up(0.500000000000001, 100), None);
+        assert_eq!(down(0.5000001, 100, 100), None);
+        let precise = input(T0, T0 + 1.0, 0, 100, Direction::Up, &[0.5000001]);
+        let err = precise.targets().expect_err("too precise");
+        assert_eq!(err.status(), axum::http::StatusCode::BAD_REQUEST);
+
+        // n past 2^53 keeps every unit; no target is past it.
+        let huge: u64 = 9_007_199_254_740_993;
+        assert_eq!(down(1.0, huge, huge), Some(0));
+        assert_eq!(up(0.5, huge), Some(4_503_599_627_370_497));
+        assert_eq!(up(1.0, huge), None);
+        assert_eq!(up(1.0, MAX_COUNT), Some(MAX_COUNT));
+        let past = input(T0, T0 + 1.0, MAX_COUNT + 1, 1, Direction::Down, &[1.0]);
+        assert_eq!(past.target(1.0), Some(MAX_COUNT));
+        let past = input(T0, T0 + 1.0, MAX_COUNT + 2, 1, Direction::Down, &[1.0]);
+        assert_eq!(past.target(1.0), None);
+        let err = past.targets().expect_err("too large");
+        assert_eq!(err.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn at_secs_never_panics() {
+        assert_eq!(
+            at_secs(1_761_213_605.5).timestamp_millis(),
+            1_761_213_605_500
+        );
+        for past in [-1.0, f64::NEG_INFINITY, f64::NAN] {
+            assert_eq!(at_secs(past), DateTime::<Utc>::UNIX_EPOCH, "{past}");
+        }
+        for future in [1e13, 1.8e19, 1e300, f64::INFINITY] {
+            assert_eq!(at_secs(future), DateTime::<Utc>::MAX_UTC, "{future}");
+        }
+
+        // A stray scrape far in the future is a scrape gap, not a panic.
+        let sweeps = ramp(5, |i| i as f64);
+        let mut scrapes = scrapes_of(&sweeps, T0, T0 + 100.0);
+        scrapes.push(ScrapeMark {
+            at_ms: i64::MAX,
+            end: T0 + 80.0,
+        });
+        let input = input(T0, T0 + 150.0, 0, 4, Direction::Up, &[1.0]);
+        let reply = compute(&input, &sweeps, &scrapes, seen());
+        assert_eq!(reply.scrape_gaps_total, 1);
+        assert_eq!(reply.scrape_gaps[0].to, DateTime::<Utc>::MAX_UTC);
     }
 }

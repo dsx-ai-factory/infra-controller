@@ -36,6 +36,13 @@ use serde::{Deserialize, Serialize};
 /// Quantiles `/v1/summary` reports when the request has no `q`.
 pub const DEFAULT_Q: &str = "0.5,0.9,0.95,0.99,0.995,1";
 
+/// Decimal places a `q` entry may have.
+pub const Q_DECIMALS: usize = 6;
+
+/// The largest count `/v1/summary` handles, 2^53: the largest an f64 holds
+/// exactly. No crossing target may exceed it.
+pub const MAX_COUNT: u64 = 1 << 53;
+
 /// Kind of unit a [`Filter`] selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -529,7 +536,11 @@ pub struct SummaryParams {
     pub base: u64,
     pub n: u64,
     pub direction: Direction,
-    /// Comma list of quantiles. [`DEFAULT_Q`] when absent.
+    /// Comma list of quantiles, each a decimal in (0, 1] with at most
+    /// [`Q_DECIMALS`] places. [`DEFAULT_Q`] when absent. The target of `q`
+    /// is `base + ceil(q * n)` going up and `base - ceil(q * n)` going down,
+    /// computed exactly. A `q` outside this form, or a target above
+    /// [`MAX_COUNT`] or below 0, is a 400 `invalid_param`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub q: Option<String>,
     pub add_window_seconds: f64,
@@ -644,13 +655,24 @@ pub struct ErrorDetail {
     pub field: Option<String>,
 }
 
-/// Parses a `q` comma list. Every entry must be in (0, 1]. The result is
-/// sorted and deduplicated.
+/// Parses a `q` comma list. Every entry must be a plain decimal in (0, 1]
+/// with at most [`Q_DECIMALS`] places, checked on the text before it becomes
+/// an f64, which would round extra places away. The result is sorted and
+/// deduplicated.
 pub fn parse_q(raw: &str) -> Result<Vec<f64>, String> {
     let mut qs = Vec::new();
     for entry in raw.split(',').map(str::trim) {
         if entry.is_empty() {
             return Err("q has an empty entry".to_string());
+        }
+        let (whole, places) = entry.split_once('.').unwrap_or((entry, ""));
+        if !(whole.bytes().chain(places.bytes())).all(|b| b.is_ascii_digit()) {
+            return Err(format!("q entry {entry:?} is not a decimal number"));
+        }
+        if places.len() > Q_DECIMALS {
+            return Err(format!(
+                "q entry {entry:?} has more than {Q_DECIMALS} decimal places"
+            ));
         }
         let q: f64 = entry
             .parse()
@@ -1326,8 +1348,18 @@ mod tests {
         );
         assert_eq!(parse_q("1").unwrap(), vec![1.0]);
         assert_eq!(parse_q("0.9, 0.5,0.9").unwrap(), vec![0.5, 0.9]);
-        for bad in ["", "0", "-0.5", "1.01", "0.5,", "x", "NaN", "inf"] {
+        assert_eq!(parse_q("0.500001,.25").unwrap(), vec![0.25, 0.500001]);
+        for bad in [
+            "", "0", "-0.5", "1.01", "0.5,", "x", "NaN", "inf", "5e-1", "+0.5", ".",
+        ] {
             assert!(parse_q(bad).is_err(), "{bad:?} should be rejected");
+        }
+        // Places past the sixth are refused before f64 could round them
+        // away: this one parses to exactly 0.5.
+        assert_eq!("0.50000000000000001".parse::<f64>().unwrap(), 0.5);
+        for precise in ["0.50000000000000001", "0.5000001", "1.0000000"] {
+            let err = parse_q(precise).expect_err("too precise");
+            assert!(err.contains("decimal places"), "{precise}: {err}");
         }
     }
 
