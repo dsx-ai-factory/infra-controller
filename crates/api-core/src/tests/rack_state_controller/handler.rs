@@ -2074,6 +2074,40 @@ async fn test_legacy_power_reset_submits_and_resumes_batch(
         assert_eq!(request.operation, MachineMaintenanceOperation::Reset);
         requests.push(request);
     }
+    let mut responses = Vec::new();
+    for id in [Some(rack_id.to_string()), None] {
+        responses.push(
+            env.api
+                .get_rack(Request::new(rpc::forge::GetRackRequest { id }))
+                .await?
+                .into_inner()
+                .rack,
+        );
+    }
+    responses.push(
+        env.api
+            .find_racks_by_ids(Request::new(rpc::forge::RacksByIdsRequest {
+                rack_ids: vec![rack_id.clone()],
+            }))
+            .await?
+            .into_inner()
+            .racks,
+    );
+    for response in responses {
+        let public_rack = response
+            .into_iter()
+            .find(|r| r.id.as_ref() == Some(&rack_id))
+            .unwrap();
+        assert_eq!(
+            public_rack.rack_state,
+            "Maintenance(PowerSequence(PowerReset))"
+        );
+        let lifecycle = public_rack.status.unwrap().lifecycle.unwrap();
+        assert_eq!(
+            serde_json::from_str::<RackState>(&lifecycle.state)?,
+            rack.controller_state.value
+        );
+    }
     env.run_rack_controller_iteration().await;
     let resumed = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     assert_eq!(resumed.controller_state.value, rack.controller_state.value);
