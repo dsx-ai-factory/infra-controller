@@ -145,10 +145,9 @@ async fn request_compute_host_restarts(
     let machine_ids = machines.iter().map(|machine| machine.id.into()).collect();
 
     Ok(StateHandlerOutcome::transition(RackState::Maintenance {
-        maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
-            configure_nmx_cluster: ConfigureNmxClusterState::WaitForComputeHostRestarts {
-                machine_ids,
-            },
+        maintenance_state: RackMaintenanceState::PowerSequence {
+            rack_power: RackPowerState::PowerReset,
+            restart_machine_ids: Some(machine_ids),
         },
     })
     .with_txn(txn))
@@ -156,7 +155,6 @@ async fn request_compute_host_restarts(
 
 async fn wait_for_compute_host_restarts(
     rack: &mut Rack,
-    scope: &MaintenanceScope,
     requested_machine_ids: &[HostMachineId],
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
@@ -224,7 +222,7 @@ async fn wait_for_compute_host_restarts(
         )));
     }
 
-    let next = next_state_after_configure(scope);
+    let next = RackMaintenanceState::Completed;
     tracing::info!(
         rack_id = %rack.id,
         machine_count = machines.len(),
@@ -432,9 +430,9 @@ async fn terminate_active_rack_maintenance(
                 state.nvos_update_job = Some(job);
             }
         }
-        RackMaintenanceState::ConfigureNmxCluster {
-            configure_nmx_cluster:
-                ConfigureNmxClusterState::WaitForComputeHostRestarts { machine_ids },
+        RackMaintenanceState::PowerSequence {
+            rack_power: RackPowerState::PowerReset,
+            restart_machine_ids: Some(machine_ids),
         } => {
             // Resets cover the saved batch, not the possibly narrower maintenance scope
             // or the rack's current membership.
@@ -1182,6 +1180,7 @@ fn next_state_after_configure(scope: &MaintenanceScope) -> RackMaintenanceState 
     if scope.should_run(&MaintenanceActivity::PowerSequence) {
         RackMaintenanceState::PowerSequence {
             rack_power: RackPowerState::PoweringOn,
+            restart_machine_ids: None,
         }
     } else {
         RackMaintenanceState::Completed
@@ -1224,9 +1223,11 @@ fn next_state_if_activity_not_requested(
         RackMaintenanceState::NVOSUpdate { .. } => {
             (!nvos_update_selected(scope)).then(|| next_state_after_nvos(scope))
         }
-        // Once NMX-C completed, finish its restart barrier even if the scope changes.
-        RackMaintenanceState::ConfigureNmxCluster {
-            configure_nmx_cluster: ConfigureNmxClusterState::WaitForComputeHostRestarts { .. },
+        // A submitted reset batch must finish even when PowerSequence was not
+        // explicitly selected (NMX-C success also submits this batch).
+        RackMaintenanceState::PowerSequence {
+            rack_power: RackPowerState::PowerReset,
+            restart_machine_ids: Some(_),
         } => None,
         RackMaintenanceState::ConfigureNmxCluster { .. } => (!scope
             .should_run(&MaintenanceActivity::ConfigureNmxCluster))
@@ -3280,9 +3281,6 @@ pub async fn handle_maintenance(
         RackMaintenanceState::ConfigureNmxCluster {
             configure_nmx_cluster,
         } => match configure_nmx_cluster {
-            ConfigureNmxClusterState::WaitForComputeHostRestarts { machine_ids } => {
-                wait_for_compute_host_restarts(state, scope, machine_ids, ctx).await
-            }
             ConfigureNmxClusterState::Start => {
                 start_configure_nmx_cluster(id, state, ctx, rack_profile_id, scope).await
             }
@@ -3331,7 +3329,10 @@ pub async fn handle_maintenance(
                 .await
             }
         },
-        RackMaintenanceState::PowerSequence { rack_power } => match rack_power {
+        RackMaintenanceState::PowerSequence {
+            rack_power,
+            restart_machine_ids,
+        } => match rack_power {
             RackPowerState::PoweringOn => {
                 tracing::info!(
                     rack_id = %id,
@@ -3351,15 +3352,10 @@ pub async fn handle_maintenance(
                     "power sequence (off) in progress".into(),
                 ))
             }
-            RackPowerState::PowerReset => {
-                tracing::info!(
-                    rack_id = %id,
-                    "Rack power sequence (reset) - stubbed",
-                );
-                Ok(StateHandlerOutcome::wait(
-                    "power sequence (reset) in progress".into(),
-                ))
-            }
+            RackPowerState::PowerReset => match restart_machine_ids {
+                Some(machine_ids) => wait_for_compute_host_restarts(state, machine_ids, ctx).await,
+                None => request_compute_host_restarts(state, ctx).await,
+            },
         },
         RackMaintenanceState::Completed => {
             tracing::info!(
@@ -3783,14 +3779,14 @@ mod tests {
     fn powering_on() -> RackMaintenanceState {
         RackMaintenanceState::PowerSequence {
             rack_power: RackPowerState::PoweringOn,
+            restart_machine_ids: None,
         }
     }
 
     fn restarting_compute_hosts() -> RackMaintenanceState {
-        RackMaintenanceState::ConfigureNmxCluster {
-            configure_nmx_cluster: ConfigureNmxClusterState::WaitForComputeHostRestarts {
-                machine_ids: vec![],
-            },
+        RackMaintenanceState::PowerSequence {
+            rack_power: RackPowerState::PowerReset,
+            restart_machine_ids: Some(vec![]),
         }
     }
 

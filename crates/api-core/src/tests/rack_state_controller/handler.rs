@@ -1812,6 +1812,19 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
         MachineMaintenanceOperation::PowerOn,
     )
     .await?;
+    // NMX-C success must run PowerReset even without an explicit PowerSequence activity.
+    db_rack::update(
+        txn.as_mut(),
+        &rack_id,
+        &RackConfig {
+            maintenance_requested: Some(MaintenanceScope {
+                activities: vec![MaintenanceActivity::ConfigureNmxCluster],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    )
+    .await?;
     crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
         txn.as_mut(),
         &rack_id,
@@ -1911,8 +1924,9 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
     assert!(matches!(
         rack.controller_state.value,
         RackState::Maintenance {
-            maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
-                configure_nmx_cluster: ConfigureNmxClusterState::WaitForComputeHostRestarts { .. },
+            maintenance_state: RackMaintenanceState::PowerSequence {
+                rack_power: RackPowerState::PowerReset,
+                restart_machine_ids: Some(_),
             },
         }
     ));
@@ -1920,11 +1934,9 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
     let restart_state = rack.controller_state.clone();
     if let RackState::Maintenance {
         maintenance_state:
-            RackMaintenanceState::ConfigureNmxCluster {
-                configure_nmx_cluster:
-                    ConfigureNmxClusterState::WaitForComputeHostRestarts {
-                        machine_ids: targets,
-                    },
+            RackMaintenanceState::PowerSequence {
+                rack_power: RackPowerState::PowerReset,
+                restart_machine_ids: Some(targets),
             },
     } = &restart_state.value
     {
@@ -1993,15 +2005,12 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
             assert!(matches!(
                 rack.controller_state.value,
                 RackState::Maintenance {
-                    maintenance_state: RackMaintenanceState::PowerSequence {
-                        rack_power: RackPowerState::PoweringOn,
-                    },
+                    maintenance_state: RackMaintenanceState::Completed,
                 }
             ));
         }
     }
 
-    env.run_rack_controller_iteration().await;
     env.run_rack_controller_iteration().await;
     let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
     assert!(matches!(
@@ -2011,6 +2020,73 @@ async fn test_compute_hosts_restart_before_validation_without_overwriting_pendin
         }
     ));
 
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_legacy_power_reset_submits_and_resumes_batch(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides {
+            config: Some(config_with_rack_profiles()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let (rack_id, host_a, host_b) = create_two_compute_rack(&env, &pool).await?;
+    // This is the exact PowerReset shape written before restart targets existed.
+    let legacy = serde_json::from_value(serde_json::json!({
+        "PowerSequence": { "rack_power": "PowerReset" }
+    }))?;
+    let mut txn = pool.begin().await?;
+    crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
+        txn.as_mut(),
+        &rack_id,
+        RackState::Maintenance {
+            maintenance_state: legacy,
+        },
+    )
+    .await?;
+    txn.commit().await?;
+    env.run_rack_controller_iteration().await;
+    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let expected_ids = vec![host_a.host_snapshot.id, host_b.host_snapshot.id];
+    let RackState::Maintenance {
+        maintenance_state:
+            RackMaintenanceState::PowerSequence {
+                rack_power: RackPowerState::PowerReset,
+                restart_machine_ids: Some(ref targets),
+            },
+    } = rack.controller_state.value
+    else {
+        panic!("expected submitted PowerReset");
+    };
+    assert_eq!(targets.len(), expected_ids.len());
+    let mut requests = Vec::new();
+    for id in &expected_ids {
+        assert!(targets.contains(id));
+        let machine = db::machine::find_one(&pool, id, Default::default())
+            .await?
+            .unwrap();
+        let request = machine.machine_maintenance_requested.unwrap();
+        assert_eq!(request.operation, MachineMaintenanceOperation::Reset);
+        requests.push(request);
+    }
+    env.run_rack_controller_iteration().await;
+    let resumed = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    assert_eq!(resumed.controller_state.value, rack.controller_state.value);
+    assert_eq!(
+        resumed.controller_state.version,
+        rack.controller_state.version
+    );
+    for (id, request) in expected_ids.iter().zip(requests) {
+        let machine = db::machine::find_one(&pool, id, Default::default())
+            .await?
+            .unwrap();
+        assert_eq!(machine.machine_maintenance_requested, Some(request));
+    }
     Ok(())
 }
 
@@ -2042,10 +2118,9 @@ async fn test_terminate_compute_restarts_uses_saved_targets(
         txn.as_mut(),
         &rack_id,
         RackState::Maintenance {
-            maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
-                configure_nmx_cluster: ConfigureNmxClusterState::WaitForComputeHostRestarts {
-                    machine_ids: ids.clone(),
-                },
+            maintenance_state: RackMaintenanceState::PowerSequence {
+                rack_power: RackPowerState::PowerReset,
+                restart_machine_ids: Some(ids.clone()),
             },
         },
     )
@@ -5397,8 +5472,9 @@ async fn run_configure_nmx_cluster_v2_workflow(
     assert!(matches!(
         rack.controller_state.value,
         RackState::Maintenance {
-            maintenance_state: RackMaintenanceState::ConfigureNmxCluster {
-                configure_nmx_cluster: ConfigureNmxClusterState::WaitForComputeHostRestarts { .. },
+            maintenance_state: RackMaintenanceState::PowerSequence {
+                rack_power: RackPowerState::PowerReset,
+                restart_machine_ids: Some(_),
             },
         }
     ));
@@ -6834,6 +6910,7 @@ async fn test_configure_nmx_cluster_transitions_to_completed(
     let nmx_state = RackState::Maintenance {
         maintenance_state: RackMaintenanceState::PowerSequence {
             rack_power: RackPowerState::PoweringOn,
+            restart_machine_ids: None,
         },
     };
     let outcome = handler_instance

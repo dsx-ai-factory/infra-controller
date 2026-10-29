@@ -517,8 +517,10 @@ pub enum RackState {
 /// ## Sub-state Flow
 ///
 /// ```text
-/// FirmwareUpgrade -> NVOSUpdate -> ConfigureNmxCluster -> Completed -> Validation(Pending)
+/// FirmwareUpgrade -> NVOSUpdate -> ConfigureNmxCluster -> PowerSequence -> Completed -> Validation(Pending)
 /// ```
+/// Activities can be skipped by scope, but a reset batch submitted after successful
+/// NMX-C configuration must complete before validation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RackMaintenanceState {
     FirmwareUpgrade {
@@ -532,6 +534,10 @@ pub enum RackMaintenanceState {
     },
     PowerSequence {
         rack_power: RackPowerState,
+        /// Hosts claimed by PowerReset. None means no batch has been submitted;
+        /// Some (including an empty list) resumes an already submitted batch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restart_machine_ids: Option<Vec<HostMachineId>>,
     },
     Completed,
 }
@@ -552,7 +558,7 @@ impl Display for RackMaintenanceState {
             } => {
                 write!(f, "ConfigureNmxCluster({})", configure_nmx_cluster)
             }
-            RackMaintenanceState::PowerSequence { rack_power } => {
+            RackMaintenanceState::PowerSequence { rack_power, .. } => {
                 write!(f, "PowerSequence({})", rack_power)
             }
             RackMaintenanceState::Completed => write!(f, "Completed"),
@@ -576,12 +582,6 @@ impl Display for RackMaintenanceState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfigureNmxClusterState {
     Start,
-
-    /// Waits for reset completion and Scout reboot reports newer than this state.
-    WaitForComputeHostRestarts {
-        /// Exact compute hosts that received the reset request.
-        machine_ids: Vec<HostMachineId>,
-    },
 
     /// Waits for the RMS switch-certificate batch to complete.
     WaitForSwitchCertificateJob {
@@ -618,9 +618,6 @@ impl Display for ConfigureNmxClusterState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConfigureNmxClusterState::Start => write!(f, "Start"),
-            ConfigureNmxClusterState::WaitForComputeHostRestarts { .. } => {
-                write!(f, "WaitForComputeHostRestarts")
-            }
             ConfigureNmxClusterState::WaitForSwitchCertificateJob { job_id } => {
                 write!(f, "WaitForSwitchCertificateJob({job_id})")
             }
@@ -678,6 +675,7 @@ impl Display for NvosUpdateState {
 pub enum RackPowerState {
     PoweringOn,
     PoweringOff,
+    /// Submits compute-host resets, or waits for the batch saved in PowerSequence.
     PowerReset,
 }
 
@@ -1022,6 +1020,48 @@ mod tests {
     use carbide_uuid::switch::{SwitchIdSource, SwitchType};
 
     use super::*;
+
+    #[test]
+    fn power_sequence_preserves_legacy_states_and_submitted_targets() {
+        let host_id: HostMachineId = "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"
+            .parse()
+            .unwrap();
+        for (encoded, rack_power, restart_machine_ids) in [
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PoweringOn"}}),
+                RackPowerState::PoweringOn,
+                None,
+            ),
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PoweringOff"}}),
+                RackPowerState::PoweringOff,
+                None,
+            ),
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PowerReset"}}),
+                RackPowerState::PowerReset,
+                None,
+            ),
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PowerReset", "restart_machine_ids": []}}),
+                RackPowerState::PowerReset,
+                Some(vec![]),
+            ),
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PowerReset", "restart_machine_ids": [host_id]}}),
+                RackPowerState::PowerReset,
+                Some(vec![host_id]),
+            ),
+        ] {
+            let expected = RackMaintenanceState::PowerSequence {
+                rack_power,
+                restart_machine_ids,
+            };
+            let decoded: RackMaintenanceState = serde_json::from_value(encoded.clone()).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+        }
+    }
 
     // ConfigureNmxClusterState wire compatibility
 
