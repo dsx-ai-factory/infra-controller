@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestAPITenantAccountRoutingProfileUpdateRequest_Validate(t *testing.T) {
+func TestAPITenantRoutingProfileUpdateRequest_Validate(t *testing.T) {
 	cases := []struct {
 		name  string
 		body  string
@@ -46,14 +46,14 @@ func TestAPITenantAccountRoutingProfileUpdateRequest_Validate(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var req APITenantAccountRoutingProfileUpdateRequest
+			var req APITenantRoutingProfileUpdateRequest
 			require.NoError(t, json.Unmarshal([]byte(tc.body), &req))
 			assert.Equal(t, tc.valid, req.Validate() == nil)
 		})
 	}
 }
 
-func TestAPITenantAccountRoutingProfileUpdateRequest_ToProto(t *testing.T) {
+func TestAPITenantRoutingProfileUpdateRequest_ToProto(t *testing.T) {
 	cases := []struct {
 		profile string
 		want    string
@@ -76,7 +76,7 @@ func TestAPITenantAccountRoutingProfileUpdateRequest_ToProto(t *testing.T) {
 				},
 				Version: "V7-T1761856992374052",
 			}
-			req := APITenantAccountRoutingProfileUpdateRequest{
+			req := APITenantRoutingProfileUpdateRequest{
 				DefaultRoutingProfile: tc.profile,
 			}
 			got := req.ToProto(current)

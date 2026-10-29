@@ -32,13 +32,93 @@ import (
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
 
-func TestUpdateTenantAccountRoutingProfileHandler_Handle(t *testing.T) {
+func TestUpdateTenantRoutingProfileHandler_Handle(t *testing.T) {
 	cases := []struct {
-		name    string
-		prepare func(*testing.T, *tenantAccountRoutingProfileFixture)
-		status  int
-		calls   int
+		name          string
+		currentTenant bool
+		prepare       func(*testing.T, *tenantRoutingProfileFixture)
+		status        int
+		calls         int
 	}{
+		{
+			name:          "privileged tenant updates its own default",
+			currentTenant: true,
+			status:        http.StatusOK,
+			calls:         2,
+		},
+		{
+			name:          "tenant cannot select another organization in the body or query",
+			currentTenant: true,
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
+				f.body = fmt.Sprintf(`{"siteId":%q,"defaultRoutingProfile":"internal","tenantId":%q,"organizationId":"other-tenant"}`, f.siteID, uuid.NewString())
+			},
+			status: http.StatusOK,
+			calls:  2,
+		},
+		{
+			name:          "unprivileged tenant cannot update its default",
+			currentTenant: true,
+			prepare:       func(t *testing.T, f *tenantRoutingProfileFixture) { f.setPrivilege(t, false) },
+			status:        http.StatusForbidden,
+		},
+		{
+			name:          "site denial overrides account privilege",
+			currentTenant: true,
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
+				cdbm.TestBuildTenantSite(t, f.db, f.tenant, f.site, &cdbm.TenantSiteConfig{
+					TargetedInstanceCreation: cutil.GetPtr(false),
+				}, f.user)
+			},
+			status: http.StatusForbidden,
+		},
+		{
+			name:          "site grant permits update without account-wide privilege",
+			currentTenant: true,
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
+				f.setPrivilege(t, false)
+				cdbm.TestBuildTenantSite(t, f.db, f.tenant, f.site, &cdbm.TenantSiteConfig{
+					TargetedInstanceCreation: cutil.GetPtr(true),
+				}, f.user)
+			},
+			status: http.StatusOK,
+			calls:  2,
+		},
+		{
+			name:          "privilege at another provider does not grant access",
+			currentTenant: true,
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
+				other := common.TestBuildInfrastructureProvider(t, f.db, "Other", "other-provider", f.user)
+				_, err := f.db.DB.NewUpdate().Model(f.site).Set("infrastructure_provider_id = ?", other.ID).WherePK().Exec(context.Background())
+				require.NoError(t, err)
+			},
+			status: http.StatusForbidden,
+		},
+		{
+			name:          "site grant still requires a Ready account",
+			currentTenant: true,
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
+				cdbm.TestBuildTenantSite(t, f.db, f.tenant, f.site, &cdbm.TenantSiteConfig{
+					TargetedInstanceCreation: cutil.GetPtr(true),
+				}, f.user)
+				_, err := f.db.DB.NewUpdate().Model(f.account).Set("status = ?", cdbm.TenantAccountStatusInvited).WherePK().Exec(context.Background())
+				require.NoError(t, err)
+			},
+			status: http.StatusForbidden,
+		},
+		{
+			name:          "provider role alone cannot use current tenant endpoint",
+			currentTenant: true,
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
+				f.user = common.TestBuildUser(t, f.db, uuid.NewString(), f.org, []string{authz.ProviderAdminRole})
+			},
+			status: http.StatusForbidden,
+		},
+		{
+			name:          "tenant cannot use another org path",
+			currentTenant: true,
+			prepare:       func(t *testing.T, f *tenantRoutingProfileFixture) { f.org = "other-tenant" },
+			status:        http.StatusForbidden,
+		},
 		{
 			name:   "provider changes default with metadata and version preserved",
 			status: http.StatusOK,
@@ -46,7 +126,7 @@ func TestUpdateTenantAccountRoutingProfileHandler_Handle(t *testing.T) {
 		},
 		{
 			name: "configured profile is passed unchanged",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) {
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
 				f.profile = "TENANT_EDGE"
 				f.updated.Tenant.RoutingProfileType = cutil.GetPtr(f.profile)
 			},
@@ -55,24 +135,24 @@ func TestUpdateTenantAccountRoutingProfileHandler_Handle(t *testing.T) {
 		},
 		{
 			name:    "missing user",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) { f.user = nil },
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) { f.user = nil },
 			status:  http.StatusInternalServerError,
 		},
 		{
 			name:    "wrong org membership",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) { f.org = "another-org" },
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) { f.org = "another-org" },
 			status:  http.StatusForbidden,
 		},
 		{
 			name: "provider viewer cannot mutate",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) {
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
 				f.user = common.TestBuildUser(t, f.db, uuid.NewString(), f.org, []string{authz.ProviderViewerRole})
 			},
 			status: http.StatusForbidden,
 		},
 		{
-			name: "privileged tenant cannot mutate",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) {
+			name: "privileged tenant cannot use provider route",
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
 				f.org = f.account.TenantOrg
 				f.user = common.TestBuildUser(t, f.db, uuid.NewString(), f.org, []string{authz.TenantAdminRole})
 				_, err := cdbm.NewTenantAccountDAO(f.db).Update(context.Background(), nil, cdbm.TenantAccountUpdateInput{
@@ -86,18 +166,31 @@ func TestUpdateTenantAccountRoutingProfileHandler_Handle(t *testing.T) {
 			status: http.StatusForbidden,
 		},
 		{
-			name:    "malformed account ID",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) { f.accountID = "invalid" },
+			name:    "malformed tenant ID",
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) { f.tenantID = "invalid" },
 			status:  http.StatusBadRequest,
 		},
 		{
-			name:    "missing account",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) { f.accountID = uuid.NewString() },
+			name:    "missing tenant",
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) { f.tenantID = uuid.NewString() },
 			status:  http.StatusNotFound,
 		},
 		{
+			name:    "account ID cannot be used as Tenant ID",
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) { f.tenantID = f.account.ID.String() },
+			status:  http.StatusNotFound,
+		},
+		{
+			name: "unlinked Tenant cannot be updated by Provider",
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
+				_, err := f.db.DB.NewUpdate().Model(f.account).Set("tenant_id = NULL").WherePK().Exec(context.Background())
+				require.NoError(t, err)
+			},
+			status: http.StatusForbidden,
+		},
+		{
 			name: "foreign account",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) {
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
 				other := common.TestBuildInfrastructureProvider(t, f.db, "Other", "other-provider", f.user)
 				_, err := f.db.DB.NewUpdate().Model(f.account).Set("infrastructure_provider_id = ?", other.ID).WherePK().Exec(context.Background())
 				require.NoError(t, err)
@@ -106,7 +199,7 @@ func TestUpdateTenantAccountRoutingProfileHandler_Handle(t *testing.T) {
 		},
 		{
 			name: "unaccepted account",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) {
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
 				_, err := f.db.DB.NewUpdate().Model(f.account).Set("status = ?", cdbm.TenantAccountStatusInvited).WherePK().Exec(context.Background())
 				require.NoError(t, err)
 			},
@@ -114,22 +207,22 @@ func TestUpdateTenantAccountRoutingProfileHandler_Handle(t *testing.T) {
 		},
 		{
 			name:    "malformed JSON",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) { f.body = "{" },
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) { f.body = "{" },
 			status:  http.StatusBadRequest,
 		},
 		{
 			name:    "invalid request rejected before proxy",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) { f.profile = "" },
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) { f.profile = "" },
 			status:  http.StatusBadRequest,
 		},
 		{
 			name:    "missing site",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) { f.siteID = uuid.NewString() },
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) { f.siteID = uuid.NewString() },
 			status:  http.StatusBadRequest,
 		},
 		{
 			name: "foreign site",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) {
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
 				other := common.TestBuildInfrastructureProvider(t, f.db, "Other", "other-provider", f.user)
 				_, err := f.db.DB.NewUpdate().Model(f.site).Set("infrastructure_provider_id = ?", other.ID).WherePK().Exec(context.Background())
 				require.NoError(t, err)
@@ -138,7 +231,7 @@ func TestUpdateTenantAccountRoutingProfileHandler_Handle(t *testing.T) {
 		},
 		{
 			name: "unregistered site",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) {
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
 				_, err := f.db.DB.NewUpdate().Model(f.site).Set("status = ?", cdbm.SiteStatusPending).WherePK().Exec(context.Background())
 				require.NoError(t, err)
 			},
@@ -146,7 +239,7 @@ func TestUpdateTenantAccountRoutingProfileHandler_Handle(t *testing.T) {
 		},
 		{
 			name: "site without native networking",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) {
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
 				_, err := f.db.DB.NewUpdate().Model(f.site).Set("config = NULL").WherePK().Exec(context.Background())
 				require.NoError(t, err)
 			},
@@ -154,13 +247,13 @@ func TestUpdateTenantAccountRoutingProfileHandler_Handle(t *testing.T) {
 		},
 		{
 			name:    "tenant missing on Core",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) { f.current.Tenant = nil },
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) { f.current.Tenant = nil },
 			status:  http.StatusNotFound,
 			calls:   1,
 		},
 		{
 			name: "mismatched Core identity cannot target another tenant",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) {
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
 				f.current.Tenant.OrganizationId = "other-tenant"
 			},
 			status: http.StatusInternalServerError,
@@ -168,19 +261,19 @@ func TestUpdateTenantAccountRoutingProfileHandler_Handle(t *testing.T) {
 		},
 		{
 			name:    "missing concurrency token prevents update",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) { f.current.Tenant.Version = "" },
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) { f.current.Tenant.Version = "" },
 			status:  http.StatusInternalServerError,
 			calls:   1,
 		},
 		{
 			name:    "metadata cannot be reconstructed from stale REST state",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) { f.current.Tenant.Metadata = nil },
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) { f.current.Tenant.Metadata = nil },
 			status:  http.StatusInternalServerError,
 			calls:   1,
 		},
 		{
 			name: "Core read failure prevents mutation",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) {
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
 				f.readErr = temporal.NewNonRetryableApplicationError("Core unavailable", swe.ErrTypeNICoUnavailable, nil)
 			},
 			status: http.StatusServiceUnavailable,
@@ -188,7 +281,7 @@ func TestUpdateTenantAccountRoutingProfileHandler_Handle(t *testing.T) {
 		},
 		{
 			name: "active FNN VPC rejection is preserved",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) {
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
 				f.updateErr = temporal.NewNonRetryableApplicationError("tenant has active FNN VPCs", swe.ErrTypeNICoFailedPrecondition, nil)
 			},
 			status: http.StatusPreconditionFailed,
@@ -196,7 +289,7 @@ func TestUpdateTenantAccountRoutingProfileHandler_Handle(t *testing.T) {
 		},
 		{
 			name: "concurrent update rejection is preserved without retry",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) {
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
 				f.updateErr = temporal.NewNonRetryableApplicationError("tenant version changed", swe.ErrTypeNICoFailedPrecondition, nil)
 			},
 			status: http.StatusPreconditionFailed,
@@ -204,7 +297,7 @@ func TestUpdateTenantAccountRoutingProfileHandler_Handle(t *testing.T) {
 		},
 		{
 			name: "unknown profile rejected by Core",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) {
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
 				f.updateErr = temporal.NewNonRetryableApplicationError("RoutingProfile not found", swe.ErrTypeNICoObjectNotFound, nil)
 			},
 			status: http.StatusBadRequest,
@@ -212,13 +305,13 @@ func TestUpdateTenantAccountRoutingProfileHandler_Handle(t *testing.T) {
 		},
 		{
 			name:    "empty mutation response is not success",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) { f.updated.Tenant = nil },
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) { f.updated.Tenant = nil },
 			status:  http.StatusInternalServerError,
 			calls:   2,
 		},
 		{
 			name: "unchanged response is not success",
-			prepare: func(t *testing.T, f *tenantAccountRoutingProfileFixture) {
+			prepare: func(t *testing.T, f *tenantRoutingProfileFixture) {
 				f.updated.Tenant.RoutingProfileType = cutil.GetPtr("EXTERNAL")
 			},
 			status: http.StatusInternalServerError,
@@ -227,7 +320,13 @@ func TestUpdateTenantAccountRoutingProfileHandler_Handle(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newTenantAccountRoutingProfileFixture(t)
+			f := newTenantRoutingProfileFixture(t)
+			if tc.currentTenant {
+				f.org = f.tenant.Org
+				f.user = common.TestBuildUser(t, f.db, uuid.NewString(), f.org, []string{authz.TenantAdminRole})
+				f.tenantID = ""
+				f.setPrivilege(t, true)
+			}
 			if tc.prepare != nil {
 				tc.prepare(t, f)
 			}
@@ -241,27 +340,35 @@ func TestUpdateTenantAccountRoutingProfileHandler_Handle(t *testing.T) {
 				f.expectProxy(t, corev1.Forge_UpdateTenant_FullMethodName, f.updated, f.updateErr)
 			}
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(f.body))
+			h := NewUpdateTenantRoutingProfileHandler(f.db, f.scp)
+			path := "/org/:orgName/nico/tenant/:id/routing-profile"
+			url := "/org/" + f.org + "/nico/tenant/" + f.tenantID + "/routing-profile"
+			if tc.currentTenant {
+				path = "/org/:orgName/nico/tenant/current/routing-profile"
+				url = "/org/" + f.org + "/nico/tenant/current/routing-profile?tenantId=" + uuid.NewString()
+			}
+			e.PATCH(path, h.Handle, func(next echo.HandlerFunc) echo.HandlerFunc {
+				return func(c echo.Context) error {
+					c.Set("user", f.user)
+					return next(c)
+				}
+			})
+			req := httptest.NewRequest(http.MethodPatch, url, strings.NewReader(f.body))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
-			c := e.NewContext(req, rec)
-			c.SetParamNames("orgName", "id")
-			c.SetParamValues(f.org, f.accountID)
-			c.Set("user", f.user)
-			h := NewUpdateTenantAccountRoutingProfileHandler(f.db, f.scp)
-			require.NoError(t, h.Handle(c))
+			e.ServeHTTP(rec, req)
 			assert.Equal(t, tc.status, rec.Code, rec.Body.String())
 			require.Len(t, f.calls, tc.calls)
 			f.client.AssertExpectations(t)
 			if tc.calls > 0 {
 				var read corev1.FindTenantRequest
 				require.NoError(t, protojson.Unmarshal(f.calls[0].RequestJSON, &read))
-				assert.Equal(t, f.account.TenantOrg, read.TenantOrganizationId)
+				assert.Equal(t, f.tenant.Org, read.TenantOrganizationId)
 			}
 			if tc.calls > 1 {
 				var update corev1.UpdateTenantRequest
 				require.NoError(t, protojson.Unmarshal(f.calls[1].RequestJSON, &update))
-				assert.Equal(t, f.account.TenantOrg, update.OrganizationId)
+				assert.Equal(t, f.tenant.Org, update.OrganizationId)
 				assert.Equal(t, f.current.Tenant.Version, update.GetIfVersionMatch())
 				assert.True(t, proto.Equal(f.current.Tenant.Metadata, update.Metadata))
 				assert.Empty(t, f.calls[1].EncryptedSecrets)
@@ -273,13 +380,14 @@ func TestUpdateTenantAccountRoutingProfileHandler_Handle(t *testing.T) {
 	}
 }
 
-type tenantAccountRoutingProfileFixture struct {
+type tenantRoutingProfileFixture struct {
 	db        *cdb.Session
 	org       string
 	user      *cdbm.User
 	site      *cdbm.Site
 	account   *cdbm.TenantAccount
-	accountID string
+	tenant    *cdbm.Tenant
+	tenantID  string
 	siteID    string
 	profile   string
 	body      string
@@ -292,7 +400,7 @@ type tenantAccountRoutingProfileFixture struct {
 	calls     []grpcproxy.Request
 }
 
-func newTenantAccountRoutingProfileFixture(t *testing.T) *tenantAccountRoutingProfileFixture {
+func newTenantRoutingProfileFixture(t *testing.T) *tenantRoutingProfileFixture {
 	t.Helper()
 	db := common.TestInitDB(t)
 	t.Cleanup(db.Close)
@@ -325,15 +433,16 @@ func newTenantAccountRoutingProfileFixture(t *testing.T) *tenantAccountRoutingPr
 	updated := proto.Clone(current).(*corev1.Tenant)
 	updated.Version = "V8-T1761856992374053"
 	updated.RoutingProfileType = cutil.GetPtr("INTERNAL")
-	return &tenantAccountRoutingProfileFixture{
-		db:        db,
-		org:       org,
-		user:      user,
-		site:      site,
-		account:   account,
-		accountID: account.ID.String(),
-		siteID:    site.ID.String(),
-		profile:   "internal",
+	return &tenantRoutingProfileFixture{
+		db:       db,
+		org:      org,
+		user:     user,
+		site:     site,
+		account:  account,
+		tenant:   tenant,
+		tenantID: tenant.ID.String(),
+		siteID:   site.ID.String(),
+		profile:  "internal",
 		current: &corev1.FindTenantResponse{
 			Tenant: current,
 		},
@@ -345,7 +454,7 @@ func newTenantAccountRoutingProfileFixture(t *testing.T) *tenantAccountRoutingPr
 	}
 }
 
-func (f *tenantAccountRoutingProfileFixture) expectProxy(t *testing.T, method string, response proto.Message, resultErr error) {
+func (f *tenantRoutingProfileFixture) expectProxy(t *testing.T, method string, response proto.Message, resultErr error) {
 	t.Helper()
 	run := &tmocks.WorkflowRun{}
 	run.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
@@ -360,4 +469,15 @@ func (f *tenantAccountRoutingProfileFixture) expectProxy(t *testing.T, method st
 		f.calls = append(f.calls, args.Get(3).(grpcproxy.Request))
 	}).Return(run, nil).Once()
 	t.Cleanup(func() { run.AssertExpectations(t) })
+}
+
+func (f *tenantRoutingProfileFixture) setPrivilege(t *testing.T, enabled bool) {
+	t.Helper()
+	_, err := cdbm.NewTenantAccountDAO(f.db).Update(context.Background(), nil, cdbm.TenantAccountUpdateInput{
+		TenantAccountID: f.account.ID,
+		Config: &cdbm.TenantAccountConfig{
+			TargetedInstanceCreation: enabled,
+		},
+	})
+	require.NoError(t, err)
 }

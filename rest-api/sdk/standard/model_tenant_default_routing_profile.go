@@ -19,38 +19,38 @@ import (
 	"fmt"
 )
 
-// checks if the TenantAccountRoutingProfile type satisfies the MappedNullable interface at compile time
-var _ MappedNullable = &TenantAccountRoutingProfile{}
+// checks if the TenantDefaultRoutingProfile type satisfies the MappedNullable interface at compile time
+var _ MappedNullable = &TenantDefaultRoutingProfile{}
 
-// TenantAccountRoutingProfile Tenant default routing profile accepted by the Site
-type TenantAccountRoutingProfile struct {
+// TenantDefaultRoutingProfile Tenant default routing profile accepted by the Site
+type TenantDefaultRoutingProfile struct {
 	SiteId                string `json:"siteId"`
 	DefaultRoutingProfile string `json:"defaultRoutingProfile"`
 }
 
-type _TenantAccountRoutingProfile TenantAccountRoutingProfile
+type _TenantDefaultRoutingProfile TenantDefaultRoutingProfile
 
-// NewTenantAccountRoutingProfile instantiates a new TenantAccountRoutingProfile object
+// NewTenantDefaultRoutingProfile instantiates a new TenantDefaultRoutingProfile object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTenantAccountRoutingProfile(siteId string, defaultRoutingProfile string) *TenantAccountRoutingProfile {
-	this := TenantAccountRoutingProfile{}
+func NewTenantDefaultRoutingProfile(siteId string, defaultRoutingProfile string) *TenantDefaultRoutingProfile {
+	this := TenantDefaultRoutingProfile{}
 	this.SiteId = siteId
 	this.DefaultRoutingProfile = defaultRoutingProfile
 	return &this
 }
 
-// NewTenantAccountRoutingProfileWithDefaults instantiates a new TenantAccountRoutingProfile object
+// NewTenantDefaultRoutingProfileWithDefaults instantiates a new TenantDefaultRoutingProfile object
 // This constructor will only assign default values to properties that have it defined,
 // but it doesn't guarantee that properties required by API are set
-func NewTenantAccountRoutingProfileWithDefaults() *TenantAccountRoutingProfile {
-	this := TenantAccountRoutingProfile{}
+func NewTenantDefaultRoutingProfileWithDefaults() *TenantDefaultRoutingProfile {
+	this := TenantDefaultRoutingProfile{}
 	return &this
 }
 
 // GetSiteId returns the SiteId field value
-func (o *TenantAccountRoutingProfile) GetSiteId() string {
+func (o *TenantDefaultRoutingProfile) GetSiteId() string {
 	if o == nil {
 		var ret string
 		return ret
@@ -61,7 +61,7 @@ func (o *TenantAccountRoutingProfile) GetSiteId() string {
 
 // GetSiteIdOk returns a tuple with the SiteId field value
 // and a boolean to check if the value has been set.
-func (o *TenantAccountRoutingProfile) GetSiteIdOk() (*string, bool) {
+func (o *TenantDefaultRoutingProfile) GetSiteIdOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -69,12 +69,12 @@ func (o *TenantAccountRoutingProfile) GetSiteIdOk() (*string, bool) {
 }
 
 // SetSiteId sets field value
-func (o *TenantAccountRoutingProfile) SetSiteId(v string) {
+func (o *TenantDefaultRoutingProfile) SetSiteId(v string) {
 	o.SiteId = v
 }
 
 // GetDefaultRoutingProfile returns the DefaultRoutingProfile field value
-func (o *TenantAccountRoutingProfile) GetDefaultRoutingProfile() string {
+func (o *TenantDefaultRoutingProfile) GetDefaultRoutingProfile() string {
 	if o == nil {
 		var ret string
 		return ret
@@ -85,7 +85,7 @@ func (o *TenantAccountRoutingProfile) GetDefaultRoutingProfile() string {
 
 // GetDefaultRoutingProfileOk returns a tuple with the DefaultRoutingProfile field value
 // and a boolean to check if the value has been set.
-func (o *TenantAccountRoutingProfile) GetDefaultRoutingProfileOk() (*string, bool) {
+func (o *TenantDefaultRoutingProfile) GetDefaultRoutingProfileOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -93,11 +93,11 @@ func (o *TenantAccountRoutingProfile) GetDefaultRoutingProfileOk() (*string, boo
 }
 
 // SetDefaultRoutingProfile sets field value
-func (o *TenantAccountRoutingProfile) SetDefaultRoutingProfile(v string) {
+func (o *TenantDefaultRoutingProfile) SetDefaultRoutingProfile(v string) {
 	o.DefaultRoutingProfile = v
 }
 
-func (o TenantAccountRoutingProfile) MarshalJSON() ([]byte, error) {
+func (o TenantDefaultRoutingProfile) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
 		return []byte{}, err
@@ -105,14 +105,14 @@ func (o TenantAccountRoutingProfile) MarshalJSON() ([]byte, error) {
 	return json.Marshal(toSerialize)
 }
 
-func (o TenantAccountRoutingProfile) ToMap() (map[string]interface{}, error) {
+func (o TenantDefaultRoutingProfile) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["siteId"] = o.SiteId
 	toSerialize["defaultRoutingProfile"] = o.DefaultRoutingProfile
 	return toSerialize, nil
 }
 
-func (o *TenantAccountRoutingProfile) UnmarshalJSON(data []byte) (err error) {
+func (o *TenantDefaultRoutingProfile) UnmarshalJSON(data []byte) (err error) {
 	// This validates that all required properties are included in the JSON object
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
@@ -135,52 +135,52 @@ func (o *TenantAccountRoutingProfile) UnmarshalJSON(data []byte) (err error) {
 		}
 	}
 
-	varTenantAccountRoutingProfile := _TenantAccountRoutingProfile{}
+	varTenantDefaultRoutingProfile := _TenantDefaultRoutingProfile{}
 
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	err = decoder.Decode(&varTenantAccountRoutingProfile)
+	err = decoder.Decode(&varTenantDefaultRoutingProfile)
 
 	if err != nil {
 		return err
 	}
 
-	*o = TenantAccountRoutingProfile(varTenantAccountRoutingProfile)
+	*o = TenantDefaultRoutingProfile(varTenantDefaultRoutingProfile)
 
 	return err
 }
 
-type NullableTenantAccountRoutingProfile struct {
-	value *TenantAccountRoutingProfile
+type NullableTenantDefaultRoutingProfile struct {
+	value *TenantDefaultRoutingProfile
 	isSet bool
 }
 
-func (v NullableTenantAccountRoutingProfile) Get() *TenantAccountRoutingProfile {
+func (v NullableTenantDefaultRoutingProfile) Get() *TenantDefaultRoutingProfile {
 	return v.value
 }
 
-func (v *NullableTenantAccountRoutingProfile) Set(val *TenantAccountRoutingProfile) {
+func (v *NullableTenantDefaultRoutingProfile) Set(val *TenantDefaultRoutingProfile) {
 	v.value = val
 	v.isSet = true
 }
 
-func (v NullableTenantAccountRoutingProfile) IsSet() bool {
+func (v NullableTenantDefaultRoutingProfile) IsSet() bool {
 	return v.isSet
 }
 
-func (v *NullableTenantAccountRoutingProfile) Unset() {
+func (v *NullableTenantDefaultRoutingProfile) Unset() {
 	v.value = nil
 	v.isSet = false
 }
 
-func NewNullableTenantAccountRoutingProfile(val *TenantAccountRoutingProfile) *NullableTenantAccountRoutingProfile {
-	return &NullableTenantAccountRoutingProfile{value: val, isSet: true}
+func NewNullableTenantDefaultRoutingProfile(val *TenantDefaultRoutingProfile) *NullableTenantDefaultRoutingProfile {
+	return &NullableTenantDefaultRoutingProfile{value: val, isSet: true}
 }
 
-func (v NullableTenantAccountRoutingProfile) MarshalJSON() ([]byte, error) {
+func (v NullableTenantDefaultRoutingProfile) MarshalJSON() ([]byte, error) {
 	return json.Marshal(v.value)
 }
 
-func (v *NullableTenantAccountRoutingProfile) UnmarshalJSON(src []byte) error {
+func (v *NullableTenantDefaultRoutingProfile) UnmarshalJSON(src []byte) error {
 	v.isSet = true
 	return json.Unmarshal(src, &v.value)
 }

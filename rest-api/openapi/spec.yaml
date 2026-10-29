@@ -578,6 +578,48 @@ paths:
           $ref: '#/components/responses/NotFoundError'
         '504':
           $ref: '#/components/responses/GatewayTimeoutError'
+    patch:
+      summary: Update current Tenant default routing profile
+      operationId: update-current-tenant-routing-profile
+      tags:
+        - Tenant
+      description: |-
+        Change the current Tenant's default VPC routing profile at one Site. Requires `TENANT_ADMIN` authorization and effective TargetedInstanceCreation for this Tenant at the requested Site. A Site-specific override takes precedence over the Ready Tenant Account's default privilege. The Site must be Registered with native networking enabled. The target Tenant is always resolved from the request organization.
+
+        The profile must exist in the Site configuration. The aliases `external`, `internal`, and `privileged-internal` select the built-in profiles; other configured names are case-sensitive and passed unchanged. The default cannot be cleared. Both request fields are required; omission, null, or an empty value is rejected.
+
+        The Tenant must have no active FNN VPCs when changing the profile. Reapplying the same profile is allowed. Existing VPCs are not modified. Tenant metadata is preserved, and a concurrent Tenant change causes a 412 response instead of overwriting newer state. A timeout does not prove the update failed; inspect the Tenant's default before retrying.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TenantRoutingProfileUpdateRequest'
+      responses:
+        '200':
+          description: Default routing profile accepted by the Site
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantDefaultRoutingProfile'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: The Tenant has active FNN VPCs or changed concurrently
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
   '/v2/org/{org}/nico/tenant/account':
     parameters:
       - schema:
@@ -756,7 +798,7 @@ paths:
                   tenantOrg: rf43bbtnb9c5
       tags:
         - Tenant Account
-  '/v2/org/{org}/nico/tenant/account/{accountId}/routing-profile':
+  '/v2/org/{org}/nico/tenant/{tenantId}/routing-profile':
     parameters:
       - name: org
         in: path
@@ -764,20 +806,20 @@ paths:
         description: Name of the Provider Org
         schema:
           type: string
-      - name: accountId
+      - name: tenantId
         in: path
         required: true
-        description: ID of the Tenant Account
+        description: ID of the Tenant
         schema:
           type: string
           format: uuid
     patch:
-      summary: Update Tenant Account default routing profile
-      operationId: update-tenant-account-routing-profile
+      summary: Update Tenant default routing profile
+      operationId: update-tenant-default-routing-profile
       tags:
-        - Tenant Account
+        - Tenant
       description: |-
-        Change the Tenant's default VPC routing profile at one Site. Requires `PROVIDER_ADMIN` authorization for the Tenant Account's Infrastructure Provider. The Tenant Account must be Ready and linked to a Tenant, and the Site must belong to the same Provider, be Registered, and have native networking enabled.
+        Change the Tenant's default VPC routing profile at one Site. The path parameter is a Tenant ID. Requires `PROVIDER_ADMIN` authorization and a Ready Tenant Account linking that Tenant to the caller's Infrastructure Provider. The Site must belong to the same Provider, be Registered, and have native networking enabled.
 
         The profile must exist in the Site configuration. The aliases `external`, `internal`, and `privileged-internal` select the built-in profiles; other configured names are case-sensitive and passed unchanged. The default cannot be cleared. Both request fields are required; omission, null, or an empty value is rejected.
 
@@ -787,14 +829,14 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/TenantAccountRoutingProfileUpdateRequest'
+              $ref: '#/components/schemas/TenantRoutingProfileUpdateRequest'
       responses:
         '200':
           description: Default routing profile accepted by the Site
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TenantAccountRoutingProfile'
+                $ref: '#/components/schemas/TenantDefaultRoutingProfile'
         '400':
           $ref: '#/components/responses/ValidationError'
         '403':
@@ -20850,8 +20892,8 @@ components:
           deprecated: true
           readOnly: true
           description: Deprecated in favor of TenantAccount.siteCapabilities. On GET `/tenant/current`, the property is present and true only when every Ready Tenant Account enables TargetedInstanceCreation and no Tenant Site explicitly disables it; otherwise it is omitted. It is also omitted from embedded TenantSummary objects.
-    TenantAccountRoutingProfileUpdateRequest:
-      title: TenantAccountRoutingProfileUpdateRequest
+    TenantRoutingProfileUpdateRequest:
+      title: TenantRoutingProfileUpdateRequest
       type: object
       description: Change a Tenant's default VPC routing profile at one Site
       properties:
@@ -20869,8 +20911,8 @@ components:
       example:
         siteId: 497f6eca-6276-4993-bfeb-53cbbbba6f08
         defaultRoutingProfile: internal
-    TenantAccountRoutingProfile:
-      title: TenantAccountRoutingProfile
+    TenantDefaultRoutingProfile:
+      title: TenantDefaultRoutingProfile
       type: object
       description: Tenant default routing profile accepted by the Site
       properties:
