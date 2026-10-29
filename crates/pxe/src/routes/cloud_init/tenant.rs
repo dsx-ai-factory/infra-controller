@@ -37,6 +37,10 @@ use crate::metrics::{BootEndpoint, CloudInitConsumer, OutcomeReason, PxeBootOutc
 /// Every outcome on these routes carries the same endpoint label.
 const ENDPOINT: BootEndpoint = BootEndpoint::CloudInit(CloudInitConsumer::Tenant);
 const CLOUD_CONFIG_HEADER: &str = "#cloud-config";
+const CLOUD_CONFIG_ARCHIVE_HEADER: &str = "#cloud-config-archive";
+const CLOUD_CONFIG_CONTENT_TYPE: &str = "text/cloud-config";
+const ARCHIVE_CONTENT_KEY: &str = "content";
+const ARCHIVE_TYPE_KEY: &str = "type";
 const NETWORK_CONFIG_KEY: &str = "network";
 
 /// Serves the tenant's cloud-init document, removing a supported network
@@ -67,16 +71,24 @@ async fn user_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
     )
 }
 
-/// Removes an unindented `network:` entry from a plain cloud-config block
-/// mapping. Preserve the remaining source: reserializing YAML can change
-/// quoted strings under cloud-init's YAML 1.1 scalar rules. Unsupported
-/// layouts or references into the removed block are passed through unchanged.
+/// Removes network settings delivered separately for plain cloud-config or a
+/// supported archive. Other formats and unsupported layouts pass through.
 fn user_data_without_network(custom_cloud_init: &str) -> Option<String> {
-    // Require a complete header token so suffixed formats pass through unchanged.
     let header = custom_cloud_init.split_whitespace().next()?;
+    if header.eq_ignore_ascii_case(CLOUD_CONFIG_ARCHIVE_HEADER) {
+        return split_archive_network(custom_cloud_init).map(|split| split.user_data);
+    }
+    // Require a complete header token so other suffixed formats pass through unchanged.
     if !header.eq_ignore_ascii_case(CLOUD_CONFIG_HEADER) {
         return None;
     }
+    cloud_config_without_network(custom_cloud_init)
+}
+
+/// Removes an unindented `network:` entry while preserving the remaining YAML
+/// source, including quoted strings interpreted with cloud-init's YAML 1.1 rules.
+/// Archive parts may declare their format through a MIME type instead of a header.
+fn cloud_config_without_network(custom_cloud_init: &str) -> Option<String> {
     let mut expected: serde_yaml::Value = serde_yaml::from_str(custom_cloud_init).ok()?;
     expected.as_mapping_mut()?.remove(NETWORK_CONFIG_KEY)?;
 
@@ -108,6 +120,87 @@ fn user_data_without_network(custom_cloud_init: &str) -> Option<String> {
     (actual == expected).then_some(user_data)
 }
 
+struct ArchiveNetworkSplit {
+    user_data: String,
+    network_config: String,
+}
+
+/// Split static cloud-config parts atomically for both NoCloud responses. With
+/// cloud-init's default merge rules, the last part defining `network` wins.
+/// Custom mergers, launch-index filters, dynamic parts, and unsafe source edits
+/// leave the entire archive on its existing passthrough/default-network path.
+fn split_archive_network(custom_cloud_init: &str) -> Option<ArchiveNetworkSplit> {
+    let mut archive: serde_yaml::Value = serde_yaml::from_str(custom_cloud_init).ok()?;
+    let mut network_config = None;
+    for part in archive.as_sequence_mut()? {
+        let content_type = match part.get(ARCHIVE_TYPE_KEY) {
+            None | Some(serde_yaml::Value::Null) => None,
+            Some(value) => Some(value.as_str()?.to_ascii_lowercase()),
+        };
+        if let Some(mapping) = part.as_mapping()
+            && mapping.keys().any(|key| {
+                key.as_str().is_some_and(|key| {
+                    ["merge-type", "x-merge-type", "launch-index", "<<"]
+                        .iter()
+                        .any(|unsupported| key.eq_ignore_ascii_case(unsupported))
+                })
+            })
+        {
+            return None;
+        }
+        let content = if part.is_string() {
+            part
+        } else {
+            part.get_mut(ARCHIVE_CONTENT_KEY)?
+        };
+        let text = content.as_str()?;
+        let header = text.split_whitespace().next().unwrap_or_default();
+        match content_type.as_deref().filter(|value| !value.is_empty()) {
+            Some(CLOUD_CONFIG_CONTENT_TYPE) => {}
+            Some(value)
+                if value.starts_with("text/x-shellscript") || value == "text/cloud-boothook" =>
+            {
+                continue;
+            }
+            Some(_) => return None,
+            None if header.starts_with("#!") => continue,
+            None if header.starts_with('#')
+                && header != "#"
+                && !header.eq_ignore_ascii_case(CLOUD_CONFIG_HEADER) =>
+            {
+                return None;
+            }
+            None => {}
+        }
+        if header == "##" {
+            return None;
+        }
+        let config: serde_yaml::Value = serde_yaml::from_str(text).ok()?;
+        let mapping = config.as_mapping()?;
+        if ["merge_how", "merge_type", "launch-index", "<<"]
+            .iter()
+            .any(|key| mapping.contains_key(*key))
+        {
+            return None;
+        }
+        if let Some(network) = mapping.get(NETWORK_CONFIG_KEY) {
+            network_config = Some(serde_yaml::to_string(network).ok()?);
+            *content = cloud_config_without_network(text)?.into();
+        }
+    }
+    let network_config = network_config?;
+    // JSON is YAML-compatible and quotes every string in the envelope. YAML 1.1
+    // must not reinterpret a filename such as 'on'; embedded YAML stays verbatim.
+    let envelope = serde_json::to_string_pretty(&archive).ok()?;
+    if serde_yaml::from_str::<serde_yaml::Value>(&envelope).ok()? != archive {
+        return None;
+    }
+    Some(ArchiveNetworkSplit {
+        user_data: format!("{CLOUD_CONFIG_ARCHIVE_HEADER}\n{envelope}\n"),
+        network_config,
+    })
+}
+
 async fn meta_data(machine: Machine, state: State<AppState>) -> impl IntoResponse {
     let (template_key, template_data) = match machine.instructions.metadata {
         None => log_and_generate_generic_error(
@@ -136,12 +229,19 @@ async fn meta_data(machine: Machine, state: State<AppState>) -> impl IntoRespons
     axum_template::Render(template_key, state.engine.clone(), template_data)
 }
 
-/// Extracts the top-level `network:` key (if present) from a tenant's
-/// custom cloud-init document and returns it as its own standalone YAML
+/// Extracts `network:` from a plain document or supported archive's cloud-config
+/// parts and returns it as its own standalone YAML
 /// document, suitable for seeding NoCloud's separate `network-config`
 /// file. The user-data handler removes supported network blocks because
 /// cloud-init rejects that key during user-data schema validation.
 fn extract_network_config(custom_cloud_init: &str) -> Option<String> {
+    if custom_cloud_init
+        .split_whitespace()
+        .next()
+        .is_some_and(|header| header.eq_ignore_ascii_case(CLOUD_CONFIG_ARCHIVE_HEADER))
+    {
+        return split_archive_network(custom_cloud_init).map(|split| split.network_config);
+    }
     let value: serde_yaml::Value = serde_yaml::from_str(custom_cloud_init).ok()?;
     serde_yaml::to_string(value.get(NETWORK_CONFIG_KEY)?).ok()
 }
@@ -308,6 +408,133 @@ mod tests {
             let actual: serde_yaml::Value = serde_yaml::from_slice(&body).unwrap();
             assert_eq!(actual, expected_network);
         }
+    }
+
+    #[tokio::test]
+    async fn tenant_cloud_config_archive_separates_network_from_user_data() {
+        let _metrics = MetricsCapture::start();
+        let input = r#"#cloud-config-archive
+- type: text/x-shellscript
+  filename: 'on'
+  content: |
+    #!/bin/sh
+    echo 'network: leave script alone'
+- type: text/cloud-config
+  content: |
+    network: {version: 2, ethernets: {eth0: {dhcp4: true}}}
+    users: [default]
+- content: |
+    #cloud-config
+    network:
+      version: 2
+      ethernets:
+        eth1:
+          addresses: [2001:db8::10/64]
+    hostname: 'on'
+    autoinstall:
+      version: 1
+      network: {version: 2, ethernets: {eth0: {dhcp4: true}}}
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      url: http://169.254.169.254/latest/meta-data/phone_home
+      post: all
+"#;
+        let machine = || Machine {
+            instructions: forge::CloudInitInstructions {
+                custom_cloud_init: Some(input.to_string()),
+                ..Default::default()
+            },
+        };
+        let state = test_app_state_with_templates();
+        let response = network_config(machine(), State(state.clone()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let actual_network: serde_yaml::Value = serde_yaml::from_slice(&body).unwrap();
+        let expected_network: serde_yaml::Value = serde_yaml::from_str(
+            "version: 2\nethernets: {eth1: {addresses: ['2001:db8::10/64']}}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            actual_network, expected_network,
+            "later network replaces earlier network"
+        );
+
+        let response = user_data(machine(), State(state)).await.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = std::str::from_utf8(&body).unwrap();
+        assert!(text.starts_with("#cloud-config-archive\n"));
+        let actual: serde_yaml::Value = serde_yaml::from_str(text).unwrap();
+        let mut expected: serde_yaml::Value = serde_yaml::from_str(input).unwrap();
+        expected[1]["content"] = "users: [default]\n".into();
+        expected[2]["content"] = "#cloud-config\nhostname: 'on'\nautoinstall:\n  version: 1\n  network: {version: 2, ethernets: {eth0: {dhcp4: true}}}\n".into();
+        assert_eq!(
+            actual, expected,
+            "preserve every other part, field, and embedded YAML string"
+        );
+    }
+
+    #[test]
+    fn archive_network_handles_part_formats() {
+        value_scenarios!(run = |part: &str| {
+            let input = format!("{CLOUD_CONFIG_ARCHIVE_HEADER}\n{part}");
+            extract_network_config(&input)
+                .map(|network| serde_yaml::from_str::<serde_yaml::Value>(&network).unwrap()["version"].as_u64().unwrap())
+        };
+            "untyped part defaults to cloud-config" {
+                "- content: |\n    # ordinary comment\n    network: {version: 2}\n" => Some(2),
+            }
+            "scalar part with inferred type" {
+                "- |\n  #cloud-config\n  network: {version: 2}\n" => Some(2),
+            }
+            "explicit cloud-config type overrides content header" {
+                "- type: text/cloud-config\n  content: |\n    #cloud-boothook\n    network: {version: 2}\n" => Some(2),
+            }
+            "explicit script type overrides content header" {
+                "- type: text/x-shellscript\n  content: |\n    #cloud-config\n    network: {version: 2}\n" => None,
+            }
+        );
+        let output = user_data_without_network(
+            "#cloud-config-archive\n- |\n  #cloud-config\n  network: {version: 2}\n",
+        )
+        .unwrap();
+        let archive: serde_yaml::Value = serde_yaml::from_str(&output).unwrap();
+        assert_eq!(archive[0].as_str(), Some("#cloud-config\n{}\n"));
+    }
+
+    #[test]
+    fn archive_network_leaves_unsupported_archives_intact() {
+        value_scenarios!(run = |part: &str| {
+            let input = format!("{CLOUD_CONFIG_ARCHIVE_HEADER}\n- content: |\n    network: {{version: 2}}\n{part}");
+            (user_data_without_network(&input), extract_network_config(&input))
+        };
+            "custom merge header" {
+                "- type: text/cloud-config\n  Merge-Type: dict(no_replace)\n  content: 'hostname: node'\n" => (None, None),
+            }
+            "custom merge in a later part without network" {
+                "- content: |\n    merge_how: dict(no_replace)\n    hostname: node\n" => (None, None),
+            }
+            "launch-index filter" {
+                "- launch-index: 1\n  content: 'network: {version: 1}'\n" => (None, None),
+            }
+            "dynamic content" {
+                "- content: |\n    ## template: jinja\n    #cloud-config\n    network: {{ v1.network }}\n" => (None, None),
+            }
+            "malformed embedded YAML" {
+                "- type: text/cloud-config\n  content: 'network: ['\n" => (None, None),
+            }
+            "source cannot be split safely" {
+                "- content: |\n    network: &net {version: 1}\n    x-network: *net\n" => (None, None),
+            }
+        );
     }
 
     #[tokio::test]
