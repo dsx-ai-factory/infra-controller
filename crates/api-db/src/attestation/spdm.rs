@@ -81,13 +81,14 @@ pub async fn insert_device_attestations(
     Ok(res.rows_affected())
 }
 
+/// Requests cancellation while preserving the deadline of any earlier request.
 pub async fn cancel_attestation_job(
     txn: &mut PgConnection,
     job_id: &uuid::Uuid,
 ) -> DatabaseResult<()> {
     let current_time = chrono::Utc::now();
     let query = r#"UPDATE spdm_machine_devices_attestation
-        SET cancelled_at = $2
+        SET cancelled_at = COALESCE(cancelled_at, $2)
         WHERE job_id = $1
         "#;
     sqlx::query(query)
@@ -148,7 +149,8 @@ pub async fn try_acquire_evidence_collection_lock(
 
 /// Releases only this job's evidence collection claim in the caller's transaction.
 ///
-/// Call only after persisting evidence or confirming that the BMC task has stopped.
+/// Call after persisting evidence, confirming the BMC task has stopped, or reaching
+/// the explicit cancellation timeout. The timeout permits release without confirmation.
 /// Releasing an already released or missing claim succeeds without changing other jobs.
 pub async fn release_evidence_collection_lock(
     txn: &mut PgConnection,

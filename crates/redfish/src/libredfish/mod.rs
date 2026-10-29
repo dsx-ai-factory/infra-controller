@@ -527,7 +527,10 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
                     }
                 }
             }
-            RedfishVendor::Supermicro | RedfishVendor::Dell | RedfishVendor::Hpe => {
+            RedfishVendor::Supermicro
+            | RedfishVendor::Dell
+            | RedfishVendor::Hpe
+            | RedfishVendor::GigaComputingAMI => {
                 client
                     .change_password(curr_user.as_str(), new_password.as_str())
                     .await
@@ -1234,6 +1237,7 @@ mod tests {
             RedfishVendor::Dell,
             RedfishVendor::Hpe,
             RedfishVendor::AMI,
+            RedfishVendor::GigaComputingAMI,
         ] {
             assert_eq!(
                 rotate_and_collect_client_vendors(vendor).await,

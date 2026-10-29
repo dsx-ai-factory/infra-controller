@@ -969,15 +969,47 @@ pub(in crate::tests) mod tests {
     async fn test_cancelled_by_user_goes_into_cancelled(
         pool: sqlx::PgPool,
     ) -> Result<(), eyre::Error> {
-        // trigger attestation - corresponding device attestations are created
-        // query attestation status - should be in progress
-        // run controller iterations - should be able to:
-        // - fetch metadata
-        // - fetch certificate,
-        // - schedule evidence
-        // -  cancel the whole thing - make sure it goes into cancelled state
-        // verify the state in each iteration using direct db lookups
-
+        struct Case {
+            scenario: &'static str,
+            trigger_iterations: usize,
+            cancel_error: Option<libredfish::RedfishError>,
+            finish_collection: bool,
+            claim_without_task: bool,
+        }
+        let cases = [
+            Case {
+                scenario: "cancel before collection starts",
+                trigger_iterations: 2,
+                cancel_error: None,
+                finish_collection: false,
+                claim_without_task: false,
+            },
+            Case {
+                scenario: "retry a transient cancellation failure, then wait for the BMC",
+                trigger_iterations: 3,
+                cancel_error: Some(libredfish::RedfishError::GenericError {
+                    error: "temporary cancellation failure".to_string(),
+                }),
+                finish_collection: true,
+                claim_without_task: false,
+            },
+            Case {
+                scenario: "unsupported cancellation releases the lock only at the deadline",
+                trigger_iterations: 3,
+                cancel_error: Some(libredfish::RedfishError::NotSupported(
+                    "cancel task".to_string(),
+                )),
+                finish_collection: false,
+                claim_without_task: false,
+            },
+            Case {
+                scenario: "a collection claim without a task ID uses the deadline",
+                trigger_iterations: 2,
+                cancel_error: None,
+                finish_collection: false,
+                claim_without_task: true,
+            },
+        ];
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
@@ -986,107 +1018,185 @@ pub(in crate::tests) mod tests {
             },
         )
         .await;
-        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
-        let response = env
-            .api
-            .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
-                machine_id: Some(machine_id.into()),
-                redfish_timeout_secs: u32::MAX,
-            }))
-            .await?
-            .into_inner();
-        let job_id = response
-            .job_id
-            .expect("attestation result should include a job ID");
-
-        // device attestations should be created now
-        let statuses = list_machines_under_attestation(&env).await?;
-
-        assert_eq!(1, statuses.len());
-        assert_eq!(Some(&job_id), statuses[0].job_id.as_ref());
-        assert_eq!(vec![MachineId::from(machine_id)], statuses[0].machine_ids);
-
-        // check that attestation's status is InProgress
-        assert_eq!(
-            rpc::forge::SpdmAttestationStatus::SpdmAttInProgress,
-            rpc::forge::SpdmAttestationStatus::try_from(statuses[0].attestation_status)?
-        );
-
-        // now, look at the state of the attestation and check that it is FetchMetadata
-        let mut txn = env.pool.begin().await.unwrap();
-
-        let object_ids = db::attestation::spdm::find_machine_ids_for_attestation(&mut txn)
-            .await
-            .expect("Failed getting object ids for attestation");
-
-        for object_id in &object_ids {
-            let SpdmObjectId(_, device_id, job_id) = object_id;
-            let (attestation_state, _) =
-                get_state_from_db(&mut txn, &machine_id, device_id, job_id)
-                    .await
-                    .expect("Failed getting attestation state from the DB");
-
-            assert_eq!(SpdmAttestationState::FetchMetadata, attestation_state);
-        }
-
-        env.run_spdm_controller_iteration_no_requeue().await;
-
-        for object_id in &*object_ids {
-            let SpdmObjectId(_, device_id, job_id) = object_id;
-            let (attestation_state, _) =
-                get_state_from_db(&mut txn, &machine_id, device_id, job_id)
-                    .await
-                    .expect("Failed getting attestation state from the DB");
-            assert_eq!(SpdmAttestationState::FetchCertificate, attestation_state);
-        }
-
-        // now proceed to FetchCertificate
-        env.run_spdm_controller_iteration_no_requeue().await;
-
-        let object_ids = db::attestation::spdm::find_machine_ids_for_attestation(&mut txn)
-            .await
-            .expect("Failed getting object ids for attestation");
-        assert_eq!(3, object_ids.len());
-
-        for object_id in &*object_ids {
-            let SpdmObjectId(_, device_id, job_id) = object_id;
-            let (attestation_state, _) =
-                get_state_from_db(&mut txn, &machine_id, device_id, job_id)
-                    .await
-                    .expect("Failed getting attestation state from the DB");
-
-            assert!(
-                matches!(
-                    attestation_state,
-                    SpdmAttestationState::TriggerEvidenceCollection { .. }
-                ),
-                "expected TriggerEvidenceCollection, got: {:?}",
-                attestation_state
+        for case in cases {
+            // Host setup performs its own attestation before the scenario starts.
+            env.redfish_sim.set_evidence_collection_running(false);
+            let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+            let initial_cancel_requests = env.redfish_sim.task_cancellation_requests().len();
+            env.redfish_sim.set_evidence_collection_running(true);
+            let job_id = uuid::Uuid::try_from(
+                env.api
+                    .trigger_machine_attestation(Request::new(
+                        SpdmMachineAttestationTriggerRequest {
+                            machine_id: Some(machine_id.into()),
+                            redfish_timeout_secs: u32::MAX,
+                        },
+                    ))
+                    .await?
+                    .into_inner()
+                    .job_id
+                    .expect("scheduled attestation has a job ID"),
+            )?;
+            for _ in 0..case.trigger_iterations {
+                env.run_spdm_controller_iteration_no_requeue().await;
+            }
+            if case.claim_without_task {
+                // Model a claim committed before a collection POST whose result was lost.
+                sqlx::query("UPDATE spdm_machine_devices_attestation SET evidence_collection_locked = TRUE WHERE job_id = $1")
+                    .bind(job_id).execute(&env.pool).await?;
+            }
+            let transient_failure = matches!(
+                case.cancel_error,
+                Some(libredfish::RedfishError::GenericError { .. })
             );
-        }
+            if let Some(error) = case.cancel_error {
+                env.redfish_sim.set_next_task_cancel_error(error);
+            }
+            env.api
+                .cancel_attestation(Request::new(job_id.into()))
+                .await?;
+            env.run_spdm_controller_iteration_no_requeue().await;
 
-        // now let's cancel the whole thing
-        let _ = env.api.cancel_attestation(Request::new(job_id)).await?;
-
-        env.run_spdm_controller_iteration_no_requeue().await;
-
-        for object_id in &*object_ids {
-            let SpdmObjectId(_, device_id, job_id) = object_id;
-            let (attestation_state, completed_at) =
-                get_state_from_db(&mut txn, &machine_id, device_id, job_id)
-                    .await
-                    .expect("Failed getting attestation state from the DB");
-
-            assert!(
-                matches!(attestation_state, SpdmAttestationState::Cancelled),
-                "expected Cancelled, got: {:?}",
-                attestation_state
+            let mut txn = env.db_txn().await;
+            let devices =
+                db::attestation::spdm::get_attestations_for_job_id(&mut txn, &job_id).await?;
+            assert_eq!(devices.len(), 3, "{}", case.scenario);
+            let collecting = case.trigger_iterations == 3;
+            let waiting = collecting || case.claim_without_task;
+            let expected_task_ids = devices
+                .iter()
+                .filter_map(|device| {
+                    if let SpdmAttestationState::PollEvidenceCollection { task_id, .. } =
+                        &device.state
+                    {
+                        Some(task_id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<std::collections::HashSet<_>>();
+            let requests =
+                env.redfish_sim.task_cancellation_requests()[initial_cancel_requests..].to_vec();
+            assert_eq!(
+                requests.len(),
+                if collecting { 3 } else { 0 },
+                "{}",
+                case.scenario
             );
+            if collecting {
+                // Distinct task IDs prove cancellation targets each component's own task.
+                assert_eq!(expected_task_ids.len(), 3, "{}", case.scenario);
+                assert_eq!(
+                    requests
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::HashSet<_>>(),
+                    expected_task_ids
+                );
+            }
+            for device in &devices {
+                let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                    &mut txn,
+                    &machine_id,
+                    &device.device_id,
+                    &job_id,
+                )
+                .await?;
+                assert_eq!(
+                    snapshot.evidence_collection_locked, waiting,
+                    "{}",
+                    case.scenario
+                );
+                assert_eq!(
+                    snapshot.completed_at.is_none(),
+                    waiting,
+                    "{}",
+                    case.scenario
+                );
+            }
+            if !waiting {
+                assert!(
+                    devices
+                        .iter()
+                        .all(|device| device.state == SpdmAttestationState::Cancelled)
+                );
+                continue;
+            }
 
-            // make sure the completed_at field has been populated also
-            assert!(completed_at.is_some());
+            // Retry only the injected failure; accepted and unsupported requests must
+            // remain persisted across subsequent controller iterations.
+            for _ in 0..2 {
+                env.run_spdm_controller_iteration_no_requeue().await;
+            }
+            assert_eq!(
+                env.redfish_sim.task_cancellation_requests().len(),
+                initial_cancel_requests + requests.len() + usize::from(transient_failure),
+                "{}",
+                case.scenario
+            );
+            for device in &devices {
+                let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                    &mut txn,
+                    &machine_id,
+                    &device.device_id,
+                    &job_id,
+                )
+                .await?;
+                assert!(snapshot.evidence_collection_locked, "{}", case.scenario);
+                if collecting {
+                    assert!(
+                        matches!(
+                            snapshot.state,
+                            SpdmAttestationState::PollEvidenceCollection {
+                                cancellation_attempted: true,
+                                ..
+                            }
+                        ),
+                        "{}",
+                        case.scenario
+                    );
+                }
+            }
+
+            if case.finish_collection {
+                env.redfish_sim.set_evidence_collection_running(false);
+            } else {
+                // Advance the persisted deadline without a real two-minute sleep.
+                sqlx::query("UPDATE spdm_machine_devices_attestation SET cancelled_at = NOW() - INTERVAL '2 minutes' WHERE job_id = $1")
+                    .bind(job_id).execute(&env.pool).await?;
+            }
+            let cancelled_at: chrono::DateTime<Utc> = sqlx::query_scalar("SELECT cancelled_at FROM spdm_machine_devices_attestation WHERE job_id = $1 LIMIT 1")
+                .bind(job_id).fetch_one(&env.pool).await?;
+            // Repeated user requests must not postpone the original deadline.
+            env.api
+                .cancel_attestation(Request::new(job_id.into()))
+                .await?;
+            let repeated_cancelled_at: chrono::DateTime<Utc> = sqlx::query_scalar("SELECT cancelled_at FROM spdm_machine_devices_attestation WHERE job_id = $1 LIMIT 1")
+                .bind(job_id).fetch_one(&env.pool).await?;
+            assert_eq!(cancelled_at, repeated_cancelled_at, "{}", case.scenario);
+            env.run_spdm_controller_iteration_no_requeue().await;
+            for device in &devices {
+                let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                    &mut txn,
+                    &machine_id,
+                    &device.device_id,
+                    &job_id,
+                )
+                .await?;
+                assert_eq!(
+                    snapshot.state,
+                    SpdmAttestationState::Cancelled,
+                    "{}",
+                    case.scenario
+                );
+                assert!(!snapshot.evidence_collection_locked, "{}", case.scenario);
+                assert!(snapshot.completed_at.is_some(), "{}", case.scenario);
+                assert!(
+                    snapshot.evidence.is_none(),
+                    "cancelled jobs must not read evidence"
+                );
+            }
         }
-
         Ok(())
     }
 

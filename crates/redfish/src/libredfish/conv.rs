@@ -167,7 +167,8 @@ pub fn bmc_vendor(r: libredfish::model::service_root::RedfishVendor) -> BMCVendo
         RedfishVendor::DeltaPowerShelf => BMCVendor::Delta,
         RedfishVendor::Supermicro => BMCVendor::Supermicro,
         RedfishVendor::Sushy => BMCVendor::Sushy,
-        RedfishVendor::Unknown => BMCVendor::Unknown,
+        // NICo has no dedicated Giga Computing vendor category.
+        RedfishVendor::GigaComputingAMI | RedfishVendor::Unknown => BMCVendor::Unknown,
     }
 }
 
@@ -227,6 +228,7 @@ mod tests {
                 RedfishVendor::DeltaPowerShelf => BMCVendor::Delta,
                 RedfishVendor::Supermicro => BMCVendor::Supermicro,
                 RedfishVendor::Sushy => BMCVendor::Sushy,
+                RedfishVendor::GigaComputingAMI => BMCVendor::Unknown,
                 RedfishVendor::Unknown => BMCVendor::Unknown,
             }
         );

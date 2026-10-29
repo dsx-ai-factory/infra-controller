@@ -58,6 +58,9 @@ struct RedfishSimState {
     get_task_trigger_evidence_returns_exception: bool,
     evidence_collection_running: bool,
     evidence_collection_requests: Vec<(String, String)>,
+    task_cancellation_requests: Vec<String>,
+    cancelling_evidence_tasks: HashSet<String>,
+    next_task_cancel_error: Option<RedfishError>,
     machine_setup_bios_job_id: Option<String>,
     is_bios_setup: Option<bool>,
     default_lockdown: Option<EnabledDisabled>,
@@ -372,6 +375,20 @@ impl RedfishSim {
             .unwrap()
             .evidence_collection_requests
             .clone()
+    }
+
+    /// Return task IDs sent to cancellation, including failed attempts, in call order.
+    pub fn task_cancellation_requests(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .task_cancellation_requests
+            .clone()
+    }
+
+    /// Fail the next task cancellation so callers can exercise unsupported or retry paths.
+    pub fn set_next_task_cancel_error(&self, error: RedfishError) {
+        self.state.lock().unwrap().next_task_cancel_error = Some(error);
     }
 
     pub fn set_machine_setup_bios_job_id(&self, job_id: Option<String>) {
@@ -835,6 +852,21 @@ impl RedfishSimClient {
 }
 
 impl Redfish for RedfishSimClient {
+    fn cancel_task<'a>(
+        &'a self,
+        task_id: &'a str,
+    ) -> libredfish::RedfishFuture<'a, Result<bool, RedfishError>> {
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            state.task_cancellation_requests.push(task_id.to_string());
+            if let Some(error) = state.next_task_cancel_error.take() {
+                return Err(error);
+            }
+            state.cancelling_evidence_tasks.insert(task_id.to_string());
+            Ok(false)
+        })
+    }
+
     fn std_redfish(&self) -> &RedfishStandard {
         panic!("RedfishSimClient must implement Redfish operations directly")
     }
@@ -1308,7 +1340,7 @@ impl Redfish for RedfishSimClient {
                 .lock()
                 .unwrap()
                 .get_task_trigger_evidence_returns_exception
-                && id == TRIGGER_EVIDENCE_TASK_ID
+                && id.starts_with(TRIGGER_EVIDENCE_TASK_ID)
             {
                 return Ok(serde_json::from_str(
                     "{
@@ -1337,11 +1369,25 @@ impl Redfish for RedfishSimClient {
             }",
             )
             .unwrap();
-            if id == TRIGGER_EVIDENCE_TASK_ID
-                && self.state.lock().unwrap().evidence_collection_running
-            {
-                task.task_state = Some(libredfish::model::task::TaskState::Running);
-                task.percent_complete = Some(0);
+            if id.starts_with(TRIGGER_EVIDENCE_TASK_ID) {
+                // Each collection has its own task. Accepted cancellation remains
+                // asynchronous while the fixture keeps collection running.
+                let state = self.state.lock().unwrap();
+                task.id = id.to_string();
+                task.task_state = Some(
+                    match (
+                        state.cancelling_evidence_tasks.contains(id),
+                        state.evidence_collection_running,
+                    ) {
+                        (true, true) => libredfish::model::task::TaskState::Cancelling,
+                        (true, false) => libredfish::model::task::TaskState::Cancelled,
+                        (false, true) => libredfish::model::task::TaskState::Running,
+                        (false, false) => libredfish::model::task::TaskState::Completed,
+                    },
+                );
+                if state.evidence_collection_running {
+                    task.percent_complete = Some(0);
+                }
             }
             Ok(task)
         })
@@ -2617,16 +2663,19 @@ impl Redfish for RedfishSimClient {
         nonce: &'a str,
     ) -> libredfish::RedfishFuture<'a, Result<Task, RedfishError>> {
         Box::pin(async move {
-            self.state
-                .lock()
-                .unwrap()
+            let mut state = self.state.lock().unwrap();
+            state
                 .evidence_collection_requests
                 .push((url.to_string(), nonce.to_string()));
+            let task_id = format!(
+                "{TRIGGER_EVIDENCE_TASK_ID}-{}",
+                state.evidence_collection_requests.len()
+            );
             let task_str = format!(
                 r##"{{
-                    "@odata.id": "/redfish/v1/TaskService/Tasks/{TRIGGER_EVIDENCE_TASK_ID}",
+                    "@odata.id": "/redfish/v1/TaskService/Tasks/{task_id}",
                     "@odata.type": "#Task.v1_4_3.Task",
-                    "Id": "{TRIGGER_EVIDENCE_TASK_ID}"
+                    "Id": "{task_id}"
                 }}"##
             );
             Ok(serde_json::from_str(&task_str).unwrap())

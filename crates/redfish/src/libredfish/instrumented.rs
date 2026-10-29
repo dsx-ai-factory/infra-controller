@@ -233,6 +233,7 @@ impl Redfish for InstrumentedRedfish {
         fn get_software_inventories<'a>(&'a self) -> Vec<String>;
         fn get_tasks<'a>(&'a self) -> Vec<String>;
         fn get_task<'a>(&'a self, id: &'a str) -> Task;
+        fn cancel_task<'a>(&'a self, id: &'a str) -> bool;
         fn get_power_state<'a>(&'a self) -> PowerState;
         fn get_service_root<'a>(&'a self) -> ServiceRoot;
         fn get_systems<'a>(&'a self) -> Vec<String>;
@@ -500,6 +501,34 @@ mod tests {
             .await
             .expect("sim client");
         InstrumentedRedfish::new(client, Vec::new())
+    }
+
+    #[tokio::test]
+    async fn task_cancellation_delegates_and_records_metrics() {
+        let sim = RedfishSim::default();
+        let client = sim_client(&sim).await;
+        let metrics = MetricsCapture::start();
+
+        // Protocol cases belong in libredfish; this proves the adapter forwards
+        // the task ID and meters cancellation through the same path as other calls.
+        assert!(
+            !client
+                .cancel_task("task-1")
+                .await
+                .expect("pending cancellation")
+        );
+        assert_eq!(sim.task_cancellation_requests(), vec!["task-1"]);
+        assert_eq!(
+            metrics.histogram_count_delta(
+                "carbide_external_call_duration_milliseconds",
+                &[
+                    ("backend", "redfish"),
+                    ("operation", "cancel_task"),
+                    ("outcome", "ok"),
+                ],
+            ),
+            1,
+        );
     }
 
     #[tokio::test]

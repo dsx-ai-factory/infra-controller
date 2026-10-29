@@ -97,7 +97,8 @@ pub mod spdm {
         // Collected Evidence.
         pub evidence: Option<Evidence>,
         /// Whether this job owns the device's shared evidence collection endpoint.
-        /// Ownership lasts until evidence is saved or the BMC task is known to have stopped.
+        /// Ownership lasts until evidence is saved, the BMC task is known to have stopped,
+        /// or the two-minute best-effort cancellation timeout expires.
         pub evidence_collection_locked: bool,
         // job id
         pub job_id: uuid::Uuid,
@@ -128,6 +129,9 @@ pub mod spdm {
         PollEvidenceCollection {
             task_id: String,
             retry_count: i32,
+            /// Whether cancellation was accepted or is unsupported. Older states retry it.
+            #[serde(default)]
+            cancellation_attempted: bool,
         },
         NrasVerification,
         ApplyAppraisalPolicy,
@@ -1056,19 +1060,22 @@ mod test {
     }
 
     #[test]
-    fn spdm_trigger_evidence_collection_deserializes_legacy_state() {
-        // Persisted states without Redfish retry fields must remain readable after an upgrade.
-        let state = serde_json::from_str::<SpdmAttestationState>(
-            r#"{"TriggerEvidenceCollection":{"retry_count":2}}"#,
-        )
-        .expect("legacy trigger state deserializes");
-
-        assert_eq!(
-            state,
-            SpdmAttestationState::TriggerEvidenceCollection {
-                retry_count: 2,
-                redfish_retry_count: 0,
-                last_redfish_failure_tstamp: None,
+    fn spdm_evidence_collection_deserializes_legacy_states() {
+        // Persisted states must remain readable when retry/cancellation fields are absent.
+        scenarios!(run = |json| serde_json::from_str::<SpdmAttestationState>(json).map_err(drop);
+            "legacy trigger state" {
+                r#"{"TriggerEvidenceCollection":{"retry_count":2}}"# => Yields(SpdmAttestationState::TriggerEvidenceCollection {
+                    retry_count: 2,
+                    redfish_retry_count: 0,
+                    last_redfish_failure_tstamp: None,
+                }),
+            }
+            "legacy poll state" {
+                r#"{"PollEvidenceCollection":{"task_id":"t1","retry_count":2}}"# => Yields(SpdmAttestationState::PollEvidenceCollection {
+                    task_id: "t1".to_string(),
+                    retry_count: 2,
+                    cancellation_attempted: false,
+                }),
             }
         );
     }
@@ -1269,6 +1276,7 @@ mod test {
                 details_with_state(SpdmAttestationState::PollEvidenceCollection {
                     task_id: "t1".to_string(),
                     retry_count: 2,
+                    cancellation_attempted: false,
                 }) => None,
             }
 
