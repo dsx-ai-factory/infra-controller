@@ -359,6 +359,7 @@ initial_backoff = "1s"
 max_backoff = "30s"
 # Deadline for deleting the BMC subscription a closed stream opened, and for each
 # cap diagnosis: listing the BMC's subscriptions plus any reap_on_cap sweep.
+# close_timeout plus 5s must be less than shutdown_timeout.
 close_timeout = "5s"
 # Delete every SSE destination on a BMC at its cap. Enable only where hw-health
 # is the BMC's sole SSE consumer. Not yet effective on BMCs that drop a capped

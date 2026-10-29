@@ -132,7 +132,7 @@ pub enum CloseReason {
 }
 
 /// How long a cancelled `connect` may finish so its stream is still released.
-const CANCELLED_CONNECT_GRACE: Duration = Duration::from_secs(5);
+pub(crate) const CANCELLED_CONNECT_GRACE: Duration = Duration::from_secs(5);
 
 pub struct BackoffConfig {
     pub initial: Duration,

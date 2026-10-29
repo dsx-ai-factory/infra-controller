@@ -31,6 +31,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::Semaphore;
 use url::Url;
 
+use crate::collectors::CANCELLED_CONNECT_GRACE;
 use crate::metrics::BmcLatencyAttribute;
 
 const MAX_GNMI_RECONCILE_INTERVAL: Duration = Duration::from_secs(366 * 24 * 60 * 60);
@@ -1542,7 +1543,8 @@ pub struct SseLogConfig {
 
     /// Deadline for deleting the BMC subscription a closed stream opened, and for
     /// each cap diagnosis: listing the BMC's subscriptions plus any `reap_on_cap`
-    /// sweep.
+    /// sweep. In `sse` and `auto` log modes, validation requires it plus 5 s for a
+    /// cancelled connect to finish to be less than `shutdown_timeout`.
     #[serde(with = "humantime_serde")]
     pub close_timeout: Duration,
 
@@ -2936,6 +2938,18 @@ impl Config {
 
         if let Configurable::Enabled(logs) = &self.collectors.logs {
             logs.validate()?;
+
+            // A cancelled connect may run for the grace before the DELETE starts.
+            if logs.mode != LogCollectionMode::Periodic
+                && CANCELLED_CONNECT_GRACE
+                    .checked_add(logs.sse_or_default().close_timeout)
+                    .is_none_or(|close| close >= self.shutdown_timeout)
+            {
+                return Err(format!(
+                    "[collectors.logs.sse].close_timeout plus the {}s cancelled-connect grace must be less than shutdown_timeout",
+                    CANCELLED_CONNECT_GRACE.as_secs()
+                ));
+            }
         }
 
         if let Configurable::Enabled(nvue) = &self.collectors.nvue
@@ -3752,6 +3766,32 @@ mac = "00:11:22:33:44:55"
                 }) => FailsWith(
                     "endpoint_discovery_interval must be greater than 0".to_string()
                 ),
+
+                config_with(|config| {
+                    config.collectors.logs = Configurable::Enabled(LogsCollectorConfig {
+                        sse: Some(SseLogConfig {
+                            close_timeout: config.shutdown_timeout - CANCELLED_CONNECT_GRACE,
+                            ..SseLogConfig::default()
+                        }),
+                        ..LogsCollectorConfig::default()
+                    });
+                }) => FailsWith(
+                    "[collectors.logs.sse].close_timeout plus the 5s cancelled-connect grace must be less than shutdown_timeout"
+                        .to_string()
+                ),
+
+                // Periodic mode opens no SSE stream, so it has nothing to delete on shutdown.
+                config_with(|config| {
+                    config.collectors.logs = Configurable::Enabled(LogsCollectorConfig {
+                        mode: LogCollectionMode::Periodic,
+                        sse: Some(SseLogConfig {
+                            close_timeout: config.shutdown_timeout,
+                            ..SseLogConfig::default()
+                        }),
+                        periodic: Some(PeriodicLogConfig::default()),
+                        ..LogsCollectorConfig::default()
+                    });
+                }) => Yields(()),
 
                 config_with(|config| {
                     config.bmc_request_concurrency =
