@@ -456,6 +456,8 @@ pub(crate) async fn forge_agent_control(
                 reprovision_state:
                     HostReprovisionState::WaitingForScoutUpgrade {
                         task_json,
+                        deadline,
+                        delivery,
                         result: None,
                         ..
                     },
@@ -467,19 +469,48 @@ pub(crate) async fn forge_agent_control(
                         reprovision_state:
                             HostReprovisionState::WaitingForScoutUpgrade {
                                 task_json,
+                                deadline,
+                                delivery,
                                 result: None,
                                 ..
                             },
                     },
             } => {
-                tracing::info!(
-                    machine_id = %machine.id,
-                    "Sending firmware upgrade task to scout",
-                );
-                let action = match serde_json::from_str::<sfu::ScoutFirmwareUpgradeTask>(task_json)
-                {
-                    Ok(task) => Action::FirmwareUpgrade(fac::FirmwareUpgrade { task: Some(task) }),
-                    Err(e) => {
+                let active_deadline = delivery.as_ref().map(|delivery| {
+                    if delivery.accepted_at.is_some() {
+                        (*deadline, "completion")
+                    } else {
+                        (delivery.deadline, "delivery")
+                    }
+                });
+                let action = match (
+                    serde_json::from_str::<sfu::ScoutFirmwareUpgradeTask>(task_json),
+                    active_deadline,
+                ) {
+                    (Ok(task), Some((deadline, deadline_type)))
+                        if chrono::Utc::now() > deadline =>
+                    {
+                        tracing::info!(
+                            machine_id = %machine.id,
+                            upgrade_task_id = %task.upgrade_task_id,
+                            deadline_type,
+                            %deadline,
+                            "Scout firmware upgrade deadline expired, sending no-op action to scout",
+                        );
+                        Action::noop()
+                    }
+                    (Ok(task), _) => {
+                        tracing::info!(
+                            machine_id = %machine.id,
+                            upgrade_task_id = %task.upgrade_task_id,
+                            "Preparing firmware upgrade task for scout",
+                        );
+                        Action::FirmwareUpgrade(fac::FirmwareUpgrade {
+                            task: Some(task),
+                            requires_acknowledgement: delivery.is_some(),
+                        })
+                    }
+                    (Err(e), _) => {
                         tracing::warn!(
                             error = %e,
                             "Could not deserialize firmware upgrade task, sending no-op action to scout",
@@ -513,9 +544,25 @@ pub(crate) async fn forge_agent_control(
         txn.commit().await?;
     }
 
-    Ok(Response::new(
-        ForgeAgentControlResponse::build_and_fill_legacy_fields(action)?,
-    ))
+    Ok(Response::new(build_agent_control_response(
+        action,
+        request.supports_firmware_upgrade_ack,
+    )?))
+}
+
+/// Build the poll response only when Scout can execute its required contract.
+fn build_agent_control_response(
+    action: fac::Action,
+    supports_firmware_upgrade_ack: bool,
+) -> Result<ForgeAgentControlResponse, CarbideError> {
+    if matches!(&action, fac::Action::FirmwareUpgrade(task) if task.requires_acknowledgement)
+        && !supports_firmware_upgrade_ack
+    {
+        return Err(CarbideError::FailedPrecondition(
+            "scout does not support firmware upgrade acknowledgement".into(),
+        ));
+    }
+    ForgeAgentControlResponse::build_and_fill_legacy_fields(action)
 }
 
 /// Records reboot duration metric for a machine if applicable

@@ -116,6 +116,7 @@ impl TestHostMachine {
         self.api
             .forge_agent_control(tonic::Request::new(ForgeAgentControlRequest {
                 machine_id: Some(self.id.into()),
+                ..Default::default()
             }))
             .await
             .unwrap()

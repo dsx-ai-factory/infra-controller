@@ -641,6 +641,7 @@ async fn test_dpu_agent_control_requires_requested_machine(pool: sqlx::PgPool) {
         .api
         .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(dpu_id.into()),
+            ..Default::default()
         }))
         .await
         .unwrap_err();
@@ -661,6 +662,7 @@ async fn test_dpu_agent_control_preserves_database_error_details(pool: sqlx::PgP
         .api
         .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(dpu_id.into()),
+            ..Default::default()
         }))
         .await
         .unwrap_err();
@@ -689,6 +691,7 @@ async fn test_dpu_agent_control_preserves_lookup_error(pool: sqlx::PgPool) {
         .api
         .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(dpu_id.into()),
+            ..Default::default()
         }))
         .await;
 
@@ -750,6 +753,7 @@ async fn test_dpu_agent_control_preserves_host_state_decode_error(pool: sqlx::Pg
         .api
         .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(mh.dpu_ids[0].into()),
+            ..Default::default()
         }))
         .await
         .unwrap_err();
@@ -809,6 +813,7 @@ async fn test_host_agent_control_preserves_scout_contact_write_error(pool: sqlx:
         .api
         .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(mh.id.into()),
+            ..Default::default()
         }))
         .await
         .unwrap_err();
@@ -872,6 +877,7 @@ async fn test_dpu_agent_control_uses_host_state_and_requires_attachment(pool: sq
         .api
         .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(dpu_id.into()),
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -894,6 +900,7 @@ async fn test_dpu_agent_control_uses_host_state_and_requires_attachment(pool: sq
         .api
         .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(dpu_id.into()),
+            ..Default::default()
         }))
         .await
         .unwrap()
@@ -915,6 +922,7 @@ async fn test_dpu_agent_control_uses_host_state_and_requires_attachment(pool: sq
         .api
         .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
             machine_id: Some(dpu_id.into()),
+            ..Default::default()
         }))
         .await
         .unwrap_err();
@@ -951,6 +959,7 @@ async fn test_agent_control_updates_scout_contact_only_for_host_requests(pool: s
         env.api
             .forge_agent_control(tonic::Request::new(rpc::forge::ForgeAgentControlRequest {
                 machine_id: Some(machine_id),
+                ..Default::default()
             }))
             .await
             .unwrap();
