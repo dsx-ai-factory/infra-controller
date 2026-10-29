@@ -106,7 +106,7 @@ async fn request_compute_host_restarts(
     let unavailable_machine_ids = machines
         .iter()
         .filter(|machine| {
-            !matches!(machine.state.value, ManagedHostState::Ready)
+            !machine.state.value.accepts_maintenance_request()
                 || machine.machine_maintenance_requested.is_some()
         })
         .map(|machine| machine.id.to_string())
@@ -437,8 +437,12 @@ async fn terminate_active_rack_maintenance(
             // Resets cover the saved batch, not the possibly narrower maintenance scope
             // or the rack's current membership.
             for machine_id in machine_ids {
-                db_machine::clear_ready_machine_reset_request(txn.as_mut(), machine_id, &initiator)
-                    .await?;
+                db_machine::clear_unclaimed_machine_reset_request(
+                    txn.as_mut(),
+                    machine_id,
+                    &initiator,
+                )
+                .await?;
             }
         }
         RackMaintenanceState::ConfigureNmxCluster { .. }

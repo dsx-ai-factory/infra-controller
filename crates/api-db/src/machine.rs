@@ -3370,7 +3370,7 @@ pub async fn set_machine_maintenance_requested(
     Ok(())
 }
 
-/// Claims maintenance on an unallocated Ready machine with no pending request.
+/// Claims maintenance on an unallocated machine at a maintenance admission boundary.
 ///
 /// The caller must use a transaction. The machine row lock serializes with instance
 /// allocation; eligibility is rechecked after acquiring it. Returns `false` when
@@ -3381,14 +3381,13 @@ pub async fn try_set_machine_maintenance_requested(
     initiator: &str,
     operation: MachineMaintenanceOperation,
 ) -> DatabaseResult<bool> {
-    let lock_query = "SELECT id FROM machines WHERE id = $1 FOR UPDATE";
-    if sqlx::query_as::<_, MachineId>(lock_query)
+    let lock_query = "SELECT controller_state FROM machines WHERE id = $1 FOR UPDATE";
+    let state: Option<sqlx::types::Json<ManagedHostState>> = sqlx::query_scalar(lock_query)
         .bind(machine_id)
         .fetch_optional(&mut *txn)
         .await
-        .map_err(|error| DatabaseError::query(lock_query, error))?
-        .is_none()
-    {
+        .map_err(|error| DatabaseError::query(lock_query, error))?;
+    if !state.is_some_and(|state| state.accepts_maintenance_request()) {
         return Ok(false);
     }
     // A separate statement observes an allocation committed while the lock was awaited.
@@ -3399,7 +3398,6 @@ pub async fn try_set_machine_maintenance_requested(
     };
     let query = r#"UPDATE machines SET machine_maintenance_requested = $1
         WHERE id = $2 AND machine_maintenance_requested IS NULL
-          AND controller_state->>'state' = 'ready'
           AND NOT EXISTS (SELECT 1 FROM instances WHERE machine_id = $2)
         RETURNING id"#;
     sqlx::query_as::<_, MachineId>(query)
@@ -3413,13 +3411,16 @@ pub async fn try_set_machine_maintenance_requested(
 
 /// Cancels only an unstarted Reset owned by the given rack initiator.
 /// Requests already claimed by a machine controller or owned by others are preserved.
-pub async fn clear_ready_machine_reset_request(
+pub async fn clear_unclaimed_machine_reset_request(
     txn: &mut PgConnection,
     machine_id: &HostMachineId,
     initiator: &str,
 ) -> DatabaseResult<bool> {
+    // The conditional update serializes with the transition into Maintenance.
+    // A pending request can still be cancelled if another workflow changed the
+    // admission state before the machine controller claimed it.
     let query = r#"UPDATE machines SET machine_maintenance_requested = NULL
-        WHERE id = $1 AND controller_state->>'state' = 'ready'
+        WHERE id = $1 AND controller_state->>'state' <> 'maintenance'
           AND machine_maintenance_requested->>'initiator' = $2
           AND machine_maintenance_requested->'operation' = $3
         RETURNING id"#;
@@ -5629,6 +5630,171 @@ mod test {
     }
 
     #[crate::sqlx_test]
+    async fn rack_reset_admission_and_cancellation_use_machine_boundaries(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use model::machine::{
+            FailureCause, FailureSource, HostReprovisionState, MachineState, ReadyBootConfigState,
+        };
+        use model::machine_boot_interface::MachineBootInterfaceTarget;
+
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let boot = |boot_config_state| ManagedHostState::BootConfiguring {
+            desired_version: ConfigVersion::initial(),
+            desired_boot_interface: MachineBootInterfaceTarget::MacOnly(
+                "02:00:00:00:00:01".parse().unwrap(),
+            ),
+            post_lock_verification_retry_count: 0,
+            boot_config_state,
+        };
+        for (name, state, eligible) in [
+            (
+                "failed host",
+                ManagedHostState::Failed {
+                    details: FailureDetails {
+                        cause: FailureCause::UnhandledState {
+                            err: "test failure".into(),
+                        },
+                        failed_at: Utc::now(),
+                        source: FailureSource::StateMachine,
+                    },
+                    machine_id: machine_id.into(),
+                    retry_count: 0,
+                },
+                true,
+            ),
+            (
+                "boot preparation",
+                boot(ReadyBootConfigState::Prepare),
+                true,
+            ),
+            (
+                "boot failure after recovery",
+                boot(ReadyBootConfigState::Failed {
+                    failure: "test failure".into(),
+                }),
+                true,
+            ),
+            (
+                "boot writes in progress",
+                boot(ReadyBootConfigState::CheckHostConfig),
+                false,
+            ),
+            (
+                "initialization in progress",
+                ManagedHostState::HostInit {
+                    machine_state: MachineState::EnableIpmiOverLan,
+                },
+                false,
+            ),
+            (
+                "firmware maintenance in progress",
+                ManagedHostState::HostReprovision {
+                    reprovision_state: HostReprovisionState::WaitingForRackFirmwareUpgrade,
+                    retry_count: 0,
+                },
+                false,
+            ),
+        ] {
+            let mut txn = pool.begin().await?;
+            super::create(
+                txn.as_mut(),
+                None,
+                &machine_id.into(),
+                state.clone(),
+                None,
+                super::CURRENT_STATE_MODEL_VERSION,
+            )
+            .await?;
+            assert_eq!(
+                super::try_set_machine_maintenance_requested(
+                    txn.as_mut(),
+                    machine_id,
+                    "rack-test",
+                    super::MachineMaintenanceOperation::Reset
+                )
+                .await?,
+                eligible,
+                "{name}"
+            );
+            let stored = super::find_one(txn.as_mut(), &machine_id, Default::default())
+                .await?
+                .unwrap();
+            assert_eq!(stored.state.value, state, "{name}");
+            assert_eq!(
+                stored.machine_maintenance_requested.is_some(),
+                eligible,
+                "{name}"
+            );
+            if eligible {
+                assert!(
+                    super::clear_unclaimed_machine_reset_request(
+                        txn.as_mut(),
+                        &machine_id,
+                        "rack-test"
+                    )
+                    .await?,
+                    "{name}"
+                );
+                let cancelled = super::find_one(txn.as_mut(), &machine_id, Default::default())
+                    .await?
+                    .unwrap();
+                assert!(cancelled.machine_maintenance_requested.is_none(), "{name}");
+                assert_eq!(cancelled.state.value, stored.state.value, "{name}");
+                assert_eq!(cancelled.state.version, stored.state.version, "{name}");
+            }
+            txn.rollback().await?;
+        }
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn rack_reset_cancels_unclaimed_request_after_another_workflow_starts(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let machine_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let mut txn = pool.begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &machine_id.into(),
+            ManagedHostState::Ready,
+            None,
+            super::CURRENT_STATE_MODEL_VERSION,
+        )
+        .await?;
+        assert!(
+            super::try_set_machine_maintenance_requested(
+                txn.as_mut(),
+                machine_id,
+                "rack-test",
+                super::MachineMaintenanceOperation::Reset
+            )
+            .await?
+        );
+        // A controller snapshot from before admission can already be advancing
+        // another workflow. It has not claimed this Reset by entering Maintenance.
+        let active = ManagedHostState::HostReprovision {
+            reprovision_state: model::machine::HostReprovisionState::WaitingForRackFirmwareUpgrade,
+            retry_count: 0,
+        };
+        super::update_state(txn.as_mut(), &machine_id, &active).await?;
+        assert!(
+            super::clear_unclaimed_machine_reset_request(txn.as_mut(), &machine_id, "rack-test")
+                .await?
+        );
+        let stored = super::find_one(txn.as_mut(), &machine_id, Default::default())
+            .await?
+            .unwrap();
+        assert_eq!(stored.state.value, active);
+        assert!(stored.machine_maintenance_requested.is_none());
+        txn.rollback().await?;
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
     async fn rack_reset_cancellation_preserves_claimed_and_foreign_requests(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -5677,8 +5843,12 @@ mod test {
                 );
             }
             assert_eq!(
-                super::clear_ready_machine_reset_request(txn.as_mut(), &machine_id, "rack-test")
-                    .await?,
+                super::clear_unclaimed_machine_reset_request(
+                    txn.as_mut(),
+                    &machine_id,
+                    "rack-test"
+                )
+                .await?,
                 should_clear
             );
             let after = super::find_one(txn.as_mut(), &machine_id, Default::default())

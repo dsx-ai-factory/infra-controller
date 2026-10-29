@@ -2041,6 +2041,22 @@ async fn test_legacy_power_reset_submits_and_resumes_batch(
         "PowerSequence": { "rack_power": "PowerReset" }
     }))?;
     let mut txn = pool.begin().await?;
+    db::machine::update_state(
+        txn.as_mut(),
+        &host_b.host_snapshot.id,
+        &model::machine::ManagedHostState::Failed {
+            details: model::machine::FailureDetails {
+                cause: model::machine::FailureCause::UnhandledState {
+                    err: "test failure".into(),
+                },
+                failed_at: chrono::Utc::now(),
+                source: model::machine::FailureSource::StateMachine,
+            },
+            machine_id: host_b.host_snapshot.id.into(),
+            retry_count: 0,
+        },
+    )
+    .await?;
     crate::tests::rack_state_controller::fixtures::rack::set_rack_controller_state(
         txn.as_mut(),
         &rack_id,
@@ -2121,6 +2137,22 @@ async fn test_legacy_power_reset_submits_and_resumes_batch(
             .unwrap();
         assert_eq!(machine.machine_maintenance_requested, Some(request));
     }
+    // The existing Failed handler must actually accept the rack's queued Reset.
+    env.run_machine_state_controller_iteration_no_requeue()
+        .await;
+    let machine = db::machine::find_one(&pool, &host_b.host_snapshot.id, Default::default())
+        .await?
+        .unwrap();
+    assert_eq!(
+        machine.state.value,
+        model::machine::ManagedHostState::maintenance_for_request(
+            machine.machine_maintenance_requested.clone().unwrap()
+        )
+    );
+    assert_eq!(
+        machine.status.failure_details.cause,
+        model::machine::FailureCause::NoError
+    );
     Ok(())
 }
 
@@ -2139,6 +2171,22 @@ async fn test_terminate_compute_restarts_uses_saved_targets(
     let (rack_id, host_a, host_b) = create_two_compute_rack(&env, &pool).await?;
     let ids = vec![host_a.host_snapshot.id, host_b.host_snapshot.id];
     let mut txn = pool.begin().await?;
+    db::machine::update_state(
+        txn.as_mut(),
+        &ids[1],
+        &model::machine::ManagedHostState::Failed {
+            details: model::machine::FailureDetails {
+                cause: model::machine::FailureCause::UnhandledState {
+                    err: "test failure".into(),
+                },
+                failed_at: chrono::Utc::now(),
+                source: model::machine::FailureSource::StateMachine,
+            },
+            machine_id: ids[1].into(),
+            retry_count: 0,
+        },
+    )
+    .await?;
     for id in &ids {
         db::machine::set_machine_maintenance_requested(
             txn.as_mut(),
