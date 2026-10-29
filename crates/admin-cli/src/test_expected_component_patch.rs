@@ -591,6 +591,38 @@ async fn unsupported_machine_patches_use_the_original_read_merge_update() {
             },
         },
         Case {
+            scenario: "legacy control-plane patch keeps the stored lockdown setting",
+            args: &[
+                "expected-machine",
+                "patch",
+                "--id",
+                ID,
+                "--control-plane",
+                "true",
+            ],
+            patch_reply: PatchReply::Grpc(Code::Unimplemented),
+            lookup_id: Some(ID),
+            methods: &[
+                "PatchExpectedMachine",
+                "GetExpectedMachine",
+                "UpdateExpectedMachine",
+            ],
+            selector: forge::ExpectedMachineRequest {
+                id: Some(rpc_id()),
+                ..Default::default()
+            },
+            expected: forge::ExpectedMachine {
+                host_lifecycle_profile: Some(forge::HostLifecycleProfile {
+                    disable_lockdown: Some(true),
+                    control_plane: Some(true),
+                }),
+                #[allow(deprecated)]
+                dpf_enabled: true,
+                is_dpf_enabled: None,
+                ..stored_machine()
+            },
+        },
+        Case {
             scenario: "file update preserves omission rules after an old site's HTTP 403",
             args: &[
                 "expected-machine",
@@ -1419,6 +1451,10 @@ fn stored_machine() -> forge::ExpectedMachine {
             mac_address: Some("00:11:22:33:44:66".to_string()),
             ..Default::default()
         }],
+        host_lifecycle_profile: Some(forge::HostLifecycleProfile {
+            disable_lockdown: Some(true),
+            control_plane: None,
+        }),
         ..Default::default()
     }
 }

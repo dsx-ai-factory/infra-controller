@@ -1382,6 +1382,20 @@ impl ApiClient {
                 expected_machine.metadata
             };
 
+        // Merge lifecycle fields individually. The legacy update replaces the
+        // stored profile, so a half-filled one clears every member this request
+        // did not supply.
+        let merged_host_lifecycle_profile = match host_lifecycle_profile {
+            Some(supplied) => {
+                let existing = expected_machine.host_lifecycle_profile.unwrap_or_default();
+                Some(::rpc::forge::HostLifecycleProfile {
+                    disable_lockdown: supplied.disable_lockdown.or(existing.disable_lockdown),
+                    control_plane: supplied.control_plane.or(existing.control_plane),
+                })
+            }
+            None => expected_machine.host_lifecycle_profile,
+        };
+
         let request = rpc::ExpectedMachine {
             bmc_mac_address: mac_str,
             bmc_username: bmc_username.unwrap_or(expected_machine.bmc_username),
@@ -1408,8 +1422,7 @@ impl ApiClient {
                 .or(expected_machine.dpu_mode),
             bmc_ip_allocation: legacy_bmc_fields.bmc_ip_allocation,
             replace_host_nics: replace_interfaces,
-            host_lifecycle_profile: host_lifecycle_profile
-                .or(expected_machine.host_lifecycle_profile),
+            host_lifecycle_profile: merged_host_lifecycle_profile,
             server_name: expected_machine.server_name,
         };
 
