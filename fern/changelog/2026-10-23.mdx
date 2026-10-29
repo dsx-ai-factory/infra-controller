@@ -49,7 +49,7 @@ Set the designation with the new `host_lifecycle_profile.control_plane` field:
 | Interface | Form |
 | --- | --- |
 | REST | `hostLifecycleProfile.controlPlane` on Expected Machine create, update, and patch |
-| Admin CLI | `nico-admin-cli expected-machine add --control-plane` and `expected-machine patch --control-plane` |
+| Admin CLI | `nico-admin-cli expected-machine add --control-plane true` and `expected-machine patch --control-plane true` |
 | Manifest | `host_lifecycle_profile.control_plane` in `expected_machines.json` |
 
 The field is optional and defaults to unset, so existing machines and manifests do not change. Omitting it in a patch preserves the stored value.
