@@ -259,15 +259,38 @@ fn split_query(
     Ok((filter.finish(), named))
 }
 
-/// The field a serde error names between backticks, if any.
-fn named_field(message: &str) -> String {
-    message.split('`').nth(1).unwrap_or("query").to_string()
+/// The parameter a serde error is about. Only "unknown/missing/duplicate
+/// field" errors name a field between backticks. An "unknown variant" error
+/// names the rejected value, so the field is the one parameter in `given`
+/// that holds that value. Anything else is the whole `query`.
+fn named_field(message: &str, given: &[(String, String)]) -> String {
+    let token = message.split('`').nth(1);
+    let field = if ["unknown field", "missing field", "duplicate field"]
+        .iter()
+        .any(|kind| message.starts_with(kind))
+    {
+        token.map(str::to_string)
+    } else if message.starts_with("unknown variant") {
+        let mut holders = given
+            .iter()
+            .filter(|(_, value)| Some(value.as_str()) == token);
+        match (holders.next(), holders.next()) {
+            (Some((key, _)), None) => Some(key.clone()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    field.unwrap_or_else(|| "query".to_string())
 }
 
 fn parse_query<T: serde::de::DeserializeOwned>(query: &str) -> Result<T, ApiError> {
     serde_urlencoded::from_str(query).map_err(|e| {
         let message = e.to_string();
-        ApiError::bad_param(&named_field(&message), message)
+        let given: Vec<(String, String)> = url::form_urlencoded::parse(query.as_bytes())
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        ApiError::bad_param(&named_field(&message, &given), message)
     })
 }
 
@@ -479,7 +502,13 @@ async fn units_query(
 ) -> Result<Json<UnitsResponse>, ApiError> {
     let query: UnitsQuery = serde_json::from_slice(&body).map_err(|e| {
         let message = e.to_string();
-        ApiError::bad_param(&named_field(&message), message)
+        let given: Vec<(String, String)> =
+            serde_json::from_slice::<BTreeMap<String, serde_json::Value>>(&body)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|(k, v)| Some((k, v.as_str()?.to_string())))
+                .collect();
+        ApiError::bad_param(&named_field(&message, &given), message)
     })?;
     let page = Page {
         name: query.name,

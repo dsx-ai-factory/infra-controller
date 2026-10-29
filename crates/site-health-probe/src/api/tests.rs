@@ -396,7 +396,8 @@ async fn unsupported_combination_is_422() {
         "422 unsupported_filter recordType type=identity_mismatch&recordType=rack",
         "422 field_unavailable updateEligible type=host&updateEligible=true&state=Ready",
         "400 invalid_param bogus type=host&bogus=1",
-        "400 invalid_param - type=host&stage=done",
+        "400 invalid_param stage type=host&stage=done",
+        "400 invalid_param query type=host&stage=done&state=done",
         "400 invalid_param type type=host&type=dpu",
         "400 invalid_param type stage=ready",
     ] {
@@ -761,6 +762,11 @@ async fn units_query_missing_ids_are_only_absent_ids() {
         .post("/v1/units/query", json!({"type": "host", "bogus": true}))
         .await;
     assert_eq!((reply.status.as_u16(), reply.field()), (400, "bogus"));
+    // An unknown variant names the parameter that holds it, not the value.
+    let reply = h
+        .post("/v1/units/query", json!({"type": "host", "stage": "x"}))
+        .await;
+    assert_eq!((reply.status.as_u16(), reply.field()), (400, "stage"));
 }
 
 fn site_match(h: &Harness, seq: u64, result: SiteMatch) {
@@ -852,15 +858,15 @@ async fn config_with_rest_reader_is_503_before_the_first_site_check() {
 async fn config_bad_params_are_400_with_the_rest_reader_on_or_off() {
     for enabled in [false, true] {
         let h = rest_reader(enabled);
-        for uri in [
-            "/v1/config?bogus=1",
-            "/v1/config?component=nope",
-            "/v1/config?vendor=a&vendor=b",
+        for (uri, field) in [
+            ("/v1/config?bogus=1", "bogus"),
+            ("/v1/config?component=nope", "component"),
+            ("/v1/config?vendor=a&vendor=b", "vendor"),
         ] {
             let reply = h.get(uri).await;
             assert_eq!(
-                (reply.status.as_u16(), reply.code()),
-                (400, "invalid_param"),
+                (reply.status.as_u16(), reply.code(), reply.field()),
+                (400, "invalid_param", field),
                 "{uri} with the reader on: {enabled}"
             );
         }
