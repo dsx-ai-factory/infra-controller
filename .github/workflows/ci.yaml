@@ -2235,7 +2235,21 @@ jobs:
           persist-credentials: false
 
       - name: Package and push Helm chart to NGC
+        id: publish_helm
+        continue-on-error: true
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@0fb54ee0cb478221430623b878faa133a4706069 # v1.27.8
+        with:
+          chart-path: helm
+          chart-version: ${{ needs.prepare.outputs.helm_version }}
+          app-version: ${{ needs.prepare.outputs.version }}
+          lint: 'false'
+          ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
+          ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
+          ngc-duplicate: verify
+
+      - name: Retry package and push Helm chart to NGC
+        if: ${{ steps.publish_helm.outcome == 'failure' }}
         uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@0fb54ee0cb478221430623b878faa133a4706069 # v1.27.8
         with:
           chart-path: helm
@@ -2338,7 +2352,21 @@ jobs:
           persist-credentials: false
 
       - name: Package and push Helm prereqs chart to NGC
+        id: publish_helm_prereqs
+        continue-on-error: true
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@0fb54ee0cb478221430623b878faa133a4706069 # v1.27.8
+        with:
+          chart-path: helm-prereqs
+          chart-version: ${{ needs.prepare.outputs.helm_version }}
+          app-version: ${{ needs.prepare.outputs.version }}
+          lint: 'false'
+          ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
+          ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
+          ngc-duplicate: verify
+
+      - name: Retry package and push Helm prereqs chart to NGC
+        if: ${{ steps.publish_helm_prereqs.outcome == 'failure' }}
         uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@0fb54ee0cb478221430623b878faa133a4706069 # v1.27.8
         with:
           chart-path: helm-prereqs
@@ -2611,6 +2639,8 @@ jobs:
           persist-credentials: false
 
       - name: Package and push nico-otelcol chart
+        id: publish_nico_otelcol
+        continue-on-error: true
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
         uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@0fb54ee0cb478221430623b878faa133a4706069 # v1.27.8
         with:
@@ -2622,7 +2652,21 @@ jobs:
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
           ngc-duplicate: verify
 
+      - name: Retry package and push nico-otelcol chart
+        if: ${{ steps.publish_nico_otelcol.outcome == 'failure' }}
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@0fb54ee0cb478221430623b878faa133a4706069 # v1.27.8
+        with:
+          chart-path: bluefield/charts/nico-otelcol
+          chart-version: ${{ needs.prepare.outputs.helm_version }}
+          app-version: ${{ needs.prepare.outputs.version }}
+          lint: 'false'
+          ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
+          ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
+          ngc-duplicate: verify
+
       - name: Package and push nico-dpu-agent chart
+        id: publish_nico_dpu_agent
+        continue-on-error: true
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
         uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@0fb54ee0cb478221430623b878faa133a4706069 # v1.27.8
         with:
@@ -2634,7 +2678,21 @@ jobs:
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
           ngc-duplicate: verify
 
+      - name: Retry package and push nico-dpu-agent chart
+        if: ${{ steps.publish_nico_dpu_agent.outcome == 'failure' }}
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@0fb54ee0cb478221430623b878faa133a4706069 # v1.27.8
+        with:
+          chart-path: bluefield/charts/nico-dpu-agent
+          chart-version: ${{ needs.prepare.outputs.helm_version }}
+          app-version: ${{ needs.prepare.outputs.version }}
+          lint: 'false'
+          ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
+          ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
+          ngc-duplicate: verify
+
       - name: Package and push nico-dhcp-server chart
+        id: publish_nico_dhcp_server
+        continue-on-error: true
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
         uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@0fb54ee0cb478221430623b878faa133a4706069 # v1.27.8
         with:
@@ -2646,8 +2704,34 @@ jobs:
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
           ngc-duplicate: verify
 
+      - name: Retry package and push nico-dhcp-server chart
+        if: ${{ steps.publish_nico_dhcp_server.outcome == 'failure' }}
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@0fb54ee0cb478221430623b878faa133a4706069 # v1.27.8
+        with:
+          chart-path: bluefield/charts/nico-dhcp-server
+          chart-version: ${{ needs.prepare.outputs.helm_version }}
+          app-version: ${{ needs.prepare.outputs.version }}
+          lint: 'false'
+          ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
+          ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
+          ngc-duplicate: verify
+
       - name: Package and push nico-fmds chart
+        id: publish_nico_fmds
+        continue-on-error: true
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@0fb54ee0cb478221430623b878faa133a4706069 # v1.27.8
+        with:
+          chart-path: bluefield/charts/nico-fmds
+          chart-version: ${{ needs.prepare.outputs.helm_version }}
+          app-version: ${{ needs.prepare.outputs.version }}
+          lint: 'false'
+          ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
+          ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
+          ngc-duplicate: verify
+
+      - name: Retry package and push nico-fmds chart
+        if: ${{ steps.publish_nico_fmds.outcome == 'failure' }}
         uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@0fb54ee0cb478221430623b878faa133a4706069 # v1.27.8
         with:
           chart-path: bluefield/charts/nico-fmds
