@@ -1129,6 +1129,11 @@ async fn test_tenant_create_keyset(pool: sqlx::PgPool) {
     let message = status.message();
     assert!(message.starts_with("keyset already exists: "), "{message}");
     assert!(message.contains("keyset1"), "{message}");
+    // REST releases before AlreadyExists support match this phrase.
+    assert!(
+        message.ends_with("(duplicate key value violates unique constraint)"),
+        "{message}"
+    );
 }
 
 #[crate::sqlx_test]

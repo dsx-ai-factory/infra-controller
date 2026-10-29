@@ -43,7 +43,14 @@ pub(crate) async fn create(
 
     let keyset = db::tenant_keyset::create(&keyset_request, &mut txn)
         .await
-        .map_err(CarbideError::from)?;
+        // REST releases before AlreadyExists support find an existing keyset by this
+        // phrase and retry with Update, so keep it while Core can be upgraded first.
+        .map_err(|error| match error {
+            db::DatabaseError::AlreadyFoundError { kind, id } => Status::already_exists(format!(
+                "{kind} already exists: {id} (duplicate key value violates unique constraint)"
+            )),
+            error => CarbideError::from(error).into(),
+        })?;
 
     txn.commit().await?;
 
