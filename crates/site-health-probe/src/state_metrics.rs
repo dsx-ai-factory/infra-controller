@@ -454,8 +454,18 @@ fn unit_series(units: &[Unit], series: &mut Series) {
     }
 }
 
-fn model_label(host: &HostFields) -> String {
+/// The `model` label of a host. `/v1/units` filters match this value too, so a
+/// count and a listing of the same filter cannot disagree.
+pub(crate) fn model_label(host: &HostFields) -> String {
     host.model.clone().unwrap_or_else(|| UNKNOWN.to_string())
+}
+
+/// The `instance_type` label of a host, shared with `/v1/units` like
+/// [`model_label`].
+pub(crate) fn instance_type_label(host: &HostFields) -> String {
+    host.instance_type
+        .clone()
+        .unwrap_or_else(|| NONE.to_string())
 }
 
 fn host_series(units: &[Unit], series: &mut Series) {
@@ -466,9 +476,7 @@ fn host_series(units: &[Unit], series: &mut Series) {
             "hosts",
             vec![
                 model_label(host),
-                host.instance_type
-                    .clone()
-                    .unwrap_or_else(|| NONE.to_string()),
+                instance_type_label(host),
                 unit.state.clone(),
                 allocatable,
                 flag(host.update_complete),

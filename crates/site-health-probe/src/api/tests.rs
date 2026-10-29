@@ -20,7 +20,8 @@ use std::time::UNIX_EPOCH;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request};
 use carbide_site_health_probe_api::{
-    ExpectedFields, HostFields, RecordType, RestResource, SiteMatch, Stage, VersionSource,
+    ExpectedFields, FirmwareRequest, HostFields, Initiator, RecordType, RestResource, SiteMatch,
+    Stage, VersionSource,
 };
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -301,30 +302,79 @@ async fn count_equals_published_metric_sum() {
     assert_eq!(reply.body["readAt"], "1970-01-01T00:19:10Z");
 }
 
+/// Pages `/v1/units?{query}` and checks its unit count equals `/v1/count`.
+async fn assert_count_and_units_agree(h: &Harness, query: &str) -> u64 {
+    let count = h.get(&format!("/v1/count?{query}")).await;
+    let mut ids = BTreeSet::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut uri = format!("/v1/units?{query}&limit=3");
+        if let Some(cursor) = &cursor {
+            uri.push_str(&format!("&cursor={cursor}"));
+        }
+        let page = h.get(&uri).await.units();
+        assert_eq!(page.sweep.snapshot_id, count.body["snapshotId"], "{query}");
+        for unit in page.units {
+            assert!(ids.insert(unit.id), "{query}: a unit twice");
+        }
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(ids.len() as u64, count.count(), "{query}");
+    count.count()
+}
+
 #[tokio::test]
 async fn count_and_units_agree_on_one_snapshot() {
     let h = harness();
     small_fleet(&h);
     for query in COUNT_FILTERS {
-        let count = h.get(&format!("/v1/count?{query}")).await;
-        let mut ids = BTreeSet::new();
-        let mut cursor: Option<String> = None;
-        loop {
-            let mut uri = format!("/v1/units?{query}&limit=3");
-            if let Some(cursor) = &cursor {
-                uri.push_str(&format!("&cursor={cursor}"));
-            }
-            let page = h.get(&uri).await.units();
-            assert_eq!(page.sweep.snapshot_id, count.body["snapshotId"], "{query}");
-            for unit in page.units {
-                assert!(ids.insert(unit.id), "{query}: a unit twice");
-            }
-            match page.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => break,
-            }
-        }
-        assert_eq!(ids.len() as u64, count.count(), "{query}");
+        assert_count_and_units_agree(&h, query).await;
+    }
+    count_and_units_agree_on_missing_model_and_instance_type().await;
+}
+
+/// A host without a model or an instance type is the metric's `unknown` and
+/// `none`: the count and the listing both match those values.
+async fn count_and_units_agree_on_missing_model_and_instance_type() {
+    let h = harness();
+    // Hosts 0 and 2 have an instance type, 1 and 3 do not. Host 4 has an
+    // instance type but no model, host 5 has neither.
+    let mut hosts: Vec<Unit> = (0..6).map(|i| host(i, "Ready", "gb200", "b1")).collect();
+    for unit in &mut hosts[4..] {
+        unit.host.as_mut().expect("host").model = None;
+    }
+    h.publish_units(Family::Host, 1, hosts);
+    let request = || FirmwareRequest {
+        initiator: Initiator::Manual,
+        requested_at: None,
+        initiated_at: None,
+    };
+    let mut modeled = host(0, "Ready", "gb200", "b1");
+    let mut unmodeled = host(1, "Ready", "gb200", "b1");
+    unmodeled.host.as_mut().expect("host").model = None;
+    for unit in [&mut modeled, &mut unmodeled] {
+        unit.unit_type = UnitType::HostFirmwareRequest;
+        unit.host.as_mut().expect("host").open_firmware_request = Some(request());
+    }
+    h.publish_units(Family::HostFirmwareRequests, 1, vec![modeled, unmodeled]);
+    for (query, expected) in [
+        ("type=host&model=unknown", 2),
+        ("type=host&model=gb200", 4),
+        ("type=host&instanceType=none", 3),
+        ("type=host&instanceType=it-1", 3),
+        ("type=host&model=unknown&instanceType=none", 1),
+        ("type=host&model=unknown&instanceType=it-1", 1),
+        ("type=host_firmware_request&model=unknown", 1),
+        ("type=host_firmware_request&model=gb200", 1),
+    ] {
+        assert_eq!(
+            assert_count_and_units_agree(&h, query).await,
+            expected,
+            "{query}"
+        );
     }
 }
 

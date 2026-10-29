@@ -21,12 +21,13 @@
 //! always equals the metric sum.
 
 use carbide_site_health_probe_api::{
-    ErrorCode, Family, Filter, RecordType, RestResource, Source, Stage, Unit, UnitType,
+    ErrorCode, Family, Filter, HostFields, RecordType, RestResource, Source, Stage, Unit, UnitType,
 };
 use regex::Regex;
 use serde::Serialize;
 
 use crate::api::ApiError;
+use crate::state_metrics::{instance_type_label, model_label};
 
 /// What the probe can answer at all, independent of any snapshot.
 #[derive(Debug, Clone)]
@@ -386,6 +387,12 @@ impl UnitsSpec {
         let eq = |want: &Option<String>, have: Option<&String>| {
             want.as_ref().is_none_or(|w| have == Some(w))
         };
+        // A host without a model or instance type is the metric's `unknown`
+        // and `none`, so those values filter the listing as they do a count.
+        let label = |want: &Option<String>, normalize: fn(&HostFields) -> String| {
+            want.as_ref()
+                .is_none_or(|w| host.is_some_and(|h| normalize(h) == *w))
+        };
         unit.unit_type == f.unit_type
             && f.source.is_none_or(|s| s == unit.source)
             && match f.stage {
@@ -393,11 +400,8 @@ impl UnitsSpec {
                 Some(stage) => unit.stage == stage,
             }
             && eq(&f.state, Some(&unit.state))
-            && eq(&f.model, host.and_then(|h| h.model.as_ref()))
-            && eq(
-                &f.instance_type,
-                host.and_then(|h| h.instance_type.as_ref()),
-            )
+            && label(&f.model, model_label)
+            && label(&f.instance_type, instance_type_label)
             && f.allocatable
                 .is_none_or(|a| host.and_then(|h| h.allocatable) == Some(a))
             && f.update_complete
