@@ -1278,6 +1278,20 @@ impl ApiClient {
             }
         }
 
+        // An older site has no `control_plane` field, so its update RPC drops the
+        // designation and still answers OK. That would report a designation the
+        // site never stored and never validated, so refuse instead. Reached for
+        // both an Unimplemented PATCH and a legacy record that has no ID.
+        if host_lifecycle_profile
+            .as_ref()
+            .is_some_and(|profile| profile.control_plane.is_some())
+        {
+            return Err(CarbideCliError::UnsupportedOperation(
+                "this site cannot store a control-plane designation. Upgrade the site, or retry \
+                 without --control-plane",
+            ));
+        }
+
         self.patch_expected_machine_legacy(
             bmc_mac_address,
             id,

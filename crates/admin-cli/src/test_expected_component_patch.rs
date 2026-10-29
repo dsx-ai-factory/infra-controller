@@ -591,13 +591,13 @@ async fn unsupported_machine_patches_use_the_original_read_merge_update() {
             },
         },
         Case {
-            scenario: "legacy control-plane patch keeps the stored lockdown setting",
+            scenario: "legacy lockdown patch keeps the stored control-plane designation",
             args: &[
                 "expected-machine",
                 "patch",
                 "--id",
                 ID,
-                "--control-plane",
+                "--disable-lockdown",
                 "true",
             ],
             patch_reply: PatchReply::Grpc(Code::Unimplemented),
@@ -915,6 +915,34 @@ async fn switch_lookup_without_an_id_uses_the_original_mac_update_and_mask() {
         requests[1].headers[EXPECTED_SWITCH_UPDATE_MASK_HEADER],
         "bmc_password,nvos_username,nvos_password"
     );
+}
+
+/// An older site has no `control_plane` field. The legacy update would drop it
+/// and still answer OK, so the CLI would report a designation the site never
+/// stored and never validated. Fail before the legacy write instead.
+#[tokio::test]
+async fn legacy_fallback_rejects_a_control_plane_designation() {
+    let (result, requests) = dispatch_with_replies(
+        &[
+            "expected-machine",
+            "patch",
+            "--id",
+            ID,
+            "--control-plane",
+            "true",
+        ],
+        PatchReply::Grpc(Code::Unimplemented),
+        Code::Ok,
+        Some(ID),
+    )
+    .await;
+    let error = result.expect_err("the legacy update cannot store a control-plane designation");
+    assert!(
+        error.to_string().contains("control-plane designation"),
+        "unexpected error: {error}"
+    );
+    // The legacy read/merge/update must not run at all.
+    assert_methods(&requests, &["PatchExpectedMachine"]);
 }
 
 #[tokio::test]
@@ -1452,8 +1480,8 @@ fn stored_machine() -> forge::ExpectedMachine {
             ..Default::default()
         }],
         host_lifecycle_profile: Some(forge::HostLifecycleProfile {
-            disable_lockdown: Some(true),
-            control_plane: None,
+            disable_lockdown: None,
+            control_plane: Some(true),
         }),
         ..Default::default()
     }
