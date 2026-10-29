@@ -7,8 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 
 Core gRPC defines the site contract used by REST adapters and authorized Core
 callers to discover held machines, open an attempt, allocate a targeted tenant
-instance, record a result, and release that instance. Maestro/NRO integrates
-through REST; publishing these protos unblocks its REST implementation.
+instance, record a result, and release that instance. External validation clients
+integrate through REST; publishing these protos unblocks the REST implementation.
 NICo owns the allocation gate. It clears the gate only after external validation
 passes and normal instance cleanup and local Machine Validation succeed.
 Repair and other health sources remain independent.
@@ -275,7 +275,7 @@ released.
 
 ## REST integration contract (implementation deferred)
 
-Maestro/NRO uses the REST API. The companion
+External validation clients use the REST API. The companion
 [PR #8147](https://github.com/dsx-ai-factory/infra-controller/pull/8147) adds hold
 and attempt routes, OpenAPI/SDK types, and `externalValidationRequestId` on
 single-instance create. Its handlers validate requests and access, then return
