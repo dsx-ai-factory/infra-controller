@@ -1306,7 +1306,7 @@ async fn foreground_writes_recheck_deadline_after_waiting_for_the_row(
     ] {
         let request = new_request(&pool, "vpc-vni", ResourcePoolValueDomain::Integer).await?;
         let deadline: DateTime<Utc> =
-            sqlx::query_scalar("SELECT clock_timestamp() + interval '10 seconds'")
+            sqlx::query_scalar("SELECT clock_timestamp() + interval '2 seconds'")
                 .fetch_one(&pool)
                 .await?;
         let authority = CompletionAuthority::Foreground {
@@ -1385,7 +1385,7 @@ async fn expiry_cancellation_preserves_ineligible_requests(pool: PgPool) -> eyre
     let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&pool)
         .await?;
-    let deadline = now + chrono::Duration::seconds(10);
+    let deadline = now - chrono::Duration::seconds(1);
     let foreground = |attach_before| CompletionAuthority::Foreground {
         attempt_id: Uuid::new_v4(),
         attach_before,
@@ -1417,34 +1417,21 @@ async fn expiry_cancellation_preserves_ineligible_requests(pool: PgPool) -> eyre
         begin(&pool, &request, &authority).await?;
         if state != AllocationState::Pending {
             let assignment = assignment();
-            attach_assignment(&pool, request.request_id, &authority, &assignment).await?;
-            if state == AllocationState::ReleaseRequested {
-                let mut txn = pool.begin().await?;
-                assert_eq!(
-                    request_release(&mut txn, request.request_id, &assignment.allocation_id)
-                        .await?,
-                    Applied(()),
-                    "{scenario}"
-                );
-                txn.commit().await?;
-            }
+            save_assignment(&pool, request.request_id, &assignment).await?;
+            // Seed attached and release-requested rows after their deadline.
+            // `attach` rejects an already expired deadline; this test checks
+            // cancellation eligibility in the saved state.
+            sqlx::query("UPDATE resource_pool_allocations SET state = $2 WHERE allocation_id = $1")
+                .bind(request.request_id)
+                .bind(state)
+                .execute(&pool)
+                .await?;
         }
         let saved = load(&pool, request.request_id).await?.expect(scenario);
         assert_eq!(saved.state, state, "{scenario}");
         preserved.push((scenario, saved));
     }
 
-    let mut clock = pool.acquire().await?;
-    sqlx::query(
-        "SELECT pg_sleep(GREATEST(
-            EXTRACT(EPOCH FROM ($1::timestamptz - clock_timestamp())), 0
-        ))",
-    )
-    .bind(deadline)
-    .execute(&mut *clock)
-    .await?;
-    wait_for_database_time_after(&mut clock, deadline).await?;
-    drop(clock);
     for (scenario, saved) in preserved {
         let mut txn = pool.begin().await?;
         assert_eq!(

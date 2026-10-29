@@ -38,7 +38,9 @@ carbide-kms-provider = { path = "../kms-provider" }
 carbide-secrets = { path = "../secrets" }
 carbide-ssh-console = { path = "../ssh-console" }
 carbide-tls = { path = "../tls" }
-carbide-api-core = { path = "../api-core", default-features = false }
+carbide-api-core = { path = "../api-core", default-features = false, features = [
+  "test-support",
+] }
 carbide-api-db = { path = "../api-db", default-features = false, features = [
   "test-support",
 ] }

@@ -552,9 +552,12 @@ mod tests {
             accepted = listener.accept() => accepted.expect("accept client socket"),
             result = &mut connection => panic!("connection ended before accept: {result:?}"),
         };
-        let result = tokio::time::timeout(RPC_TIMEOUT + Duration::from_secs(1), connection)
-            .await
-            .expect("client must bound its own handshake");
+        // Accept the real socket before letting paused runtime time reach the
+        // client's deadline. The accepted peer stays silent throughout.
+        tokio::time::pause();
+        let result = tokio::time::timeout(RPC_TIMEOUT + Duration::from_secs(1), connection).await;
+        tokio::time::resume();
+        let result = result.expect("client must bound its own handshake");
         assert!(matches!(
             result,
             Err(FirmwareSupervisorClientError::Deadline)

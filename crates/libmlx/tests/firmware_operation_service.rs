@@ -971,7 +971,13 @@ async fn submit_deadline_preserves_admitted_work_over_a_real_socket() {
                 _ = wait_for_file(&burn_path) => {},
                 result = &mut submitting => panic!("submit finished before the admitted burn: {result:?}"),
             }
-            submitting.await
+            // Admission and the burn are established. Paused time advances all
+            // timers on this runtime while the relay withholds the reply; the
+            // external daemon and its burn keep running on real time.
+            tokio::time::pause();
+            let result = submitting.await;
+            tokio::time::resume();
+            result
         };
         assert!(matches!(result, Err(FirmwareSupervisorClientError::Deadline)));
         let accepted = direct.get("lost-reply").await.unwrap();
@@ -995,6 +1001,18 @@ async fn submit_deadline_preserves_admitted_work_over_a_real_socket() {
             }
         }).await.expect("accepted work completes after the reply deadline");
         assert_eq!(fs::read_to_string(fixture.join("burns")).unwrap(), "launch");
+        kill(Pid::from_raw(daemon.process.0.id() as i32), Signal::SIGTERM).unwrap();
+        // Keep the client runtime polling while Tonic drains its connections;
+        // blocking in Drop would prevent that shutdown from completing.
+        let status = timeout(WATCHDOG, async {
+            loop {
+                if let Some(status) = daemon.process.0.try_wait().unwrap() {
+                    break status;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("daemon finishes admitted work and connection shutdown");
+        assert!(status.success());
     }).await.expect("lost submit reply fixture exceeded its watchdog");
 }
 
