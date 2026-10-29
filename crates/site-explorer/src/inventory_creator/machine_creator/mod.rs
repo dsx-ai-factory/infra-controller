@@ -548,13 +548,13 @@ impl MachineCreator {
                 .iter()
                 .filter(|dpu| {
                     dpu.os_mac_addresses()
-                        .any(|mac| mac == reservation.dpu_oob_mac_address)
+                        .any(|mac| mac == reservation.dpu_oob_net0_mac_address)
                 })
                 .collect::<Vec<_>>();
             let [dpu] = matching.as_slice() else {
                 return Err(SiteExplorerError::internal(format!(
                     "cannot resolve DPU loopback MAC {} unambiguously from discovery ({} matching DPUs); defer creation",
-                    reservation.dpu_oob_mac_address,
+                    reservation.dpu_oob_net0_mac_address,
                     matching.len()
                 )));
             };

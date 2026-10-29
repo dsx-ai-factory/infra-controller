@@ -273,7 +273,10 @@ impl TryFrom<rpc::forge::ExpectedInterface> for ExpectedInterface {
 
     fn try_from(expected_interface: rpc::forge::ExpectedInterface) -> Result<Self, Self::Error> {
         if expected_interface.role == Some(rpc::forge::ExpectedInterfaceRole::DpuLoopback as i32)
-            && expected_interface.fixed_gateway.is_some()
+            && expected_interface
+                .fixed_gateway
+                .as_ref()
+                .is_some_and(|gateway| !gateway.is_empty())
         {
             return Err(RpcDataConversionError::InvalidArgument(
                 "dpu_loopback does not accept fixed_gateway".to_string(),
@@ -838,6 +841,29 @@ mod tests {
                 ..Default::default()
             })
             .is_err()
+        );
+    }
+
+    #[test]
+    fn loopback_gateway_accepts_only_absent_or_empty_values() {
+        scenarios!(
+            run = |gateway: Option<&str>| {
+                ExpectedInterface::try_from(rpc::forge::ExpectedInterface {
+                    mac_address: Some("02:00:00:00:00:20".into()),
+                    role: Some(rpc::forge::ExpectedInterfaceRole::DpuLoopback as i32),
+                    fixed_ip: Some("198.51.100.20".into()),
+                    fixed_gateway: gateway.map(str::to_string),
+                    ..Default::default()
+                }).map(|interface| interface.fixed_gateway).map_err(drop)
+            };
+            "absent gateway" {
+                None => Yields(None),
+                Some("") => Yields(None),
+            }
+            "non-empty gateway" {
+                Some("198.51.100.1") => Fails,
+                Some("not-an-ip") => Fails,
+            }
         );
     }
 
